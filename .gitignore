@@ -1,0 +1,42 @@
+# Build output
+build/
+*/build/
+.gradle/
+out/
+
+# The embedded bee-lite node, ~143 MiB. Exceeds GitHub's 100 MB file limit.
+# Rebuild locally from Solar-Punk-Ltd/bee-lite-java — see README § Building mobile.aar.
+swarmnode/libs/mobile.aar
+
+# Kotlin / IDE caches
+.kotlin/
+local.properties
+
+# Android Studio / IntelliJ
+.idea/
+*.iml
+captures/
+
+# VS Code
+.vscode/
+
+# macOS / Windows cruft
+.DS_Store
+Thumbs.db
+
+# Machine-specific env (a sample is committed as .envrc.example)
+.envrc
+
+# Release signing — must never be committed
+*.jks
+*.keystore
+keystore.properties
+signing.properties
+
+# Log files
+*.log
+hs_err_pid*
+
+# Python virtualenvs (for scripts)
+.venv/
+__pycache__/

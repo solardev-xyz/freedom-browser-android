@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Freedom</string>
+    <string name="node_channel_name">Swarm node</string>
+    <string name="node_channel_description">Keeps the embedded Swarm node alive in the background.</string>
+    <string name="node_notification_title">Freedom — Swarm node</string>
+</resources>
