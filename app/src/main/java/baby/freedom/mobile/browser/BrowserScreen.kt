@@ -13,7 +13,6 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.systemBars
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
@@ -24,12 +23,13 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.ArrowForward
+import androidx.compose.material.icons.filled.Bookmark
+import androidx.compose.material.icons.filled.BookmarkBorder
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.HourglassTop
 import androidx.compose.material.icons.filled.PowerSettingsNew
-import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -45,6 +45,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -60,6 +61,7 @@ import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.font.FontFamily
@@ -67,6 +69,7 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import baby.freedom.mobile.data.BrowsingRepository
 import baby.freedom.mobile.ens.EnsInput
 import baby.freedom.mobile.ens.EnsResolver
 import baby.freedom.mobile.ens.EnsResult
@@ -79,33 +82,40 @@ import kotlinx.coroutines.launch
 @Composable
 fun BrowserScreen(
     nodeInfo: NodeInfo,
-    initialUrl: String = "https://freedombrowser.eth.limo",
+    initialUrl: String = "ens://freedombrowser.eth",
 ) {
-    val state = remember { BrowserState() }
+    val tabs = remember { TabsState(homepage = initialUrl) }
     val ensResolver = remember { EnsResolver() }
+    val context = LocalContext.current
+    val repo = remember(context) { BrowsingRepository.get(context) }
     val scope = rememberCoroutineScope()
     val focusManager = LocalFocusManager.current
     val keyboard = LocalSoftwareKeyboardController.current
     var showNodeSheet by rememberSaveable { mutableStateOf(false) }
+    var showTabSwitcher by rememberSaveable { mutableStateOf(false) }
+    var showLibrary by rememberSaveable { mutableStateOf(false) }
     var resolvingEns by remember { mutableStateOf(false) }
     var didInitialLoad by rememberSaveable { mutableStateOf(false) }
     val snackbarHostState = remember { SnackbarHostState() }
+
+    val state = tabs.active
+    val isBookmarked by repo.isBookmarked(state.url).collectAsState(initial = false)
 
     BackHandler(enabled = state.canGoBack) {
         state.loadUrl("javascript:history.back();void(0);")
     }
 
-    fun submit(raw: String) {
+    fun submit(target: BrowserState, raw: String) {
         keyboard?.hide()
         focusManager.clearFocus()
 
         val trimmed = raw.trim()
         // Let the user type the friendly form and re-submit to reload.
-        val canonical = state.effectiveFetchUrl(trimmed)
+        val canonical = target.effectiveFetchUrl(trimmed)
 
         val ens = EnsInput.parse(canonical)
         if (ens != null) {
-            state.addressBarText = "ens://${ens.name}${ens.suffix}"
+            target.addressBarText = "ens://${ens.name}${ens.suffix}"
             resolvingEns = true
             scope.launch {
                 try {
@@ -113,8 +123,8 @@ fun BrowserScreen(
                     when (result) {
                         is EnsResult.Ok -> {
                             if (result.protocol == "bzz") {
-                                val target = result.uri + ens.suffix
-                                state.loadUrl(target, ensName = ens.name)
+                                val t = result.uri + ens.suffix
+                                target.loadUrl(t, ensName = ens.name)
                             } else {
                                 snackbarHostState.showSnackbar(
                                     "${ens.name} → ${result.protocol}:// (${result.decoded.take(12)}…) — not supported yet",
@@ -139,18 +149,19 @@ fun BrowserScreen(
         }
 
         val url = UrlParser.toUrl(canonical)
-        state.addressBarText = url
-        state.clearEnsOverride()
-        state.loadUrl(url)
+        target.addressBarText = url
+        target.clearEnsOverride()
+        target.loadUrl(url)
     }
 
-    // Kick off the homepage as soon as we're composed. The default lives on
-    // a plain HTTPS gateway (eth.limo) so we don't need to wait for bee-lite
-    // to be running.
-    LaunchedEffect(Unit) {
-        if (!didInitialLoad) {
+    // Kick off the homepage on the initial tab as soon as we're composed.
+    // `ens://…` requires the embedded node to be running before we can
+    // resolve — gate the load on NodeStatus.Running so the WebView doesn't
+    // race the gateway.
+    LaunchedEffect(nodeInfo.status) {
+        if (!didInitialLoad && nodeInfo.status == NodeStatus.Running) {
             didInitialLoad = true
-            submit(initialUrl)
+            submit(tabs.active, tabs.homepageUrl)
         }
     }
 
@@ -163,17 +174,21 @@ fun BrowserScreen(
         ) {
             TopBar(
                 state = state,
+                tabCount = tabs.tabs.size,
                 nodeInfo = nodeInfo,
                 resolvingEns = resolvingEns,
-                onSubmit = ::submit,
+                isBookmarked = isBookmarked,
+                onSubmit = { submit(state, it) },
                 onBack = { state.loadUrl("javascript:history.back();void(0);") },
                 onForward = { state.loadUrl("javascript:history.forward();void(0);") },
-                onReload = {
-                    val raw = state.addressBarText.ifBlank { state.url }
-                    val refetch = state.effectiveFetchUrl(raw)
-                    state.loadUrl(refetch.ifBlank { state.pendingUrl })
+                onToggleBookmark = {
+                    val url = state.url
+                    if (url.isBlank()) return@TopBar
+                    if (isBookmarked) repo.unbookmark(url)
+                    else repo.bookmark(url, state.title)
                 },
                 onOpenNodePanel = { showNodeSheet = true },
+                onOpenTabs = { showTabSwitcher = true },
             )
 
             Box(
@@ -193,8 +208,8 @@ fun BrowserScreen(
                 }
             }
 
-            BrowserWebView(
-                state = state,
+            BrowserWebViewHost(
+                tabs = tabs,
                 modifier = Modifier.fillMaxSize(),
             )
         }
@@ -210,19 +225,48 @@ fun BrowserScreen(
     if (showNodeSheet) {
         NodeDetailsDialog(nodeInfo = nodeInfo, onDismiss = { showNodeSheet = false })
     }
+
+    if (showTabSwitcher) {
+        TabSwitcherScreen(
+            tabs = tabs,
+            onDismiss = { showTabSwitcher = false },
+            onNewTab = {
+                val fresh = tabs.newTab()
+                submit(fresh, tabs.homepageUrl)
+            },
+            onOpenLibrary = {
+                showTabSwitcher = false
+                showLibrary = true
+            },
+        )
+    }
+
+    if (showLibrary) {
+        LibrarySheet(
+            repo = repo,
+            onDismiss = { showLibrary = false },
+            onOpen = { url ->
+                showLibrary = false
+                submit(state, url)
+            },
+        )
+    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun TopBar(
     state: BrowserState,
+    tabCount: Int,
     nodeInfo: NodeInfo,
     resolvingEns: Boolean,
+    isBookmarked: Boolean,
     onSubmit: (String) -> Unit,
     onBack: () -> Unit,
     onForward: () -> Unit,
-    onReload: () -> Unit,
+    onToggleBookmark: () -> Unit,
     onOpenNodePanel: () -> Unit,
+    onOpenTabs: () -> Unit,
 ) {
     val focusRequester = remember { FocusRequester() }
     var addressFocused by remember { mutableStateOf(false) }
@@ -300,6 +344,14 @@ private fun TopBar(
                             innerTextField()
                         }
                         // Trailing action — sized to the pill, never pushes it taller.
+                        // State machine:
+                        //   focused + non-empty text → Clear (×)
+                        //   loading                  → spinner
+                        //   idle on a real URL       → bookmark toggle
+                        //   idle on blank            → nothing
+                        // Reload isn't rendered here: the user can re-submit
+                        // the current URL by tapping the pill and hitting Go
+                        // on the keyboard, which is effectively reload.
                         Box(
                             modifier = Modifier.size(32.dp),
                             contentAlignment = Alignment.Center,
@@ -323,14 +375,17 @@ private fun TopBar(
                                         modifier = Modifier.size(18.dp),
                                     )
                                 }
-                                else -> {
+                                state.url.isNotBlank() -> {
                                     IconButton(
-                                        onClick = onReload,
+                                        onClick = onToggleBookmark,
                                         modifier = Modifier.size(32.dp),
                                     ) {
                                         Icon(
-                                            Icons.Filled.Refresh,
-                                            contentDescription = "Reload",
+                                            imageVector = if (isBookmarked) Icons.Filled.Bookmark
+                                            else Icons.Filled.BookmarkBorder,
+                                            contentDescription = if (isBookmarked) "Remove bookmark" else "Add bookmark",
+                                            tint = if (isBookmarked) MaterialTheme.colorScheme.primary
+                                            else MaterialTheme.colorScheme.onSurface,
                                             modifier = Modifier.size(18.dp),
                                         )
                                     }
@@ -342,10 +397,16 @@ private fun TopBar(
             )
         }
 
+        TabsCountButton(
+            count = tabCount,
+            onClick = onOpenTabs,
+            modifier = Modifier.padding(start = 2.dp),
+        )
+
         NodeStatusDot(
             nodeInfo = nodeInfo,
             onClick = onOpenNodePanel,
-            modifier = Modifier.padding(start = 4.dp),
+            modifier = Modifier.padding(start = 2.dp),
         )
     }
 }
@@ -446,4 +507,3 @@ private fun NodeDetailRow(label: String, value: String, mono: Boolean = false) {
         )
     }
 }
-

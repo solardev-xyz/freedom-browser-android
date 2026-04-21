@@ -1,22 +1,32 @@
 package baby.freedom.mobile.browser
 
 import android.annotation.SuppressLint
+import android.content.Context
 import android.graphics.Bitmap
+import android.graphics.Canvas
 import android.util.Log
+import android.view.View
 import android.view.ViewGroup
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.widget.FrameLayout
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.graphics.createBitmap
+import baby.freedom.mobile.data.BrowsingRepository
 import baby.freedom.swarm.SwarmNode
+import kotlinx.coroutines.flow.collectLatest
 import java.io.ByteArrayInputStream
 import java.net.HttpURLConnection
 import java.net.URL
@@ -50,118 +60,240 @@ private fun extractBzzRoot(url: String?): String? {
     return bzzRootRegex.find(url)?.groupValues?.get(1)
 }
 
+// Max width (in px) of a thumbnail bitmap. Anything bigger is wasteful
+// since we only ever render these at half-screen-ish sizes in the grid.
+private const val THUMBNAIL_MAX_WIDTH_PX = 640
+
+/**
+ * Capture the current WebView to a down-scaled [Bitmap] and publish it as
+ * [BrowserState.thumbnail]. Runs synchronously — callers must be on the
+ * UI thread (WebView.draw requires it). Silent-no-ops if the view hasn't
+ * been laid out yet.
+ */
+internal fun captureThumbnail(view: WebView, state: BrowserState) {
+    val w = view.width
+    val h = view.height
+    if (w <= 0 || h <= 0) return
+    val scale = if (w > THUMBNAIL_MAX_WIDTH_PX) THUMBNAIL_MAX_WIDTH_PX.toFloat() / w else 1f
+    val bw = (w * scale).toInt().coerceAtLeast(1)
+    val bh = (h * scale).toInt().coerceAtLeast(1)
+    val bitmap = createBitmap(bw, bh)
+    val canvas = Canvas(bitmap)
+    if (scale != 1f) canvas.scale(scale, scale)
+    try {
+        view.draw(canvas)
+    } catch (t: Throwable) {
+        Log.w(LOG_TAG, "thumbnail capture failed", t)
+        return
+    }
+    state.thumbnail = bitmap.asImageBitmap()
+}
+
+/**
+ * Host for N browser tabs.
+ *
+ * Each tab keeps its own live [WebView] so switching tabs preserves
+ * scroll position, JS state, form contents etc. All WebViews are children
+ * of the same [FrameLayout]; only the active tab's view is visible — the
+ * rest are [View.GONE] so they stop drawing but retain their state.
+ *
+ * When [TabsState.tabs] shrinks (tab closed) we remove and `destroy()` the
+ * orphaned WebView so we don't leak native resources.
+ */
 @SuppressLint("SetJavaScriptEnabled")
 @Composable
-fun BrowserWebView(
-    state: BrowserState,
+fun BrowserWebViewHost(
+    tabs: TabsState,
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
+    val repo = remember(context) { BrowsingRepository.get(context) }
 
-    val webView = remember {
-        WebView(context).apply {
+    val frame = remember {
+        FrameLayout(context).apply {
             layoutParams = ViewGroup.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT,
             )
-
-            // Match the dark Compose background. WebView defaults to a
-            // white background that flashes before the first page paints;
-            // worse, before its first paint it can leave the Compose
-            // drawing in an inconsistent state that hides the top chrome.
-            // Painting a matching colour immediately keeps the UI stable
-            // while we wait for the bee-lite node to come up.
             setBackgroundColor(0xFF121212.toInt())
-
-            settings.apply {
-                javaScriptEnabled = true
-                domStorageEnabled = true
-                loadsImagesAutomatically = true
-                builtInZoomControls = true
-                displayZoomControls = false
-                useWideViewPort = true
-                loadWithOverviewMode = true
-                mediaPlaybackRequiresUserGesture = true
-            }
-
-            // Force an initial paint so the WebView's compositor surface
-            // is valid even before the user submits a URL.
-            loadUrl("about:blank")
-
-            webViewClient = object : WebViewClient() {
-                override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
-                    if (url == ABOUT_BLANK) return
-                    state.currentBzzRoot = extractBzzRoot(url)
-                    url?.let { state.url = displayFor(it, state) }
-                    state.progress = 0
-                }
-
-                override fun onPageFinished(view: WebView?, url: String?) {
-                    // Skip the priming `about:blank` load we do at construction
-                    // time — otherwise it clobbers the address bar before the
-                    // user's initial navigation has even started.
-                    if (url == ABOUT_BLANK) return
-                    state.currentBzzRoot = extractBzzRoot(url)
-                    val display = displayFor(url.orEmpty(), state)
-                    state.url = display
-                    state.title = view?.title.orEmpty()
-                    state.canGoBack = view?.canGoBack() == true
-                    state.canGoForward = view?.canGoForward() == true
-                    state.progress = -1
-                    state.addressBarText = display
-                }
-
-                override fun shouldOverrideUrlLoading(
-                    view: WebView?,
-                    request: WebResourceRequest?,
-                ): Boolean {
-                    val target = request?.url?.toString() ?: return false
-                    if (target.startsWith("bzz://")) {
-                        view?.loadUrl(SwarmResolver.toLoadable(target))
-                        return true
-                    }
-                    return false
-                }
-
-                override fun shouldInterceptRequest(
-                    view: WebView?,
-                    request: WebResourceRequest?,
-                ): WebResourceResponse? = rewriteGatewayEscape(state, request)
-            }
-
-            webChromeClient = object : WebChromeClient() {
-                override fun onProgressChanged(view: WebView?, newProgress: Int) {
-                    state.progress = if (newProgress in 1..99) newProgress else -1
-                }
-
-                override fun onReceivedTitle(view: WebView?, title: String?) {
-                    state.title = title.orEmpty()
-                }
-            }
         }
     }
 
-    // Navigation: when `navCounter` changes, load the pending url.
-    DisposableEffect(state.navCounter) {
-        if (state.navCounter > 0 && state.pendingUrl.isNotEmpty()) {
-            webView.loadUrl(state.pendingUrl)
+    // One WebView per tab id, attached to [frame]. Shown/hidden based on
+    // which tab is active.
+    val webViews = remember { mutableMapOf<Long, WebView>() }
+
+    // Per-tab navigation observers (coroutine jobs, tracked so we can cancel
+    // them if the tab is closed).
+    // Drive navigation + lifecycle for each current tab.
+    val currentIds: List<Long> = tabs.tabs.map { it.id }
+
+    // Create any WebViews that don't yet exist; tear down any that belong
+    // to tabs that have been closed.
+    run {
+        val idsNow = currentIds.toSet()
+        for (tab in tabs.tabs) {
+            if (webViews[tab.id] == null) {
+                val wv = buildWebView(context, tab, repo)
+                webViews[tab.id] = wv
+                frame.addView(wv)
+            }
         }
-        onDispose { }
+        val toRemove = webViews.keys.filter { it !in idsNow }
+        for (id in toRemove) {
+            val wv = webViews.remove(id) ?: continue
+            frame.removeView(wv)
+            wv.stopLoading()
+            wv.destroy()
+        }
+    }
+
+    // Visibility: only the active tab draws.
+    val activeId = tabs.active.id
+    for ((id, wv) in webViews) {
+        val targetVisibility = if (id == activeId) View.VISIBLE else View.GONE
+        if (wv.visibility != targetVisibility) wv.visibility = targetVisibility
+    }
+
+    // Drive loads for each tab as its navCounter changes. `snapshotFlow`
+    // turns the mutable counter into a flow we can collect for the lifetime
+    // of the tab; `key(tab.id)` scopes the effect so closing a tab cancels
+    // its observer.
+    for (tab in tabs.tabs) {
+        androidx.compose.runtime.key(tab.id) {
+            LaunchedEffect(tab.id) {
+                snapshotFlow { tab.navCounter to tab.pendingUrl }
+                    .collectLatest { (counter, pending) ->
+                        if (counter > 0 && pending.isNotEmpty()) {
+                            webViews[tab.id]?.loadUrl(pending)
+                        }
+                    }
+            }
+        }
     }
 
     AndroidView(
-        factory = { webView },
+        factory = { frame },
         modifier = modifier.fillMaxSize(),
     )
 
-    // Make sure the WebView is destroyed with the composition.
+    // Expose a "snapshot the active tab" hook to TabsState. The tab
+    // switcher invokes this right before it renders and [TabsState.switchTo]
+    // invokes it right before swapping, so every card has a preview that
+    // matches what the user last saw.
+    DisposableEffect(tabs) {
+        tabs.captureActiveThumbnail = {
+            val wv = webViews[tabs.active.id]
+            if (wv != null) captureThumbnail(wv, tabs.active)
+        }
+        onDispose { tabs.captureActiveThumbnail = null }
+    }
+
     DisposableEffect(Unit) {
         onDispose {
-            webView.stopLoading()
-            webView.destroy()
+            for (wv in webViews.values) {
+                wv.stopLoading()
+                wv.destroy()
+            }
+            webViews.clear()
         }
     }
 }
+
+@SuppressLint("SetJavaScriptEnabled")
+private fun buildWebView(
+    context: Context,
+    state: BrowserState,
+    repo: BrowsingRepository,
+): WebView =
+    WebView(context).apply {
+        layoutParams = ViewGroup.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.MATCH_PARENT,
+        )
+
+        // Match the dark Compose background. WebView defaults to a
+        // white background that flashes before the first page paints;
+        // worse, before its first paint it can leave the Compose
+        // drawing in an inconsistent state that hides the top chrome.
+        setBackgroundColor(0xFF121212.toInt())
+
+        settings.apply {
+            javaScriptEnabled = true
+            domStorageEnabled = true
+            loadsImagesAutomatically = true
+            builtInZoomControls = true
+            displayZoomControls = false
+            useWideViewPort = true
+            loadWithOverviewMode = true
+            mediaPlaybackRequiresUserGesture = true
+        }
+
+        // Force an initial paint so the WebView's compositor surface
+        // is valid even before the user submits a URL.
+        loadUrl(ABOUT_BLANK)
+
+        webViewClient = object : WebViewClient() {
+            override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
+                if (url == ABOUT_BLANK) return
+                state.currentBzzRoot = extractBzzRoot(url)
+                url?.let { state.url = displayFor(it, state) }
+                state.progress = 0
+            }
+
+            override fun onPageFinished(view: WebView?, url: String?) {
+                if (url == ABOUT_BLANK) return
+                state.currentBzzRoot = extractBzzRoot(url)
+                val display = displayFor(url.orEmpty(), state)
+                state.url = display
+                state.title = view?.title.orEmpty()
+                state.canGoBack = view?.canGoBack() == true
+                state.canGoForward = view?.canGoForward() == true
+                state.progress = -1
+                state.addressBarText = display
+                // Record the *displayed* URL (bzz://, ens://, https://) — not
+                // the gateway-rewritten one — so history reflects what the
+                // user actually visited.
+                repo.recordVisit(display, state.title)
+                // Give the renderer a beat to paint, then capture a
+                // thumbnail. 400ms is enough for most pages; if the load
+                // is still progressing we'll re-capture on the next
+                // onPageFinished anyway.
+                view?.postDelayed({
+                    if (view.visibility == View.VISIBLE) {
+                        captureThumbnail(view, state)
+                    }
+                }, 400)
+            }
+
+            override fun shouldOverrideUrlLoading(
+                view: WebView?,
+                request: WebResourceRequest?,
+            ): Boolean {
+                val target = request?.url?.toString() ?: return false
+                if (target.startsWith("bzz://")) {
+                    view?.loadUrl(SwarmResolver.toLoadable(target))
+                    return true
+                }
+                return false
+            }
+
+            override fun shouldInterceptRequest(
+                view: WebView?,
+                request: WebResourceRequest?,
+            ): WebResourceResponse? = rewriteGatewayEscape(state, request)
+        }
+
+        webChromeClient = object : WebChromeClient() {
+            override fun onProgressChanged(view: WebView?, newProgress: Int) {
+                state.progress = if (newProgress in 1..99) newProgress else -1
+            }
+
+            override fun onReceivedTitle(view: WebView?, title: String?) {
+                state.title = title.orEmpty()
+            }
+        }
+    }
 
 /**
  * Next-style sites served from `/bzz/<hash>/` often reference resources via
@@ -240,15 +372,6 @@ internal fun rewriteGatewayEscape(
     } catch (t: Throwable) {
         Log.w(LOG_TAG, "gateway-escape rewrite failed: $url → $rewritten", t)
         null
-    }
-}
-
-/** Call from the host when the user hits the system back button. */
-fun BrowserState.handleBackPress(webView: WebView): Boolean {
-    return if (webView.canGoBack()) {
-        webView.goBack(); true
-    } else {
-        false
     }
 }
 

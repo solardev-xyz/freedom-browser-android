@@ -4,13 +4,18 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.graphics.ImageBitmap
 
 /**
- * Observable state for a single browser "tab" (we only have one in Phase 2).
+ * Observable state for a single browser tab.
  * The [android.webkit.WebView] itself holds the canonical navigation state;
  * this class mirrors just enough for Compose to reflect it in the chrome.
+ *
+ * [id] is a process-unique, stable identifier so the multi-tab host can
+ * map a tab to its physical [android.webkit.WebView] instance across
+ * recompositions. It should never be reused within a session.
  */
-class BrowserState {
+class BrowserState(val id: Long) {
     var url by mutableStateOf("")
         internal set
     var title by mutableStateOf("")
@@ -47,6 +52,16 @@ class BrowserState {
     var displayOverrideBaseUrl: String? = null
         internal set
     var displayOverridePrefix: String? = null
+        internal set
+
+    /**
+     * Most recent page-preview bitmap for this tab, shown in the tab
+     * switcher grid. Captured from the live WebView after each successful
+     * load and whenever the user opens the switcher (so the thumbnail
+     * reflects their current scroll / DOM state). `null` means we don't
+     * have a snapshot yet — the card falls back to a letter placeholder.
+     */
+    var thumbnail: ImageBitmap? by mutableStateOf<ImageBitmap?>(null)
         internal set
 
     /**
@@ -120,5 +135,6 @@ class BrowserState {
         displayOverrideBaseUrl = null
         displayOverridePrefix = null
         currentBzzRoot = null
+        thumbnail = null
     }
 }

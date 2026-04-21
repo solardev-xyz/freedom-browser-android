@@ -85,15 +85,16 @@ Prove the toolchain and the node binary work before we write any of our own code
 
 **Outcome:** we own the node lifecycle end-to-end in Kotlin on top of the validated `mobile.aar`. Next: add a browser shell on top.
 
-### Phase 2 — Browser shell
-- [ ] Single `MainActivity` hosting a Compose UI
-- [ ] Address bar with input, back / forward / reload, progress bar
-- [ ] Multi-tab model (list of `WebView` instances with state)
-- [ ] `WebView` embedded via `AndroidView { WebView(ctx) }`, JS + DOM storage on
-- [ ] History + bookmarks via Room
-- [ ] Foreground service to keep the node alive with a controllable notification
+### Phase 2 — Browser shell  ✅
+- [x] Single `MainActivity` hosting a Compose UI
+- [x] Address bar with input, back / forward / reload, progress bar
+- [x] Multi-tab model — `TabsState` owns a `SnapshotStateList<BrowserState>`; `BrowserWebViewHost` holds one live `WebView` per tab id as siblings in a shared `FrameLayout` (hidden tabs are `View.GONE` so they keep scroll position, JS state, form contents across switches). Tab switcher is a `ModalBottomSheet` with new/close/switch.
+- [x] `WebView` embedded via `AndroidView { FrameLayout(ctx) }` hosting the per-tab WebViews, JS + DOM storage on
+- [x] History + bookmarks via Room (Room 2.8.4 via KSP 2.1.10-1.0.31). `BrowsingRepository` is the single choke-point; history records the *displayed* URL (`bzz://…`, `ens://…`, or `https://…`) on `onPageFinished`, skipping `about:` / `data:` / `javascript:` / `blob:`. Bookmarks are keyed by URL (unique index) so the star toggle is a trivial upsert / delete.
+- [x] Foreground service to keep the node alive with a controllable notification (done in Phase 1)
+- [x] Library sheet — two-tab bottom sheet (History / Bookmarks) reachable from the top chrome; tapping a row closes the sheet and submits the URL into the active tab.
 
-**Exit criteria:** can open tabs, navigate to `https://` sites, bookmark and revisit.
+**Outcome:** Freedom is now a real multi-tab browser shell. Tabs preserve state across switches, history and bookmarks survive app restarts, ENS and bzz URLs are recorded in their canonical form.
 
 ### Phase 3 — Swarm resolution  ✅ (first pass)
 - [x] `SwarmResolver` — `bzz://<hash>[/path]` ↔ `http://127.0.0.1:1633/bzz/<hash>[/path]`
@@ -117,7 +118,7 @@ Prove the toolchain and the node binary work before we write any of our own code
 - [x] End-to-end verified on the emulator: a Swarm-hosted ENS name resolves to its `bzz://<hash>` via `ethereum.publicnode.com`, address bar stays on `ens://<name>/` while the bee-lite gateway serves the resolved content
 - [ ] ENSIP-15 normalization (currently lowercase-ASCII only; emoji / non-ASCII labels may diverge from `ens_normalize`)
 - [ ] CCIP-Read (OffchainLookup reverts currently surface as `NO_RESOLVER`; required for `.box` via 3DNS and a handful of offchain `.eth` names)
-- [ ] IPFS / IPNS display-only handling (snackbar today; needs an "open in external browser" flow or an embedded IPFS gateway)
+- [x] ~~IPFS / IPNS display-only handling~~ — deferred indefinitely. Freedom is a Swarm-first browser; IPFS content that resolves through ENS falls back to a snackbar ("not supported yet") and that's where it stays for now.
 
 **Exit criteria:** entering `<name>.eth` in the address bar loads the corresponding Swarm content, address bar shows `ens://<name>/`. ✅
 
