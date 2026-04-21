@@ -31,6 +31,18 @@ android {
     }
     kotlinOptions { jvmTarget = "17" }
 
+    // Per-ABI split so we can ship a slim arm64-v8a-only APK (~80 MB)
+    // instead of the universal 310 MB build. Release builds and the
+    // local `:installDebug` flow still work via `universalApk = true`.
+    splits {
+        abi {
+            isEnable = true
+            reset()
+            include("arm64-v8a", "x86_64")
+            isUniversalApk = true
+        }
+    }
+
     packaging {
         resources.excludes += setOf(
             "META-INF/INDEX.LIST",
