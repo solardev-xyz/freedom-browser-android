@@ -17,7 +17,10 @@ android {
         versionName = "0.1.0"
     }
 
-    buildFeatures { compose = true }
+    buildFeatures {
+        compose = true
+        aidl = true
+    }
 
     buildTypes {
         release {
@@ -73,6 +76,8 @@ dependencies {
     implementation("androidx.core:core-ktx:1.15.0")
 
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.1")
+
+    implementation("androidx.datastore:datastore-preferences:1.2.1")
 
     val roomVersion = "2.8.4"
     implementation("androidx.room:room-runtime:$roomVersion")

@@ -7,9 +7,9 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
-import android.os.Binder
 import android.os.Build
 import android.os.IBinder
+import android.os.RemoteCallbackList
 import android.util.Log
 import baby.freedom.mobile.R
 import baby.freedom.swarm.NodeInfo
@@ -20,13 +20,18 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
-import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.launchIn
+import kotlin.system.exitProcess
 
 /**
- * Holds the embedded Swarm node for the lifetime of the app, surviving
- * UI rotation and backgrounding via a foreground service notification.
+ * Holds the embedded Swarm node for the lifetime of its own process
+ * (`:node`, see AndroidManifest). The service is started + bound while
+ * the user wants the node running; when the user flips the toggle off
+ * the UI calls [stopService] + [unbindService], Android destroys this
+ * Service, and [onDestroy] kills the process outright so that
+ * bee-lite's LevelDB state-store file lock is actually released —
+ * something `MobileNode.shutdown()` alone does not do.
  */
 class NodeService : Service() {
 
@@ -34,13 +39,29 @@ class NodeService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var observer: Job? = null
 
-    val state: StateFlow<NodeInfo> get() = swarmNode.state
+    /**
+     * Bound UI clients that want NodeInfo updates. [RemoteCallbackList]
+     * keeps this Binder-death-safe so we don't leak callbacks when the
+     * UI process is restarted.
+     */
+    private val callbacks = RemoteCallbackList<INodeCallback>()
 
-    inner class LocalBinder : Binder() {
-        val state: StateFlow<NodeInfo> get() = this@NodeService.state
+    private val binder = object : INodeService.Stub() {
+        override fun getState(): NodeInfo = swarmNode.state.value
+
+        override fun registerCallback(cb: INodeCallback?) {
+            cb ?: return
+            callbacks.register(cb)
+            runCatching { cb.onStateChanged(swarmNode.state.value) }
+        }
+
+        override fun unregisterCallback(cb: INodeCallback?) {
+            cb ?: return
+            callbacks.unregister(cb)
+        }
     }
 
-    override fun onBind(intent: Intent?): IBinder = LocalBinder()
+    override fun onBind(intent: Intent?): IBinder = binder
 
     override fun onCreate() {
         super.onCreate()
@@ -64,6 +85,7 @@ class NodeService : Service() {
         observer = swarmNode.state
             .onEach { info ->
                 updateNotification(info)
+                broadcastState(info)
                 Log.i(TAG, "node → ${info.status}  peers=${info.connectedPeers}")
             }
             .launchIn(scope)
@@ -74,10 +96,26 @@ class NodeService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int = START_STICKY
 
     override fun onDestroy() {
+        callbacks.kill()
         observer?.cancel()
         scope.cancel()
         swarmNode.dispose()
         super.onDestroy()
+
+        // Kill the :node process so the kernel releases bee-lite's
+        // LevelDB LOCK file. The next startForegroundService() from
+        // the UI will boot a fresh process that can open the store.
+        Log.i(TAG, "exiting :node process to release state-store lock")
+        exitProcess(0)
+    }
+
+    private fun broadcastState(info: NodeInfo) {
+        val n = callbacks.beginBroadcast()
+        for (i in 0 until n) {
+            runCatching { callbacks.getBroadcastItem(i).onStateChanged(info) }
+                .onFailure { Log.w(TAG, "callback threw", it) }
+        }
+        callbacks.finishBroadcast()
     }
 
     private fun createChannel() {
@@ -135,6 +173,10 @@ class NodeService : Service() {
         fun start(ctx: Context) {
             val i = Intent(ctx, NodeService::class.java)
             ctx.startForegroundService(i)
+        }
+
+        fun stop(ctx: Context) {
+            ctx.stopService(Intent(ctx, NodeService::class.java))
         }
     }
 }

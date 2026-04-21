@@ -54,8 +54,7 @@ class SwarmNode(
         scope.launch {
             try {
                 val node = withContext(Dispatchers.IO) {
-                    val options = buildOptions()
-                    Mobile.startNode(options, config.password, LOG_LEVEL)
+                    Mobile.startNode(buildOptions(), config.password, LOG_LEVEL)
                         ?: error("bee-lite startNode returned null")
                 }
                 mobileNode = node

@@ -27,10 +27,17 @@
             </intent-filter>
         </activity>
 
+        <!--
+          NodeService lives in its own `:node` process so we can exit
+          that process (and release bee-lite's LevelDB state-store file
+          lock) when the user toggles the node off, without tearing
+          down the UI.
+        -->
         <service
             android:name=".node.NodeService"
             android:exported="false"
-            android:foregroundServiceType="dataSync" />
+            android:foregroundServiceType="dataSync"
+            android:process=":node" />
 
     </application>
 </manifest>

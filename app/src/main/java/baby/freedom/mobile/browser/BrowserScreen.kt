@@ -41,6 +41,7 @@ import androidx.compose.material3.Snackbar
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.LocalTextStyle
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -65,6 +66,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.style.TextOverflow
@@ -82,6 +84,8 @@ import kotlinx.coroutines.launch
 @Composable
 fun BrowserScreen(
     nodeInfo: NodeInfo,
+    runNodeEnabled: Boolean,
+    onToggleRunNode: (Boolean) -> Unit,
     initialUrl: String = "ens://freedombrowser.eth",
 ) {
     val tabs = remember { TabsState(homepage = initialUrl) }
@@ -223,7 +227,12 @@ fun BrowserScreen(
     }
 
     if (showNodeSheet) {
-        NodeDetailsDialog(nodeInfo = nodeInfo, onDismiss = { showNodeSheet = false })
+        NodeDetailsDialog(
+            nodeInfo = nodeInfo,
+            runNodeEnabled = runNodeEnabled,
+            onToggleRunNode = onToggleRunNode,
+            onDismiss = { showNodeSheet = false },
+        )
     }
 
     if (showTabSwitcher) {
@@ -435,7 +444,12 @@ private fun NodeStatusDot(
 }
 
 @Composable
-private fun NodeDetailsDialog(nodeInfo: NodeInfo, onDismiss: () -> Unit) {
+private fun NodeDetailsDialog(
+    nodeInfo: NodeInfo,
+    runNodeEnabled: Boolean,
+    onToggleRunNode: (Boolean) -> Unit,
+    onDismiss: () -> Unit,
+) {
     val (color, icon, label) = statusTriple(nodeInfo.status)
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -448,6 +462,28 @@ private fun NodeDetailsDialog(nodeInfo: NodeInfo, onDismiss: () -> Unit) {
         },
         text = {
             Column {
+                // Primary control: run-node on/off. Persisted via
+                // DataStore; the service reacts by calling start()/stop().
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("Run node", fontWeight = FontWeight.Medium)
+                        Text(
+                            if (runNodeEnabled) "On — serving bzz://" else "Off — gateway disabled",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Switch(
+                        checked = runNodeEnabled,
+                        onCheckedChange = onToggleRunNode,
+                    )
+                }
+                Spacer(Modifier.height(8.dp))
                 NodeDetailRow("Mode", "ultra-light")
                 NodeDetailRow("Peers", nodeInfo.connectedPeers.toString())
                 if (nodeInfo.walletAddress.isNotEmpty()) {
@@ -455,7 +491,7 @@ private fun NodeDetailsDialog(nodeInfo: NodeInfo, onDismiss: () -> Unit) {
                 }
                 val err = nodeInfo.errorMessage
                 if (!err.isNullOrBlank()) {
-                    NodeDetailRow("Error", err)
+                    NodeDetailRow("Error", err, singleLine = false)
                 }
                 Spacer(Modifier.height(8.dp))
                 Text(
@@ -486,7 +522,12 @@ private fun statusTriple(status: NodeStatus): StatusTriple = when (status) {
 }
 
 @Composable
-private fun NodeDetailRow(label: String, value: String, mono: Boolean = false) {
+private fun NodeDetailRow(
+    label: String,
+    value: String,
+    mono: Boolean = false,
+    singleLine: Boolean = true,
+) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -501,8 +542,8 @@ private fun NodeDetailRow(label: String, value: String, mono: Boolean = false) {
         Text(
             value,
             fontFamily = if (mono) FontFamily.Monospace else FontFamily.Default,
-            overflow = TextOverflow.Ellipsis,
-            maxLines = 1,
+            overflow = if (singleLine) TextOverflow.Ellipsis else TextOverflow.Clip,
+            maxLines = if (singleLine) 1 else Int.MAX_VALUE,
             modifier = Modifier.weight(1f, fill = false),
         )
     }
