@@ -42,16 +42,25 @@ source .envrc   # or use direnv for automatic activation
 
 ## Quick start
 
-```bash
-# 1. Build the embedded Bee node once (~5 minutes; see § Building mobile.aar).
-#    Produces swarmnode/libs/mobile.aar. Only needed on a fresh clone or when
-#    upgrading the Bee version.
-ls swarmnode/libs/mobile.aar   # ~143 MiB — if missing, go build it first
+Fresh clone, from zero to a running app:
 
-# 2. Build the debug APK.
+```bash
+# 1. Activate the toolchain env (JDK 17 + Android SDK).
+source .envrc   # if you haven't: cp .envrc.example .envrc && edit to taste
+
+# 2. Build the embedded Bee node. ~5 minutes on first run, cache-fast after.
+#    Produces the ~143 MiB swarmnode/libs/mobile.aar, which is gitignored
+#    (too big for GitHub) and must exist before Gradle can build the app.
+#    Needs Go 1.26+, Android NDK r27+, and gomobile — see § Building mobile.aar
+#    for toolchain setup. Only needed on a fresh clone or when upgrading Bee.
+git clone https://github.com/Solar-Punk-Ltd/bee-lite-java.git /tmp/bee-lite-java
+( cd /tmp/bee-lite-java && make install && make build )
+cp /tmp/bee-lite-java/build/mobile.aar swarmnode/libs/mobile.aar
+
+# 3. Build the debug APK.
 ./gradlew :app:assembleDebug
 
-# 3. Install on a connected device or running emulator.
+# 4. Install on a connected device or running emulator.
 ./gradlew :app:installDebug
 # or:  adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
