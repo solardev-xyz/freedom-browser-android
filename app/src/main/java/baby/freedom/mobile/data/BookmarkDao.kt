@@ -17,6 +17,13 @@ interface BookmarkDao {
     @Query("SELECT * FROM bookmarks ORDER BY createdAt DESC")
     fun all(): Flow<List<BookmarkEntry>>
 
+    /** Substring search used by the address-bar auto-complete. */
+    @Query(
+        "SELECT * FROM bookmarks WHERE url LIKE :q OR title LIKE :q " +
+            "ORDER BY createdAt DESC LIMIT :limit",
+    )
+    fun search(q: String, limit: Int): Flow<List<BookmarkEntry>>
+
     @Query("SELECT EXISTS(SELECT 1 FROM bookmarks WHERE url = :url)")
     fun isBookmarked(url: String): Flow<Boolean>
 }

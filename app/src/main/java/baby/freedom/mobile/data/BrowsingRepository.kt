@@ -5,6 +5,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
 
 /**
@@ -43,6 +44,38 @@ class BrowsingRepository private constructor(
     }
 
     fun isBookmarked(url: String): Flow<Boolean> = db.bookmarks().isBookmarked(url)
+
+    /**
+     * Address-bar auto-complete suggestions.
+     *
+     * Bookmarks come first (since the user asked the browser to remember
+     * them), followed by recent history with bookmarked URLs filtered
+     * out. History is deduped by URL in-memory: we oversample from Room
+     * (`limit * 3`) so that a site visited 20 times in a row doesn't
+     * crowd out other matches from the final list.
+     *
+     * [query] may be empty — in that case we fall back to the most-recent
+     * bookmarks and history, which gives the address bar a useful
+     * "top sites" list the moment it's focused.
+     */
+    fun suggestions(query: String, limit: Int = 8): Flow<List<UrlSuggestion>> {
+        val pattern = "%" + query.trim().escapeForLike() + "%"
+        return combine(
+            db.bookmarks().search(pattern, limit),
+            db.history().search(pattern, limit * 3),
+        ) { bookmarks, history ->
+            val bookmarkUrls = bookmarks.mapTo(HashSet()) { it.url }
+            val bookmarkItems = bookmarks.map {
+                UrlSuggestion(it.url, it.title, UrlSuggestion.Source.BOOKMARK)
+            }
+            val historyItems = history.asSequence()
+                .filter { it.url !in bookmarkUrls }
+                .distinctBy { it.url }
+                .map { UrlSuggestion(it.url, it.title, UrlSuggestion.Source.HISTORY) }
+                .toList()
+            (bookmarkItems + historyItems).take(limit)
+        }
+    }
 
     /** Add (or replace) the bookmark for [url]. */
     fun bookmark(url: String, title: String) {
