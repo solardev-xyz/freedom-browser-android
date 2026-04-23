@@ -69,7 +69,7 @@ The build produces three debug APKs — `app-arm64-v8a-debug.apk` (~166 MiB), `a
 
 ## Running on an emulator
 
-The embedded node's DNS-based bootstrap fails on Android emulator DNS, so Freedom hard-codes a set of pre-resolved leaf multiaddrs (see [`PLAN.md § Emulator DHT bootstrap`](./PLAN.md)). No extra configuration needed — just:
+The embedded node's DNS-based bootstrap fails on Android emulator DNS, so Freedom hard-codes a set of pre-resolved leaf multiaddrs (see [DHT bootstrap](#dht-bootstrap) below). No extra configuration needed — just:
 
 ```bash
 # Create a Pixel AVD with Android 16 (API 36), arm64 on Apple Silicon.
@@ -82,7 +82,7 @@ adb shell monkey -p baby.freedom.mobile 1
 
 Expected behaviour on cold start:
 
-- Address bar shows `ens://freedombrowser.eth/` with an amber status dot (node starting).
+- Address bar is blank and the home page renders from the app's assets; the status dot is amber (node starting).
 - Within ~25 s the dot turns green; peer count ramps to ~80+ within 60 s.
 - Tap the status dot to see wallet address, peer count, and gateway URL.
 
@@ -93,6 +93,20 @@ adb forward tcp:1633 tcp:1633
 curl http://127.0.0.1:1633/health      # {"status":"ok","version":"..."}
 curl http://127.0.0.1:1633/status      # beeMode=ultra-light, ...
 ```
+
+### DHT bootstrap
+
+Bee-lite's default bootnode is `/dnsaddr/mainnet.ethswarm.org`, which requires multi-step TXT-record resolution. Android emulator DNS does not handle `/dnsaddr/` chains reliably, so peer discovery fails entirely (0 peers after minutes). Freedom's `SwarmNode` configures `Bootnodes` with five pre-resolved leaf multiaddrs instead; with this the emulator reaches ~80+ peers within 60 s:
+
+```
+/ip4/159.223.6.181/tcp/1634/p2p/QmP9b7MxjyEfrJrch5jUThmuFaGzvUPpWEJewCpx5Ln6i8   (ams)
+/ip4/135.181.84.53/tcp/1634/p2p/QmTxX73q8dDiVbmXU7GqMNwG3gWmjSFECuMoCsTW4xp6CK   (hel)
+/ip4/139.84.229.70/tcp/1634/p2p/QmRa6rSrUWJ7s68MNmV94bo2KAa9pYcp6YbFLMHZ3r7n2M   (jhb)
+/ip4/172.104.43.205/tcp/1634/p2p/QmeovveLJmgyfjiA9mJnvFTawHyisuJMCYicJffdWdxNmr  (sgp)
+/ip4/170.64.184.25/tcp/1634/p2p/Qmeh2e7U2FWrSooyrjWjnNKGceJWbRxLLx8Ppy5CimzsGH   (syd)
+```
+
+Long-term: re-resolve the chain periodically on the host, or ship a larger hard-coded list. Note: `StaticNodes` takes *overlay addresses* (64-hex swarm IDs), not multiaddrs — the two fields are not interchangeable. Filed upstream as [swarm-mobile-android#23](https://github.com/Solar-Punk-Ltd/swarm-mobile-android/issues/23).
 
 ## Project layout
 
@@ -110,7 +124,7 @@ freedom-browser-android/
 │       ├── SwarmNode.kt          # lifecycle + StateFlow<NodeInfo>
 │       ├── NodeInfo.kt           # wallet, peers, error
 │       └── NodeStatus.kt         # Stopped | Starting | Running | Error
-├── PLAN.md                       # architecture, decisions, known issues
+├── PLAN.md                       # status: shipped, not yet done, deferred
 ├── build.gradle.kts              # plugin versions
 ├── settings.gradle.kts           # module wiring + flatDir for mobile.aar
 └── .envrc.example                # JAVA_HOME / ANDROID_HOME pointers for macOS
@@ -118,7 +132,7 @@ freedom-browser-android/
 
 Two Gradle modules:
 - `:app` — the Android application.
-- `:swarmnode` — a self-contained Android library wrapping `mobile.aar`, depended on by `:app`. Designed to be publishable on its own (see [`PLAN.md § is it worth publishing?`](./PLAN.md)).
+- `:swarmnode` — a self-contained Android library wrapping `mobile.aar`, depended on by `:app`. Designed to be publishable on its own.
 
 ## Common tasks
 
@@ -219,7 +233,7 @@ For distribution, Android App Bundles ship just the one ABI the device needs via
 
 ## Further reading
 
-- [`PLAN.md`](./PLAN.md) — architecture, decisions, known issues and their workarounds.
+- [`PLAN.md`](./PLAN.md) — what's shipped, what's still open, and deferred work.
 - [Swarm docs](https://docs.ethswarm.org/) — the Swarm network itself.
 - [`bee-lite-java`](https://github.com/Solar-Punk-Ltd/bee-lite-java) — Go sources for the embedded node.
 - [`gomobile` reference](https://pkg.go.dev/golang.org/x/mobile/cmd/gobind) — Go ↔ Java type mapping rules.
