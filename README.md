@@ -2,7 +2,7 @@
 
 A native Android browser that loads both regular `https://` sites and decentralised content addressed via `bzz://` hashes or `ens://` names. An embedded [bee-lite](https://github.com/Solar-Punk-Ltd/bee-lite) node runs inside the app and serves Swarm content through a local HTTP gateway; the WebView sees an ordinary `http://127.0.0.1:1633/bzz/…` URL.
 
-- **Package:** `baby.freedom.mobile` · **Version:** 0.1.0
+- **Package:** `baby.freedom.mobile` · **Version:** 0.2.0
 - **Status:** Phase 3c landed — browser shell, Swarm resolution, ENS resolution, polished chrome. See [`PLAN.md`](./PLAN.md) for roadmap.
 - **Inspired by:** [`Solar-Punk-Ltd/swarm-mobile-android`](https://github.com/Solar-Punk-Ltd/swarm-mobile-android)
 

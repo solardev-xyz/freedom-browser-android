@@ -13,8 +13,8 @@ android {
         applicationId = "baby.freedom.mobile"
         minSdk = 30
         targetSdk = 36
-        versionCode = 2
-        versionName = "0.1.1"
+        versionCode = 3
+        versionName = "0.2.0"
     }
 
     buildFeatures {
@@ -25,6 +25,10 @@ android {
     buildTypes {
         release {
             isMinifyEnabled = false
+            // Sign release builds with the debug keystore so they install
+            // without Play Store signing. Replace with a proper release
+            // signingConfig before publishing.
+            signingConfig = signingConfigs.getByName("debug")
         }
     }
 
