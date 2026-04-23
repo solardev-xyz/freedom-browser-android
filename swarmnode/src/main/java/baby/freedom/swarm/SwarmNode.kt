@@ -23,8 +23,8 @@ import mobile.MobileNodeOptions
  *
  * The UI observes [state]. Because it's a [StateFlow], any new collector
  * immediately receives the current value — there is no edge to miss.
- * This deliberately replaces the upstream listener-replay hack described
- * in PLAN.md under "Known issues & workarounds".
+ * This deliberately replaces the upstream listener-replay hack that
+ * drops the Running edge if `addListener` runs after `start()` completes.
  */
 class SwarmNode(
     private val config: Config,
@@ -120,7 +120,7 @@ class SwarmNode(
         fullNodeMode = false
         bootnodeMode = false
         // Bypass /dnsaddr/mainnet.ethswarm.org which breaks on Android emulator DNS.
-        // See PLAN.md → "Known issues & workarounds → Emulator DHT bootstrap".
+        // See README.md → "Running on an emulator → DHT bootstrap".
         bootnodes = LEAF_BOOTNODES.joinToString("|")
         dataDir = config.dataDir + "/swarm"
         welcomeMessage = "Freedom"

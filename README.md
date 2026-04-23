@@ -124,7 +124,7 @@ freedom-browser-android/
 │       ├── SwarmNode.kt          # lifecycle + StateFlow<NodeInfo>
 │       ├── NodeInfo.kt           # wallet, peers, error
 │       └── NodeStatus.kt         # Stopped | Starting | Running | Error
-├── PLAN.md                       # status: shipped, not yet done, deferred
+├── TODO.md                       # todo + deferred work
 ├── build.gradle.kts              # plugin versions
 ├── settings.gradle.kts           # module wiring + flatDir for mobile.aar
 └── .envrc.example                # JAVA_HOME / ANDROID_HOME pointers for macOS
@@ -233,7 +233,7 @@ For distribution, Android App Bundles ship just the one ABI the device needs via
 
 ## Further reading
 
-- [`PLAN.md`](./PLAN.md) — what's shipped, what's still open, and deferred work.
+- [`TODO.md`](./TODO.md) — what's still open and deferred.
 - [Swarm docs](https://docs.ethswarm.org/) — the Swarm network itself.
 - [`bee-lite-java`](https://github.com/Solar-Punk-Ltd/bee-lite-java) — Go sources for the embedded node.
 - [`gomobile` reference](https://pkg.go.dev/golang.org/x/mobile/cmd/gobind) — Go ↔ Java type mapping rules.
