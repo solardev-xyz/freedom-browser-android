@@ -75,6 +75,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.AnnotatedString
@@ -96,6 +97,7 @@ import baby.freedom.mobile.ens.EnsResult
 import baby.freedom.swarm.NodeInfo
 import baby.freedom.swarm.NodeStatus
 import baby.freedom.swarm.SwarmNode
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 /**
@@ -119,6 +121,7 @@ fun BrowserScreen(
     val repo = remember(context) { BrowsingRepository.get(context) }
     val scope = rememberCoroutineScope()
     val keyboard = LocalSoftwareKeyboardController.current
+    val focusManager = LocalFocusManager.current
     var showNode by rememberSaveable { mutableStateOf(false) }
     var showTabSwitcher by rememberSaveable { mutableStateOf(false) }
     var showHistory by rememberSaveable { mutableStateOf(false) }
@@ -150,13 +153,18 @@ fun BrowserScreen(
 
     fun submit(target: BrowserState, raw: String) {
         keyboard?.hide()
-        // Dismiss the suggestions overlay. We intentionally DO NOT clear
-        // focus here: calling focusManager.clearFocus() synchronously
-        // while the IME's Enter event is still being dispatched lets the
-        // key event propagate to whichever focusable lands next in focus
-        // order (the Home button, for us) and trigger it as a synthetic
-        // click — which would then re-load the home page on top of the
-        // URL the user just submitted.
+        // Drop focus synchronously so the IME's input connection is torn
+        // down before we overwrite the text below. Otherwise the IME
+        // still thinks the committed text is what the user typed ("be")
+        // and will clobber our newly-assigned URL on its next
+        // round-trip.
+        //
+        // For the keyboard-Go path this must be bounced via a
+        // coroutine delay (see the onGo handler) — clearing focus
+        // synchronously while the Enter key event is still in flight
+        // lets Compose route it to the next focusable (the Home button)
+        // and fire it as a synthetic click.
+        focusManager.clearFocus()
         addressBarEdited = false
 
         val trimmed = raw.trim()
@@ -232,6 +240,7 @@ fun BrowserScreen(
                 resolvingEns = resolvingEns,
                 isBookmarked = isBookmarked,
                 addressFocused = addressFocused,
+                addressBarEdited = addressBarEdited,
                 onAddressFocusChanged = { focused ->
                     addressFocused = focused
                     // Losing focus always resets the "has the user typed?"
@@ -240,7 +249,19 @@ fun BrowserScreen(
                     if (!focused) addressBarEdited = false
                 },
                 onAddressEditedChanged = { addressBarEdited = it },
-                onSubmit = { submit(state, it) },
+                onSubmit = { text ->
+                    // Called from the TextField's IME Go action. Bounce
+                    // through a short coroutine delay so the in-flight
+                    // Enter key event is delivered to the TextField
+                    // (and consumed there) before submit() clears
+                    // focus. Otherwise the Enter propagates to the
+                    // Home icon button and fires it as a synthetic
+                    // click.
+                    scope.launch {
+                        delay(50)
+                        submit(state, text)
+                    }
+                },
                 onForward = { state.loadUrl("javascript:history.forward();void(0);") },
                 onHome = {
                     submit(state, tabs.homepageUrl)
@@ -375,6 +396,7 @@ private fun TopBar(
     resolvingEns: Boolean,
     isBookmarked: Boolean,
     addressFocused: Boolean,
+    addressBarEdited: Boolean,
     onAddressFocusChanged: (Boolean) -> Unit,
     onAddressEditedChanged: (Boolean) -> Unit,
     onSubmit: (String) -> Unit,
@@ -409,9 +431,14 @@ private fun TopBar(
     // rewrites the bar with a canonical / ENS form.
     LaunchedEffect(state.addressBarText) {
         if (fieldValue.text != state.addressBarText) {
+            // Park the cursor at position 0 so long URLs horizontally
+            // scroll to their *start* rather than their tail — the
+            // domain is what the user cares about, so keeping e.g.
+            // `https://example.com/...` visible beats showing the end
+            // of a deep query string with the scheme pushed off-screen.
             fieldValue = TextFieldValue(
                 text = state.addressBarText,
-                selection = TextRange(state.addressBarText.length),
+                selection = TextRange.Zero,
             )
         }
     }
@@ -425,16 +452,24 @@ private fun TopBar(
         }
     }
 
-    // Select-all on focus. Running this in a LaunchedEffect (rather
-    // than from `onFocusChanged`) makes sure we apply *after* any
-    // tap-to-place-cursor selection the framework might set during the
-    // focus-granting gesture — otherwise the cursor can land wherever
-    // the user happened to tap inside the pill.
+    // Select-all on focus, park cursor at 0 on focus loss.
+    //
+    // Running the select-all in a LaunchedEffect (rather than from
+    // `onFocusChanged`) makes sure we apply *after* any tap-to-place-
+    // cursor selection the framework might set during the focus-
+    // granting gesture — otherwise the cursor can land wherever the
+    // user happened to tap inside the pill.
+    //
+    // On focus loss we reset the selection to position 0 so long URLs
+    // horizontally scroll to their *start* rather than their tail. The
+    // domain is what the user cares about, so keeping e.g.
+    // `https://example.com/...` visible beats showing the end of a
+    // deep path with the scheme pushed off-screen.
     LaunchedEffect(addressFocused) {
-        if (addressFocused && fieldValue.text.isNotEmpty()) {
-            fieldValue = fieldValue.copy(
-                selection = TextRange(0, fieldValue.text.length),
-            )
+        fieldValue = if (addressFocused && fieldValue.text.isNotEmpty()) {
+            fieldValue.copy(selection = TextRange(0, fieldValue.text.length))
+        } else {
+            fieldValue.copy(selection = TextRange.Zero)
         }
     }
 
@@ -510,15 +545,20 @@ private fun TopBar(
                         }
                         // Trailing action — sized to the pill, never pushes it taller.
                         // State machine:
-                        //   focused + non-empty text → Clear (×)
-                        //   loading                  → spinner
-                        //   otherwise                → nothing (bookmark lives in the overflow menu)
+                        //   user is actively editing (focused + typed something) → Clear (×)
+                        //   loading                                              → spinner
+                        //   otherwise                                            → nothing
+                        // The `addressBarEdited` guard matters once the user
+                        // submits: submit() resets that flag (to dismiss the
+                        // suggestions panel) but intentionally leaves focus
+                        // alone, so without this check the × would stay
+                        // visible while the page is already loading.
                         Box(
                             modifier = Modifier.size(32.dp),
                             contentAlignment = Alignment.Center,
                         ) {
                             when {
-                                addressFocused && fieldValue.text.isNotEmpty() -> {
+                                addressFocused && addressBarEdited && fieldValue.text.isNotEmpty() -> {
                                     IconButton(
                                         onClick = {
                                             fieldValue = TextFieldValue("")
