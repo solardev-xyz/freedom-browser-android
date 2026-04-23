@@ -40,3 +40,6 @@ hs_err_pid*
 # Python virtualenvs (for scripts)
 .venv/
 __pycache__/
+
+# Temporary research / planning notes — not part of the product
+research/

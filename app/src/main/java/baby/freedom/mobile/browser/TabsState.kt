@@ -45,6 +45,15 @@ class TabsState(
     var captureActiveThumbnail: (() -> Unit)? = null
 
     /**
+     * Hook installed by the [BrowserWebViewHost] so the settings screen
+     * can wipe every tab's WebView-side state (cache, form data, back/
+     * forward stack, cookies, site storage) in one shot. `null` before
+     * the host has composed, or after it disposes.
+     */
+    @Volatile
+    var clearWebViewData: (() -> Unit)? = null
+
+    /**
      * Open a new tab. If [url] is null (typical "+" button) the tab starts
      * blank and the caller is expected to load the homepage once the node
      * is running; otherwise [url] is submitted immediately (typical

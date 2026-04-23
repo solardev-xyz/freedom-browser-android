@@ -26,4 +26,7 @@ interface BookmarkDao {
 
     @Query("SELECT EXISTS(SELECT 1 FROM bookmarks WHERE url = :url)")
     fun isBookmarked(url: String): Flow<Boolean>
+
+    @Query("DELETE FROM bookmarks")
+    suspend fun clear()
 }

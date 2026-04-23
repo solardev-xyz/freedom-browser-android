@@ -7,9 +7,11 @@ import android.graphics.Canvas
 import android.util.Log
 import android.view.View
 import android.view.ViewGroup
+import android.webkit.CookieManager
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
+import android.webkit.WebStorage
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.FrameLayout
@@ -192,7 +194,26 @@ fun BrowserWebViewHost(
             val wv = webViews[tabs.active.id]
             if (wv != null) captureThumbnail(wv, tabs.active)
         }
-        onDispose { tabs.captureActiveThumbnail = null }
+        tabs.clearWebViewData = {
+            // Globally-scoped stores: cookies and DOM storage / IndexedDB /
+            // WebSQL are shared across every WebView in the process, so
+            // wiping them once is enough.
+            runCatching { CookieManager.getInstance().removeAllCookies(null) }
+            runCatching { CookieManager.getInstance().flush() }
+            runCatching { WebStorage.getInstance().deleteAllData() }
+            // Per-instance state: HTTP cache, autofill form data, and the
+            // back/forward stack live on each WebView, so clear them on
+            // every live tab.
+            for (wv in webViews.values) {
+                runCatching { wv.clearCache(true) }
+                runCatching { wv.clearFormData() }
+                runCatching { wv.clearHistory() }
+            }
+        }
+        onDispose {
+            tabs.captureActiveThumbnail = null
+            tabs.clearWebViewData = null
+        }
     }
 
     DisposableEffect(Unit) {

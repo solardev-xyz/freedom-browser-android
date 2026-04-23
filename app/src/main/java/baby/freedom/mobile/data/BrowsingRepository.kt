@@ -99,6 +99,10 @@ class BrowsingRepository private constructor(
         scope.launch { db.history().clear() }
     }
 
+    fun clearBookmarks() {
+        scope.launch { db.bookmarks().clear() }
+    }
+
     fun deleteHistory(id: Long) {
         scope.launch { db.history().delete(id) }
     }

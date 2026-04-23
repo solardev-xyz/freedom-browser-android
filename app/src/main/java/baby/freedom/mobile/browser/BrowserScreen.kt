@@ -5,9 +5,9 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
@@ -25,23 +25,17 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowForward
-import androidx.compose.material.icons.filled.Bookmark
-import androidx.compose.material.icons.filled.CheckCircle
-import androidx.compose.material.icons.filled.Clear
-import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Bookmark
+import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Home
-import androidx.compose.material.icons.filled.HourglassTop
 import androidx.compose.material.icons.filled.Menu
-import androidx.compose.material.icons.filled.PowerSettingsNew
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.StarBorder
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -51,10 +45,9 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Snackbar
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.Surface
 import androidx.compose.material3.LocalTextStyle
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -73,7 +66,8 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
-import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.layout.boundsInWindow
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
@@ -81,14 +75,20 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.IntRect
+import androidx.compose.ui.unit.IntSize
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Popup
+import androidx.compose.ui.window.PopupPositionProvider
+import androidx.compose.ui.window.PopupProperties
 import baby.freedom.mobile.data.BrowsingRepository
 import baby.freedom.mobile.data.UrlSuggestion
 import baby.freedom.mobile.ens.EnsInput
@@ -96,7 +96,6 @@ import baby.freedom.mobile.ens.EnsResolver
 import baby.freedom.mobile.ens.EnsResult
 import baby.freedom.swarm.NodeInfo
 import baby.freedom.swarm.NodeStatus
-import baby.freedom.swarm.SwarmNode
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
@@ -122,6 +121,7 @@ fun BrowserScreen(
     val scope = rememberCoroutineScope()
     val keyboard = LocalSoftwareKeyboardController.current
     val focusManager = LocalFocusManager.current
+    var showSettings by rememberSaveable { mutableStateOf(false) }
     var showNode by rememberSaveable { mutableStateOf(false) }
     var showTabSwitcher by rememberSaveable { mutableStateOf(false) }
     var showHistory by rememberSaveable { mutableStateOf(false) }
@@ -274,6 +274,7 @@ fun BrowserScreen(
                     if (isBookmarked) repo.unbookmark(url)
                     else repo.bookmark(url, state.title)
                 },
+                onOpenSettings = { showSettings = true },
                 onOpenNode = { showNode = true },
                 onOpenTabs = { showTabSwitcher = true },
                 onOpenHistory = { showHistory = true },
@@ -343,6 +344,17 @@ fun BrowserScreen(
         ) { data -> Snackbar(snackbarData = data) }
     }
 
+    if (showSettings) {
+        SettingsScreen(
+            repo = repo,
+            onClearWebViewData = { tabs.clearWebViewData?.invoke() },
+            onDismiss = { showSettings = false },
+        )
+    }
+
+    // NodeScreen is placed *after* SettingsScreen so it overlays it when
+    // the user drills in from Settings → Node details. Back / × dismisses
+    // only the node screen and returns them to Settings.
     if (showNode) {
         NodeScreen(
             nodeInfo = nodeInfo,
@@ -404,6 +416,7 @@ private fun TopBar(
     onHome: () -> Unit,
     focusAddressTrigger: Int,
     onToggleBookmark: () -> Unit,
+    onOpenSettings: () -> Unit,
     onOpenNode: () -> Unit,
     onOpenTabs: () -> Unit,
     onOpenHistory: () -> Unit,
@@ -476,7 +489,7 @@ private fun TopBar(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 8.dp, vertical = 6.dp),
+            .padding(start = 8.dp, end = 8.dp, top = 4.dp, bottom = 1.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         IconButton(onClick = onHome) {
@@ -615,22 +628,56 @@ private fun TopBar(
         TabsCountButton(
             count = tabCount,
             onClick = onOpenTabs,
-            modifier = Modifier.padding(start = 2.dp),
+            modifier = Modifier.padding(start = 10.dp),
         )
 
-        Box {
+        // We hand-roll the anchor positioning rather than rely on
+        // Material3's [DropdownMenu]: its Popup mis-anchors on the very
+        // first open (appears pinned to the top of the content area
+        // instead of below the hamburger) and only recovers on
+        // subsequent opens. Tracking the IconButton's window bounds
+        // ourselves via [onGloballyPositioned] and feeding them to a
+        // [Popup] + custom [PopupPositionProvider] produces a stable
+        // anchor from the first frame.
+        var anchorBounds by remember { mutableStateOf<IntRect?>(null) }
+        Box(
+            modifier = Modifier.onGloballyPositioned { coords ->
+                val r = coords.boundsInWindow()
+                anchorBounds = IntRect(
+                    r.left.toInt(), r.top.toInt(),
+                    r.right.toInt(), r.bottom.toInt(),
+                )
+            },
+        ) {
             IconButton(
                 onClick = { menuExpanded = true },
                 modifier = Modifier.padding(start = 2.dp),
             ) {
                 Icon(Icons.Filled.Menu, contentDescription = "Menu")
             }
-            DropdownMenu(
-                expanded = menuExpanded,
-                onDismissRequest = { menuExpanded = false },
-            ) {
+            if (menuExpanded && anchorBounds != null) {
+                Popup(
+                    popupPositionProvider = AnchoredBelowRightProvider(anchorBounds!!),
+                    onDismissRequest = { menuExpanded = false },
+                    properties = PopupProperties(focusable = true),
+                ) {
+                    Surface(
+                        shape = RoundedCornerShape(4.dp),
+                        color = MaterialTheme.colorScheme.surfaceContainer,
+                        tonalElevation = 3.dp,
+                        shadowElevation = 3.dp,
+                    ) {
+                        // [IntrinsicSize.Max] makes the Column size to
+                        // its widest child's natural width. Without
+                        // this, [DropdownMenuItem] uses fillMaxWidth
+                        // internally and the popup grows to the window.
+                        Column(
+                            modifier = Modifier
+                                .width(IntrinsicSize.Max)
+                                .padding(vertical = 8.dp),
+                        ) {
                 DropdownMenuItem(
-                    text = { Text(if (isBookmarked) "Remove bookmark" else "Add bookmark") },
+                    text = { MenuItemLabel(if (isBookmarked) "Remove bookmark" else "Add bookmark") },
                     leadingIcon = {
                         Icon(
                             imageVector = if (isBookmarked) Icons.Filled.Star
@@ -647,7 +694,7 @@ private fun TopBar(
                     },
                 )
                 DropdownMenuItem(
-                    text = { Text("Forward") },
+                    text = { MenuItemLabel("Forward") },
                     leadingIcon = {
                         Icon(
                             Icons.AutoMirrored.Filled.ArrowForward,
@@ -661,7 +708,7 @@ private fun TopBar(
                     },
                 )
                 DropdownMenuItem(
-                    text = { Text("New tab") },
+                    text = { MenuItemLabel("New tab") },
                     leadingIcon = { Icon(Icons.Filled.Add, contentDescription = null) },
                     onClick = {
                         menuExpanded = false
@@ -669,7 +716,7 @@ private fun TopBar(
                     },
                 )
                 DropdownMenuItem(
-                    text = { Text("Reload") },
+                    text = { MenuItemLabel("Reload") },
                     leadingIcon = { Icon(Icons.Filled.Refresh, contentDescription = null) },
                     onClick = {
                         menuExpanded = false
@@ -677,7 +724,7 @@ private fun TopBar(
                     },
                 )
                 DropdownMenuItem(
-                    text = { Text("History") },
+                    text = { MenuItemLabel("History") },
                     leadingIcon = {
                         Icon(Icons.Filled.History, contentDescription = null)
                     },
@@ -687,7 +734,7 @@ private fun TopBar(
                     },
                 )
                 DropdownMenuItem(
-                    text = { Text("Bookmarks") },
+                    text = { MenuItemLabel("Bookmarks") },
                     leadingIcon = {
                         Icon(Icons.Filled.Bookmark, contentDescription = null)
                     },
@@ -697,10 +744,19 @@ private fun TopBar(
                     },
                 )
                 DropdownMenuItem(
+                    text = { MenuItemLabel("Settings") },
+                    leadingIcon = {
+                        Icon(Icons.Filled.Settings, contentDescription = null)
+                    },
+                    onClick = {
+                        menuExpanded = false
+                        onOpenSettings()
+                    },
+                )
+                DropdownMenuItem(
                     text = {
-                        Text(
-                            if (peerCount == 1L) "1 peer"
-                            else "$peerCount peers",
+                        MenuItemLabel(
+                            if (peerCount == 1L) "1 peer" else "$peerCount peers",
                         )
                     },
                     leadingIcon = {
@@ -714,8 +770,53 @@ private fun TopBar(
                         onOpenNode()
                     },
                 )
+                        }
+                    }
+                }
             }
         }
+    }
+}
+
+/**
+ * Text label for a [DropdownMenuItem] that carries its own trailing
+ * padding. Every label wears the same end-inset, so [IntrinsicSize.Max]
+ * on the parent Column grows the whole popup past the bare-text width
+ * and keeps long labels like "Bookmark" from hugging the right edge.
+ */
+@Composable
+private fun MenuItemLabel(text: String) {
+    Text(
+        text = text,
+        modifier = Modifier.padding(end = 32.dp),
+    )
+}
+
+/**
+ * Places a [Popup] flush against an anchor's bottom edge and its right
+ * edge (LTR) / left edge (RTL), clamping to the window so the popup
+ * never runs off-screen on smaller devices. The anchor bounds are
+ * captured by the caller via [Modifier.onGloballyPositioned]; we
+ * deliberately ignore the [anchorBounds] argument the framework hands
+ * in, since that's the very value that mis-fires on the first open for
+ * Material3's default [androidx.compose.material3.DropdownMenu].
+ */
+private class AnchoredBelowRightProvider(
+    private val anchor: IntRect,
+) : PopupPositionProvider {
+    override fun calculatePosition(
+        anchorBounds: IntRect,
+        windowSize: IntSize,
+        layoutDirection: LayoutDirection,
+        popupContentSize: IntSize,
+    ): IntOffset {
+        val x = when (layoutDirection) {
+            LayoutDirection.Ltr -> anchor.right - popupContentSize.width
+            LayoutDirection.Rtl -> anchor.left
+        }.coerceIn(0, (windowSize.width - popupContentSize.width).coerceAtLeast(0))
+        val y = anchor.bottom
+            .coerceIn(0, (windowSize.height - popupContentSize.height).coerceAtLeast(0))
+        return IntOffset(x, y)
     }
 }
 
@@ -864,143 +965,3 @@ private fun NodeStatusDot(
     )
 }
 
-/**
- * Full-screen node-details page — replaces the former AlertDialog.
- * Shows peer count, wallet, run-node toggle, and gateway URL, with a
- * matching × close button and hardware back support.
- */
-@Composable
-private fun NodeScreen(
-    nodeInfo: NodeInfo,
-    runNodeEnabled: Boolean,
-    onToggleRunNode: (Boolean) -> Unit,
-    onDismiss: () -> Unit,
-) {
-    BackHandler(onBack = onDismiss)
-    val (color, icon, label) = statusTriple(nodeInfo.status)
-
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(MaterialTheme.colorScheme.background)
-            .windowInsetsPadding(WindowInsets.systemBars),
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 8.dp, vertical = 4.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Row(
-                modifier = Modifier
-                    .weight(1f)
-                    .padding(start = 8.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Icon(icon, contentDescription = null, tint = color)
-                Spacer(Modifier.width(8.dp))
-                Column {
-                    Text(
-                        "Swarm node",
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.SemiBold,
-                    )
-                    Text(
-                        label,
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-            }
-            IconButton(onClick = onDismiss) {
-                Icon(Icons.Filled.Close, contentDescription = "Close")
-            }
-        }
-
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 8.dp),
-        ) {
-            // Primary control: run-node on/off. Persisted via DataStore;
-            // the service reacts by calling start()/stop().
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(vertical = 4.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text("Run node", fontWeight = FontWeight.Medium)
-                    Text(
-                        if (runNodeEnabled) "On — serving bzz://" else "Off — gateway disabled",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-                Switch(
-                    checked = runNodeEnabled,
-                    onCheckedChange = onToggleRunNode,
-                )
-            }
-            Spacer(Modifier.height(16.dp))
-            NodeDetailRow("Mode", "ultra-light")
-            NodeDetailRow("Peers", nodeInfo.connectedPeers.toString())
-            if (nodeInfo.walletAddress.isNotEmpty()) {
-                NodeDetailRow("Wallet", nodeInfo.walletAddress, mono = true)
-            }
-            val err = nodeInfo.errorMessage
-            if (!err.isNullOrBlank()) {
-                NodeDetailRow("Error", err, singleLine = false)
-            }
-            Spacer(Modifier.height(16.dp))
-            Text(
-                "Gateway: ${SwarmNode.GATEWAY_URL}",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                fontFamily = FontFamily.Monospace,
-            )
-        }
-    }
-}
-
-private data class StatusTriple(
-    val color: Color,
-    val icon: ImageVector,
-    val label: String,
-)
-
-private fun statusTriple(status: NodeStatus): StatusTriple = when (status) {
-    NodeStatus.Running -> StatusTriple(Color(0xFF22C55E), Icons.Filled.CheckCircle, "Running")
-    NodeStatus.Starting -> StatusTriple(Color(0xFFF59E0B), Icons.Filled.HourglassTop, "Starting…")
-    NodeStatus.Stopped -> StatusTriple(Color(0xFF94A3B8), Icons.Filled.PowerSettingsNew, "Stopped")
-    NodeStatus.Error -> StatusTriple(Color(0xFFEF4444), Icons.Filled.ErrorOutline, "Error")
-}
-
-@Composable
-private fun NodeDetailRow(
-    label: String,
-    value: String,
-    mono: Boolean = false,
-    singleLine: Boolean = true,
-) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(vertical = 4.dp),
-        horizontalArrangement = Arrangement.SpaceBetween,
-    ) {
-        Text(
-            label,
-            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
-            modifier = Modifier.padding(end = 12.dp),
-        )
-        Text(
-            value,
-            fontFamily = if (mono) FontFamily.Monospace else FontFamily.Default,
-            overflow = if (singleLine) TextOverflow.Ellipsis else TextOverflow.Clip,
-            maxLines = if (singleLine) 1 else Int.MAX_VALUE,
-            modifier = Modifier.weight(1f, fill = false),
-        )
-    }
-}

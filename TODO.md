@@ -4,7 +4,6 @@
 - Error page for unreachable hashes or node failures; `BrowserWebView` has no `onReceivedError` / `onReceivedHttpError` override.
 - ENSIP-15 normalization (currently lowercase-ASCII only).
 - CCIP-Read / OffchainLookup (required for `.box` via 3DNS and some offchain `.eth` names).
-- Unified Settings screen — pulls together node page, browsing-data reset (currently only history-trash from the library sheet), and an About page.
 - Offline / node-not-ready handling beyond the status dot.
 - Real release keystore to replace the debug-keystore stand-in in `app/build.gradle.kts`.
 - End-to-end Swarm content fetch test against a hash we pinned ourselves (blocked on Light-mode uploads).

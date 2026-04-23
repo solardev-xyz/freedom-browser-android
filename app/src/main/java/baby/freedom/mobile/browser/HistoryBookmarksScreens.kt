@@ -2,26 +2,23 @@ package baby.freedom.mobile.browser
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.systemBars
-import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.DeleteForever
+import androidx.compose.material.icons.outlined.BookmarkBorder
+import androidx.compose.material.icons.outlined.History
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -31,10 +28,12 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.BiasAlignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import baby.freedom.mobile.data.BrowsingRepository
 import java.text.DateFormat
@@ -58,23 +57,16 @@ fun HistoryScreen(
         DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT)
     }
 
-    FullScreenListScaffold(
+    FullScreenScaffold(
         title = "History",
-        subtitle = "${entries.size} visit${if (entries.size == 1) "" else "s"}",
         onDismiss = onDismiss,
-        trailing = {
-            if (entries.isNotEmpty()) {
-                IconButton(onClick = { repo.clearHistory() }) {
-                    Icon(
-                        Icons.Filled.DeleteForever,
-                        contentDescription = "Clear history",
-                    )
-                }
-            }
-        },
     ) {
         if (entries.isEmpty()) {
-            EmptyState("No history yet")
+            EmptyState(
+                icon = Icons.Outlined.History,
+                title = "No history yet",
+                hint = "Pages you visit will show up here.",
+            )
         } else {
             LazyColumn(
                 verticalArrangement = Arrangement.spacedBy(6.dp),
@@ -110,13 +102,16 @@ fun BookmarksScreen(
 
     val entries by remember { repo.bookmarks }.collectAsState(initial = emptyList())
 
-    FullScreenListScaffold(
+    FullScreenScaffold(
         title = "Bookmarks",
-        subtitle = "${entries.size} bookmark${if (entries.size == 1) "" else "s"}",
         onDismiss = onDismiss,
     ) {
         if (entries.isEmpty()) {
-            EmptyState("No bookmarks yet — tap the star icon while on a page to save it")
+            EmptyState(
+                icon = Icons.Outlined.BookmarkBorder,
+                title = "No bookmarks yet",
+                hint = "Tap the star in the menu while on a page to save it.",
+            )
         } else {
             LazyColumn(
                 verticalArrangement = Arrangement.spacedBy(6.dp),
@@ -137,60 +132,6 @@ fun BookmarksScreen(
     }
 }
 
-/**
- * Shared chrome for the History and Bookmarks full-screen pages:
- * a background-coloured root, system-bar insets, a title/subtitle bar
- * with a back button (and optional [trailing] slot), and a content
- * area that fills the remaining space.
- */
-@Composable
-private fun FullScreenListScaffold(
-    title: String,
-    subtitle: String,
-    onDismiss: () -> Unit,
-    trailing: @Composable () -> Unit = {},
-    content: @Composable () -> Unit,
-) {
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(MaterialTheme.colorScheme.background)
-            .windowInsetsPadding(WindowInsets.systemBars),
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 8.dp, vertical = 4.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Column(
-                modifier = Modifier
-                    .weight(1f)
-                    .padding(start = 8.dp),
-            ) {
-                Text(
-                    title,
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.SemiBold,
-                )
-                Text(
-                    subtitle,
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-            trailing()
-            IconButton(onClick = onDismiss) {
-                Icon(Icons.Filled.Close, contentDescription = "Close")
-            }
-        }
-
-        Box(modifier = Modifier.fillMaxSize()) {
-            content()
-        }
-    }
-}
-
 @Composable
 private fun EntryRow(
     title: String,
@@ -199,60 +140,68 @@ private fun EntryRow(
     onClick: () -> Unit,
     onRemove: () -> Unit,
 ) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(10.dp))
-            .background(MaterialTheme.colorScheme.surfaceVariant)
-            .clickable { onClick() }
-            .padding(horizontal = 12.dp, vertical = 10.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Column(modifier = Modifier.weight(1f)) {
-            Text(
-                title,
-                fontWeight = FontWeight.Medium,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-            Text(
-                subtitle,
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-            if (timestamp != null) {
-                Text(
-                    timestamp,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+    PageRow(
+        title = title,
+        subtitle = subtitle,
+        thirdLine = timestamp,
+        onClick = onClick,
+        trailing = {
+            IconButton(onClick = onRemove, modifier = Modifier.size(32.dp)) {
+                Icon(
+                    Icons.Filled.Close,
+                    contentDescription = "Remove",
+                    modifier = Modifier.size(18.dp),
                 )
             }
-        }
-        Spacer(Modifier.size(8.dp))
-        IconButton(onClick = onRemove, modifier = Modifier.size(32.dp)) {
-            Icon(
-                Icons.Filled.Close,
-                contentDescription = "Remove",
-                modifier = Modifier.size(18.dp),
-            )
-        }
-    }
+        },
+    )
 }
 
 @Composable
-private fun EmptyState(text: String) {
+private fun EmptyState(
+    icon: ImageVector,
+    title: String,
+    hint: String,
+) {
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .padding(vertical = 48.dp),
-        contentAlignment = Alignment.TopCenter,
+            .padding(horizontal = 32.dp),
+        contentAlignment = BiasAlignment(0f, -0.25f),
     ) {
-        Text(
-            text,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            style = MaterialTheme.typography.bodyMedium,
-        )
+        Column(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(112.dp)
+                    .clip(CircleShape)
+                    .background(MaterialTheme.colorScheme.surfaceVariant),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    icon,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(52.dp),
+                )
+            }
+            Spacer(Modifier.height(20.dp))
+            Text(
+                title,
+                style = MaterialTheme.typography.titleLarge,
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.onSurface,
+                textAlign = TextAlign.Center,
+            )
+            Spacer(Modifier.height(8.dp))
+            Text(
+                hint,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.Center,
+            )
+        }
     }
 }
