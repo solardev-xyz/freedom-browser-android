@@ -425,7 +425,13 @@ private fun buildRefreshableWebView(
                 state.currentBzzRoot = extractBzzRoot(url)
                 val display = url?.let { displayFor(it, state) }
                 if (display != null) {
-                    state.url = display
+                    // For error pages, surface the URL the user was
+                    // actually trying to visit (`ens://…`, `bzz://…`)
+                    // instead of our internal `file:///android_asset/…`
+                    // path. `lastLoadedDisplayUrl` stays on the raw
+                    // file URL so the [ErrorPage.isErrorPage] guards in
+                    // [onReceivedIcon] etc. still match.
+                    state.url = ErrorPage.displayUrlFor(url) ?: display
                     lastLoadedDisplayUrl = display
                 }
                 // Refresh navigation flags here (as well as in
@@ -470,13 +476,20 @@ private fun buildRefreshableWebView(
                 refreshLayout.isRefreshing = false
                 state.currentBzzRoot = extractBzzRoot(url)
                 val display = displayFor(url.orEmpty(), state)
-                state.url = display
+                // See the companion comment in `onPageStarted` — for
+                // error pages the address bar / `state.url` show the
+                // URL the user was trying to visit, while the raw
+                // `file:///android_asset/…` path is kept only on
+                // `lastLoadedDisplayUrl` so the error-page guards
+                // elsewhere still fire.
+                val uiDisplay = ErrorPage.displayUrlFor(url) ?: display
+                state.url = uiDisplay
                 lastLoadedDisplayUrl = display
                 state.title = sanitizeTitle(view?.title, url)
                 state.canGoBack = view?.canGoBack() == true
                 state.canGoForward = view?.canGoForward() == true
                 state.progress = -1
-                state.addressBarText = display
+                state.addressBarText = uiDisplay
                 // Record the *displayed* URL (bzz://, ens://, https://) — not
                 // the gateway-rewritten one — so history reflects what the
                 // user actually visited. The local home page is hidden from

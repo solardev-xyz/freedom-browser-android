@@ -317,7 +317,8 @@ fun BrowserScreen(
 
         val ens = EnsInput.parse(canonical)
         if (ens != null) {
-            target.addressBarText = "ens://${ens.name}${ens.suffix}"
+            val ensDisplay = "ens://${ens.name}${ens.suffix}"
+            target.addressBarText = ensDisplay
             resolvingEns = true
             target.pendingProbeJob = scope.launch {
                 try {
@@ -331,23 +332,56 @@ fun BrowserScreen(
                             KnownEnsNames.record(result.uri, ens.name)
                             if (result.protocol == "bzz") {
                                 val bzzUri = result.uri + ens.suffix
-                                val display = "ens://${ens.name}${ens.suffix}"
-                                gateBzzNavigation(target, bzzUri, ens.name, display)
+                                gateBzzNavigation(target, bzzUri, ens.name, ensDisplay)
                             } else {
-                                snackbarHostState.showSnackbar(
-                                    "${ens.name} → ${result.protocol}:// (${result.decoded.take(12)}…) — not supported yet",
+                                target.clearEnsOverride()
+                                target.loadUrl(
+                                    ErrorPage.url(
+                                        errorCode = "ens_protocol_not_supported",
+                                        displayUrl = ensDisplay,
+                                        protocol = "ens",
+                                        retryUrl = ensDisplay,
+                                        detail = "${result.protocol}:// (${result.decoded.take(16)}…)",
+                                    ),
                                 )
                             }
                         }
-                        is EnsResult.NotFound -> snackbarHostState.showSnackbar(
-                            "${ens.name}: no contenthash (${result.reason})",
-                        )
-                        is EnsResult.Unsupported -> snackbarHostState.showSnackbar(
-                            "${ens.name}: unsupported contenthash codec ${result.codec}",
-                        )
-                        is EnsResult.Error -> snackbarHostState.showSnackbar(
-                            "ENS lookup failed: ${result.reason}",
-                        )
+                        is EnsResult.NotFound -> {
+                            target.clearEnsOverride()
+                            target.loadUrl(
+                                ErrorPage.url(
+                                    errorCode = "ens_not_found",
+                                    displayUrl = ensDisplay,
+                                    protocol = "ens",
+                                    retryUrl = ensDisplay,
+                                    detail = result.reason,
+                                ),
+                            )
+                        }
+                        is EnsResult.Unsupported -> {
+                            target.clearEnsOverride()
+                            target.loadUrl(
+                                ErrorPage.url(
+                                    errorCode = "ens_unsupported_codec",
+                                    displayUrl = ensDisplay,
+                                    protocol = "ens",
+                                    retryUrl = ensDisplay,
+                                    detail = "codec ${result.codec}",
+                                ),
+                            )
+                        }
+                        is EnsResult.Error -> {
+                            target.clearEnsOverride()
+                            target.loadUrl(
+                                ErrorPage.url(
+                                    errorCode = "ens_lookup_failed",
+                                    displayUrl = ensDisplay,
+                                    protocol = "ens",
+                                    retryUrl = ensDisplay,
+                                    detail = result.reason,
+                                ),
+                            )
+                        }
                     }
                 } finally {
                     resolvingEns = false

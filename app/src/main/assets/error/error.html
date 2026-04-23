@@ -141,6 +141,7 @@
       const url = params.get('url');
       const explicitProtocol = params.get('protocol');
       const retryUrl = params.get('retry') || url;
+      const detail = params.get('detail');
       const protocolUrl = toProtocolUrl(url);
       const protocol = explicitProtocol || detectProtocol(url);
 
@@ -162,7 +163,26 @@
         if (protocolUrl) parts.push(protocolUrl);
         else if (url) parts.push(url);
 
-        if (error === 'swarm_content_not_found') {
+        if (error === 'ens_not_found') {
+          titleEl.textContent = 'No content for this ENS name';
+          descriptionEl.innerHTML =
+            "This ENS name doesn't point at any content yet. The owner may not have set a " +
+            '<code>contenthash</code> record, or the name has no resolver.';
+        } else if (error === 'ens_unsupported_codec') {
+          titleEl.textContent = 'Unsupported content format';
+          descriptionEl.innerHTML =
+            'This ENS name resolves to a content format Freedom Browser cannot load yet on mobile.';
+        } else if (error === 'ens_protocol_not_supported') {
+          titleEl.textContent = 'Protocol not supported yet';
+          descriptionEl.innerHTML =
+            'This ENS name points at an IPFS / IPNS address. Only Swarm (<code>bzz://</code>) ' +
+            'content is supported on mobile today.';
+        } else if (error === 'ens_lookup_failed') {
+          titleEl.textContent = 'ENS lookup failed';
+          descriptionEl.innerHTML =
+            "Couldn't reach an Ethereum RPC endpoint to resolve this name. Check your " +
+            'connection and try again.';
+        } else if (error === 'swarm_content_not_found') {
           titleEl.textContent = 'Content not ready yet';
           descriptionEl.innerHTML =
             "Couldn't find this content on the Swarm network yet. The node is " +
@@ -189,6 +209,10 @@
         } else if (error) {
           parts.push('');
           parts.push(error);
+        }
+
+        if (detail) {
+          parts.push(detail);
         }
 
         detailsEl.textContent = parts.join('\n') || 'Unknown error';
