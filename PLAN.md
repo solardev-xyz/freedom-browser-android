@@ -2,7 +2,7 @@
 
 A native Android browser that can load both regular `https://` sites and Swarm content via `bzz://` URLs, built on top of an embedded [bee-lite](https://github.com/ethersphere/bee) node. Inspired by [Solar-Punk-Ltd/swarm-mobile-android](https://github.com/Solar-Punk-Ltd/swarm-mobile-android).
 
-- **Internal / package name:** `freedom-mobile`
+- **Internal / package name:** `freedom-browser-android`
 - **Display name:** Freedom
 
 ## Decisions
@@ -40,7 +40,7 @@ A native Android browser that can load both regular `https://` sites and Swarm c
 ## Repo layout (target)
 
 ```
-freedom-mobile/
+freedom-browser-android/
 ├── PLAN.md                       # this file
 ├── app/                          # Compose browser UI
 │   └── src/main/java/.../

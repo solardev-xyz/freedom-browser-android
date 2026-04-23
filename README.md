@@ -3,7 +3,6 @@
 A native Android browser that loads both regular `https://` sites and decentralised content addressed via `bzz://` hashes or `ens://` names. An embedded [bee-lite](https://github.com/Solar-Punk-Ltd/bee-lite) node runs inside the app and serves Swarm content through a local HTTP gateway; the WebView sees an ordinary `http://127.0.0.1:1633/bzz/…` URL.
 
 - **Package:** `baby.freedom.mobile` · **Version:** 0.2.0
-- **Status:** Phase 3c landed — browser shell, Swarm resolution, ENS resolution, polished chrome. See [`PLAN.md`](./PLAN.md) for roadmap.
 - **Inspired by:** [`Solar-Punk-Ltd/swarm-mobile-android`](https://github.com/Solar-Punk-Ltd/swarm-mobile-android)
 
 ## Requirements
@@ -62,10 +61,11 @@ cp /tmp/bee-lite-java/build/mobile.aar swarmnode/libs/mobile.aar
 
 # 4. Install on a connected device or running emulator.
 ./gradlew :app:installDebug
-# or:  adb install -r app/build/outputs/apk/debug/app-debug.apk
+# or, for a slim per-ABI APK on a physical arm64 device:
+#   adb install -r app/build/outputs/apk/debug/app-arm64-v8a-debug.apk
 ```
 
-The debug APK is ~320 MiB because it carries four ABIs of the fully-linked Bee node. For smaller builds on device see [APK size](#apk-size).
+The build produces three debug APKs — `app-arm64-v8a-debug.apk` (~166 MiB), `app-x86_64-debug.apk` (~210 MiB), and `app-universal-debug.apk` (~556 MiB, all ABIs). See [APK size](#apk-size) for what to ship.
 
 ## Running on an emulator
 
@@ -97,7 +97,7 @@ curl http://127.0.0.1:1633/status      # beeMode=ultra-light, ...
 ## Project layout
 
 ```
-freedom-mobile/
+freedom-browser-android/
 ├── app/                          # Android application (Compose + Material 3)
 │   └── src/main/java/baby/freedom/mobile/
 │       ├── MainActivity.kt       # hosts the Compose tree, binds NodeService
@@ -110,7 +110,7 @@ freedom-mobile/
 │       ├── SwarmNode.kt          # lifecycle + StateFlow<NodeInfo>
 │       ├── NodeInfo.kt           # wallet, peers, error
 │       └── NodeStatus.kt         # Stopped | Starting | Running | Error
-├── PLAN.md                       # architecture, phases, decisions, known issues
+├── PLAN.md                       # architecture, decisions, known issues
 ├── build.gradle.kts              # plugin versions
 ├── settings.gradle.kts           # module wiring + flatDir for mobile.aar
 └── .envrc.example                # JAVA_HOME / ANDROID_HOME pointers for macOS
@@ -135,8 +135,8 @@ Two Gradle modules:
 Reading the current APK's metadata:
 
 ```bash
-$ANDROID_HOME/build-tools/36.0.0/aapt2 dump badging app/build/outputs/apk/debug/app-debug.apk | head
-# package: name='baby.freedom.mobile' versionCode='1' versionName='0.1.0'
+$ANDROID_HOME/build-tools/36.0.0/aapt2 dump badging app/build/outputs/apk/debug/app-arm64-v8a-debug.apk | head
+# package: name='baby.freedom.mobile' versionCode='3' versionName='0.2.0'
 ```
 
 ## Building `mobile.aar`
@@ -159,11 +159,11 @@ cd /tmp/bee-lite-java
 make install
 make build      # gomobile bind -target=android -androidapi=30 -ldflags="-checklinkname=0"
 
-# 3. Copy the result into Freedom (replace <freedom-mobile> with this repo's path).
-cp build/mobile.aar <freedom-mobile>/swarmnode/libs/mobile.aar
+# 3. Copy the result into Freedom (replace <freedom-browser-android> with this repo's path).
+cp build/mobile.aar <freedom-browser-android>/swarmnode/libs/mobile.aar
 
 # 4. Build Freedom against the new AAR.
-cd <freedom-mobile>
+cd <freedom-browser-android>
 ./gradlew :app:assembleDebug
 ```
 
@@ -190,18 +190,21 @@ The resulting AAR contains:
 
 ## APK size
 
-The debug APK is ~320 MiB because it bundles all four native ABIs. Real installations only need one, which is why Android App Bundles (`.aab`) are the right distribution format:
+The embedded Bee node is ~62–68 MiB per ABI, so the size story depends on how many ABIs you ship.
+
+`app/build.gradle.kts` already enables per-ABI splits (`arm64-v8a` + `x86_64`) alongside a universal fallback, so every debug/release build produces:
+
+| APK | Size | Use |
+|---|---|---|
+| `app-arm64-v8a-debug.apk` | ~166 MiB | Physical arm64 devices, Apple Silicon emulators |
+| `app-x86_64-debug.apk` | ~210 MiB | x86_64 Android emulators |
+| `app-universal-debug.apk` | ~556 MiB | Fallback / `:installDebug` default |
+
+For distribution, Android App Bundles ship just the one ABI the device needs via Play Store's dynamic delivery:
 
 ```bash
 ./gradlew :app:bundleRelease
 # app/build/outputs/bundle/release/app-release.aab  (~150 MiB bundle, ~80 MiB per-device install)
-```
-
-Play Store's dynamic delivery ships just the one ABI the device needs. For local experiments, you can also produce split APKs via:
-
-```kotlin
-// app/build.gradle.kts — add inside android { ... }
-splits { abi { isEnable = true; reset(); include("arm64-v8a", "x86_64"); isUniversalApk = false } }
 ```
 
 ## Troubleshooting
@@ -214,11 +217,9 @@ splits { abi { isEnable = true; reset(); include("arm64-v8a", "x86_64"); isUnive
 
 **`UnsatisfiedLinkError: dlopen failed: library "libgojni.so" not found` after a minified release build.** Make sure `swarmnode/consumer-rules.pro` is being honoured — it ships `-keep class mobile.** { *; }` and `-keep class go.** { *; }`; R8 removes the gomobile-generated classes without these.
 
-**APK installs as a separate app from a previous `co.freedom.mobile` build.** Intentional — we renamed the application ID to `baby.freedom.mobile` in April 2026. Uninstall the old one: `adb uninstall co.freedom.mobile`.
-
 ## Further reading
 
-- [`PLAN.md`](./PLAN.md) — architecture, phase-by-phase progress, decisions, known issues and their workarounds.
+- [`PLAN.md`](./PLAN.md) — architecture, decisions, known issues and their workarounds.
 - [Swarm docs](https://docs.ethswarm.org/) — the Swarm network itself.
 - [`bee-lite-java`](https://github.com/Solar-Punk-Ltd/bee-lite-java) — Go sources for the embedded node.
 - [`gomobile` reference](https://pkg.go.dev/golang.org/x/mobile/cmd/gobind) — Go ↔ Java type mapping rules.

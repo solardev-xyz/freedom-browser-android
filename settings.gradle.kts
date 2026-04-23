@@ -15,6 +15,6 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "freedom-mobile"
+rootProject.name = "freedom-browser-android"
 include(":app")
 include(":swarmnode")
