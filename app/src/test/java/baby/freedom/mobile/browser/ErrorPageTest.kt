@@ -46,7 +46,7 @@ class ErrorPageTest {
     @Test
     fun `isErrorPage rejects other file URLs`() {
         assertFalse(ErrorPage.isErrorPage(null))
-        assertFalse(ErrorPage.isErrorPage("file:///android_asset/home/home.html"))
+        assertFalse(ErrorPage.isErrorPage("about:blank"))
         assertFalse(ErrorPage.isErrorPage("http://127.0.0.1:1633/bzz/abc"))
     }
 

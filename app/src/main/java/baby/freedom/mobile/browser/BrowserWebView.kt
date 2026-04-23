@@ -134,6 +134,23 @@ private const val THUMBNAIL_MAX_WIDTH_PX = 640
  * UI thread (WebView.draw requires it). Silent-no-ops if the view hasn't
  * been laid out yet.
  */
+/**
+ * Encode a [Bitmap] to a PNG byte array suitable for persisting into
+ * Room. Returns `null` if the bitmap is empty or compression fails —
+ * callers should silently skip storing in that case.
+ */
+internal fun encodePngBytes(bitmap: Bitmap): ByteArray? {
+    if (bitmap.width <= 0 || bitmap.height <= 0) return null
+    val out = java.io.ByteArrayOutputStream()
+    return try {
+        val ok = bitmap.compress(Bitmap.CompressFormat.PNG, 100, out)
+        if (ok) out.toByteArray() else null
+    } catch (t: Throwable) {
+        Log.w(LOG_TAG, "favicon encode failed", t)
+        null
+    }
+}
+
 internal fun captureThumbnail(view: WebView, state: BrowserState) {
     val w = view.width
     val h = view.height
@@ -322,6 +339,14 @@ private fun buildRefreshableWebView(
         )
     }
 
+    // Display URL of the most recently loaded (non-home) page. We key
+    // cached favicons off this rather than [BrowserState.url] because
+    // `onReceivedIcon` can fire *after* the user has hit back to home
+    // (at which point `state.url` has already been reset to `""`), and
+    // we still want to attribute the icon to the page it actually
+    // belongs to.
+    var lastLoadedDisplayUrl: String? = null
+
     val webView = WebView(context).apply {
         layoutParams = ViewGroup.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
@@ -360,14 +385,59 @@ private fun buildRefreshableWebView(
 
         webViewClient = object : WebViewClient() {
             override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
-                if (url == ABOUT_BLANK) return
+                if (url == ABOUT_BLANK) {
+                    // `about:blank` is our home sentinel — either the
+                    // WebView's forced initial paint, a user-initiated
+                    // Home tap, or a back/forward gesture that lands
+                    // on the blank entry in the back stack. All three
+                    // want the same end state: a home-looking tab
+                    // (empty url/title/address bar) so the Compose
+                    // HomeScreen overlay takes over.
+                    state.url = ""
+                    state.title = ""
+                    state.addressBarText = ""
+                    state.currentBzzRoot = null
+                    state.progress = -1
+                    lastLoadedDisplayUrl = null
+                    return
+                }
                 state.currentBzzRoot = extractBzzRoot(url)
-                url?.let { state.url = displayFor(it, state) }
+                val display = url?.let { displayFor(it, state) }
+                if (display != null) {
+                    state.url = display
+                    lastLoadedDisplayUrl = display
+                }
+                // Refresh navigation flags here (as well as in
+                // onPageFinished) so the system-back hardware button
+                // works the instant a new page starts loading. If we
+                // waited for onPageFinished, the user pressing back
+                // mid-load would slip through the disabled BackHandler
+                // and minimize the app instead of returning home.
+                state.canGoBack = view?.canGoBack() == true
+                state.canGoForward = view?.canGoForward() == true
                 state.progress = 0
             }
 
             override fun onPageFinished(view: WebView?, url: String?) {
-                if (url == ABOUT_BLANK) return
+                if (url == ABOUT_BLANK) {
+                    // See companion branch in onPageStarted. Back/
+                    // forward onto about:blank never fires
+                    // onPageStarted, so we must also zero out the
+                    // tab state here — otherwise returning to home
+                    // from a deeper page would leave state.url set
+                    // to the old display URL and the HomeScreen
+                    // overlay would stay hidden, showing a blank
+                    // WebView instead.
+                    refreshLayout.isRefreshing = false
+                    state.url = ""
+                    state.title = ""
+                    state.addressBarText = ""
+                    state.currentBzzRoot = null
+                    state.canGoBack = view?.canGoBack() == true
+                    state.canGoForward = view?.canGoForward() == true
+                    state.progress = -1
+                    return
+                }
                 // Dismiss the pull-to-refresh spinner once the page has
                 // finished loading (or errored out). Happens regardless
                 // of whether the load was user-initiated reload or not.
@@ -375,6 +445,7 @@ private fun buildRefreshableWebView(
                 state.currentBzzRoot = extractBzzRoot(url)
                 val display = displayFor(url.orEmpty(), state)
                 state.url = display
+                lastLoadedDisplayUrl = display
                 state.title = sanitizeTitle(view?.title, url)
                 state.canGoBack = view?.canGoBack() == true
                 state.canGoForward = view?.canGoForward() == true
@@ -486,6 +557,31 @@ private fun buildRefreshableWebView(
 
             override fun onReceivedTitle(view: WebView?, title: String?) {
                 state.title = sanitizeTitle(title, view?.url)
+            }
+
+            override fun onReceivedIcon(view: WebView?, icon: Bitmap?) {
+                // Key the cache off the *displayed* URL (`bzz://…`,
+                // `ens://…`, `https://…`), not the gateway-rewritten
+                // one — otherwise bookmarks to `ens://example.eth`
+                // would never find the icon we captured under
+                // `http://127.0.0.1:1633/bzz/<hash>`.
+                //
+                // We read `lastLoadedDisplayUrl` rather than
+                // [BrowserState.url] because onReceivedIcon is async:
+                // for pages whose `<link rel="icon">` gets fetched
+                // slowly (e.g. cold Bee nodes that still need to
+                // resolve a chunk), the callback frequently arrives
+                // *after* the user has navigated back to home, at
+                // which point `state.url` is already `""` and the
+                // icon would otherwise be dropped.
+                val display = lastLoadedDisplayUrl ?: return
+                if (icon == null || display.isBlank()) return
+                // Skip our own transient error page — we don't want
+                // a "page load failed" icon persisted against the
+                // origin the user was actually trying to visit.
+                if (ErrorPage.isErrorPage(display)) return
+                val bytes = encodePngBytes(icon) ?: return
+                repo.storeFavicon(display, bytes)
             }
         }
     }

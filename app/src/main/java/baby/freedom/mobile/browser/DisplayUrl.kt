@@ -8,16 +8,20 @@ package baby.freedom.mobile.browser
  * from `freedom-browser/src/renderer/lib/navigation-utils.js` and
  * `url-utils.js`:
  *
- *   1. Home URL → `""` (we hide the `file:///android_asset/...` path).
- *   2. Active per-tab [BrowserState.Override] → substitute the ENS prefix
+ *   1. Active per-tab [BrowserState.Override] → substitute the ENS prefix
  *      for the gateway base. This is what keeps in-manifest clicks on
  *      `ens://name/path`.
- *   3. `bzz://<hash>[…]` (after [SwarmResolver.toDisplay]); rewrite the
+ *   2. `bzz://<hash>[…]` (after [SwarmResolver.toDisplay]); rewrite the
  *      hash to `ens://<name>` if [KnownEnsNames] knows it.
- *   4. (Port-plan §2) `ipfs://<cid>[…]` / `ipns://<name>[…]` — same shape;
+ *   3. (Port-plan §2) `ipfs://<cid>[…]` / `ipns://<name>[…]` — same shape;
  *      currently only exercised if an external caller hands us one of
  *      those URIs directly.
- *   5. Otherwise pass-through.
+ *   4. Otherwise pass-through.
+ *
+ * The home page ([HOME_URL] = `about:blank`) never reaches this function
+ * — [BrowserWebView]'s client early-returns from `onPageStarted` /
+ * `onPageFinished` before calling through to `displayFor`, so the
+ * address bar is kept blank without special-casing here.
  */
 object DisplayUrl {
     private val bzzRegex = Regex("^bzz://([a-fA-F0-9]+)(.*)$")
@@ -27,10 +31,7 @@ object DisplayUrl {
     fun forActualUrl(
         actualUrl: String,
         override: BrowserState.Override?,
-        homeUrl: String = HOME_URL,
     ): String {
-        if (actualUrl == homeUrl) return ""
-
         if (override != null && actualUrl.startsWith(override.baseUrl)) {
             return override.prefix + actualUrl.substring(override.baseUrl.length)
         }

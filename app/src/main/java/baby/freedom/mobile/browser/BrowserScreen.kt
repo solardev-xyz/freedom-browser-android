@@ -103,11 +103,14 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 /**
- * Local home page shipped inside the app's assets. Kept in sync with
- * the home page used by freedom-browser. See
- * `app/src/main/assets/home/home.html`.
+ * Sentinel URL for the home tab. We load `about:blank` into the
+ * underlying [android.webkit.WebView] so it stops rendering whatever
+ * page was there before, and overlay a native Compose [HomeScreen] on
+ * top whenever [BrowserState.url] is empty — which is how the WebView's
+ * `onPageStarted` / `onPageFinished` early-returns leave it after an
+ * `about:blank` load.
  */
-const val HOME_URL: String = "file:///android_asset/home/home.html"
+const val HOME_URL: String = "about:blank"
 
 /**
  * Upper bound on how long a `bzz://` submit will sit in "spinner, node
@@ -196,8 +199,28 @@ fun BrowserScreen(
     val state = tabs.active
     val isBookmarked by repo.isBookmarked(state.url).collectAsState(initial = false)
 
-    BackHandler(enabled = state.canGoBack) {
-        state.loadUrl("javascript:history.back();void(0);")
+    // Gate the hardware back button on "is the user somewhere other
+    // than the home overlay?" — exactly mirroring the condition that
+    // renders [HomeScreen] below. Keying off `canGoBack` alone isn't
+    // safe because that flag is only refreshed in the WebView client's
+    // async callbacks: a user who taps an `ens://` bookmark and hits
+    // back while the resolver is still running (WebView hasn't even
+    // been told to navigate yet) would fall through the disabled
+    // handler and minimize the app.
+    //
+    // When fired we prefer the WebView's own history stack; if there's
+    // nothing to pop (mid-probe, or a direct typed URL that failed
+    // before the WebView ever navigated), cancel any in-flight resolver
+    // work and fall back to a clean home state.
+    val isHomeTab = state.url.isBlank() && state.addressBarText.isBlank()
+    BackHandler(enabled = !isHomeTab) {
+        if (state.canGoBack) {
+            state.loadUrl("javascript:history.back();void(0);")
+        } else {
+            state.cancelPendingProbe()
+            resolvingEns = false
+            state.navigateHome()
+        }
     }
 
     // Run the peer-warmup probe against a bzz URL, then either load it
@@ -337,10 +360,15 @@ fun BrowserScreen(
         }
 
         val url = UrlParser.toUrl(canonical)
-        // The home page is intentionally shown as a blank address bar so
-        // the ugly `file:///android_asset/...` URL never surfaces; skip
-        // the usual echo-to-address-bar for that one case.
-        target.addressBarText = if (url == HOME_URL) "" else url
+        // Home is a special non-URL destination — clear the tab, blank
+        // the WebView, and let the Compose [HomeScreen] overlay take
+        // over. Fall-through into the gateway-probe / plain-load paths
+        // below would pointlessly push `about:blank` through them.
+        if (url == HOME_URL) {
+            target.navigateHome()
+            return
+        }
+        target.addressBarText = url
         target.clearEnsOverride()
 
         // Direct bzz:// / gateway URLs get the same probe-gated
@@ -477,6 +505,27 @@ fun BrowserScreen(
                     tabs = tabs,
                     modifier = Modifier.fillMaxSize(),
                 )
+                // Home overlay. Rendered whenever the tab hasn't loaded
+                // a real page (fresh tab, or user navigated home). The
+                // WebView keeps `about:blank` under us — see
+                // [BrowserState.navigateHome] — so there's nothing for
+                // the user to see through this layer.
+                //
+                // The check keys off [BrowserState.url], which stays
+                // empty while the `about:blank` load is in flight
+                // thanks to the ABOUT_BLANK early-returns in
+                // [BrowserWebView]. Additionally guarding on
+                // `addressBarText.isBlank()` hides the overlay the
+                // moment the user hits Go on a typed URL, before the
+                // WebView has a chance to fire onPageStarted and
+                // populate `state.url`.
+                if (isHomeTab) {
+                    HomeScreen(
+                        repo = repo,
+                        onOpen = { submit(state, it) },
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                }
                 if (addressFocused && addressBarEdited && state.addressBarText.isNotEmpty()) {
                     SuggestionsPanel(
                         repo = repo,

@@ -6,6 +6,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 
 /**
@@ -22,8 +24,35 @@ class BrowsingRepository private constructor(
 ) {
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
+    init {
+        // One-time cleanup for installs that predate [shouldRecord]
+        // rejecting `about:*` — earlier builds wrote `about:blank`
+        // rows when the home sentinel flipped, and those still linger
+        // in Room. Drop them so the home page's Recent list stays
+        // clean instead of permanently showing an "about:blank" tile
+        // at the top.
+        scope.launch { db.history().deleteByUrl("about:blank") }
+    }
+
     val history: Flow<List<HistoryEntry>> = db.history().recent()
     val bookmarks: Flow<List<BookmarkEntry>> = db.bookmarks().all()
+
+    /**
+     * Most recently visited pages, deduplicated by URL so a site visited
+     * 20 times in a row doesn't crowd out other entries. Backs the home
+     * page's "Recent pages" list.
+     *
+     * We dedupe in-memory off [history] (which already orders by
+     * `visitedAt DESC`) so the first occurrence we see is the most
+     * recent visit — exactly what [distinctBy] keeps.
+     */
+    fun recentDistinct(limit: Int = 10): Flow<List<HistoryEntry>> =
+        history.map { list ->
+            list.asSequence()
+                .distinctBy { it.url }
+                .take(limit)
+                .toList()
+        }
 
     /**
      * Record a page visit. No-ops for empty URLs, `about:*`, `data:*`, and
@@ -105,6 +134,41 @@ class BrowsingRepository private constructor(
 
     fun deleteHistory(id: Long) {
         scope.launch { db.history().delete(id) }
+    }
+
+    /**
+     * Cache the PNG-encoded favicon [data] for the [pageUrl]'s origin.
+     * No-op for URLs that don't have a meaningful origin
+     * (`about:blank`, `data:`, `javascript:`, etc.) so we don't
+     * overwrite a real site's icon with an internal page's blank one.
+     */
+    fun storeFavicon(pageUrl: String, data: ByteArray) {
+        val origin = FaviconOrigin.from(pageUrl) ?: return
+        if (data.isEmpty()) return
+        scope.launch {
+            db.favicons().upsert(
+                FaviconEntry(
+                    origin = origin,
+                    data = data,
+                    updatedAt = System.currentTimeMillis(),
+                ),
+            )
+        }
+    }
+
+    /**
+     * Stream the favicon bytes for the given URL's origin. Emits
+     * `null` until something is cached (and again if the row is ever
+     * evicted). Caller is responsible for decoding — see
+     * `HomeScreen.kt` for a Compose-side remember/decode pattern.
+     */
+    fun favicon(pageUrl: String): Flow<ByteArray?> {
+        val origin = FaviconOrigin.from(pageUrl) ?: return flowOf(null)
+        return db.favicons().get(origin)
+    }
+
+    fun clearFavicons() {
+        scope.launch { db.favicons().clear() }
     }
 
     private fun shouldRecord(url: String): Boolean {

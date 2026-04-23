@@ -12,11 +12,6 @@ class DisplayUrlTest {
     }
 
     @Test
-    fun `home url is blank`() {
-        assertEquals("", DisplayUrl.forActualUrl(HOME_URL, override = null))
-    }
-
-    @Test
     fun `override wins over known names`() {
         // The override is set for swarm.eth pointing at a gateway base.
         // Known-names registry *also* has that hash — override should still

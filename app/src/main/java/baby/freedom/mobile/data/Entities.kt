@@ -39,3 +39,22 @@ data class BookmarkEntry(
     val title: String,
     val createdAt: Long,
 )
+
+/**
+ * A cached favicon. [origin] is a canonical scheme+authority string
+ * (e.g. `https://spiegel.de`, `ens://meinhard.eth`, `bzz://<hash>`) —
+ * every page under that origin shares the same icon, which matches
+ * both what users expect and how the underlying sites serve their
+ * `/favicon.ico`. [data] is the PNG-encoded bitmap as captured from
+ * the WebView's `onReceivedIcon` callback.
+ *
+ * We don't care about equality semantics on this type (it's never
+ * held in a Set / used as a Map key), so the `ByteArray` field is
+ * harmless; Room only needs reflection-based copy behaviour.
+ */
+@Entity(tableName = "favicons")
+data class FaviconEntry(
+    @PrimaryKey val origin: String,
+    val data: ByteArray,
+    val updatedAt: Long,
+)

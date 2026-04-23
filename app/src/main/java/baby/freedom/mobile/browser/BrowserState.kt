@@ -147,6 +147,21 @@ class BrowserState(val id: Long) {
                 null
             }
         }
+        // Optimistically flip `canGoBack` the instant a real navigation
+        // is scheduled. The WebView updates its back-stack synchronously
+        // inside [WebView.loadUrl], but `onPageStarted` / `onPageFinished`
+        // only echo that back asynchronously — so if we waited for them
+        // to refresh this flag, a user who tapped a home-page link and
+        // then hit the system-back button before the first frame arrived
+        // would sail past the disabled `BackHandler` and minimize the
+        // app instead of returning to home.
+        //
+        // `javascript:` URLs never push a history entry, so they can't
+        // change the stack; and `about:blank` is our home sentinel (its
+        // own lifecycle callbacks reset the flag correctly).
+        if (url != HOME_URL && !url.startsWith("javascript:")) {
+            canGoBack = true
+        }
         navCounter++
     }
 
@@ -154,6 +169,29 @@ class BrowserState(val id: Long) {
      *  that the user explicitly typed (and that isn't an ENS name). */
     fun clearEnsOverride() {
         override = null
+    }
+
+    /**
+     * Reset this tab back to the home state. Clears every last-loaded-
+     * page field and navigates the underlying WebView to `about:blank`
+     * so the previous page stops drawing — the Compose-side home
+     * overlay renders on top of the (now-blank) WebView whenever
+     * [url] is empty.
+     *
+     * [BrowserWebView]'s client treats `about:blank` as a home sentinel
+     * in its `onPageStarted` / `onPageFinished`, so the subsequent
+     * WebView lifecycle keeps [url] / [title] pinned to empty instead
+     * of clobbering them back with display strings for a real page.
+     */
+    fun navigateHome() {
+        cancelPendingProbe()
+        override = null
+        currentBzzRoot = null
+        url = ""
+        title = ""
+        addressBarText = ""
+        progress = -1
+        loadUrl(HOME_URL)
     }
 
     /**
