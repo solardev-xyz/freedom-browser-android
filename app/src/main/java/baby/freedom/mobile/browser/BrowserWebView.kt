@@ -56,12 +56,7 @@ private val HEADERS_TO_STRIP = setOf(
     "content-length",
 )
 
-private val bzzRootRegex = Regex("^(https?://[^/]+/bzz/[a-fA-F0-9]+/)")
-
-private fun extractBzzRoot(url: String?): String? {
-    if (url == null) return null
-    return bzzRootRegex.find(url)?.groupValues?.get(1)
-}
+private fun extractBzzRoot(url: String?): String? = GatewayUrls.extractRoot(url)
 
 // Max width (in px) of a thumbnail bitmap. Anything bigger is wasteful
 // since we only ever render these at half-screen-ish sizes in the grid.
@@ -432,17 +427,7 @@ internal fun rewriteGatewayEscape(
 /**
  * Map a "real" URL (what the WebView actually loaded — `http://127.0.0.1:…`
  * for Swarm content, or an external origin) to the friendly string for the
- * address bar. Prefers the active ENS override when the URL is under its
- * base prefix, otherwise falls back to the `bzz://` rewrite. Returns an
- * empty string for the local home page so the address bar looks blank
- * there instead of exposing the `file:///android_asset/...` URL.
+ * address bar.
  */
-internal fun displayFor(actualUrl: String, state: BrowserState): String {
-    if (actualUrl == HOME_URL) return ""
-    val base = state.displayOverrideBaseUrl
-    val prefix = state.displayOverridePrefix
-    if (base != null && prefix != null && actualUrl.startsWith(base)) {
-        return prefix + actualUrl.substring(base.length)
-    }
-    return SwarmResolver.toDisplay(actualUrl)
-}
+internal fun displayFor(actualUrl: String, state: BrowserState): String =
+    DisplayUrl.forActualUrl(actualUrl, state.override)

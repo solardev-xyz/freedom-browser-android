@@ -180,6 +180,11 @@ fun BrowserScreen(
                     val result = ensResolver.resolveContenthash(ens.name)
                     when (result) {
                         is EnsResult.Ok -> {
+                            // Remember hash/cid → name for the whole session
+                            // (cross-tab address-bar preservation). Safe for
+                            // every protocol; only bzz is actually loadable
+                            // today, the rest will plug in under port-plan §2.
+                            KnownEnsNames.record(result.uri, ens.name)
                             if (result.protocol == "bzz") {
                                 val t = result.uri + ens.suffix
                                 target.loadUrl(t, ensName = ens.name)

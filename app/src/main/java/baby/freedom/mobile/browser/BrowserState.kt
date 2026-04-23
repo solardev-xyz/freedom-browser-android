@@ -16,6 +16,19 @@ import androidx.compose.ui.graphics.ImageBitmap
  * recompositions. It should never be reused within a session.
  */
 class BrowserState(val id: Long) {
+    /**
+     * Active per-tab address-bar rewrite. While set, any actual URL
+     * starting with [baseUrl] is shown as `prefix + tail` — used to keep
+     * `ens://<name>/path` visible while browsing under the resolved
+     * content manifest (Swarm today; IPFS/IPNS after port-plan §2).
+     *
+     * Separate from the process-wide [KnownEnsNames] registry: the
+     * override only catches in-manifest navigation within a tab, the
+     * registry catches raw `bzz://<hash>` loads of a previously-resolved
+     * hash in any tab.
+     */
+    data class Override(val baseUrl: String, val prefix: String)
+
     var url by mutableStateOf("")
         internal set
     var title by mutableStateOf("")
@@ -43,15 +56,7 @@ class BrowserState(val id: Long) {
     var pendingUrl: String = ""
         private set
 
-    /**
-     * If set, any actual URL starting with [displayOverrideBaseUrl] is
-     * rendered in the address bar as [displayOverridePrefix] + the tail.
-     * Used to keep "ens://<name>/path" visible instead of the resolved
-     * Swarm-gateway URL while browsing under an ENS-resolved manifest.
-     */
-    var displayOverrideBaseUrl: String? = null
-        internal set
-    var displayOverridePrefix: String? = null
+    var override: Override? by mutableStateOf<Override?>(null)
         internal set
 
     /**
@@ -91,8 +96,12 @@ class BrowserState(val id: Long) {
         val loadable = SwarmResolver.toLoadable(url)
         pendingUrl = loadable
         if (ensName != null) {
-            displayOverrideBaseUrl = extractBzzBase(loadable)
-            displayOverridePrefix = "ens://$ensName"
+            val base = GatewayUrls.extractBase(loadable)
+            override = if (base != null) {
+                Override(baseUrl = base.prefix, prefix = "ens://$ensName")
+            } else {
+                null
+            }
         }
         navCounter++
     }
@@ -100,8 +109,7 @@ class BrowserState(val id: Long) {
     /** Drop any active ENS display override. Call before loading a URL
      *  that the user explicitly typed (and that isn't an ENS name). */
     fun clearEnsOverride() {
-        displayOverrideBaseUrl = null
-        displayOverridePrefix = null
+        override = null
     }
 
     /**
@@ -111,18 +119,11 @@ class BrowserState(val id: Long) {
      * under the override, not the friendly form.
      */
     fun effectiveFetchUrl(raw: String): String {
-        val prefix = displayOverridePrefix
-        val base = displayOverrideBaseUrl
-        if (prefix != null && base != null && raw.startsWith(prefix)) {
-            return base + raw.substring(prefix.length)
+        val o = override ?: return raw
+        if (raw.startsWith(o.prefix)) {
+            return o.baseUrl + raw.substring(o.prefix.length)
         }
         return raw
-    }
-
-    private fun extractBzzBase(url: String): String? {
-        // http://127.0.0.1:1633/bzz/<hash>[/...] → drop the /... tail.
-        val m = Regex("^(https?://[^/]+/bzz/[a-fA-F0-9]+)").find(url)
-        return m?.groupValues?.get(1)
     }
 
     /** Tokens the WebView client should not treat as "new" navigations. */
@@ -132,8 +133,7 @@ class BrowserState(val id: Long) {
         progress = -1
         canGoBack = false
         canGoForward = false
-        displayOverrideBaseUrl = null
-        displayOverridePrefix = null
+        override = null
         currentBzzRoot = null
         thumbnail = null
     }
