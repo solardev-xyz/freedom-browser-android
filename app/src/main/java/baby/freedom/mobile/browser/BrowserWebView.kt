@@ -24,6 +24,7 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.graphics.createBitmap
+import androidx.swiperefreshlayout.widget.SwipeRefreshLayout
 import baby.freedom.mobile.data.BrowsingRepository
 import baby.freedom.swarm.SwarmNode
 import kotlinx.coroutines.flow.collectLatest
@@ -119,9 +120,11 @@ fun BrowserWebViewHost(
         }
     }
 
-    // One WebView per tab id, attached to [frame]. Shown/hidden based on
-    // which tab is active.
+    // One WebView per tab id — each wrapped in its own SwipeRefreshLayout
+    // so pull-to-refresh can reload the current page. The SwipeRefreshLayout
+    // is what actually lives under [frame]; the WebView is its only child.
     val webViews = remember { mutableMapOf<Long, WebView>() }
+    val refreshLayouts = remember { mutableMapOf<Long, SwipeRefreshLayout>() }
 
     // Per-tab navigation observers (coroutine jobs, tracked so we can cancel
     // them if the tab is closed).
@@ -134,25 +137,28 @@ fun BrowserWebViewHost(
         val idsNow = currentIds.toSet()
         for (tab in tabs.tabs) {
             if (webViews[tab.id] == null) {
-                val wv = buildWebView(context, tab, repo)
+                val (layout, wv) = buildRefreshableWebView(context, tab, repo)
                 webViews[tab.id] = wv
-                frame.addView(wv)
+                refreshLayouts[tab.id] = layout
+                frame.addView(layout)
             }
         }
         val toRemove = webViews.keys.filter { it !in idsNow }
         for (id in toRemove) {
             val wv = webViews.remove(id) ?: continue
-            frame.removeView(wv)
+            val layout = refreshLayouts.remove(id)
+            if (layout != null) frame.removeView(layout)
             wv.stopLoading()
             wv.destroy()
         }
     }
 
-    // Visibility: only the active tab draws.
+    // Visibility: only the active tab draws. Toggle the SwipeRefreshLayout
+    // (the actual child of [frame]) rather than the WebView itself.
     val activeId = tabs.active.id
-    for ((id, wv) in webViews) {
+    for ((id, layout) in refreshLayouts) {
         val targetVisibility = if (id == activeId) View.VISIBLE else View.GONE
-        if (wv.visibility != targetVisibility) wv.visibility = targetVisibility
+        if (layout.visibility != targetVisibility) layout.visibility = targetVisibility
     }
 
     // Drive loads for each tab as its navCounter changes. `snapshotFlow`
@@ -196,17 +202,25 @@ fun BrowserWebViewHost(
                 wv.destroy()
             }
             webViews.clear()
+            refreshLayouts.clear()
         }
     }
 }
 
 @SuppressLint("SetJavaScriptEnabled")
-private fun buildWebView(
+private fun buildRefreshableWebView(
     context: Context,
     state: BrowserState,
     repo: BrowsingRepository,
-): WebView =
-    WebView(context).apply {
+): Pair<SwipeRefreshLayout, WebView> {
+    val refreshLayout = SwipeRefreshLayout(context).apply {
+        layoutParams = ViewGroup.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.MATCH_PARENT,
+        )
+    }
+
+    val webView = WebView(context).apply {
         layoutParams = ViewGroup.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.MATCH_PARENT,
@@ -243,6 +257,10 @@ private fun buildWebView(
 
             override fun onPageFinished(view: WebView?, url: String?) {
                 if (url == ABOUT_BLANK) return
+                // Dismiss the pull-to-refresh spinner once the page has
+                // finished loading (or errored out). Happens regardless
+                // of whether the load was user-initiated reload or not.
+                refreshLayout.isRefreshing = false
                 state.currentBzzRoot = extractBzzRoot(url)
                 val display = displayFor(url.orEmpty(), state)
                 state.url = display
@@ -262,7 +280,7 @@ private fun buildWebView(
                 // is still progressing we'll re-capture on the next
                 // onPageFinished anyway.
                 view?.postDelayed({
-                    if (view.visibility == View.VISIBLE) {
+                    if (view.isShown) {
                         captureThumbnail(view, state)
                     }
                 }, 400)
@@ -296,6 +314,16 @@ private fun buildWebView(
             }
         }
     }
+
+    refreshLayout.addView(webView)
+    refreshLayout.setOnRefreshListener { webView.reload() }
+    // Only arm the pull-down gesture when the WebView is scrolled to the
+    // top. Without this override SwipeRefreshLayout can trigger in the
+    // middle of a page because WebView's canScrollUp reporting is flaky
+    // for nested scrollers.
+    refreshLayout.setOnChildScrollUpCallback { _, _ -> webView.scrollY > 0 }
+    return refreshLayout to webView
+}
 
 /**
  * Next-style sites served from `/bzz/<hash>/` often reference resources via

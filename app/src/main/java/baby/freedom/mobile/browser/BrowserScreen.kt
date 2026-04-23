@@ -75,7 +75,6 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
@@ -118,7 +117,6 @@ fun BrowserScreen(
     val context = LocalContext.current
     val repo = remember(context) { BrowsingRepository.get(context) }
     val scope = rememberCoroutineScope()
-    val focusManager = LocalFocusManager.current
     val keyboard = LocalSoftwareKeyboardController.current
     var showNodeSheet by rememberSaveable { mutableStateOf(false) }
     var showTabSwitcher by rememberSaveable { mutableStateOf(false) }
@@ -151,7 +149,14 @@ fun BrowserScreen(
 
     fun submit(target: BrowserState, raw: String) {
         keyboard?.hide()
-        focusManager.clearFocus()
+        // Dismiss the suggestions overlay. We intentionally DO NOT clear
+        // focus here: calling focusManager.clearFocus() synchronously
+        // while the IME's Enter event is still being dispatched lets the
+        // key event propagate to whichever focusable lands next in focus
+        // order (the Home button, for us) and trigger it as a synthetic
+        // click — which would then re-load the home page on top of the
+        // URL the user just submitted.
+        addressBarEdited = false
 
         val trimmed = raw.trim()
         // Let the user type the friendly form and re-submit to reload.
@@ -257,6 +262,7 @@ fun BrowserScreen(
                 onNewTab = {
                     val fresh = tabs.newTab()
                     submit(fresh, tabs.homepageUrl)
+                    focusAddressTrigger++
                 },
             )
 
@@ -330,6 +336,7 @@ fun BrowserScreen(
             onNewTab = {
                 val fresh = tabs.newTab()
                 submit(fresh, tabs.homepageUrl)
+                focusAddressTrigger++
             },
         )
     }
