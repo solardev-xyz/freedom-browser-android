@@ -28,6 +28,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Clear
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.History
@@ -36,7 +37,6 @@ import androidx.compose.material.icons.filled.HourglassTop
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.PowerSettingsNew
 import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material.icons.filled.Router
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.StarBorder
 import androidx.compose.material3.AlertDialog
@@ -76,6 +76,7 @@ import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
@@ -118,7 +119,7 @@ fun BrowserScreen(
     val repo = remember(context) { BrowsingRepository.get(context) }
     val scope = rememberCoroutineScope()
     val keyboard = LocalSoftwareKeyboardController.current
-    var showNodeSheet by rememberSaveable { mutableStateOf(false) }
+    var showNode by rememberSaveable { mutableStateOf(false) }
     var showTabSwitcher by rememberSaveable { mutableStateOf(false) }
     var showHistory by rememberSaveable { mutableStateOf(false) }
     var showBookmarks by rememberSaveable { mutableStateOf(false) }
@@ -227,6 +228,7 @@ fun BrowserScreen(
             TopBar(
                 state = state,
                 tabCount = tabs.tabs.size,
+                peerCount = nodeInfo.connectedPeers,
                 resolvingEns = resolvingEns,
                 isBookmarked = isBookmarked,
                 addressFocused = addressFocused,
@@ -251,7 +253,7 @@ fun BrowserScreen(
                     if (isBookmarked) repo.unbookmark(url)
                     else repo.bookmark(url, state.title)
                 },
-                onOpenNodePanel = { showNodeSheet = true },
+                onOpenNode = { showNode = true },
                 onOpenTabs = { showTabSwitcher = true },
                 onOpenHistory = { showHistory = true },
                 onOpenBookmarks = { showBookmarks = true },
@@ -320,12 +322,12 @@ fun BrowserScreen(
         ) { data -> Snackbar(snackbarData = data) }
     }
 
-    if (showNodeSheet) {
-        NodeDetailsDialog(
+    if (showNode) {
+        NodeScreen(
             nodeInfo = nodeInfo,
             runNodeEnabled = runNodeEnabled,
             onToggleRunNode = onToggleRunNode,
-            onDismiss = { showNodeSheet = false },
+            onDismiss = { showNode = false },
         )
     }
 
@@ -369,6 +371,7 @@ fun BrowserScreen(
 private fun TopBar(
     state: BrowserState,
     tabCount: Int,
+    peerCount: Long,
     resolvingEns: Boolean,
     isBookmarked: Boolean,
     addressFocused: Boolean,
@@ -379,7 +382,7 @@ private fun TopBar(
     onHome: () -> Unit,
     focusAddressTrigger: Int,
     onToggleBookmark: () -> Unit,
-    onOpenNodePanel: () -> Unit,
+    onOpenNode: () -> Unit,
     onOpenTabs: () -> Unit,
     onOpenHistory: () -> Unit,
     onOpenBookmarks: () -> Unit,
@@ -632,11 +635,21 @@ private fun TopBar(
                     },
                 )
                 DropdownMenuItem(
-                    text = { Text("Node") },
-                    leadingIcon = { Icon(Icons.Filled.Router, contentDescription = null) },
+                    text = {
+                        Text(
+                            if (peerCount == 1L) "1 peer"
+                            else "$peerCount peers",
+                        )
+                    },
+                    leadingIcon = {
+                        Icon(
+                            painter = painterResource(baby.freedom.mobile.R.drawable.ic_nodes),
+                            contentDescription = null,
+                        )
+                    },
                     onClick = {
                         menuExpanded = false
-                        onOpenNodePanel()
+                        onOpenNode()
                     },
                 )
             }
@@ -789,69 +802,104 @@ private fun NodeStatusDot(
     )
 }
 
+/**
+ * Full-screen node-details page — replaces the former AlertDialog.
+ * Shows peer count, wallet, run-node toggle, and gateway URL, with a
+ * matching × close button and hardware back support.
+ */
 @Composable
-private fun NodeDetailsDialog(
+private fun NodeScreen(
     nodeInfo: NodeInfo,
     runNodeEnabled: Boolean,
     onToggleRunNode: (Boolean) -> Unit,
     onDismiss: () -> Unit,
 ) {
+    BackHandler(onBack = onDismiss)
     val (color, icon, label) = statusTriple(nodeInfo.status)
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = {
-            Row(verticalAlignment = Alignment.CenterVertically) {
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(MaterialTheme.colorScheme.background)
+            .windowInsetsPadding(WindowInsets.systemBars),
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 8.dp, vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Row(
+                modifier = Modifier
+                    .weight(1f)
+                    .padding(start = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
                 Icon(icon, contentDescription = null, tint = color)
                 Spacer(Modifier.width(8.dp))
-                Text("Swarm node — $label")
-            }
-        },
-        text = {
-            Column {
-                // Primary control: run-node on/off. Persisted via
-                // DataStore; the service reacts by calling start()/stop().
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(vertical = 4.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text("Run node", fontWeight = FontWeight.Medium)
-                        Text(
-                            if (runNodeEnabled) "On — serving bzz://" else "Off — gateway disabled",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                    Switch(
-                        checked = runNodeEnabled,
-                        onCheckedChange = onToggleRunNode,
+                Column {
+                    Text(
+                        "Swarm node",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    Text(
+                        label,
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
-                Spacer(Modifier.height(8.dp))
-                NodeDetailRow("Mode", "ultra-light")
-                NodeDetailRow("Peers", nodeInfo.connectedPeers.toString())
-                if (nodeInfo.walletAddress.isNotEmpty()) {
-                    NodeDetailRow("Wallet", nodeInfo.walletAddress, mono = true)
+            }
+            IconButton(onClick = onDismiss) {
+                Icon(Icons.Filled.Close, contentDescription = "Close")
+            }
+        }
+
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 8.dp),
+        ) {
+            // Primary control: run-node on/off. Persisted via DataStore;
+            // the service reacts by calling start()/stop().
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("Run node", fontWeight = FontWeight.Medium)
+                    Text(
+                        if (runNodeEnabled) "On — serving bzz://" else "Off — gateway disabled",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                 }
-                val err = nodeInfo.errorMessage
-                if (!err.isNullOrBlank()) {
-                    NodeDetailRow("Error", err, singleLine = false)
-                }
-                Spacer(Modifier.height(8.dp))
-                Text(
-                    "Gateway: ${SwarmNode.GATEWAY_URL}",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    fontFamily = FontFamily.Monospace,
+                Switch(
+                    checked = runNodeEnabled,
+                    onCheckedChange = onToggleRunNode,
                 )
             }
-        },
-        confirmButton = {
-            TextButton(onClick = onDismiss) { Text("Close") }
-        },
-    )
+            Spacer(Modifier.height(16.dp))
+            NodeDetailRow("Mode", "ultra-light")
+            NodeDetailRow("Peers", nodeInfo.connectedPeers.toString())
+            if (nodeInfo.walletAddress.isNotEmpty()) {
+                NodeDetailRow("Wallet", nodeInfo.walletAddress, mono = true)
+            }
+            val err = nodeInfo.errorMessage
+            if (!err.isNullOrBlank()) {
+                NodeDetailRow("Error", err, singleLine = false)
+            }
+            Spacer(Modifier.height(16.dp))
+            Text(
+                "Gateway: ${SwarmNode.GATEWAY_URL}",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                fontFamily = FontFamily.Monospace,
+            )
+        }
+    }
 }
 
 private data class StatusTriple(

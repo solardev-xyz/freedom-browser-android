@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Nodes-menu icon mirrored from freedom-browser's index.html:
+  three circles connected in a triangle, representing a peer-to-peer
+  network.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="100"
+    android:viewportHeight="100">
+    <!--
+      Scale the raw content down ~10% so the icon looks slightly smaller
+      than it does natively. Stroke width is pre-multiplied by the
+      inverse factor (8 / 0.9 ≈ 8.9) so the apparent stroke stays ~8
+      units thick.
+    -->
+    <group
+        android:scaleX="0.9"
+        android:scaleY="0.9"
+        android:pivotX="50"
+        android:pivotY="50">
+        <!-- Connecting lines. -->
+        <path
+            android:pathData="M44.5,33.5 L25.5,66.5"
+            android:strokeColor="#FFFFFF"
+            android:strokeWidth="8.9"
+            android:strokeLineCap="round" />
+        <path
+            android:pathData="M55.5,33.5 L74.5,66.5"
+            android:strokeColor="#FFFFFF"
+            android:strokeWidth="8.9"
+            android:strokeLineCap="round" />
+        <path
+            android:pathData="M31,76 L69,76"
+            android:strokeColor="#FFFFFF"
+            android:strokeWidth="8.9"
+            android:strokeLineCap="round" />
+        <!-- Nodes (stroked circles, no fill). -->
+        <path
+            android:pathData="M50,13 a11,11 0 1 1 0,22 a11,11 0 1 1 0,-22 Z"
+            android:strokeColor="#FFFFFF"
+            android:strokeWidth="8.9" />
+        <path
+            android:pathData="M20,65 a11,11 0 1 1 0,22 a11,11 0 1 1 0,-22 Z"
+            android:strokeColor="#FFFFFF"
+            android:strokeWidth="8.9" />
+        <path
+            android:pathData="M80,65 a11,11 0 1 1 0,22 a11,11 0 1 1 0,-22 Z"
+            android:strokeColor="#FFFFFF"
+            android:strokeWidth="8.9" />
+    </group>
+</vector>
