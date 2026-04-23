@@ -253,8 +253,10 @@ private fun buildWebView(
                 state.addressBarText = display
                 // Record the *displayed* URL (bzz://, ens://, https://) — not
                 // the gateway-rewritten one — so history reflects what the
-                // user actually visited.
-                repo.recordVisit(display, state.title)
+                // user actually visited. The local home page is hidden from
+                // the address bar (displayFor returns "") and shouldn't
+                // clutter the history either.
+                if (display.isNotBlank()) repo.recordVisit(display, state.title)
                 // Give the renderer a beat to paint, then capture a
                 // thumbnail. 400ms is enough for most pages; if the load
                 // is still progressing we'll re-capture on the next
@@ -379,9 +381,12 @@ internal fun rewriteGatewayEscape(
  * Map a "real" URL (what the WebView actually loaded — `http://127.0.0.1:…`
  * for Swarm content, or an external origin) to the friendly string for the
  * address bar. Prefers the active ENS override when the URL is under its
- * base prefix, otherwise falls back to the `bzz://` rewrite.
+ * base prefix, otherwise falls back to the `bzz://` rewrite. Returns an
+ * empty string for the local home page so the address bar looks blank
+ * there instead of exposing the `file:///android_asset/...` URL.
  */
 internal fun displayFor(actualUrl: String, state: BrowserState): String {
+    if (actualUrl == HOME_URL) return ""
     val base = state.displayOverrideBaseUrl
     val prefix = state.displayOverridePrefix
     if (base != null && prefix != null && actualUrl.startsWith(base)) {

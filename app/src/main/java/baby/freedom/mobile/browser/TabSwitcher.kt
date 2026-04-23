@@ -23,10 +23,8 @@ import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.History
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -46,17 +44,16 @@ import androidx.compose.ui.unit.sp
 /**
  * Full-screen, Chrome-style tab switcher.
  *
- * A top bar with "+ New tab", a Library shortcut, and an × to dismiss,
- * followed by a 2-column grid of tab cards. Each card shows its page
- * title, a close (×) button, and a preview thumbnail of the page (or a
- * letter placeholder when no snapshot has been captured yet).
+ * A top bar with "+ New tab" and an × to dismiss, followed by a 2-column
+ * grid of tab cards. Each card shows its page title, a close (×) button,
+ * and a preview thumbnail of the page (or a letter placeholder when no
+ * snapshot has been captured yet).
  */
 @Composable
 fun TabSwitcherScreen(
     tabs: TabsState,
     onDismiss: () -> Unit,
     onNewTab: () -> Unit,
-    onOpenLibrary: () -> Unit,
 ) {
     // Snapshot the currently-active tab right before we render so the
     // user sees an up-to-date preview of whatever they were last reading.
@@ -83,12 +80,6 @@ fun TabSwitcherScreen(
                 Text("New tab", fontWeight = FontWeight.Medium)
             }
             Spacer(Modifier.weight(1f))
-            IconButton(onClick = onOpenLibrary) {
-                Icon(
-                    Icons.Filled.History,
-                    contentDescription = "Library",
-                )
-            }
             IconButton(onClick = onDismiss) {
                 Icon(Icons.Filled.Close, contentDescription = "Close tab switcher")
             }
@@ -103,9 +94,6 @@ fun TabSwitcherScreen(
             verticalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(12.dp),
             horizontalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(12.dp),
         ) {
-            item(span = { androidx.compose.foundation.lazy.grid.GridItemSpan(maxLineSpan) }) {
-                LibraryShortcut(onClick = onOpenLibrary)
-            }
             itemsIndexed(
                 items = tabs.tabs,
                 key = { _, tab -> tab.id },
@@ -121,43 +109,6 @@ fun TabSwitcherScreen(
                 )
             }
         }
-    }
-}
-
-@Composable
-private fun LibraryShortcut(onClick: () -> Unit) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(12.dp))
-            .background(MaterialTheme.colorScheme.surfaceVariant)
-            .clickable { onClick() }
-            .padding(horizontal = 12.dp, vertical = 12.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Icon(
-            Icons.Filled.History,
-            contentDescription = null,
-            tint = MaterialTheme.colorScheme.onSurface,
-        )
-        Spacer(Modifier.size(12.dp))
-        Column(modifier = Modifier.weight(1f)) {
-            Text(
-                "Library",
-                fontWeight = FontWeight.Medium,
-                color = MaterialTheme.colorScheme.onSurface,
-            )
-            Text(
-                "History and bookmarks",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
-        Icon(
-            Icons.AutoMirrored.Filled.ArrowForward,
-            contentDescription = null,
-            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
     }
 }
 

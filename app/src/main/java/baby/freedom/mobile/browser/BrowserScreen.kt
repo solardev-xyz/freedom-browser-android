@@ -24,18 +24,25 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.filled.Bookmark
-import androidx.compose.material.icons.filled.BookmarkBorder
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.ErrorOutline
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.History
+import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.HourglassTop
+import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.PowerSettingsNew
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Router
+import androidx.compose.material.icons.filled.Star
+import androidx.compose.material.icons.filled.StarBorder
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -52,6 +59,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -90,13 +98,20 @@ import baby.freedom.swarm.NodeStatus
 import baby.freedom.swarm.SwarmNode
 import kotlinx.coroutines.launch
 
+/**
+ * Local home page shipped inside the app's assets. Kept in sync with
+ * the home page used by freedom-browser. See
+ * `app/src/main/assets/home/home.html`.
+ */
+const val HOME_URL: String = "file:///android_asset/home/home.html"
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun BrowserScreen(
     nodeInfo: NodeInfo,
     runNodeEnabled: Boolean,
     onToggleRunNode: (Boolean) -> Unit,
-    initialUrl: String = "ens://freedombrowser.eth",
+    initialUrl: String = HOME_URL,
 ) {
     val tabs = remember { TabsState(homepage = initialUrl) }
     val ensResolver = remember { EnsResolver() }
@@ -107,15 +122,24 @@ fun BrowserScreen(
     val keyboard = LocalSoftwareKeyboardController.current
     var showNodeSheet by rememberSaveable { mutableStateOf(false) }
     var showTabSwitcher by rememberSaveable { mutableStateOf(false) }
-    var showLibrary by rememberSaveable { mutableStateOf(false) }
+    var showHistory by rememberSaveable { mutableStateOf(false) }
+    var showBookmarks by rememberSaveable { mutableStateOf(false) }
     var resolvingEns by remember { mutableStateOf(false) }
-    var didInitialLoad by rememberSaveable { mutableStateOf(false) }
+    // Intentionally NOT `rememberSaveable`: on rotation the Activity is
+    // recreated, `tabs` is rebuilt as a fresh blank tab, and we need to
+    // re-submit the homepage into it. If this survived config changes
+    // the load would be suppressed and the tab would render blank.
+    var didInitialLoad by remember { mutableStateOf(false) }
     var addressFocused by remember { mutableStateOf(false) }
     // Suggestions should only appear once the user has actively changed
     // the address-bar text. Tapping the pill (which select-alls the
     // current URL) must NOT flash a dropdown — the user just wants to
     // replace the URL with a fresh one.
     var addressBarEdited by remember { mutableStateOf(false) }
+    // Bumped when we want the address bar to grab focus (launch, Home).
+    // TopBar reacts by calling FocusRequester.requestFocus() whenever
+    // this value changes.
+    var focusAddressTrigger by remember { mutableIntStateOf(0) }
     val snackbarHostState = remember { SnackbarHostState() }
 
     val state = tabs.active
@@ -169,20 +193,23 @@ fun BrowserScreen(
         }
 
         val url = UrlParser.toUrl(canonical)
-        target.addressBarText = url
+        // The home page is intentionally shown as a blank address bar so
+        // the ugly `file:///android_asset/...` URL never surfaces; skip
+        // the usual echo-to-address-bar for that one case.
+        target.addressBarText = if (url == HOME_URL) "" else url
         target.clearEnsOverride()
         target.loadUrl(url)
     }
 
     // Kick off the homepage on the initial tab as soon as we're composed.
-    // `ens://…` requires the embedded node to be running before we can
-    // resolve — gate the load on NodeStatus.Running so the WebView doesn't
-    // race the gateway.
-    LaunchedEffect(nodeInfo.status) {
-        if (!didInitialLoad && nodeInfo.status == NodeStatus.Running) {
+    // The home page lives in local assets, so it loads without waiting
+    // for the embedded node.
+    LaunchedEffect(Unit) {
+        if (!didInitialLoad) {
             didInitialLoad = true
             submit(tabs.active, tabs.homepageUrl)
         }
+        focusAddressTrigger++
     }
 
     Box(modifier = Modifier.fillMaxSize()) {
@@ -195,7 +222,6 @@ fun BrowserScreen(
             TopBar(
                 state = state,
                 tabCount = tabs.tabs.size,
-                nodeInfo = nodeInfo,
                 resolvingEns = resolvingEns,
                 isBookmarked = isBookmarked,
                 addressFocused = addressFocused,
@@ -208,8 +234,12 @@ fun BrowserScreen(
                 },
                 onAddressEditedChanged = { addressBarEdited = it },
                 onSubmit = { submit(state, it) },
-                onBack = { state.loadUrl("javascript:history.back();void(0);") },
                 onForward = { state.loadUrl("javascript:history.forward();void(0);") },
+                onHome = {
+                    submit(state, tabs.homepageUrl)
+                    focusAddressTrigger++
+                },
+                focusAddressTrigger = focusAddressTrigger,
                 onToggleBookmark = {
                     val url = state.url
                     if (url.isBlank()) return@TopBar
@@ -218,6 +248,16 @@ fun BrowserScreen(
                 },
                 onOpenNodePanel = { showNodeSheet = true },
                 onOpenTabs = { showTabSwitcher = true },
+                onOpenHistory = { showHistory = true },
+                onOpenBookmarks = { showBookmarks = true },
+                onReload = {
+                    val url = state.url.ifBlank { state.addressBarText }
+                    if (url.isNotBlank()) submit(state, url)
+                },
+                onNewTab = {
+                    val fresh = tabs.newTab()
+                    submit(fresh, tabs.homepageUrl)
+                },
             )
 
             Box(
@@ -258,6 +298,14 @@ fun BrowserScreen(
             }
         }
 
+        NodeStatusDot(
+            nodeInfo = nodeInfo,
+            modifier = Modifier
+                .align(Alignment.TopEnd)
+                .windowInsetsPadding(WindowInsets.systemBars)
+                .padding(top = 4.dp, end = 6.dp),
+        )
+
         SnackbarHost(
             hostState = snackbarHostState,
             modifier = Modifier
@@ -283,19 +331,26 @@ fun BrowserScreen(
                 val fresh = tabs.newTab()
                 submit(fresh, tabs.homepageUrl)
             },
-            onOpenLibrary = {
-                showTabSwitcher = false
-                showLibrary = true
+        )
+    }
+
+    if (showHistory) {
+        HistoryScreen(
+            repo = repo,
+            onDismiss = { showHistory = false },
+            onOpen = { url ->
+                showHistory = false
+                submit(state, url)
             },
         )
     }
 
-    if (showLibrary) {
-        LibrarySheet(
+    if (showBookmarks) {
+        BookmarksScreen(
             repo = repo,
-            onDismiss = { showLibrary = false },
+            onDismiss = { showBookmarks = false },
             onOpen = { url ->
-                showLibrary = false
+                showBookmarks = false
                 submit(state, url)
             },
         )
@@ -307,19 +362,24 @@ fun BrowserScreen(
 private fun TopBar(
     state: BrowserState,
     tabCount: Int,
-    nodeInfo: NodeInfo,
     resolvingEns: Boolean,
     isBookmarked: Boolean,
     addressFocused: Boolean,
     onAddressFocusChanged: (Boolean) -> Unit,
     onAddressEditedChanged: (Boolean) -> Unit,
     onSubmit: (String) -> Unit,
-    onBack: () -> Unit,
     onForward: () -> Unit,
+    onHome: () -> Unit,
+    focusAddressTrigger: Int,
     onToggleBookmark: () -> Unit,
     onOpenNodePanel: () -> Unit,
     onOpenTabs: () -> Unit,
+    onOpenHistory: () -> Unit,
+    onOpenBookmarks: () -> Unit,
+    onReload: () -> Unit,
+    onNewTab: () -> Unit,
 ) {
+    var menuExpanded by remember { mutableStateOf(false) }
     val focusRequester = remember { FocusRequester() }
     // Local [TextFieldValue] so we can steer the selection (e.g. select
     // all on focus). We keep it in sync with [state.addressBarText],
@@ -346,6 +406,15 @@ private fun TopBar(
         }
     }
 
+    // Grab focus whenever the host bumps the trigger (launch / Home).
+    // Skip the very first composition — the initial `0` is just the
+    // starting value, not a user-initiated request.
+    LaunchedEffect(focusAddressTrigger) {
+        if (focusAddressTrigger > 0) {
+            runCatching { focusRequester.requestFocus() }
+        }
+    }
+
     // Select-all on focus. Running this in a LaunchedEffect (rather
     // than from `onFocusChanged`) makes sure we apply *after* any
     // tap-to-place-cursor selection the framework might set during the
@@ -365,17 +434,8 @@ private fun TopBar(
             .padding(horizontal = 8.dp, vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        IconButton(
-            onClick = onBack,
-            enabled = state.canGoBack,
-        ) {
-            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
-        }
-        IconButton(
-            onClick = onForward,
-            enabled = state.canGoForward,
-        ) {
-            Icon(Icons.AutoMirrored.Filled.ArrowForward, contentDescription = "Forward")
+        IconButton(onClick = onHome) {
+            Icon(Icons.Filled.Home, contentDescription = "Home")
         }
 
         // Custom-built address pill. We can't use M3's `TextField` here
@@ -442,11 +502,7 @@ private fun TopBar(
                         // State machine:
                         //   focused + non-empty text → Clear (×)
                         //   loading                  → spinner
-                        //   idle on a real URL       → bookmark toggle
-                        //   idle on blank            → nothing
-                        // Reload isn't rendered here: the user can re-submit
-                        // the current URL by tapping the pill and hitting Go
-                        // on the keyboard, which is effectively reload.
+                        //   otherwise                → nothing (bookmark lives in the overflow menu)
                         Box(
                             modifier = Modifier.size(32.dp),
                             contentAlignment = Alignment.Center,
@@ -477,21 +533,6 @@ private fun TopBar(
                                         modifier = Modifier.size(18.dp),
                                     )
                                 }
-                                state.url.isNotBlank() -> {
-                                    IconButton(
-                                        onClick = onToggleBookmark,
-                                        modifier = Modifier.size(32.dp),
-                                    ) {
-                                        Icon(
-                                            imageVector = if (isBookmarked) Icons.Filled.Bookmark
-                                            else Icons.Filled.BookmarkBorder,
-                                            contentDescription = if (isBookmarked) "Remove bookmark" else "Add bookmark",
-                                            tint = if (isBookmarked) MaterialTheme.colorScheme.primary
-                                            else MaterialTheme.colorScheme.onSurface,
-                                            modifier = Modifier.size(18.dp),
-                                        )
-                                    }
-                                }
                             }
                         }
                     }
@@ -505,11 +546,94 @@ private fun TopBar(
             modifier = Modifier.padding(start = 2.dp),
         )
 
-        NodeStatusDot(
-            nodeInfo = nodeInfo,
-            onClick = onOpenNodePanel,
-            modifier = Modifier.padding(start = 2.dp),
-        )
+        Box {
+            IconButton(
+                onClick = { menuExpanded = true },
+                modifier = Modifier.padding(start = 2.dp),
+            ) {
+                Icon(Icons.Filled.Menu, contentDescription = "Menu")
+            }
+            DropdownMenu(
+                expanded = menuExpanded,
+                onDismissRequest = { menuExpanded = false },
+            ) {
+                DropdownMenuItem(
+                    text = { Text(if (isBookmarked) "Remove bookmark" else "Add bookmark") },
+                    leadingIcon = {
+                        Icon(
+                            imageVector = if (isBookmarked) Icons.Filled.Star
+                            else Icons.Filled.StarBorder,
+                            contentDescription = null,
+                            tint = if (isBookmarked) MaterialTheme.colorScheme.primary
+                            else MaterialTheme.colorScheme.onSurface,
+                        )
+                    },
+                    enabled = state.url.isNotBlank(),
+                    onClick = {
+                        menuExpanded = false
+                        onToggleBookmark()
+                    },
+                )
+                DropdownMenuItem(
+                    text = { Text("Forward") },
+                    leadingIcon = {
+                        Icon(
+                            Icons.AutoMirrored.Filled.ArrowForward,
+                            contentDescription = null,
+                        )
+                    },
+                    enabled = state.canGoForward,
+                    onClick = {
+                        menuExpanded = false
+                        onForward()
+                    },
+                )
+                DropdownMenuItem(
+                    text = { Text("New tab") },
+                    leadingIcon = { Icon(Icons.Filled.Add, contentDescription = null) },
+                    onClick = {
+                        menuExpanded = false
+                        onNewTab()
+                    },
+                )
+                DropdownMenuItem(
+                    text = { Text("Reload") },
+                    leadingIcon = { Icon(Icons.Filled.Refresh, contentDescription = null) },
+                    onClick = {
+                        menuExpanded = false
+                        onReload()
+                    },
+                )
+                DropdownMenuItem(
+                    text = { Text("History") },
+                    leadingIcon = {
+                        Icon(Icons.Filled.History, contentDescription = null)
+                    },
+                    onClick = {
+                        menuExpanded = false
+                        onOpenHistory()
+                    },
+                )
+                DropdownMenuItem(
+                    text = { Text("Bookmarks") },
+                    leadingIcon = {
+                        Icon(Icons.Filled.Bookmark, contentDescription = null)
+                    },
+                    onClick = {
+                        menuExpanded = false
+                        onOpenBookmarks()
+                    },
+                )
+                DropdownMenuItem(
+                    text = { Text("Node") },
+                    leadingIcon = { Icon(Icons.Filled.Router, contentDescription = null) },
+                    onClick = {
+                        menuExpanded = false
+                        onOpenNodePanel()
+                    },
+                )
+            }
+        }
     }
 }
 
@@ -642,7 +766,6 @@ private fun highlightedText(text: String, needle: String): AnnotatedString {
 @Composable
 private fun NodeStatusDot(
     nodeInfo: NodeInfo,
-    onClick: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val color = when (nodeInfo.status) {
@@ -651,15 +774,12 @@ private fun NodeStatusDot(
         NodeStatus.Stopped -> Color(0xFF94A3B8)
         NodeStatus.Error -> Color(0xFFEF4444)
     }
-    IconButton(onClick = onClick, modifier = modifier) {
-        Box(
-            modifier = Modifier
-                .width(14.dp)
-                .height(14.dp)
-                .clip(RoundedCornerShape(50))
-                .background(color),
-        )
-    }
+    Box(
+        modifier = modifier
+            .size(8.dp)
+            .clip(RoundedCornerShape(50))
+            .background(color),
+    )
 }
 
 @Composable
