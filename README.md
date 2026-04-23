@@ -108,6 +108,21 @@ Bee-lite's default bootnode is `/dnsaddr/mainnet.ethswarm.org`, which requires m
 
 Long-term: re-resolve the chain periodically on the host, or ship a larger hard-coded list. Note: `StaticNodes` takes *overlay addresses* (64-hex swarm IDs), not multiaddrs — the two fields are not interchangeable. Filed upstream as [swarm-mobile-android#23](https://github.com/Solar-Punk-Ltd/swarm-mobile-android/issues/23).
 
+## Swarm content retrieval
+
+A fresh Bee node pulls chunks on demand through the DHT, and any individual chunk lookup can transiently fail (HTTP `404 {"address not found or incorrect"}`) even when the content is healthy and plenty of peers are connected. A typical Swarm-hosted site loads 10–30 sub-resources; a modest per-request failure rate compounds into broken CSS, missing images, and videos that don't load. Retries almost always succeed — the problem is strictly first contact with cold content.
+
+Freedom handles this in two layers:
+
+1. **Navigation-time probe.** `GatewayProbe` HEAD-polls `/bzz/<hash>` before the WebView loads, with escalating delays, a 5-minute budget, and a grace window for `ECONNREFUSED` during node startup. The tab's spinner stays active while the probe runs; on timeout or unreachable the tab routes to `assets/error/error.html` with a **Try Again** button that re-enters the probe.
+2. **Native request interception.** Sub-resource fetches go through `WebViewClient.shouldInterceptRequest` in `BrowserWebView.kt`, which:
+    - Retries transient `404` / `5xx` from `/bzz/`, `/ipfs/`, `/ipns/` with bounded backoff (~17 s across 8 attempts, inside the WebView's ~30 s request-hang window).
+    - Rewrites absolute-root paths like `/_next/static/…` back under the current `/bzz/<hash>/` root (Next.js-style sites reference sub-resources this way and would otherwise 404).
+    - Synthesises proper `206 Partial Content` for `<video>` / `<audio>` `Range` requests by fetching the body once into a small in-process LRU and slicing it. Bee itself returns the full body for every Range and omits `Accept-Ranges`, which stalls Chromium's media pipeline at `HAVE_METADATA`.
+    - Stamps every outgoing fetch with `Swarm-Chunk-Retrieval-Timeout: 30s`, `Swarm-Redundancy-Strategy: 3`, `Swarm-Redundancy-Fallback-Mode: true` to give Bee more server-side runway per chunk.
+
+Unlike the Electron-based desktop port, Android WebView does not allow registering a custom `bzz:` scheme as a first-class origin (there is no `session.protocol.handle` equivalent). So the WebView loads the gateway URL directly (`http://127.0.0.1:1633/bzz/<hash>/…`) and `BrowserState.currentBzzRoot` tracks the active root so the interceptor can rewrite absolute-root paths at request time.
+
 ## Project layout
 
 ```

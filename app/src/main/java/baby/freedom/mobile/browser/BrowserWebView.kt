@@ -69,6 +69,59 @@ private val HEADERS_TO_STRIP = setOf(
     "transfer-encoding", "content-encoding", "connection", "keep-alive",
 )
 
+// Request headers we never forward upstream — either managed by
+// `HttpURLConnection` itself or carrying state tied to the WebView's
+// gateway origin (`Host: 127.0.0.1:1633`, `Origin`, `Referer`) that
+// would only confuse Bee.
+private val REQUEST_HEADERS_TO_STRIP = setOf(
+    "host", "origin", "referer", "content-length", "accept-encoding",
+    "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
+    "te", "trailer", "transfer-encoding", "upgrade",
+)
+
+// HTTP status codes we treat as transient — a cold Bee node regularly
+// answers 404 for a chunk that's still being fetched, and brief 5xx
+// from the node itself resolve on retry too. Matches the retry set
+// used by freedom-browser's `bzz-protocol.js` on desktop.
+private val TRANSIENT_STATUSES = setOf(404, 500, 502, 503, 504)
+
+/**
+ * Apply the Swarm-specific request headers that give Bee extra
+ * server-side runway on transient chunk-retrieval failures. Measured on
+ * the desktop port to turn a 40 % single-chunk failure rate into 100 %
+ * success on cold content. These headers are ignored by Bee for
+ * non-redundant content, so they're always safe to set.
+ */
+private fun HttpURLConnection.applySwarmRequestHeaders() {
+    setRequestProperty("Swarm-Chunk-Retrieval-Timeout", "30s")
+    setRequestProperty("Swarm-Redundancy-Strategy", "3")
+    setRequestProperty("Swarm-Redundancy-Fallback-Mode", "true")
+}
+
+/**
+ * Copy request headers from [req] onto [this] connection, stripping
+ * hop-by-hop / origin-tied headers, optionally dropping `Range`
+ * (when the caller wants to fetch the full body), forcing
+ * `Accept-Encoding: identity`, and stamping the Swarm-* retrieval
+ * hints Bee honors.
+ */
+private fun HttpURLConnection.forwardProxiedHeaders(
+    req: WebResourceRequest,
+    stripRange: Boolean = false,
+) {
+    req.requestHeaders?.forEach { (k, v) ->
+        val lk = k.lowercase()
+        if (lk in REQUEST_HEADERS_TO_STRIP) return@forEach
+        if (stripRange && lk == "range") return@forEach
+        try { setRequestProperty(k, v) } catch (_: Throwable) {}
+    }
+    // Force `identity` so HttpURLConnection doesn't silently
+    // decompress the body out from under us and mismatch the
+    // upstream Content-Length we forward to the WebView.
+    setRequestProperty("Accept-Encoding", "identity")
+    applySwarmRequestHeaders()
+}
+
 private fun extractBzzRoot(url: String?): String? = GatewayUrls.extractRoot(url)
 
 // Max width (in px) of a thumbnail bitmap. Anything bigger is wasteful
@@ -447,13 +500,17 @@ private fun buildRefreshableWebView(
     return refreshLayout to webView
 }
 
-// Back-off schedule for the gateway-escape retry loop. Kept short so we
-// never block the WebView's network thread long enough for its internal
-// request timeout to fire (~30s Chromium default). With 5 attempts and
-// these delays the worst-case budget is ~5.5s of sleeping plus N
-// connection attempts, so even a slow bee-lite peer warmup still lands
-// inside the WebView's own window.
-private val ESCAPE_RETRY_DELAYS_MS: LongArray = longArrayOf(0L, 250L, 500L, 1000L, 2000L)
+// Back-off schedule for the subresource retry loop. Sized to recover
+// from transient 404s on cold Bee nodes — which frequently take several
+// seconds to find a chunk via the DHT — while staying inside the
+// WebView's internal ~30 s request-hang detector. ~17 s of sleeping
+// across 7 attempts, plus ≤ ~1 s per attempt for a fast 404 response
+// from Bee, lands the worst-case budget near 25 s. (The desktop port
+// uses ~3 min across 13 attempts, but runs via a custom Electron
+// protocol handler that isn't bound by the WebView hang detector.)
+private val ESCAPE_RETRY_DELAYS_MS: LongArray = longArrayOf(
+    0L, 250L, 500L, 1000L, 2000L, 3000L, 5000L, 5000L,
+)
 
 /**
  * Proxy subresource fetches that the Bee gateway can't fulfill on its own
@@ -553,33 +610,66 @@ private fun loadMediaBody(
     synchronized(mediaBodyCache) {
         mediaBodyCache[targetUrl]?.let { return it }
     }
+    // Retry transient chunk-retrieval failures the same way non-media
+    // subresources do. Range is stripped on outgoing fetches because
+    // we always want the full body to feed the in-memory cache.
+    for ((index, delayMs) in ESCAPE_RETRY_DELAYS_MS.withIndex()) {
+        if (delayMs > 0) {
+            try {
+                Thread.sleep(delayMs)
+            } catch (_: InterruptedException) {
+                Thread.currentThread().interrupt()
+                return null
+            }
+        }
+        val attempt = tryLoadMediaBody(req, targetUrl)
+        when (attempt) {
+            is MediaLoadResult.Ok -> return attempt.body
+            MediaLoadResult.Fatal -> return null
+            MediaLoadResult.Transient -> {
+                Log.i(
+                    LOG_TAG,
+                    "media transient for $targetUrl " +
+                        "(attempt ${index + 1}/${ESCAPE_RETRY_DELAYS_MS.size})",
+                )
+            }
+        }
+    }
+    return null
+}
+
+private sealed class MediaLoadResult {
+    data class Ok(val body: MediaBody) : MediaLoadResult()
+    object Transient : MediaLoadResult()
+    object Fatal : MediaLoadResult()
+}
+
+private fun tryLoadMediaBody(
+    req: WebResourceRequest,
+    targetUrl: String,
+): MediaLoadResult {
     val conn = try {
         (URL(targetUrl).openConnection() as HttpURLConnection).apply {
             requestMethod = "GET"
             connectTimeout = 5_000
             readTimeout = 60_000
             instanceFollowRedirects = true
-            req.requestHeaders?.forEach { (k, v) ->
-                if (!k.equals("Host", ignoreCase = true) &&
-                    !k.equals("Content-Length", ignoreCase = true) &&
-                    !k.equals("Accept-Encoding", ignoreCase = true) &&
-                    !k.equals("Range", ignoreCase = true)
-                ) {
-                    try { setRequestProperty(k, v) } catch (_: Throwable) {}
-                }
-            }
-            setRequestProperty("Accept-Encoding", "identity")
+            forwardProxiedHeaders(req, stripRange = true)
         }
     } catch (t: Throwable) {
         Log.w(LOG_TAG, "media fetch open failed: $targetUrl", t)
-        return null
+        return MediaLoadResult.Fatal
     }
     return try {
         conn.connect()
         val status = conn.responseCode
+        if (status in TRANSIENT_STATUSES) {
+            Log.w(LOG_TAG, "media fetch transient $status for $targetUrl")
+            return MediaLoadResult.Transient
+        }
         if (status !in 200..299) {
             Log.w(LOG_TAG, "media fetch status $status for $targetUrl")
-            return null
+            return MediaLoadResult.Fatal
         }
         val bytes = conn.inputStream.use { it.readBytes() }
         val rawCt = conn.contentType
@@ -592,10 +682,13 @@ private fun loadMediaBody(
         val body = MediaBody(bytes, mime)
         synchronized(mediaBodyCache) { mediaBodyCache[targetUrl] = body }
         Log.i(LOG_TAG, "media cached: $targetUrl bytes=${bytes.size} mime=$mime")
-        body
-    } catch (t: Throwable) {
+        MediaLoadResult.Ok(body)
+    } catch (t: IOException) {
         Log.w(LOG_TAG, "media fetch failed: $targetUrl", t)
-        null
+        MediaLoadResult.Transient
+    } catch (t: Throwable) {
+        Log.w(LOG_TAG, "media fetch unexpected failure: $targetUrl", t)
+        MediaLoadResult.Fatal
     }
 }
 
@@ -725,18 +818,7 @@ private fun fetchOnce(
             connectTimeout = 5_000
             readTimeout = 10_000
             instanceFollowRedirects = true
-            req.requestHeaders?.forEach { (k, v) ->
-                if (!k.equals("Host", ignoreCase = true) &&
-                    !k.equals("Content-Length", ignoreCase = true) &&
-                    !k.equals("Accept-Encoding", ignoreCase = true)
-                ) {
-                    try { setRequestProperty(k, v) } catch (_: Throwable) {}
-                }
-            }
-            // Force `identity` so HttpURLConnection doesn't silently
-            // decompress the body out from under us and mismatch the
-            // upstream Content-Length we forward to the WebView.
-            setRequestProperty("Accept-Encoding", "identity")
+            forwardProxiedHeaders(req)
         }
         conn.connect()
         val status = conn.responseCode
@@ -777,7 +859,7 @@ private fun fetchOnce(
             else -> conn.errorStream ?: ByteArrayInputStream(ByteArray(0))
         }
         val response = WebResourceResponse(mime, charset, status, reason, headers, body)
-        val transient = status == 404 || status == 500
+        val transient = status in TRANSIENT_STATUSES
         response to transient
     } catch (t: IOException) {
         Log.w(LOG_TAG, "gateway fetch failed: $targetUrl", t)
