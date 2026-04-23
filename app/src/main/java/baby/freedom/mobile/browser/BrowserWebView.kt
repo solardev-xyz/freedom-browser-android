@@ -226,11 +226,14 @@ private fun buildRefreshableWebView(
             ViewGroup.LayoutParams.MATCH_PARENT,
         )
 
-        // Match the dark Compose background. WebView defaults to a
-        // white background that flashes before the first page paints;
-        // worse, before its first paint it can leave the Compose
-        // drawing in an inconsistent state that hides the top chrome.
-        setBackgroundColor(0xFF121212.toInt())
+        // Use a white WebView background (the browser default) so that
+        // pages without their own styling — most notably Chromium's
+        // built-in error pages, which render dark text on whatever
+        // canvas the WebView provides — stay readable even though the
+        // rest of the app chrome is dark-themed. Pages that style
+        // themselves (home page, most real sites) are unaffected; they
+        // paint their own background over this base colour.
+        setBackgroundColor(0xFFFFFFFF.toInt())
 
         settings.apply {
             javaScriptEnabled = true
