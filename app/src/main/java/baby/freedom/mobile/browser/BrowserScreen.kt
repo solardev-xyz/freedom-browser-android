@@ -526,12 +526,34 @@ private fun TopBar(
                     onGo = { onSubmit(fieldValue.text) },
                 ),
                 decorationBox = { innerTextField ->
+                    // "via Swarm" badge: the pill grows a Swarm hex mark on
+                    // the left whenever the *loaded* page origin is the
+                    // local bee-lite gateway — i.e. either a raw `bzz://`
+                    // URL or an `ens://` name that resolved to a Swarm
+                    // contenthash. Mirrors the `protocol-icon[data-protocol='swarm']`
+                    // behavior in freedom-browser's desktop address bar.
+                    val showSwarmBadge = state.url.startsWith("bzz://") ||
+                        state.url.startsWith("ens://")
                     Row(
                         modifier = Modifier
                             .fillMaxSize()
-                            .padding(start = 16.dp, end = 4.dp),
+                            .padding(
+                                start = if (showSwarmBadge) 10.dp else 16.dp,
+                                end = 4.dp,
+                            ),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
+                        if (showSwarmBadge) {
+                            Icon(
+                                painter = painterResource(
+                                    baby.freedom.mobile.R.drawable.ic_swarm,
+                                ),
+                                contentDescription = "via Swarm",
+                                tint = Color(0xFFF7931A),
+                                modifier = Modifier.size(16.dp),
+                            )
+                            Spacer(Modifier.width(8.dp))
+                        }
                         Box(modifier = Modifier.weight(1f)) {
                             if (fieldValue.text.isEmpty()) {
                                 Text(

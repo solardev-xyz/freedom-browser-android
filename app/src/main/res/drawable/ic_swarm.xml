@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Official Swarm logo — four hexagons, the top-left one notched.
+  Ported verbatim from freedom-browser's index.html (see `.icon-swarm`
+  in src/renderer/index.html). The source SVG uses `viewBox="18 34 44 45"`
+  which Android VectorDrawable can't express directly, so every point
+  has been translated by (-18, -34) and the viewport set to 44 × 45.
+  Filled in Swarm orange (#F7931A) to match `.protocol-icon[data-protocol='swarm']`.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="16dp"
+    android:height="16dp"
+    android:viewportWidth="44"
+    android:viewportHeight="45">
+    <!-- Bottom-left hexagon. -->
+    <path
+        android:pathData="M2.3,37.7 L11.6,42.8 L20.8,37.7 L20.8,27.3 L11.6,22.1 L2.3,27.3 Z"
+        android:fillColor="#F7931A" />
+    <!-- Small hexagon top-right. -->
+    <path
+        android:pathData="M32.8,2.6 L28,5.4 L28,10.9 L32.8,13.6 L37.8,10.9 L37.8,5.4 Z"
+        android:fillColor="#F7931A" />
+    <!-- Bottom-right hexagon. -->
+    <path
+        android:pathData="M41.9,27.3 L32.7,22.1 L23.5,27.3 L23.5,37.7 L32.7,42.8 L41.9,37.7 Z"
+        android:fillColor="#F7931A" />
+    <!-- Top-left hexagon with notch. -->
+    <path
+        android:pathData="M22.1,4.1 L12.8,9.3 L12.8,19.6 L22.1,24.8 L31.3,19.6 L31.3,15.5 L26.8,13 L25.6,12.3 L25.6,10.9 L25.6,6.2 Z"
+        android:fillColor="#F7931A" />
+</vector>
