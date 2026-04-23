@@ -50,6 +50,14 @@ android {
         }
     }
 
+    testOptions {
+        // Let unit tests that touch `android.util.Log` (e.g. the
+        // GatewayProbe retry logger) run without Robolectric; default
+        // values are fine since the tests don't actually inspect log
+        // output.
+        unitTests.isReturnDefaultValues = true
+    }
+
     packaging {
         resources.excludes += setOf(
             "META-INF/INDEX.LIST",

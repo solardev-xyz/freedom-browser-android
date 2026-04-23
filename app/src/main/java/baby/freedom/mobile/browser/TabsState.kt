@@ -54,6 +54,17 @@ class TabsState(
     var clearWebViewData: (() -> Unit)? = null
 
     /**
+     * Hook installed by [BrowserScreen] so the WebView layer can bounce
+     * `bzz://` / `ens://` navigations (in-page link clicks, error-page
+     * "Try Again" button) back through the screen's probe-gated submit
+     * flow. Without this detour, in-page bzz clicks would short-circuit
+     * to a raw gateway load and skip the [GatewayProbe]-based
+     * peer-warmup gate.
+     */
+    @Volatile
+    var requestSubmit: ((BrowserState, String) -> Unit)? = null
+
+    /**
      * Open a new tab. If [url] is null (typical "+" button) the tab starts
      * blank and the caller is expected to load the homepage once the node
      * is running; otherwise [url] is submitted immediately (typical

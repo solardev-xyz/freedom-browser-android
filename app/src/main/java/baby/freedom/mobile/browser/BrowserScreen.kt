@@ -49,6 +49,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -56,6 +57,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -96,6 +98,7 @@ import baby.freedom.mobile.ens.EnsResolver
 import baby.freedom.mobile.ens.EnsResult
 import baby.freedom.swarm.NodeInfo
 import baby.freedom.swarm.NodeStatus
+import baby.freedom.swarm.SwarmNode
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
@@ -105,6 +108,46 @@ import kotlinx.coroutines.launch
  * `app/src/main/assets/home/home.html`.
  */
 const val HOME_URL: String = "file:///android_asset/home/home.html"
+
+/**
+ * Upper bound on how long a `bzz://` submit will sit in "spinner, node
+ * warming up" mode before giving up and showing the error page. Covers
+ * cold starts on slow devices plus the handful of seconds it takes the
+ * bee-lite gateway socket to bind after [NodeStatus.Running] flips on.
+ */
+private const val NODE_READY_TIMEOUT_MS: Long = 90_000L
+
+/**
+ * Suspend until the embedded node is [NodeStatus.Running], or until we
+ * hit a terminal state that won't recover on its own:
+ *   - [NodeStatus.Error] → give up immediately
+ *   - [NodeStatus.Stopped] while the user has the "run node" toggle
+ *     off → give up immediately (the node will never start on its own)
+ *   - Overall [timeoutMs] budget elapsed → give up
+ *
+ * Returns `true` if the node reached [NodeStatus.Running] within the
+ * budget, `false` otherwise. Caller-supplied [currentNodeInfoProvider]
+ * lets the loop observe fresh Compose-snapshot reads of the node info
+ * state on each iteration without plumbing a Flow.
+ */
+private suspend fun awaitNodeRunning(
+    currentNodeInfoProvider: () -> NodeInfo,
+    runNodeEnabled: Boolean,
+    timeoutMs: Long,
+): Boolean {
+    val started = System.currentTimeMillis()
+    while (true) {
+        val info = currentNodeInfoProvider()
+        when (info.status) {
+            NodeStatus.Running -> return true
+            NodeStatus.Error -> return false
+            NodeStatus.Stopped -> if (!runNodeEnabled) return false
+            NodeStatus.Starting -> { /* keep waiting */ }
+        }
+        if (System.currentTimeMillis() - started >= timeoutMs) return false
+        delay(200)
+    }
+}
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -116,9 +159,15 @@ fun BrowserScreen(
 ) {
     val tabs = remember { TabsState(homepage = initialUrl) }
     val ensResolver = remember { EnsResolver() }
+    val gatewayProbe = remember { GatewayProbe() }
     val context = LocalContext.current
     val repo = remember(context) { BrowsingRepository.get(context) }
     val scope = rememberCoroutineScope()
+    // Keep a stable reference to the latest nodeInfo for probe-gating
+    // closures launched from submit(). Without rememberUpdatedState, a
+    // probe job that outlives the recomposition would capture stale
+    // NodeStatus and falsely treat a now-running node as stopped.
+    val currentNodeInfo by rememberUpdatedState(nodeInfo)
     val keyboard = LocalSoftwareKeyboardController.current
     val focusManager = LocalFocusManager.current
     var showSettings by rememberSaveable { mutableStateOf(false) }
@@ -151,6 +200,75 @@ fun BrowserScreen(
         state.loadUrl("javascript:history.back();void(0);")
     }
 
+    // Run the peer-warmup probe against a bzz URL, then either load it
+    // or fall back to the in-app error page. Returns nothing; any
+    // spinner-state bookkeeping is the caller's job (so both the
+    // direct-bzz and ens→bzz paths can share the same routine).
+    suspend fun gateBzzNavigation(
+        target: BrowserState,
+        bzzUri: String,
+        ensName: String?,
+        displayUrl: String,
+    ) {
+        val loadable = SwarmResolver.toLoadable(bzzUri)
+        val headUrl = GatewayUrls.extractBase(loadable)?.prefix ?: loadable
+
+        // Wait for the node to finish booting before firing the probe.
+        // Entering a `bzz://` address while the node is still in
+        // `Starting` should keep the tab spinner running, not bail
+        // straight to the "content unavailable" page. We only give up
+        // if the node enters a terminal non-running state (`Error`, or
+        // `Stopped` while the user has the "run node" toggle off) or
+        // the overall wait budget expires.
+        val nodeReady = awaitNodeRunning(
+            currentNodeInfoProvider = { currentNodeInfo },
+            runNodeEnabled = runNodeEnabled,
+            timeoutMs = NODE_READY_TIMEOUT_MS,
+        )
+        if (!nodeReady) {
+            target.clearEnsOverride()
+            target.loadUrl(
+                ErrorPage.url(
+                    errorCode = "ERR_CONNECTION_REFUSED",
+                    displayUrl = displayUrl,
+                    protocol = "swarm",
+                    retryUrl = bzzUri,
+                ),
+            )
+            return
+        }
+
+        when (val outcome = gatewayProbe.probe(headUrl)) {
+            GatewayProbe.Outcome.Ok -> target.loadUrl(bzzUri, ensName = ensName)
+            GatewayProbe.Outcome.Aborted -> { /* superseded by a later submit */ }
+            is GatewayProbe.Outcome.Unreachable -> {
+                target.clearEnsOverride()
+                target.loadUrl(
+                    ErrorPage.url(
+                        errorCode = "ERR_CONNECTION_REFUSED",
+                        displayUrl = displayUrl,
+                        protocol = "swarm",
+                        retryUrl = bzzUri,
+                    ),
+                )
+            }
+            GatewayProbe.Outcome.NotFound, is GatewayProbe.Outcome.Other -> {
+                val detail = if (outcome is GatewayProbe.Outcome.Other) {
+                    "swarm_content_not_found_${outcome.status}"
+                } else "swarm_content_not_found"
+                target.clearEnsOverride()
+                target.loadUrl(
+                    ErrorPage.url(
+                        errorCode = detail,
+                        displayUrl = displayUrl,
+                        protocol = "swarm",
+                        retryUrl = bzzUri,
+                    ),
+                )
+            }
+        }
+    }
+
     fun submit(target: BrowserState, raw: String) {
         keyboard?.hide()
         // Drop focus synchronously so the IME's input connection is torn
@@ -167,6 +285,11 @@ fun BrowserScreen(
         focusManager.clearFocus()
         addressBarEdited = false
 
+        // Any new submit supersedes a probe that was still in flight on
+        // this tab — otherwise switching URL mid-probe would let the
+        // stale probe decide the navigation.
+        target.cancelPendingProbe()
+
         val trimmed = raw.trim()
         // Let the user type the friendly form and re-submit to reload.
         val canonical = target.effectiveFetchUrl(trimmed)
@@ -175,7 +298,7 @@ fun BrowserScreen(
         if (ens != null) {
             target.addressBarText = "ens://${ens.name}${ens.suffix}"
             resolvingEns = true
-            scope.launch {
+            target.pendingProbeJob = scope.launch {
                 try {
                     val result = ensResolver.resolveContenthash(ens.name)
                     when (result) {
@@ -186,8 +309,9 @@ fun BrowserScreen(
                             // today, the rest will plug in under port-plan §2.
                             KnownEnsNames.record(result.uri, ens.name)
                             if (result.protocol == "bzz") {
-                                val t = result.uri + ens.suffix
-                                target.loadUrl(t, ensName = ens.name)
+                                val bzzUri = result.uri + ens.suffix
+                                val display = "ens://${ens.name}${ens.suffix}"
+                                gateBzzNavigation(target, bzzUri, ens.name, display)
                             } else {
                                 snackbarHostState.showSnackbar(
                                     "${ens.name} → ${result.protocol}:// (${result.decoded.take(12)}…) — not supported yet",
@@ -206,6 +330,7 @@ fun BrowserScreen(
                     }
                 } finally {
                     resolvingEns = false
+                    target.pendingProbeJob = null
                 }
             }
             return
@@ -217,7 +342,37 @@ fun BrowserScreen(
         // the usual echo-to-address-bar for that one case.
         target.addressBarText = if (url == HOME_URL) "" else url
         target.clearEnsOverride()
+
+        // Direct bzz:// / gateway URLs get the same probe-gated
+        // treatment as an ens:// resolution, so a cold node shows the
+        // tab spinner instead of Bee's raw 404 JSON.
+        val isBzz = url.startsWith("bzz://") ||
+            url.startsWith("${SwarmNode.GATEWAY_URL}/bzz/")
+        if (isBzz) {
+            val bzzUri = SwarmResolver.toDisplay(url)
+            resolvingEns = true
+            target.pendingProbeJob = scope.launch {
+                try {
+                    gateBzzNavigation(target, bzzUri, ensName = null, displayUrl = bzzUri)
+                } finally {
+                    resolvingEns = false
+                    target.pendingProbeJob = null
+                }
+            }
+            return
+        }
+
         target.loadUrl(url)
+    }
+
+    // Wire the WebView layer's "route this URL through submit" hook up
+    // to this screen's [submit] function. The callback lives on
+    // [TabsState] so BrowserWebView (which is composed under us) can
+    // bounce bzz:// / ens:// link-clicks + error-page "Try Again"
+    // back through the same probe gate the top address bar uses.
+    DisposableEffect(tabs) {
+        tabs.requestSubmit = { tab, url -> submit(tab, url) }
+        onDispose { tabs.requestSubmit = null }
     }
 
     // Kick off the homepage on the initial tab as soon as we're composed.

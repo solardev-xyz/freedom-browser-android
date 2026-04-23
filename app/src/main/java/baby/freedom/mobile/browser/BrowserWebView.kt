@@ -8,7 +8,9 @@ import android.util.Log
 import android.view.View
 import android.view.ViewGroup
 import android.webkit.CookieManager
+import android.webkit.MimeTypeMap
 import android.webkit.WebChromeClient
+import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebStorage
@@ -31,6 +33,7 @@ import baby.freedom.mobile.data.BrowsingRepository
 import baby.freedom.swarm.SwarmNode
 import kotlinx.coroutines.flow.collectLatest
 import java.io.ByteArrayInputStream
+import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
 
@@ -49,11 +52,21 @@ private val BEE_API_SEGMENTS = setOf(
     "auth", "refresh",
 )
 
+// First-segment prefixes that identify user-facing content served from
+// the Bee gateway (vs. the node's own JSON API under /health, /status,
+// etc.). Subresources that land on one of these but 404 are retried —
+// a cold Bee node regularly answers the top-level manifest before every
+// chunk is in hand, so these transient failures resolve a few seconds
+// later without anything visibly breaking on the page.
+private val GATEWAY_CONTENT_SEGMENTS = setOf("bzz", "ipfs", "ipns")
+
 // Response headers we strip when proxying — they're either managed by the
 // WebView's own transport or would confuse it if passed through verbatim.
+// `content-length` is stripped because `HttpURLConnection` auto-decodes
+// gzip responses for us and the incoming length is for the compressed
+// body, which would be wrong for what we hand back to the WebView.
 private val HEADERS_TO_STRIP = setOf(
     "transfer-encoding", "content-encoding", "connection", "keep-alive",
-    "content-length",
 )
 
 private fun extractBzzRoot(url: String?): String? = GatewayUrls.extractRoot(url)
@@ -107,6 +120,18 @@ fun BrowserWebViewHost(
     val context = LocalContext.current
     val repo = remember(context) { BrowsingRepository.get(context) }
 
+    // Enable Chrome DevTools inspection for debug builds so we can
+    // diagnose broken subresources on Swarm-hosted pages. Cheap no-op
+    // once set and idempotent.
+    remember {
+        if ((context.applicationInfo.flags and
+                android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0
+        ) {
+            WebView.setWebContentsDebuggingEnabled(true)
+        }
+        Unit
+    }
+
     val frame = remember {
         FrameLayout(context).apply {
             layoutParams = ViewGroup.LayoutParams(
@@ -134,7 +159,14 @@ fun BrowserWebViewHost(
         val idsNow = currentIds.toSet()
         for (tab in tabs.tabs) {
             if (webViews[tab.id] == null) {
-                val (layout, wv) = buildRefreshableWebView(context, tab, repo)
+                val (layout, wv) = buildRefreshableWebView(
+                    context = context,
+                    state = tab,
+                    repo = repo,
+                    onSubmitUrl = { target, url ->
+                        tabs.requestSubmit?.invoke(target, url)
+                    },
+                )
                 webViews[tab.id] = wv
                 refreshLayouts[tab.id] = layout
                 frame.addView(layout)
@@ -228,6 +260,7 @@ private fun buildRefreshableWebView(
     context: Context,
     state: BrowserState,
     repo: BrowsingRepository,
+    onSubmitUrl: (BrowserState, String) -> Unit,
 ): Pair<SwipeRefreshLayout, WebView> {
     val refreshLayout = SwipeRefreshLayout(context).apply {
         layoutParams = ViewGroup.LayoutParams(
@@ -259,7 +292,13 @@ private fun buildRefreshableWebView(
             displayZoomControls = false
             useWideViewPort = true
             loadWithOverviewMode = true
-            mediaPlaybackRequiresUserGesture = true
+            // Allow muted `<video autoplay>` backgrounds (swarm.eth, and
+            // every other modern Next.js hero video) to kick off without
+            // a user tap. Matches Chrome-on-Android's own policy, which
+            // lets muted media autoplay without interaction. Audio that
+            // actually requires a tap is still gated by the browser's
+            // own per-frame autoplay policy.
+            mediaPlaybackRequiresUserGesture = false
         }
 
         // Force an initial paint so the WebView's compositor surface
@@ -292,8 +331,13 @@ private fun buildRefreshableWebView(
                 // the gateway-rewritten one — so history reflects what the
                 // user actually visited. The local home page is hidden from
                 // the address bar (displayFor returns "") and shouldn't
-                // clutter the history either.
-                if (display.isNotBlank()) repo.recordVisit(display, state.title)
+                // clutter the history either. The error page is also
+                // deliberately kept out of history — it's a transient
+                // state, not a destination the user meant to visit.
+                if (display.isNotBlank() && !ErrorPage.isErrorPage(url)) {
+                    repo.recordVisit(display, state.title)
+                }
+
                 // Give the renderer a beat to paint, then capture a
                 // thumbnail. 400ms is enough for most pages; if the load
                 // is still progressing we'll re-capture on the next
@@ -310,8 +354,14 @@ private fun buildRefreshableWebView(
                 request: WebResourceRequest?,
             ): Boolean {
                 val target = request?.url?.toString() ?: return false
-                if (target.startsWith("bzz://")) {
-                    view?.loadUrl(SwarmResolver.toLoadable(target))
+                // Route bzz:// and ens:// through the screen's submit flow
+                // so in-page clicks + error-page "Try Again" go through
+                // the same GatewayProbe gate the top address bar uses.
+                // Falls back to a direct gateway load if no submit hook
+                // is wired (defensive — the hook is installed before the
+                // first tab ever renders).
+                if (target.startsWith("bzz://") || target.startsWith("ens://")) {
+                    onSubmitUrl(state, target)
                     return true
                 }
                 return false
@@ -321,6 +371,59 @@ private fun buildRefreshableWebView(
                 view: WebView?,
                 request: WebResourceRequest?,
             ): WebResourceResponse? = rewriteGatewayEscape(state, request)
+
+            override fun onReceivedError(
+                view: WebView?,
+                request: WebResourceRequest?,
+                error: WebResourceError?,
+            ) {
+                val req = request ?: return
+                if (!req.isForMainFrame) return
+                val failed = req.url?.toString() ?: return
+                // Already on the error page? Don't loop.
+                if (ErrorPage.isErrorPage(failed)) return
+                if (!isLocalGatewayUrl(failed)) return
+
+                val display = displayFor(failed, state).ifBlank { failed }
+                val retryUri = SwarmResolver.toDisplay(failed)
+                val code = error?.errorCode?.let { "ERR_$it" } ?: "ERR_FAILED"
+                val page = ErrorPage.url(
+                    errorCode = code,
+                    displayUrl = display,
+                    protocol = "swarm",
+                    retryUrl = retryUri,
+                )
+                state.clearEnsOverride()
+                view?.loadUrl(page)
+            }
+
+            override fun onReceivedHttpError(
+                view: WebView?,
+                request: WebResourceRequest?,
+                errorResponse: WebResourceResponse?,
+            ) {
+                val req = request ?: return
+                if (!req.isForMainFrame) return
+                val failed = req.url?.toString() ?: return
+                if (ErrorPage.isErrorPage(failed)) return
+                if (!isLocalGatewayUrl(failed)) return
+
+                val status = errorResponse?.statusCode ?: 0
+                // The probe already waited out transient 404/500s — if we
+                // got one here, the gateway answered but the content
+                // genuinely isn't available (misspelled hash, etc).
+                val display = displayFor(failed, state).ifBlank { failed }
+                val retryUri = SwarmResolver.toDisplay(failed)
+                val page = ErrorPage.url(
+                    errorCode = "swarm_content_not_found",
+                    displayUrl = display,
+                    protocol = "swarm",
+                    retryUrl = retryUri,
+                )
+                Log.i(LOG_TAG, "main-frame HTTP $status for $failed → error page")
+                state.clearEnsOverride()
+                view?.loadUrl(page)
+            }
         }
 
         webChromeClient = object : WebChromeClient() {
@@ -344,16 +447,44 @@ private fun buildRefreshableWebView(
     return refreshLayout to webView
 }
 
+// Back-off schedule for the gateway-escape retry loop. Kept short so we
+// never block the WebView's network thread long enough for its internal
+// request timeout to fire (~30s Chromium default). With 5 attempts and
+// these delays the worst-case budget is ~5.5s of sleeping plus N
+// connection attempts, so even a slow bee-lite peer warmup still lands
+// inside the WebView's own window.
+private val ESCAPE_RETRY_DELAYS_MS: LongArray = longArrayOf(0L, 250L, 500L, 1000L, 2000L)
+
 /**
- * Next-style sites served from `/bzz/<hash>/` often reference resources via
- * absolute-root paths (e.g. `<link href="/_next/static/...">`). When loaded
- * through the Bee gateway that resolves to `http://127.0.0.1:1633/_next/...`
- * — outside the bzz namespace — and 404s, leaving the page unstyled.
+ * Proxy subresource fetches that the Bee gateway can't fulfill on its own
+ * fast enough or in a WebView-friendly format.
  *
- * If the current page is a bzz site, we transparently rewrite any such
- * "escaped" gateway-origin subresource request to live under the current
- * `/bzz/<hash>/` root, fetch it via [HttpURLConnection], and hand the body
- * back to the WebView.
+ * Three cases get intercepted:
+ *
+ * 1. **Gateway-escape rewrites.** Next-style sites served from
+ *    `/bzz/<hash>/` often reference resources via absolute-root paths
+ *    (`<link href="/_next/static/…">`). Those resolve to
+ *    `http://127.0.0.1:1633/_next/…` — outside the bzz namespace — and
+ *    404, leaving the page unstyled. We transparently rewrite such
+ *    requests to live under the current `/bzz/<hash>/` root.
+ *
+ * 2. **Content-path retries.** Subresources already correctly rooted
+ *    at `/bzz/`, `/ipfs/`, or `/ipns/` that hit a transient 404/500
+ *    get retried with short backoff. A cold Bee node sometimes answers
+ *    the top-level manifest before every chunk is in hand, so the
+ *    resource exists but isn't retrievable yet.
+ *
+ * 3. **Media range-request synthesis.** Bee returns the whole body for
+ *    every `Range` request (no 206, no `Accept-Ranges`, empty
+ *    `Content-Type`), which stalls Chromium's media pipeline at
+ *    `HAVE_METADATA`. [fetchMediaWithRangeSupport] buffers the body once
+ *    and synthesises proper Partial Content responses.
+ *
+ * Main-frame requests (and non-GETs) are left to the WebView's own
+ * network stack — the top-level navigation is already gated by
+ * [GatewayProbe], and interception only buys us retries we don't need.
+ * Requests to the node's own JSON API (/health, /status, etc.) also
+ * pass through untouched.
  */
 internal fun rewriteGatewayEscape(
     state: BrowserState,
@@ -362,8 +493,8 @@ internal fun rewriteGatewayEscape(
     val req = request ?: return null
     val url = req.url?.toString() ?: return null
     if (req.method != "GET") return null
+    if (req.isForMainFrame) return null
 
-    val bzzRoot = state.currentBzzRoot ?: return null
     val gatewayPrefix = "${SwarmNode.GATEWAY_URL}/"
     if (!url.startsWith(gatewayPrefix)) return null
 
@@ -374,33 +505,260 @@ internal fun rewriteGatewayEscape(
         .substringBefore('?')
         .substringBefore('#')
     if (firstSegment.isEmpty()) return null
+
+    // Case 2 + 3: request is already on a content path. Handle media
+    // specially (range-aware), and retry on transient 404/500 for other
+    // content subresources. Non-content API endpoints fall through to
+    // Chromium's native fetch.
+    if (firstSegment in GATEWAY_CONTENT_SEGMENTS) {
+        return if (isMediaLikeUrl(url)) {
+            fetchMediaWithRangeSupport(req, url)
+        } else {
+            fetchWithRetry(req, url, url)
+        }
+    }
     if (firstSegment in BEE_API_SEGMENTS) return null
 
+    // Case 1: path escaped the current bzz/ipfs/ipns root. Rewrite it
+    // back under the root and fetch. Requires the current bzz root to
+    // be known — we can't escape-rewrite from a non-content page.
+    val bzzRoot = state.currentBzzRoot ?: return null
     val rewritten = bzzRoot + tail
-    return try {
-        val conn = (URL(rewritten).openConnection() as HttpURLConnection).apply {
+    Log.v(LOG_TAG, "gateway-escape rewrite: $url → $rewritten")
+    return if (isMediaLikeUrl(rewritten)) {
+        fetchMediaWithRangeSupport(req, rewritten)
+    } else {
+        fetchWithRetry(req, rewritten, url)
+    }
+}
+
+// In-process LRU of fully-buffered media bodies keyed by bzz URL, so
+// successive Range requests for the same file don't re-fetch from Bee.
+// Bee returns the whole body for every Range request anyway, so the
+// second Range would otherwise download the file all over again.
+private data class MediaBody(val bytes: ByteArray, val mime: String)
+
+private const val MEDIA_CACHE_MAX_ENTRIES = 4
+private val mediaBodyCache: MutableMap<String, MediaBody> =
+    object : java.util.LinkedHashMap<String, MediaBody>(8, 0.75f, true) {
+        override fun removeEldestEntry(
+            eldest: MutableMap.MutableEntry<String, MediaBody>?,
+        ): Boolean = size > MEDIA_CACHE_MAX_ENTRIES
+    }
+
+private fun loadMediaBody(
+    req: WebResourceRequest,
+    targetUrl: String,
+): MediaBody? {
+    synchronized(mediaBodyCache) {
+        mediaBodyCache[targetUrl]?.let { return it }
+    }
+    val conn = try {
+        (URL(targetUrl).openConnection() as HttpURLConnection).apply {
             requestMethod = "GET"
-            connectTimeout = 15_000
-            readTimeout = 30_000
+            connectTimeout = 5_000
+            readTimeout = 60_000
             instanceFollowRedirects = true
             req.requestHeaders?.forEach { (k, v) ->
                 if (!k.equals("Host", ignoreCase = true) &&
-                    !k.equals("Content-Length", ignoreCase = true)
+                    !k.equals("Content-Length", ignoreCase = true) &&
+                    !k.equals("Accept-Encoding", ignoreCase = true) &&
+                    !k.equals("Range", ignoreCase = true)
                 ) {
                     try { setRequestProperty(k, v) } catch (_: Throwable) {}
                 }
             }
+            setRequestProperty("Accept-Encoding", "identity")
+        }
+    } catch (t: Throwable) {
+        Log.w(LOG_TAG, "media fetch open failed: $targetUrl", t)
+        return null
+    }
+    return try {
+        conn.connect()
+        val status = conn.responseCode
+        if (status !in 200..299) {
+            Log.w(LOG_TAG, "media fetch status $status for $targetUrl")
+            return null
+        }
+        val bytes = conn.inputStream.use { it.readBytes() }
+        val rawCt = conn.contentType
+        val mime = rawCt
+            ?.substringBefore(';')
+            ?.trim()
+            ?.ifBlank { null }
+            ?: mimeTypeFromUrl(targetUrl)
+            ?: "application/octet-stream"
+        val body = MediaBody(bytes, mime)
+        synchronized(mediaBodyCache) { mediaBodyCache[targetUrl] = body }
+        Log.i(LOG_TAG, "media cached: $targetUrl bytes=${bytes.size} mime=$mime")
+        body
+    } catch (t: Throwable) {
+        Log.w(LOG_TAG, "media fetch failed: $targetUrl", t)
+        null
+    }
+}
+
+/**
+ * Regex matching a single byte-range in an HTTP `Range` request header —
+ * `bytes=<first>-<last>`. We only support single-range requests (the
+ * common case for HTML5 media); multipart/byteranges is vanishingly rare
+ * and Chromium never sends it for `<video>`.
+ */
+private val RANGE_REGEX = Regex("""^bytes=(\d+)?-(\d+)?$""")
+
+/**
+ * Serve a media subresource from Bee with synthetic Range support. Bee
+ * itself returns the full body (with empty Content-Type and no
+ * Accept-Ranges) for every request regardless of the `Range` header, so
+ * Chromium's media pipeline stalls at `HAVE_METADATA` when it tries to
+ * seek. We fetch the body once, cache it in-process, and answer each
+ * Range request by slicing the buffer and returning a proper 206 with
+ * Content-Range / Content-Length — exactly what Chromium expects.
+ *
+ * Also injects a real MIME type (inferred from the URL extension) so
+ * the media element can pick a decoder.
+ */
+private fun fetchMediaWithRangeSupport(
+    req: WebResourceRequest,
+    targetUrl: String,
+): WebResourceResponse? {
+    val body = loadMediaBody(req, targetUrl) ?: return null
+    val total = body.bytes.size
+    val rangeHeader = req.requestHeaders?.entries
+        ?.firstOrNull { it.key.equals("Range", ignoreCase = true) }
+        ?.value
+    val match = rangeHeader?.let { RANGE_REGEX.matchEntire(it.trim()) }
+    val baseHeaders = mutableMapOf(
+        "Accept-Ranges" to "bytes",
+        "Access-Control-Allow-Origin" to "*",
+    )
+    return if (match != null) {
+        val firstStr = match.groupValues[1]
+        val lastStr = match.groupValues[2]
+        val (start, end) = when {
+            firstStr.isEmpty() && lastStr.isEmpty() -> 0 to (total - 1)
+            firstStr.isEmpty() -> {
+                val suffixLen = lastStr.toLong().coerceAtMost(total.toLong()).toInt()
+                (total - suffixLen) to (total - 1)
+            }
+            lastStr.isEmpty() -> firstStr.toLong().toInt() to (total - 1)
+            else -> firstStr.toLong().toInt() to lastStr.toLong().toInt().coerceAtMost(total - 1)
+        }
+        if (start < 0 || start >= total || end < start) {
+            Log.w(LOG_TAG, "media range unsatisfiable: $rangeHeader total=$total")
+            return WebResourceResponse(
+                body.mime, null, 416, "Range Not Satisfiable",
+                baseHeaders + ("Content-Range" to "bytes */$total"),
+                ByteArrayInputStream(ByteArray(0)),
+            )
+        }
+        val length = end - start + 1
+        val slice = body.bytes.copyOfRange(start, end + 1)
+        val headers = baseHeaders + mapOf(
+            "Content-Range" to "bytes $start-$end/$total",
+            "Content-Length" to length.toString(),
+        )
+        Log.v(
+            LOG_TAG,
+            "media 206: $targetUrl range=$start-$end/$total mime=${body.mime}",
+        )
+        WebResourceResponse(
+            body.mime, null, 206, "Partial Content",
+            headers, ByteArrayInputStream(slice),
+        )
+    } else {
+        val headers = baseHeaders + ("Content-Length" to total.toString())
+        Log.v(LOG_TAG, "media 200 full: $targetUrl bytes=$total mime=${body.mime}")
+        WebResourceResponse(
+            body.mime, null, 200, "OK",
+            headers, ByteArrayInputStream(body.bytes),
+        )
+    }
+}
+
+private fun fetchWithRetry(
+    req: WebResourceRequest,
+    targetUrl: String,
+    originalUrl: String,
+): WebResourceResponse? {
+    var lastResponse: WebResourceResponse? = null
+    for ((index, delayMs) in ESCAPE_RETRY_DELAYS_MS.withIndex()) {
+        if (delayMs > 0) {
+            try {
+                Thread.sleep(delayMs)
+            } catch (_: InterruptedException) {
+                Thread.currentThread().interrupt()
+                return lastResponse
+            }
+        }
+
+        val (response, transient) = fetchOnce(req, targetUrl) ?: (null to true)
+        if (response != null && !transient) {
+            return response
+        }
+        lastResponse = response
+        if (response != null) {
+            Log.i(
+                LOG_TAG,
+                "gateway-escape transient ${response.statusCode} for $originalUrl → $targetUrl " +
+                    "(attempt ${index + 1}/${ESCAPE_RETRY_DELAYS_MS.size})",
+            )
+        }
+    }
+    return lastResponse
+}
+
+/**
+ * Single network attempt against [targetUrl]. Returns the response + a
+ * "transient" flag indicating whether the caller should retry. `null`
+ * means the request failed with a non-retriable exception (bail out so
+ * the WebView can show its own network error).
+ */
+private fun fetchOnce(
+    req: WebResourceRequest,
+    targetUrl: String,
+): Pair<WebResourceResponse?, Boolean>? {
+    return try {
+        val conn = (URL(targetUrl).openConnection() as HttpURLConnection).apply {
+            requestMethod = "GET"
+            connectTimeout = 5_000
+            readTimeout = 10_000
+            instanceFollowRedirects = true
+            req.requestHeaders?.forEach { (k, v) ->
+                if (!k.equals("Host", ignoreCase = true) &&
+                    !k.equals("Content-Length", ignoreCase = true) &&
+                    !k.equals("Accept-Encoding", ignoreCase = true)
+                ) {
+                    try { setRequestProperty(k, v) } catch (_: Throwable) {}
+                }
+            }
+            // Force `identity` so HttpURLConnection doesn't silently
+            // decompress the body out from under us and mismatch the
+            // upstream Content-Length we forward to the WebView.
+            setRequestProperty("Accept-Encoding", "identity")
         }
         conn.connect()
         val status = conn.responseCode
         val reason = conn.responseMessage?.ifBlank { null } ?: "OK"
-        val rawCt = conn.contentType ?: "application/octet-stream"
-        val mime = rawCt.substringBefore(';').trim().ifBlank { "application/octet-stream" }
+        val rawCt = conn.contentType
+        val mime = rawCt
+            ?.substringBefore(';')
+            ?.trim()
+            ?.ifBlank { null }
+            // Bee occasionally serves bzz subresources with an empty or
+            // generic Content-Type. Fall back to the OS MIME registry
+            // (driven by the URL's file extension) so CSS / fonts / etc.
+            // don't get handed `application/octet-stream` and get
+            // refused by the renderer.
+            ?: mimeTypeFromUrl(targetUrl)
+            ?: "application/octet-stream"
+        Log.v(LOG_TAG, "fetch: $targetUrl status=$status mime=$mime rawCt=$rawCt")
         val charset = rawCt
-            .substringAfter("charset=", "")
-            .trim()
-            .trim('"')
-            .ifBlank { null }
+            ?.substringAfter("charset=", "")
+            ?.trim()
+            ?.trim('"')
+            ?.ifBlank { null }
 
         val headers = conn.headerFields
             .asSequence()
@@ -408,21 +766,58 @@ internal fun rewriteGatewayEscape(
                 if (k == null || v == null) null
                 else k to v.joinToString(",")
             }
-            .filter { (k, _) -> k.lowercase() !in HEADERS_TO_STRIP }
+            .filter { (k, _) ->
+                val lk = k.lowercase()
+                lk !in HEADERS_TO_STRIP && lk != "content-length"
+            }
             .toMap()
 
-        val body = if (status in 200..399) {
-            conn.inputStream
-        } else {
-            conn.errorStream ?: ByteArrayInputStream(ByteArray(0))
+        val body = when {
+            status in 200..399 -> conn.inputStream
+            else -> conn.errorStream ?: ByteArrayInputStream(ByteArray(0))
         }
-
-        WebResourceResponse(mime, charset, status, reason, headers, body)
+        val response = WebResourceResponse(mime, charset, status, reason, headers, body)
+        val transient = status == 404 || status == 500
+        response to transient
+    } catch (t: IOException) {
+        Log.w(LOG_TAG, "gateway fetch failed: $targetUrl", t)
+        null
     } catch (t: Throwable) {
-        Log.w(LOG_TAG, "gateway-escape rewrite failed: $url → $rewritten", t)
+        Log.w(LOG_TAG, "gateway fetch unexpected failure: $targetUrl", t)
         null
     }
 }
+
+internal fun isLocalGatewayUrl(url: String): Boolean =
+    url.startsWith("${SwarmNode.GATEWAY_URL}/")
+
+/**
+ * Guess the response MIME type from a URL's file extension, using the
+ * system's [MimeTypeMap]. Used as a fallback when the upstream server
+ * returns an empty or missing Content-Type — notably, the bee-lite
+ * gateway, which hands back `Content-Type: ` for bzz subresources and
+ * lets the browser sniff. HTML5 `<video>` / `<audio>` won't play
+ * `application/octet-stream`, so getting a real `video/mp4` out of the
+ * extension is what makes background videos on Swarm sites actually
+ * render.
+ */
+private fun mimeTypeFromUrl(url: String): String? {
+    val ext = fileExtension(url) ?: return null
+    return MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext)
+}
+
+private fun fileExtension(url: String): String? {
+    val path = url.substringBefore('?').substringBefore('#')
+    return path.substringAfterLast('.', "").lowercase().ifBlank { null }
+}
+
+private val MEDIA_EXTENSIONS: Set<String> = setOf(
+    "mp4", "webm", "ogv", "ogg", "m4v", "mov", "mkv",
+    "mp3", "m4a", "wav", "flac", "aac", "opus",
+)
+
+private fun isMediaLikeUrl(url: String): Boolean =
+    fileExtension(url) in MEDIA_EXTENSIONS
 
 /**
  * Map a "real" URL (what the WebView actually loaded — `http://127.0.0.1:…`

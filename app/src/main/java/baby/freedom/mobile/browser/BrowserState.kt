@@ -5,6 +5,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.graphics.ImageBitmap
+import kotlinx.coroutines.Job
 
 /**
  * Observable state for a single browser tab.
@@ -81,6 +82,31 @@ class BrowserState(val id: Long) {
         internal set
 
     /**
+     * In-flight [GatewayProbe] job for this tab (if any). Set by
+     * [BrowserScreen] when a bzz / ens-to-bzz navigation enters the
+     * "peers warming up" gate, and cleared either by the probe finishing
+     * or by [cancelPendingProbe].
+     *
+     * Held on the per-tab state (rather than, say, a
+     * `BrowserScreen`-level `remember`) so that switching tabs while a
+     * probe is running doesn't leak the probe into the new tab, and a
+     * fresh submit on the same tab cancels the old one cleanly.
+     */
+    @Volatile
+    var pendingProbeJob: Job? = null
+
+    /**
+     * Cancel any in-flight [pendingProbeJob]. No-op if there isn't one.
+     * Called from [loadUrl] so a fresh navigation supersedes whatever
+     * probe the tab was previously waiting on.
+     */
+    fun cancelPendingProbe() {
+        val job = pendingProbeJob
+        pendingProbeJob = null
+        job?.cancel()
+    }
+
+    /**
      * Schedule a navigation. [url] is the *canonical* URL (may be `bzz://…`);
      * the pending URL handed to the WebView is the rewritten form that it
      * can actually fetch (`http://127.0.0.1:1633/bzz/…` for Swarm content).
@@ -93,8 +119,26 @@ class BrowserState(val id: Long) {
      * [clearEnsOverride] to reset.
      */
     fun loadUrl(url: String, ensName: String? = null) {
+        cancelPendingProbe()
         val loadable = SwarmResolver.toLoadable(url)
         pendingUrl = loadable
+        // Seed `currentBzzRoot` right here so that subresource escape
+        // rewrites (see `BrowserWebView.rewriteGatewayEscape`) work for
+        // the very earliest fetches the page kicks off. Chromium's
+        // HTML preload scanner races ahead of `onPageStarted` for
+        // `<link rel=preload>` and other early subresources, and if
+        // they hit `shouldInterceptRequest` while the previous page's
+        // root (or `null`) is still in place, we fail to rewrite them
+        // and the page renders unstyled. Clearing on a non-bzz load
+        // is equally important so a subsequent https:// page doesn't
+        // still see the previous site's root.
+        //
+        // `extractRoot` only matches when there's a trailing slash, but
+        // `SwarmResolver.toLoadable("bzz://<hash>")` yields `/bzz/<hash>`
+        // without one. Fall back to `extractBase` + "/" in that case so
+        // bare-root loads still seed the right root for subresources.
+        currentBzzRoot = GatewayUrls.extractRoot(loadable)
+            ?: GatewayUrls.extractBase(loadable)?.let { it.prefix + "/" }
         if (ensName != null) {
             val base = GatewayUrls.extractBase(loadable)
             override = if (base != null) {
@@ -128,6 +172,7 @@ class BrowserState(val id: Long) {
 
     /** Tokens the WebView client should not treat as "new" navigations. */
     fun reset() {
+        cancelPendingProbe()
         url = ""
         title = ""
         progress = -1
