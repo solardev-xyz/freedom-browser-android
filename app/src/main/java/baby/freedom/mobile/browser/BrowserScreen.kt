@@ -3,6 +3,8 @@ package baby.freedom.mobile.browser
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.layout.Box
@@ -35,7 +37,6 @@ import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.StarBorder
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -53,7 +54,6 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -68,6 +68,8 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalContext
@@ -190,10 +192,6 @@ fun BrowserScreen(
     // current URL) must NOT flash a dropdown — the user just wants to
     // replace the URL with a fresh one.
     var addressBarEdited by remember { mutableStateOf(false) }
-    // Bumped when we want the address bar to grab focus (launch, Home).
-    // TopBar reacts by calling FocusRequester.requestFocus() whenever
-    // this value changes.
-    var focusAddressTrigger by remember { mutableIntStateOf(0) }
     val snackbarHostState = remember { SnackbarHostState() }
 
     val state = tabs.active
@@ -404,14 +402,16 @@ fun BrowserScreen(
     }
 
     // Kick off the homepage on the initial tab as soon as we're composed.
-    // The home page lives in local assets, so it loads without waiting
-    // for the embedded node.
+    // The home page is now a native Compose overlay (see [HomeScreen]),
+    // so this just primes the tab state without actually loading
+    // anything over the network. We deliberately don't auto-focus the
+    // address bar here — the home surface should be the first thing
+    // the user sees, not an already-open keyboard.
     LaunchedEffect(Unit) {
         if (!didInitialLoad) {
             didInitialLoad = true
             submit(tabs.active, tabs.homepageUrl)
         }
-        focusAddressTrigger++
     }
 
     Box(modifier = Modifier.fillMaxSize()) {
@@ -453,9 +453,7 @@ fun BrowserScreen(
                 onForward = { state.loadUrl("javascript:history.forward();void(0);") },
                 onHome = {
                     submit(state, tabs.homepageUrl)
-                    focusAddressTrigger++
                 },
-                focusAddressTrigger = focusAddressTrigger,
                 onToggleBookmark = {
                     val url = state.url
                     if (url.isBlank()) return@TopBar
@@ -474,7 +472,6 @@ fun BrowserScreen(
                 onNewTab = {
                     val fresh = tabs.newTab()
                     submit(fresh, tabs.homepageUrl)
-                    focusAddressTrigger++
                 },
             )
 
@@ -500,7 +497,28 @@ fun BrowserScreen(
             // panel on top of it rather than unmounting the WebView — that
             // keeps the underlying page alive (scroll position, JS timers,
             // media) across focus changes.
-            Box(modifier = Modifier.fillMaxSize()) {
+            //
+            // The pointer-input modifier gives us "tap anywhere below the
+            // address bar to dismiss the keyboard" behaviour. We intercept
+            // presses on the Initial pass so we see them before the
+            // WebView/HomeScreen children, but we never consume — the
+            // child still receives the tap normally. Clearing focus is a
+            // no-op when nothing is focused, so the common case (address
+            // bar idle) pays only the cost of the gesture loop.
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .pointerInput(Unit) {
+                        awaitEachGesture {
+                            awaitFirstDown(
+                                requireUnconsumed = false,
+                                pass = PointerEventPass.Initial,
+                            )
+                            focusManager.clearFocus()
+                            keyboard?.hide()
+                        }
+                    },
+            ) {
                 BrowserWebViewHost(
                     tabs = tabs,
                     modifier = Modifier.fillMaxSize(),
@@ -580,7 +598,6 @@ fun BrowserScreen(
             onNewTab = {
                 val fresh = tabs.newTab()
                 submit(fresh, tabs.homepageUrl)
-                focusAddressTrigger++
             },
         )
     }
@@ -623,7 +640,6 @@ private fun TopBar(
     onSubmit: (String) -> Unit,
     onForward: () -> Unit,
     onHome: () -> Unit,
-    focusAddressTrigger: Int,
     onToggleBookmark: () -> Unit,
     onOpenSettings: () -> Unit,
     onOpenNode: () -> Unit,
@@ -662,15 +678,6 @@ private fun TopBar(
                 text = state.addressBarText,
                 selection = TextRange.Zero,
             )
-        }
-    }
-
-    // Grab focus whenever the host bumps the trigger (launch / Home).
-    // Skip the very first composition — the initial `0` is just the
-    // starting value, not a user-initiated request.
-    LaunchedEffect(focusAddressTrigger) {
-        if (focusAddressTrigger > 0) {
-            runCatching { focusRequester.requestFocus() }
         }
     }
 
@@ -787,11 +794,13 @@ private fun TopBar(
                             }
                             innerTextField()
                         }
-                        // Trailing action — sized to the pill, never pushes it taller.
-                        // State machine:
-                        //   user is actively editing (focused + typed something) → Clear (×)
-                        //   loading                                              → spinner
-                        //   otherwise                                            → nothing
+                        // Trailing Clear (×) — sized to the pill, never pushes it
+                        // taller. Shown only while the user is actively editing
+                        // (focused + typed something). Loading state is
+                        // communicated by the LinearProgressIndicator below
+                        // the top bar, so the pill doesn't need its own
+                        // spinner.
+                        //
                         // The `addressBarEdited` guard matters once the user
                         // submits: submit() resets that flag (to dismiss the
                         // suggestions panel) but intentionally leaves focus
@@ -801,29 +810,21 @@ private fun TopBar(
                             modifier = Modifier.size(32.dp),
                             contentAlignment = Alignment.Center,
                         ) {
-                            when {
-                                addressFocused && addressBarEdited && fieldValue.text.isNotEmpty() -> {
-                                    IconButton(
-                                        onClick = {
-                                            fieldValue = TextFieldValue("")
-                                            state.addressBarText = ""
-                                            // × is a "start over" gesture — drop the
-                                            // suggestions panel and wait for the next
-                                            // keystroke before showing it again.
-                                            onAddressEditedChanged(false)
-                                        },
-                                        modifier = Modifier.size(32.dp),
-                                    ) {
-                                        Icon(
-                                            Icons.Filled.Clear,
-                                            contentDescription = "Clear",
-                                            modifier = Modifier.size(18.dp),
-                                        )
-                                    }
-                                }
-                                resolvingEns || state.progress in 0..99 -> {
-                                    CircularProgressIndicator(
-                                        strokeWidth = 2.dp,
+                            if (addressFocused && addressBarEdited && fieldValue.text.isNotEmpty()) {
+                                IconButton(
+                                    onClick = {
+                                        fieldValue = TextFieldValue("")
+                                        state.addressBarText = ""
+                                        // × is a "start over" gesture — drop the
+                                        // suggestions panel and wait for the next
+                                        // keystroke before showing it again.
+                                        onAddressEditedChanged(false)
+                                    },
+                                    modifier = Modifier.size(32.dp),
+                                ) {
+                                    Icon(
+                                        Icons.Filled.Clear,
+                                        contentDescription = "Clear",
                                         modifier = Modifier.size(18.dp),
                                     )
                                 }

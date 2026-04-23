@@ -32,6 +32,12 @@ class BrowsingRepository private constructor(
         // clean instead of permanently showing an "about:blank" tile
         // at the top.
         scope.launch { db.history().deleteByUrl("about:blank") }
+        // Same idea for rows whose *title* is `about:blank`: those come
+        // from aborted loads recorded before `currentLoadCommitted`
+        // gated history writes. The title only shows up as literal
+        // "about:blank" when the page never painted, so this is a
+        // safe heuristic for "never finished loading".
+        scope.launch { db.history().deleteByTitle("about:blank") }
     }
 
     val history: Flow<List<HistoryEntry>> = db.history().recent()

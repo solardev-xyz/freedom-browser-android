@@ -270,7 +270,16 @@ fun BrowserWebViewHost(
                 snapshotFlow { tab.navCounter to tab.pendingUrl }
                     .collectLatest { (counter, pending) ->
                         if (counter > 0 && pending.isNotEmpty()) {
-                            webViews[tab.id]?.loadUrl(pending)
+                            val wv = webViews[tab.id] ?: return@collectLatest
+                            // Abort any in-flight load first. Without this,
+                            // hitting Home (or otherwise navigating) mid-
+                            // load lets Chromium keep firing late
+                            // onProgressChanged callbacks for the aborted
+                            // page, which flips the top progress bar back
+                            // on after navigateHome() has already cleared
+                            // it to -1.
+                            wv.stopLoading()
+                            wv.loadUrl(pending)
                         }
                     }
             }
@@ -347,6 +356,16 @@ private fun buildRefreshableWebView(
     // belongs to.
     var lastLoadedDisplayUrl: String? = null
 
+    // Flips to `true` once the current navigation has actually started
+    // painting (see `onPageCommitVisible`) and flips back to `false` in
+    // `onPageStarted`. Used by `onPageFinished` to suppress history
+    // recording for aborted loads — e.g. the user tapped Home while
+    // `spiegel.de` was still fetching; Chromium fires a synthetic
+    // `onPageFinished` for the cancelled page, but since it never
+    // committed (never reached first paint) we don't want a stub
+    // history entry with no real title.
+    var currentLoadCommitted: Boolean = false
+
     val webView = WebView(context).apply {
         layoutParams = ViewGroup.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
@@ -399,8 +418,10 @@ private fun buildRefreshableWebView(
                     state.currentBzzRoot = null
                     state.progress = -1
                     lastLoadedDisplayUrl = null
+                    currentLoadCommitted = false
                     return
                 }
+                currentLoadCommitted = false
                 state.currentBzzRoot = extractBzzRoot(url)
                 val display = url?.let { displayFor(it, state) }
                 if (display != null) {
@@ -416,6 +437,11 @@ private fun buildRefreshableWebView(
                 state.canGoBack = view?.canGoBack() == true
                 state.canGoForward = view?.canGoForward() == true
                 state.progress = 0
+            }
+
+            override fun onPageCommitVisible(view: WebView?, url: String?) {
+                if (url == ABOUT_BLANK) return
+                currentLoadCommitted = true
             }
 
             override fun onPageFinished(view: WebView?, url: String?) {
@@ -458,7 +484,10 @@ private fun buildRefreshableWebView(
                 // clutter the history either. The error page is also
                 // deliberately kept out of history — it's a transient
                 // state, not a destination the user meant to visit.
-                if (display.isNotBlank() && !ErrorPage.isErrorPage(url)) {
+                if (display.isNotBlank() &&
+                    !ErrorPage.isErrorPage(url) &&
+                    currentLoadCommitted
+                ) {
                     repo.recordVisit(display, state.title)
                 }
 
@@ -552,6 +581,16 @@ private fun buildRefreshableWebView(
 
         webChromeClient = object : WebChromeClient() {
             override fun onProgressChanged(view: WebView?, newProgress: Int) {
+                // Home-sentinel loads never show a progress bar — the
+                // overlay is the UI, not a loading page. Also guards
+                // against late callbacks from an aborted real-page
+                // load arriving after the user has already tapped
+                // Home (see the stopLoading() above navCounter
+                // collection).
+                if (view?.url == ABOUT_BLANK) {
+                    state.progress = -1
+                    return
+                }
                 state.progress = if (newProgress in 1..99) newProgress else -1
             }
 
