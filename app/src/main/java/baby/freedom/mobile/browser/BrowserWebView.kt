@@ -283,7 +283,7 @@ private fun buildRefreshableWebView(
                 state.currentBzzRoot = extractBzzRoot(url)
                 val display = displayFor(url.orEmpty(), state)
                 state.url = display
-                state.title = view?.title.orEmpty()
+                state.title = sanitizeTitle(view?.title, url)
                 state.canGoBack = view?.canGoBack() == true
                 state.canGoForward = view?.canGoForward() == true
                 state.progress = -1
@@ -329,7 +329,7 @@ private fun buildRefreshableWebView(
             }
 
             override fun onReceivedTitle(view: WebView?, title: String?) {
-                state.title = title.orEmpty()
+                state.title = sanitizeTitle(title, view?.url)
             }
         }
     }
@@ -431,3 +431,26 @@ internal fun rewriteGatewayEscape(
  */
 internal fun displayFor(actualUrl: String, state: BrowserState): String =
     DisplayUrl.forActualUrl(actualUrl, state.override)
+
+/**
+ * Android's [WebView] auto-generates a title from the page URL when the
+ * document has no `<title>` element. For gateway-hosted content that's
+ * something like `127.0.0.1:1633/bzz/<hash>/…`, which is useless in the
+ * tab switcher / history list (and worse, leaks the raw gateway URL
+ * after we went to the trouble of folding it back to `bzz://` / `ens://`
+ * in [displayFor]).
+ *
+ * Treat any title that looks like the loaded URL (with or without the
+ * scheme) as "no title" by returning an empty string, so the UI can
+ * fall back to the friendly display URL.
+ */
+internal fun sanitizeTitle(rawTitle: String?, actualUrl: String?): String {
+    val title = rawTitle.orEmpty()
+    if (title.isEmpty()) return ""
+    val url = actualUrl.orEmpty()
+    if (url.isEmpty()) return title
+    val stripped = url.substringAfter("://", url)
+    return if (title == url || title == stripped ||
+        stripped.startsWith(title) || title.startsWith(stripped)
+    ) "" else title
+}
