@@ -21,6 +21,6 @@ object UrlParser {
         if (bareHostRegex.matches(trimmed) || ipPortRegex.matches(trimmed)) {
             return "https://$trimmed"
         }
-        return "https://duckduckgo.com/?q=" + Uri.encode(trimmed)
+        return "https://search.brave.com/search?q=" + Uri.encode(trimmed)
     }
 }
