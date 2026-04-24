@@ -172,11 +172,6 @@
           titleEl.textContent = 'Unsupported content format';
           descriptionEl.innerHTML =
             'This ENS name resolves to a content format Freedom Browser cannot load yet on mobile.';
-        } else if (error === 'ens_protocol_not_supported') {
-          titleEl.textContent = 'Protocol not supported yet';
-          descriptionEl.innerHTML =
-            'This ENS name points at an IPFS / IPNS address. Only Swarm (<code>bzz://</code>) ' +
-            'content is supported on mobile today.';
         } else if (error === 'ens_lookup_failed') {
           titleEl.textContent = 'ENS lookup failed';
           descriptionEl.innerHTML =

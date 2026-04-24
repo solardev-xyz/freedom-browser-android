@@ -30,7 +30,6 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.graphics.createBitmap
 import androidx.swiperefreshlayout.widget.SwipeRefreshLayout
 import baby.freedom.mobile.data.BrowsingRepository
-import baby.freedom.swarm.SwarmNode
 import kotlinx.coroutines.flow.collectLatest
 import java.io.ByteArrayInputStream
 import java.io.IOException
@@ -526,7 +525,11 @@ private fun buildRefreshableWebView(
                 // Falls back to a direct gateway load if no submit hook
                 // is wired (defensive — the hook is installed before the
                 // first tab ever renders).
-                if (target.startsWith("bzz://") || target.startsWith("ens://")) {
+                if (target.startsWith("bzz://") ||
+                    target.startsWith("ipfs://") ||
+                    target.startsWith("ipns://") ||
+                    target.startsWith("ens://")
+                ) {
                     onSubmitUrl(state, target)
                     return true
                 }
@@ -551,12 +554,12 @@ private fun buildRefreshableWebView(
                 if (!isLocalGatewayUrl(failed)) return
 
                 val display = displayFor(failed, state).ifBlank { failed }
-                val retryUri = SwarmResolver.toDisplay(failed)
+                val retryUri = Gateways.toDisplay(failed)
                 val code = error?.errorCode?.let { "ERR_$it" } ?: "ERR_FAILED"
                 val page = ErrorPage.url(
                     errorCode = code,
                     displayUrl = display,
-                    protocol = "swarm",
+                    protocol = protocolForErrorPage(failed),
                     retryUrl = retryUri,
                 )
                 state.clearEnsOverride()
@@ -579,11 +582,11 @@ private fun buildRefreshableWebView(
                 // got one here, the gateway answered but the content
                 // genuinely isn't available (misspelled hash, etc).
                 val display = displayFor(failed, state).ifBlank { failed }
-                val retryUri = SwarmResolver.toDisplay(failed)
+                val retryUri = Gateways.toDisplay(failed)
                 val page = ErrorPage.url(
                     errorCode = "swarm_content_not_found",
                     displayUrl = display,
-                    protocol = "swarm",
+                    protocol = protocolForErrorPage(failed),
                     retryUrl = retryUri,
                 )
                 Log.i(LOG_TAG, "main-frame HTTP $status for $failed → error page")
@@ -700,8 +703,17 @@ internal fun rewriteGatewayEscape(
     if (req.method != "GET") return null
     if (req.isForMainFrame) return null
 
-    val gatewayPrefix = "${SwarmNode.GATEWAY_URL}/"
-    if (!url.startsWith(gatewayPrefix)) return null
+    // Match against whichever local gateway origin (Swarm or IPFS) the
+    // request hit. Subresources under the IPFS gateway share the exact
+    // same escape semantics as Swarm — a Next.js site served from
+    // `/ipfs/<cid>/` references `/_next/static/…`, which would otherwise
+    // fall outside every gateway namespace.
+    val gatewayPrefix = when {
+        url.startsWith("${Gateways.SWARM_BASE}/") -> "${Gateways.SWARM_BASE}/"
+        Gateways.ipfsBase.isNotEmpty() &&
+            url.startsWith("${Gateways.ipfsBase}/") -> "${Gateways.ipfsBase}/"
+        else -> return null
+    }
 
     val tail = url.substring(gatewayPrefix.length)
     if (tail.isEmpty()) return null
@@ -1018,8 +1030,23 @@ private fun fetchOnce(
     }
 }
 
-internal fun isLocalGatewayUrl(url: String): Boolean =
-    url.startsWith("${SwarmNode.GATEWAY_URL}/")
+internal fun isLocalGatewayUrl(url: String): Boolean = Gateways.isLocalGateway(url)
+
+/**
+ * Pick the [ErrorPage] `protocol` hint based on which gateway origin a
+ * failed URL belongs to. The error-page HTML can auto-detect from the
+ * URL too, but handing it an explicit value avoids a race where the
+ * detector sees the rewritten loadable URL before the WebView has
+ * flipped back to the canonical scheme.
+ */
+private fun protocolForErrorPage(failedUrl: String): String {
+    if (failedUrl.startsWith("${Gateways.SWARM_BASE}/")) return "swarm"
+    val ipfsBase = Gateways.ipfsBase
+    if (ipfsBase.isNotEmpty() && failedUrl.startsWith("$ipfsBase/")) {
+        return if (failedUrl.startsWith("$ipfsBase/ipns/")) "ipns" else "ipfs"
+    }
+    return "swarm"
+}
 
 /**
  * Guess the response MIME type from a URL's file extension, using the

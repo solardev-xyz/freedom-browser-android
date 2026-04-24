@@ -199,11 +199,18 @@ class EnsResolver(
             )
         }
 
-        // IPFS (dag-pb): 0xe3 01 70 + multihash
-        val ipfsPrefix = byteArrayOf(0xe3.toByte(), 0x01, 0x70)
-        if (bytes.size > ipfsPrefix.size && bytes.startsWith(ipfsPrefix)) {
-            val mh = bytes.copyOfRange(ipfsPrefix.size, bytes.size)
-            val cid = Base58.encode(mh)
+        // IPFS: 0xe3 0x01 (varint for ipfs-ns multicodec 0xe3) + CID.
+        // The CID that follows is either:
+        //   • CIDv0: raw multihash, always dag-pb + sha2-256. Starts with
+        //     0x12 0x20 (sha2-256, 32 bytes). Rendered as Base58BTC
+        //     ("Qm…").
+        //   • CIDv1: <0x01 version><codec><multihash>. Rendered as
+        //     multibase Base32 with a 'b' prefix ("bafy…"). This is what
+        //     modern ENS names (vitalik.eth and friends) actually use.
+        val ipfsNs = byteArrayOf(0xe3.toByte(), 0x01)
+        if (bytes.size > ipfsNs.size && bytes.startsWith(ipfsNs)) {
+            val cidBytes = bytes.copyOfRange(ipfsNs.size, bytes.size)
+            val cid = encodeCid(cidBytes) ?: return null
             return EnsResult.Ok(
                 name = name,
                 protocol = "ipfs",
@@ -212,11 +219,13 @@ class EnsResolver(
             )
         }
 
-        // IPNS: 0xe5 01 72 + multihash
-        val ipnsPrefix = byteArrayOf(0xe5.toByte(), 0x01, 0x72)
-        if (bytes.size > ipnsPrefix.size && bytes.startsWith(ipnsPrefix)) {
-            val mh = bytes.copyOfRange(ipnsPrefix.size, bytes.size)
-            val cid = Base58.encode(mh)
+        // IPNS: 0xe5 0x01 + CID. Same CIDv0 / CIDv1 split as above. For
+        // CIDv0-style IPNS the CID is a raw libp2p-key multihash; for
+        // CIDv1 the codec is typically 0x72 (libp2p-key).
+        val ipnsNs = byteArrayOf(0xe5.toByte(), 0x01)
+        if (bytes.size > ipnsNs.size && bytes.startsWith(ipnsNs)) {
+            val cidBytes = bytes.copyOfRange(ipnsNs.size, bytes.size)
+            val cid = encodeCid(cidBytes) ?: return null
             return EnsResult.Ok(
                 name = name,
                 protocol = "ipns",
@@ -225,6 +234,29 @@ class EnsResolver(
             )
         }
 
+        return null
+    }
+
+    /**
+     * Encode raw CID bytes (everything after the EIP-1577 protoCode
+     * varint) to the string form Kubo's gateway accepts. Returns `null`
+     * if the layout isn't recognised as either CIDv0 or CIDv1.
+     */
+    private fun encodeCid(cid: ByteArray): String? {
+        if (cid.isEmpty()) return null
+        // CIDv0: first byte is the multihash algorithm code (e.g. 0x12
+        // for sha2-256). Only sha2-256 + 32 bytes is defined as CIDv0,
+        // but in practice we pass the whole multihash through unchanged.
+        if (cid[0] == 0x12.toByte() && cid.size >= 2) {
+            val mhLen = cid[1].toInt() and 0xff
+            if (cid.size == 2 + mhLen) return Base58.encode(cid)
+        }
+        // CIDv1: starts with 0x01 <codec> <multihash>. The whole thing
+        // — version + codec + multihash — is what gets Base32-encoded
+        // with the 'b' multibase prefix.
+        if (cid[0] == 0x01.toByte() && cid.size >= 3) {
+            return "b" + Base32.encodeLower(cid)
+        }
         return null
     }
 
@@ -465,5 +497,35 @@ internal object Base58 {
             remainder = num % divisor
         }
         return remainder
+    }
+}
+
+/**
+ * RFC 4648 Base32 using the lowercase multibase-'b' alphabet and no
+ * padding. Used to render CIDv1 bytes to their canonical `bafy…`
+ * string form (see [multibase](https://github.com/multiformats/multibase)).
+ */
+internal object Base32 {
+    private const val ALPHABET = "abcdefghijklmnopqrstuvwxyz234567"
+
+    fun encodeLower(input: ByteArray): String {
+        if (input.isEmpty()) return ""
+        val outLen = (input.size * 8 + 4) / 5
+        val out = CharArray(outLen)
+        var bits = 0
+        var bitCount = 0
+        var idx = 0
+        for (b in input) {
+            bits = (bits shl 8) or (b.toInt() and 0xff)
+            bitCount += 8
+            while (bitCount >= 5) {
+                bitCount -= 5
+                out[idx++] = ALPHABET[(bits ushr bitCount) and 0x1f]
+            }
+        }
+        if (bitCount > 0) {
+            out[idx++] = ALPHABET[(bits shl (5 - bitCount)) and 0x1f]
+        }
+        return String(out, 0, idx)
     }
 }

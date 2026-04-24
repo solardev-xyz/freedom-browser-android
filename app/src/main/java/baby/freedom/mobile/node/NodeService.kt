@@ -12,6 +12,9 @@ import android.os.IBinder
 import android.os.RemoteCallbackList
 import android.util.Log
 import baby.freedom.mobile.R
+import baby.freedom.mobile.data.NodeSettings
+import baby.freedom.swarm.IpfsInfo
+import baby.freedom.swarm.IpfsNode
 import baby.freedom.swarm.NodeInfo
 import baby.freedom.swarm.NodeStatus
 import baby.freedom.swarm.SwarmNode
@@ -20,27 +23,33 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
-import kotlinx.coroutines.flow.onEach
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.launchIn
+import kotlinx.coroutines.flow.onEach
+import kotlinx.coroutines.launch
 import kotlin.system.exitProcess
 
 /**
- * Holds the embedded Swarm node for the lifetime of its own process
- * (`:node`, see AndroidManifest). The service is started + bound while
- * the user wants the node running; when the user flips the toggle off
- * the UI calls [stopService] + [unbindService], Android destroys this
- * Service, and [onDestroy] kills the process outright so that
- * bee-lite's LevelDB state-store file lock is actually released —
- * something `MobileNode.shutdown()` alone does not do.
+ * Holds the embedded Swarm + IPFS nodes for the lifetime of the `:node`
+ * process. The service is started + bound while the user wants the
+ * node(s) running; when the user flips the Swarm toggle off the UI
+ * calls [stopService] + [unbindService], Android destroys this Service,
+ * and [onDestroy] kills the process outright so that bee-lite's
+ * LevelDB state-store file lock is actually released — something
+ * `MobileNode.shutdown()` alone does not do. Killing the process also
+ * tears down the IPFS node, which is the behaviour the user's global
+ * "Run node" toggle implies anyway.
  */
 class NodeService : Service() {
 
     private lateinit var swarmNode: SwarmNode
+    private var ipfsNode: IpfsNode? = null
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
-    private var observer: Job? = null
+    private var swarmObserver: Job? = null
+    private var ipfsObserver: Job? = null
 
     /**
-     * Bound UI clients that want NodeInfo updates. [RemoteCallbackList]
+     * Bound UI clients that want state updates. [RemoteCallbackList]
      * keeps this Binder-death-safe so we don't leak callbacks when the
      * UI process is restarted.
      */
@@ -49,15 +58,22 @@ class NodeService : Service() {
     private val binder = object : INodeService.Stub() {
         override fun getState(): NodeInfo = swarmNode.state.value
 
+        override fun getIpfsState(): IpfsInfo = ipfsNode?.state?.value ?: IpfsInfo()
+
         override fun registerCallback(cb: INodeCallback?) {
             cb ?: return
             callbacks.register(cb)
             runCatching { cb.onStateChanged(swarmNode.state.value) }
+            runCatching { cb.onIpfsStateChanged(ipfsNode?.state?.value ?: IpfsInfo()) }
         }
 
         override fun unregisterCallback(cb: INodeCallback?) {
             cb ?: return
             callbacks.unregister(cb)
+        }
+
+        override fun ensureIpfsStarted() {
+            scope.launch { maybeStartIpfs() }
         }
     }
 
@@ -82,23 +98,81 @@ class NodeService : Service() {
             foregroundTypeCompat(),
         )
 
-        observer = swarmNode.state
+        swarmObserver = swarmNode.state
             .onEach { info ->
                 updateNotification(info)
                 broadcastState(info)
-                Log.i(TAG, "node → ${info.status}  peers=${info.connectedPeers}")
+                Log.i(TAG, "swarm → ${info.status}  peers=${info.connectedPeers}")
             }
             .launchIn(scope)
 
         swarmNode.start()
+
+        // IPFS is NOT started here. Cold boot leaves the Kubo node
+        // dormant so users who never visit `ipfs://` / IPFS-resolved
+        // ENS content don't pay the bootstrap cost (or the background
+        // peer churn) for a network they'll never use. The UI calls
+        // [INodeService.ensureIpfsStarted] the first time a navigation
+        // actually needs IPFS, which routes into [maybeStartIpfs]
+        // below — idempotent, so repeated calls after start are
+        // cheap no-ops.
+    }
+
+    /**
+     * Idempotently bring the IPFS node up. Called lazily from the UI
+     * via [INodeService.ensureIpfsStarted] on the first `ipfs://` /
+     * `ipns://` / IPFS-resolved `ens://` navigation. Subsequent calls
+     * short-circuit — once [ipfsNode] exists we let it run for the
+     * lifetime of this `:node` process.
+     *
+     * Honors the hidden `runIpfsEnabled` opt-out: if the user has
+     * flipped IPFS off in Settings → Other, we broadcast a Stopped
+     * state so the navigation gate can surface a clear error instead
+     * of spinning forever.
+     */
+    private suspend fun maybeStartIpfs() {
+        if (ipfsNode != null) return
+        val settings = NodeSettings.get(this)
+        val enabled = settings.runIpfsEnabled.first()
+        if (!enabled) {
+            Log.i(TAG, "ipfs disabled; skipping start")
+            broadcastIpfsState(IpfsInfo())
+            return
+        }
+        val lowPower = settings.ipfsLowPower.first()
+        val routingMode = settings.ipfsRoutingMode.first()
+
+        val node = IpfsNode(
+            IpfsNode.Config(
+                dataDir = filesDir.resolve("ipfs").absolutePath,
+                lowPower = lowPower,
+                routingMode = routingMode,
+            ),
+        )
+        ipfsNode = node
+
+        ipfsObserver = node.state
+            .onEach { info ->
+                broadcastIpfsState(info)
+                Log.i(
+                    TAG,
+                    "ipfs → ${info.status}  peers=${info.connectedPeers}  gw=${info.gatewayUrl}",
+                )
+            }
+            .launchIn(scope)
+
+        node.start()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int = START_STICKY
 
     override fun onDestroy() {
         callbacks.kill()
-        observer?.cancel()
+        swarmObserver?.cancel()
+        ipfsObserver?.cancel()
         scope.cancel()
+        ipfsNode?.dispose()
+        ipfsNode = null
         swarmNode.dispose()
         super.onDestroy()
 
@@ -114,6 +188,15 @@ class NodeService : Service() {
         for (i in 0 until n) {
             runCatching { callbacks.getBroadcastItem(i).onStateChanged(info) }
                 .onFailure { Log.w(TAG, "callback threw", it) }
+        }
+        callbacks.finishBroadcast()
+    }
+
+    private fun broadcastIpfsState(info: IpfsInfo) {
+        val n = callbacks.beginBroadcast()
+        for (i in 0 until n) {
+            runCatching { callbacks.getBroadcastItem(i).onIpfsStateChanged(info) }
+                .onFailure { Log.w(TAG, "ipfs callback threw", it) }
         }
         callbacks.finishBroadcast()
     }
@@ -136,6 +219,10 @@ class NodeService : Service() {
         mgr.notify(NOTIFICATION_ID, buildNotification(info))
     }
 
+    // The notification intentionally reflects only the Swarm node.
+    // Surfacing IPFS here would spoil the "look, vitalik.eth also
+    // works" demo moment; the hidden settings card is the one place
+    // IPFS status is visible today.
     private fun buildNotification(info: NodeInfo): Notification {
         val text = when (info.status) {
             NodeStatus.Stopped -> "Stopped"

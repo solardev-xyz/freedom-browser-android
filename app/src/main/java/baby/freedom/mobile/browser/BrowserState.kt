@@ -120,7 +120,7 @@ class BrowserState(val id: Long) {
      */
     fun loadUrl(url: String, ensName: String? = null) {
         cancelPendingProbe()
-        val loadable = SwarmResolver.toLoadable(url)
+        val loadable = Gateways.toLoadable(url)
         pendingUrl = loadable
         // Seed `currentBzzRoot` right here so that subresource escape
         // rewrites (see `BrowserWebView.rewriteGatewayEscape`) work for

@@ -1,6 +1,7 @@
 package baby.freedom.mobile.browser
 
 import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
@@ -98,9 +99,10 @@ import baby.freedom.mobile.data.UrlSuggestion
 import baby.freedom.mobile.ens.EnsInput
 import baby.freedom.mobile.ens.EnsResolver
 import baby.freedom.mobile.ens.EnsResult
+import baby.freedom.swarm.IpfsInfo
+import baby.freedom.swarm.IpfsStatus
 import baby.freedom.swarm.NodeInfo
 import baby.freedom.swarm.NodeStatus
-import baby.freedom.swarm.SwarmNode
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
@@ -123,33 +125,125 @@ const val HOME_URL: String = "about:blank"
 private const val NODE_READY_TIMEOUT_MS: Long = 90_000L
 
 /**
- * Suspend until the embedded node is [NodeStatus.Running], or until we
- * hit a terminal state that won't recover on its own:
- *   - [NodeStatus.Error] → give up immediately
- *   - [NodeStatus.Stopped] while the user has the "run node" toggle
- *     off → give up immediately (the node will never start on its own)
- *   - Overall [timeoutMs] budget elapsed → give up
- *
- * Returns `true` if the node reached [NodeStatus.Running] within the
- * budget, `false` otherwise. Caller-supplied [currentNodeInfoProvider]
- * lets the loop observe fresh Compose-snapshot reads of the node info
- * state on each iteration without plumbing a Flow.
+ * Outcome of a node-readiness wait: Running, a terminal "give up"
+ * state, or an expired deadline. Kept as an enum rather than a Boolean
+ * so both Swarm and IPFS wait loops share the same taxonomy.
  */
-private suspend fun awaitNodeRunning(
+private enum class NodeReadyOutcome { Running, Unrecoverable, TimedOut }
+
+/**
+ * Classify a submitted URL as a content-addressed (bzz / ipfs / ipns)
+ * destination that should go through the probe-gated navigation path,
+ * or return `null` for "treat as a plain URL". Accepts both the
+ * canonical scheme form (e.g. `ipfs://bafy…`) and a pre-rewritten
+ * gateway URL (e.g. `http://127.0.0.1:58312/ipfs/bafy…`) — the latter
+ * happens when a user pastes a gateway link from another browser or
+ * when an in-page click routes through [BrowserWebView]'s
+ * `shouldOverrideUrlLoading`.
+ */
+private fun contentUriForSubmit(url: String): String? {
+    if (url.startsWith("bzz://") ||
+        url.startsWith("ipfs://") ||
+        url.startsWith("ipns://")
+    ) return url
+    val display = Gateways.toDisplay(url)
+    return if (display != url) display else null
+}
+
+/**
+ * Which gateway logo (if any) to show in the leading end of the
+ * address-bar pill. Mirrors the CSS selector matrix in
+ * `freedom-browser/src/renderer/styles/toolbar.css`:
+ *
+ *   `data-protocol='swarm'` → Swarm hex logo
+ *   `data-protocol='ipfs' | 'ipns'` → IPFS cube logo
+ *
+ * For `bzz://` / `ipfs://` / `ipns://` URLs the protocol is obvious
+ * from [BrowserState.url]. For `ens://` we look at the active display
+ * override — its `baseUrl` is the loopback gateway that actually
+ * served the page, so we can tell a Swarm-resolved name from an
+ * IPFS-resolved one without re-running the ENS lookup.
+ */
+private data class ProtocolBadge(
+    @androidx.annotation.DrawableRes val drawableRes: Int,
+    val contentDescription: String,
+)
+
+private fun protocolBadgeFor(state: BrowserState): ProtocolBadge? {
+    val url = state.url
+    if (url.startsWith("bzz://")) return SWARM_BADGE
+    if (url.startsWith("ipfs://") || url.startsWith("ipns://")) return IPFS_BADGE
+    if (url.startsWith("ens://")) {
+        val base = state.override?.baseUrl ?: return SWARM_BADGE
+        if (base.startsWith(Gateways.SWARM_BASE)) return SWARM_BADGE
+        val ipfsBase = Gateways.ipfsBase
+        if (ipfsBase.isNotEmpty() && base.startsWith(ipfsBase)) return IPFS_BADGE
+        return SWARM_BADGE
+    }
+    return null
+}
+
+private val SWARM_BADGE = ProtocolBadge(
+    drawableRes = baby.freedom.mobile.R.drawable.ic_swarm,
+    contentDescription = "via Swarm",
+)
+
+private val IPFS_BADGE = ProtocolBadge(
+    drawableRes = baby.freedom.mobile.R.drawable.ic_ipfs,
+    contentDescription = "via IPFS",
+)
+
+/**
+ * Suspend until the Swarm node is [NodeStatus.Running], or until we hit
+ * a terminal state that won't recover on its own:
+ *   - [NodeStatus.Error] → [NodeReadyOutcome.Unrecoverable]
+ *   - [NodeStatus.Stopped] while the user has the "run node" toggle
+ *     off → [NodeReadyOutcome.Unrecoverable]
+ *   - Overall [timeoutMs] budget elapsed → [NodeReadyOutcome.TimedOut]
+ *
+ * Caller-supplied [currentNodeInfoProvider] lets the loop observe fresh
+ * Compose-snapshot reads of the node info state on each iteration
+ * without plumbing a Flow.
+ */
+private suspend fun awaitSwarmRunning(
     currentNodeInfoProvider: () -> NodeInfo,
     runNodeEnabled: Boolean,
     timeoutMs: Long,
-): Boolean {
+): NodeReadyOutcome {
     val started = System.currentTimeMillis()
     while (true) {
         val info = currentNodeInfoProvider()
         when (info.status) {
-            NodeStatus.Running -> return true
-            NodeStatus.Error -> return false
-            NodeStatus.Stopped -> if (!runNodeEnabled) return false
+            NodeStatus.Running -> return NodeReadyOutcome.Running
+            NodeStatus.Error -> return NodeReadyOutcome.Unrecoverable
+            NodeStatus.Stopped -> if (!runNodeEnabled) return NodeReadyOutcome.Unrecoverable
             NodeStatus.Starting -> { /* keep waiting */ }
         }
-        if (System.currentTimeMillis() - started >= timeoutMs) return false
+        if (System.currentTimeMillis() - started >= timeoutMs) return NodeReadyOutcome.TimedOut
+        delay(200)
+    }
+}
+
+/**
+ * IPFS analogue of [awaitSwarmRunning]. The Kubo node lives on the same
+ * `:node` process as Swarm — so if the user has turned the process off
+ * (`runNodeEnabled` false), the only honest answer is "unrecoverable".
+ */
+private suspend fun awaitIpfsRunning(
+    currentIpfsInfoProvider: () -> IpfsInfo,
+    runNodeEnabled: Boolean,
+    timeoutMs: Long,
+): NodeReadyOutcome {
+    val started = System.currentTimeMillis()
+    while (true) {
+        val info = currentIpfsInfoProvider()
+        when (info.status) {
+            IpfsStatus.Running -> return NodeReadyOutcome.Running
+            IpfsStatus.Error -> return NodeReadyOutcome.Unrecoverable
+            IpfsStatus.Stopped -> if (!runNodeEnabled) return NodeReadyOutcome.Unrecoverable
+            IpfsStatus.Starting -> { /* keep waiting */ }
+        }
+        if (System.currentTimeMillis() - started >= timeoutMs) return NodeReadyOutcome.TimedOut
         delay(200)
     }
 }
@@ -158,8 +252,10 @@ private suspend fun awaitNodeRunning(
 @Composable
 fun BrowserScreen(
     nodeInfo: NodeInfo,
+    ipfsInfo: IpfsInfo,
     runNodeEnabled: Boolean,
     onToggleRunNode: (Boolean) -> Unit,
+    onEnsureIpfsStarted: () -> Unit,
     initialUrl: String = HOME_URL,
 ) {
     val tabs = remember { TabsState(homepage = initialUrl) }
@@ -173,6 +269,7 @@ fun BrowserScreen(
     // probe job that outlives the recomposition would capture stale
     // NodeStatus and falsely treat a now-running node as stopped.
     val currentNodeInfo by rememberUpdatedState(nodeInfo)
+    val currentIpfsInfo by rememberUpdatedState(ipfsInfo)
     val keyboard = LocalSoftwareKeyboardController.current
     val focusManager = LocalFocusManager.current
     var showSettings by rememberSaveable { mutableStateOf(false) }
@@ -221,71 +318,89 @@ fun BrowserScreen(
         }
     }
 
-    // Run the peer-warmup probe against a bzz URL, then either load it
-    // or fall back to the in-app error page. Returns nothing; any
-    // spinner-state bookkeeping is the caller's job (so both the
-    // direct-bzz and ens→bzz paths can share the same routine).
-    suspend fun gateBzzNavigation(
+    // Run the peer-warmup probe against a bzz:// / ipfs:// / ipns://
+    // URL, then either load it or fall back to the in-app error page.
+    // Returns nothing; any spinner-state bookkeeping is the caller's
+    // job (so the direct-content and ens→content paths can share the
+    // same routine).
+    //
+    // For the demo surprise — "look, vitalik.eth also works" — the
+    // error page's `protocol` hint always resolves to whichever of the
+    // three schemes the URI actually used, so a failure still signals
+    // clearly to the user which network we were trying. A *successful*
+    // IPFS load leaves no visible IPFS trace in the chrome (the swarm
+    // badge logic below deliberately doesn't differentiate).
+    suspend fun gateGatewayNavigation(
         target: BrowserState,
-        bzzUri: String,
+        contentUri: String,
         ensName: String?,
         displayUrl: String,
     ) {
-        val loadable = SwarmResolver.toLoadable(bzzUri)
-        val headUrl = GatewayUrls.extractBase(loadable)?.prefix ?: loadable
+        val loadable = Gateways.toLoadable(contentUri)
+        val isIpfs = contentUri.startsWith("ipfs://") || contentUri.startsWith("ipns://")
+        val protocolHint = when {
+            contentUri.startsWith("bzz://") -> "swarm"
+            contentUri.startsWith("ipns://") -> "ipns"
+            contentUri.startsWith("ipfs://") -> "ipfs"
+            else -> "swarm"
+        }
 
-        // Wait for the node to finish booting before firing the probe.
-        // Entering a `bzz://` address while the node is still in
-        // `Starting` should keep the tab spinner running, not bail
-        // straight to the "content unavailable" page. We only give up
-        // if the node enters a terminal non-running state (`Error`, or
-        // `Stopped` while the user has the "run node" toggle off) or
-        // the overall wait budget expires.
-        val nodeReady = awaitNodeRunning(
-            currentNodeInfoProvider = { currentNodeInfo },
-            runNodeEnabled = runNodeEnabled,
-            timeoutMs = NODE_READY_TIMEOUT_MS,
-        )
-        if (!nodeReady) {
+        fun showError(errorCode: String) {
             target.clearEnsOverride()
             target.loadUrl(
                 ErrorPage.url(
-                    errorCode = "ERR_CONNECTION_REFUSED",
+                    errorCode = errorCode,
                     displayUrl = displayUrl,
-                    protocol = "swarm",
-                    retryUrl = bzzUri,
+                    protocol = protocolHint,
+                    retryUrl = contentUri,
                 ),
             )
+        }
+
+        // Wait for the right node to finish booting before firing the
+        // probe. Entering an address while the node is still in
+        // `Starting` should keep the tab spinner running, not bail
+        // straight to the "content unavailable" page.
+        //
+        // The IPFS node is lazy-started — the first IPFS navigation
+        // in a given `:node` process kicks off `ensureIpfsStarted()`
+        // here so we don't pay the Kubo bootstrap cost on cold app
+        // launch. Idempotent on the service side; safe to call on
+        // every IPFS navigation.
+        val readiness = if (isIpfs) {
+            onEnsureIpfsStarted()
+            awaitIpfsRunning(
+                currentIpfsInfoProvider = { currentIpfsInfo },
+                runNodeEnabled = runNodeEnabled,
+                timeoutMs = NODE_READY_TIMEOUT_MS,
+            )
+        } else {
+            awaitSwarmRunning(
+                currentNodeInfoProvider = { currentNodeInfo },
+                runNodeEnabled = runNodeEnabled,
+                timeoutMs = NODE_READY_TIMEOUT_MS,
+            )
+        }
+        if (readiness != NodeReadyOutcome.Running) {
+            showError("ERR_CONNECTION_REFUSED")
             return
         }
 
+        // After the node flipped to Running the gateway base URL is
+        // known; resolve the loadable form again in case ipfsBase was
+        // still empty when we first computed it.
+        val resolved = Gateways.toLoadable(contentUri)
+        val headUrl = GatewayUrls.extractBase(resolved)?.prefix ?: resolved
+
         when (val outcome = gatewayProbe.probe(headUrl)) {
-            GatewayProbe.Outcome.Ok -> target.loadUrl(bzzUri, ensName = ensName)
+            GatewayProbe.Outcome.Ok -> target.loadUrl(contentUri, ensName = ensName)
             GatewayProbe.Outcome.Aborted -> { /* superseded by a later submit */ }
-            is GatewayProbe.Outcome.Unreachable -> {
-                target.clearEnsOverride()
-                target.loadUrl(
-                    ErrorPage.url(
-                        errorCode = "ERR_CONNECTION_REFUSED",
-                        displayUrl = displayUrl,
-                        protocol = "swarm",
-                        retryUrl = bzzUri,
-                    ),
-                )
-            }
+            is GatewayProbe.Outcome.Unreachable -> showError("ERR_CONNECTION_REFUSED")
             GatewayProbe.Outcome.NotFound, is GatewayProbe.Outcome.Other -> {
                 val detail = if (outcome is GatewayProbe.Outcome.Other) {
                     "swarm_content_not_found_${outcome.status}"
                 } else "swarm_content_not_found"
-                target.clearEnsOverride()
-                target.loadUrl(
-                    ErrorPage.url(
-                        errorCode = detail,
-                        displayUrl = displayUrl,
-                        protocol = "swarm",
-                        retryUrl = bzzUri,
-                    ),
-                )
+                showError(detail)
             }
         }
     }
@@ -327,17 +442,25 @@ fun BrowserScreen(
                         is EnsResult.Ok -> {
                             // Remember hash/cid → name for the whole session
                             // (cross-tab address-bar preservation). Safe for
-                            // every protocol; only bzz is actually loadable
-                            // today, the rest will plug in under port-plan §2.
+                            // every protocol — bzz, ipfs, and ipns all round-
+                            // trip through [Gateways] + [DisplayUrl] now.
                             KnownEnsNames.record(result.uri, ens.name)
-                            if (result.protocol == "bzz") {
-                                val bzzUri = result.uri + ens.suffix
-                                gateBzzNavigation(target, bzzUri, ens.name, ensDisplay)
+                            if (result.protocol == "bzz" ||
+                                result.protocol == "ipfs" ||
+                                result.protocol == "ipns"
+                            ) {
+                                val contentUri = result.uri + ens.suffix
+                                gateGatewayNavigation(
+                                    target = target,
+                                    contentUri = contentUri,
+                                    ensName = ens.name,
+                                    displayUrl = ensDisplay,
+                                )
                             } else {
                                 target.clearEnsOverride()
                                 target.loadUrl(
                                     ErrorPage.url(
-                                        errorCode = "ens_protocol_not_supported",
+                                        errorCode = "ens_unsupported_codec",
                                         displayUrl = ensDisplay,
                                         protocol = "ens",
                                         retryUrl = ensDisplay,
@@ -403,17 +526,21 @@ fun BrowserScreen(
         target.addressBarText = url
         target.clearEnsOverride()
 
-        // Direct bzz:// / gateway URLs get the same probe-gated
-        // treatment as an ens:// resolution, so a cold node shows the
-        // tab spinner instead of Bee's raw 404 JSON.
-        val isBzz = url.startsWith("bzz://") ||
-            url.startsWith("${SwarmNode.GATEWAY_URL}/bzz/")
-        if (isBzz) {
-            val bzzUri = SwarmResolver.toDisplay(url)
+        // Direct content-addressed URLs (bzz://, ipfs://, ipns://, or
+        // their loaded gateway form) get the same probe-gated treatment
+        // as an ens:// resolution — a cold node shows the tab spinner
+        // instead of the raw gateway's 404 page.
+        val contentUri = contentUriForSubmit(url)
+        if (contentUri != null) {
             resolvingEns = true
             target.pendingProbeJob = scope.launch {
                 try {
-                    gateBzzNavigation(target, bzzUri, ensName = null, displayUrl = bzzUri)
+                    gateGatewayNavigation(
+                        target = target,
+                        contentUri = contentUri,
+                        ensName = null,
+                        displayUrl = contentUri,
+                    )
                 } finally {
                     resolvingEns = false
                     target.pendingProbeJob = null
@@ -608,6 +735,7 @@ fun BrowserScreen(
     if (showSettings) {
         SettingsScreen(
             repo = repo,
+            ipfsInfo = ipfsInfo,
             onClearWebViewData = { tabs.clearWebViewData?.invoke() },
             onDismiss = { showSettings = false },
         )
@@ -789,30 +917,29 @@ private fun TopBar(
                     onGo = { onSubmit(fieldValue.text) },
                 ),
                 decorationBox = { innerTextField ->
-                    // "via Swarm" badge: the pill grows a Swarm hex mark on
-                    // the left whenever the *loaded* page origin is the
-                    // local bee-lite gateway — i.e. either a raw `bzz://`
-                    // URL or an `ens://` name that resolved to a Swarm
-                    // contenthash. Mirrors the `protocol-icon[data-protocol='swarm']`
-                    // behavior in freedom-browser's desktop address bar.
-                    val showSwarmBadge = state.url.startsWith("bzz://") ||
-                        state.url.startsWith("ens://")
+                    // Protocol badge: the pill grows a Swarm hex mark or
+                    // the IPFS cube on the left whenever the *loaded*
+                    // page origin is one of our embedded gateways. For
+                    // `ens://` names we look at the active display
+                    // override — its `baseUrl` is the gateway that
+                    // actually served the page, which tells us whether
+                    // the contenthash resolved to Swarm or IPFS.
+                    // Mirrors `.protocol-icon[data-protocol='swarm'|'ipfs'|'ipns']`
+                    // in freedom-browser's desktop address bar.
+                    val badge = protocolBadgeFor(state)
                     Row(
                         modifier = Modifier
                             .fillMaxSize()
                             .padding(
-                                start = if (showSwarmBadge) 10.dp else 16.dp,
+                                start = if (badge != null) 10.dp else 16.dp,
                                 end = 4.dp,
                             ),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        if (showSwarmBadge) {
-                            Icon(
-                                painter = painterResource(
-                                    baby.freedom.mobile.R.drawable.ic_swarm,
-                                ),
-                                contentDescription = "via Swarm",
-                                tint = Color(0xFFF7931A),
+                        if (badge != null) {
+                            Image(
+                                painter = painterResource(badge.drawableRes),
+                                contentDescription = badge.contentDescription,
                                 modifier = Modifier.size(16.dp),
                             )
                             Spacer(Modifier.width(8.dp))

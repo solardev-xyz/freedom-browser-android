@@ -11,12 +11,12 @@ package baby.freedom.mobile.browser
  *   1. Active per-tab [BrowserState.Override] → substitute the ENS prefix
  *      for the gateway base. This is what keeps in-manifest clicks on
  *      `ens://name/path`.
- *   2. `bzz://<hash>[…]` (after [SwarmResolver.toDisplay]); rewrite the
- *      hash to `ens://<name>` if [KnownEnsNames] knows it.
- *   3. (Port-plan §2) `ipfs://<cid>[…]` / `ipns://<name>[…]` — same shape;
- *      currently only exercised if an external caller hands us one of
- *      those URIs directly.
- *   4. Otherwise pass-through.
+ *   2. `bzz://<hash>[…]` / `ipfs://<cid>[…]` / `ipns://<name>[…]` (after
+ *      [Gateways.toDisplay] maps the loaded `http://127.0.0.1:<port>/…`
+ *      back to its user-facing scheme); rewrite the hash / CID to
+ *      `ens://<name>` if [KnownEnsNames] knows it so ENS-sourced
+ *      navigations keep their name in the address bar.
+ *   3. Otherwise pass-through.
  *
  * The home page ([HOME_URL] = `about:blank`) never reaches this function
  * — [BrowserWebView]'s client early-returns from `onPageStarted` /
@@ -36,7 +36,7 @@ object DisplayUrl {
             return override.prefix + actualUrl.substring(override.baseUrl.length)
         }
 
-        val display = SwarmResolver.toDisplay(actualUrl)
+        val display = Gateways.toDisplay(actualUrl)
         return applyNamePreservation(display)
     }
 
