@@ -75,6 +75,10 @@ class NodeService : Service() {
         override fun ensureIpfsStarted() {
             scope.launch { maybeStartIpfs() }
         }
+
+        override fun stopIpfs() {
+            scope.launch { maybeStopIpfs() }
+        }
     }
 
     override fun onBind(intent: Intent?): IBinder = binder
@@ -119,26 +123,20 @@ class NodeService : Service() {
     }
 
     /**
-     * Idempotently bring the IPFS node up. Called lazily from the UI
-     * via [INodeService.ensureIpfsStarted] on the first `ipfs://` /
-     * `ipns://` / IPFS-resolved `ens://` navigation. Subsequent calls
-     * short-circuit — once [ipfsNode] exists we let it run for the
-     * lifetime of this `:node` process.
+     * Idempotently bring the IPFS node up. Driven entirely by the UI:
+     * either the user flipping the IPFS toggle on in Settings, or the
+     * first `ipfs://` / `ipns://` / IPFS-resolved `ens://` navigation
+     * hitting [INodeService.ensureIpfsStarted]. No-op if a Kubo node
+     * is already live in this `:node` process.
      *
-     * Honors the hidden `runIpfsEnabled` opt-out: if the user has
-     * flipped IPFS off in Settings → Other, we broadcast a Stopped
-     * state so the navigation gate can surface a clear error instead
-     * of spinning forever.
+     * `ipfs_low_power` and `ipfs_routing_mode` are snapshotted here
+     * and written into the Kubo repo on first init; the Kubo wrapper
+     * has no live-reconfig path, so changing them in Settings only
+     * takes effect on the next start cycle (off → on).
      */
     private suspend fun maybeStartIpfs() {
         if (ipfsNode != null) return
         val settings = NodeSettings.get(this)
-        val enabled = settings.runIpfsEnabled.first()
-        if (!enabled) {
-            Log.i(TAG, "ipfs disabled; skipping start")
-            broadcastIpfsState(IpfsInfo())
-            return
-        }
         val lowPower = settings.ipfsLowPower.first()
         val routingMode = settings.ipfsRoutingMode.first()
 
@@ -162,6 +160,24 @@ class NodeService : Service() {
             .launchIn(scope)
 
         node.start()
+    }
+
+    /**
+     * Shut the IPFS node down and clear the slot so a subsequent
+     * [maybeStartIpfs] spins up a fresh instance. Swarm is
+     * deliberately left alone — stopping IPFS shouldn't close
+     * `bzz://` pages the user currently has open.
+     */
+    private fun maybeStopIpfs() {
+        val node = ipfsNode ?: return
+        ipfsObserver?.cancel()
+        ipfsObserver = null
+        node.dispose()
+        ipfsNode = null
+        // Emit a final Stopped tick so the UI toggle + status
+        // immediately reflect the off state instead of lingering
+        // on the last Running frame.
+        broadcastIpfsState(IpfsInfo())
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int = START_STICKY

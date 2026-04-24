@@ -21,15 +21,21 @@ import kotlinx.coroutines.flow.map
  * ## IPFS keys
  *
  * `show_ipfs_ui` gates visibility of every IPFS-related control in the
- * UI. While it's `false` (the default) the embedded Kubo node still
- * runs and serves `ipfs://` / `ipns://` navigations — the toggle only
- * hides the UI. The Settings screen "Other" section reveals a single
- * row the user can tap to flip this on before a demo.
+ * UI. The Settings screen "Other" section reveals a single row the
+ * user can tap to flip this on before a demo.
  *
- * The remaining IPFS preferences (`run_ipfs_enabled`, `ipfs_low_power`,
- * `ipfs_routing_mode`) are read at `:node` process startup and
- * re-applied on the next restart — there is no live-reconfig path on
- * the Kubo wrapper.
+ * `ipfs_low_power` and `ipfs_routing_mode` are read at `:node` process
+ * startup and re-applied on the next restart — there is no live
+ * reconfig path on the Kubo wrapper.
+ *
+ * There is no persistent "run IPFS" flag by design. The Kubo node is
+ * always off at cold launch (demo-surprise requirement) and driven
+ * live via AIDL: [baby.freedom.mobile.node.INodeService.ensureIpfsStarted]
+ * from the Settings toggle or the first `ipfs://` / `ipns://`
+ * navigation, and [baby.freedom.mobile.node.INodeService.stopIpfs]
+ * from the toggle. The UI derives the toggle's on/off state from the
+ * live [baby.freedom.swarm.IpfsInfo.status] so it survives process
+ * restarts naturally.
  */
 class NodeSettings private constructor(
     private val store: DataStore<Preferences>,
@@ -58,19 +64,6 @@ class NodeSettings private constructor(
 
     suspend fun setShowIpfsUi(enabled: Boolean) {
         store.edit { it[Keys.SHOW_IPFS_UI] = enabled }
-    }
-
-    /**
-     * Whether the embedded Kubo node should start with the `:node`
-     * process. Default `true`; set this to `false` from the hidden
-     * IPFS settings card to skip IPFS on the next process launch.
-     */
-    val runIpfsEnabled: Flow<Boolean> = store.data.map { prefs ->
-        prefs[Keys.RUN_IPFS_ENABLED] ?: true
-    }
-
-    suspend fun setRunIpfsEnabled(enabled: Boolean) {
-        store.edit { it[Keys.RUN_IPFS_ENABLED] = enabled }
     }
 
     /**
@@ -103,7 +96,6 @@ class NodeSettings private constructor(
     private object Keys {
         val RUN_NODE_ENABLED = booleanPreferencesKey("run_node_enabled")
         val SHOW_IPFS_UI = booleanPreferencesKey("show_ipfs_ui")
-        val RUN_IPFS_ENABLED = booleanPreferencesKey("run_ipfs_enabled")
         val IPFS_LOW_POWER = booleanPreferencesKey("ipfs_low_power")
         val IPFS_ROUTING_MODE = stringPreferencesKey("ipfs_routing_mode")
     }

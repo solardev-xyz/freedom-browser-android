@@ -256,6 +256,7 @@ fun BrowserScreen(
     runNodeEnabled: Boolean,
     onToggleRunNode: (Boolean) -> Unit,
     onEnsureIpfsStarted: () -> Unit,
+    onIpfsToggle: (Boolean) -> Unit,
     initialUrl: String = HOME_URL,
 ) {
     val tabs = remember { TabsState(homepage = initialUrl) }
@@ -736,6 +737,7 @@ fun BrowserScreen(
         SettingsScreen(
             repo = repo,
             ipfsInfo = ipfsInfo,
+            onIpfsToggle = onIpfsToggle,
             onClearWebViewData = { tabs.clearWebViewData?.invoke() },
             onDismiss = { showSettings = false },
         )

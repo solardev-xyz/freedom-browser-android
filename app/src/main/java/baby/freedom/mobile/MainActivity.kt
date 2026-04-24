@@ -115,6 +115,7 @@ class MainActivity : ComponentActivity() {
                         runNodeEnabled = runNodeEnabled,
                         onToggleRunNode = ::onToggleRunNode,
                         onEnsureIpfsStarted = ::onEnsureIpfsStarted,
+                        onIpfsToggle = ::onIpfsToggle,
                     )
                 }
             }
@@ -144,6 +145,17 @@ class MainActivity : ComponentActivity() {
      */
     private fun onEnsureIpfsStarted() {
         runCatching { binder?.ensureIpfsStarted() }
+    }
+
+    /**
+     * Handle the user flipping the "IPFS" toggle in Settings. Starts
+     * or stops the Kubo node live — there's no persisted "run IPFS"
+     * flag; each cold launch begins with IPFS off, and the toggle
+     * state is derived from the live [IpfsInfo.status] broadcast.
+     */
+    private fun onIpfsToggle(enabled: Boolean) {
+        if (enabled) runCatching { binder?.ensureIpfsStarted() }
+        else runCatching { binder?.stopIpfs() }
     }
 
     private fun startAndBindService() {

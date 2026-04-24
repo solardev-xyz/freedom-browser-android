@@ -75,6 +75,7 @@ import kotlinx.coroutines.launch
 fun SettingsScreen(
     repo: BrowsingRepository,
     ipfsInfo: IpfsInfo,
+    onIpfsToggle: (Boolean) -> Unit,
     onClearWebViewData: () -> Unit,
     onDismiss: () -> Unit,
 ) {
@@ -127,6 +128,7 @@ fun SettingsScreen(
                     IpfsSection(
                         settings = settings,
                         ipfsInfo = ipfsInfo,
+                        onIpfsToggle = onIpfsToggle,
                     )
                 }
             }
@@ -291,20 +293,27 @@ private fun OtherSection(
 // Intentionally not part of the default UI surface. Controls here are
 // revealed by [OtherSection]'s toggle so that IPFS support stays a
 // demo surprise until the user flips it on explicitly.
+//
+// The "IPFS" master toggle is purely derived from the live
+// [IpfsInfo.status]: we never persist a "run IPFS" preference, so the
+// toggle is always off at cold launch. Flipping it on calls
+// [onIpfsToggle] which routes through `MainActivity` → `NodeService`
+// to start/stop the Kubo node live.
 @Composable
 private fun IpfsSection(
     settings: NodeSettings,
     ipfsInfo: IpfsInfo,
+    onIpfsToggle: (Boolean) -> Unit,
 ) {
     val scope = rememberCoroutineScope()
-    val runIpfs by settings.runIpfsEnabled.collectAsState(initial = true)
     val lowPower by settings.ipfsLowPower.collectAsState(initial = true)
     val routingMode by settings.ipfsRoutingMode
         .collectAsState(initial = NodeSettings.DEFAULT_IPFS_ROUTING_MODE)
 
-    val triple = ipfsStatusTriple(ipfsInfo.status)
+    val triple = ipfsStatusTriple(ipfsInfo)
+    val isOn = ipfsInfo.status != IpfsStatus.Stopped
 
-    SectionCard(title = "IPFS node (experimental)") {
+    SectionCard(title = "IPFS") {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -314,32 +323,32 @@ private fun IpfsSection(
             Icon(triple.icon, contentDescription = null, tint = triple.color)
             Spacer(Modifier.width(12.dp))
             Column(modifier = Modifier.weight(1f)) {
-                Text(triple.label, fontWeight = FontWeight.Medium)
+                Text("IPFS", fontWeight = FontWeight.Medium)
                 Text(
-                    if (runIpfs) "Serving ipfs:// and ipns:// locally"
-                    else "IPFS disabled on next restart",
+                    triple.label,
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
             Switch(
-                checked = runIpfs,
-                onCheckedChange = { enabled ->
-                    scope.launch { settings.setRunIpfsEnabled(enabled) }
-                },
+                checked = isOn,
+                onCheckedChange = onIpfsToggle,
             )
         }
 
-        Spacer(Modifier.height(8.dp))
-        DetailRow("Peers", ipfsInfo.connectedPeers.toString())
-        if (ipfsInfo.peerId.isNotBlank()) {
-            DetailRow("Peer ID", ipfsInfo.peerId, mono = true)
-        }
-        if (ipfsInfo.gatewayUrl.isNotBlank()) {
-            DetailRow("Gateway", ipfsInfo.gatewayUrl, mono = true)
+        if (ipfsInfo.connectedPeers > 0 || ipfsInfo.peerId.isNotBlank()) {
+            Spacer(Modifier.height(8.dp))
+            if (ipfsInfo.peerId.isNotBlank()) {
+                DetailRow("Peer ID", ipfsInfo.peerId, mono = true)
+            }
+            DetailRow("Peers", ipfsInfo.connectedPeers.toString())
+            if (ipfsInfo.gatewayUrl.isNotBlank()) {
+                DetailRow("Gateway", ipfsInfo.gatewayUrl, mono = true)
+            }
         }
         val err = ipfsInfo.errorMessage
         if (!err.isNullOrBlank()) {
+            Spacer(Modifier.height(8.dp))
             DetailRow("Error", err, singleLine = false)
         }
 
@@ -376,8 +385,8 @@ private fun IpfsSection(
 
         Spacer(Modifier.height(8.dp))
         Text(
-            "Changes take effect the next time the node restarts " +
-                "(toggle the Swarm node off and on from its details page).",
+            "Low-power and routing mode apply the next time IPFS " +
+                "starts — toggle IPFS off and on to re-init.",
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
         )
@@ -483,15 +492,26 @@ private data class IpfsStatusTriple(
     val label: String,
 )
 
-private fun ipfsStatusTriple(status: IpfsStatus): IpfsStatusTriple = when (status) {
-    IpfsStatus.Running -> IpfsStatusTriple(
-        Color(0xFF22C55E), Icons.Filled.CheckCircle, "Running",
+/**
+ * Translate the live Kubo [IpfsInfo] into an icon + color + user-
+ * facing label for the master IPFS toggle. Visible to the user:
+ *
+ *  - `Disconnected` — node not running (toggle off)
+ *  - `Connecting…`  — node starting, or running but still peer-less
+ *  - `Connected`    — node running with at least one peer
+ *  - `Error`        — last start attempt threw
+ */
+private fun ipfsStatusTriple(info: IpfsInfo): IpfsStatusTriple = when (info.status) {
+    IpfsStatus.Running -> if (info.connectedPeers > 0) IpfsStatusTriple(
+        Color(0xFF22C55E), Icons.Filled.CheckCircle, "Connected",
+    ) else IpfsStatusTriple(
+        Color(0xFFF59E0B), Icons.Filled.HourglassTop, "Connecting…",
     )
     IpfsStatus.Starting -> IpfsStatusTriple(
-        Color(0xFFF59E0B), Icons.Filled.HourglassTop, "Starting…",
+        Color(0xFFF59E0B), Icons.Filled.HourglassTop, "Connecting…",
     )
     IpfsStatus.Stopped -> IpfsStatusTriple(
-        Color(0xFF94A3B8), Icons.Filled.PowerSettingsNew, "Stopped",
+        Color(0xFF94A3B8), Icons.Filled.PowerSettingsNew, "Disconnected",
     )
     IpfsStatus.Error -> IpfsStatusTriple(
         Color(0xFFEF4444), Icons.Filled.ErrorOutline, "Error",
