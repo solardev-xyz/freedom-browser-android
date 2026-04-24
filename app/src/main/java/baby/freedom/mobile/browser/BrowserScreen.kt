@@ -278,7 +278,6 @@ fun BrowserScreen(
     var showTabSwitcher by rememberSaveable { mutableStateOf(false) }
     var showHistory by rememberSaveable { mutableStateOf(false) }
     var showBookmarks by rememberSaveable { mutableStateOf(false) }
-    var resolvingEns by remember { mutableStateOf(false) }
     // Intentionally NOT `rememberSaveable`: on rotation the Activity is
     // recreated, `tabs` is rebuilt as a fresh blank tab, and we need to
     // re-submit the homepage into it. If this survived config changes
@@ -314,7 +313,6 @@ fun BrowserScreen(
             state.loadUrl("javascript:history.back();void(0);")
         } else {
             state.cancelPendingProbe()
-            resolvingEns = false
             state.navigateHome()
         }
     }
@@ -435,7 +433,7 @@ fun BrowserScreen(
         if (ens != null) {
             val ensDisplay = "ens://${ens.name}${ens.suffix}"
             target.addressBarText = ensDisplay
-            resolvingEns = true
+            target.resolving = true
             target.pendingProbeJob = scope.launch {
                 try {
                     val result = ensResolver.resolveContenthash(ens.name)
@@ -508,7 +506,7 @@ fun BrowserScreen(
                         }
                     }
                 } finally {
-                    resolvingEns = false
+                    target.resolving = false
                     target.pendingProbeJob = null
                 }
             }
@@ -533,7 +531,7 @@ fun BrowserScreen(
         // instead of the raw gateway's 404 page.
         val contentUri = contentUriForSubmit(url)
         if (contentUri != null) {
-            resolvingEns = true
+            target.resolving = true
             target.pendingProbeJob = scope.launch {
                 try {
                     gateGatewayNavigation(
@@ -543,7 +541,7 @@ fun BrowserScreen(
                         displayUrl = contentUri,
                     )
                 } finally {
-                    resolvingEns = false
+                    target.resolving = false
                     target.pendingProbeJob = null
                 }
             }
@@ -587,7 +585,6 @@ fun BrowserScreen(
                 state = state,
                 tabCount = tabs.tabs.size,
                 peerCount = nodeInfo.connectedPeers,
-                resolvingEns = resolvingEns,
                 isBookmarked = isBookmarked,
                 addressFocused = addressFocused,
                 addressBarEdited = addressBarEdited,
@@ -642,8 +639,8 @@ fun BrowserScreen(
                     .fillMaxWidth()
                     .height(3.dp),
             ) {
-                if (state.progress in 0..99 || resolvingEns) {
-                    if (resolvingEns) {
+                if (state.progress in 0..99 || state.resolving) {
+                    if (state.resolving) {
                         LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
                     } else {
                         LinearProgressIndicator(
@@ -795,7 +792,6 @@ private fun TopBar(
     state: BrowserState,
     tabCount: Int,
     peerCount: Long,
-    resolvingEns: Boolean,
     isBookmarked: Boolean,
     addressFocused: Boolean,
     addressBarEdited: Boolean,
@@ -819,7 +815,15 @@ private fun TopBar(
     // all on focus). We keep it in sync with [state.addressBarText],
     // which is the source of truth for submit / external updates
     // (navigation events, ENS resolution).
-    var fieldValue by remember {
+    //
+    // Keyed on [state.id] so that switching tabs re-initialises
+    // `fieldValue` from the new tab's `addressBarText` *synchronously*,
+    // inside composition. Without the key, the remembered value would
+    // carry over the previous tab's text and only be corrected on the
+    // next composition pass once the `LaunchedEffect` below ran — which
+    // briefly rendered the stale URL inside the newly-active tab's
+    // pill.
+    var fieldValue by remember(state.id) {
         mutableStateOf(
             TextFieldValue(
                 text = state.addressBarText,
@@ -830,8 +834,12 @@ private fun TopBar(
 
     // External → internal sync. Fires when the webview updates the
     // displayed URL, when the user hits × (see below), or when submit()
-    // rewrites the bar with a canonical / ENS form.
-    LaunchedEffect(state.addressBarText) {
+    // rewrites the bar with a canonical / ENS form. Keyed on the tab
+    // id too so that when the active tab changes the new tab's own
+    // sync state is tracked from scratch (otherwise a key based purely
+    // on `state.addressBarText` would miss an update that happens to
+    // land on the *same* string the previous tab had).
+    LaunchedEffect(state.id, state.addressBarText) {
         if (fieldValue.text != state.addressBarText) {
             // Park the cursor at position 0 so long URLs horizontally
             // scroll to their *start* rather than their tail — the

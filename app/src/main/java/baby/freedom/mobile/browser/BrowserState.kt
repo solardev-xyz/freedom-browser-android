@@ -41,6 +41,19 @@ class BrowserState(val id: Long) {
     /** 0..100, or -1 when idle. */
     var progress by mutableIntStateOf(-1)
 
+    /**
+     * Indicates this tab is in the indeterminate pre-navigation phase:
+     * ENS name being resolved, or peer-warmup [GatewayProbe] still
+     * running. Drives the top LinearProgressIndicator independently
+     * of [progress] (which is the WebView's 0..100 load counter and
+     * only starts ticking once an actual URL is handed to the
+     * WebView). Scoped per-tab so a background tab resolving in the
+     * background doesn't animate a spinner on whatever tab the user
+     * is currently viewing.
+     */
+    var resolving by mutableStateOf(false)
+        internal set
+
     var canGoBack by mutableStateOf(false)
         internal set
     var canGoForward by mutableStateOf(false)
@@ -191,6 +204,7 @@ class BrowserState(val id: Long) {
         title = ""
         addressBarText = ""
         progress = -1
+        resolving = false
         loadUrl(HOME_URL)
     }
 
@@ -214,6 +228,7 @@ class BrowserState(val id: Long) {
         url = ""
         title = ""
         progress = -1
+        resolving = false
         canGoBack = false
         canGoForward = false
         override = null
