@@ -45,7 +45,6 @@ android {
 }
 
 dependencies {
-    api(group = "", name = "mobile", ext = "aar")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.1")
     implementation("androidx.core:core-ktx:1.15.0")
 }
