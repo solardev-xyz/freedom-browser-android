@@ -3,10 +3,16 @@ build/
 */build/
 .gradle/
 out/
+.cxx/
+*/.cxx/
 
-# The embedded bee-lite node, ~143 MiB. Exceeds GitHub's 100 MB file limit.
+# The embedded Kubo (IPFS) node, ~143 MiB. Exceeds GitHub's 100 MB file limit.
 # Rebuild locally from Solar-Punk-Ltd/bee-lite-java — see README § Building mobile.aar.
 swarmnode/libs/mobile.aar
+
+# The embedded ant (Swarm) node, tens of MiB per ABI.
+# Rebuild locally from solardev-xyz/ant — see README § Building libant_ffi.so.
+swarmnode/src/main/jniLibs/
 
 # Kotlin / IDE caches
 .kotlin/

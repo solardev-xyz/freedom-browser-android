@@ -32,8 +32,8 @@ import kotlinx.coroutines.launch
  * Hosts the browser UI and brokers the bind/unbind lifecycle of the
  * out-of-process [NodeService]. Both the Swarm and IPFS nodes run
  * inside the `:node` process; flipping the UI's "run node" toggle off
- * tears that process down so bee-lite's LevelDB state-store lock is
- * released, allowing a future toggle-on to reopen the store cleanly.
+ * tears that process down so no native state (ant's tokio runtime,
+ * Kubo's repo lock) survives, letting a future toggle-on boot clean.
  *
  * IPFS state is hidden from the default UI — see `SettingsScreen`'s
  * "Other" section for the reveal gate — but the flow is plumbed all

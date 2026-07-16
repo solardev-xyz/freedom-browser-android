@@ -11,6 +11,15 @@ android {
     defaultConfig {
         minSdk = 30
         consumerProguardFiles("consumer-rules.pro")
+        // Matches the ABIs we build libant_ffi.so for (cargo xtask
+        // build-android-arm64 / -x86_64 in solardev-xyz/ant) — see
+        // README § Building libant_ffi.so.
+        ndk { abiFilters += setOf("arm64-v8a", "x86_64") }
+    }
+
+    // JNI shim over the prebuilt libant_ffi.so in src/main/jniLibs/.
+    externalNativeBuild {
+        cmake { path = file("src/main/cpp/CMakeLists.txt") }
     }
 
     compileOptions {

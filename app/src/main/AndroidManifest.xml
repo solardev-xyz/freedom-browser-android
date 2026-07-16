@@ -30,9 +30,9 @@
 
         <!--
           NodeService lives in its own `:node` process so we can exit
-          that process (and release bee-lite's LevelDB state-store file
-          lock) when the user toggles the node off, without tearing
-          down the UI.
+          that process (and everything native inside it — ant's tokio
+          runtime, Kubo's repo lock) when the user toggles the node
+          off, without tearing down the UI.
         -->
         <service
             android:name=".node.NodeService"

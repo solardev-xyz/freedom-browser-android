@@ -5,7 +5,7 @@ import baby.freedom.swarm.SwarmNode
 /**
  * Process-wide holder + router for the local content gateways.
  *
- * The Bee gateway lives on a fixed port so [SwarmNode.GATEWAY_URL] is a
+ * The ant gateway lives on a fixed port so [SwarmNode.GATEWAY_URL] is a
  * compile-time constant; the Kubo gateway binds to an ephemeral port at
  * startup, so the UI process mirrors it into [ipfsBase] whenever the
  * `:node` process broadcasts a new [baby.freedom.swarm.IpfsInfo].

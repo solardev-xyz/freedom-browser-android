@@ -39,11 +39,12 @@ import java.net.URL
 private const val ABOUT_BLANK = "about:blank"
 private const val LOG_TAG = "BrowserWebView"
 
-// Paths under `http://127.0.0.1:1633/` that legitimately belong to the Bee
-// gateway's own HTTP API. Any other gateway-origin request from a page is
+// Paths under `http://127.0.0.1:1633/` that legitimately belong to the
+// gateway's own bee-shaped HTTP API (ant serves the same endpoint set).
+// Any other gateway-origin request from a page is
 // almost certainly a subresource that forgot to include its /bzz/<hash>/
 // prefix, so we transparently refetch it from under the current bzz root.
-private val BEE_API_SEGMENTS = setOf(
+private val GATEWAY_API_SEGMENTS = setOf(
     "bzz", "bzz-chunk", "bytes", "chunks", "tags", "pins", "stewardship",
     "feeds", "soc", "pss", "stamps", "wallet", "chequebook", "settlements",
     "accounting", "redistributionstate", "reservestate", "addresses", "peers",
@@ -52,9 +53,9 @@ private val BEE_API_SEGMENTS = setOf(
 )
 
 // First-segment prefixes that identify user-facing content served from
-// the Bee gateway (vs. the node's own JSON API under /health, /status,
+// the local gateway (vs. the node's own JSON API under /health, /status,
 // etc.). Subresources that land on one of these but 404 are retried —
-// a cold Bee node regularly answers the top-level manifest before every
+// a cold Swarm node regularly answers the top-level manifest before every
 // chunk is in hand, so these transient failures resolve a few seconds
 // later without anything visibly breaking on the page.
 private val GATEWAY_CONTENT_SEGMENTS = setOf("bzz", "ipfs", "ipns")
@@ -71,25 +72,26 @@ private val HEADERS_TO_STRIP = setOf(
 // Request headers we never forward upstream — either managed by
 // `HttpURLConnection` itself or carrying state tied to the WebView's
 // gateway origin (`Host: 127.0.0.1:1633`, `Origin`, `Referer`) that
-// would only confuse Bee.
+// would only confuse the gateway.
 private val REQUEST_HEADERS_TO_STRIP = setOf(
     "host", "origin", "referer", "content-length", "accept-encoding",
     "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
     "te", "trailer", "transfer-encoding", "upgrade",
 )
 
-// HTTP status codes we treat as transient — a cold Bee node regularly
+// HTTP status codes we treat as transient — a cold Swarm node regularly
 // answers 404 for a chunk that's still being fetched, and brief 5xx
 // from the node itself resolve on retry too. Matches the retry set
 // used by freedom-browser's `bzz-protocol.js` on desktop.
 private val TRANSIENT_STATUSES = setOf(404, 500, 502, 503, 504)
 
 /**
- * Apply the Swarm-specific request headers that give Bee extra
+ * Apply the Swarm-specific request headers that give the node extra
  * server-side runway on transient chunk-retrieval failures. Measured on
- * the desktop port to turn a 40 % single-chunk failure rate into 100 %
- * success on cold content. These headers are ignored by Bee for
- * non-redundant content, so they're always safe to set.
+ * the desktop port (against bee) to turn a 40 % single-chunk failure
+ * rate into 100 % success on cold content; ant parses the same headers
+ * for bee parity. They're ignored for non-redundant content, so they're
+ * always safe to set.
  */
 private fun HttpURLConnection.applySwarmRequestHeaders() {
     setRequestProperty("Swarm-Chunk-Retrieval-Timeout", "30s")
@@ -102,7 +104,7 @@ private fun HttpURLConnection.applySwarmRequestHeaders() {
  * hop-by-hop / origin-tied headers, optionally dropping `Range`
  * (when the caller wants to fetch the full body), forcing
  * `Accept-Encoding: identity`, and stamping the Swarm-* retrieval
- * hints Bee honors.
+ * hints the gateway honors.
  */
 private fun HttpURLConnection.forwardProxiedHeaders(
     req: WebResourceRequest,
@@ -624,7 +626,7 @@ private fun buildRefreshableWebView(
                 // We read `lastLoadedDisplayUrl` rather than
                 // [BrowserState.url] because onReceivedIcon is async:
                 // for pages whose `<link rel="icon">` gets fetched
-                // slowly (e.g. cold Bee nodes that still need to
+                // slowly (e.g. cold Swarm nodes that still need to
                 // resolve a chunk), the callback frequently arrives
                 // *after* the user has navigated back to home, at
                 // which point `state.url` is already `""` and the
@@ -652,11 +654,11 @@ private fun buildRefreshableWebView(
 }
 
 // Back-off schedule for the subresource retry loop. Sized to recover
-// from transient 404s on cold Bee nodes — which frequently take several
+// from transient 404s on cold Swarm nodes — which frequently take several
 // seconds to find a chunk via the DHT — while staying inside the
 // WebView's internal ~30 s request-hang detector. ~17 s of sleeping
 // across 7 attempts, plus ≤ ~1 s per attempt for a fast 404 response
-// from Bee, lands the worst-case budget near 25 s. (The desktop port
+// from the gateway, lands the worst-case budget near 25 s. (The desktop port
 // uses ~3 min across 13 attempts, but runs via a custom Electron
 // protocol handler that isn't bound by the WebView hang detector.)
 private val ESCAPE_RETRY_DELAYS_MS: LongArray = longArrayOf(
@@ -664,8 +666,8 @@ private val ESCAPE_RETRY_DELAYS_MS: LongArray = longArrayOf(
 )
 
 /**
- * Proxy subresource fetches that the Bee gateway can't fulfill on its own
- * fast enough or in a WebView-friendly format.
+ * Proxy subresource fetches that the local gateway can't fulfill on its
+ * own fast enough or in a WebView-friendly format.
  *
  * Three cases get intercepted:
  *
@@ -678,15 +680,17 @@ private val ESCAPE_RETRY_DELAYS_MS: LongArray = longArrayOf(
  *
  * 2. **Content-path retries.** Subresources already correctly rooted
  *    at `/bzz/`, `/ipfs/`, or `/ipns/` that hit a transient 404/500
- *    get retried with short backoff. A cold Bee node sometimes answers
+ *    get retried with short backoff. A cold Swarm node sometimes answers
  *    the top-level manifest before every chunk is in hand, so the
  *    resource exists but isn't retrievable yet.
  *
- * 3. **Media range-request synthesis.** Bee returns the whole body for
+ * 3. **Media range-request synthesis.** bee returned the whole body for
  *    every `Range` request (no 206, no `Accept-Ranges`, empty
  *    `Content-Type`), which stalls Chromium's media pipeline at
- *    `HAVE_METADATA`. [fetchMediaWithRangeSupport] buffers the body once
- *    and synthesises proper Partial Content responses.
+ *    `HAVE_METADATA`. ant answers single ranges with proper 206s, but
+ *    [fetchMediaWithRangeSupport] still buffers the body once and
+ *    synthesises Partial Content locally, so seeking never re-fetches
+ *    the file and playback doesn't depend on gateway behaviour.
  *
  * Main-frame requests (and non-GETs) are left to the WebView's own
  * network stack — the top-level navigation is already gated by
@@ -734,7 +738,7 @@ internal fun rewriteGatewayEscape(
             fetchWithRetry(req, url, url)
         }
     }
-    if (firstSegment in BEE_API_SEGMENTS) return null
+    if (firstSegment in GATEWAY_API_SEGMENTS) return null
 
     // Case 1: path escaped the current bzz/ipfs/ipns root. Rewrite it
     // back under the root and fetch. Requires the current bzz root to
@@ -750,9 +754,8 @@ internal fun rewriteGatewayEscape(
 }
 
 // In-process LRU of fully-buffered media bodies keyed by bzz URL, so
-// successive Range requests for the same file don't re-fetch from Bee.
-// Bee returns the whole body for every Range request anyway, so the
-// second Range would otherwise download the file all over again.
+// successive Range requests for the same file don't re-fetch from the
+// gateway.
 private data class MediaBody(val bytes: ByteArray, val mime: String)
 
 private const val MEDIA_CACHE_MAX_ENTRIES = 4
@@ -861,13 +864,12 @@ private fun tryLoadMediaBody(
 private val RANGE_REGEX = Regex("""^bytes=(\d+)?-(\d+)?$""")
 
 /**
- * Serve a media subresource from Bee with synthetic Range support. Bee
- * itself returns the full body (with empty Content-Type and no
- * Accept-Ranges) for every request regardless of the `Range` header, so
- * Chromium's media pipeline stalls at `HAVE_METADATA` when it tries to
- * seek. We fetch the body once, cache it in-process, and answer each
- * Range request by slicing the buffer and returning a proper 206 with
- * Content-Range / Content-Length — exactly what Chromium expects.
+ * Serve a media subresource with synthetic Range support. We fetch the
+ * body once, cache it in-process, and answer each Range request by
+ * slicing the buffer and returning a proper 206 with Content-Range /
+ * Content-Length — exactly what Chromium expects. (Load-bearing under
+ * bee, which answered every Range with the full body; kept under ant
+ * so seeks are served from the buffer instead of re-hitting the node.)
  *
  * Also injects a real MIME type (inferred from the URL extension) so
  * the media element can pick a decoder.

@@ -3,7 +3,7 @@ package baby.freedom.mobile.browser
 import baby.freedom.swarm.SwarmNode
 
 /**
- * Maps between the user-facing `bzz://` URL scheme and the local bee-lite
+ * Maps between the user-facing `bzz://` URL scheme and the local ant
  * gateway that actually serves the content.
  *
  * User-facing (what we show in the address bar):  `bzz://<hash>[/path]`

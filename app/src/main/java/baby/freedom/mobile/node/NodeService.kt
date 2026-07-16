@@ -34,11 +34,10 @@ import kotlin.system.exitProcess
  * process. The service is started + bound while the user wants the
  * node(s) running; when the user flips the Swarm toggle off the UI
  * calls [stopService] + [unbindService], Android destroys this Service,
- * and [onDestroy] kills the process outright so that bee-lite's
- * LevelDB state-store file lock is actually released — something
- * `MobileNode.shutdown()` alone does not do. Killing the process also
- * tears down the IPFS node, which is the behaviour the user's global
- * "Run node" toggle implies anyway.
+ * and [onDestroy] kills the process outright so no native state — the
+ * ant node's tokio runtime, Kubo's repo lock — can outlive the toggle.
+ * Killing the process also tears down the IPFS node, which is the
+ * behaviour the user's global "Run node" toggle implies anyway.
  */
 class NodeService : Service() {
 
@@ -88,12 +87,7 @@ class NodeService : Service() {
         createChannel()
 
         swarmNode = SwarmNode(
-            SwarmNode.Config(
-                dataDir = filesDir.absolutePath,
-                password = NODE_KEYSTORE_PASSWORD,
-                rpcEndpoint = "",
-                cacheEnabled = true,
-            ),
+            SwarmNode.Config(dataDir = filesDir.absolutePath),
         )
 
         startForeground(
@@ -192,9 +186,9 @@ class NodeService : Service() {
         swarmNode.dispose()
         super.onDestroy()
 
-        // Kill the :node process so the kernel releases bee-lite's
-        // LevelDB LOCK file. The next startForegroundService() from
-        // the UI will boot a fresh process that can open the store.
+        // Kill the :node process so nothing native lingers (ant's
+        // tokio runtime threads, Kubo's repo lock). The next
+        // startForegroundService() from the UI boots a fresh process.
         Log.i(TAG, "exiting :node process to release state-store lock")
         exitProcess(0)
     }
@@ -265,13 +259,6 @@ class NodeService : Service() {
         private const val TAG = "NodeService"
         private const val CHANNEL_ID = "freedom_node"
         private const val NOTIFICATION_ID = 1
-
-        // Bee-lite's startNode() requires a non-empty password to encrypt the
-        // on-device keystore for the ultra-light-mode wallet it generates on
-        // first launch. In ultra-light mode the wallet is read-only (no swap,
-        // no postage stamps, no funds), so this is a throwaway per-install
-        // secret, not a user credential. Safe to be a compile-time constant.
-        private const val NODE_KEYSTORE_PASSWORD = "freedom-keystore"
 
         fun start(ctx: Context) {
             val i = Intent(ctx, NodeService::class.java)

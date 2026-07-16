@@ -19,7 +19,7 @@ import kotlin.coroutines.coroutineContext
 /**
  * HEAD-polls a local gateway URL until the content is retrievable, the
  * gateway is detected as unreachable, or an overall budget elapses. Used
- * to gate WebView navigation while the bee-lite node (and, eventually,
+ * to gate WebView navigation while the ant node (and, eventually,
  * an embedded IPFS node) is still connecting to peers.
  *
  * Mirrors `src/main/swarm/swarm-probe.js` from the freedom-browser
@@ -98,7 +98,7 @@ class GatewayProbe {
                     Log.i(TAG, "attempt timed out (${attemptTimeoutMs}ms), retrying")
                 }
                 is AttemptResult.Unreachable -> {
-                    // The bee-lite gateway socket can take a moment to
+                    // The ant gateway socket can take a moment to
                     // bind after the node flips to `Running`. Treat
                     // ECONNREFUSED as transient for a short grace
                     // window so that race doesn't turn into an error
@@ -188,7 +188,7 @@ class GatewayProbe {
         val DEFAULT_DELAYS_MS: LongArray = longArrayOf(0, 500, 1000, 2000, 3000)
 
         /**
-         * Per-attempt budget. Freshly-started bee-lite nodes routinely
+         * Per-attempt budget. Freshly-started Swarm nodes routinely
          * take 2–5 seconds to answer a feed-based `/bzz/<hash>` HEAD
          * once they have peers; a too-tight cap aborts every request
          * just as the node is about to respond. Matches the desktop's
