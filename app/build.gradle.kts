@@ -24,7 +24,12 @@ android {
 
     buildTypes {
         release {
-            isMinifyEnabled = false
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro",
+            )
             // Sign release builds with the debug keystore so they install
             // without Play Store signing. Replace with a proper release
             // signingConfig before publishing.
