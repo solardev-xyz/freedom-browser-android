@@ -80,10 +80,10 @@ class NodeSettings private constructor(
     }
 
     /**
-     * Kubo content-routing strategy. One of `autoclient`, `dhtclient`,
-     * `dht`, `none`. Default `autoclient` — delegated routing for
-     * lookups plus a client-only DHT, which is the cheapest mode that
-     * still resolves arbitrary CIDs on mobile.
+     * freedom-ipfs content-routing strategy. One of `auto`,
+     * `delegated`, `light_dht`, `offline`. Default `auto` — delegated
+     * routing for lookups with a client-only light-DHT fallback, the
+     * cheapest mode that still resolves arbitrary CIDs on mobile.
      */
     val ipfsRoutingMode: Flow<String> = store.data.map { prefs ->
         prefs[Keys.IPFS_ROUTING_MODE] ?: DEFAULT_IPFS_ROUTING_MODE
@@ -101,17 +101,19 @@ class NodeSettings private constructor(
     }
 
     companion object {
-        const val DEFAULT_IPFS_ROUTING_MODE = "autoclient"
+        const val DEFAULT_IPFS_ROUTING_MODE = "auto"
 
         /**
-         * Valid Kubo content-routing strategies, in the order we want
-         * them to appear in the settings picker.
+         * Valid freedom-ipfs routing strategies, in the order we want
+         * them to appear in the settings picker. Legacy Kubo values
+         * persisted by earlier builds ("autoclient", "dht", …) are
+         * mapped to "auto" by the swarmnode IpfsNode wrapper.
          */
         val IPFS_ROUTING_MODES: List<String> = listOf(
-            "autoclient",
-            "dhtclient",
-            "dht",
-            "none",
+            "auto",
+            "delegated",
+            "light_dht",
+            "offline",
         )
 
         private val Context.nodeSettingsStore by preferencesDataStore(

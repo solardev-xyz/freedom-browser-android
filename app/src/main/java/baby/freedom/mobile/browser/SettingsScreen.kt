@@ -306,7 +306,6 @@ private fun IpfsSection(
     onIpfsToggle: (Boolean) -> Unit,
 ) {
     val scope = rememberCoroutineScope()
-    val lowPower by settings.ipfsLowPower.collectAsState(initial = true)
     val routingMode by settings.ipfsRoutingMode
         .collectAsState(initial = NodeSettings.DEFAULT_IPFS_ROUTING_MODE)
 
@@ -336,15 +335,12 @@ private fun IpfsSection(
             )
         }
 
-        if (ipfsInfo.connectedPeers > 0 || ipfsInfo.peerId.isNotBlank()) {
+        if (ipfsInfo.gatewayUrl.isNotBlank()) {
             Spacer(Modifier.height(8.dp))
-            if (ipfsInfo.peerId.isNotBlank()) {
-                DetailRow("Peer ID", ipfsInfo.peerId, mono = true)
-            }
-            DetailRow("Peers", ipfsInfo.connectedPeers.toString())
-            if (ipfsInfo.gatewayUrl.isNotBlank()) {
-                DetailRow("Gateway", ipfsInfo.gatewayUrl, mono = true)
-            }
+            // connectedPeers carries verified blocks fetched — the
+            // reader has no peer set (see swarmnode IpfsNode).
+            DetailRow("Blocks fetched", ipfsInfo.connectedPeers.toString())
+            DetailRow("Gateway", ipfsInfo.gatewayUrl, mono = true)
         }
         val err = ipfsInfo.errorMessage
         if (!err.isNullOrBlank()) {
@@ -353,29 +349,6 @@ private fun IpfsSection(
         }
 
         Spacer(Modifier.height(12.dp))
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(vertical = 4.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Column(modifier = Modifier.weight(1f)) {
-                Text("Low-power mode", fontWeight = FontWeight.Medium)
-                Text(
-                    "Tighter connection + stream limits",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-            Switch(
-                checked = lowPower,
-                onCheckedChange = { enabled ->
-                    scope.launch { settings.setIpfsLowPower(enabled) }
-                },
-            )
-        }
-
-        Spacer(Modifier.height(8.dp))
         RoutingModePicker(
             selected = routingMode,
             onSelect = { mode ->
@@ -385,7 +358,7 @@ private fun IpfsSection(
 
         Spacer(Modifier.height(8.dp))
         Text(
-            "Low-power and routing mode apply the next time IPFS " +
+            "Routing mode applies the next time IPFS " +
                 "starts — toggle IPFS off and on to re-init.",
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
@@ -502,10 +475,10 @@ private data class IpfsStatusTriple(
  *  - `Error`        — last start attempt threw
  */
 private fun ipfsStatusTriple(info: IpfsInfo): IpfsStatusTriple = when (info.status) {
-    IpfsStatus.Running -> if (info.connectedPeers > 0) IpfsStatusTriple(
+    // freedom-ipfs is an on-demand reader: the gateway being up means
+    // the node is usable — there is no peer set to wait for.
+    IpfsStatus.Running -> IpfsStatusTriple(
         Color(0xFF22C55E), Icons.Filled.CheckCircle, "Connected",
-    ) else IpfsStatusTriple(
-        Color(0xFFF59E0B), Icons.Filled.HourglassTop, "Connecting…",
     )
     IpfsStatus.Starting -> IpfsStatusTriple(
         Color(0xFFF59E0B), Icons.Filled.HourglassTop, "Connecting…",

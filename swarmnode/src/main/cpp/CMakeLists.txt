@@ -11,3 +11,10 @@ project(ant_jni C)
 add_library(ant_jni SHARED ant_jni.c)
 target_link_directories(ant_jni PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../jniLibs/${ANDROID_ABI})
 target_link_libraries(ant_jni ant_ffi log)
+
+# Same arrangement for libfreedom_ipfs_jni.so over the prebuilt
+# libfreedom_ipfs_mobile.so (cargo xtask build-android-* in
+# solardev-xyz/freedom-ipfs).
+add_library(freedom_ipfs_jni SHARED freedom_ipfs_jni.c)
+target_link_directories(freedom_ipfs_jni PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../jniLibs/${ANDROID_ABI})
+target_link_libraries(freedom_ipfs_jni freedom_ipfs_mobile log)
