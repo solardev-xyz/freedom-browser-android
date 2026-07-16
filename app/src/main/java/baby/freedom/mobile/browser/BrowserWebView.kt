@@ -123,7 +123,15 @@ private fun HttpURLConnection.forwardProxiedHeaders(
     applySwarmRequestHeaders()
 }
 
-private fun extractBzzRoot(url: String?): String? = GatewayUrls.extractRoot(url)
+// Root extraction must tolerate bare-hash page URLs: bee 301-redirected
+// `/bzz/<hash>` to `/bzz/<hash>/`, so the committed URL always carried the
+// trailing slash `GatewayUrls.extractRoot` requires — but ant serves the
+// bare form directly with 200, and without this fallback onPageStarted
+// would wipe the root `BrowserState.loadUrl` seeded (same fallback as
+// there), breaking every absolute-root subresource rewrite on the page.
+private fun extractBzzRoot(url: String?): String? =
+    GatewayUrls.extractRoot(url)
+        ?: url?.let { u -> GatewayUrls.extractBase(u)?.prefix?.plus("/") }
 
 // Max width (in px) of a thumbnail bitmap. Anything bigger is wasteful
 // since we only ever render these at half-screen-ish sizes in the grid.
