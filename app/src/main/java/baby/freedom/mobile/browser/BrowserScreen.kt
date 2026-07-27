@@ -225,7 +225,7 @@ private suspend fun awaitSwarmRunning(
 }
 
 /**
- * IPFS analogue of [awaitSwarmRunning]. The Kubo node lives on the same
+ * IPFS analogue of [awaitSwarmRunning]. The IPFS node lives on the same
  * `:node` process as Swarm — so if the user has turned the process off
  * (`runNodeEnabled` false), the only honest answer is "unrecoverable".
  */
@@ -363,7 +363,7 @@ fun BrowserScreen(
         //
         // The IPFS node is lazy-started — the first IPFS navigation
         // in a given `:node` process kicks off `ensureIpfsStarted()`
-        // here so we don't pay the Kubo bootstrap cost on cold app
+        // here so we don't pay the IPFS bootstrap cost on cold app
         // launch. Idempotent on the service side; safe to call on
         // every IPFS navigation.
         val readiness = if (isIpfs) {

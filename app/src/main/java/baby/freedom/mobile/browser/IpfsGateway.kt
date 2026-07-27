@@ -2,13 +2,13 @@ package baby.freedom.mobile.browser
 
 /**
  * Maps between the user-facing `ipfs://` / `ipns://` URL schemes and
- * the embedded Kubo HTTP gateway that actually serves the content.
+ * the embedded freedom-ipfs HTTP gateway that actually serves the content.
  *
  *   User-facing:  `ipfs://<cid>[/path]`   `ipns://<name>[/path]`
  *   Loadable:     `http://127.0.0.1:<port>/ipfs/<cid>[/path]`
  *                 `http://127.0.0.1:<port>/ipns/<name>[/path]`
  *
- * Parallel to [SwarmResolver]. The Kubo gateway port is not fixed —
+ * Parallel to [SwarmResolver]. The IPFS gateway port is not fixed —
  * [baby.freedom.swarm.IpfsNode] starts the listener on `127.0.0.1:0`
  * and the kernel picks a free port at startup — so both directions
  * take the current `base` (`"http://127.0.0.1:<port>"`) as a parameter.

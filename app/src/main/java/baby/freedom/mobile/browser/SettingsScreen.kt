@@ -298,7 +298,7 @@ private fun OtherSection(
 // [IpfsInfo.status]: we never persist a "run IPFS" preference, so the
 // toggle is always off at cold launch. Flipping it on calls
 // [onIpfsToggle] which routes through `MainActivity` → `NodeService`
-// to start/stop the Kubo node live.
+// to start/stop the IPFS node live.
 @Composable
 private fun IpfsSection(
     settings: NodeSettings,
@@ -466,7 +466,7 @@ private data class IpfsStatusTriple(
 )
 
 /**
- * Translate the live Kubo [IpfsInfo] into an icon + color + user-
+ * Translate the live IPFS [IpfsInfo] into an icon + color + user-
  * facing label for the master IPFS toggle. Visible to the user:
  *
  *  - `Disconnected` — node not running (toggle off)

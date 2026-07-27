@@ -33,7 +33,7 @@ import kotlinx.coroutines.launch
  * out-of-process [NodeService]. Both the Swarm and IPFS nodes run
  * inside the `:node` process; flipping the UI's "run node" toggle off
  * tears that process down so no native state (ant's tokio runtime,
- * Kubo's repo lock) survives, letting a future toggle-on boot clean.
+ * the freedom-ipfs block store) survives, letting a future toggle-on boot clean.
  *
  * IPFS state is hidden from the default UI — see `SettingsScreen`'s
  * "Other" section for the reveal gate — but the flow is plumbed all
@@ -136,7 +136,7 @@ class MainActivity : ComponentActivity() {
 
     /**
      * Lazy-start hook for the IPFS node. Called by [BrowserScreen] the
-     * first time a navigation needs IPFS — we don't pay the Kubo boot
+     * first time a navigation needs IPFS — we don't pay the IPFS boot
      * + peer-discovery cost on app launch, only when the user actually
      * visits `ipfs://` / `ipns://` / an IPFS-resolved `ens://`.
      *
@@ -149,7 +149,7 @@ class MainActivity : ComponentActivity() {
 
     /**
      * Handle the user flipping the "IPFS" toggle in Settings. Starts
-     * or stops the Kubo node live — there's no persisted "run IPFS"
+     * or stops the freedom-ipfs node live — there's no persisted "run IPFS"
      * flag; each cold launch begins with IPFS off, and the toggle
      * state is derived from the live [IpfsInfo.status] broadcast.
      */

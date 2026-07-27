@@ -35,7 +35,7 @@ import kotlin.system.exitProcess
  * node(s) running; when the user flips the Swarm toggle off the UI
  * calls [stopService] + [unbindService], Android destroys this Service,
  * and [onDestroy] kills the process outright so no native state — the
- * ant node's tokio runtime, Kubo's repo lock — can outlive the toggle.
+ * ant node's tokio runtime, the freedom-ipfs store lock — can outlive the toggle.
  * Killing the process also tears down the IPFS node, which is the
  * behaviour the user's global "Run node" toggle implies anyway.
  */
@@ -106,7 +106,7 @@ class NodeService : Service() {
 
         swarmNode.start()
 
-        // IPFS is NOT started here. Cold boot leaves the Kubo node
+        // IPFS is NOT started here. Cold boot leaves the freedom-ipfs node
         // dormant so users who never visit `ipfs://` / IPFS-resolved
         // ENS content don't pay the bootstrap cost (or the background
         // peer churn) for a network they'll never use. The UI calls
@@ -120,11 +120,11 @@ class NodeService : Service() {
      * Idempotently bring the IPFS node up. Driven entirely by the UI:
      * either the user flipping the IPFS toggle on in Settings, or the
      * first `ipfs://` / `ipns://` / IPFS-resolved `ens://` navigation
-     * hitting [INodeService.ensureIpfsStarted]. No-op if a Kubo node
+     * hitting [INodeService.ensureIpfsStarted]. No-op if an IPFS node
      * is already live in this `:node` process.
      *
      * `ipfs_low_power` and `ipfs_routing_mode` are snapshotted here
-     * and written into the Kubo repo on first init; the Kubo wrapper
+     * and applied on node init; the freedom-ipfs wrapper
      * has no live-reconfig path, so changing them in Settings only
      * takes effect on the next start cycle (off → on).
      */
@@ -187,7 +187,7 @@ class NodeService : Service() {
         super.onDestroy()
 
         // Kill the :node process so nothing native lingers (ant's
-        // tokio runtime threads, Kubo's repo lock). The next
+        // tokio runtime threads, the freedom-ipfs store lock). The next
         // startForegroundService() from the UI boots a fresh process.
         Log.i(TAG, "exiting :node process to release state-store lock")
         exitProcess(0)

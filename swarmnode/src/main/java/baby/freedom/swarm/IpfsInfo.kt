@@ -4,7 +4,7 @@ import android.os.Parcelable
 import kotlinx.parcelize.Parcelize
 
 /**
- * Snapshot of the embedded Kubo (IPFS) node's runtime state.
+ * Snapshot of the embedded IPFS node's runtime state.
  *
  * Parallel to [NodeInfo] for the Bee node. Marshalled across the UI ↔
  * `:node` AIDL boundary so the browser process can gate `ipfs://` /

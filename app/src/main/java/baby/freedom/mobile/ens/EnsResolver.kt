@@ -239,7 +239,7 @@ class EnsResolver(
 
     /**
      * Encode raw CID bytes (everything after the EIP-1577 protoCode
-     * varint) to the string form Kubo's gateway accepts. Returns `null`
+     * varint) to the string form the IPFS gateway accepts. Returns `null`
      * if the layout isn't recognised as either CIDv0 or CIDv1.
      */
     private fun encodeCid(cid: ByteArray): String? {

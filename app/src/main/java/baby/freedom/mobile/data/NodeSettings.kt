@@ -26,9 +26,9 @@ import kotlinx.coroutines.flow.map
  *
  * `ipfs_low_power` and `ipfs_routing_mode` are read at `:node` process
  * startup and re-applied on the next restart — there is no live
- * reconfig path on the Kubo wrapper.
+ * reconfig path on the freedom-ipfs wrapper.
  *
- * There is no persistent "run IPFS" flag by design. The Kubo node is
+ * There is no persistent "run IPFS" flag by design. The IPFS node is
  * always off at cold launch (demo-surprise requirement) and driven
  * live via AIDL: [baby.freedom.mobile.node.INodeService.ensureIpfsStarted]
  * from the Settings toggle or the first `ipfs://` / `ipns://`
@@ -56,7 +56,7 @@ class NodeSettings private constructor(
     /**
      * Whether any IPFS UI is rendered. Off by default — IPFS support
      * is a hidden capability surfaced only from Settings → Other. The
-     * Kubo node still runs regardless of this flag.
+     * IPFS node still runs regardless of this flag.
      */
     val showIpfsUi: Flow<Boolean> = store.data.map { prefs ->
         prefs[Keys.SHOW_IPFS_UI] ?: false
@@ -67,8 +67,8 @@ class NodeSettings private constructor(
     }
 
     /**
-     * Apply Kubo's "lowpower" init profile. Tighter connection / stream
-     * limits and client-only DHT participation; battery-friendly.
+     * Legacy Kubo "lowpower" toggle, retained for settings compatibility;
+     * freedom-ipfs ignores it — its defaults are already mobile-budgeted.
      * Default `true`.
      */
     val ipfsLowPower: Flow<Boolean> = store.data.map { prefs ->
