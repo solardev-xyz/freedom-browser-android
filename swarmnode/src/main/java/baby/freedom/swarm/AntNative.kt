@@ -1,8 +1,9 @@
 package baby.freedom.swarm
 
 /**
- * Raw JNI surface over the embedded ant light-node (`libant_ffi.so`),
- * bridged by the shim in `src/main/cpp/ant_jni.c`.
+ * Raw JNI surface over the embedded ant light-node (the Swarm half of
+ * the combined `libfreedom_mobile_ffi.so`), bridged by the shim in
+ * `src/main/cpp/ant_jni.c`.
  *
  * Handles are `*mut AntHandle` cast to [Long]; `0` is never a valid
  * handle. Every call is blocking — callers must stay off the main
@@ -11,8 +12,8 @@ package baby.freedom.swarm
  */
 internal object AntNative {
     init {
-        // Pulls in libant_ffi.so transitively via DT_NEEDED.
-        System.loadLibrary("ant_jni")
+        // Pulls in libfreedom_mobile_ffi.so transitively via DT_NEEDED.
+        System.loadLibrary("freedom_jni")
     }
 
     /** Boot the node against Swarm mainnet; returns a non-zero handle. */

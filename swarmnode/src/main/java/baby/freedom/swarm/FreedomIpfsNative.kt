@@ -1,8 +1,8 @@
 package baby.freedom.swarm
 
 /**
- * Raw JNI surface over the embedded freedom-ipfs reader
- * (`libfreedom_ipfs_mobile.so`), bridged by the shim in
+ * Raw JNI surface over the embedded freedom-ipfs reader (the IPFS half
+ * of the combined `libfreedom_mobile_ffi.so`), bridged by the shim in
  * `src/main/cpp/freedom_ipfs_jni.c`.
  *
  * Handles are `*mut FreedomIpfsNode` cast to [Long]; `0` is never a
@@ -12,8 +12,8 @@ package baby.freedom.swarm
  */
 internal object FreedomIpfsNative {
     init {
-        // Pulls in libfreedom_ipfs_mobile.so transitively via DT_NEEDED.
-        System.loadLibrary("freedom_ipfs_jni")
+        // Pulls in libfreedom_mobile_ffi.so transitively via DT_NEEDED.
+        System.loadLibrary("freedom_jni")
     }
 
     /** `FREEDOM_IPFS_ROUTING_MODE_*` constants from freedom_ipfs.h. */

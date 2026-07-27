@@ -1,6 +1,6 @@
 # Freedom — Swarm Browser for Android
 
-A native Android browser that loads both regular `https://` sites and decentralised content addressed via `bzz://` hashes or `ens://` names. An embedded [ant](https://github.com/solardev-xyz/ant) light-node (a Swarm client in Rust) runs inside the app and serves Swarm content through a local bee-shaped HTTP gateway; the WebView sees an ordinary `http://127.0.0.1:1633/bzz/…` URL. IPFS/IPNS content is served by an embedded Kubo node from the [freedom-node-mobile](https://github.com/solardev-xyz/freedom-node-mobile) AAR.
+A native Android browser that loads both regular `https://` sites and decentralised content addressed via `bzz://` hashes or `ens://` names. Both embedded nodes — [ant](https://github.com/solardev-xyz/ant), a Swarm light-node in Rust serving a local bee-shaped HTTP gateway on `127.0.0.1:1633`, and the [freedom-ipfs](https://github.com/solardev-xyz/freedom-ipfs) reader serving `ipfs://` / `ipns://` on an ephemeral loopback port — ship as one combined Rust library, `libfreedom_mobile_ffi.so`, built from [freedom-mobile-ffi](https://github.com/solardev-xyz/freedom-mobile-ffi). The WebView sees ordinary `http://127.0.0.1:…` URLs.
 
 - **Package:** `baby.freedom.mobile` · **Version:** 0.3.0
 - **Inspired by:** [`Solar-Punk-Ltd/swarm-mobile-android`](https://github.com/Solar-Punk-Ltd/swarm-mobile-android)
@@ -16,15 +16,13 @@ A native Android browser that loads both regular `https://` sites and decentrali
 | Kotlin | 2.1.10 | Managed by Gradle plugin. |
 | Android Gradle Plugin | 8.13.2 | Managed by Gradle plugin. |
 
-Building the two embedded-node artifacts (required — neither is checked in) additionally requires:
+Building the embedded-node artifact (required — not checked in) additionally requires:
 
 | Component | Version | Notes |
 |---|---|---|
-| Rust | stable | Compiles `libant_ffi.so` (the embedded ant Swarm node) — see [Building libant_ffi.so](#building-libant_ffiso). |
-| cargo-ndk | latest | `cargo install cargo-ndk` — used by ant's `cargo xtask build-android-*`. |
-| Go | 1.26+ | `gomobile bind` compiles the embedded Kubo (IPFS) node — see [Building mobile.aar](#building-mobileaar). |
-| Android NDK | r27+ | Installed via `sdkmanager "ndk;27.2.12479018"` or similar. Also builds the JNI shim in `swarmnode/src/main/cpp/`. |
-| gomobile | latest | `go install golang.org/x/mobile/cmd/gomobile@latest` — handled by `make install` inside the `freedom-node-mobile` clone. |
+| Rust | pinned by `rust-toolchain.toml` in freedom-mobile-ffi | Compiles `libfreedom_mobile_ffi.so` (ant + freedom-ipfs in one cdylib) — see [Building libfreedom_mobile_ffi.so](#building-libfreedom_mobile_ffiso). |
+| cargo-ndk | latest | `cargo install cargo-ndk` — used by freedom-mobile-ffi's `scripts/build-android.sh`. |
+| Android NDK | r27+ | Installed via `sdkmanager "ndk;27.2.12479018"` or similar. Also builds the JNI shims in `swarmnode/src/main/cpp/`. |
 
 ### One-time environment setup (macOS with Homebrew)
 
@@ -49,28 +47,20 @@ Fresh clone, from zero to a running app:
 # 1. Activate the toolchain env (JDK 17 + Android SDK).
 source .envrc   # if you haven't: cp .envrc.example .envrc && edit to taste
 
-# 2. Build the embedded ant node (Swarm). Produces
-#    swarmnode/src/main/jniLibs/{arm64-v8a,x86_64}/libant_ffi.so, which is
-#    gitignored and must exist before Gradle can build the app.
-#    Needs Rust (stable), cargo-ndk, and the Android NDK.
-git clone https://github.com/solardev-xyz/ant.git /tmp/ant
-( cd /tmp/ant && cargo xtask build-android-arm64 && cargo xtask build-android-x86_64 )
-mkdir -p swarmnode/src/main/jniLibs/{arm64-v8a,x86_64}
-cp /tmp/ant/target/aarch64-linux-android/release/libant_ffi.so swarmnode/src/main/jniLibs/arm64-v8a/
-cp /tmp/ant/target/x86_64-linux-android/release/libant_ffi.so swarmnode/src/main/jniLibs/x86_64/
+# 2. Build the combined embedded-node library (ant/Swarm + freedom-ipfs).
+#    Produces target/android/jniLibs/{arm64-v8a,x86_64}/libfreedom_mobile_ffi.so,
+#    which is gitignored here and must exist before Gradle can build the app.
+#    Needs cargo-ndk and ANDROID_NDK_HOME; rustup picks the toolchain from
+#    the repo's rust-toolchain.toml.
+git clone https://github.com/solardev-xyz/freedom-mobile-ffi.git /tmp/freedom-mobile-ffi
+( cd /tmp/freedom-mobile-ffi && ./scripts/build-android.sh )
+mkdir -p swarmnode/src/main/jniLibs
+cp -r /tmp/freedom-mobile-ffi/target/android/jniLibs/. swarmnode/src/main/jniLibs/
 
-# 3. Build the embedded Kubo node (IPFS). ~5 minutes on first run, cache-fast
-#    after. Produces the ~143 MiB swarmnode/libs/mobile.aar (gitignored, too
-#    big for GitHub). Needs Go 1.26+, Android NDK r27+, and gomobile — see
-#    § Building mobile.aar for toolchain setup.
-git clone https://github.com/solardev-xyz/freedom-node-mobile.git /tmp/freedom-node-mobile
-( cd /tmp/freedom-node-mobile && make install && make build )
-cp /tmp/freedom-node-mobile/build/mobile-*.aar swarmnode/libs/mobile.aar
-
-# 4. Build the debug APK.
+# 3. Build the debug APK.
 ./gradlew :app:assembleDebug
 
-# 5. Install on a connected device or running emulator.
+# 4. Install on a connected device or running emulator.
 ./gradlew :app:installDebug
 # or, for a slim per-ABI APK on a physical arm64 device:
 #   adb install -r app/build/outputs/apk/debug/app-arm64-v8a-debug.apk
@@ -135,23 +125,24 @@ freedom-browser-android/
 │       ├── ens/                  # Keccak256, ENS contenthash, Universal Resolver
 │       └── node/NodeService.kt   # foreground service owning the Swarm node
 ├── swarmnode/                    # Kotlin wrapper around the embedded nodes
-│   ├── libs/mobile.aar           # ~143 MiB embedded Kubo/IPFS node (gitignored — build it, see below)
-│   ├── src/main/jniLibs/         # libant_ffi.so per ABI — embedded ant/Swarm node (gitignored)
-│   ├── src/main/cpp/             # ant.h (vendored) + JNI shim over the ant C API
+│   ├── src/main/jniLibs/         # libfreedom_mobile_ffi.so per ABI — combined ant + freedom-ipfs (gitignored)
+│   ├── src/main/cpp/             # vendored ant.h + freedom_ipfs.h, JNI shims over both C APIs
 │   └── src/main/java/baby/freedom/swarm/
-│       ├── SwarmNode.kt          # lifecycle + StateFlow<NodeInfo>
-│       ├── AntNative.kt          # raw JNI surface over libant_ffi.so
+│       ├── SwarmNode.kt          # ant lifecycle + StateFlow<NodeInfo>
+│       ├── AntNative.kt          # raw JNI surface over the ant C API
+│       ├── IpfsNode.kt           # freedom-ipfs lifecycle + StateFlow<IpfsInfo>
+│       ├── FreedomIpfsNative.kt  # raw JNI surface over the freedom-ipfs C API
 │       ├── NodeInfo.kt           # status, peers, error
 │       └── NodeStatus.kt         # Stopped | Starting | Running | Error
 ├── TODO.md                       # todo + deferred work
 ├── build.gradle.kts              # plugin versions
-├── settings.gradle.kts           # module wiring + flatDir for mobile.aar
+├── settings.gradle.kts           # module wiring
 └── .envrc.example                # JAVA_HOME / ANDROID_HOME pointers for macOS
 ```
 
 Two Gradle modules:
 - `:app` — the Android application.
-- `:swarmnode` — a self-contained Android library wrapping the embedded ant node (`libant_ffi.so` + JNI shim) and the Kubo node (`mobile.aar`), depended on by `:app`. Designed to be publishable on its own.
+- `:swarmnode` — a self-contained Android library wrapping both embedded nodes (`libfreedom_mobile_ffi.so` + the JNI shims), depended on by `:app`. Designed to be publishable on its own.
 
 ## Common tasks
 
@@ -172,90 +163,47 @@ $ANDROID_HOME/build-tools/36.0.0/aapt2 dump badging app/build/outputs/apk/debug/
 # package: name='baby.freedom.mobile' versionCode='5' versionName='0.3.0'
 ```
 
-## Building `libant_ffi.so`
+## Building `libfreedom_mobile_ffi.so`
 
-`libant_ffi.so` is the embedded ant node — the Rust Swarm light-node compiled per ABI. It's **not checked in**; every fresh clone builds it once:
+`libfreedom_mobile_ffi.so` is both embedded nodes in one Rust cdylib — the ant Swarm light-node plus the freedom-ipfs reader, compiled per ABI from [`solardev-xyz/freedom-mobile-ffi`](https://github.com/solardev-xyz/freedom-mobile-ffi). Combining them in a single compilation graph dedupes everything the two dependency trees share (std, tokio, hyper/axum, libp2p, ring, SQLite, …), which is ~7 MiB per ABI versus shipping two separate `.so`s. It's **not checked in**; every fresh clone builds it once:
 
 ```bash
-# 1. Clone ant somewhere outside this repo.
-git clone https://github.com/solardev-xyz/ant.git /tmp/ant
+# 1. Clone freedom-mobile-ffi somewhere outside this repo.
+git clone https://github.com/solardev-xyz/freedom-mobile-ffi.git /tmp/freedom-mobile-ffi
 
-# 2. Cross-compile. Needs rustup targets + cargo-ndk + ANDROID_NDK_HOME;
-#    the xtask prints exactly what's missing if something isn't set up.
-cd /tmp/ant
-cargo xtask build-android-arm64     # aarch64-linux-android
-cargo xtask build-android-x86_64    # x86_64-linux-android (emulator)
+# 2. Cross-compile both ABIs. Needs cargo-ndk + ANDROID_NDK_HOME; rustup
+#    installs the pinned toolchain + targets from rust-toolchain.toml.
+#    The script also verifies both C ABIs are exported and stages the
+#    matching headers under target/android/headers/.
+cd /tmp/freedom-mobile-ffi
+./scripts/build-android.sh
 
 # 3. Copy the results into Freedom.
 cd <freedom-browser-android>
-mkdir -p swarmnode/src/main/jniLibs/{arm64-v8a,x86_64}
-cp /tmp/ant/target/aarch64-linux-android/release/libant_ffi.so swarmnode/src/main/jniLibs/arm64-v8a/
-cp /tmp/ant/target/x86_64-linux-android/release/libant_ffi.so swarmnode/src/main/jniLibs/x86_64/
+mkdir -p swarmnode/src/main/jniLibs
+cp -r /tmp/freedom-mobile-ffi/target/android/jniLibs/. swarmnode/src/main/jniLibs/
 ```
 
-The Kotlin side talks to it through the hand-written JNI shim in `swarmnode/src/main/cpp/ant_jni.c` (built by the module's CMake step), which wraps the C API in the vendored `ant.h`: `ant_init`, `ant_start_gateway` (the bee-shaped HTTP gateway on `127.0.0.1:1633`), `ant_peer_count`, `ant_shutdown`. When upgrading ant, refresh `swarmnode/src/main/cpp/ant.h` from `crates/ant-ffi/include/ant.h` along with the `.so`s.
-
-## Building `mobile.aar`
-
-`mobile.aar` is the embedded Kubo (IPFS) node — ~150 MiB of statically-linked Go, built from [`solardev-xyz/freedom-node-mobile`](https://github.com/solardev-xyz/freedom-node-mobile) (a combined gomobile binding of bee-lite + kubo; only the `mobile.IpfsNode` surface is used since the Swarm side moved to ant). It's **not checked in**: it exceeds GitHub's 100 MB per-file limit, and rebuilds are non-deterministic (see [Reproducibility caveat](#reproducibility-caveat)). Every fresh clone needs to build it once.
-
-### Steps
-
-```bash
-# 1. Clone freedom-node-mobile somewhere outside this repo.
-git clone https://github.com/solardev-xyz/freedom-node-mobile.git /tmp/freedom-node-mobile
-
-# 2. Produce the AAR. The 'install' target runs go mod tidy + gomobile init.
-cd /tmp/freedom-node-mobile
-make install
-make build      # gomobile bind -target=android -androidapi=30 -ldflags="-checklinkname=0 ..."
-
-# 3. Copy the result into Freedom (replace <freedom-browser-android> with this repo's path).
-cp build/mobile-*.aar <freedom-browser-android>/swarmnode/libs/mobile.aar
-
-# 4. Build Freedom against the new AAR.
-cd <freedom-browser-android>
-./gradlew :app:assembleDebug
-```
-
-Expect `make build` to take several minutes on first run — `gomobile bind` compiles the full bee + kubo + `go-ethereum` + `go-libp2p` tree four times (one per ABI). Subsequent builds are cache-fast. A kubo-only AAR (dropping the now-unused bee half) would roughly halve it — that's a `freedom-node-mobile` change, tracked there.
-
-### When to rebuild
-
-After the initial build, you only need to rebuild when:
-
-- Upgrading Kubo to a newer version.
-- Shrinking the binary (adding `-ldflags="-s -w"`, stripping DWARF, Go build tags to drop unused bee packages — the AAR still statically links the whole bee tree even though Freedom now only uses its Kubo half).
-- Patching the Go side (e.g. exposing a new method on `IpfsNode`).
-
-### What's inside
-
-The resulting AAR contains:
-
-- `classes.jar` — gomobile Java/JNI bridge + the public `mobile.MobileNode` / `mobile.IpfsNode` surfaces.
-- `jni/{arm64-v8a,armeabi-v7a,x86,x86_64}/libgojni.so` (~62–68 MiB each) — Kubo plus the (now unused) bee node statically linked (`Solar-Punk-Ltd/bee-lite` + `ethersphere/bee/v2` + `go-ethereum` + `go-libp2p`).
-
-### Reproducibility caveat
-
-`make install` runs `go mod tidy`, which re-resolves indirect dependency versions against whatever's currently available on the Go module proxy. Two builds on different days will be functionally equivalent but produce different SHA-256s as `golang.org/x/{crypto,net,sys,...}` and other transitive deps release patches. Pinning the exact bytes would require a vendored Go module tree, which upstream doesn't provide.
+The Kotlin side talks to it through the hand-written JNI shims in `swarmnode/src/main/cpp/` (built into `libfreedom_jni.so` by the module's CMake step): `ant_jni.c` wraps the ant C API (`ant_init`, `ant_start_gateway` — the bee-shaped HTTP gateway on `127.0.0.1:1633` —, `ant_peer_count`, `ant_shutdown`) and `freedom_ipfs_jni.c` wraps the freedom-ipfs loopback-gateway surface. When upgrading, refresh the vendored `swarmnode/src/main/cpp/{ant.h,freedom_ipfs.h}` from the build's `target/android/headers/` along with the `.so`s, and bump the pinned (ant, freedom-ipfs) tags in freedom-mobile-ffi's `Cargo.toml` — the same aggregator also feeds the iOS xcframework, so both platforms move versions together.
 
 ## APK size
 
-The embedded Kubo node is ~62–68 MiB per ABI and the ant node adds its own `.so` on top, so the size story depends on how many ABIs you ship.
+The combined node library is ~20 MiB (arm64) / ~23 MiB (x86_64) and dominates the APK — everything else (dex, resources, the JNI shim) is under 6 MiB in a release build.
 
-`app/build.gradle.kts` already enables per-ABI splits (`arm64-v8a` + `x86_64`) alongside a universal fallback, so every debug/release build produces:
+`app/build.gradle.kts` already enables per-ABI splits (`arm64-v8a` + `x86_64`) alongside a universal fallback, so every build produces:
 
-| APK | Size | Use |
-|---|---|---|
-| `app-arm64-v8a-debug.apk` | ~157 MiB | Physical arm64 devices, Apple Silicon emulators |
-| `app-x86_64-debug.apk` | ~189 MiB | x86_64 Android emulators |
-| `app-universal-debug.apk` | ~456 MiB | Fallback / `:installDebug` default |
+| APK | Release | Debug | Use |
+|---|---|---|---|
+| `app-arm64-v8a-*.apk` | ~25 MiB | ~94 MiB | Physical arm64 devices, Apple Silicon emulators |
+| `app-x86_64-*.apk` | ~28 MiB | ~98 MiB | x86_64 Android emulators |
+| `app-universal-*.apk` | ~48 MiB | ~127 MiB | Fallback / `:installDebug` default |
+
+(For context: shipping ant and freedom-ipfs as two separate `.so`s cost ~11 MiB more per ABI in duplicated Rust std/tokio/libp2p/SQLite; the gomobile-era APKs were 157–456 MiB.)
 
 For distribution, Android App Bundles ship just the one ABI the device needs via Play Store's dynamic delivery:
 
 ```bash
 ./gradlew :app:bundleRelease
-# app/build/outputs/bundle/release/app-release.aab  (~150 MiB bundle, ~80 MiB per-device install)
 ```
 
 ## Troubleshooting
@@ -266,17 +214,17 @@ For distribution, Android App Bundles ship just the one ABI the device needs via
 
 **Node never reaches `Running` on emulator.** Check `adb logcat -s SwarmNode` for errors. If the node runs but gathers no peers, the network may be blocking outbound TCP dials or UDP DNS to `1.1.1.1` (ant's bootstrap fallback). Try on a different network or a physical device.
 
-**`UnsatisfiedLinkError: dlopen failed: library "libgojni.so" not found` after a minified release build.** Make sure `swarmnode/consumer-rules.pro` is being honoured — it ships `-keep class mobile.** { *; }` and `-keep class go.** { *; }`; R8 removes the gomobile-generated classes without these. The same file keeps `baby.freedom.swarm.AntNative`'s native method names, which the ant JNI shim resolves by exact symbol.
+**`UnsatisfiedLinkError` after a minified release build.** Make sure `swarmnode/consumer-rules.pro` is being honoured — it keeps the native method names on `baby.freedom.swarm.AntNative` and `baby.freedom.swarm.FreedomIpfsNative`, which the JNI shims resolve by exact symbol; R8 renames them without it.
 
-**`UnsatisfiedLinkError` mentioning `libant_ffi.so` or `libant_jni.so`.** The prebuilt ant library for that ABI is missing from `swarmnode/src/main/jniLibs/` — see [Building libant_ffi.so](#building-libant_ffiso).
+**`UnsatisfiedLinkError` mentioning `libfreedom_mobile_ffi.so` or `libfreedom_jni.so`.** The prebuilt combined library for that ABI is missing from `swarmnode/src/main/jniLibs/` — see [Building libfreedom_mobile_ffi.so](#building-libfreedom_mobile_ffiso).
 
 ## Further reading
 
 - [`TODO.md`](./TODO.md) — what's still open and deferred.
 - [Swarm docs](https://docs.ethswarm.org/) — the Swarm network itself.
 - [`ant`](https://github.com/solardev-xyz/ant) — the embedded Swarm light-node (Rust).
-- [`freedom-node-mobile`](https://github.com/solardev-xyz/freedom-node-mobile) — Go sources for the embedded Kubo node (combined bee+kubo AAR).
-- [`gomobile` reference](https://pkg.go.dev/golang.org/x/mobile/cmd/gobind) — Go ↔ Java type mapping rules.
+- [`freedom-ipfs`](https://github.com/solardev-xyz/freedom-ipfs) — the embedded IPFS reader (Rust).
+- [`freedom-mobile-ffi`](https://github.com/solardev-xyz/freedom-mobile-ffi) — the aggregator that builds both into one library per platform (Android `.so`, iOS xcframework).
 
 ## License
 
