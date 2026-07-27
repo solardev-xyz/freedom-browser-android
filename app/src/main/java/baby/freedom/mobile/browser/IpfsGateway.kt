@@ -22,11 +22,23 @@ object IpfsGateway {
     fun toLoadable(url: String, base: String): String {
         if (base.isEmpty()) return url
         return when {
-            url.startsWith(IPFS_PREFIX) -> "$base/ipfs/" + url.removePrefix(IPFS_PREFIX)
-            url.startsWith(IPNS_PREFIX) -> "$base/ipns/" + url.removePrefix(IPNS_PREFIX)
+            url.startsWith(IPFS_PREFIX) -> "$base/ipfs/" + rootSlash(url.removePrefix(IPFS_PREFIX))
+            url.startsWith(IPNS_PREFIX) -> "$base/ipns/" + rootSlash(url.removePrefix(IPNS_PREFIX))
             else -> url
         }
     }
+
+    /**
+     * `<cid>` → `<cid>/`: a bare root must reach the WebView with a
+     * trailing slash so the page's *relative* URLs resolve under the
+     * root instead of under `/ipfs/`. Kubo enforced this shape with a
+     * 301 on bare directory roots; the freedom-ipfs gateway serves the
+     * bare form directly (and ignores the slash on single-file CIDs),
+     * so the browser has to normalize. Roots that already carry a
+     * path, query, or fragment are left alone.
+     */
+    private fun rootSlash(rest: String): String =
+        if (rest.isNotEmpty() && rest.none { it == '/' || it == '?' || it == '#' }) "$rest/" else rest
 
     fun toDisplay(url: String, base: String): String {
         if (base.isEmpty()) return url

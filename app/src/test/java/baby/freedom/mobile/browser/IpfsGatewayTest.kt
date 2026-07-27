@@ -24,6 +24,30 @@ class IpfsGatewayTest {
     }
 
     @Test
+    fun `bare ipfs root gains trailing slash`() {
+        assertEquals(
+            "http://127.0.0.1:58312/ipfs/bafybeigdy/",
+            IpfsGateway.toLoadable("ipfs://bafybeigdy", "http://127.0.0.1:58312"),
+        )
+    }
+
+    @Test
+    fun `bare ipns root gains trailing slash`() {
+        assertEquals(
+            "http://127.0.0.1:58312/ipns/ipfs.tech/",
+            IpfsGateway.toLoadable("ipns://ipfs.tech", "http://127.0.0.1:58312"),
+        )
+    }
+
+    @Test
+    fun `root with query is not slashed`() {
+        assertEquals(
+            "http://127.0.0.1:58312/ipfs/bafy?x=1",
+            IpfsGateway.toLoadable("ipfs://bafy?x=1", "http://127.0.0.1:58312"),
+        )
+    }
+
+    @Test
     fun `empty base leaves ipfs url unchanged`() {
         assertEquals(
             "ipfs://bafy/p",
