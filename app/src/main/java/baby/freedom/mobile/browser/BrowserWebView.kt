@@ -1073,7 +1073,11 @@ private fun fetchOnce(
             // don't get handed `application/octet-stream` and get
             // refused by the renderer.
             ?: mimeTypeFromUrl(targetUrl)
-            ?: "application/octet-stream"
+            // Error responses with no Content-Type must never fall back
+            // to octet-stream: on a main-frame load Chromium treats
+            // that as a download and the navigation never finishes —
+            // the tab just hangs. Plain text renders the error inline.
+            ?: if (status >= 400) "text/plain" else "application/octet-stream"
         Log.v(LOG_TAG, "fetch: $targetUrl status=$status mime=$mime rawCt=$rawCt")
         val charset = rawCt
             ?.substringAfter("charset=", "")
