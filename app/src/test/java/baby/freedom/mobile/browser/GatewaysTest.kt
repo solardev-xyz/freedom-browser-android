@@ -27,6 +27,22 @@ class GatewaysTest {
     }
 
     @Test
+    fun `bare bzz root gains trailing slash`() {
+        assertEquals(
+            "http://127.0.0.1:1633/bzz/abc/",
+            Gateways.toLoadable("bzz://abc"),
+        )
+    }
+
+    @Test
+    fun `bzz root with query is not slashed`() {
+        assertEquals(
+            "http://127.0.0.1:1633/bzz/abc?x=1",
+            Gateways.toLoadable("bzz://abc?x=1"),
+        )
+    }
+
+    @Test
     fun `toLoadable routes ipfs through ipfs gateway when base set`() {
         Gateways.setIpfsBase("http://127.0.0.1:58312")
         assertEquals(
