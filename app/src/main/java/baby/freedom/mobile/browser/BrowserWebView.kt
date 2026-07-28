@@ -183,7 +183,23 @@ fun BrowserWebViewHost(
         ) {
             WebView.setWebContentsDebuggingEnabled(true)
         }
+        // Route service-worker fetches through the same virtual-origin
+        // interceptor as everything else (feature-gated no-op where the
+        // WebView doesn't support SW interception).
+        ServiceWorkerInterception.install()
         Unit
+    }
+
+    // Periodic cookie sweep (defense in depth against cookie tossing
+    // across virtual origins until the PSL entry propagates — and kept
+    // afterwards; see [CookieHygiene]). The on-navigation sweep in
+    // onPageStarted handles the common case; this catches long-lived
+    // pages that write document.cookie while sitting idle.
+    LaunchedEffect(Unit) {
+        while (true) {
+            CookieHygiene.sweepAsync()
+            kotlinx.coroutines.delay(CookieHygiene.SWEEP_INTERVAL_MS)
+        }
     }
 
     val frame = remember {
@@ -287,7 +303,11 @@ fun BrowserWebViewHost(
         tabs.clearWebViewData = {
             // Globally-scoped stores: cookies and DOM storage / IndexedDB /
             // WebSQL are shared across every WebView in the process, so
-            // wiping them once is enough.
+            // wiping them once is enough. This covers the per-root
+            // virtual origins too — removeAllCookies / deleteAllData
+            // are origin-agnostic, so "clear browsing data" clears
+            // every `*.bzz.freedom.baby`-style origin's storage along
+            // with everything else.
             runCatching { CookieManager.getInstance().removeAllCookies(null) }
             runCatching { CookieManager.getInstance().flush() }
             runCatching { WebStorage.getInstance().deleteAllData() }
@@ -405,6 +425,10 @@ private fun buildRefreshableWebView(
                     return
                 }
                 currentLoadCommitted = false
+                // Entering a virtual origin: expire anything page JS
+                // managed to plant via document.cookie before this
+                // page gets a chance to read it.
+                if (VirtualOrigin.isVirtualUrl(url)) CookieHygiene.sweepAsync(url)
                 val display = url?.let { displayFor(it, state) }
                 if (display != null) {
                     // For error pages, surface the URL the user was
@@ -651,6 +675,29 @@ private val ESCAPE_RETRY_DELAYS_MS: LongArray = longArrayOf(
 // virtual-origin equivalent (`<img src="bzz://…">` inside a page).
 private val CONTENT_SCHEMES = setOf("bzz", "ipfs", "ipns", "ens")
 
+/**
+ * Answer a CORS preflight locally. Permissive by policy: content on
+ * virtual origins is public and credential-less, and the node API on
+ * localhost is only reachable from this device anyway.
+ */
+private fun corsPreflightResponse(req: WebResourceRequest): WebResourceResponse {
+    val requestedHeaders = req.requestHeaders?.entries
+        ?.firstOrNull { it.key.equals("Access-Control-Request-Headers", ignoreCase = true) }
+        ?.value
+    val headers = mutableMapOf(
+        "Access-Control-Allow-Origin" to "*",
+        "Access-Control-Allow-Methods" to "GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS",
+        "Access-Control-Max-Age" to "600",
+    )
+    if (!requestedHeaders.isNullOrBlank()) {
+        headers["Access-Control-Allow-Headers"] = requestedHeaders
+    }
+    return WebResourceResponse(
+        "text/plain", "utf-8", 204, "No Content",
+        headers, ByteArrayInputStream(ByteArray(0)),
+    )
+}
+
 /** Minimal synthesized response — used for errors the interceptor must
  *  answer itself (nothing loads on a virtual host unless we answer). */
 private fun syntheticResponse(
@@ -703,6 +750,19 @@ internal fun interceptVirtualRequest(
     val uri = req.url ?: return null
     val url = uri.toString()
 
+    // Sanctioned write path: pages on virtual origins POST/upload to
+    // the node API origin (`http://127.0.0.1:…`) directly. Those
+    // requests pass through to Chromium's network stack (bodies never
+    // reach the interceptor), but their CORS *preflights* are bodyless
+    // — answer them here so the write path works regardless of the
+    // node's own CORS configuration. The node must still stamp
+    // `Access-Control-Allow-Origin` on the actual response (see
+    // docs/virtual-origins-hardening.md for the ant/freedom-ipfs
+    // config status).
+    if (req.method == "OPTIONS" && isLocalGatewayUrl(url)) {
+        return corsPreflightResponse(req)
+    }
+
     val scheme = uri.scheme?.lowercase()
     val root: ContentRoot
     val pathAndQuery: String
@@ -715,6 +775,15 @@ internal fun interceptVirtualRequest(
         root = VirtualOrigin.parseHostOfUrl(url) ?: return null
         pathAndQuery = VirtualOrigin.pathAndQueryOf(url)
     }
+
+    // Cross-root CORS policy: answer preflights locally (the
+    // interceptor sees them — nothing else can) and stamp
+    // `Access-Control-Allow-Origin: *` on content responses below.
+    // `*` rather than reflect-origin: dweb content is public,
+    // credentials never ride along (cookies are stripped in both
+    // directions on this path), so reflecting the origin would grant
+    // nothing `*` doesn't while adding a per-response branch.
+    if (req.method == "OPTIONS") return corsPreflightResponse(req)
 
     if (req.method != "GET" && req.method != "HEAD") {
         return syntheticResponse(
@@ -1020,9 +1089,10 @@ private fun fetchOnce(
             }
             .filter { (k, _) ->
                 val lk = k.lowercase()
-                lk !in HEADERS_TO_STRIP && lk != "content-length"
+                lk !in HEADERS_TO_STRIP && lk != "content-length" &&
+                    lk != "access-control-allow-origin"
             }
-            .toMap()
+            .toMap() + ("Access-Control-Allow-Origin" to "*")
 
         val body = when {
             status in 200..399 -> conn.inputStream
