@@ -79,7 +79,14 @@ class SwarmNode(
                     h
                 }
                 handle = h
-                _state.update { it.copy(status = NodeStatus.Running, errorMessage = null) }
+                val agent = runCatching { AntNative.agentString(h) }.getOrNull().orEmpty()
+                _state.update {
+                    it.copy(
+                        status = NodeStatus.Running,
+                        clientVersion = agent,
+                        errorMessage = null,
+                    )
+                }
                 startPeerPolling()
             } catch (t: Throwable) {
                 Log.e(TAG, "Failed to start Swarm node", t)
@@ -100,7 +107,9 @@ class SwarmNode(
         val h = handle
         handle = 0L
 
-        _state.update { it.copy(status = NodeStatus.Stopped, connectedPeers = 0) }
+        _state.update {
+            it.copy(status = NodeStatus.Stopped, connectedPeers = 0, clientVersion = "")
+        }
 
         if (h != 0L) {
             scope.launch {

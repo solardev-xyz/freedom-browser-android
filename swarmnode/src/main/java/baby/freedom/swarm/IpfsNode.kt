@@ -91,11 +91,13 @@ class IpfsNode(
                     FreedomIpfsNative.gatewayUrl(node)
                         ?: error("gateway started but reported no URL")
                 }
-                Log.i(TAG, "freedom-ipfs ${FreedomIpfsNative.version()} gateway at $gatewayUrl")
+                val version = FreedomIpfsNative.version().orEmpty()
+                Log.i(TAG, "freedom-ipfs $version gateway at $gatewayUrl")
                 _state.update {
                     it.copy(
                         status = IpfsStatus.Running,
                         gatewayUrl = gatewayUrl,
+                        clientVersion = version,
                         errorMessage = null,
                     )
                 }
@@ -122,6 +124,7 @@ class IpfsNode(
                 status = IpfsStatus.Stopped,
                 connectedPeers = 0,
                 gatewayUrl = "",
+                clientVersion = "",
             )
         }
 

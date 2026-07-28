@@ -23,5 +23,10 @@ data class IpfsInfo(
      * appended per-navigation by `IpfsGateway.toLoadable`.
      */
     val gatewayUrl: String = "",
+    /**
+     * Release version of the embedded freedom-ipfs client (e.g.
+     * `0.4.3`), or `""` while the node isn't running.
+     */
+    val clientVersion: String = "",
     val errorMessage: String? = null,
 ) : Parcelable

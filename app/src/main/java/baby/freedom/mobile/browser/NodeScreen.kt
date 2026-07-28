@@ -109,6 +109,9 @@ private fun DetailsSection(nodeInfo: NodeInfo) {
     SectionCard(title = "Details") {
         DetailRow("Mode", "ultra-light")
         DetailRow("Peers", nodeInfo.connectedPeers.toString())
+        if (nodeInfo.clientVersion.isNotBlank()) {
+            DetailRow("Client", nodeInfo.clientVersion, mono = true)
+        }
         val err = nodeInfo.errorMessage
         if (!err.isNullOrBlank()) {
             DetailRow("Error", err, singleLine = false)

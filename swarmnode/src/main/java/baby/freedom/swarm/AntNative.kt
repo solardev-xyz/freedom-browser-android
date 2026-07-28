@@ -32,6 +32,13 @@ internal object AntNative {
     /** Connected BZZ peer count; -1 on a stale handle. */
     external fun peerCount(handle: Long): Int
 
+    /**
+     * The running node's agent string (e.g. `ant-ffi/0.5.42`) — the
+     * version of the embedded library actually loaded, independent of
+     * the APK's version metadata. Null on a stale handle.
+     */
+    external fun agentString(handle: Long): String?
+
     /** Tear the node down and free the handle — it must not be reused. */
     external fun shutdown(handle: Long)
 }

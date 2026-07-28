@@ -341,6 +341,9 @@ private fun IpfsSection(
             // reader has no peer set (see swarmnode IpfsNode).
             DetailRow("Blocks fetched", ipfsInfo.connectedPeers.toString())
             DetailRow("Gateway", ipfsInfo.gatewayUrl, mono = true)
+            if (ipfsInfo.clientVersion.isNotBlank()) {
+                DetailRow("Client", "freedom-ipfs/${ipfsInfo.clientVersion}", mono = true)
+            }
         }
         val err = ipfsInfo.errorMessage
         if (!err.isNullOrBlank()) {

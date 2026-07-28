@@ -74,6 +74,16 @@ Java_baby_freedom_swarm_AntNative_peerCount(JNIEnv *env, jobject thiz, jlong han
     return (jint)ant_peer_count((const AntHandle *)(uintptr_t)handle);
 }
 
+JNIEXPORT jstring JNICALL
+Java_baby_freedom_swarm_AntNative_agentString(JNIEnv *env, jobject thiz, jlong handle) {
+    (void)thiz;
+    char *agent = ant_agent_string((const AntHandle *)(uintptr_t)handle);
+    if (agent == NULL) return NULL;
+    jstring out = (*env)->NewStringUTF(env, agent);
+    ant_free_string(agent);
+    return out;
+}
+
 JNIEXPORT void JNICALL
 Java_baby_freedom_swarm_AntNative_shutdown(JNIEnv *env, jobject thiz, jlong handle) {
     (void)env;
