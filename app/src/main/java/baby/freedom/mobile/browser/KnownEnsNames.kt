@@ -26,6 +26,7 @@ import java.util.concurrent.ConcurrentHashMap
 object KnownEnsNames {
     private val hashToName = ConcurrentHashMap<String, String>()
     private val nameToProtocol = ConcurrentHashMap<String, String>()
+    private val nameToUri = ConcurrentHashMap<String, String>()
 
     private val bzzRegex = Regex("^bzz://([a-fA-F0-9]+)")
     private val ipfsRegex = Regex("^ipfs://([A-Za-z0-9]+)")
@@ -38,6 +39,7 @@ object KnownEnsNames {
      */
     fun record(uri: String, name: String) {
         val lowerName = name.lowercase()
+        nameToUri[lowerName] = uri
         bzzRegex.find(uri)?.let {
             hashToName[it.groupValues[1].lowercase()] = lowerName
             nameToProtocol[lowerName] = "bzz"
@@ -67,6 +69,13 @@ object KnownEnsNames {
     /** "bzz" | "ipfs" | "ipns" for any name resolved this session. */
     fun protocolFor(name: String): String? = nameToProtocol[name.lowercase()]
 
+    /**
+     * Full resolved content URI (`bzz://<hash>` etc.) for a name, if
+     * resolved this session. The virtual-origin interceptor uses this
+     * to serve `<name>.ens.…` hosts without re-running the lookup.
+     */
+    fun uriFor(name: String): String? = nameToUri[name.lowercase()]
+
     fun forget(hashOrCid: String) {
         hashToName.remove(hashOrCid)
         hashToName.remove(hashOrCid.lowercase())
@@ -76,5 +85,6 @@ object KnownEnsNames {
     fun clear() {
         hashToName.clear()
         nameToProtocol.clear()
+        nameToUri.clear()
     }
 }

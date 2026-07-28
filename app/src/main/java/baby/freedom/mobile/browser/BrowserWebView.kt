@@ -39,44 +39,29 @@ import java.net.URL
 private const val ABOUT_BLANK = "about:blank"
 private const val LOG_TAG = "BrowserWebView"
 
-// Paths under `http://127.0.0.1:1633/` that legitimately belong to the
-// gateway's own bee-shaped HTTP API (ant serves the same endpoint set).
-// Any other gateway-origin request from a page is
-// almost certainly a subresource that forgot to include its /bzz/<hash>/
-// prefix, so we transparently refetch it from under the current bzz root.
-private val GATEWAY_API_SEGMENTS = setOf(
-    "bzz", "bzz-chunk", "bytes", "chunks", "tags", "pins", "stewardship",
-    "feeds", "soc", "pss", "stamps", "wallet", "chequebook", "settlements",
-    "accounting", "redistributionstate", "reservestate", "addresses", "peers",
-    "topology", "welcome-message", "node", "health", "readiness", "status",
-    "auth", "refresh",
-)
-
-// First-segment prefixes that identify user-facing content served from
-// the local gateway (vs. the node's own JSON API under /health, /status,
-// etc.). Subresources that land on one of these but 404 are retried —
-// a cold Swarm node regularly answers the top-level manifest before every
-// chunk is in hand, so these transient failures resolve a few seconds
-// later without anything visibly breaking on the page.
-private val GATEWAY_CONTENT_SEGMENTS = setOf("bzz", "ipfs", "ipns")
-
 // Response headers we strip when proxying — they're either managed by the
 // WebView's own transport or would confuse it if passed through verbatim.
 // `content-length` is stripped because `HttpURLConnection` auto-decodes
 // gzip responses for us and the incoming length is for the compressed
 // body, which would be wrong for what we hand back to the WebView.
+// `Set-Cookie` never crosses from the gateway to a virtual origin —
+// cookies are stripped in both directions (dweb sites get localStorage
+// isolation per root; cookie state would leak through the shared
+// registrable domain until the PSL entry propagates).
 private val HEADERS_TO_STRIP = setOf(
     "transfer-encoding", "content-encoding", "connection", "keep-alive",
+    "set-cookie", "set-cookie2",
 )
 
 // Request headers we never forward upstream — either managed by
 // `HttpURLConnection` itself or carrying state tied to the WebView's
-// gateway origin (`Host: 127.0.0.1:1633`, `Origin`, `Referer`) that
-// would only confuse the gateway.
+// virtual origin (`Host`, `Origin`, `Referer`) that would only confuse
+// the gateway. `Cookie` is stripped for the same both-directions rule
+// as `Set-Cookie` above.
 private val REQUEST_HEADERS_TO_STRIP = setOf(
     "host", "origin", "referer", "content-length", "accept-encoding",
     "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
-    "te", "trailer", "transfer-encoding", "upgrade",
+    "te", "trailer", "transfer-encoding", "upgrade", "cookie",
 )
 
 // HTTP status codes we treat as transient — a cold Swarm node regularly
@@ -122,16 +107,6 @@ private fun HttpURLConnection.forwardProxiedHeaders(
     setRequestProperty("Accept-Encoding", "identity")
     applySwarmRequestHeaders()
 }
-
-// Root extraction must tolerate bare-hash page URLs: bee 301-redirected
-// `/bzz/<hash>` to `/bzz/<hash>/`, so the committed URL always carried the
-// trailing slash `GatewayUrls.extractRoot` requires — but ant serves the
-// bare form directly with 200, and without this fallback onPageStarted
-// would wipe the root `BrowserState.loadUrl` seeded (same fallback as
-// there), breaking every absolute-root subresource rewrite on the page.
-private fun extractBzzRoot(url: String?): String? =
-    GatewayUrls.extractRoot(url)
-        ?: url?.let { u -> GatewayUrls.extractBase(u)?.prefix?.plus("/") }
 
 // Max width (in px) of a thumbnail bitmap. Anything bigger is wasteful
 // since we only ever render these at half-screen-ish sizes in the grid.
@@ -424,14 +399,12 @@ private fun buildRefreshableWebView(
                     state.url = ""
                     state.title = ""
                     state.addressBarText = ""
-                    state.currentBzzRoot = null
                     state.progress = -1
                     lastLoadedDisplayUrl = null
                     currentLoadCommitted = false
                     return
                 }
                 currentLoadCommitted = false
-                state.currentBzzRoot = extractBzzRoot(url)
                 val display = url?.let { displayFor(it, state) }
                 if (display != null) {
                     // For error pages, surface the URL the user was
@@ -473,7 +446,6 @@ private fun buildRefreshableWebView(
                     state.url = ""
                     state.title = ""
                     state.addressBarText = ""
-                    state.currentBzzRoot = null
                     state.canGoBack = view?.canGoBack() == true
                     state.canGoForward = view?.canGoForward() == true
                     state.progress = -1
@@ -483,7 +455,6 @@ private fun buildRefreshableWebView(
                 // finished loading (or errored out). Happens regardless
                 // of whether the load was user-initiated reload or not.
                 refreshLayout.isRefreshing = false
-                state.currentBzzRoot = extractBzzRoot(url)
                 val display = displayFor(url.orEmpty(), state)
                 // See the companion comment in `onPageStarted` — for
                 // error pages the address bar / `state.url` show the
@@ -549,7 +520,7 @@ private fun buildRefreshableWebView(
             override fun shouldInterceptRequest(
                 view: WebView?,
                 request: WebResourceRequest?,
-            ): WebResourceResponse? = rewriteGatewayEscape(state, request)
+            ): WebResourceResponse? = interceptVirtualRequest(request)
 
             override fun onReceivedError(
                 view: WebView?,
@@ -561,16 +532,15 @@ private fun buildRefreshableWebView(
                 val failed = req.url?.toString() ?: return
                 // Already on the error page? Don't loop.
                 if (ErrorPage.isErrorPage(failed)) return
-                if (!isLocalGatewayUrl(failed)) return
+                if (!isDwebPageUrl(failed)) return
 
                 val display = displayFor(failed, state).ifBlank { failed }
-                val retryUri = Gateways.toDisplay(failed)
                 val code = error?.errorCode?.let { "ERR_$it" } ?: "ERR_FAILED"
                 val page = ErrorPage.url(
                     errorCode = code,
                     displayUrl = display,
                     protocol = protocolForErrorPage(failed),
-                    retryUrl = retryUri,
+                    retryUrl = retryUrlFor(failed),
                 )
                 state.clearEnsOverride()
                 view?.loadUrl(page)
@@ -585,19 +555,23 @@ private fun buildRefreshableWebView(
                 if (!req.isForMainFrame) return
                 val failed = req.url?.toString() ?: return
                 if (ErrorPage.isErrorPage(failed)) return
-                if (!isLocalGatewayUrl(failed)) return
+                if (!isDwebPageUrl(failed)) return
 
                 val status = errorResponse?.statusCode ?: 0
                 // The probe already waited out transient 404/500s — if we
                 // got one here, the gateway answered but the content
-                // genuinely isn't available (misspelled hash, etc).
+                // genuinely isn't available (misspelled hash, etc). A
+                // synthesized 502 is the interceptor telling us the
+                // gateway socket itself is gone (node not running).
                 val display = displayFor(failed, state).ifBlank { failed }
-                val retryUri = Gateways.toDisplay(failed)
+                val errorCode =
+                    if (status == 502) "ERR_CONNECTION_REFUSED"
+                    else "swarm_content_not_found"
                 val page = ErrorPage.url(
-                    errorCode = "swarm_content_not_found",
+                    errorCode = errorCode,
                     displayUrl = display,
                     protocol = protocolForErrorPage(failed),
-                    retryUrl = retryUri,
+                    retryUrl = retryUrlFor(failed),
                 )
                 Log.i(LOG_TAG, "main-frame HTTP $status for $failed → error page")
                 state.clearEnsOverride()
@@ -673,92 +647,105 @@ private val ESCAPE_RETRY_DELAYS_MS: LongArray = longArrayOf(
     0L, 250L, 500L, 1000L, 2000L, 3000L, 5000L, 5000L,
 )
 
+// Schemes whose subresource requests we answer with a redirect to the
+// virtual-origin equivalent (`<img src="bzz://…">` inside a page).
+private val CONTENT_SCHEMES = setOf("bzz", "ipfs", "ipns", "ens")
+
+/** Minimal synthesized response — used for errors the interceptor must
+ *  answer itself (nothing loads on a virtual host unless we answer). */
+private fun syntheticResponse(
+    status: Int,
+    reason: String,
+    body: String = "",
+    extraHeaders: Map<String, String> = emptyMap(),
+): WebResourceResponse = WebResourceResponse(
+    "text/plain", "utf-8", status, reason,
+    extraHeaders, ByteArrayInputStream(body.toByteArray(Charsets.UTF_8)),
+)
+
+/** 301 to [location] — WebView follows redirects from intercepted
+ *  responses through the normal load pipeline. */
+private fun redirectResponse(location: String): WebResourceResponse =
+    WebResourceResponse(
+        "text/html", "utf-8", 301, "Moved Permanently",
+        mapOf("Location" to location),
+        ByteArrayInputStream(ByteArray(0)),
+    )
+
 /**
- * Proxy subresource fetches that the local gateway can't fulfill on its
- * own fast enough or in a WebView-friendly format.
+ * Serve the per-root virtual https origins (see [VirtualOrigin]) — the
+ * only network path for dweb content.
  *
- * Three cases get intercepted:
+ * 1. **Virtual hosts** (`<label>.bzz.freedom.baby` etc.): translate the
+ *    host back to its content root, map path+query onto the local
+ *    gateway, and proxy — main frames *included*: these hostnames never
+ *    resolve in DNS, so nothing loads unless we answer here. Media gets
+ *    range-aware buffering ([fetchMediaWithRangeSupport]); everything
+ *    else retries transient 404/500s ([fetchWithRetry]) because a cold
+ *    Swarm node regularly answers the manifest before every chunk is
+ *    retrievable. `<name>.ens.…` hosts resolve the *name* per request
+ *    (the origin is name-derived so storage survives content updates).
  *
- * 1. **Gateway-escape rewrites.** Next-style sites served from
- *    `/bzz/<hash>/` often reference resources via absolute-root paths
- *    (`<link href="/_next/static/…">`). Those resolve to
- *    `http://127.0.0.1:1633/_next/…` — outside the bzz namespace — and
- *    404, leaving the page unstyled. We transparently rewrite such
- *    requests to live under the current `/bzz/<hash>/` root.
+ * 2. **Scheme-URL subresources** (`bzz://…` / `ipfs://…` / `ipns://…`
+ *    inside a page): answered with a 301 to the virtual-origin
+ *    equivalent, which then loads via case 1. (Top-level clicks still
+ *    go through `shouldOverrideUrlLoading` → the submit flow.)
  *
- * 2. **Content-path retries.** Subresources already correctly rooted
- *    at `/bzz/`, `/ipfs/`, or `/ipns/` that hit a transient 404/500
- *    get retried with short backoff. A cold Swarm node sometimes answers
- *    the top-level manifest before every chunk is in hand, so the
- *    resource exists but isn't retrievable yet.
+ * Everything else — external https, and direct `http://127.0.0.1`
+ * gateway calls (the sanctioned write path for dapps) — passes through
+ * to Chromium's own network stack untouched.
  *
- * 3. **Media range-request synthesis.** bee returned the whole body for
- *    every `Range` request (no 206, no `Accept-Ranges`, empty
- *    `Content-Type`), which stalls Chromium's media pipeline at
- *    `HAVE_METADATA`. ant answers single ranges with proper 206s, but
- *    [fetchMediaWithRangeSupport] still buffers the body once and
- *    synthesises Partial Content locally, so seeking never re-fetches
- *    the file and playback doesn't depend on gateway behaviour.
- *
- * Main-frame requests (and non-GETs) are left to the WebView's own
- * network stack — the top-level navigation is already gated by
- * [GatewayProbe], and interception only buys us retries we don't need.
- * Requests to the node's own JSON API (/health, /status, etc.) also
- * pass through untouched.
+ * Error contract: the interceptor always answers for virtual hosts. A
+ * gateway that's unreachable (node not running) or an ENS name that
+ * doesn't resolve synthesizes a clean 502 so the main frame fails fast
+ * into [ErrorPage] instead of hanging; non-GET/HEAD methods get a 405
+ * (WebView interception can't carry request bodies — writes go to the
+ * node API origin directly).
  */
-internal fun rewriteGatewayEscape(
-    state: BrowserState,
+internal fun interceptVirtualRequest(
     request: WebResourceRequest?,
 ): WebResourceResponse? {
     val req = request ?: return null
-    val url = req.url?.toString() ?: return null
-    if (req.method != "GET") return null
-    if (req.isForMainFrame) return null
+    val uri = req.url ?: return null
+    val url = uri.toString()
 
-    // Match against whichever local gateway origin (Swarm or IPFS) the
-    // request hit. Subresources under the IPFS gateway share the exact
-    // same escape semantics as Swarm — a Next.js site served from
-    // `/ipfs/<cid>/` references `/_next/static/…`, which would otherwise
-    // fall outside every gateway namespace.
-    val gatewayPrefix = when {
-        url.startsWith("${Gateways.SWARM_BASE}/") -> "${Gateways.SWARM_BASE}/"
-        Gateways.ipfsBase.isNotEmpty() &&
-            url.startsWith("${Gateways.ipfsBase}/") -> "${Gateways.ipfsBase}/"
-        else -> return null
+    val scheme = uri.scheme?.lowercase()
+    if (scheme in CONTENT_SCHEMES) {
+        val virtual = VirtualOrigin.toVirtualUrl(url) ?: return null
+        Log.v(LOG_TAG, "scheme subresource redirect: $url → $virtual")
+        return redirectResponse(virtual)
     }
 
-    val tail = url.substring(gatewayPrefix.length)
-    if (tail.isEmpty()) return null
-    val firstSegment = tail
-        .substringBefore('/')
-        .substringBefore('?')
-        .substringBefore('#')
-    if (firstSegment.isEmpty()) return null
+    val root = VirtualOrigin.parseHostOfUrl(url) ?: return null
 
-    // Case 2 + 3: request is already on a content path. Handle media
-    // specially (range-aware), and retry on transient 404/500 for other
-    // content subresources. Non-content API endpoints fall through to
-    // Chromium's native fetch.
-    if (firstSegment in GATEWAY_CONTENT_SEGMENTS) {
-        return if (isMediaLikeUrl(url)) {
-            fetchMediaWithRangeSupport(req, url)
-        } else {
-            fetchWithRetry(req, url, url)
-        }
+    if (req.method != "GET" && req.method != "HEAD") {
+        return syntheticResponse(
+            405, "Method Not Allowed",
+            "Virtual dweb origins are read-only (GET/HEAD). " +
+                "Send writes to the node API at ${Gateways.SWARM_BASE}.",
+        )
     }
-    if (firstSegment in GATEWAY_API_SEGMENTS) return null
 
-    // Case 1: path escaped the current bzz/ipfs/ipns root. Rewrite it
-    // back under the root and fetch. Requires the current bzz root to
-    // be known — we can't escape-rewrite from a non-content page.
-    val bzzRoot = state.currentBzzRoot ?: return null
-    val rewritten = bzzRoot + tail
-    Log.v(LOG_TAG, "gateway-escape rewrite: $url → $rewritten")
-    return if (isMediaLikeUrl(rewritten)) {
-        fetchMediaWithRangeSupport(req, rewritten)
+    val target = Gateways.gatewayUrlFor(root, VirtualOrigin.pathAndQueryOf(url))
+        ?: return syntheticResponse(
+            502, "Bad Gateway",
+            "No local gateway can serve this content root " +
+                "(node not running, or name resolution failed).",
+        )
+
+    val response = if (isMediaLikeUrl(target)) {
+        fetchMediaWithRangeSupport(req, target)
     } else {
-        fetchWithRetry(req, rewritten, url)
+        fetchWithRetry(req, target, url)
     }
+    // A null here means the gateway socket itself is gone (connection
+    // refused / node stopped). Synthesize instead of returning null —
+    // null would send Chromium to DNS for a hostname that doesn't
+    // exist, which surfaces as a slow, confusing resolver error.
+    return response ?: syntheticResponse(
+        502, "Bad Gateway",
+        "The local gateway did not answer (is the node running?).",
+    )
 }
 
 // In-process LRU of fully-buffered media bodies keyed by bzz URL, so
@@ -854,6 +841,11 @@ private fun tryLoadMediaBody(
         synchronized(mediaBodyCache) { mediaBodyCache[targetUrl] = body }
         Log.i(LOG_TAG, "media cached: $targetUrl bytes=${bytes.size} mime=$mime")
         MediaLoadResult.Ok(body)
+    } catch (t: java.net.ConnectException) {
+        // The gateway socket refused — the node is down; retrying the
+        // whole backoff schedule would just stall the media element.
+        Log.w(LOG_TAG, "media fetch unreachable: $targetUrl", t)
+        MediaLoadResult.Fatal
     } catch (t: IOException) {
         Log.w(LOG_TAG, "media fetch failed: $targetUrl", t)
         MediaLoadResult.Transient
@@ -940,6 +932,20 @@ private fun fetchMediaWithRangeSupport(
     }
 }
 
+private sealed class FetchAttempt {
+    data class Response(
+        val response: WebResourceResponse,
+        val transient: Boolean,
+    ) : FetchAttempt()
+
+    /** Recoverable I/O failure — worth another attempt. */
+    object Retry : FetchAttempt()
+
+    /** The gateway socket refused outright — retrying is pointless;
+     *  the caller should synthesize a clean error immediately. */
+    object Unreachable : FetchAttempt()
+}
+
 private fun fetchWithRetry(
     req: WebResourceRequest,
     targetUrl: String,
@@ -956,35 +962,31 @@ private fun fetchWithRetry(
             }
         }
 
-        val (response, transient) = fetchOnce(req, targetUrl) ?: (null to true)
-        if (response != null && !transient) {
-            return response
-        }
-        lastResponse = response
-        if (response != null) {
-            Log.i(
-                LOG_TAG,
-                "gateway-escape transient ${response.statusCode} for $originalUrl → $targetUrl " +
-                    "(attempt ${index + 1}/${ESCAPE_RETRY_DELAYS_MS.size})",
-            )
+        when (val attempt = fetchOnce(req, targetUrl)) {
+            is FetchAttempt.Response -> {
+                if (!attempt.transient) return attempt.response
+                lastResponse = attempt.response
+                Log.i(
+                    LOG_TAG,
+                    "transient ${attempt.response.statusCode} for $originalUrl → $targetUrl " +
+                        "(attempt ${index + 1}/${ESCAPE_RETRY_DELAYS_MS.size})",
+                )
+            }
+            FetchAttempt.Unreachable -> return lastResponse
+            FetchAttempt.Retry -> {}
         }
     }
     return lastResponse
 }
 
-/**
- * Single network attempt against [targetUrl]. Returns the response + a
- * "transient" flag indicating whether the caller should retry. `null`
- * means the request failed with a non-retriable exception (bail out so
- * the WebView can show its own network error).
- */
+/** Single network attempt against [targetUrl]. */
 private fun fetchOnce(
     req: WebResourceRequest,
     targetUrl: String,
-): Pair<WebResourceResponse?, Boolean>? {
+): FetchAttempt {
     return try {
         val conn = (URL(targetUrl).openConnection() as HttpURLConnection).apply {
-            requestMethod = "GET"
+            requestMethod = if (req.method == "HEAD") "HEAD" else "GET"
             connectTimeout = 5_000
             readTimeout = 10_000
             instanceFollowRedirects = true
@@ -1029,27 +1031,58 @@ private fun fetchOnce(
             else -> conn.errorStream ?: ByteArrayInputStream(ByteArray(0))
         }
         val response = WebResourceResponse(mime, charset, status, reason, headers, body)
-        val transient = status in TRANSIENT_STATUSES
-        response to transient
+        FetchAttempt.Response(response, transient = status in TRANSIENT_STATUSES)
+    } catch (t: java.net.ConnectException) {
+        Log.w(LOG_TAG, "gateway unreachable: $targetUrl", t)
+        FetchAttempt.Unreachable
     } catch (t: IOException) {
         Log.w(LOG_TAG, "gateway fetch failed: $targetUrl", t)
-        null
+        FetchAttempt.Retry
     } catch (t: Throwable) {
         Log.w(LOG_TAG, "gateway fetch unexpected failure: $targetUrl", t)
-        null
+        FetchAttempt.Unreachable
     }
 }
 
 internal fun isLocalGatewayUrl(url: String): Boolean = Gateways.isLocalGateway(url)
 
 /**
- * Pick the [ErrorPage] `protocol` hint based on which gateway origin a
- * failed URL belongs to. The error-page HTML can auto-detect from the
- * URL too, but handing it an explicit value avoids a race where the
- * detector sees the rewritten loadable URL before the WebView has
- * flipped back to the canonical scheme.
+ * Should a failed main-frame load of [url] surface our in-app dweb
+ * error page (as opposed to Chromium's default error UI, which is the
+ * right thing for external https sites)? True for virtual-origin URLs
+ * and for direct local-gateway URLs.
+ */
+internal fun isDwebPageUrl(url: String): Boolean =
+    VirtualOrigin.isVirtualUrl(url) || isLocalGatewayUrl(url)
+
+/**
+ * "Try Again" target for the error page — a scheme the submit flow can
+ * route (`bzz://…`, `ens://…`), never a raw virtual/gateway URL. The
+ * bare `name.eth` display form is unroutable *inside* the `file://`
+ * error page (it would resolve as a relative path), hence `ens://`.
+ */
+internal fun retryUrlFor(failedUrl: String): String {
+    val root = VirtualOrigin.parseHostOfUrl(failedUrl)
+    if (root is ContentRoot.Ens) {
+        val tail = VirtualOrigin.pathAndQueryOf(failedUrl).let { if (it == "/") "" else it }
+        return "ens://${root.name}$tail"
+    }
+    return Gateways.toDisplay(failedUrl)
+}
+
+/**
+ * Pick the [ErrorPage] `protocol` hint based on which origin a failed
+ * URL belongs to — virtual-origin hosts by namespace, raw gateway URLs
+ * by path prefix.
  */
 private fun protocolForErrorPage(failedUrl: String): String {
+    when (VirtualOrigin.parseHostOfUrl(failedUrl)) {
+        is ContentRoot.Bzz -> return "swarm"
+        is ContentRoot.Ipfs -> return "ipfs"
+        is ContentRoot.IpnsKey, is ContentRoot.IpnsName -> return "ipns"
+        is ContentRoot.Ens -> return "ens"
+        null -> {}
+    }
     if (failedUrl.startsWith("${Gateways.SWARM_BASE}/")) return "swarm"
     val ipfsBase = Gateways.ipfsBase
     if (ipfsBase.isNotEmpty() && failedUrl.startsWith("$ipfsBase/")) {

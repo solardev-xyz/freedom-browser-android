@@ -97,7 +97,6 @@ import androidx.compose.ui.window.PopupProperties
 import baby.freedom.mobile.data.BrowsingRepository
 import baby.freedom.mobile.data.UrlSuggestion
 import baby.freedom.mobile.ens.EnsInput
-import baby.freedom.mobile.ens.EnsResolver
 import baby.freedom.mobile.ens.EnsResult
 import baby.freedom.swarm.IpfsInfo
 import baby.freedom.swarm.IpfsStatus
@@ -175,11 +174,14 @@ private fun protocolBadgeFor(state: BrowserState): ProtocolBadge? {
     if (url.startsWith("bzz://")) return SWARM_BADGE
     if (url.startsWith("ipfs://") || url.startsWith("ipns://")) return IPFS_BADGE
     if (url.startsWith("ens://") || EnsInput.looksLikeEns(url)) {
-        val base = state.override?.baseUrl ?: return SWARM_BADGE
-        if (base.startsWith(Gateways.SWARM_BASE)) return SWARM_BADGE
-        val ipfsBase = Gateways.ipfsBase
-        if (ipfsBase.isNotEmpty() && base.startsWith(ipfsBase)) return IPFS_BADGE
-        return SWARM_BADGE
+        // The session registry knows which protocol the name's
+        // contenthash resolved to — recorded by the submit flow before
+        // any ENS navigation reaches the WebView.
+        val name = EnsInput.parse(url)?.name ?: return SWARM_BADGE
+        return when (KnownEnsNames.protocolFor(name)) {
+            "ipfs", "ipns" -> IPFS_BADGE
+            else -> SWARM_BADGE
+        }
     }
     return null
 }
@@ -261,7 +263,9 @@ fun BrowserScreen(
     initialUrl: String = HOME_URL,
 ) {
     val tabs = remember { TabsState(homepage = initialUrl) }
-    val ensResolver = remember { EnsResolver() }
+    // Shared with the request interceptor (which resolves
+    // `<name>.ens.…` virtual hosts) so both sides use one cache.
+    val ensResolver = Gateways.ensResolver
     val gatewayProbe = remember { GatewayProbe() }
     val context = LocalContext.current
     val repo = remember(context) { BrowsingRepository.get(context) }
@@ -330,13 +334,18 @@ fun BrowserScreen(
     // clearly to the user which network we were trying. A *successful*
     // IPFS load leaves no visible IPFS trace in the chrome (the swarm
     // badge logic below deliberately doesn't differentiate).
+    // [contentUri] is what the probe checks against the local gateway
+    // (`bzz://<hash>…` etc.); [loadUri] is what the tab ultimately
+    // navigates to — for ENS names that's the `ens://<name>…` form, so
+    // the WebView loads the *name-derived* virtual origin and the
+    // site's storage survives contenthash updates.
     suspend fun gateGatewayNavigation(
         target: BrowserState,
         contentUri: String,
         displayPrefix: String?,
         displayUrl: String,
+        loadUri: String = contentUri,
     ) {
-        val loadable = Gateways.toLoadable(contentUri)
         val isIpfs = contentUri.startsWith("ipfs://") || contentUri.startsWith("ipns://")
         val protocolHint = when {
             contentUri.startsWith("bzz://") -> "swarm"
@@ -386,14 +395,15 @@ fun BrowserScreen(
             return
         }
 
-        // After the node flipped to Running the gateway base URL is
-        // known; resolve the loadable form again in case ipfsBase was
-        // still empty when we first computed it.
-        val resolved = Gateways.toLoadable(contentUri)
+        // Probe the gateway directly (`http://127.0.0.1:…`) — the
+        // WebView gets the virtual-origin URL, but readiness is a
+        // question for the node itself. Resolved after the node flips
+        // to Running, in case ipfsBase was still empty before.
+        val resolved = Gateways.toGatewayUrl(contentUri)
         val headUrl = GatewayUrls.extractBase(resolved)?.prefix ?: resolved
 
         when (val outcome = gatewayProbe.probe(headUrl)) {
-            GatewayProbe.Outcome.Ok -> target.loadUrl(contentUri, displayPrefix = displayPrefix)
+            GatewayProbe.Outcome.Ok -> target.loadUrl(loadUri, displayPrefix = displayPrefix)
             GatewayProbe.Outcome.Aborted -> { /* superseded by a later submit */ }
             is GatewayProbe.Outcome.Unreachable -> showError("ERR_CONNECTION_REFUSED")
             GatewayProbe.Outcome.NotFound, is GatewayProbe.Outcome.Other -> {
@@ -499,6 +509,12 @@ fun BrowserScreen(
                                     contentUri = result.uri + suffix,
                                     displayPrefix = displayPrefix,
                                     displayUrl = ensDisplay,
+                                    // Navigate the *name-derived* origin —
+                                    // the interceptor re-resolves the name
+                                    // (via the registry entry recorded
+                                    // above), and per-site storage sticks
+                                    // to the name across content updates.
+                                    loadUri = "ens://$name$suffix",
                                 )
                             } else {
                                 ensError(

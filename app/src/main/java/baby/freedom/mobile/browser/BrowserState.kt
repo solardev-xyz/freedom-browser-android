@@ -84,17 +84,6 @@ class BrowserState(val id: Long) {
         internal set
 
     /**
-     * When the page currently in the WebView is served from `/bzz/<hash>/`,
-     * this holds the fully-qualified root (with trailing slash). Used by
-     * [BrowserWebView] to rewrite subresource requests that escape the bzz
-     * namespace — e.g. a Next.js site referencing `/_next/static/...` would
-     * otherwise miss the bzz hash and 404.
-     */
-    @Volatile
-    var currentBzzRoot: String? = null
-        internal set
-
-    /**
      * In-flight [GatewayProbe] job for this tab (if any). Set by
      * [BrowserScreen] when a bzz / ens-to-bzz navigation enters the
      * "peers warming up" gate, and cleared either by the probe finishing
@@ -120,9 +109,10 @@ class BrowserState(val id: Long) {
     }
 
     /**
-     * Schedule a navigation. [url] is the *canonical* URL (may be `bzz://…`);
-     * the pending URL handed to the WebView is the rewritten form that it
-     * can actually fetch (`http://127.0.0.1:1633/bzz/…` for Swarm content).
+     * Schedule a navigation. [url] is the *canonical* URL (may be `bzz://…`
+     * or `ens://…`); the pending URL handed to the WebView is the rewritten
+     * form it can actually fetch — the per-root virtual https origin
+     * (`https://<label>.bzz.freedom.baby/…`) for dweb content.
      *
      * If [displayPrefix] is provided, the address bar will show
      * `<displayPrefix>[<path>]` for this navigation and any subsequent
@@ -136,27 +126,16 @@ class BrowserState(val id: Long) {
         cancelPendingProbe()
         val loadable = Gateways.toLoadable(url)
         pendingUrl = loadable
-        // Seed `currentBzzRoot` right here so that subresource escape
-        // rewrites (see `BrowserWebView.rewriteGatewayEscape`) work for
-        // the very earliest fetches the page kicks off. Chromium's
-        // HTML preload scanner races ahead of `onPageStarted` for
-        // `<link rel=preload>` and other early subresources, and if
-        // they hit `shouldInterceptRequest` while the previous page's
-        // root (or `null`) is still in place, we fail to rewrite them
-        // and the page renders unstyled. Clearing on a non-bzz load
-        // is equally important so a subsequent https:// page doesn't
-        // still see the previous site's root.
-        //
-        // `extractRoot` only matches when there's a trailing slash, but
-        // `SwarmResolver.toLoadable("bzz://<hash>")` yields `/bzz/<hash>`
-        // without one. Fall back to `extractBase` + "/" in that case so
-        // bare-root loads still seed the right root for subresources.
-        currentBzzRoot = GatewayUrls.extractRoot(loadable)
-            ?: GatewayUrls.extractBase(loadable)?.let { it.prefix + "/" }
         if (displayPrefix != null) {
-            val base = GatewayUrls.extractBase(loadable)
-            override = if (base != null) {
-                Override(baseUrl = base.prefix, prefix = displayPrefix)
+            // The override base is the virtual origin the content is
+            // served from — in-manifest navigation stays under it, so
+            // prefix substitution keeps `name.eth/path` (or the typed
+            // `bzz://name.eth/path`) in the address bar.
+            val root = VirtualOrigin.parseHostOfUrl(loadable)
+            override = if (root != null) {
+                VirtualOrigin.originFor(root)?.let {
+                    Override(baseUrl = it, prefix = displayPrefix)
+                }
             } else {
                 null
             }
@@ -200,7 +179,6 @@ class BrowserState(val id: Long) {
     fun navigateHome() {
         cancelPendingProbe()
         override = null
-        currentBzzRoot = null
         url = ""
         title = ""
         addressBarText = ""
@@ -233,7 +211,6 @@ class BrowserState(val id: Long) {
         canGoBack = false
         canGoForward = false
         override = null
-        currentBzzRoot = null
         thumbnail = null
     }
 }
