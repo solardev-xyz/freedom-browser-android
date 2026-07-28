@@ -261,6 +261,8 @@ fun BrowserScreen(
     onEnsureIpfsStarted: () -> Unit,
     onIpfsToggle: (Boolean) -> Unit,
     initialUrl: String = HOME_URL,
+    deepLinkUrl: String? = null,
+    onDeepLinkHandled: () -> Unit = {},
 ) {
     val tabs = remember { TabsState(homepage = initialUrl) }
     // Shared with the request interceptor (which resolves
@@ -597,6 +599,25 @@ fun BrowserScreen(
             didInitialLoad = true
             submit(tabs.active, tabs.homepageUrl)
         }
+    }
+
+    // An App Link that arrives while we're already running (see
+    // MainActivity.onNewIntent). Cold start doesn't come through here —
+    // it's the [initialUrl] above — so a link tapped now is a second
+    // destination and gets its own tab rather than replacing whatever
+    // the user was reading. [onDeepLinkHandled] clears the pending URL
+    // so a config change doesn't re-open it.
+    LaunchedEffect(deepLinkUrl) {
+        val url = deepLinkUrl ?: return@LaunchedEffect
+        // Whatever full-screen overlay was up would otherwise hide the
+        // tab we just opened.
+        showSettings = false
+        showNode = false
+        showTabSwitcher = false
+        showHistory = false
+        showBookmarks = false
+        submit(tabs.newTab(), url)
+        onDeepLinkHandled()
     }
 
     Box(modifier = Modifier.fillMaxSize()) {

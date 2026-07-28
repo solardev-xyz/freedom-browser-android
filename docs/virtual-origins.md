@@ -28,6 +28,24 @@ What this buys:
 - **Name-derived ENS origins** — `name.eth` sites keep their storage
   across contenthash updates; the interceptor re-resolves the name.
 
+## Links that leave the app
+
+Pages copy `window.location.href` into share buttons, so the synthetic
+URL escapes. Because the domain is ours, that leak is a feature rather
+than a bug:
+
+- a small redirector (`infra/redirector/`) decodes the label back to the
+  content id and 301s to a public gateway, so a shared link opens the
+  same content in any browser;
+- on a device with Freedom installed, Android App Links intercepts it
+  first — the manifest's `autoVerify` filter covers the four virtual
+  suffixes, and `MainActivity` translates the URL back through
+  `VirtualOrigin.displayUrlFor` and opens it in a tab. Desktop's
+  `bzz://` URLs can't do this.
+
+Both depend on infrastructure that lives outside the app; `infra/`
+documents what has to be created and by whom.
+
 ## Release note: site storage is reset
 
 Any localStorage / IndexedDB state that dweb sites saved in previous

@@ -20,11 +20,35 @@
         <activity
             android:name=".MainActivity"
             android:exported="true"
+            android:launchMode="singleTop"
             android:theme="@style/Theme.Freedom"
             android:windowSoftInputMode="adjustPan">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+
+            <!--
+              App Links for the virtual origins (see VirtualOrigin.kt).
+              A share link copied out of a dweb page is a real https URL
+              on a domain we own; on a device with Freedom installed it
+              should open here at the same content instead of round-
+              tripping through the public-gateway redirector.
+
+              The wildcard hosts mirror VirtualOrigin.SUFFIXES exactly.
+              Verification is done against the host minus the wildcard,
+              so `assetlinks.json` is fetched from the four bare
+              namespace domains — see infra/applinks/README.md.
+            -->
+            <intent-filter android:autoVerify="true">
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="https" />
+                <data android:host="*.bzz.freedom.baby" />
+                <data android:host="*.ipfs.freedom.baby" />
+                <data android:host="*.ipns.freedom.baby" />
+                <data android:host="*.ens.freedom.baby" />
             </intent-filter>
         </activity>
 
