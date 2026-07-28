@@ -26,7 +26,7 @@ permissions:
   contents: write
 
 env:
-  FFI_REF: v0.7.2
+  FFI_REF: v0.7.3
 
 jobs:
   release:
@@ -64,6 +64,14 @@ jobs:
           ./scripts/build-android.sh
           mkdir -p "$GITHUB_WORKSPACE/swarmnode/src/main/jniLibs"
           cp -r target/android/jniLibs/. "$GITHUB_WORKSPACE/swarmnode/src/main/jniLibs/"
+
+      - name: Upload native diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@v6
+        with:
+          name: jniLibs-debug
+          path: freedom-mobile-ffi/target/android/
+          if-no-files-found: ignore
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
