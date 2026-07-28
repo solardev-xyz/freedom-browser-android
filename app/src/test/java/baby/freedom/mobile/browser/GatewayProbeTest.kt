@@ -178,13 +178,18 @@ class GatewayProbeTest {
         val hits = AtomicInteger(0)
         server.respondWith { _ ->
             val n = hits.incrementAndGet()
-            if (n == 1) Response(200, hangMs = 1_000) else Response(200)
+            if (n == 1) Response(200, hangMs = 10_000) else Response(200)
         }
+        // Margins are deliberately wide: the first attempt must time out
+        // (hang >> attempt timeout) and a retry must succeed within its
+        // own attempt budget even on a loaded CI machine — a 200ms
+        // attempt timeout flaked here whenever the JVM hiccuped past it
+        // on the *successful* attempt.
         val outcome = GatewayProbe().probe(
             headUrl = "${server.baseUrl}/bzz/abc",
             delaysMs = longArrayOf(0L, 50L, 50L),
-            attemptTimeoutMs = 200L,
-            overallTimeoutMs = 5_000L,
+            attemptTimeoutMs = 1_500L,
+            overallTimeoutMs = 30_000L,
         )
         assertEquals(GatewayProbe.Outcome.Ok, outcome)
         assertTrue("expected >=2 hits, got ${hits.get()}", hits.get() >= 2)

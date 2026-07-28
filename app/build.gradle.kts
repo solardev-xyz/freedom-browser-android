@@ -13,8 +13,26 @@ android {
         applicationId = "baby.freedom.mobile"
         minSdk = 30
         targetSdk = 36
-        versionCode = 5
-        versionName = "0.3.0"
+        versionCode = 6
+        versionName = "0.4.0"
+    }
+
+    // Release signing comes from the environment so the same config
+    // serves both CI (.github/workflows/release.yml, secrets-fed) and a
+    // local machine with the keystore checked out. Without the env vars
+    // release builds fall back to the debug key — installable for local
+    // testing, never for publishing.
+    signingConfigs {
+        create("release") {
+            val ksFile = System.getenv("FREEDOM_KEYSTORE_FILE")
+            if (ksFile != null) {
+                storeFile = file(ksFile)
+                storePassword = System.getenv("FREEDOM_KEYSTORE_PASSWORD")
+                keyAlias = System.getenv("FREEDOM_KEY_ALIAS") ?: "freedom"
+                keyPassword = System.getenv("FREEDOM_KEY_PASSWORD")
+                    ?: System.getenv("FREEDOM_KEYSTORE_PASSWORD")
+            }
+        }
     }
 
     buildFeatures {
@@ -30,10 +48,11 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro",
             )
-            // Sign release builds with the debug keystore so they install
-            // without Play Store signing. Replace with a proper release
-            // signingConfig before publishing.
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = if (System.getenv("FREEDOM_KEYSTORE_FILE") != null) {
+                signingConfigs.getByName("release")
+            } else {
+                signingConfigs.getByName("debug")
+            }
         }
     }
 

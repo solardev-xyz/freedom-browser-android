@@ -2,8 +2,18 @@
 
 A native Android browser that loads both regular `https://` sites and decentralised content addressed via `bzz://` hashes or `ens://` names. Both embedded nodes — [ant](https://github.com/solardev-xyz/ant), a Swarm light-node in Rust serving a local bee-shaped HTTP gateway on `127.0.0.1:1633`, and the [freedom-ipfs](https://github.com/solardev-xyz/freedom-ipfs) reader serving `ipfs://` / `ipns://` on an ephemeral loopback port — ship as one combined Rust library, `libfreedom_mobile_ffi.so`, built from [freedom-mobile-ffi](https://github.com/solardev-xyz/freedom-mobile-ffi). The WebView sees ordinary `http://127.0.0.1:…` URLs.
 
-- **Package:** `baby.freedom.mobile` · **Version:** 0.3.0
+- **Package:** `baby.freedom.mobile` · **Version:** 0.4.0
 - **Inspired by:** [`Solar-Punk-Ltd/swarm-mobile-android`](https://github.com/Solar-Punk-Ltd/swarm-mobile-android)
+
+## Install
+
+Download the latest APK from [GitHub Releases](https://github.com/solardev-xyz/freedom-browser-android/releases): `arm64-v8a` for phones/tablets, `x86_64` for emulators, `universal` if unsure. Android will prompt to allow installs from your browser or file manager the first time ("install unknown apps"). Every release is signed with the project key, so newer releases install as updates over older ones; `SHA256SUMS` in each release verifies the download.
+
+### Cutting a release (maintainers)
+
+1. Bump `versionCode` + `versionName` in `app/build.gradle.kts` (and the version above).
+2. Tag and push: `git tag v0.x.y && git push origin v0.x.y`.
+3. [`release.yml`](.github/workflows/release.yml) builds `libfreedom_mobile_ffi.so` at the pinned `FFI_REF`, assembles signed per-ABI APKs (signing key lives in repo secrets), and publishes them with `SHA256SUMS`. When upgrading the embedded nodes, bump `FFI_REF` together with the vendored headers.
 
 ## Requirements
 

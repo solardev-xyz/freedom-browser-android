@@ -1,0 +1,102 @@
+# Release workflow: build the combined native library, assemble signed
+# per-ABI release APKs, and publish them as a GitHub Release so users
+# can sideload straight from the Releases page (mirrors ant's
+# release.yml shape: tag push → build → softprops release + SHA256SUMS).
+#
+# Trigger: push a tag like `v0.4.0`, or run manually via the Actions
+# tab (workflow_dispatch) for a dry run that builds without publishing.
+#
+# Secrets: KEYSTORE_BASE64 (the release keystore, base64),
+# KEYSTORE_PASSWORD, KEY_ALIAS. APKs are signed with this one key
+# forever — Android ties updates to the signing certificate, so the
+# keystore must never be rotated casually.
+#
+# FFI_REF pins which freedom-mobile-ffi tag supplies the embedded
+# nodes; bump it together with the vendored headers in
+# swarmnode/src/main/cpp/ (see README § Building libfreedom_mobile_ffi.so).
+
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  FFI_REF: v0.7.1
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Checkout freedom-mobile-ffi
+        uses: actions/checkout@v4
+        with:
+          repository: solardev-xyz/freedom-mobile-ffi
+          ref: ${{ env.FFI_REF }}
+          path: freedom-mobile-ffi
+
+      # The ffi crate pins its node deps as ssh:// git URLs (local-dev
+      # convenience); all repos are public, so fetch them over https.
+      - name: Rewrite ssh git deps to https
+        run: git config --global url."https://github.com/".insteadOf "ssh://git@github.com/"
+
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk --locked
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: freedom-mobile-ffi
+
+      - name: Build libfreedom_mobile_ffi.so (arm64-v8a + x86_64)
+        run: |
+          export ANDROID_NDK_HOME="$ANDROID_NDK_LATEST_HOME"
+          cd freedom-mobile-ffi
+          ./scripts/build-android.sh
+          mkdir -p "$GITHUB_WORKSPACE/swarmnode/src/main/jniLibs"
+          cp -r target/android/jniLibs/. "$GITHUB_WORKSPACE/swarmnode/src/main/jniLibs/"
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Gradle cache
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Decode release keystore
+        run: echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > "$RUNNER_TEMP/release.keystore"
+
+      - name: Assemble signed release APKs
+        env:
+          FREEDOM_KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          FREEDOM_KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+        run: |
+          export FREEDOM_KEYSTORE_FILE="$RUNNER_TEMP/release.keystore"
+          ./gradlew --no-daemon :app:testDebugUnitTest :app:assembleRelease
+
+      - name: Stage release assets
+        run: |
+          VERSION="${GITHUB_REF_NAME:-manual}"
+          mkdir -p dist
+          for abi in arm64-v8a x86_64 universal; do
+            cp "app/build/outputs/apk/release/app-$abi-release.apk" \
+               "dist/freedom-browser-$VERSION-$abi.apk"
+          done
+          cd dist && sha256sum * > SHA256SUMS
+          echo "=== release contents ===" && ls -la && cat SHA256SUMS
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v3
+        with:
+          files: dist/*
+          generate_release_notes: true
