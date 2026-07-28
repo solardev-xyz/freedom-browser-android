@@ -168,6 +168,12 @@
           descriptionEl.innerHTML =
             "This ENS name doesn't point at any content yet. The owner may not have set a " +
             '<code>contenthash</code> record, or the name has no resolver.';
+        } else if (error === 'ens_wrong_protocol') {
+          titleEl.textContent = 'Name lives on a different network';
+          descriptionEl.innerHTML =
+            'This ENS name resolves to content on a different network than the ' +
+            'scheme you typed asks for. Try the name on its own &mdash; the browser ' +
+            'will follow wherever its <code>contenthash</code> points.';
         } else if (error === 'ens_unsupported_codec') {
           titleEl.textContent = 'Unsupported content format';
           descriptionEl.innerHTML =

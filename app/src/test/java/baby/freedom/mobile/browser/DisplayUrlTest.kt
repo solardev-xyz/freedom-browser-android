@@ -20,10 +20,25 @@ class DisplayUrlTest {
         KnownEnsNames.record("bzz://deadbeef", "swarm.eth")
         val o = BrowserState.Override(
             baseUrl = "http://127.0.0.1:1633/bzz/deadbeef",
-            prefix = "ens://swarm.eth",
+            prefix = "swarm.eth",
         )
         assertEquals(
-            "ens://swarm.eth/page",
+            "swarm.eth/page",
+            DisplayUrl.forActualUrl(
+                "http://127.0.0.1:1633/bzz/deadbeef/page",
+                override = o,
+            ),
+        )
+    }
+
+    @Test
+    fun `scheme-constrained override keeps the typed scheme form`() {
+        val o = BrowserState.Override(
+            baseUrl = "http://127.0.0.1:1633/bzz/deadbeef",
+            prefix = "bzz://swarm.eth",
+        )
+        assertEquals(
+            "bzz://swarm.eth/page",
             DisplayUrl.forActualUrl(
                 "http://127.0.0.1:1633/bzz/deadbeef/page",
                 override = o,
@@ -35,7 +50,7 @@ class DisplayUrlTest {
     fun `gateway url with known hash rewrites to ens`() {
         KnownEnsNames.record("bzz://abcdef", "swarm.eth")
         assertEquals(
-            "ens://swarm.eth/docs",
+            "swarm.eth/docs",
             DisplayUrl.forActualUrl(
                 "http://127.0.0.1:1633/bzz/abcdef/docs",
                 override = null,
@@ -59,7 +74,7 @@ class DisplayUrlTest {
         KnownEnsNames.record("bzz://ABCDEF", "caseful.eth")
         // Gateway URL uses lowercase hex; registry recorded it uppercase.
         assertEquals(
-            "ens://caseful.eth/p",
+            "caseful.eth/p",
             DisplayUrl.forActualUrl(
                 "http://127.0.0.1:1633/bzz/abcdef/p",
                 override = null,
@@ -71,7 +86,7 @@ class DisplayUrlTest {
     fun `bzz scheme input with known hash rewrites`() {
         KnownEnsNames.record("bzz://abc", "s.eth")
         assertEquals(
-            "ens://s.eth/p",
+            "s.eth/p",
             DisplayUrl.forActualUrl("bzz://abc/p", override = null),
         )
     }
@@ -80,7 +95,7 @@ class DisplayUrlTest {
     fun `ipfs scheme input with known cid rewrites`() {
         KnownEnsNames.record("ipfs://bafy", "v.eth")
         assertEquals(
-            "ens://v.eth/x",
+            "v.eth/x",
             DisplayUrl.forActualUrl("ipfs://bafy/x", override = null),
         )
     }

@@ -249,7 +249,7 @@ private fun AboutSection() {
         DetailRow("Package", context.packageName, mono = true)
         Spacer(Modifier.height(8.dp))
         Text(
-            "Loads regular https:// sites plus decentralised content via bzz:// hashes and ens:// names, served through an embedded ant node.",
+            "Loads regular https:// sites plus decentralised content via bzz:// hashes and ENS names (vitalik.eth), served through embedded nodes.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )

@@ -159,10 +159,11 @@ private fun contentUriForSubmit(url: String): String? {
  *   `data-protocol='ipfs' | 'ipns'` → IPFS cube logo
  *
  * For `bzz://` / `ipfs://` / `ipns://` URLs the protocol is obvious
- * from [BrowserState.url]. For `ens://` we look at the active display
- * override — its `baseUrl` is the loopback gateway that actually
- * served the page, so we can tell a Swarm-resolved name from an
- * IPFS-resolved one without re-running the ENS lookup.
+ * from [BrowserState.url]. For an ENS-displayed page (bare `name.eth`,
+ * or an `ens://` string from an older session's history) we look at the
+ * active display override — its `baseUrl` is the loopback gateway that
+ * actually served the page, so we can tell a Swarm-resolved name from
+ * an IPFS-resolved one without re-running the ENS lookup.
  */
 private data class ProtocolBadge(
     @androidx.annotation.DrawableRes val drawableRes: Int,
@@ -173,7 +174,7 @@ private fun protocolBadgeFor(state: BrowserState): ProtocolBadge? {
     val url = state.url
     if (url.startsWith("bzz://")) return SWARM_BADGE
     if (url.startsWith("ipfs://") || url.startsWith("ipns://")) return IPFS_BADGE
-    if (url.startsWith("ens://")) {
+    if (url.startsWith("ens://") || EnsInput.looksLikeEns(url)) {
         val base = state.override?.baseUrl ?: return SWARM_BADGE
         if (base.startsWith(Gateways.SWARM_BASE)) return SWARM_BADGE
         val ipfsBase = Gateways.ipfsBase
@@ -332,7 +333,7 @@ fun BrowserScreen(
     suspend fun gateGatewayNavigation(
         target: BrowserState,
         contentUri: String,
-        ensName: String?,
+        displayPrefix: String?,
         displayUrl: String,
     ) {
         val loadable = Gateways.toLoadable(contentUri)
@@ -392,7 +393,7 @@ fun BrowserScreen(
         val headUrl = GatewayUrls.extractBase(resolved)?.prefix ?: resolved
 
         when (val outcome = gatewayProbe.probe(headUrl)) {
-            GatewayProbe.Outcome.Ok -> target.loadUrl(contentUri, ensName = ensName)
+            GatewayProbe.Outcome.Ok -> target.loadUrl(contentUri, displayPrefix = displayPrefix)
             GatewayProbe.Outcome.Aborted -> { /* superseded by a later submit */ }
             is GatewayProbe.Outcome.Unreachable -> showError("ERR_CONNECTION_REFUSED")
             GatewayProbe.Outcome.NotFound, is GatewayProbe.Outcome.Other -> {
@@ -429,81 +430,89 @@ fun BrowserScreen(
         // Let the user type the friendly form and re-submit to reload.
         val canonical = target.effectiveFetchUrl(trimmed)
 
+        // Generic ENS (`name.eth`, or the `ens://` compat alias which is
+        // normalized away) follows whatever the contenthash points at;
+        // scheme-constrained ENS (`bzz://name.eth`, `ipfs://name.eth`,
+        // `ipns://name.eth`) also resolves the name but *requires* the
+        // contenthash to match the scheme — ENS has a single contenthash,
+        // so the scheme asserts rather than selects. Raw ids
+        // (`bzz://<hex>`, `ipfs://<cid>`) never parse as either and stay
+        // on the direct gateway path below.
         val ens = EnsInput.parse(canonical)
-        if (ens != null) {
-            val ensDisplay = "ens://${ens.name}${ens.suffix}"
+        val constrained = if (ens == null) EnsInput.parseConstrained(canonical) else null
+        if (ens != null || constrained != null) {
+            val name = ens?.name ?: constrained!!.name
+            val suffix = ens?.suffix ?: constrained!!.suffix
+            val requiredProtocol = constrained?.protocol
+            // Canonical display: bare `name.eth` for generic ENS, the
+            // typed scheme form for constrained ENS (it carries intent).
+            // Error-page retries always use the routable scheme forms —
+            // a bare `name.eth` inside the file:// error page would
+            // resolve as a relative path.
+            val displayPrefix =
+                if (requiredProtocol != null) "$requiredProtocol://$name" else name
+            val ensDisplay = "$displayPrefix$suffix"
+            val retryDisplay =
+                if (requiredProtocol != null) ensDisplay else "ens://$name$suffix"
             target.addressBarText = ensDisplay
             target.resolving = true
+
+            fun ensError(errorCode: String, detail: String, retryUrl: String = retryDisplay) {
+                target.clearEnsOverride()
+                target.loadUrl(
+                    ErrorPage.url(
+                        errorCode = errorCode,
+                        displayUrl = ensDisplay,
+                        protocol = "ens",
+                        retryUrl = retryUrl,
+                        detail = detail,
+                    ),
+                )
+            }
+
             target.pendingProbeJob = scope.launch {
                 try {
-                    val result = ensResolver.resolveContenthash(ens.name)
+                    val result = ensResolver.resolveContenthash(name)
                     when (result) {
                         is EnsResult.Ok -> {
                             // Remember hash/cid → name for the whole session
                             // (cross-tab address-bar preservation). Safe for
                             // every protocol — bzz, ipfs, and ipns all round-
                             // trip through [Gateways] + [DisplayUrl] now.
-                            KnownEnsNames.record(result.uri, ens.name)
-                            if (result.protocol == "bzz" ||
+                            KnownEnsNames.record(result.uri, name)
+                            if (requiredProtocol != null && result.protocol != requiredProtocol) {
+                                // Retry with the generic ens:// form: the
+                                // same constrained URL would fail forever,
+                                // but the content itself is loadable.
+                                ensError(
+                                    errorCode = "ens_wrong_protocol",
+                                    detail = "$name resolves to ${result.protocol}:// content, " +
+                                        "not $requiredProtocol://",
+                                    retryUrl = "ens://$name$suffix",
+                                )
+                            } else if (result.protocol == "bzz" ||
                                 result.protocol == "ipfs" ||
                                 result.protocol == "ipns"
                             ) {
-                                val contentUri = result.uri + ens.suffix
                                 gateGatewayNavigation(
                                     target = target,
-                                    contentUri = contentUri,
-                                    ensName = ens.name,
+                                    contentUri = result.uri + suffix,
+                                    displayPrefix = displayPrefix,
                                     displayUrl = ensDisplay,
                                 )
                             } else {
-                                target.clearEnsOverride()
-                                target.loadUrl(
-                                    ErrorPage.url(
-                                        errorCode = "ens_unsupported_codec",
-                                        displayUrl = ensDisplay,
-                                        protocol = "ens",
-                                        retryUrl = ensDisplay,
-                                        detail = "${result.protocol}:// (${result.decoded.take(16)}…)",
-                                    ),
+                                ensError(
+                                    errorCode = "ens_unsupported_codec",
+                                    detail = "${result.protocol}:// (${result.decoded.take(16)}…)",
                                 )
                             }
                         }
-                        is EnsResult.NotFound -> {
-                            target.clearEnsOverride()
-                            target.loadUrl(
-                                ErrorPage.url(
-                                    errorCode = "ens_not_found",
-                                    displayUrl = ensDisplay,
-                                    protocol = "ens",
-                                    retryUrl = ensDisplay,
-                                    detail = result.reason,
-                                ),
-                            )
-                        }
-                        is EnsResult.Unsupported -> {
-                            target.clearEnsOverride()
-                            target.loadUrl(
-                                ErrorPage.url(
-                                    errorCode = "ens_unsupported_codec",
-                                    displayUrl = ensDisplay,
-                                    protocol = "ens",
-                                    retryUrl = ensDisplay,
-                                    detail = "codec ${result.codec}",
-                                ),
-                            )
-                        }
-                        is EnsResult.Error -> {
-                            target.clearEnsOverride()
-                            target.loadUrl(
-                                ErrorPage.url(
-                                    errorCode = "ens_lookup_failed",
-                                    displayUrl = ensDisplay,
-                                    protocol = "ens",
-                                    retryUrl = ensDisplay,
-                                    detail = result.reason,
-                                ),
-                            )
-                        }
+                        is EnsResult.NotFound ->
+                            ensError("ens_not_found", detail = result.reason)
+                        is EnsResult.Unsupported ->
+                            ensError("ens_unsupported_codec", detail = "codec ${result.codec}")
+                        is EnsResult.Error ->
+                            ensError("ens_lookup_failed", detail = result.reason)
                     }
                 } finally {
                     target.resolving = false
@@ -537,7 +546,7 @@ fun BrowserScreen(
                     gateGatewayNavigation(
                         target = target,
                         contentUri = contentUri,
-                        ensName = null,
+                        displayPrefix = null,
                         displayUrl = contentUri,
                     )
                 } finally {

@@ -20,8 +20,8 @@ class BrowserState(val id: Long) {
     /**
      * Active per-tab address-bar rewrite. While set, any actual URL
      * starting with [baseUrl] is shown as `prefix + tail` — used to keep
-     * `ens://<name>/path` visible while browsing under the resolved
-     * content manifest (Swarm today; IPFS/IPNS after port-plan §2).
+     * `<name>/path` (or the scheme-constrained `bzz://<name>/path`)
+     * visible while browsing under the resolved content manifest.
      *
      * Separate from the process-wide [KnownEnsNames] registry: the
      * override only catches in-manifest navigation within a tab, the
@@ -124,14 +124,15 @@ class BrowserState(val id: Long) {
      * the pending URL handed to the WebView is the rewritten form that it
      * can actually fetch (`http://127.0.0.1:1633/bzz/…` for Swarm content).
      *
-     * If [ensName] is provided, the address bar will show
-     * `ens://<ensName>[<path>]` for this navigation and any subsequent
-     * navigation under the same Swarm manifest. Passing `null` (the
-     * default) leaves any existing ENS override untouched — reload,
-     * back, and forward all reuse the current override. Call
-     * [clearEnsOverride] to reset.
+     * If [displayPrefix] is provided, the address bar will show
+     * `<displayPrefix>[<path>]` for this navigation and any subsequent
+     * navigation under the same content manifest — the bare `name.eth`
+     * for generic ENS, or the typed `bzz://name.eth` form for a
+     * scheme-constrained ENS load. Passing `null` (the default) leaves
+     * any existing override untouched — reload, back, and forward all
+     * reuse the current override. Call [clearEnsOverride] to reset.
      */
-    fun loadUrl(url: String, ensName: String? = null) {
+    fun loadUrl(url: String, displayPrefix: String? = null) {
         cancelPendingProbe()
         val loadable = Gateways.toLoadable(url)
         pendingUrl = loadable
@@ -152,10 +153,10 @@ class BrowserState(val id: Long) {
         // bare-root loads still seed the right root for subresources.
         currentBzzRoot = GatewayUrls.extractRoot(loadable)
             ?: GatewayUrls.extractBase(loadable)?.let { it.prefix + "/" }
-        if (ensName != null) {
+        if (displayPrefix != null) {
             val base = GatewayUrls.extractBase(loadable)
             override = if (base != null) {
-                Override(baseUrl = base.prefix, prefix = "ens://$ensName")
+                Override(baseUrl = base.prefix, prefix = displayPrefix)
             } else {
                 null
             }

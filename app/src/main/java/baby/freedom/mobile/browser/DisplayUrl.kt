@@ -8,14 +8,16 @@ package baby.freedom.mobile.browser
  * from `freedom-browser/src/renderer/lib/navigation-utils.js` and
  * `url-utils.js`:
  *
- *   1. Active per-tab [BrowserState.Override] → substitute the ENS prefix
- *      for the gateway base. This is what keeps in-manifest clicks on
- *      `ens://name/path`.
+ *   1. Active per-tab [BrowserState.Override] → substitute the display
+ *      prefix for the gateway base. This is what keeps in-manifest
+ *      clicks on `name.eth/path` (or `bzz://name.eth/path` for a
+ *      scheme-constrained load).
  *   2. `bzz://<hash>[…]` / `ipfs://<cid>[…]` / `ipns://<name>[…]` (after
  *      [Gateways.toDisplay] maps the loaded `http://127.0.0.1:<port>/…`
- *      back to its user-facing scheme); rewrite the hash / CID to
- *      `ens://<name>` if [KnownEnsNames] knows it so ENS-sourced
- *      navigations keep their name in the address bar.
+ *      back to its user-facing scheme); rewrite the hash / CID to the
+ *      bare `<name>` if [KnownEnsNames] knows it so ENS-sourced
+ *      navigations keep their name in the address bar. (`ens://` is an
+ *      input-only compat alias — it is never produced for display.)
  *   3. Otherwise pass-through.
  *
  * The home page ([HOME_URL] = `about:blank`) never reaches this function
@@ -45,21 +47,21 @@ object DisplayUrl {
             val hash = m.groupValues[1]
             val tail = m.groupValues[2]
             val name = KnownEnsNames.nameFor(hash.lowercase())
-            if (name != null) return "ens://$name$tail"
+            if (name != null) return "$name$tail"
             return display
         }
         ipfsRegex.matchEntire(display)?.let { m ->
             val cid = m.groupValues[1]
             val tail = m.groupValues[2]
             val name = KnownEnsNames.nameFor(cid)
-            if (name != null) return "ens://$name$tail"
+            if (name != null) return "$name$tail"
             return display
         }
         ipnsRegex.matchEntire(display)?.let { m ->
             val id = m.groupValues[1]
             val tail = m.groupValues[2]
             val name = KnownEnsNames.nameFor(id)
-            if (name != null) return "ens://$name$tail"
+            if (name != null) return "$name$tail"
             return display
         }
         return display
