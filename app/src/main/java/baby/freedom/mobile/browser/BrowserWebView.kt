@@ -663,15 +663,6 @@ private fun syntheticResponse(
     extraHeaders, ByteArrayInputStream(body.toByteArray(Charsets.UTF_8)),
 )
 
-/** 301 to [location] — WebView follows redirects from intercepted
- *  responses through the normal load pipeline. */
-private fun redirectResponse(location: String): WebResourceResponse =
-    WebResourceResponse(
-        "text/html", "utf-8", 301, "Moved Permanently",
-        mapOf("Location" to location),
-        ByteArrayInputStream(ByteArray(0)),
-    )
-
 /**
  * Serve the per-root virtual https origins (see [VirtualOrigin]) — the
  * only network path for dweb content.
@@ -687,9 +678,12 @@ private fun redirectResponse(location: String): WebResourceResponse =
  *    (the origin is name-derived so storage survives content updates).
  *
  * 2. **Scheme-URL subresources** (`bzz://…` / `ipfs://…` / `ipns://…`
- *    inside a page): answered with a 301 to the virtual-origin
- *    equivalent, which then loads via case 1. (Top-level clicks still
- *    go through `shouldOverrideUrlLoading` → the submit flow.)
+ *    inside a page): translated and served directly through the same
+ *    gateway mapping. (A redirect to the virtual-origin form would be
+ *    cleaner, but [WebResourceResponse] rejects 3xx status codes —
+ *    `[300, 399]` throws — so serving the bytes is the only option.
+ *    Top-level clicks still go through `shouldOverrideUrlLoading` →
+ *    the submit flow.)
  *
  * Everything else — external https, and direct `http://127.0.0.1`
  * gateway calls (the sanctioned write path for dapps) — passes through
@@ -710,13 +704,17 @@ internal fun interceptVirtualRequest(
     val url = uri.toString()
 
     val scheme = uri.scheme?.lowercase()
+    val root: ContentRoot
+    val pathAndQuery: String
     if (scheme in CONTENT_SCHEMES) {
-        val virtual = VirtualOrigin.toVirtualUrl(url) ?: return null
-        Log.v(LOG_TAG, "scheme subresource redirect: $url → $virtual")
-        return redirectResponse(virtual)
+        val parsed = VirtualOrigin.parseContentUrl(url) ?: return null
+        root = parsed.first
+        pathAndQuery = parsed.second.ifEmpty { "/" }
+        Log.v(LOG_TAG, "scheme subresource: $url served via gateway mapping")
+    } else {
+        root = VirtualOrigin.parseHostOfUrl(url) ?: return null
+        pathAndQuery = VirtualOrigin.pathAndQueryOf(url)
     }
-
-    val root = VirtualOrigin.parseHostOfUrl(url) ?: return null
 
     if (req.method != "GET" && req.method != "HEAD") {
         return syntheticResponse(
@@ -726,7 +724,7 @@ internal fun interceptVirtualRequest(
         )
     }
 
-    val target = Gateways.gatewayUrlFor(root, VirtualOrigin.pathAndQueryOf(url))
+    val target = Gateways.gatewayUrlFor(root, pathAndQuery)
         ?: return syntheticResponse(
             502, "Bad Gateway",
             "No local gateway can serve this content root " +
