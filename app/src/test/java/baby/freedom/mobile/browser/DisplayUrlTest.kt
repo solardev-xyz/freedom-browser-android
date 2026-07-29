@@ -101,6 +101,49 @@ class DisplayUrlTest {
     }
 
     @Test
+    fun `virtual bzz origin displays as bzz scheme`() {
+        val ref = "8f1d385f2493d4bcd4d3b2c1e3c1b8f7d1a09876543210fedcba98765432abcd"
+        val virtual = VirtualOrigin.toVirtualUrl("bzz://$ref/docs")!!
+        assertEquals(
+            "bzz://$ref/docs",
+            DisplayUrl.forActualUrl(virtual, override = null),
+        )
+    }
+
+    @Test
+    fun `virtual bzz origin with known hash rewrites to the ens name`() {
+        val ref = "8f1d385f2493d4bcd4d3b2c1e3c1b8f7d1a09876543210fedcba98765432abcd"
+        KnownEnsNames.record("bzz://$ref", "swarm.eth")
+        val virtual = VirtualOrigin.toVirtualUrl("bzz://$ref/docs")!!
+        assertEquals(
+            "swarm.eth/docs",
+            DisplayUrl.forActualUrl(virtual, override = null),
+        )
+    }
+
+    @Test
+    fun `virtual ens origin displays as the bare name`() {
+        val virtual = VirtualOrigin.toVirtualUrl("ens://vitalik.eth/about")!!
+        assertEquals(
+            "vitalik.eth/about",
+            DisplayUrl.forActualUrl(virtual, override = null),
+        )
+    }
+
+    @Test
+    fun `virtual-origin override keeps the typed scheme form`() {
+        val virtual = VirtualOrigin.toVirtualUrl("ens://swarm.eth")!!
+        val o = BrowserState.Override(
+            baseUrl = virtual.removeSuffix("/"),
+            prefix = "bzz://swarm.eth",
+        )
+        assertEquals(
+            "bzz://swarm.eth/page",
+            DisplayUrl.forActualUrl(virtual.removeSuffix("/") + "/page", override = o),
+        )
+    }
+
+    @Test
     fun `external url passes through`() {
         assertEquals(
             "https://example.com/path",

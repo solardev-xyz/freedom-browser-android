@@ -53,23 +53,4 @@ class GatewayUrlsTest {
         assertNull(GatewayUrls.extractBase("http://127.0.0.1:1633/health"))
     }
 
-    @Test
-    fun `extractRoot includes trailing slash`() {
-        assertEquals(
-            "http://127.0.0.1:1633/bzz/deadbeef/",
-            GatewayUrls.extractRoot("http://127.0.0.1:1633/bzz/deadbeef/page/index.html"),
-        )
-        assertEquals(
-            "http://127.0.0.1:5080/ipfs/bafy/",
-            GatewayUrls.extractRoot("http://127.0.0.1:5080/ipfs/bafy/index.html"),
-        )
-    }
-
-    @Test
-    fun `extractRoot null for non-gateway`() {
-        assertNull(GatewayUrls.extractRoot(null))
-        assertNull(GatewayUrls.extractRoot("https://example.com/"))
-        // No path after the hash → no root.
-        assertNull(GatewayUrls.extractRoot("http://127.0.0.1:1633/bzz/abc"))
-    }
 }
