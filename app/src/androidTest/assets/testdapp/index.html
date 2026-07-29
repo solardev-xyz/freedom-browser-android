@@ -1,0 +1,30 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>virtual-origin test dapp</title>
+  <!-- absolute-root subresource: resolves only if the virtual origin
+       owns the whole path namespace (the old shared-gateway model
+       needed escape-rewrite heuristics for exactly this shape) -->
+  <link rel="stylesheet" href="/style.css">
+  <!-- relative subresource -->
+  <script src="app.js"></script>
+</head>
+<body>
+  <h1 id="marker">testdapp</h1>
+  <div id="version">VERSION_A</div>
+  <img id="rel" src="sub/pixel.png">
+  <script>
+    // Signals the harness can poll.
+    window.results = window.results || {};
+    window.addEventListener('load', () => {
+      const img = document.getElementById('rel');
+      window.results.relImg = img.naturalWidth > 0;
+      window.results.absCss =
+        getComputedStyle(document.getElementById('marker')).color ===
+        'rgb(0, 128, 0)';
+      window.results.loaded = true;
+    });
+  </script>
+</body>
+</html>

@@ -15,6 +15,7 @@ android {
         targetSdk = 36
         versionCode = 6
         versionName = "0.4.0"
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
     // Release signing comes from the environment so the same config
@@ -126,4 +127,12 @@ dependencies {
     ksp("androidx.room:room-compiler:$roomVersion")
 
     testImplementation("junit:junit:4.13.2")
+
+    androidTestImplementation("androidx.test:runner:1.6.2")
+    androidTestImplementation("androidx.test:rules:1.6.1")
+    androidTestImplementation("androidx.test.ext:junit:1.2.1")
+    // Fixture gateway: the verification suite serves the test dapp from
+    // a loopback server standing in for the local gateway, so the
+    // tests are hermetic (no p2p, no external network).
+    androidTestImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
 }
