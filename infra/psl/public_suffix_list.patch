@@ -1,0 +1,26 @@
+Add the four Freedom Browser virtual-origin suffixes to PRIVATE DOMAINS.
+
+Apply against publicsuffix/list@main:
+
+    git apply infra/psl/public_suffix_list.patch
+
+Line numbers are as of the 2026-07-28 snapshot of the list; if the file
+has moved on, insert the block by position instead — alphabetically by
+entity name, between the `freedesktop.org` and `freemyip.com` blocks.
+
+--- a/public_suffix_list.dat
++++ b/public_suffix_list.dat
+@@ -13694,6 +13694,13 @@
+ // Submitted by Daniel Stone <daniel@fooishbar.org>
+ freedesktop.org
+ 
++// Freedom Browser : https://github.com/solardev-xyz/freedom-browser-android
++// Submitted by Meinhard Benn <mufuti@gmail.com>
++bzz.freedom.baby
++ens.freedom.baby
++ipfs.freedom.baby
++ipns.freedom.baby
++
+ // freemyip.com : https://freemyip.com
+ // Submitted by Cadence <contact@freemyip.com>
+ freemyip.com

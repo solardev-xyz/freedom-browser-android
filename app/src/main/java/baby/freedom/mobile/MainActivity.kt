@@ -18,6 +18,8 @@ import androidx.compose.ui.Modifier
 import androidx.lifecycle.lifecycleScope
 import baby.freedom.mobile.browser.BrowserScreen
 import baby.freedom.mobile.browser.Gateways
+import baby.freedom.mobile.browser.HOME_URL
+import baby.freedom.mobile.browser.VirtualOrigin
 import baby.freedom.mobile.data.NodeSettings
 import baby.freedom.mobile.node.INodeCallback
 import baby.freedom.mobile.node.INodeService
@@ -45,6 +47,13 @@ class MainActivity : ComponentActivity() {
     private val infoFlow = MutableStateFlow(NodeInfo())
     private val ipfsInfoFlow = MutableStateFlow(IpfsInfo())
     private lateinit var settings: NodeSettings
+
+    /**
+     * An App Link that arrived after the UI was already composed (see
+     * [onNewIntent]), waiting to be opened in a tab. Cold-start links
+     * don't use this — they're passed straight in as the initial URL.
+     */
+    private val deepLinkFlow = MutableStateFlow<String?>(null)
 
     @Volatile
     private var binder: INodeService? = null
@@ -99,6 +108,10 @@ class MainActivity : ComponentActivity() {
             if (settings.runNodeEnabled.first()) startAndBindService()
         }
 
+        // A cold start from an App Link opens straight at the shared
+        // content instead of the home surface.
+        val startUrl = displayUrlForDeepLink(intent) ?: HOME_URL
+
         setContent {
             MaterialTheme(colorScheme = darkColorScheme()) {
                 Surface(
@@ -109,6 +122,7 @@ class MainActivity : ComponentActivity() {
                     val ipfsInfo by ipfsInfoFlow.collectAsState()
                     val runNodeEnabled by settings.runNodeEnabled
                         .collectAsState(initial = true)
+                    val deepLink by deepLinkFlow.collectAsState()
                     BrowserScreen(
                         nodeInfo = info,
                         ipfsInfo = ipfsInfo,
@@ -116,10 +130,41 @@ class MainActivity : ComponentActivity() {
                         onToggleRunNode = ::onToggleRunNode,
                         onEnsureIpfsStarted = ::onEnsureIpfsStarted,
                         onIpfsToggle = ::onIpfsToggle,
+                        initialUrl = startUrl,
+                        deepLinkUrl = deepLink,
+                        onDeepLinkHandled = { deepLinkFlow.value = null },
                     )
                 }
             }
         }
+    }
+
+    /**
+     * An App Link tapped while the app was already running. The
+     * manifest declares `singleTop` so the link lands here instead of
+     * spawning a second activity instance — the user's open tabs
+     * survive.
+     */
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        displayUrlForDeepLink(intent)?.let { deepLinkFlow.value = it }
+    }
+
+    /**
+     * The user-facing display URL for an incoming `VIEW` intent, or
+     * `null` if it isn't one of our virtual origins.
+     *
+     * The translation goes through [VirtualOrigin] — the label
+     * encodings are never parsed here, so the deep-link path can't
+     * drift from the mapping the WebView and the redirector use. A
+     * `null` return also acts as the gate: an intent aimed at some
+     * other https host (a stale filter, an explicit `am start`) is
+     * ignored rather than loaded.
+     */
+    private fun displayUrlForDeepLink(intent: Intent?): String? {
+        if (intent?.action != Intent.ACTION_VIEW) return null
+        return intent.dataString?.let { VirtualOrigin.displayUrlFor(it) }
     }
 
     override fun onDestroy() {

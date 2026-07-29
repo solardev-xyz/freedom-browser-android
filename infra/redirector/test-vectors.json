@@ -1,0 +1,179 @@
+{
+  "_comment": [
+    "Cross-implementation vectors for the virtual-origin label encodings.",
+    "",
+    "Two implementations must agree on these forever: the app's mapping",
+    "module (app/src/main/java/baby/freedom/mobile/browser/VirtualOrigin.kt)",
+    "and the redirector in this directory. Both are pinned here:",
+    "  - node infra/redirector/redirector.test.js  loads this file directly",
+    "  - VirtualOriginVectorsTest.kt mirrors it literally (no JSON parser on",
+    "    the unit-test classpath) and fails if either side moves.",
+    "Change a value here and you must change it in all three places.",
+    "",
+    "`redirect` is what the redirector 301s to with the default gateways",
+    "below; `display` is what the app shows in the address bar for the",
+    "same host + path."
+  ],
+  "baseDomain": "freedom.baby",
+  "gateways": {
+    "swarmGateway": "https://gateway.ethswarm.org",
+    "ipfsGatewayHost": "dweb.link",
+    "ipnsGatewayHost": "dweb.link",
+    "ensGatewaySuffix": "limo"
+  },
+
+  "bzz": [
+    {
+      "name": "plain 64-hex ref, path + query",
+      "ref": "8f1d385f2493d4bcd4d3b2c1e3c1b8f7d1a09876543210fedcba98765432abcd",
+      "labels": ["3kescpgjpg23w0jk9ccszdtmgq3mcqnthwg1oxbfcnb6w68t71"],
+      "host": "3kescpgjpg23w0jk9ccszdtmgq3mcqnthwg1oxbfcnb6w68t71.bzz.freedom.baby",
+      "path": "/gallery/index.html?q=1",
+      "display": "bzz://8f1d385f2493d4bcd4d3b2c1e3c1b8f7d1a09876543210fedcba98765432abcd/gallery/index.html?q=1",
+      "redirect": "https://gateway.ethswarm.org/bzz/8f1d385f2493d4bcd4d3b2c1e3c1b8f7d1a09876543210fedcba98765432abcd/gallery/index.html?q=1"
+    },
+    {
+      "name": "same ref, bare root",
+      "ref": "8f1d385f2493d4bcd4d3b2c1e3c1b8f7d1a09876543210fedcba98765432abcd",
+      "labels": ["3kescpgjpg23w0jk9ccszdtmgq3mcqnthwg1oxbfcnb6w68t71"],
+      "host": "3kescpgjpg23w0jk9ccszdtmgq3mcqnthwg1oxbfcnb6w68t71.bzz.freedom.baby",
+      "path": "/",
+      "display": "bzz://8f1d385f2493d4bcd4d3b2c1e3c1b8f7d1a09876543210fedcba98765432abcd",
+      "redirect": "https://gateway.ethswarm.org/bzz/8f1d385f2493d4bcd4d3b2c1e3c1b8f7d1a09876543210fedcba98765432abcd/"
+    },
+    {
+      "name": "128-hex encrypted ref uses two labels, most-significant chunk first",
+      "ref": "8f1d385f2493d4bcd4d3b2c1e3c1b8f7d1a09876543210fedcba98765432abcd0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "labels": [
+        "3kescpgjpg23w0jk9ccszdtmgq3mcqnthwg1oxbfcnb6w68t71",
+        "10r2curot7aoi80l0gyf25bl7y111lpgrb8bzoi8f0c1uhmgf"
+      ],
+      "host": "3kescpgjpg23w0jk9ccszdtmgq3mcqnthwg1oxbfcnb6w68t71.10r2curot7aoi80l0gyf25bl7y111lpgrb8bzoi8f0c1uhmgf.bzz.freedom.baby",
+      "path": "/x",
+      "display": "bzz://8f1d385f2493d4bcd4d3b2c1e3c1b8f7d1a09876543210fedcba98765432abcd0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef/x",
+      "redirect": "https://gateway.ethswarm.org/bzz/8f1d385f2493d4bcd4d3b2c1e3c1b8f7d1a09876543210fedcba98765432abcd0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef/x"
+    },
+    {
+      "name": "leading zero bytes encode as leading '0' chars (multibase convention)",
+      "ref": "000000002493d4bcd4d3b2c1e3c1b8f7d1a09876543210fedcba98765432abcd",
+      "labels": ["0000gmt7pg0m47sf3innkz4sz73gbzf2xzswf47xjt5q025"],
+      "host": "0000gmt7pg0m47sf3innkz4sz73gbzf2xzswf47xjt5q025.bzz.freedom.baby",
+      "path": "/",
+      "display": "bzz://000000002493d4bcd4d3b2c1e3c1b8f7d1a09876543210fedcba98765432abcd",
+      "redirect": "https://gateway.ethswarm.org/bzz/000000002493d4bcd4d3b2c1e3c1b8f7d1a09876543210fedcba98765432abcd/"
+    },
+    {
+      "name": "all-zero ref is 32 zero chars, not the empty label",
+      "ref": "0000000000000000000000000000000000000000000000000000000000000000",
+      "labels": ["00000000000000000000000000000000"],
+      "host": "00000000000000000000000000000000.bzz.freedom.baby",
+      "path": "/",
+      "display": "bzz://0000000000000000000000000000000000000000000000000000000000000000",
+      "redirect": "https://gateway.ethswarm.org/bzz/0000000000000000000000000000000000000000000000000000000000000000/"
+    }
+  ],
+
+  "ipfs": [
+    {
+      "name": "CIDv0 normalizes to base36 CIDv1 (hostnames case-fold, so Qm... can't survive)",
+      "cidV0": "QmbWqxBEKC3P8tqsKc98xmWNzrzDtRLMiMPL8wBuTGsMnR",
+      "cid": "k2jmtxw8rjh1z69c6not3wtdxb0u3urbzhyll1t9jg6ox26dhi5sfi1m",
+      "host": "k2jmtxw8rjh1z69c6not3wtdxb0u3urbzhyll1t9jg6ox26dhi5sfi1m.ipfs.freedom.baby",
+      "path": "/",
+      "display": "ipfs://k2jmtxw8rjh1z69c6not3wtdxb0u3urbzhyll1t9jg6ox26dhi5sfi1m",
+      "redirect": "https://k2jmtxw8rjh1z69c6not3wtdxb0u3urbzhyll1t9jg6ox26dhi5sfi1m.ipfs.dweb.link/"
+    },
+    {
+      "name": "second CIDv0 vector",
+      "cidV0": "QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG",
+      "cid": "k2jmtxvacy5p64u708sn9oawhfsizpcwgk1g59ckse0h1r7a2j7d0tlr",
+      "host": "k2jmtxvacy5p64u708sn9oawhfsizpcwgk1g59ckse0h1r7a2j7d0tlr.ipfs.freedom.baby",
+      "path": "/index.html",
+      "display": "ipfs://k2jmtxvacy5p64u708sn9oawhfsizpcwgk1g59ckse0h1r7a2j7d0tlr/index.html",
+      "redirect": "https://k2jmtxvacy5p64u708sn9oawhfsizpcwgk1g59ckse0h1r7a2j7d0tlr.ipfs.dweb.link/index.html"
+    },
+    {
+      "name": "lowercase base32 CIDv1 passes through verbatim",
+      "cid": "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi",
+      "host": "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi.ipfs.freedom.baby",
+      "path": "/app.js",
+      "display": "ipfs://bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi/app.js",
+      "redirect": "https://bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi.ipfs.dweb.link/app.js"
+    }
+  ],
+
+  "ipnsKeys": [
+    {
+      "name": "base58 ed25519 PeerID becomes a base36 libp2p-key CIDv1",
+      "peerId": "12D3KooW9tJMax94Lrqw7Y5Qw36viGQAS2gTEPQ5Wg1vTk7xPfQs",
+      "key": "k51qzi5uqu5dg7hrs1jyr49oygapxsw71v7pv43rk8lemejo9h2m3hkzvww8io",
+      "host": "k51qzi5uqu5dg7hrs1jyr49oygapxsw71v7pv43rk8lemejo9h2m3hkzvww8io.ipns.freedom.baby",
+      "path": "/",
+      "display": "ipns://k51qzi5uqu5dg7hrs1jyr49oygapxsw71v7pv43rk8lemejo9h2m3hkzvww8io",
+      "redirect": "https://k51qzi5uqu5dg7hrs1jyr49oygapxsw71v7pv43rk8lemejo9h2m3hkzvww8io.ipns.dweb.link/"
+    }
+  ],
+
+  "ipnsNames": [
+    {
+      "name": "DNSLink name, dot-escaped",
+      "dnslink": "en.wikipedia-on-ipfs.org",
+      "label": "en-wikipedia--on--ipfs-org",
+      "host": "en-wikipedia--on--ipfs-org.ipns.freedom.baby",
+      "path": "/wiki",
+      "display": "ipns://en.wikipedia-on-ipfs.org/wiki",
+      "redirect": "https://en-wikipedia--on--ipfs-org.ipns.dweb.link/wiki"
+    },
+    {
+      "name": "short DNSLink name — the one dot becomes the one hyphen",
+      "dnslink": "ipfs.tech",
+      "label": "ipfs-tech",
+      "host": "ipfs-tech.ipns.freedom.baby",
+      "path": "/",
+      "display": "ipns://ipfs.tech",
+      "redirect": "https://ipfs-tech.ipns.dweb.link/"
+    }
+  ],
+
+  "ens": [
+    {
+      "name": "plain ENS name",
+      "ensName": "vitalik.eth",
+      "label": "vitalik-eth",
+      "host": "vitalik-eth.ens.freedom.baby",
+      "path": "/about",
+      "display": "vitalik.eth/about",
+      "redirect": "https://vitalik.eth.limo/about"
+    },
+    {
+      "name": "ENS name containing a hyphen — '-' doubles before '.' collapses",
+      "ensName": "foo-bar.swarm.eth",
+      "label": "foo--bar-swarm-eth",
+      "host": "foo--bar-swarm-eth.ens.freedom.baby",
+      "path": "/",
+      "display": "foo-bar.swarm.eth",
+      "redirect": "https://foo-bar.swarm.eth.limo/"
+    }
+  ],
+
+  "escaping": [
+    { "name": "a.b", "label": "a-b" },
+    { "name": "a-b", "label": "a--b" },
+    { "name": "a--b", "label": "a----b" },
+    { "name": "a-b.c-d", "label": "a--b-c--d" },
+    { "name": "a---b.c", "label": "a------b-c" },
+    { "name": "x", "label": "x" },
+    { "name": "foo-bar.swarm.eth", "label": "foo--bar-swarm-eth" },
+    { "name": "en.wikipedia-on-ipfs.org", "label": "en-wikipedia--on--ipfs-org" }
+  ],
+
+  "rejects": [
+    { "host": "example.com", "why": "not a virtual suffix" },
+    { "host": "freedom.baby", "why": "the base domain itself carries no label" },
+    { "host": "bzz.freedom.baby", "why": "namespace with no label" },
+    { "host": "3kescpgjpg23w0jk9ccszdtmgq3mcqnthwg1oxbfcnb6w68t71.zzz.freedom.baby", "why": "unknown namespace" },
+    { "host": "a.b.c.bzz.freedom.baby", "why": "bzz takes at most two labels" },
+    { "host": "NOT-hex!.bzz.freedom.baby", "why": "label is not lowercase base36" },
+    { "host": "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz.bzz.freedom.baby", "why": "decodes to more than 32 bytes" }
+  ]
+}
