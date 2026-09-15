@@ -1,8 +1,11 @@
 package baby.freedom.mobile.browser
 
+import android.view.View
+import android.webkit.WebChromeClient
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import java.util.concurrent.atomic.AtomicLong
 
@@ -65,6 +68,65 @@ class TabsState(
     var requestSubmit: ((BrowserState, String) -> Unit)? = null
 
     /**
+     * An HTML5 fullscreen session (`element.requestFullscreen()`) in
+     * progress. Android WebView hands the fullscreen content over as a
+     * plain [View] via `WebChromeClient.onShowCustomView`; the browser
+     * chrome renders it in a screen-covering overlay (see
+     * [FullscreenCustomView]) and hides the system bars for as long as
+     * this is non-null.
+     *
+     * At most one tab can be fullscreen at a time, and only the active
+     * one — a request from a background tab is refused so it can't
+     * paint over what the user is looking at.
+     */
+    class Fullscreen(
+        val tabId: Long,
+        val view: View,
+        val callback: WebChromeClient.CustomViewCallback?,
+    )
+
+    var fullscreen: Fullscreen? by mutableStateOf(null)
+        private set
+
+    /**
+     * `WebChromeClient.onShowCustomView` for [tab]. Refused (the
+     * callback is told the view was hidden straight away) if another
+     * fullscreen session is already up or [tab] isn't the active one.
+     */
+    fun enterFullscreen(
+        tab: BrowserState,
+        view: View,
+        callback: WebChromeClient.CustomViewCallback?,
+    ) {
+        if (fullscreen != null || tab !== active) {
+            callback?.onCustomViewHidden()
+            return
+        }
+        fullscreen = Fullscreen(tab.id, view, callback)
+    }
+
+    /**
+     * `WebChromeClient.onHideCustomView` for [tab] — the page itself
+     * exited fullscreen (`document.exitFullscreen()`, or the video
+     * player's own button). Ignored if [tab] isn't the one fullscreen.
+     */
+    fun onFullscreenHidden(tab: BrowserState) {
+        if (fullscreen?.tabId == tab.id) fullscreen = null
+    }
+
+    /**
+     * Leave fullscreen from the browser side (system back, tab closed).
+     * Telling the WebView via its [WebChromeClient.CustomViewCallback]
+     * makes the page see a proper `fullscreenchange`; the WebView then
+     * echoes `onHideCustomView`, which is a no-op by the time it lands.
+     */
+    fun exitFullscreen() {
+        val fs = fullscreen ?: return
+        fullscreen = null
+        fs.callback?.onCustomViewHidden()
+    }
+
+    /**
      * Open a new tab. If [url] is null (typical "+" button) the tab starts
      * blank and the caller is expected to load the homepage once the node
      * is running; otherwise [url] is submitted immediately (typical
@@ -86,6 +148,9 @@ class TabsState(
 
     fun closeTab(index: Int) {
         if (index !in tabs.indices) return
+        // Let the WebView wind its fullscreen session down before the
+        // host destroys it (see [BrowserWebViewHost]).
+        if (fullscreen?.tabId == tabs[index].id) exitFullscreen()
         tabs.removeAt(index)
         if (tabs.isEmpty()) {
             tabs.add(newBlankTab())

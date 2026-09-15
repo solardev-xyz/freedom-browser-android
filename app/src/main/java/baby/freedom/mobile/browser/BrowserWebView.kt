@@ -236,6 +236,10 @@ fun BrowserWebViewHost(
                     onSubmitUrl = { target, url ->
                         tabs.requestSubmit?.invoke(target, url)
                     },
+                    onEnterFullscreen = { view, callback ->
+                        tabs.enterFullscreen(tab, view, callback)
+                    },
+                    onExitFullscreen = { tabs.onFullscreenHidden(tab) },
                 )
                 webViews[tab.id] = wv
                 refreshLayouts[tab.id] = layout
@@ -344,6 +348,8 @@ private fun buildRefreshableWebView(
     state: BrowserState,
     repo: BrowsingRepository,
     onSubmitUrl: (BrowserState, String) -> Unit,
+    onEnterFullscreen: (View, WebChromeClient.CustomViewCallback?) -> Unit,
+    onExitFullscreen: () -> Unit,
 ): Pair<SwipeRefreshLayout, WebView> {
     val refreshLayout = SwipeRefreshLayout(context).apply {
         layoutParams = ViewGroup.LayoutParams(
@@ -620,6 +626,29 @@ private fun buildRefreshableWebView(
 
             override fun onReceivedTitle(view: WebView?, title: String?) {
                 state.title = sanitizeTitle(title, view?.url)
+            }
+
+            // HTML5 fullscreen (`element.requestFullscreen()`, and the
+            // native `<video>` fullscreen button). Without these two
+            // overrides the WebView rejects every request and the
+            // page's promise falls into its `.catch` — games, video
+            // players and map apps silently stay windowed, and
+            // `screen.orientation.lock()` (which Chromium only grants
+            // while fullscreen) is unavailable too. The chrome
+            // renders [view] in [FullscreenCustomView].
+            override fun onShowCustomView(
+                view: View?,
+                callback: WebChromeClient.CustomViewCallback?,
+            ) {
+                if (view == null) {
+                    callback?.onCustomViewHidden()
+                    return
+                }
+                onEnterFullscreen(view, callback)
+            }
+
+            override fun onHideCustomView() {
+                onExitFullscreen()
             }
 
             override fun onReceivedIcon(view: WebView?, icon: Bitmap?) {

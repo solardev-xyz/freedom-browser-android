@@ -833,6 +833,14 @@ fun BrowserScreen(
             },
         )
     }
+
+    // HTML5 fullscreen. Last, so it paints over every overlay above.
+    tabs.fullscreen?.let { session ->
+        FullscreenCustomView(
+            session = session,
+            onExit = { tabs.exitFullscreen() },
+        )
+    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
