@@ -127,6 +127,9 @@ dependencies {
     ksp("androidx.room:room-compiler:$roomVersion")
 
     testImplementation("junit:junit:4.13.2")
+    // Real org.json for unit tests: the android.jar stub returns null from
+    // every method, which breaks anything that builds JSON-RPC bodies.
+    testImplementation("org.json:json:20240303")
 
     androidTestImplementation("androidx.test:runner:1.6.2")
     androidTestImplementation("androidx.test:rules:1.6.1")
