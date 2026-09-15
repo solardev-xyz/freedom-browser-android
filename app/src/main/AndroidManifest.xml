@@ -17,10 +17,21 @@
         android:theme="@style/Theme.Freedom"
         android:usesCleartextTraffic="true">
 
+        <!--
+          `configChanges` keeps the Activity (and with it every tab's
+          WebView) alive across rotation, fold/unfold, keyboard, locale
+          and theme changes. Without it Android recreates the Activity
+          on each of these, and since the WebViews are built with the
+          Activity context and live in Compose `remember`, recreation
+          throws away every page: scroll, form input, JS state, playback
+          position. Compose reads LocalConfiguration / LocalDensity
+          live, so the UI relayouts without a restart.
+        -->
         <activity
             android:name=".MainActivity"
             android:exported="true"
             android:launchMode="singleTop"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|navigation|uiMode|locale|layoutDirection|fontScale|density|colorMode"
             android:theme="@style/Theme.Freedom"
             android:windowSoftInputMode="adjustPan">
             <intent-filter>

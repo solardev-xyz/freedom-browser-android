@@ -285,10 +285,13 @@ fun BrowserScreen(
     var showTabSwitcher by rememberSaveable { mutableStateOf(false) }
     var showHistory by rememberSaveable { mutableStateOf(false) }
     var showBookmarks by rememberSaveable { mutableStateOf(false) }
-    // Intentionally NOT `rememberSaveable`: on rotation the Activity is
-    // recreated, `tabs` is rebuilt as a fresh blank tab, and we need to
-    // re-submit the homepage into it. If this survived config changes
-    // the load would be suppressed and the tab would render blank.
+    // Intentionally NOT `rememberSaveable`: rotation and the other
+    // declared `configChanges` don't recreate the Activity (see the
+    // manifest), but process death or an undeclared config change still
+    // does. In that case `tabs` is rebuilt as a fresh blank tab and we
+    // need to re-submit the homepage into it. If this survived
+    // recreation the load would be suppressed and the tab would render
+    // blank.
     var didInitialLoad by remember { mutableStateOf(false) }
     var addressFocused by remember { mutableStateOf(false) }
     // Suggestions should only appear once the user has actively changed
