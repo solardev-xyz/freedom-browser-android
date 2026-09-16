@@ -7,6 +7,10 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
+import android.net.NetworkRequest
 import android.os.Build
 import android.os.IBinder
 import android.os.RemoteCallbackList
@@ -78,6 +82,111 @@ class NodeService : Service() {
         override fun stopIpfs() {
             scope.launch { maybeStopIpfs() }
         }
+
+        override fun onAppForeground() {
+            scope.launch {
+                Log.i(TAG, "app foreground → resume nodes")
+                swarmNode.resume()
+                ipfsNode?.enterForeground()
+                repromoteForegroundIfDemoted()
+            }
+        }
+
+        override fun onAppBackground() {
+            scope.launch {
+                Log.i(TAG, "app background → suspend nodes")
+                swarmNode.suspend()
+                ipfsNode?.enterBackground()
+            }
+        }
+
+        override fun recoverNetwork() {
+            scope.launch { recoverNetworkNow("ui request") }
+        }
+    }
+
+    /**
+     * Drop stale connections and redial on both nodes. Triggered by a
+     * network change, or by the UI after a dweb fetch failed against a
+     * node that reports Running (the wedge in freedom-hq/ant#12).
+     */
+    private fun recoverNetworkNow(reason: String) {
+        Log.i(TAG, "recover network ($reason)")
+        swarmNode.onNetworkChanged()
+        ipfsNode?.onNetworkChanged()
+    }
+
+    /**
+     * Connectivity changes are observed here, in the `:node` process,
+     * rather than relayed from the UI: they matter most while the UI
+     * is gone. A network becoming available after one was lost is the
+     * Wi-Fi ↔ cellular handoff / airplane-mode-off case; the nodes'
+     * sockets from the previous network are dead and nothing redials.
+     */
+    private var lastNetwork: Network? = null
+    private val networkCallback = object : ConnectivityManager.NetworkCallback() {
+        override fun onAvailable(network: Network) {
+            val previous = lastNetwork
+            lastNetwork = network
+            if (previous != null && previous != network) {
+                scope.launch { recoverNetworkNow("network changed $previous → $network") }
+            }
+        }
+
+        override fun onLost(network: Network) {
+            if (lastNetwork == network) {
+                // Keep `lastNetwork` so the next onAvailable counts as a
+                // change even if the same Network object comes back.
+                Log.i(TAG, "network lost $network")
+            }
+        }
+    }
+
+    private fun registerNetworkCallback() {
+        val cm = getSystemService(ConnectivityManager::class.java) ?: return
+        val request = NetworkRequest.Builder()
+            .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+            .build()
+        runCatching { cm.registerNetworkCallback(request, networkCallback) }
+            .onFailure { Log.w(TAG, "network callback registration failed", it) }
+    }
+
+    private fun unregisterNetworkCallback() {
+        val cm = getSystemService(ConnectivityManager::class.java) ?: return
+        runCatching { cm.unregisterNetworkCallback(networkCallback) }
+    }
+
+    /**
+     * Android 15+ stops a `dataSync` foreground service after ~6 h of
+     * use per day and calls this first; an app that doesn't stop the
+     * service promptly is crashed. We drop foreground status but keep
+     * the service alive for as long as the UI is bound to it, and try
+     * to re-promote it the next time the app comes to the foreground
+     * (the budget resets daily; the call is refused until then).
+     *
+     * While demoted, the `:node` process is an ordinary background
+     * process: Android may freeze it, which is exactly the state
+     * [INodeService.onAppForeground] recovers from.
+     */
+    @Volatile
+    private var foregroundDemoted = false
+
+    override fun onTimeout(startId: Int, fgsType: Int) {
+        Log.w(TAG, "foreground service time limit reached (type=$fgsType); demoting")
+        foregroundDemoted = true
+        runCatching { stopForeground(STOP_FOREGROUND_REMOVE) }
+    }
+
+    private fun repromoteForegroundIfDemoted() {
+        if (!foregroundDemoted) return
+        runCatching {
+            startForeground(NOTIFICATION_ID, buildNotification(swarmNode.state.value), foregroundTypeCompat())
+        }.onSuccess {
+            foregroundDemoted = false
+            Log.i(TAG, "re-promoted to foreground service")
+        }.onFailure {
+            Log.i(TAG, "foreground re-promotion refused: ${it.message}")
+        }
     }
 
     override fun onBind(intent: Intent?): IBinder = binder
@@ -105,6 +214,7 @@ class NodeService : Service() {
             .launchIn(scope)
 
         swarmNode.start()
+        registerNetworkCallback()
 
         // IPFS is NOT started here. Cold boot leaves the freedom-ipfs node
         // dormant so users who never visit `ipfs://` / IPFS-resolved
@@ -177,6 +287,7 @@ class NodeService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int = START_STICKY
 
     override fun onDestroy() {
+        unregisterNetworkCallback()
         callbacks.kill()
         swarmObserver?.cancel()
         ipfsObserver?.cancel()
@@ -225,6 +336,7 @@ class NodeService : Service() {
     }
 
     private fun updateNotification(info: NodeInfo) {
+        if (foregroundDemoted) return
         val mgr = getSystemService(NotificationManager::class.java)
         mgr.notify(NOTIFICATION_ID, buildNotification(info))
     }

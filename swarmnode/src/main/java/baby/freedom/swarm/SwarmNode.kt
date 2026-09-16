@@ -121,6 +121,35 @@ class SwarmNode(
         }
     }
 
+    /**
+     * App came to the foreground, or connectivity came back: re-warm
+     * the peer connections and restart paused background work. This is
+     * the fix for the "node says Running, every bzz:// page fails until
+     * the node is toggled off and on" wedge — see freedom-hq/ant#12.
+     */
+    fun resume() = lifecycle("resume") { h ->
+        AntNative.resume(h)
+        AntNative.wake(h)
+    }
+
+    /** App went to the background: let uploads checkpoint and quiesce. */
+    fun suspend() = lifecycle("suspend") { h -> AntNative.suspend(h) }
+
+    /** Network changed (Wi-Fi ↔ cellular, airplane mode off): redial. */
+    fun onNetworkChanged() = lifecycle("network-change") { h -> AntNative.resume(h) }
+
+    private fun lifecycle(what: String, block: (Long) -> Unit) {
+        val h = handle
+        if (h == 0L || _state.value.status != NodeStatus.Running) return
+        scope.launch {
+            withContext(Dispatchers.IO) {
+                runCatching { block(h) }
+                    .onSuccess { Log.i(TAG, "$what ok  peers=${_state.value.connectedPeers}") }
+                    .onFailure { Log.w(TAG, "$what failed", it) }
+            }
+        }
+    }
+
     /** Cancel the internal scope; call from Service.onDestroy after [stop]. */
     fun dispose() {
         stop()

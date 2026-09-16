@@ -128,3 +128,25 @@ Java_baby_freedom_swarm_FreedomIpfsNative_handleNetworkChange(JNIEnv *env,
                ? JNI_TRUE
                : JNI_FALSE;
 }
+
+JNIEXPORT jboolean JNICALL
+Java_baby_freedom_swarm_FreedomIpfsNative_enterBackground(JNIEnv *env,
+                                                          jobject thiz,
+                                                          jlong handle) {
+    (void)env;
+    (void)thiz;
+    return freedom_ipfs_node_enter_background((FreedomIpfsNode *)(uintptr_t)handle)
+               ? JNI_TRUE
+               : JNI_FALSE;
+}
+
+JNIEXPORT jboolean JNICALL
+Java_baby_freedom_swarm_FreedomIpfsNative_enterForeground(JNIEnv *env,
+                                                          jobject thiz,
+                                                          jlong handle) {
+    (void)env;
+    (void)thiz;
+    return freedom_ipfs_node_enter_foreground((FreedomIpfsNode *)(uintptr_t)handle)
+               ? JNI_TRUE
+               : JNI_FALSE;
+}

@@ -30,4 +30,22 @@ interface INodeService {
      * node untouched. No-op if the node is already stopped.
      */
     void stopIpfs();
+
+    /**
+     * The UI came to the foreground. Re-warms the Swarm peer
+     * connections and resumes IPFS discovery — after Android froze
+     * the process or the network flipped, the nodes otherwise sit on
+     * dead sockets while still reporting Running.
+     */
+    void onAppForeground();
+
+    /** The UI went to the background: quiesce background work. */
+    void onAppBackground();
+
+    /**
+     * Something on the UI side saw a dweb fetch fail against a node
+     * that reports Running: prompt both nodes to drop stale
+     * connections and redial, without a restart.
+     */
+    void recoverNetwork();
 }

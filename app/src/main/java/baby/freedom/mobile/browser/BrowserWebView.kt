@@ -240,6 +240,7 @@ fun BrowserWebViewHost(
                         tabs.enterFullscreen(tab, view, callback)
                     },
                     onExitFullscreen = { tabs.onFullscreenHidden(tab) },
+                    onRecoverNodes = { tabs.requestNodeRecovery?.invoke() },
                 )
                 webViews[tab.id] = wv
                 refreshLayouts[tab.id] = layout
@@ -350,6 +351,7 @@ private fun buildRefreshableWebView(
     onSubmitUrl: (BrowserState, String) -> Unit,
     onEnterFullscreen: (View, WebChromeClient.CustomViewCallback?) -> Unit,
     onExitFullscreen: () -> Unit,
+    onRecoverNodes: () -> Unit = {},
 ): Pair<SwipeRefreshLayout, WebView> {
     val refreshLayout = SwipeRefreshLayout(context).apply {
         layoutParams = ViewGroup.LayoutParams(
@@ -375,6 +377,15 @@ private fun buildRefreshableWebView(
     // committed (never reached first paint) we don't want a stub
     // history entry with no real title.
     var currentLoadCommitted: Boolean = false
+
+    // The dweb URL we already prompted a node recovery + retry for. A
+    // main-frame load through the interceptor that dies mid-body
+    // (Chromium's generic -1) is the signature of a node sitting on
+    // dead peer sockets while still reporting Running; one redial and
+    // reload fixes it, a second identical failure goes to the error
+    // page. Cleared when a real page finishes so a later visit can
+    // recover again.
+    var autoRecoveredUrl: String? = null
 
     val webView = WebView(context).apply {
         layoutParams = ViewGroup.LayoutParams(
@@ -463,6 +474,9 @@ private fun buildRefreshableWebView(
             }
 
             override fun onPageFinished(view: WebView?, url: String?) {
+                if (url != null && !ErrorPage.isErrorPage(url) && url != ABOUT_BLANK) {
+                    autoRecoveredUrl = null
+                }
                 if (url == ABOUT_BLANK) {
                     // See companion branch in onPageStarted. Back/
                     // forward onto about:blank never fires
@@ -563,6 +577,14 @@ private fun buildRefreshableWebView(
                 // Already on the error page? Don't loop.
                 if (ErrorPage.isErrorPage(failed)) return
                 if (!isDwebPageUrl(failed)) return
+
+                if (autoRecoveredUrl != failed && view != null) {
+                    autoRecoveredUrl = failed
+                    Log.i(LOG_TAG, "main-frame ${error?.errorCode} for $failed → recover nodes + retry")
+                    onRecoverNodes()
+                    view.postDelayed({ view.loadUrl(failed) }, AUTO_RECOVER_RETRY_DELAY_MS)
+                    return
+                }
 
                 val display = displayFor(failed, state).ifBlank { failed }
                 val code = error?.errorCode?.let { "ERR_$it" } ?: "ERR_FAILED"
@@ -696,6 +718,11 @@ private fun buildRefreshableWebView(
 // from the gateway, lands the worst-case budget near 25 s. (The desktop port
 // uses ~3 min across 13 attempts, but runs via a custom Electron
 // protocol handler that isn't bound by the WebView hang detector.)
+// Grace period between prompting the nodes to redial and reloading the
+// failed page: ant_resume opens the bootnode sockets in parallel, so a
+// couple of seconds is enough for retrieval to have working routes.
+private const val AUTO_RECOVER_RETRY_DELAY_MS = 2_500L
+
 private val ESCAPE_RETRY_DELAYS_MS: LongArray = longArrayOf(
     0L, 250L, 500L, 1000L, 2000L, 3000L, 5000L, 5000L,
 )
