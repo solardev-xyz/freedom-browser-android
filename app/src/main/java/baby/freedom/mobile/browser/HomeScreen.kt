@@ -17,7 +17,6 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -187,7 +186,7 @@ private fun BookmarkTile(
     Column(
         modifier = Modifier
             .width(84.dp)
-            .clip(RoundedCornerShape(12.dp))
+            .clip(MaterialTheme.shapes.medium)
             .clickable(onClick = onClick)
             .padding(vertical = 4.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
@@ -218,7 +217,7 @@ private fun FaviconTile(favicon: ImageBitmap) {
     Box(
         modifier = Modifier
             .size(64.dp)
-            .clip(RoundedCornerShape(16.dp))
+            .clip(MaterialTheme.shapes.large)
             .background(Color.White),
         contentAlignment = Alignment.Center,
     ) {
@@ -241,7 +240,7 @@ private fun LetterTile(entry: BookmarkEntry) {
     Box(
         modifier = Modifier
             .size(64.dp)
-            .clip(RoundedCornerShape(16.dp))
+            .clip(MaterialTheme.shapes.large)
             .background(accent),
         contentAlignment = Alignment.Center,
     ) {

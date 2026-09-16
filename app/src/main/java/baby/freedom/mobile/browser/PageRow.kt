@@ -10,7 +10,6 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -57,15 +56,16 @@ internal fun PageRow(
     val onSurface = MaterialTheme.colorScheme.onSurface.copy(alpha = alpha)
     val onSurfaceVariant = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = alpha)
 
-    val (bgColor, corner) = when (style) {
-        PageRowStyle.Listed -> MaterialTheme.colorScheme.surfaceVariant to 10.dp
-        PageRowStyle.Inset -> null to 8.dp
+    val (bgColor, shape) = when (style) {
+        PageRowStyle.Listed ->
+            MaterialTheme.colorScheme.surfaceVariant to MaterialTheme.shapes.medium
+        PageRowStyle.Inset -> null to MaterialTheme.shapes.small
     }
 
     Row(
         modifier = modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(corner))
+            .clip(shape)
             .let { if (bgColor != null) it.background(bgColor) else it }
             .clickable(enabled = enabled, onClick = onClick)
             .padding(horizontal = 12.dp, vertical = 10.dp),

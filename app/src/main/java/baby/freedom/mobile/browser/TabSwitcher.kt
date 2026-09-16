@@ -27,6 +27,7 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -80,7 +81,7 @@ fun TabSwitcherScreen(
                 Text("New tab", fontWeight = FontWeight.Medium)
             }
             Spacer(Modifier.weight(1f))
-            IconButton(onClick = onDismiss) {
+            IconButton(onClick = onDismiss, shapes = IconButtonDefaults.shapes()) {
                 Icon(Icons.Filled.Close, contentDescription = "Close tab switcher")
             }
         }
@@ -130,12 +131,12 @@ private fun TabCard(
         modifier = Modifier
             .fillMaxWidth()
             .aspectRatio(0.78f)
-            .clip(RoundedCornerShape(14.dp))
+            .clip(MaterialTheme.shapes.large)
             .background(MaterialTheme.colorScheme.surface)
             .border(
                 width = borderWidth,
                 color = borderColor,
-                shape = RoundedCornerShape(14.dp),
+                shape = MaterialTheme.shapes.large,
             )
             .clickable { onClick() },
     ) {
@@ -161,6 +162,7 @@ private fun TabCard(
             )
             IconButton(
                 onClick = onClose,
+                shapes = IconButtonDefaults.shapes(),
                 modifier = Modifier.size(36.dp),
             ) {
                 Icon(
@@ -205,7 +207,7 @@ private fun ThumbnailPlaceholder(tab: BrowserState) {
         Box(
             modifier = Modifier
                 .size(48.dp)
-                .clip(RoundedCornerShape(12.dp))
+                .clip(MaterialTheme.shapes.medium)
                 .background(MaterialTheme.colorScheme.primaryContainer),
             contentAlignment = Alignment.Center,
         ) {
@@ -241,7 +243,7 @@ fun TabsCountButton(
     modifier: Modifier = Modifier,
 ) {
     val stroke = MaterialTheme.colorScheme.onSurface
-    IconButton(onClick = onClick, modifier = modifier) {
+    IconButton(onClick = onClick, shapes = IconButtonDefaults.shapes(), modifier = modifier) {
         Box(
             modifier = Modifier
                 .size(22.dp)
