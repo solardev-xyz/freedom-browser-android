@@ -11,7 +11,6 @@ import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
-import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
@@ -24,6 +23,7 @@ import baby.freedom.mobile.data.NodeSettings
 import baby.freedom.mobile.node.INodeCallback
 import baby.freedom.mobile.node.INodeService
 import baby.freedom.mobile.node.NodeService
+import baby.freedom.mobile.ui.FreedomTheme
 import baby.freedom.swarm.IpfsInfo
 import baby.freedom.swarm.NodeInfo
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -113,7 +113,7 @@ class MainActivity : ComponentActivity() {
         val startUrl = displayUrlForDeepLink(intent) ?: HOME_URL
 
         setContent {
-            MaterialTheme(colorScheme = darkColorScheme()) {
+            FreedomTheme {
                 Surface(
                     modifier = Modifier.fillMaxSize(),
                     color = MaterialTheme.colorScheme.background,

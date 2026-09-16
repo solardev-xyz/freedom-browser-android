@@ -1,18 +1,19 @@
+import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+
 plugins {
     id("com.android.application")
-    id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
     id("com.google.devtools.ksp")
 }
 
 android {
     namespace = "baby.freedom.mobile"
-    compileSdk = 36
+    compileSdk = 37
 
     defaultConfig {
         applicationId = "baby.freedom.mobile"
         minSdk = 30
-        targetSdk = 36
+        targetSdk = 37
         versionCode = 7
         versionName = "0.4.1"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
@@ -61,7 +62,6 @@ android {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
-    kotlinOptions { jvmTarget = "17" }
 
     // Per-ABI split so we can ship a slim arm64-v8a-only APK (~80 MB)
     // instead of the universal 310 MB build. Release builds and the
@@ -96,6 +96,12 @@ android {
     }
 }
 
+// AGP 9 applies the Kotlin plugin itself, so the compiler options live
+// in the top-level `kotlin` block rather than `android.kotlinOptions`.
+kotlin {
+    compilerOptions { jvmTarget = JvmTarget.JVM_17 }
+}
+
 dependencies {
     implementation(project(":swarmnode"))
 
@@ -103,7 +109,12 @@ dependencies {
     implementation(composeBom)
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.ui:ui-tooling-preview")
-    implementation("androidx.compose.material3:material3")
+    // Material 3 Expressive (MaterialExpressiveTheme, wavy progress,
+    // LoadingIndicator, icon-button shapes) is internal in the BOM's
+    // 1.4.0 and only public from the 1.5.0 alphas, so this one artifact
+    // overrides the BOM. It pulls compose ui / foundation / animation up
+    // to 1.13.0-alpha01 transitively; everything else stays on the BOM.
+    implementation("androidx.compose.material3:material3:1.5.0-alpha28")
     implementation("androidx.compose.material:material-icons-extended")
     debugImplementation("androidx.compose.ui:ui-tooling")
 

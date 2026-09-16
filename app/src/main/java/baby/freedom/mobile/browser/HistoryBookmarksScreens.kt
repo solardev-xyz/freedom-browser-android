@@ -21,6 +21,7 @@ import androidx.compose.material.icons.outlined.BookmarkBorder
 import androidx.compose.material.icons.outlined.History
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -146,7 +147,11 @@ private fun EntryRow(
         thirdLine = timestamp,
         onClick = onClick,
         trailing = {
-            IconButton(onClick = onRemove, modifier = Modifier.size(32.dp)) {
+            IconButton(
+                onClick = onRemove,
+                shapes = IconButtonDefaults.shapes(),
+                modifier = Modifier.size(32.dp),
+            ) {
                 Icon(
                     Icons.Filled.Close,
                     contentDescription = "Remove",

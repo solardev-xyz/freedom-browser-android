@@ -42,7 +42,8 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.IconButtonDefaults
+import androidx.compose.material3.LinearWavyProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Snackbar
 import androidx.compose.material3.SnackbarHost
@@ -50,6 +51,7 @@ import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.Text
+import androidx.compose.material3.WavyProgressIndicatorDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -683,16 +685,22 @@ fun BrowserScreen(
                 },
             )
 
+            // Page-load bar. The wavy indicators are taller than the old
+            // 3 dp hairline (the wave needs room for its amplitude), so
+            // the reserved strip is sized off the component's own
+            // container height rather than a magic number — the chrome
+            // still keeps a fixed-height slot so the WebView below
+            // doesn't jump when loading starts or ends.
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(3.dp),
+                    .height(WavyProgressIndicatorDefaults.LinearContainerHeight),
             ) {
                 if (state.progress in 0..99 || state.resolving) {
                     if (state.resolving) {
-                        LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                        LinearWavyProgressIndicator(modifier = Modifier.fillMaxWidth())
                     } else {
-                        LinearProgressIndicator(
+                        LinearWavyProgressIndicator(
                             modifier = Modifier.fillMaxWidth(),
                             progress = { state.progress / 100f },
                         )
@@ -937,7 +945,10 @@ private fun TopBar(
             .padding(start = 8.dp, end = 8.dp, top = 4.dp, bottom = 1.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        IconButton(onClick = onHome) {
+        // Expressive shape variants: the icon buttons morph from round
+        // to a squarer pressed shape on touch. Purely visual — the
+        // 48 dp hit target and click handlers are unchanged.
+        IconButton(onClick = onHome, shapes = IconButtonDefaults.shapes()) {
             Icon(Icons.Filled.Home, contentDescription = "Home")
         }
 
@@ -1048,6 +1059,7 @@ private fun TopBar(
                                         // keystroke before showing it again.
                                         onAddressEditedChanged(false)
                                     },
+                                    shapes = IconButtonDefaults.shapes(),
                                     modifier = Modifier.size(32.dp),
                                 ) {
                                     Icon(
@@ -1089,6 +1101,7 @@ private fun TopBar(
         ) {
             IconButton(
                 onClick = { menuExpanded = true },
+                shapes = IconButtonDefaults.shapes(),
                 modifier = Modifier.padding(start = 2.dp),
             ) {
                 Icon(Icons.Filled.Menu, contentDescription = "Menu")
@@ -1100,7 +1113,7 @@ private fun TopBar(
                     properties = PopupProperties(focusable = true),
                 ) {
                     Surface(
-                        shape = RoundedCornerShape(4.dp),
+                        shape = MaterialTheme.shapes.small,
                         color = MaterialTheme.colorScheme.surfaceContainer,
                         tonalElevation = 3.dp,
                         shadowElevation = 3.dp,

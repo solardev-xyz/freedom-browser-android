@@ -1,12 +1,18 @@
+import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+
 plugins {
     id("com.android.library")
-    id("org.jetbrains.kotlin.android")
     id("kotlin-parcelize")
 }
 
 android {
     namespace = "baby.freedom.swarm"
-    compileSdk = 36
+    compileSdk = 37
+    // AGP 9 defaults to NDK r28; pin the r27 the JNI shim has always
+    // been built with so it keeps matching the toolchain that produces
+    // libfreedom_mobile_ffi.so (cargo-ndk against the runner's
+    // ANDROID_NDK_ROOT — see .github/workflows/release.yml).
+    ndkVersion = "27.0.12077973"
 
     defaultConfig {
         minSdk = 30
@@ -26,7 +32,6 @@ android {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
-    kotlinOptions { jvmTarget = "17" }
 
     buildFeatures {
         aidl = true
@@ -42,6 +47,12 @@ android {
             "META-INF/DISCLAIMER",
         )
     }
+}
+
+// AGP 9 applies the Kotlin plugin itself, so the compiler options live
+// in the top-level `kotlin` block rather than `android.kotlinOptions`.
+kotlin {
+    compilerOptions { jvmTarget = JvmTarget.JVM_17 }
 }
 
 dependencies {
