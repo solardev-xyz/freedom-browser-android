@@ -11,5 +11,11 @@ project(freedom_jni C)
 # link-by-name keeps us safe against ever regressing to a cargo-bare
 # .so whose DT_NEEDED would otherwise capture the build-host path.
 add_library(freedom_jni SHARED ant_jni.c freedom_ipfs_jni.c)
+# 16 KB page-size compatibility. NDK r27 links with 4 KB LOAD alignment by
+# default; a device booted with 16 KB pages then refuses to dlopen this
+# library ("not page-aligned"), the :node process never comes up, and
+# every bzz:// / ipfs:// navigation fails while plain https keeps working.
+# libfreedom_mobile_ffi.so is already built 16 KB-aligned by cargo-ndk.
+target_link_options(freedom_jni PRIVATE "-Wl,-z,max-page-size=16384")
 target_link_directories(freedom_jni PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../jniLibs/${ANDROID_ABI})
 target_link_libraries(freedom_jni freedom_mobile_ffi log)
