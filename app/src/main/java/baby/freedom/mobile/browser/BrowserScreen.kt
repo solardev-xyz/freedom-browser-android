@@ -265,6 +265,7 @@ fun BrowserScreen(
     initialUrl: String = HOME_URL,
     deepLinkUrl: String? = null,
     onDeepLinkHandled: () -> Unit = {},
+    onRecoverNodes: () -> Unit = {},
 ) {
     val tabs = remember { TabsState(homepage = initialUrl) }
     // Shared with the request interceptor (which resolves
@@ -590,7 +591,11 @@ fun BrowserScreen(
     // back through the same probe gate the top address bar uses.
     DisposableEffect(tabs) {
         tabs.requestSubmit = { tab, url -> submit(tab, url) }
-        onDispose { tabs.requestSubmit = null }
+        tabs.requestNodeRecovery = onRecoverNodes
+        onDispose {
+            tabs.requestSubmit = null
+            tabs.requestNodeRecovery = null
+        }
     }
 
     // Kick off the homepage on the initial tab as soon as we're composed.

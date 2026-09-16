@@ -84,6 +84,43 @@ Java_baby_freedom_swarm_AntNative_agentString(JNIEnv *env, jobject thiz, jlong h
     return out;
 }
 
+/*
+ * Lifecycle recovery (ant.h: ant_resume / ant_suspend / ant_wake). After
+ * Android freezes or the network flips, the swarm's peer sockets are
+ * reaped while the peer counter still looks healthy and nothing
+ * re-dials — retrievals then hang and the page shows ERR_-1 until the
+ * node is restarted. `resume` re-opens live sockets to the bootnodes;
+ * `suspend` / `wake` quiesce and restart background work around a
+ * suspension. All three are idempotent and cheap.
+ */
+static void call_lifecycle(JNIEnv *env, jlong handle,
+                           int (*fn)(const AntHandle *, char **),
+                           const char *what) {
+    char *err = NULL;
+    int rc = fn((const AntHandle *)(uintptr_t)handle, &err);
+    if (rc != 0) {
+        throw_runtime(env, err, what);
+    }
+}
+
+JNIEXPORT void JNICALL
+Java_baby_freedom_swarm_AntNative_resume(JNIEnv *env, jobject thiz, jlong handle) {
+    (void)thiz;
+    call_lifecycle(env, handle, ant_resume, "ant_resume failed");
+}
+
+JNIEXPORT void JNICALL
+Java_baby_freedom_swarm_AntNative_suspend(JNIEnv *env, jobject thiz, jlong handle) {
+    (void)thiz;
+    call_lifecycle(env, handle, ant_suspend, "ant_suspend failed");
+}
+
+JNIEXPORT void JNICALL
+Java_baby_freedom_swarm_AntNative_wake(JNIEnv *env, jobject thiz, jlong handle) {
+    (void)thiz;
+    call_lifecycle(env, handle, ant_wake, "ant_wake failed");
+}
+
 JNIEXPORT void JNICALL
 Java_baby_freedom_swarm_AntNative_shutdown(JNIEnv *env, jobject thiz, jlong handle) {
     (void)env;

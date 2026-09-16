@@ -136,6 +136,17 @@ class IpfsNode(
         scope.cancel()
     }
 
+    fun enterBackground() = whileRunning { FreedomIpfsNative.enterBackground(it) }
+
+    fun enterForeground() = whileRunning { FreedomIpfsNative.enterForeground(it) }
+
+    private fun whileRunning(block: (Long) -> Unit) {
+        val node = handle
+        if (node != 0L && _state.value.status == IpfsStatus.Running) {
+            scope.launch { runCatching { block(node) }.onFailure { Log.w(TAG, "lifecycle call failed", it) } }
+        }
+    }
+
     /** Forward connectivity changes so stale provider state is dropped. */
     fun onNetworkChanged() {
         val node = handle

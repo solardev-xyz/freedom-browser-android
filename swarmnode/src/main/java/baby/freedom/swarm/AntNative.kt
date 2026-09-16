@@ -41,4 +41,19 @@ internal object AntNative {
 
     /** Tear the node down and free the handle — it must not be reused. */
     external fun shutdown(handle: Long)
+
+    /**
+     * Re-open live sockets to the bootnodes after an OS suspension or a
+     * network change (`ant_resume`). The swarm doesn't notice reaped
+     * peer sockets on its own — the peer count stays healthy while
+     * every retrieval hangs — so the host has to prompt it. Cheap and
+     * idempotent; throws only if the node loop is already gone.
+     */
+    external fun resume(handle: Long)
+
+    /** Quiesce background work before a suspension (`ant_suspend`). Blocks ≤ ~5 s. */
+    external fun suspend(handle: Long)
+
+    /** Undo [suspend] on foreground / network restored (`ant_wake`). */
+    external fun wake(handle: Long)
 }

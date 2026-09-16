@@ -68,6 +68,15 @@ class TabsState(
     var requestSubmit: ((BrowserState, String) -> Unit)? = null
 
     /**
+     * Hook installed by [BrowserScreen]: a main-frame dweb fetch failed
+     * although the node reports Running, so the WebView layer wants the
+     * nodes prompted to redial before it retries once. `null` before
+     * the screen has composed.
+     */
+    @Volatile
+    var requestNodeRecovery: (() -> Unit)? = null
+
+    /**
      * An HTML5 fullscreen session (`element.requestFullscreen()`) in
      * progress. Android WebView hands the fullscreen content over as a
      * plain [View] via `WebChromeClient.onShowCustomView`; the browser

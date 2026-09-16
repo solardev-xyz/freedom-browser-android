@@ -58,4 +58,10 @@ internal object FreedomIpfsNative {
 
     /** Tell the node connectivity changed (drops stale provider state). */
     external fun handleNetworkChange(handle: Long): Boolean
+
+    /** App going to the background: pause discovery / preloads. */
+    external fun enterBackground(handle: Long): Boolean
+
+    /** App back in the foreground: resume discovery / preloads. */
+    external fun enterForeground(handle: Long): Boolean
 }

@@ -133,6 +133,7 @@ class MainActivity : ComponentActivity() {
                         initialUrl = startUrl,
                         deepLinkUrl = deepLink,
                         onDeepLinkHandled = { deepLinkFlow.value = null },
+                        onRecoverNodes = ::onRecoverNodes,
                     )
                 }
             }
@@ -165,6 +166,34 @@ class MainActivity : ComponentActivity() {
     private fun displayUrlForDeepLink(intent: Intent?): String? {
         if (intent?.action != Intent.ACTION_VIEW) return null
         return intent.dataString?.let { VirtualOrigin.displayUrlFor(it) }
+    }
+
+    /**
+     * Foreground / background transitions are relayed to the `:node`
+     * process so the embedded nodes can re-warm their peer sockets
+     * (after Android froze the process the swarm otherwise sits on dead
+     * connections while still reporting Running — see
+     * freedom-hq/ant#12) and quiesce on the way out. If the service
+     * isn't bound yet these are no-ops; the node boots fresh anyway.
+     */
+    override fun onStart() {
+        super.onStart()
+        runCatching { binder?.onAppForeground() }
+    }
+
+    override fun onStop() {
+        runCatching { binder?.onAppBackground() }
+        super.onStop()
+    }
+
+    /**
+     * A dweb fetch failed while the node reports Running: ask the
+     * nodes to drop stale connections and redial before the WebView
+     * layer retries once. Manual equivalent: toggling the node off
+     * and on in Settings.
+     */
+    private fun onRecoverNodes() {
+        runCatching { binder?.recoverNetwork() }
     }
 
     override fun onDestroy() {
