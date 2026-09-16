@@ -1,7 +1,6 @@
 package baby.freedom.mobile.ens
 
 import android.util.Log
-import java.net.HttpURLConnection
 import java.net.URL
 import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.Dispatchers
@@ -21,18 +20,27 @@ import org.json.JSONObject
  *   - Keccak-256: [Keccak256] (pure Kotlin, legacy padding)
  *   - JSON-RPC: [HttpURLConnection] + `org.json.JSONObject`
  *
+ * CCIP-Read (EIP-3668) is followed for offchain resolvers — subnames
+ * under `base.eth`, `cb.id`, NameStone-managed names and the like. The
+ * Universal Resolver reverts with `OffchainLookup`; we fetch from the
+ * gateway it names, then call its callback with the gateway's answer
+ * and the revert's `extraData`, repeating if the callback reverts with
+ * another lookup. Gateway fetches are bounded (https only, 15 s, 4 MB)
+ * because the URLs come from the contract, not from us; see
+ * [ccipFetch].
+ *
  * Known limitations vs. the desktop resolver:
- *   - No CCIP-Read. The Universal Resolver reverts with `OffchainLookup`
- *     for offchain resolvers (notably `.box` via 3DNS); we surface that
- *     as `NotFound(NO_RESOLVER)` today. Implementing CCIP-Read is a
- *     separate follow-up (fetch from `urls[]`, call back with extraData).
  *   - ENSIP-15 normalization is lowercased-ASCII only. Pure-ASCII names
  *     round-trip correctly; emoji / non-ASCII labels may normalize
  *     differently than `@adraffy/ens-normalize`.
  */
-class EnsResolver(
-    private val rpcEndpoints: List<String> = DEFAULT_RPC_ENDPOINTS,
+class EnsResolver internal constructor(
+    private val rpcEndpoints: List<String>,
+    private val http: EnsHttp,
 ) {
+    constructor(rpcEndpoints: List<String> = DEFAULT_RPC_ENDPOINTS) :
+        this(rpcEndpoints, EnsHttp.Default)
+
     private data class Cached(val result: EnsResult, val timestamp: Long)
 
     private val cache = ConcurrentHashMap<String, Cached>()
@@ -81,7 +89,28 @@ class EnsResolver(
                 continue
             }
 
-            val call = rpcResult.getOrThrow()
+            var call = rpcResult.getOrThrow()
+            if (call.revertData != null && isOffchainLookup(call.revertData)) {
+                // Offchain resolver: run the CCIP-Read loop against the
+                // same RPC. Gateway failures are retryable transport
+                // errors, not "no such name", and aren't cached.
+                val followed = runCatching {
+                    withContext(Dispatchers.IO) {
+                        followOffchainLookup(rpc, call.revertData!!)
+                    }
+                }
+                val err = followed.exceptionOrNull()
+                if (err != null) {
+                    Log.w(TAG, "[$normalized] CCIP-Read failed: ${err.message}")
+                    return EnsResult.Error(
+                        name = normalized,
+                        reason = "CCIP_GATEWAY_FAILED",
+                        error = err.message.orEmpty(),
+                        retryable = true,
+                    )
+                }
+                call = followed.getOrThrow()
+            }
             if (call.revertData != null) {
                 val mapped = mapRevert(normalized, call.revertData)
                 if (mapped != null) {
@@ -131,25 +160,114 @@ class EnsResolver(
         val dnsName = dnsEncode(normalizedName)
         val node = namehash(normalizedName)
         val innerCallData = CONTENTHASH_SELECTOR + node
+        return RESOLVE_SELECTOR + abiEncodeTwoBytes(dnsName, innerCallData)
+    }
 
-        val selector = RESOLVE_SELECTOR
-        val head = ByteArray(64)
-        // offsets relative to start of args (after selector): 0x40 and
-        // 0x40 + 32 + padded(dnsName).
-        writeUint256(0x40L, head, 0)
-        val namePaddedLen = padLen32(dnsName.size)
-        writeUint256((0x40 + 32 + namePaddedLen).toLong(), head, 32)
+    // ---- CCIP-Read (EIP-3668) ----
 
-        val nameBlock = ByteArray(32 + namePaddedLen).apply {
-            writeUint256(dnsName.size.toLong(), this, 0)
-            dnsName.copyInto(this, 32)
+    /**
+     * Decoded `OffchainLookup(address sender, string[] urls, bytes
+     * callData, bytes4 callbackFunction, bytes extraData)`.
+     */
+    internal class OffchainLookup(
+        val sender: String,
+        val urls: List<String>,
+        val callData: ByteArray,
+        val callback: ByteArray,
+        val extraData: ByteArray,
+    )
+
+    /**
+     * Drive the lookup to completion: fetch the gateway's answer, feed it
+     * to the sender's callback, and repeat while that reverts with a
+     * further `OffchainLookup`. Returns the final call outcome — a
+     * result to decode as usual, or a non-CCIP revert for [mapRevert].
+     * Throws on gateway failure, a sender other than the Universal
+     * Resolver, malformed revert data, or too many rounds.
+     */
+    private fun followOffchainLookup(rpc: String, firstRevert: String): CallOutcome {
+        var revert = firstRevert
+        repeat(MAX_CCIP_ROUNDS) {
+            val lookup = decodeOffchainLookup(revert)
+                ?: throw IllegalStateException("malformed OffchainLookup revert")
+            // Only follow lookups issued by the contract we called. A
+            // resolver can't redirect us into calling back some other
+            // contract with gateway-supplied bytes.
+            if (!lookup.sender.equals(UNIVERSAL_RESOLVER, ignoreCase = true)) {
+                throw IllegalStateException("OffchainLookup sender is not the Universal Resolver")
+            }
+            val response = ccipFetch(lookup.sender, lookup.urls, lookup.callData)
+                ?: throw IllegalStateException("CCIP gateways unavailable or returned invalid data")
+            val callbackData = lookup.callback + abiEncodeTwoBytes(response, lookup.extraData)
+            val outcome = ethCall(rpc, lookup.sender, callbackData)
+            val next = outcome.revertData
+            if (next == null || !isOffchainLookup(next)) return outcome
+            revert = next
         }
-        val dataPaddedLen = padLen32(innerCallData.size)
-        val dataBlock = ByteArray(32 + dataPaddedLen).apply {
-            writeUint256(innerCallData.size.toLong(), this, 0)
-            innerCallData.copyInto(this, 32)
+        throw IllegalStateException("CCIP-Read recursion limit exceeded")
+    }
+
+    /**
+     * Ask the gateways, in order, for the answer to [callData]. Follows
+     * EIP-3668 exactly: `{sender}` / `{data}` are substituted into the
+     * URL template, a template containing `{data}` is fetched with GET,
+     * anything else gets a JSON `{sender, data}` POST, and the reply is
+     * JSON with a hex `data` field. A gateway that fails any check is
+     * skipped and the next one tried; `null` once they're exhausted.
+     *
+     * Bounds are deliberate — the URLs are chosen by the resolver
+     * contract, not by us: https only, no redirects, no credentials or
+     * bare-IP / local hosts, [CCIP_TIMEOUT_MS] wall clock and
+     * [CCIP_MAX_RESPONSE_BYTES] body per gateway. Non-URL entries such
+     * as the Universal Resolver's `x-batch-gateway:true` hint are
+     * skipped like any other non-https string.
+     */
+    internal fun ccipFetch(sender: String, urls: List<String>, callData: ByteArray): ByteArray? {
+        val senderLower = sender.lowercase()
+        val dataHex = "0x" + callData.toHex()
+        for (template in urls) {
+            val url = template.replace("{sender}", senderLower).replace("{data}", dataHex)
+            val parsed = runCatching { URL(url) }.getOrNull() ?: continue
+            val host = parsed.host.orEmpty().trim('[', ']').trimEnd('.').lowercase()
+            if (parsed.protocol != "https" || parsed.userInfo != null || !isPublicHostname(host)) {
+                continue
+            }
+            val get = template.contains("{data}")
+            val reply = runCatching {
+                http.request(
+                    method = if (get) "GET" else "POST",
+                    url = url,
+                    headers = if (get) {
+                        mapOf("accept" to "application/json")
+                    } else {
+                        mapOf("accept" to "application/json", "content-type" to "application/json")
+                    },
+                    body = if (get) {
+                        null
+                    } else {
+                        JSONObject().put("sender", senderLower).put("data", dataHex).toString()
+                    },
+                    timeoutMs = CCIP_TIMEOUT_MS,
+                    maxBytes = CCIP_MAX_RESPONSE_BYTES,
+                    followRedirects = false,
+                )
+            }.getOrNull() ?: continue
+            if (reply.code !in 200..299) continue
+            val data = runCatching { JSONObject(reply.body).optString("data", "") }.getOrNull() ?: continue
+            if (!isHexBytes(data)) continue
+            return data.hexToBytes()
         }
-        return selector + head + nameBlock + dataBlock
+        return null
+    }
+
+    private fun isPublicHostname(host: String): Boolean {
+        if (host.isEmpty() || !host.contains('.')) return false
+        if (host.endsWith(".localhost") || host.endsWith(".local") || host.endsWith(".internal")) return false
+        // Bare IPv4 / IPv6 literals: the point of a CCIP gateway is a
+        // named, certificated service.
+        if (host.all { it.isDigit() || it == '.' }) return false
+        if (host.contains(':')) return false
+        return true
     }
 
     // ---- Response decoding ----
@@ -266,12 +384,6 @@ class EnsResolver(
         return when (selector) {
             // ResolverNotFound(bytes), ResolverNotContract(bytes,address)
             "0x77209fe8", "0x1e9535f2" -> EnsResult.NotFound(name, "NO_RESOLVER")
-            // OffchainLookup — CCIP-Read not supported yet
-            "0x556f1830" -> EnsResult.NotFound(
-                name = name,
-                reason = "NO_RESOLVER",
-                error = "CCIP-Read not supported (offchain resolver)",
-            )
             else -> null
         }
     }
@@ -299,43 +411,80 @@ class EnsResolver(
             )
         }.toString()
 
-        val conn = (URL(rpc).openConnection() as HttpURLConnection).apply {
-            requestMethod = "POST"
-            doOutput = true
-            connectTimeout = 8_000
-            readTimeout = 15_000
-            setRequestProperty("content-type", "application/json")
-            setRequestProperty("accept", "application/json")
+        val reply = http.request(
+            method = "POST",
+            url = rpc,
+            headers = mapOf("content-type" to "application/json", "accept" to "application/json"),
+            body = body,
+            timeoutMs = RPC_TIMEOUT_MS,
+            maxBytes = RPC_MAX_RESPONSE_BYTES,
+            followRedirects = true,
+        )
+        if (reply.code !in 200..299) {
+            throw RuntimeException("HTTP ${reply.code}: ${reply.body.take(200)}")
         }
-        try {
-            conn.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
-            val code = conn.responseCode
-            val stream = if (code in 200..299) conn.inputStream else conn.errorStream
-            val text = stream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }.orEmpty()
-            if (code !in 200..299) {
-                throw RuntimeException("HTTP $code: ${text.take(200)}")
+        val json = JSONObject(reply.body)
+        json.optJSONObject("error")?.let { err ->
+            // Some providers pack the revert data inside error.data;
+            // surface it so we can distinguish ResolverNotFound from
+            // transport failures.
+            val data = err.optString("data", "")
+            if (data.startsWith("0x") && data.length >= 10) {
+                return CallOutcome(data = null, revertData = data)
             }
-            val json = JSONObject(text)
-            json.optJSONObject("error")?.let { err ->
-                // Some providers pack the revert data inside error.data;
-                // surface it so we can distinguish ResolverNotFound from
-                // transport failures.
-                val data = err.optString("data", "")
-                if (data.startsWith("0x") && data.length >= 10) {
-                    return CallOutcome(data = null, revertData = data)
-                }
-                throw RuntimeException("RPC error: ${err.optString("message", "unknown")}")
-            }
-            val result = json.optString("result", "")
-            return CallOutcome(data = result, revertData = null)
-        } finally {
-            conn.disconnect()
+            throw RuntimeException("RPC error: ${err.optString("message", "unknown")}")
         }
+        val result = json.optString("result", "")
+        return CallOutcome(data = result, revertData = null)
     }
 
     companion object {
         private const val TAG = "EnsResolver"
         private const val CACHE_TTL_MS = 15L * 60 * 1000
+
+        private const val RPC_TIMEOUT_MS = 15_000
+        private const val RPC_MAX_RESPONSE_BYTES = 1L * 1024 * 1024
+
+        // Per-gateway bounds for CCIP-Read fetches (same as the desktop
+        // resolver's `ccip-fetch.js`).
+        internal const val CCIP_TIMEOUT_MS = 15_000
+        internal const val CCIP_MAX_RESPONSE_BYTES = 4L * 1024 * 1024
+        private const val MAX_CCIP_ROUNDS = 10
+
+        // bytes4(keccak256("OffchainLookup(address,string[],bytes,bytes4,bytes)"))
+        private const val OFFCHAIN_LOOKUP_SELECTOR = "0x556f1830"
+
+        internal fun isOffchainLookup(revertData: String): Boolean =
+            revertData.length >= 10 &&
+                revertData.substring(0, 10).equals(OFFCHAIN_LOOKUP_SELECTOR, ignoreCase = true)
+
+        /**
+         * Decode an `OffchainLookup` revert. `null` if any offset or
+         * length points outside the data.
+         */
+        internal fun decodeOffchainLookup(revertData: String): OffchainLookup? {
+            val bytes = runCatching { revertData.hexToBytes() }.getOrNull() ?: return null
+            if (bytes.size < 4 + 5 * 32) return null
+            val body = bytes.copyOfRange(4, bytes.size)
+            val sender = "0x" + body.copyOfRange(12, 32).toHex()
+            val urlsOffset = readUint256AsInt(body, 32) ?: return null
+            val callData = decodeDynamicBytesAt(body, pointerSlot = 2) ?: return null
+            val callback = body.copyOfRange(96, 100)
+            val extraData = decodeDynamicBytesAt(body, pointerSlot = 4) ?: return null
+
+            if (body.size < urlsOffset + 32) return null
+            val count = readUint256AsInt(body, urlsOffset) ?: return null
+            if (count < 0 || count > 64) return null
+            val base = urlsOffset + 32
+            val urls = ArrayList<String>(count)
+            for (i in 0 until count) {
+                if (body.size < base + (i + 1) * 32) return null
+                val rel = readUint256AsInt(body, base + i * 32) ?: return null
+                val str = decodeDynamicBytesAtOffset(body, base + rel) ?: return null
+                urls.add(String(str, Charsets.UTF_8))
+            }
+            return OffchainLookup(sender, urls, callData, callback, extraData)
+        }
 
         private const val UNIVERSAL_RESOLVER = "0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe"
 
@@ -422,6 +571,34 @@ private fun padLen32(n: Int): Int {
     return if (rem == 0) n else n + (32 - rem)
 }
 
+/** `abi.encode(bytes a, bytes b)` — two dynamic args, heads then tails. */
+internal fun abiEncodeTwoBytes(a: ByteArray, b: ByteArray): ByteArray {
+    val head = ByteArray(64)
+    // Offsets relative to the start of the args: 0x40 and
+    // 0x40 + 32 + padded(a).
+    writeUint256(0x40L, head, 0)
+    val aPaddedLen = padLen32(a.size)
+    writeUint256((0x40 + 32 + aPaddedLen).toLong(), head, 32)
+    val aBlock = ByteArray(32 + aPaddedLen).apply {
+        writeUint256(a.size.toLong(), this, 0)
+        a.copyInto(this, 32)
+    }
+    val bBlock = ByteArray(32 + padLen32(b.size)).apply {
+        writeUint256(b.size.toLong(), this, 0)
+        b.copyInto(this, 32)
+    }
+    return head + aBlock + bBlock
+}
+
+private fun isHexBytes(s: String): Boolean {
+    if (!s.startsWith("0x") || s.length % 2 != 0) return false
+    for (i in 2 until s.length) {
+        val c = s[i]
+        if (!(c in '0'..'9' || c in 'a'..'f' || c in 'A'..'F')) return false
+    }
+    return true
+}
+
 private fun ByteArray.startsWith(prefix: ByteArray): Boolean {
     if (size < prefix.size) return false
     for (i in prefix.indices) if (this[i] != prefix[i]) return false
@@ -436,11 +613,19 @@ private fun ByteArray.startsWith(prefix: ByteArray): Boolean {
 private fun decodeDynamicBytesAt(rawHex: String, pointerSlot: Int): ByteArray? {
     val body = if (rawHex.startsWith("0x") || rawHex.startsWith("0X")) rawHex.substring(2) else rawHex
     if (body.length % 2 != 0) return null
-    val bytes = body.hexToBytes()
+    return decodeDynamicBytesAt(body.hexToBytes(), pointerSlot)
+}
+
+private fun decodeDynamicBytesAt(bytes: ByteArray, pointerSlot: Int): ByteArray? {
     val pointerOffset = pointerSlot * 32
     if (bytes.size < pointerOffset + 32) return null
     val offset = readUint256AsInt(bytes, pointerOffset) ?: return null
-    if (bytes.size < offset + 32) return null
+    return decodeDynamicBytesAtOffset(bytes, offset)
+}
+
+/** Length-prefixed dynamic bytes / string whose length word sits at [offset]. */
+private fun decodeDynamicBytesAtOffset(bytes: ByteArray, offset: Int): ByteArray? {
+    if (offset < 0 || bytes.size < offset + 32) return null
     val len = readUint256AsInt(bytes, offset) ?: return null
     if (bytes.size < offset + 32 + len) return null
     return bytes.copyOfRange(offset + 32, offset + 32 + len)
