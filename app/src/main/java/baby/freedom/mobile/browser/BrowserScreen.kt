@@ -607,6 +607,28 @@ fun BrowserScreen(
     // window itself never resizes, Compose's inset padding does the
     // work).
     val chromeInsets = WindowInsets.systemBars.union(WindowInsets.ime)
+
+    // "Tap anywhere outside the floating toolbar to dismiss the
+    // keyboard". We intercept presses on the Initial pass so we see
+    // them before the WebView/HomeScreen children, but we never
+    // consume — the child still receives the tap normally. Clearing
+    // focus is a no-op when nothing is focused, so the common case
+    // (address bar idle) pays only the cost of the gesture loop.
+    //
+    // Applied to every band of the screen that isn't the pill itself:
+    // the page area, the progress strip, and the chrome background
+    // around the pill (side gutters + the padding under it).
+    val dismissKeyboardOnTap = Modifier.pointerInput(Unit) {
+        awaitEachGesture {
+            awaitFirstDown(
+                requireUnconsumed = false,
+                pass = PointerEventPass.Initial,
+            )
+            focusManager.clearFocus()
+            keyboard?.hide()
+        }
+    }
+
     Box(modifier = Modifier.fillMaxSize()) {
         Column(
             modifier = Modifier
@@ -619,28 +641,11 @@ fun BrowserScreen(
             // panel on top of it rather than unmounting the WebView — that
             // keeps the underlying page alive (scroll position, JS timers,
             // media) across focus changes.
-            //
-            // The pointer-input modifier gives us "tap anywhere outside
-            // the toolbar to dismiss the keyboard" behaviour. We intercept
-            // presses on the Initial pass so we see them before the
-            // WebView/HomeScreen children, but we never consume — the
-            // child still receives the tap normally. Clearing focus is a
-            // no-op when nothing is focused, so the common case (address
-            // bar idle) pays only the cost of the gesture loop.
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
                     .weight(1f)
-                    .pointerInput(Unit) {
-                        awaitEachGesture {
-                            awaitFirstDown(
-                                requireUnconsumed = false,
-                                pass = PointerEventPass.Initial,
-                            )
-                            focusManager.clearFocus()
-                            keyboard?.hide()
-                        }
-                    },
+                    .then(dismissKeyboardOnTap),
             ) {
                 BrowserWebViewHost(
                     tabs = tabs,
@@ -687,7 +692,8 @@ fun BrowserScreen(
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(WavyProgressIndicatorDefaults.LinearContainerHeight),
+                    .height(WavyProgressIndicatorDefaults.LinearContainerHeight)
+                    .then(dismissKeyboardOnTap),
             ) {
                 if (state.progress in 0..99 || state.resolving) {
                     if (state.resolving) {
@@ -701,70 +707,84 @@ fun BrowserScreen(
                 }
             }
 
-            // Capped width so the pill doesn't stretch edge to edge in
-            // landscape or on a tablet; on a phone in portrait the cap
-            // never kicks in.
-            BottomToolbar(
-                state = state,
-                tabCount = tabs.tabs.size,
-                nodeInfo = nodeInfo,
-                isBookmarked = isBookmarked,
-                addressFocused = addressFocused,
-                addressBarEdited = addressBarEdited,
-                onAddressFocusChanged = { focused ->
-                    addressFocused = focused
-                    // Losing focus always resets the "has the user typed?"
-                    // latch so the next tap starts clean (select-all, no
-                    // dropdown) regardless of what was typed last time.
-                    if (!focused) addressBarEdited = false
-                },
-                onAddressEditedChanged = { addressBarEdited = it },
-                onSubmit = { text ->
-                    // Called from the TextField's IME Go action. Bounce
-                    // through a short coroutine delay so the in-flight
-                    // Enter key event is delivered to the TextField
-                    // (and consumed there) before submit() clears
-                    // focus. Otherwise the Enter propagates to the
-                    // Home icon button and fires it as a synthetic
-                    // click.
-                    scope.launch {
-                        delay(50)
-                        submit(state, text)
-                    }
-                },
-                onForward = { state.loadUrl("javascript:history.forward();void(0);") },
-                onHome = {
-                    submit(state, tabs.homepageUrl)
-                },
-                onToggleBookmark = {
-                    val url = state.url
-                    if (url.isBlank()) return@BottomToolbar
-                    if (isBookmarked) repo.unbookmark(url)
-                    else repo.bookmark(url, state.title)
-                },
-                onOpenSettings = { showSettings = true },
-                onOpenNode = { showNode = true },
-                onOpenTabs = { showTabSwitcher = true },
-                onOpenHistory = { showHistory = true },
-                onOpenBookmarks = { showBookmarks = true },
-                onReload = {
-                    val url = state.url.ifBlank { state.addressBarText }
-                    if (url.isNotBlank()) submit(state, url)
-                },
-                onNewTab = {
-                    val fresh = tabs.newTab()
-                    submit(fresh, tabs.homepageUrl)
-                },
-                modifier = Modifier
-                    .align(Alignment.CenterHorizontally)
-                    .widthIn(max = 640.dp)
-                    .padding(
-                        start = FloatingToolbarDefaults.ScreenOffset,
-                        end = FloatingToolbarDefaults.ScreenOffset,
-                        top = 2.dp,
-                        bottom = 8.dp,
-                    ),
-            )
+            // The pill floats in a full-width band. Its side gutters and
+            // the padding beneath it are chrome background rather than
+            // toolbar, so a catcher sits *behind* the pill and gives
+            // those areas the same tap-to-dismiss behaviour as the page
+            // above. Behind, not around: taps that land on the pill hit
+            // it first and never reach the catcher, so tapping inside
+            // the address field doesn't bounce its own focus.
+            Box(modifier = Modifier.fillMaxWidth()) {
+                Box(
+                    modifier = Modifier
+                        .matchParentSize()
+                        .then(dismissKeyboardOnTap),
+                )
+                // Capped width so the pill doesn't stretch edge to edge
+                // in landscape or on a tablet; on a phone in portrait
+                // the cap never kicks in.
+                BottomToolbar(
+                    state = state,
+                    tabCount = tabs.tabs.size,
+                    nodeInfo = nodeInfo,
+                    isBookmarked = isBookmarked,
+                    addressFocused = addressFocused,
+                    addressBarEdited = addressBarEdited,
+                    onAddressFocusChanged = { focused ->
+                        addressFocused = focused
+                        // Losing focus always resets the "has the user typed?"
+                        // latch so the next tap starts clean (select-all, no
+                        // dropdown) regardless of what was typed last time.
+                        if (!focused) addressBarEdited = false
+                    },
+                    onAddressEditedChanged = { addressBarEdited = it },
+                    onSubmit = { text ->
+                        // Called from the TextField's IME Go action. Bounce
+                        // through a short coroutine delay so the in-flight
+                        // Enter key event is delivered to the TextField
+                        // (and consumed there) before submit() clears
+                        // focus. Otherwise the Enter propagates to the
+                        // Home icon button and fires it as a synthetic
+                        // click.
+                        scope.launch {
+                            delay(50)
+                            submit(state, text)
+                        }
+                    },
+                    onForward = { state.loadUrl("javascript:history.forward();void(0);") },
+                    onHome = {
+                        submit(state, tabs.homepageUrl)
+                    },
+                    onToggleBookmark = {
+                        val url = state.url
+                        if (url.isBlank()) return@BottomToolbar
+                        if (isBookmarked) repo.unbookmark(url)
+                        else repo.bookmark(url, state.title)
+                    },
+                    onOpenSettings = { showSettings = true },
+                    onOpenNode = { showNode = true },
+                    onOpenTabs = { showTabSwitcher = true },
+                    onOpenHistory = { showHistory = true },
+                    onOpenBookmarks = { showBookmarks = true },
+                    onReload = {
+                        val url = state.url.ifBlank { state.addressBarText }
+                        if (url.isNotBlank()) submit(state, url)
+                    },
+                    onNewTab = {
+                        val fresh = tabs.newTab()
+                        submit(fresh, tabs.homepageUrl)
+                    },
+                    modifier = Modifier
+                        .align(Alignment.Center)
+                        .widthIn(max = 640.dp)
+                        .padding(
+                            start = FloatingToolbarDefaults.ScreenOffset,
+                            end = FloatingToolbarDefaults.ScreenOffset,
+                            top = 2.dp,
+                            bottom = 8.dp,
+                        ),
+                )
+            }
         }
 
         // Snackbars pop up above the toolbar rather than under it.
