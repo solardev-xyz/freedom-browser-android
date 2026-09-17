@@ -113,6 +113,47 @@ private const val NODE_READY_TIMEOUT_MS: Long = 90_000L
 private enum class NodeReadyOutcome { Running, Unrecoverable, TimedOut }
 
 /**
+ * Who asked for a navigation — and therefore whether the capsule may
+ * rest on the destination *before* it commits.
+ *
+ * [User] is the user naming the destination themselves (typed URL,
+ * suggestion, bookmark, history, home, deep link). The pill echoes it
+ * straight away, the way Chrome's omnibox shows a typed URL while the
+ * previous page is still on screen: the user supplied the string, so
+ * reading it back vouches for nobody.
+ *
+ * [Renderer] is the *current page* asking — an in-page link click or a
+ * bare `location.href = 'ens://…'` from page JS, routed here by
+ * [BrowserWebView]'s `shouldOverrideUrlLoading`. Writing the
+ * destination's label then would let any page park a trusted ENS name
+ * over its own still-painted content for the whole
+ * resolve → probe → navigate window (up to [NODE_READY_TIMEOUT_MS] on
+ * a cold node, and re-armable since each submit cancels the previous
+ * probe). So the committed address stays on the page the user is
+ * actually looking at, and flips at navigation commit
+ * (`onPageStarted`) — exactly like every renderer-initiated navigation
+ * the WebView handles without us.
+ */
+internal enum class SubmitSource { User, Renderer }
+
+/**
+ * What a tab's committed address ([BrowserState.addressBarText], which
+ * the capsule's bold resting label is derived from) should be once
+ * [submitted] has been submitted but *not yet* navigated to: the
+ * submitted display string when the user named it, the unchanged
+ * [current] address — the page that is still on screen — when the
+ * renderer did. See [SubmitSource].
+ */
+internal fun pendingAddressBarText(
+    current: String,
+    submitted: String,
+    source: SubmitSource,
+): String = when (source) {
+    SubmitSource.User -> submitted
+    SubmitSource.Renderer -> current
+}
+
+/**
  * Classify a submitted URL as a content-addressed (bzz / ipfs / ipns)
  * destination that should go through the probe-gated navigation path,
  * or return `null` for "treat as a plain URL". Accepts both the
@@ -410,7 +451,11 @@ fun BrowserScreen(
         }
     }
 
-    fun submit(target: BrowserState, raw: String) {
+    fun submit(
+        target: BrowserState,
+        raw: String,
+        source: SubmitSource = SubmitSource.User,
+    ) {
         keyboard?.hide()
         // Drop focus synchronously so the IME's input connection is torn
         // down before we overwrite the text below. Otherwise the IME
@@ -459,7 +504,12 @@ fun BrowserScreen(
             val ensDisplay = "$displayPrefix$suffix"
             val retryDisplay =
                 if (requiredProtocol != null) ensDisplay else "ens://$name$suffix"
-            target.addressBarText = ensDisplay
+            // Only a destination the *user* named earns the pill before
+            // it commits — a page that navigated us here doesn't get to
+            // dress itself in the name it is resolving. See
+            // [SubmitSource].
+            target.addressBarText =
+                pendingAddressBarText(target.addressBarText, ensDisplay, source)
             target.resolving = true
 
             fun ensError(errorCode: String, detail: String, retryUrl: String = retryDisplay) {
@@ -542,7 +592,10 @@ fun BrowserScreen(
             target.navigateHome()
             return
         }
-        target.addressBarText = url
+        // Same rule as the ENS branch above: a renderer-initiated
+        // `bzz://` / `ipfs://` click waits for the commit before the
+        // pill describes where it is going.
+        target.addressBarText = pendingAddressBarText(target.addressBarText, url, source)
         target.clearEnsOverride()
 
         // Direct content-addressed URLs (bzz://, ipfs://, ipns://, or
@@ -576,8 +629,14 @@ fun BrowserScreen(
     // [TabsState] so BrowserWebView (which is composed under us) can
     // bounce bzz:// / ens:// link-clicks + error-page "Try Again"
     // back through the same probe gate the top address bar uses.
+    //
+    // Everything arriving on this hook comes out of
+    // `shouldOverrideUrlLoading`, i.e. the page asked — never the user
+    // directly — so it submits as [SubmitSource.Renderer] and the pill
+    // keeps describing the page still on screen until the new one
+    // commits.
     DisposableEffect(tabs) {
-        tabs.requestSubmit = { tab, url -> submit(tab, url) }
+        tabs.requestSubmit = { tab, url -> submit(tab, url, SubmitSource.Renderer) }
         tabs.requestNodeRecovery = onRecoverNodes
         onDispose {
             tabs.requestSubmit = null
