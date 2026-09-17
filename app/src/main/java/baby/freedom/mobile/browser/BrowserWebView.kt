@@ -752,9 +752,24 @@ private const val AUTO_RECOVER_RETRY_DELAY_MS = 2_500L
 // the page really has an editable focused, and `scrollIntoViewIfNeeded`
 // (Chromium) only moves the page when the field isn't already fully
 // visible, so the common case costs nothing visible.
+//
+// Seen from the top document, a field focused inside an `<iframe>` is
+// reported as the IFRAME element itself, so the snippet descends
+// through nested frames to the innermost active element. That only
+// works for same-origin frames (`contentDocument` is null, or throws,
+// across origins); a cross-origin frame keeps Chromium's own
+// first-keystroke scroll. Scrolling an element inside a same-origin
+// frame scrolls the ancestor documents too, so the outer page moves
+// as needed.
 private const val SCROLL_FOCUSED_FIELD_JS = """
 (function () {
   var e = document.activeElement;
+  for (var depth = 0; e && e.tagName === 'IFRAME' && depth < 8; depth++) {
+    var inner = null;
+    try { inner = e.contentDocument && e.contentDocument.activeElement; } catch (_) {}
+    if (!inner) break;
+    e = inner;
+  }
   if (!e) return;
   var t = e.tagName;
   if (t !== 'INPUT' && t !== 'TEXTAREA' && t !== 'SELECT' && !e.isContentEditable) return;
