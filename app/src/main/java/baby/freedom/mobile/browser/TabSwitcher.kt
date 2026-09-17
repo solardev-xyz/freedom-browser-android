@@ -233,7 +233,7 @@ private fun firstLetterFor(tab: BrowserState): String {
 }
 
 /**
- * The tabs-count pill that lives in the top chrome. Tapping it opens the
+ * The tabs-count pill that lives in the bottom toolbar. Tapping it opens the
  * switcher. Renders as a bordered square with the tab count inside.
  */
 @Composable

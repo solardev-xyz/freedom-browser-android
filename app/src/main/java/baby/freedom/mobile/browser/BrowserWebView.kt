@@ -419,6 +419,30 @@ private fun buildRefreshableWebView(
             mediaPlaybackRequiresUserGesture = false
         }
 
+        // Keep a focused form field visible when the keyboard opens.
+        //
+        // Chromium does scroll the focused editable into view itself,
+        // but it runs that scroll against the pre-keyboard viewport:
+        // the app is edge-to-edge, so the window never resizes for the
+        // IME (`adjustResize` notwithstanding) and this WebView only
+        // shrinks a frame later, when Compose re-pads the chrome column
+        // for the IME inset — see [BrowserScreen]. A field near the
+        // bottom of a page therefore lands back under the chrome and
+        // stays there until the first keystroke triggers a second
+        // scroll, so that character is typed blind. Re-running the
+        // scroll once the shrink has actually landed puts the caret on
+        // screen at focus time instead.
+        //
+        // Only shrinks matter (the keyboard closing re-grows us, and
+        // the page is free to stay where it is), and only while the
+        // page — not the address bar — owns the focus.
+        addOnLayoutChangeListener { v, _, top, _, bottom, _, oldTop, _, oldBottom ->
+            val shrank = (bottom - top) < (oldBottom - oldTop)
+            if (shrank && v.hasFocus()) {
+                (v as WebView).evaluateJavascript(SCROLL_FOCUSED_FIELD_JS, null)
+            }
+        }
+
         // Force an initial paint so the WebView's compositor surface
         // is valid even before the user submits a URL.
         loadUrl(ABOUT_BLANK)
@@ -722,6 +746,22 @@ private fun buildRefreshableWebView(
 // failed page: ant_resume opens the bootnode sockets in parallel, so a
 // couple of seconds is enough for retrieval to have working routes.
 private const val AUTO_RECOVER_RETRY_DELAY_MS = 2_500L
+
+// Scroll the page's focused form field back into view — see the
+// layout-change listener in [buildRefreshableWebView]. A no-op unless
+// the page really has an editable focused, and `scrollIntoViewIfNeeded`
+// (Chromium) only moves the page when the field isn't already fully
+// visible, so the common case costs nothing visible.
+private const val SCROLL_FOCUSED_FIELD_JS = """
+(function () {
+  var e = document.activeElement;
+  if (!e) return;
+  var t = e.tagName;
+  if (t !== 'INPUT' && t !== 'TEXTAREA' && t !== 'SELECT' && !e.isContentEditable) return;
+  if (e.scrollIntoViewIfNeeded) e.scrollIntoViewIfNeeded(false);
+  else e.scrollIntoView({ block: 'nearest' });
+})();
+"""
 
 private val ESCAPE_RETRY_DELAYS_MS: LongArray = longArrayOf(
     0L, 250L, 500L, 1000L, 2000L, 3000L, 5000L, 5000L,
