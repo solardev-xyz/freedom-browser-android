@@ -118,10 +118,45 @@ class CapsuleTrailingControlTest {
         state.progress = 99
         assertEquals(true, isCapsuleLoading(state))
 
-        // 0 and 100 are both spelled `-1` by the chrome client; a load
+        // `-1` is the only idle spelling: the chrome client folds both 0
+        // and 100 into it, and `stopProgress()` resets to it. A load
         // that finished must not leave the edge trace lit.
         state.progress = -1
         assertEquals(false, isCapsuleLoading(state))
+    }
+
+    @Test
+    fun `a freshly committed navigation counts as loading`() {
+        // `onPageStarted` writes progress = 0 at navigation commit,
+        // before the first percentage arrives. That window is a load,
+        // not an idle tab — otherwise the edge trace goes out and the
+        // trailing slot flips Stop → Reload → Stop mid-navigation.
+        val state = BrowserState(id = 3L)
+        state.progress = 0
+        assertEquals(true, isCapsuleLoading(state))
+    }
+
+    @Test
+    fun `a resolve with no percentage yet counts as loading`() {
+        val state = BrowserState(id = 4L)
+        state.resolving = true
+        assertEquals(true, isCapsuleLoading(state))
+    }
+
+    @Test
+    fun `clearing the buffer mid-load does not arm stop under the finger`() {
+        // × resets `addressBarEdited` and empties the buffer while the
+        // previous page is still loading behind the keyboard. The slot
+        // the finger just left must not become a primary-tinted Stop.
+        assertEquals(
+            CapsuleTrailingControl.None,
+            control(
+                addressFocused = true,
+                addressBarEdited = false,
+                editBufferEmpty = true,
+                loading = true,
+            ),
+        )
     }
 
     @Test

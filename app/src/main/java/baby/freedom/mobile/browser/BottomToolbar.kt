@@ -53,6 +53,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.State
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -60,11 +61,12 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.draw.drawWithCache
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.PathMeasure
@@ -183,6 +185,12 @@ internal enum class CapsuleTrailingControl {
  * happens to still be loading behind the keyboard. Otherwise a live
  * load owns it (Stop), and a settled page gets Reload — one control,
  * two states, exactly as the brief's loading state asks.
+ *
+ * "The editor owns the slot" also covers the frame *after* a Clear: an
+ * open editor on an empty buffer offers nothing, so the × the user just
+ * tapped doesn't turn into a Stop under the same finger. A submitted
+ * edit is different — the buffer still holds the URL that was sent — so
+ * the post-submit Stop is unaffected.
  */
 internal fun capsuleTrailingControl(
     addressFocused: Boolean,
@@ -192,14 +200,25 @@ internal fun capsuleTrailingControl(
     canReload: Boolean,
 ): CapsuleTrailingControl = when {
     addressFocused && addressBarEdited && !editBufferEmpty -> CapsuleTrailingControl.Clear
+    addressFocused && editBufferEmpty -> CapsuleTrailingControl.None
     loading -> CapsuleTrailingControl.Stop
     !addressFocused && canReload -> CapsuleTrailingControl.Reload
     else -> CapsuleTrailingControl.None
 }
 
-/** True while this tab has a load worth showing progress for. */
+/**
+ * True while this tab has a load worth showing progress for.
+ *
+ * `-1` is the idle sentinel: [BrowserState.progress] starts there, the
+ * chrome client folds both ends of Chromium's 0..100 counter into it
+ * (`onProgressChanged` maps 0 and 100 to `-1`), and `stopProgress()`
+ * resets to it. `0` is *not* idle — `onPageStarted` writes it at
+ * navigation commit, before the first percentage arrives — so the band
+ * that means "busy" is `0..99`, the same predicate the wavy strip this
+ * trace replaced used.
+ */
 internal fun isCapsuleLoading(state: BrowserState): Boolean =
-    state.resolving || state.progress in 1..99
+    state.resolving || state.progress in 0..99
 
 /**
  * Capsule background opacity. Low enough that the page reads through as
@@ -273,7 +292,13 @@ internal fun BottomToolbar(
     // and are gone once there is nothing left of them to draw.
     val controlScale = (1f - editProgress).coerceIn(0f, 1f)
 
-    val loading = isCapsuleLoading(state)
+    // Derived, not read straight: `isCapsuleLoading` looks at
+    // `state.progress`, and reading that here would put every single
+    // progress tick in this composable's recompose scope. Wrapped in a
+    // `derivedStateOf`, composition is only invalidated when the tick
+    // crosses the loading/idle boundary; the percentage itself is read
+    // in the draw phase below, where it invalidates drawing only.
+    val loading by remember(state) { derivedStateOf { isCapsuleLoading(state) } }
     // The travelling segment only exists while we have no percentage to
     // show; composing the infinite transition conditionally keeps an
     // idle capsule off the animation clock entirely.
@@ -287,22 +312,31 @@ internal fun BottomToolbar(
             .height(lerp(CapsuleHeight, CapsuleEditingHeight, editProgress))
             // Drawn outside the Surface's own shape clip so the trace
             // sits exactly on the edge rather than half-swallowed by it.
-            // `state.progress` is read inside the draw lambda, so a
-            // ticking load invalidates drawing only — never layout.
+            // `state.progress` is read inside the draw lambda (and only
+            // as a boundary through `loading` above), so a ticking load
+            // invalidates drawing only — never layout or composition.
             .then(
-                if (!loading) Modifier else Modifier.drawWithContent {
-                    drawContent()
-                    val start: Float
-                    val end: Float
-                    if (sweep != null) {
-                        val head = sweep.value * (1f + CAPSULE_SWEEP_WINDOW)
-                        start = (head - CAPSULE_SWEEP_WINDOW).coerceIn(0f, 1f)
-                        end = head.coerceIn(0f, 1f)
-                    } else {
-                        start = 0f
-                        end = state.progress.coerceIn(0, 100) / 100f
+                if (!loading) Modifier else Modifier.drawWithCache {
+                    // The outline only changes when the capsule's size
+                    // does, so it is traced and measured here in the
+                    // cache block — a frame of the sweep then costs one
+                    // `getSegment` per half, not two fresh paths and a
+                    // fresh PathMeasure.
+                    val trace = CapsuleEdgeTrace(size, progressStrokePx)
+                    onDrawWithContent {
+                        drawContent()
+                        val start: Float
+                        val end: Float
+                        if (sweep != null) {
+                            val head = sweep.value * (1f + CAPSULE_SWEEP_WINDOW)
+                            start = (head - CAPSULE_SWEEP_WINDOW).coerceIn(0f, 1f)
+                            end = head.coerceIn(0f, 1f)
+                        } else {
+                            start = 0f
+                            end = state.progress.coerceIn(0, 100) / 100f
+                        }
+                        trace.draw(this, start, end, progressColor)
                     }
-                    drawCapsuleEdgeProgress(start, end, progressColor, progressStrokePx)
                 },
             ),
         shape = CircleShape,
@@ -429,32 +463,62 @@ private fun rememberCapsuleSweep(): State<Float> {
 }
 
 /**
- * Trace the capsule's own outline with the load progress.
+ * The capsule's own outline, pre-split and pre-measured, ready to be
+ * traced with the load progress.
  *
  * The perimeter is split into two halves that both start at the bottom
  * centre and end at the top centre, so progress opens outwards from
  * under the domain and closes at the top — symmetric, and unambiguous
- * about where 0 % and 100 % are. [start] and [end] are fractions of each
- * half: a determinate load draws `0 → progress`, an indeterminate one a
- * short window travelling from bottom to top.
+ * about where 0 % and 100 % are.
  *
- * Drawn on top of the finished capsule and inset by half the stroke, so
- * the trace's outer edge lands exactly on the capsule's edge and nothing
- * about it participates in layout.
+ * The geometry depends on nothing but the capsule's [size] and the
+ * stroke width, so one of these is built per size in
+ * [Modifier.drawWithCache]'s cache block and reused for every frame of
+ * the load. The paths are inset by half the stroke, so the trace's outer
+ * edge lands exactly on the capsule's edge, and they are drawn over the
+ * finished capsule, so nothing about them participates in layout.
  */
-private fun DrawScope.drawCapsuleEdgeProgress(
-    start: Float,
-    end: Float,
-    color: Color,
-    strokeWidth: Float,
-) {
-    if (end <= start) return
+private class CapsuleEdgeTrace(size: Size, strokeWidth: Float) {
+    private val stroke = Stroke(width = strokeWidth, cap = StrokeCap.Round)
+
+    // Held for the lifetime of the trace: a [PathMeasure] measures the
+    // path it was given rather than a copy of it.
+    private val halves: List<Path> = capsuleHalves(size, strokeWidth)
+    private val measures: List<PathMeasure> =
+        halves.map { half -> PathMeasure().apply { setPath(half, false) } }
+    private val lengths: List<Float> = measures.map { it.length }
+
+    // Rewritten in place each frame; `getSegment` appends, so it is
+    // reset first.
+    private val segment = Path()
+
+    /**
+     * Stroke the [start]..[end] fraction of each half onto [scope]: a
+     * determinate load draws `0 → progress`, an indeterminate one a
+     * short window travelling from bottom to top.
+     */
+    fun draw(scope: DrawScope, start: Float, end: Float, color: Color) {
+        if (end <= start) return
+        for (i in measures.indices) {
+            val length = lengths[i]
+            segment.reset()
+            measures[i].getSegment(start * length, end * length, segment, true)
+            scope.drawPath(segment, color, style = stroke)
+        }
+    }
+}
+
+/**
+ * The capsule outline as two half-paths, each running bottom centre →
+ * along an edge → around the end cap → back to the top centre. Empty
+ * when [size] is not the shape we trace: a capsule needs at least one
+ * full cap per side.
+ */
+private fun capsuleHalves(size: Size, strokeWidth: Float): List<Path> {
     val inset = strokeWidth / 2f
     val width = size.width - strokeWidth
     val height = size.height - strokeWidth
-    // A capsule needs at least one full cap per side; anything narrower
-    // isn't the shape we're tracing.
-    if (height <= 0f || width < height) return
+    if (height <= 0f || width < height) return emptyList()
 
     val left = inset
     val top = inset
@@ -463,31 +527,19 @@ private fun DrawScope.drawCapsuleEdgeProgress(
     val radius = height / 2f
     val centerX = inset + width / 2f
 
-    // Bottom centre → along the bottom edge → around the end cap → back
-    // along the top edge to the top centre. One path per side.
-    val rightHalf = Path().apply {
-        moveTo(centerX, bottom)
-        lineTo(right - radius, bottom)
-        arcTo(Rect(right - height, top, right, bottom), 90f, -180f, false)
-        lineTo(centerX, top)
-    }
     val leftHalf = Path().apply {
         moveTo(centerX, bottom)
         lineTo(left + radius, bottom)
         arcTo(Rect(left, top, left + height, bottom), 90f, 180f, false)
         lineTo(centerX, top)
     }
-
-    val stroke = Stroke(width = strokeWidth, cap = StrokeCap.Round)
-    val measure = PathMeasure()
-    val segment = Path()
-    for (half in arrayOf(leftHalf, rightHalf)) {
-        measure.setPath(half, false)
-        val length = measure.length
-        segment.reset()
-        measure.getSegment(start * length, end * length, segment, true)
-        drawPath(segment, color, style = stroke)
+    val rightHalf = Path().apply {
+        moveTo(centerX, bottom)
+        lineTo(right - radius, bottom)
+        arcTo(Rect(right - height, top, right, bottom), 90f, -180f, false)
+        lineTo(centerX, top)
     }
+    return listOf(leftHalf, rightHalf)
 }
 
 /**

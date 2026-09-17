@@ -740,12 +740,18 @@ fun BrowserScreen(
     val capsuleSideMargin =
         lerp(CapsuleSideMargin, CapsuleEditingSideMargin, editProgress)
 
+    // Keyed on the *address bar's* focus, not on the keyboard: the IME
+    // also comes up for a form field inside the page, and the capsule
+    // stays at its resting height for that — reserving the editing
+    // height there would leave an 8 dp band of background between the
+    // WebView and the capsule.
+    //
     // Deliberately the *settled* editing height rather than the animated
     // one: this padding shrinks the WebView, and re-laying Chromium out
     // on every frame of the morph is far more expensive than the 8 dp it
     // would buy — and the keyboard is on its way over that strip anyway.
     val capsuleFootprint =
-        (if (keyboardVisible) CapsuleEditingHeight else CapsuleHeight) + CapsuleBottomMargin
+        (if (addressFocused) CapsuleEditingHeight else CapsuleHeight) + CapsuleBottomMargin
     val contentBottomReserve = if (keyboardVisible) capsuleFootprint else 0.dp
 
     // How much of the content area the capsule still covers once that
