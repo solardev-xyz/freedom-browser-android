@@ -87,6 +87,19 @@ class PublicSuffixListTest {
     }
 
     @Test
+    fun `warming off-thread leaves the same rule set a first label would build`() {
+        // What MainActivity does at startup: build the list on a
+        // background thread so the first resting label doesn't. The
+        // answers afterwards must be the ones the lazy load gives.
+        val warmers = List(4) { Thread { PublicSuffixList.warm() } }
+        warmers.forEach { it.start() }
+        warmers.forEach { it.join() }
+        assertEquals("bbc.co.uk", PublicSuffixList.registrableDomain("news.bbc.co.uk"))
+        assertEquals("google.github.io", PublicSuffixList.registrableDomain("google.github.io"))
+        assertNull(PublicSuffixList.registrableDomain("co.uk"))
+    }
+
+    @Test
     fun `malformed hosts have no registrable domain`() {
         assertNull(PublicSuffixList.registrableDomain(""))
         assertNull(PublicSuffixList.registrableDomain("a..b"))

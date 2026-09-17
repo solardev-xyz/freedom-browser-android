@@ -25,6 +25,28 @@ OUT = (
     / "app/src/main/resources/baby/freedom/mobile/browser/public_suffix_list.dat"
 )
 MARKERS = ("// ===BEGIN ICANN DOMAINS===", "// ===BEGIN PRIVATE DOMAINS===")
+PATCH = Path(__file__).resolve().parent / "public_suffix_list.patch"
+
+
+def patched_rules() -> list[str]:
+    """The rules `public_suffix_list.patch` adds to the upstream list.
+
+    Read out of the patch rather than repeated here, so editing the
+    submission (the source of truth, see infra/psl/README.md) is the
+    only place the four virtual-origin suffixes are ever written.
+    """
+    rules = []
+    for line in PATCH.read_text(encoding="utf-8").splitlines():
+        # `+++ b/...` is the diff header, not an added line.
+        if not line.startswith("+") or line.startswith("+++"):
+            continue
+        rule = line[1:].strip()
+        if not rule or rule.startswith("//"):
+            continue
+        rules.append(rule)
+    if not rules:
+        raise SystemExit(f"{PATCH} adds no rules — refusing to write a list without them")
+    return rules
 
 
 def a_label(rule: str) -> str:
@@ -65,7 +87,7 @@ def main() -> None:
 
     lines.append("// ===BEGIN FREEDOM BROWSER VIRTUAL ORIGINS===")
     lines.append("// Pending upstream: infra/psl/public_suffix_list.patch (issue #6).")
-    lines += ["bzz.freedom.baby", "ens.freedom.baby", "ipfs.freedom.baby", "ipns.freedom.baby"]
+    lines += patched_rules()
 
     OUT.parent.mkdir(parents=True, exist_ok=True)
     OUT.write_text("\n".join(lines) + "\n", encoding="utf-8")

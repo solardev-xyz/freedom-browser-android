@@ -34,6 +34,22 @@ object PublicSuffixList {
      */
     private val rules: Set<String> by lazy { load() }
 
+    /**
+     * Build the rule set now, on the calling thread, so the first
+     * resting label doesn't. The list is ~150 KB of resource read and a
+     * ~10k-entry set build, and the label that needs it is composed on
+     * a navigation-commit frame — call this off the main thread at
+     * startup and that frame finds the set already there.
+     *
+     * Safe from any thread and any number of times: [rules] is a
+     * `lazy` in its default synchronized mode, so the load runs exactly
+     * once and a label composed mid-warm simply waits on the same load
+     * it would otherwise have run itself.
+     */
+    fun warm() {
+        rules
+    }
+
     private fun load(): Set<String> =
         try {
             PublicSuffixList::class.java.getResourceAsStream("public_suffix_list.dat")
