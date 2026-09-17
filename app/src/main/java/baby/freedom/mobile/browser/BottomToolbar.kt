@@ -130,6 +130,7 @@ internal fun BottomToolbar(
     addressBarEdited: Boolean,
     onAddressFocusChanged: (Boolean) -> Unit,
     onAddressEditedChanged: (Boolean) -> Unit,
+    onAddressQueryChanged: (String) -> Unit,
     onSubmit: (String) -> Unit,
     onBack: () -> Unit,
     onForward: () -> Unit,
@@ -182,6 +183,7 @@ internal fun BottomToolbar(
                 addressBarEdited = addressBarEdited,
                 onAddressFocusChanged = onAddressFocusChanged,
                 onAddressEditedChanged = onAddressEditedChanged,
+                onAddressQueryChanged = onAddressQueryChanged,
                 onSubmit = onSubmit,
                 modifier = Modifier
                     .weight(1f)
@@ -223,14 +225,19 @@ private fun AddressField(
     addressBarEdited: Boolean,
     onAddressFocusChanged: (Boolean) -> Unit,
     onAddressEditedChanged: (Boolean) -> Unit,
+    onAddressQueryChanged: (String) -> Unit,
     onSubmit: (String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val focusRequester = remember { FocusRequester() }
-    // Local [TextFieldValue] so we can steer the selection (e.g. select
-    // all on focus). We keep it in sync with [state.addressBarText],
-    // which is the source of truth for submit / external updates
-    // (navigation events, ENS resolution).
+    // Local [TextFieldValue]: the *edit buffer*. It holds whatever the
+    // user is typing and lets us steer the selection (e.g. select all
+    // on focus). Keystrokes stay here — they never write back into
+    // [state.addressBarText], which is the tab's committed address
+    // (what the WebView loaded, or what the user submitted) and the
+    // only thing we're allowed to present as "the site you are on".
+    // The buffer is re-seeded from that address whenever it changes and
+    // whenever an edit is abandoned (see the two effects below).
     //
     // Keyed on [state.id] so that switching tabs re-initialises
     // `fieldValue` from the new tab's `addressBarText` *synchronously*,
@@ -256,7 +263,10 @@ private fun AddressField(
     // on `state.addressBarText` would miss an update that happens to
     // land on the *same* string the previous tab had).
     LaunchedEffect(state.id, state.addressBarText) {
-        if (fieldValue.text != state.addressBarText) {
+        // Never clobber an in-progress edit: a page that happens to
+        // finish loading while the user is typing updates the committed
+        // address, and the buffer picks that up when the edit ends.
+        if (!addressFocused && fieldValue.text != state.addressBarText) {
             // Park the cursor at position 0 so long URLs horizontally
             // scroll to their *start* rather than their tail — the
             // domain is what the user cares about, so keeping e.g.
@@ -269,18 +279,27 @@ private fun AddressField(
         }
     }
 
-    // Select-all on focus, park cursor at 0 on focus loss.
+    // Select-all on focus; on focus loss, abandon the edit.
     //
     // Running the select-all in a LaunchedEffect (rather than from
     // `onFocusChanged`) makes sure we apply *after* any tap-to-place-
     // cursor selection the framework might set during the focus-
     // granting gesture — otherwise the cursor can land wherever the
     // user happened to tap inside the pill.
+    //
+    // Losing focus ends the edit, so the buffer goes back to the tab's
+    // committed address (cursor parked at 0, see above): text the user
+    // typed but never submitted is not an address this tab is on, and
+    // leaving it in the pill would have the capsule vouch for a site
+    // that was never loaded. On the submit path this is a no-op —
+    // `submit()` clears focus *and* writes the submitted URL into
+    // `addressBarText` before we get here, so we re-seed from that.
     LaunchedEffect(addressFocused) {
-        fieldValue = if (addressFocused && fieldValue.text.isNotEmpty()) {
-            fieldValue.copy(selection = TextRange(0, fieldValue.text.length))
+        fieldValue = if (addressFocused) {
+            if (fieldValue.text.isEmpty()) fieldValue
+            else fieldValue.copy(selection = TextRange(0, fieldValue.text.length))
         } else {
-            fieldValue.copy(selection = TextRange.Zero)
+            TextFieldValue(text = state.addressBarText, selection = TextRange.Zero)
         }
     }
 
@@ -310,7 +329,10 @@ private fun AddressField(
                 val textChanged = newValue.text != fieldValue.text
                 fieldValue = newValue
                 if (textChanged) {
-                    state.addressBarText = newValue.text
+                    // Typing feeds the suggestions query only. The
+                    // tab's committed address stays put until the user
+                    // actually submits (or the WebView navigates).
+                    onAddressQueryChanged(newValue.text)
                     onAddressEditedChanged(true)
                 }
             },
@@ -367,17 +389,29 @@ private fun AddressField(
                     // under the domain label while resting — so a tap
                     // anywhere on the pill still lands on it and focuses
                     // it, exactly as before.
+                    //
+                    // The label is derived from the tab's committed
+                    // address, never from the edit buffer: a bold bare
+                    // domain is the capsule asserting "this is the site
+                    // you are on", and only a loaded (or just-submitted)
+                    // URL earns that.
                     val restingLabel =
-                        if (addressFocused) "" else AddressLabel.resting(fieldValue.text)
+                        if (addressFocused) "" else AddressLabel.resting(state.addressBarText)
+                    // Blank label at rest means a blank address (the
+                    // home tab) — [AddressLabel.resting] passes
+                    // everything else through — so the placeholder is
+                    // the right thing to draw underneath.
+                    val showPlaceholder =
+                        if (addressFocused) fieldValue.text.isEmpty() else restingLabel.isEmpty()
                     Box(modifier = Modifier.weight(1f)) {
                         Box(
                             modifier = Modifier.graphicsLayer {
-                                alpha = if (restingLabel.isEmpty()) 1f else 0f
+                                alpha = if (addressFocused) 1f else 0f
                             },
                         ) {
                             innerTextField()
                         }
-                        if (fieldValue.text.isEmpty()) {
+                        if (showPlaceholder) {
                             Text(
                                 text = "Search or type URL",
                                 color = colors.onSurfaceVariant,
@@ -413,7 +447,7 @@ private fun AddressField(
                         IconButton(
                             onClick = {
                                 fieldValue = TextFieldValue("")
-                                state.addressBarText = ""
+                                onAddressQueryChanged("")
                                 // × is a "start over" gesture — drop the
                                 // suggestions panel and wait for the next
                                 // keystroke before showing it again.

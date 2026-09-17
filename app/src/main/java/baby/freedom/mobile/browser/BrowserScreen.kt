@@ -282,6 +282,13 @@ fun BrowserScreen(
     // current URL) must NOT flash a dropdown — the user just wants to
     // replace the URL with a fresh one.
     var addressBarEdited by remember { mutableStateOf(false) }
+    // What the user has typed into the pill during the current edit.
+    // Deliberately *not* [BrowserState.addressBarText]: that field is
+    // the tab's committed address (what the WebView loaded, or what was
+    // submitted) and everything that describes the current site — the
+    // resting domain label, the home overlay, reload — reads it. Typed
+    // text lives here until it is submitted.
+    var addressQuery by remember { mutableStateOf("") }
     val snackbarHostState = remember { SnackbarHostState() }
 
     val state = tabs.active
@@ -747,10 +754,10 @@ fun BrowserScreen(
                     modifier = Modifier.fillMaxSize(),
                 )
             }
-            if (addressFocused && addressBarEdited && state.addressBarText.isNotEmpty()) {
+            if (addressFocused && addressBarEdited && addressQuery.isNotEmpty()) {
                 SuggestionsPanel(
                     repo = repo,
-                    query = state.addressBarText,
+                    query = addressQuery,
                     onPick = { submit(state, it) },
                     bottomContentPadding = capsuleOverlap,
                     modifier = Modifier.fillMaxSize(),
@@ -828,9 +835,15 @@ fun BrowserScreen(
                         // Losing focus always resets the "has the user typed?"
                         // latch so the next tap starts clean (select-all, no
                         // dropdown) regardless of what was typed last time.
-                        if (!focused) addressBarEdited = false
+                        // The abandoned query goes with it — the pill is back
+                        // to showing the tab's committed address.
+                        if (!focused) {
+                            addressBarEdited = false
+                            addressQuery = ""
+                        }
                     },
                     onAddressEditedChanged = { addressBarEdited = it },
+                    onAddressQueryChanged = { addressQuery = it },
                     onSubmit = { text ->
                         // Called from the TextField's IME Go action. Bounce
                         // through a short coroutine delay so the in-flight
