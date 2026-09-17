@@ -18,6 +18,7 @@ import androidx.lifecycle.lifecycleScope
 import baby.freedom.mobile.browser.BrowserScreen
 import baby.freedom.mobile.browser.Gateways
 import baby.freedom.mobile.browser.HOME_URL
+import baby.freedom.mobile.browser.PublicSuffixList
 import baby.freedom.mobile.browser.VirtualOrigin
 import baby.freedom.mobile.data.NodeSettings
 import baby.freedom.mobile.node.INodeCallback
@@ -26,6 +27,7 @@ import baby.freedom.mobile.node.NodeService
 import baby.freedom.mobile.ui.FreedomTheme
 import baby.freedom.swarm.IpfsInfo
 import baby.freedom.swarm.NodeInfo
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
@@ -107,6 +109,16 @@ class MainActivity : ComponentActivity() {
         lifecycleScope.launch {
             if (settings.runNodeEnabled.first()) startAndBindService()
         }
+
+        // The address label's resting form needs the vendored Public
+        // Suffix List, and the first label that asks for it is composed
+        // on a navigation-commit frame — a bad frame to spend a 150 KB
+        // resource read and a 10k-entry set build on. Build it here
+        // instead, off the main thread (hence the explicit dispatcher:
+        // lifecycleScope defaults to Main). [PublicSuffixList.warm] is
+        // idempotent and thread-safe, so a label that arrives first
+        // just does the load itself, exactly as it does today.
+        lifecycleScope.launch(Dispatchers.Default) { PublicSuffixList.warm() }
 
         // A cold start from an App Link opens straight at the shared
         // content instead of the home surface.

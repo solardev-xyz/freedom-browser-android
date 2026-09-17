@@ -35,7 +35,14 @@ class BrowserState(val id: Long) {
     var title by mutableStateOf("")
         internal set
 
-    /** What the user is currently typing in the address bar. */
+    /**
+     * The tab's *committed* address: the display form of the page the
+     * WebView loaded, or of a URL the user has just submitted. This is
+     * what the address bar presents as "the site you are on" (the
+     * resting domain label in [BottomToolbar] reads it), so nothing but
+     * a navigation or a submit may write it — in-progress typing lives
+     * in the address field's own edit buffer until it is submitted.
+     */
     var addressBarText by mutableStateOf("")
 
     /** 0..100, or -1 when idle. */

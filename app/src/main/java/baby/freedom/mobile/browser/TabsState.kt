@@ -63,6 +63,11 @@ class TabsState(
      * flow. Without this detour, in-page bzz clicks would short-circuit
      * to a raw gateway load and skip the [GatewayProbe]-based
      * peer-warmup gate.
+     *
+     * Everything on this hook is renderer-initiated by construction, so
+     * [BrowserScreen] submits it as `SubmitSource.Renderer` — the
+     * address bar keeps describing the page currently on screen until
+     * the new navigation commits.
      */
     @Volatile
     var requestSubmit: ((BrowserState, String) -> Unit)? = null

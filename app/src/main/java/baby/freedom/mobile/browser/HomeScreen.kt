@@ -35,6 +35,7 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.foundation.Image
 import androidx.compose.ui.layout.ContentScale
@@ -61,6 +62,13 @@ import baby.freedom.mobile.data.HistoryEntry
 fun HomeScreen(
     repo: BrowsingRepository,
     onOpen: (String) -> Unit,
+    /**
+     * Footprint of the floating chrome capsule, which overlays the
+     * bottom of this surface — added to the scrolling column's bottom
+     * padding so the last "Recent" row can still be scrolled clear of
+     * it.
+     */
+    bottomContentPadding: Dp = 0.dp,
     modifier: Modifier = Modifier,
 ) {
     val bookmarks by remember { repo.bookmarks }.collectAsState(initial = emptyList())
@@ -86,7 +94,7 @@ fun HomeScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .verticalScroll(rememberScrollState())
-                .padding(vertical = 24.dp),
+                .padding(top = 24.dp, bottom = 24.dp + bottomContentPadding),
         ) {
             HomeHero(modifier = Modifier.padding(horizontal = 24.dp))
 

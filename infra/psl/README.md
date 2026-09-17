@@ -48,6 +48,16 @@ this reason, and this submission is modelled on it.
 | `public_suffix_list.patch` | the exact diff against `public_suffix_list.dat`                 |
 | `pr-description.md`        | the upstream PR template, filled in, ready to paste             |
 | `dns-records.md`           | the `_psl` TXT records to create, and the order to do it in     |
+| `vendor-list.py`           | regenerates the list the app ships (see below)                  |
+
+The app carries its own copy of the whole list in
+`app/src/main/resources/baby/freedom/mobile/browser/public_suffix_list.dat`,
+read by `PublicSuffixList.kt` so the address-bar label rests on a real
+registrable domain — the PRIVATE section is what keeps two tenants of
+`github.io` / `web.app` / `eth.limo` from sharing one bold label. Refresh
+it with `python3 infra/psl/vendor-list.py` (needs the `idna` package); it
+re-appends the four virtual-origin suffixes above, which stay local until
+the upstream entry lands.
 
 ## The order of operations
 

@@ -478,8 +478,23 @@ private fun buildRefreshableWebView(
                     // path. `lastLoadedDisplayUrl` stays on the raw
                     // file URL so the [ErrorPage.isErrorPage] guards in
                     // [onReceivedIcon] etc. still match.
-                    state.url = ErrorPage.displayUrlFor(url) ?: display
+                    val uiDisplay = ErrorPage.displayUrlFor(url) ?: display
+                    state.url = uiDisplay
                     lastLoadedDisplayUrl = display
+                    // Commit the address *here*, at navigation commit —
+                    // not in `onPageFinished`. The new document starts
+                    // painting long before its load event fires, and a
+                    // single hanging subresource can hold that event off
+                    // for as long as the destination site likes. Waiting
+                    // for it would leave the destination's content on
+                    // screen under the *previous* site's bold domain
+                    // label — the capsule vouching for a site the user
+                    // is no longer on. WebView posts `onPageStarted`
+                    // once the main-frame navigation has committed, so
+                    // this is the first moment the new document can
+                    // paint, and the label flips no later than the
+                    // content it describes.
+                    state.addressBarText = uiDisplay
                 }
                 // Refresh navigation flags here (as well as in
                 // onPageFinished) so the system-back hardware button
