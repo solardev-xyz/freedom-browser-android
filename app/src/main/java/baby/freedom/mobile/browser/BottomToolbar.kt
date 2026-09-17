@@ -1,6 +1,12 @@
 package baby.freedom.mobile.browser
 
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
@@ -25,6 +31,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.filled.Clear
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Menu
@@ -45,6 +52,8 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.State
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -53,17 +62,24 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.draw.drawWithCache
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.PathMeasure
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.TransformOrigin
+import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.layout
 import androidx.compose.ui.layout.onGloballyPositioned
@@ -75,6 +91,7 @@ import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntRect
 import androidx.compose.ui.unit.IntSize
@@ -86,22 +103,206 @@ import androidx.compose.ui.window.PopupPositionProvider
 import androidx.compose.ui.window.PopupProperties
 import baby.freedom.swarm.NodeInfo
 import baby.freedom.swarm.NodeStatus
+import kotlin.math.max
 import kotlin.math.roundToInt
 
 /**
- * Height of the floating capsule. The brief allows 52–58 dp; 56 dp is
- * the one value in that band that fits a stock 48 dp [IconButton] with
- * a symmetric 4 dp of breathing room above and below, so every control
- * keeps its full Material touch target without the capsule growing a
- * visible gutter.
+ * Height of the floating capsule at rest. The brief allows 52–58 dp;
+ * 56 dp is the one value in that band that fits a stock 48 dp
+ * [IconButton] with a symmetric 4 dp of breathing room above and below,
+ * so every control keeps its full Material touch target without the
+ * capsule growing a visible gutter.
  */
 internal val CapsuleHeight = 56.dp
+
+/**
+ * Height of the capsule in its compact (scrolled) state. The brief
+ * allows 40–44 dp; 44 dp is the top of that band, which is what keeps
+ * the domain label the same size it is at rest — the compact bar says
+ * less, it must not say it *smaller* (see [AddressLabel]: the label is
+ * a trust surface, and a shrunken domain is a harder one to read).
+ */
+internal val CapsuleCompactHeight = 44.dp
+
+/**
+ * Height of the capsule once it has morphed into the address editor.
+ * The bar grows by the same 8 dp it gains on each side (see
+ * [CapsuleEditingSideMargin]) so the expansion reads as one object
+ * inflating rather than a control that got taller.
+ */
+internal val CapsuleEditingHeight = 64.dp
 
 /** Side margin between the capsule and the screen edge (brief: 12–16 dp). */
 internal val CapsuleSideMargin = 14.dp
 
+/**
+ * Side margin while editing. The capsule reaches towards the screen
+ * edges to make room for the full URL — still a floating pill with page
+ * visible around it, never a full-bleed bar and never a new screen.
+ */
+internal val CapsuleEditingSideMargin = 8.dp
+
 /** Gap between the capsule and the navigation/gesture inset (brief: 8–12 dp). */
 internal val CapsuleBottomMargin = 10.dp
+
+/** Address pill height inside the resting (56 dp) capsule. */
+internal val AddressPillHeight = 40.dp
+
+/** Address pill height inside the compact (44 dp) capsule. */
+internal val AddressPillCompactHeight = 32.dp
+
+/** Address pill height inside the editing (64 dp) capsule. */
+internal val AddressPillEditingHeight = 48.dp
+
+/**
+ * Touch height of the address pill. Constant across all three states
+ * and independent of the pill's *drawn* height, so neither morph ever
+ * shrinks a tap target: the field is laid out 48 dp tall inside the
+ * toolbar's (equally constant) 48 dp control row and its pill is
+ * painted at the interpolated height inside that box.
+ */
+internal val AddressFieldTouchHeight = 48.dp
+
+/**
+ * Height of the *slot* the capsule is laid out in.
+ *
+ * Compacting deliberately doesn't touch it: the bar shrinks inside a
+ * frame that stays exactly where it was, which is what keeps the page,
+ * the snackbar and the IME reserve from shifting under a flick — the
+ * rule the separate progress strip used to violate and that removing
+ * it made absolute. Editing is the one transition allowed to grow the
+ * slot, because the user asked for it and the keyboard is on its way
+ * over that strip anyway.
+ */
+internal fun capsuleSlotHeight(editProgress: Float): Dp =
+    lerp(CapsuleHeight, CapsuleEditingHeight, editProgress.coerceIn(0f, 1f))
+
+/**
+ * Height the capsule is actually drawn at — the single height function
+ * both morphs go through, so there is one geometry model rather than a
+ * scroll driver and an editing driver arguing over the same pixels.
+ *
+ * It reads outwards from the slot: [editProgress] grows 56 → 64 dp,
+ * then [collapse] shrinks whatever that gives towards 44 dp. The two
+ * can't fight over the result, because [BrowserScreen] holds `collapse`
+ * at 0 whenever the address bar has focus — **editing always wins over
+ * compact** — so the settled values are exactly 44 ← 56 → 64. Composing
+ * them rather than picking one keeps the handover continuous: tapping a
+ * compact bar springs `collapse` back down while `editProgress` comes
+ * up, and the capsule travels 44 → 64 without a discontinuity in the
+ * frame where they cross.
+ */
+internal fun capsuleDrawnHeight(collapse: Float, editProgress: Float): Dp =
+    lerp(capsuleSlotHeight(editProgress), CapsuleCompactHeight, collapse.coerceIn(0f, 1f))
+
+/**
+ * The address pill's drawn height, derived from the same two morphs by
+ * the same rule as [capsuleDrawnHeight]. It tracks the capsule so the
+ * gutter above and below the pill stays even in every state (8 dp at
+ * rest and while editing, 6 dp compact), and it is only ever *drawn* at
+ * this height — see [AddressFieldTouchHeight].
+ */
+internal fun addressPillHeight(collapse: Float, editProgress: Float): Dp =
+    lerp(
+        lerp(AddressPillHeight, AddressPillEditingHeight, editProgress.coerceIn(0f, 1f)),
+        AddressPillCompactHeight,
+        collapse.coerceIn(0f, 1f),
+    )
+
+/**
+ * How much faster the flanking controls leave than the capsule changes
+ * height. 1.6 puts them at zero width when the transition — *either*
+ * transition — is about ⅔ of the way through, so the address pill
+ * always has somewhere to grow into and neither the compact bar nor the
+ * editor ever looks crowded mid-morph.
+ */
+private const val CONTROL_COLLAPSE_RATE = 1.6f
+
+/**
+ * Stroke of the load-progress trace that runs along the capsule's own
+ * outline. Thin enough to read as a highlight on the edge rather than a
+ * second border; drawn *over* the capsule, so it costs no layout height
+ * and nothing shifts when a load starts or ends.
+ */
+private val CapsuleProgressStroke = 2.5.dp
+
+/**
+ * Fraction of each half-perimeter covered by the travelling segment
+ * while the load is indeterminate (ENS resolve / gateway warm-up).
+ */
+private const val CAPSULE_SWEEP_WINDOW = 0.4f
+
+/** One full lap of the indeterminate sweep, in milliseconds. */
+private const val CAPSULE_SWEEP_PERIOD_MS = 1400
+
+/**
+ * Which control the address pill's trailing slot is showing. The slot
+ * is a fixed-size square that is *always* reserved, so the pill's text
+ * area never changes width — that is what keeps a load starting or
+ * ending from shifting anything inside the capsule.
+ */
+internal enum class CapsuleTrailingControl {
+    /** Nothing to offer (home tab with no address). */
+    None,
+
+    /** × — abandon what has been typed so far. */
+    Clear,
+
+    /**
+     * × — abort the load that is currently running. Shares Clear's
+     * glyph (as Safari's does) but never its moment: Clear only exists
+     * while the user is mid-edit, Stop only while they are not, and
+     * Stop wears the primary tint that matches the edge trace it turns
+     * off.
+     */
+    Stop,
+
+    /** ⟳ — reload the committed address. */
+    Reload,
+}
+
+/**
+ * Decide what the address pill's trailing slot shows.
+ *
+ * Priority is "what is the user doing right now" first: while they are
+ * actively editing, the slot belongs to Clear even if the previous page
+ * happens to still be loading behind the keyboard. Otherwise a live
+ * load owns it (Stop), and a settled page gets Reload — one control,
+ * two states, exactly as the brief's loading state asks.
+ *
+ * "The editor owns the slot" also covers the frame *after* a Clear: an
+ * open editor on an empty buffer offers nothing, so the × the user just
+ * tapped doesn't turn into a Stop under the same finger. A submitted
+ * edit is different — the buffer still holds the URL that was sent — so
+ * the post-submit Stop is unaffected.
+ */
+internal fun capsuleTrailingControl(
+    addressFocused: Boolean,
+    addressBarEdited: Boolean,
+    editBufferEmpty: Boolean,
+    loading: Boolean,
+    canReload: Boolean,
+): CapsuleTrailingControl = when {
+    addressFocused && addressBarEdited && !editBufferEmpty -> CapsuleTrailingControl.Clear
+    addressFocused && editBufferEmpty -> CapsuleTrailingControl.None
+    loading -> CapsuleTrailingControl.Stop
+    !addressFocused && canReload -> CapsuleTrailingControl.Reload
+    else -> CapsuleTrailingControl.None
+}
+
+/**
+ * True while this tab has a load worth showing progress for.
+ *
+ * `-1` is the idle sentinel: [BrowserState.progress] starts there, the
+ * chrome client folds both ends of Chromium's 0..100 counter into it
+ * (`onProgressChanged` maps 0 and 100 to `-1`), and `stopProgress()`
+ * resets to it. `0` is *not* idle — `onPageStarted` writes it at
+ * navigation commit, before the first percentage arrives — so the band
+ * that means "busy" is `0..99`, the same predicate the wavy strip this
+ * trace replaced used.
+ */
+internal fun isCapsuleLoading(state: BrowserState): Boolean =
+    state.resolving || state.progress in 0..99
 
 /**
  * Capsule background opacity. Low enough that the page reads through as
@@ -123,16 +324,37 @@ private const val CAPSULE_ALPHA = 0.90f
  * low shadow, not an opaque full-width bar; the address field is a
  * second, darker pill inside it (`surfaceContainerHighest`) that grows
  * a primary-coloured outline while focused. Layout is fixed-height so
- * nothing shifts when focus, the clear (×) button, the Back control or
- * the protocol badge come and go.
+ * nothing shifts when focus, the trailing control or the protocol badge
+ * come and go.
  *
- * [collapseFraction] drives the compact-on-scroll state (0 = resting,
- * 1 = compact): the capsule interpolates down to
- * [CapsuleCompactHeight] and the secondary controls collapse out of
- * the row, leaving the domain. It is pure geometry — sizes and
- * positions interpolate, nothing cross-fades — and the layout *slot*
- * stays [CapsuleHeight] tall throughout, so the capsule shrinks within
- * a frame that never moves and nothing else on screen shifts.
+ * The capsule has exactly three heights and one model that produces
+ * them (see [capsuleDrawnHeight]): 44 dp **compact**, 56 dp **resting**,
+ * 64 dp **editing**. Two callers-supplied fractions drive it and
+ * nothing else does:
+ *
+ * **[collapseFraction]** (0 resting, 1 compact) is the compact-on-scroll
+ * state. The capsule shrinks *inside* a layout slot that keeps its
+ * resting height, so a flick moves the bar and nothing else on screen.
+ *
+ * **[editProgress]** (0 at rest, 1 in the editor) is the editing morph —
+ * the same object inflating, not a second screen. It grows the slot as
+ * well as the capsule, interpolates the address pill's height here and
+ * the side margins in the caller.
+ *
+ * They are one axis, not two: the caller holds [collapseFraction] at 0
+ * whenever the field has focus, so editing always wins over compact, and
+ * both transitions take the flanking controls away through the *same*
+ * mechanism ([Modifier.collapsingControl]) — each control shrinks whole
+ * into the edge it retreats to, width and scale together, never a
+ * cross-fade and never a clipped fragment.
+ *
+ * **Loading** is drawn *on* the capsule: a thin trace runs along its
+ * outline from the bottom centre out to both sides (see
+ * [CapsuleEdgeTrace]). It is measured from whatever outline the capsule
+ * currently has, so it traces the compact and editing shapes just as
+ * readily as the resting one. The pill's trailing slot turns into a Stop
+ * control. Both are overlays on geometry that is already settled, so a
+ * load starting or ending moves nothing.
  *
  * The caller owns the layout slot (insets, IME padding, max width); this
  * composable only fills whatever width it is given.
@@ -146,6 +368,8 @@ internal fun BottomToolbar(
     isBookmarked: Boolean,
     addressFocused: Boolean,
     addressBarEdited: Boolean,
+    editProgress: Float,
+    collapseFraction: Float,
     onAddressFocusChanged: (Boolean) -> Unit,
     onAddressEditedChanged: (Boolean) -> Unit,
     onAddressQueryChanged: (String) -> Unit,
@@ -160,30 +384,52 @@ internal fun BottomToolbar(
     onOpenHistory: () -> Unit,
     onOpenBookmarks: () -> Unit,
     onReload: () -> Unit,
+    onStop: () -> Unit,
     onNewTab: () -> Unit,
-    collapseFraction: Float = 0f,
     modifier: Modifier = Modifier,
 ) {
-    // Clamp rather than trust the caller: the collapse is driven by a
-    // spring, and the expressive spatial springs overshoot slightly at
+    // Clamp rather than trust the caller: both fractions are driven by
+    // springs, and the expressive spatial springs overshoot slightly at
     // both ends.
     val collapse = collapseFraction.coerceIn(0f, 1f)
-    val capsuleHeight = lerp(CapsuleHeight, CapsuleCompactHeight, collapse)
-    // Secondary controls finish collapsing before the capsule finishes
-    // shrinking (they're gone by ~⅔ of the way), so the pill always has
-    // somewhere to grow into and the compact bar never looks crowded
-    // mid-transition.
-    val controlScale = (1f - collapse * CONTROL_COLLAPSE_RATE).coerceIn(0f, 1f)
+    val edit = editProgress.coerceIn(0f, 1f)
+    val slotHeight = capsuleSlotHeight(edit)
+    val drawnHeight = capsuleDrawnHeight(collapse, edit)
+
+    // How much of their resting size the flanking controls still have —
+    // one number for both transitions, because they leave the same way
+    // in both. Taking the max rather than tracking the two separately is
+    // what makes tapping a compact bar read as one continuous move:
+    // `collapse` springs back to 0 while `edit` comes up, and the
+    // controls stay gone across the handover instead of flashing in
+    // between the two states.
+    val controlScale =
+        (1f - max(collapse, edit) * CONTROL_COLLAPSE_RATE).coerceIn(0f, 1f)
+
+    // Derived, not read straight: `isCapsuleLoading` looks at
+    // `state.progress`, and reading that here would put every single
+    // progress tick in this composable's recompose scope. Wrapped in a
+    // `derivedStateOf`, composition is only invalidated when the tick
+    // crosses the loading/idle boundary; the percentage itself is read
+    // in the draw phase below, where it invalidates drawing only.
+    val loading by remember(state) { derivedStateOf { isCapsuleLoading(state) } }
+    // The travelling segment only exists while we have no percentage to
+    // show; composing the infinite transition conditionally keeps an
+    // idle capsule off the animation clock entirely.
+    val sweep: State<Float>? = if (state.resolving) rememberCapsuleSweep() else null
+    val progressColor = MaterialTheme.colorScheme.primary
+    val progressStrokePx = with(LocalDensity.current) { CapsuleProgressStroke.toPx() }
 
     Box(
-        // The slot keeps its full height in both states. The capsule
-        // shrinks *inside* it, which is what keeps the page, the
-        // progress strip, the snackbar and the IME reserve from moving
-        // when the bar collapses — and what lets the controls keep 48 dp
-        // touch targets while the capsule around them is 44 dp tall.
+        // The slot the capsule lives in. Compacting shrinks the capsule
+        // *inside* it, which is what keeps the page, the snackbar and
+        // the IME reserve from moving when the bar collapses — and what
+        // lets the controls keep 48 dp touch targets while the capsule
+        // around them is only 44 dp tall. Editing is the one transition
+        // that grows it (see [capsuleSlotHeight]).
         modifier = modifier
             .fillMaxWidth()
-            .height(CapsuleHeight),
+            .height(slotHeight),
         contentAlignment = Alignment.Center,
     ) {
         // The capsule itself is background only: drawn at the
@@ -192,7 +438,7 @@ internal fun BottomToolbar(
         Surface(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(capsuleHeight),
+                .height(drawnHeight),
             shape = CircleShape,
             color = MaterialTheme.colorScheme.surfaceContainer.copy(alpha = CAPSULE_ALPHA),
             // Just enough shadow to lift the capsule off the page without
@@ -221,7 +467,8 @@ internal fun BottomToolbar(
                 //
                 // Fully-collapsed controls are not composed at all, so a
                 // zero-width Back button can never take a tap meant for
-                // the page or the domain.
+                // the page or the domain, and the overflow menu's popup
+                // anchor goes away with the button it belongs to.
                 if (state.canGoBack && controlScale > 0f) {
                     Box(modifier = Modifier.collapsingControl(controlScale, towardsStart = true)) {
                         // Expressive shape variants: the icon buttons morph
@@ -239,10 +486,14 @@ internal fun BottomToolbar(
                     addressFocused = addressFocused,
                     addressBarEdited = addressBarEdited,
                     collapse = collapse,
+                    editProgress = edit,
+                    loading = loading,
                     onAddressFocusChanged = onAddressFocusChanged,
                     onAddressEditedChanged = onAddressEditedChanged,
                     onAddressQueryChanged = onAddressQueryChanged,
                     onSubmit = onSubmit,
+                    onReload = onReload,
+                    onStop = onStop,
                     modifier = Modifier
                         .weight(1f)
                         .padding(horizontal = 4.dp),
@@ -276,22 +527,65 @@ internal fun BottomToolbar(
                 }
             }
         }
+
+        // Load progress, stroked along the capsule's *current* outline.
+        //
+        // Its own sibling, sized to the drawn capsule rather than to the
+        // slot, and last in the Box so it lands over the finished
+        // capsule and its controls — the trace belongs on the edge, not
+        // half-swallowed by the Surface's shape clip. It carries no
+        // pointer input, so it is not a hit target and the controls
+        // underneath it still take every tap.
+        //
+        // Because it is measured from `size`, the trace re-traces
+        // whatever shape the capsule currently is: 44 dp compact, 56 dp
+        // at rest, 64 dp editing, and every frame in between.
+        //
+        // `state.progress` is read inside the draw lambda (and only as a
+        // boundary, through `loading` above), so a ticking load
+        // invalidates drawing only — never layout or composition.
+        if (loading) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(drawnHeight)
+                    .drawWithCache {
+                        // The outline only changes when the capsule's
+                        // size does, so it is traced and measured here in
+                        // the cache block — a frame of the sweep then
+                        // costs one `getSegment` per half, not two fresh
+                        // paths and a fresh PathMeasure.
+                        val trace = CapsuleEdgeTrace(size, progressStrokePx)
+                        onDrawBehind {
+                            val start: Float
+                            val end: Float
+                            if (sweep != null) {
+                                val head = sweep.value * (1f + CAPSULE_SWEEP_WINDOW)
+                                start = (head - CAPSULE_SWEEP_WINDOW).coerceIn(0f, 1f)
+                                end = head.coerceIn(0f, 1f)
+                            } else {
+                                start = 0f
+                                end = state.progress.coerceIn(0, 100) / 100f
+                            }
+                            trace.draw(this, start, end, progressColor)
+                        }
+                    },
+            )
+        }
     }
 }
 
 /**
- * How much faster the secondary controls collapse than the capsule
- * shrinks. 1.6 puts them at zero width when the capsule is ~⅔ of the
- * way to compact.
- */
-private const val CONTROL_COLLAPSE_RATE = 1.6f
-
-/**
- * Collapse a control by interpolating its geometry: the slot it
- * occupies narrows towards zero while the control scales down about
+ * Take a flanking control away by interpolating its geometry: the slot
+ * it occupies narrows towards zero while the control scales down about
  * the edge it collapses into. No cross-fade — the brief asks for
  * position/size interpolation over opacity, and a control that shrinks
  * into the capsule's edge keeps saying where it went.
+ *
+ * This is the single mechanism behind *both* morphs: compacting on
+ * scroll and inflating into the editor take the same controls away the
+ * same way, so there is one thing to reason about (and one thing that
+ * can be wrong) rather than two.
  *
  * [visible] is 1 at rest and 0 when fully collapsed;
  * [towardsStart] picks the edge the control retreats to (leading
@@ -327,21 +621,122 @@ private fun Modifier.collapsingControl(visible: Float, towardsStart: Boolean): M
 }
 
 /**
+ * Phase of the indeterminate edge sweep, 0..1 per lap. Kept in its own
+ * composable so the infinite transition is only created while a tab is
+ * actually resolving.
+ */
+@Composable
+private fun rememberCapsuleSweep(): State<Float> {
+    val transition = rememberInfiniteTransition(label = "capsuleSweep")
+    return transition.animateFloat(
+        initialValue = 0f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(CAPSULE_SWEEP_PERIOD_MS, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Restart,
+        ),
+        label = "capsuleSweepPhase",
+    )
+}
+
+/**
+ * The capsule's own outline, pre-split and pre-measured, ready to be
+ * traced with the load progress.
+ *
+ * The perimeter is split into two halves that both start at the bottom
+ * centre and end at the top centre, so progress opens outwards from
+ * under the domain and closes at the top — symmetric, and unambiguous
+ * about where 0 % and 100 % are.
+ *
+ * The geometry depends on nothing but the capsule's [size] and the
+ * stroke width, so one of these is built per size in
+ * [Modifier.drawWithCache]'s cache block and reused for every frame of
+ * the load. The paths are inset by half the stroke, so the trace's outer
+ * edge lands exactly on the capsule's edge, and they are drawn over the
+ * finished capsule, so nothing about them participates in layout.
+ */
+private class CapsuleEdgeTrace(size: Size, strokeWidth: Float) {
+    private val stroke = Stroke(width = strokeWidth, cap = StrokeCap.Round)
+
+    // Held for the lifetime of the trace: a [PathMeasure] measures the
+    // path it was given rather than a copy of it.
+    private val halves: List<Path> = capsuleHalves(size, strokeWidth)
+    private val measures: List<PathMeasure> =
+        halves.map { half -> PathMeasure().apply { setPath(half, false) } }
+    private val lengths: List<Float> = measures.map { it.length }
+
+    // Rewritten in place each frame; `getSegment` appends, so it is
+    // reset first.
+    private val segment = Path()
+
+    /**
+     * Stroke the [start]..[end] fraction of each half onto [scope]: a
+     * determinate load draws `0 → progress`, an indeterminate one a
+     * short window travelling from bottom to top.
+     */
+    fun draw(scope: DrawScope, start: Float, end: Float, color: Color) {
+        if (end <= start) return
+        for (i in measures.indices) {
+            val length = lengths[i]
+            segment.reset()
+            measures[i].getSegment(start * length, end * length, segment, true)
+            scope.drawPath(segment, color, style = stroke)
+        }
+    }
+}
+
+/**
+ * The capsule outline as two half-paths, each running bottom centre →
+ * along an edge → around the end cap → back to the top centre. Empty
+ * when [size] is not the shape we trace: a capsule needs at least one
+ * full cap per side.
+ */
+private fun capsuleHalves(size: Size, strokeWidth: Float): List<Path> {
+    val inset = strokeWidth / 2f
+    val width = size.width - strokeWidth
+    val height = size.height - strokeWidth
+    if (height <= 0f || width < height) return emptyList()
+
+    val left = inset
+    val top = inset
+    val right = inset + width
+    val bottom = inset + height
+    val radius = height / 2f
+    val centerX = inset + width / 2f
+
+    val leftHalf = Path().apply {
+        moveTo(centerX, bottom)
+        lineTo(left + radius, bottom)
+        arcTo(Rect(left, top, left + height, bottom), 90f, 180f, false)
+        lineTo(centerX, top)
+    }
+    val rightHalf = Path().apply {
+        moveTo(centerX, bottom)
+        lineTo(right - radius, bottom)
+        arcTo(Rect(right - height, top, right, bottom), 90f, -180f, false)
+        lineTo(centerX, top)
+    }
+    return listOf(leftHalf, rightHalf)
+}
+
+/**
  * The address pill. Hand-built around [BasicTextField] rather than M3's
  * `TextField` / `SearchBar`: their content padding shifts by a couple
  * of dp between focused and unfocused, which makes the pill appear to
  * grow when tapped, and the search bar wants to own the whole screen
- * on expansion. A fixed-height Box gives us a rock-steady 40 dp bubble
- * that lives comfortably inside the 56 dp capsule.
+ * on expansion. A bubble we paint ourselves gives a rock-steady 40 dp
+ * pill inside the 56 dp resting capsule, 32 dp inside the 44 dp compact
+ * one and 48 dp inside the 64 dp editing one — see [addressPillHeight],
+ * which is the capsule's own height rule applied one level down, so the
+ * gutter above and below the pill stays even in every state and the
+ * pill is exactly centred for every frame of either morph.
  *
- * [collapse] (0 at rest, 1 compact) shrinks the *drawn* bubble to
- * [AddressPillCompactHeight] so it keeps its margins inside the
- * compact capsule. The Box itself stays [AddressFieldTouchHeight] tall
- * in both states — the pill is painted at the interpolated height
- * rather than laid out at it — so the compact bar's one remaining
- * control keeps a full-width, 48 dp touch target. The domain label is
- * deliberately *not* interpolated: it is a trust surface and has to
- * read the same either way.
+ * The bubble is *drawn*, not laid out: the Box stays
+ * [AddressFieldTouchHeight] tall throughout, so neither shrinking the
+ * capsule nor inflating it ever changes the size of the tap target, and
+ * the compact bar's one remaining control keeps a full-width 48 dp one.
+ * The domain label is deliberately *not* interpolated either: it is a
+ * trust surface and has to read the same at every height.
  */
 @Composable
 private fun AddressField(
@@ -349,10 +744,14 @@ private fun AddressField(
     addressFocused: Boolean,
     addressBarEdited: Boolean,
     collapse: Float,
+    editProgress: Float,
+    loading: Boolean,
     onAddressFocusChanged: (Boolean) -> Unit,
     onAddressEditedChanged: (Boolean) -> Unit,
     onAddressQueryChanged: (String) -> Unit,
     onSubmit: (String) -> Unit,
+    onReload: () -> Unit,
+    onStop: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val focusRequester = remember { FocusRequester() }
@@ -441,9 +840,10 @@ private fun AddressField(
         label = "addressOutline",
     )
 
-    // Drawn (not laid out) pill geometry: the bubble shrinks with the
-    // capsule while the Box that owns the touches keeps its height.
-    val pillHeight = lerp(AddressPillHeight, AddressPillCompactHeight, collapse)
+    // Drawn (not laid out) pill geometry: the bubble follows the capsule
+    // through both morphs while the Box that owns the touches keeps its
+    // height.
+    val pillHeight = addressPillHeight(collapse, editProgress)
     val pillFill = colors.surfaceContainerHighest
 
     Box(
@@ -588,45 +988,93 @@ private fun AddressField(
                             )
                         }
                     }
-                    // Trailing Clear (×) — sized to the pill, never pushes it
-                    // taller. Shown only while the user is actively editing
-                    // (focused + typed something); the slot is not
-                    // reserved otherwise, because the pill is narrower
-                    // now that it shares the toolbar with three buttons
-                    // and every dp of URL matters while reading. Loading
-                    // state is communicated by the wavy progress bar
-                    // above the toolbar, so the pill doesn't need its
-                    // own spinner.
+                    // Trailing control slot — sized to the pill, never
+                    // pushes it taller, and *always* reserved at the same
+                    // 32 dp whatever it is currently holding. That fixed
+                    // reservation is what makes "no layout shifts" true
+                    // for the loading state: the Stop control appears
+                    // into a slot that was already there, and the URL
+                    // beside it doesn't re-wrap or re-ellipsise when a
+                    // load starts or finishes.
                     //
-                    // The `addressBarEdited` guard matters once the user
-                    // submits: submit() resets that flag (to dismiss the
-                    // suggestions panel) but intentionally leaves focus
-                    // alone, so without this check the × would stay
-                    // visible while the page is already loading.
-                    if (addressFocused && addressBarEdited && fieldValue.text.isNotEmpty()) {
-                        IconButton(
-                            onClick = {
-                                fieldValue = TextFieldValue("")
-                                onAddressQueryChanged("")
-                                // × is a "start over" gesture — drop the
-                                // suggestions panel and wait for the next
-                                // keystroke before showing it again.
-                                onAddressEditedChanged(false)
-                            },
-                            shapes = IconButtonDefaults.shapes(),
-                            modifier = Modifier.size(32.dp),
-                        ) {
-                            Icon(
-                                Icons.Filled.Clear,
+                    // Which control: see [capsuleTrailingControl]. The
+                    // `addressBarEdited` guard inside it matters once the
+                    // user submits — submit() resets that flag (to
+                    // dismiss the suggestions panel) but intentionally
+                    // leaves focus alone, so without the check the ×
+                    // would stay visible while the page is already
+                    // loading; now that slot correctly becomes Stop.
+                    val trailing = capsuleTrailingControl(
+                        addressFocused = addressFocused,
+                        addressBarEdited = addressBarEdited,
+                        editBufferEmpty = fieldValue.text.isEmpty(),
+                        loading = loading,
+                        // Reload needs something to reload: either a
+                        // loaded page or a committed address. Mirrors
+                        // the guard on [BrowserScreen]'s onReload.
+                        canReload = state.url.isNotBlank() ||
+                            state.addressBarText.isNotBlank(),
+                    )
+                    Box(
+                        modifier = Modifier.size(32.dp),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        when (trailing) {
+                            CapsuleTrailingControl.None -> Unit
+                            CapsuleTrailingControl.Clear -> CapsuleTrailingButton(
+                                icon = Icons.Filled.Clear,
                                 contentDescription = "Clear",
-                                modifier = Modifier.size(18.dp),
+                                onClick = {
+                                    fieldValue = TextFieldValue("")
+                                    onAddressQueryChanged("")
+                                    // × is a "start over" gesture — drop the
+                                    // suggestions panel and wait for the next
+                                    // keystroke before showing it again.
+                                    onAddressEditedChanged(false)
+                                },
+                            )
+                            CapsuleTrailingControl.Stop -> CapsuleTrailingButton(
+                                icon = Icons.Filled.Close,
+                                contentDescription = "Stop loading",
+                                tint = colors.primary,
+                                onClick = onStop,
+                            )
+                            CapsuleTrailingControl.Reload -> CapsuleTrailingButton(
+                                icon = Icons.Filled.Refresh,
+                                contentDescription = "Reload",
+                                onClick = onReload,
                             )
                         }
-                    } else {
-                        Spacer(Modifier.width(8.dp))
                     }
                 }
             },
+        )
+    }
+}
+
+/**
+ * One icon in the address pill's trailing slot. Every occupant is built
+ * the same way — 32 dp button, 18 dp glyph — so swapping between Clear,
+ * Stop and Reload changes only which vector is drawn, never a metric.
+ */
+@OptIn(ExperimentalMaterial3ExpressiveApi::class)
+@Composable
+private fun CapsuleTrailingButton(
+    icon: ImageVector,
+    contentDescription: String,
+    onClick: () -> Unit,
+    tint: Color = LocalContentColor.current,
+) {
+    IconButton(
+        onClick = onClick,
+        shapes = IconButtonDefaults.shapes(),
+        modifier = Modifier.size(32.dp),
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = contentDescription,
+            tint = tint,
+            modifier = Modifier.size(18.dp),
         )
     }
 }

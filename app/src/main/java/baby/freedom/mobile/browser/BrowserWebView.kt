@@ -308,6 +308,12 @@ fun BrowserWebViewHost(
             val wv = webViews[tabs.active.id]
             if (wv != null) captureThumbnail(wv, tabs.active)
         }
+        // Abort whatever the given tab is loading. Chromium answers a
+        // stopLoading() with a final onProgressChanged(100), which the
+        // chrome client below folds into `progress = -1`; [BrowserScreen]
+        // also clears the counter itself so the capsule's edge trace
+        // goes out on the same frame as the tap.
+        tabs.stopLoading = { tab -> webViews[tab.id]?.stopLoading() }
         tabs.clearWebViewData = {
             // Globally-scoped stores: cookies and DOM storage / IndexedDB /
             // WebSQL are shared across every WebView in the process, so
@@ -331,6 +337,7 @@ fun BrowserWebViewHost(
         onDispose {
             tabs.captureActiveThumbnail = null
             tabs.clearWebViewData = null
+            tabs.stopLoading = null
         }
     }
 

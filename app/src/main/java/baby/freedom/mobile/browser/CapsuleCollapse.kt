@@ -3,32 +3,12 @@ package baby.freedom.mobile.browser
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.unit.dp
 import kotlin.math.abs
 
-/**
- * Height of the capsule in its compact (scrolled) state. The brief
- * allows 40–44 dp; 44 dp is the top of that band, which is what keeps
- * the domain label the same size it is at rest — the compact bar says
- * less, it must not say it *smaller* (see [AddressLabel]: the label is
- * a trust surface, and a shrunken domain is a harder one to read).
- */
-internal val CapsuleCompactHeight = 44.dp
-
-/** Address pill height inside the resting (56 dp) capsule. */
-internal val AddressPillHeight = 40.dp
-
-/** Address pill height inside the compact (44 dp) capsule. */
-internal val AddressPillCompactHeight = 32.dp
-
-/**
- * Touch height of the address pill. Constant across both states and
- * independent of the pill's *drawn* height, so shrinking the capsule
- * never shrinks a tap target: the field is laid out 48 dp tall inside
- * the toolbar's (equally constant) 48 dp control row and its pill is
- * painted at the interpolated height inside that box.
- */
-internal val AddressFieldTouchHeight = 48.dp
+// The capsule's heights — compact, resting and editing — and the rule
+// that turns the fraction this class produces into one of them live in
+// [BottomToolbar], next to the editing morph they share a model with.
+// This file is only the gesture: scroll deltas in, one Boolean out.
 
 /**
  * Downward travel, in dp, that collapses the capsule. Small enough to

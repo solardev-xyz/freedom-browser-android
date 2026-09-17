@@ -205,6 +205,20 @@ class BrowserState(val id: Long) {
     }
 
     /**
+     * Drop every "this tab is busy" signal the capsule reads, without
+     * touching the address or the page itself. Called when the user
+     * hits Stop: the actual abort (cancelling an in-flight resolve,
+     * telling the WebView to stop fetching) is the caller's job — this
+     * is just the part the chrome renders, cleared on the same frame as
+     * the tap instead of whenever Chromium's last progress callback
+     * happens to arrive.
+     */
+    fun stopProgress() {
+        progress = -1
+        resolving = false
+    }
+
+    /**
      * Given an address bar string, reconstruct what should actually be
      * fetched, honoring any active display override. When the user hits
      * reload (icon, not a typed URL), we want to reload the real URL
