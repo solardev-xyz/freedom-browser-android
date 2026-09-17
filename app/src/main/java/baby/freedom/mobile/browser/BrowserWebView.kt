@@ -443,12 +443,33 @@ private fun buildRefreshableWebView(
             }
         }
 
+        // Compact-on-scroll for the floating capsule (#30).
+        //
+        // A WebView scrolls itself: it consumes the touch stream in its
+        // own native compositor and reports nothing up Compose's
+        // nested-scroll chain, so the chrome can't observe the gesture
+        // the way a `LazyColumn` would drive a
+        // `TopAppBarScrollBehavior`. Its own scroll callback is the
+        // signal that *is* available, so the collapse is derived from
+        // that — deltas in, one Boolean out (see [CapsuleCollapseState]).
+        //
+        // `setOnScrollChangeListener` rather than a WebView subclass
+        // overriding `onScrollChanged`: same callback, no new type, and
+        // nothing else in the app listens to this view's scroll.
+        val screenDensity = context.resources.displayMetrics.density
+        setOnScrollChangeListener { _, _, scrollY, _, oldScrollY ->
+            state.capsuleCollapse.onScroll(scrollY, oldScrollY, screenDensity)
+        }
+
         // Force an initial paint so the WebView's compositor surface
         // is valid even before the user submits a URL.
         loadUrl(ABOUT_BLANK)
 
         webViewClient = object : WebViewClient() {
             override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
+                // A new document arrives with the chrome whole, however
+                // far the previous one was scrolled.
+                state.capsuleCollapse.expand()
                 if (url == ABOUT_BLANK) {
                     // `about:blank` is our home sentinel — either the
                     // WebView's forced initial paint, a user-initiated

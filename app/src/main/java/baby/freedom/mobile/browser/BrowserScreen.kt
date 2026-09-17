@@ -1,6 +1,7 @@
 package baby.freedom.mobile.browser
 
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
@@ -722,6 +723,29 @@ fun BrowserScreen(
     val capsuleFootprint = CapsuleHeight + CapsuleBottomMargin
     val contentBottomReserve = if (keyboardVisible) capsuleFootprint else 0.dp
 
+    // Compact-on-scroll (#30). The tab's WebView feeds
+    // [CapsuleCollapseState] its own scroll deltas — Chromium's WebView
+    // doesn't report scrolling up Compose's nested-scroll chain, so
+    // there is nothing else to key off — and the chrome interpolates
+    // between its resting and compact geometry from the Boolean that
+    // comes out.
+    //
+    // Three states override it back to resting, because in all three
+    // the bar is the thing the user is dealing with rather than the
+    // page: the address field has focus (stage 3 morphs the capsule
+    // into the editor from here), the keyboard is up, or the tab is on
+    // the home surface (nothing is scrolling).
+    val capsuleCollapsed =
+        state.capsuleCollapse.collapsed && !addressFocused && !keyboardVisible && !isHomeTab
+    // Expressive motion, geometry only: one spatial spring drives the
+    // capsule's height and the secondary controls' size. Nothing
+    // cross-fades.
+    val collapseFraction by animateFloatAsState(
+        targetValue = if (capsuleCollapsed) 1f else 0f,
+        animationSpec = MaterialTheme.motionScheme.defaultSpatialSpec(),
+        label = "capsuleCollapse",
+    )
+
     // How much of the content area the capsule still covers once that
     // reserve is applied — zero while the keyboard is up, its own
     // footprint plus the navigation inset the content draws behind
@@ -940,6 +964,7 @@ fun BrowserScreen(
                         val fresh = tabs.newTab()
                         submit(fresh, tabs.homepageUrl)
                     },
+                    collapseFraction = collapseFraction,
                     modifier = Modifier
                         .widthIn(max = CHROME_MAX_WIDTH)
                         .fillMaxWidth(),
