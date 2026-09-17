@@ -27,6 +27,45 @@ class AddressLabelTest {
     }
 
     @Test
+    fun `tenants of a user-content platform keep their own label`() {
+        // The PSL's PRIVATE section: everything under these suffixes is
+        // handed out per-user, so two tenants are two owners and must
+        // not rest on one bold platform name.
+        assertEquals("google.github.io", AddressLabel.resting("https://google.github.io/styleguide/"))
+        assertEquals("myapp.web.app", AddressLabel.resting("https://myapp.web.app/"))
+        assertEquals(
+            "myapp-support.web.app",
+            AddressLabel.resting("https://myapp-support.web.app/seed"),
+        )
+        assertEquals("evil.netlify.app", AddressLabel.resting("https://evil.netlify.app/x"))
+        assertEquals("someone.blogspot.com", AddressLabel.resting("https://someone.blogspot.com/p"))
+        assertEquals("vitalik.eth.limo", AddressLabel.resting("https://vitalik.eth.limo/"))
+        // Deeper labels below the tenant still collapse onto it — the
+        // tenant owns everything under its own name.
+        assertEquals("google.github.io", AddressLabel.resting("https://a.b.google.github.io/x"))
+    }
+
+    @Test
+    fun `virtual dweb origins are one label per content root`() {
+        // `*.{bzz,ipfs,ipns,ens}.freedom.baby` are ours and pending
+        // upstream (issue #6); two roots are two owners.
+        assertEquals(
+            "vitalik-eth.ens.freedom.baby",
+            AddressLabel.resting("https://vitalik-eth.ens.freedom.baby/"),
+        )
+        assertEquals(
+            "deadbeef.bzz.freedom.baby",
+            AddressLabel.resting("https://deadbeef.bzz.freedom.baby/index.html"),
+        )
+    }
+
+    @Test
+    fun `a host that is itself a public suffix is shown whole`() {
+        assertEquals("github.io", AddressLabel.resting("https://github.io/"))
+        assertEquals("www.github.io", AddressLabel.resting("https://www.github.io/"))
+    }
+
+    @Test
     fun `ports and userinfo are stripped`() {
         assertEquals("example.com", AddressLabel.resting("https://example.com:8443/x"))
         assertEquals("example.com", AddressLabel.resting("https://user:pw@www.example.com/x"))

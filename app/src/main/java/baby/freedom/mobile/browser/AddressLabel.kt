@@ -19,6 +19,9 @@ package baby.freedom.mobile.browser
  *   `https://www.example.com/a/b?c` → `example.com`
  *   `https://en.wikipedia.org/wiki/X` → `wikipedia.org`
  *   `https://foo.bbc.co.uk/x` → `bbc.co.uk` (compound public suffix)
+ *   `https://google.github.io/styleguide/` → `google.github.io`
+ *       (every tenant of a user-content platform is its own owner —
+ *       see [PublicSuffixList])
  *   `swarm.eth/docs` / `bzz://swarm.eth` → `swarm.eth`
  *   `pay.vitalik.eth/x` → `pay.vitalik.eth` (ENS names never collapse)
  *   `bzz://a1b2…f9/index.html` → `bzz://a1b2c3…d4e5`
@@ -28,24 +31,6 @@ package baby.freedom.mobile.browser
  * through untouched rather than mangled.
  */
 object AddressLabel {
-
-    /**
-     * Two-label public suffixes common enough to be worth keeping the
-     * third label for, so `bbc.co.uk` doesn't collapse to `co.uk`. This
-     * is deliberately a short list rather than a vendored Public Suffix
-     * List: the failure mode of a miss is cosmetic (one label too few
-     * on a rare ccTLD) and a ~10 k-entry PSL in the APK for an address
-     * label isn't a trade this stage wants to make.
-     */
-    private val COMPOUND_SUFFIXES: Set<String> = setOf(
-        "co.uk", "org.uk", "ac.uk", "gov.uk", "me.uk", "net.uk", "sch.uk",
-        "co.jp", "or.jp", "ne.jp", "ac.jp", "go.jp",
-        "com.au", "net.au", "org.au", "edu.au", "gov.au",
-        "com.br", "com.cn", "net.cn", "org.cn", "gov.cn",
-        "co.in", "net.in", "org.in", "co.za", "org.za",
-        "com.mx", "com.ar", "com.tr", "com.sg", "com.hk", "com.tw",
-        "co.kr", "co.nz", "co.il", "co.id", "co.th", "com.pl", "com.ua",
-    )
 
     /**
      * TLDs whose names are ENS names rather than DNS domains (the two
@@ -122,22 +107,23 @@ object AddressLabel {
     }
 
     /**
-     * Strip `www.` and every label above the registrable one:
-     * `www.en.example.co.uk` → `example.co.uk`. IP literals and
-     * single-label hosts (`localhost`) are returned as-is — truncating
-     * `127.0.0.1` to `0.1` would be worse than useless.
+     * Strip every label above the registrable one, the boundary drawn by
+     * the [PublicSuffixList]: `www.en.example.co.uk` → `example.co.uk`,
+     * but `google.github.io` → `google.github.io`, because under a
+     * PRIVATE-section suffix each subdomain is a separate tenant and
+     * collapsing them would have the capsule rest on a name shared with
+     * whoever else signed up for the platform.
+     *
+     * IP literals, single-label hosts (`localhost`) and hosts that *are*
+     * a public suffix are returned as-is — truncating `127.0.0.1` to
+     * `0.1` would be worse than useless, and shrinking a name we can't
+     * place is the one direction the label must never take.
      */
     fun registrableHost(host: String): String {
         val h = hostOnly(host).lowercase().trimEnd('.')
         if (h.isEmpty()) return ""
         if (isIpLiteral(h)) return h
-        val labels = h.split('.').filter { it.isNotEmpty() }
-        if (labels.size <= 2) return labels.joinToString(".")
-        val stripped = if (labels.first() == "www") labels.drop(1) else labels
-        if (stripped.size <= 2) return stripped.joinToString(".")
-        val lastTwo = stripped.takeLast(2).joinToString(".")
-        val keep = if (lastTwo in COMPOUND_SUFFIXES) 3 else 2
-        return stripped.takeLast(keep).joinToString(".")
+        return PublicSuffixList.registrableDomain(h) ?: h
     }
 
     /**
