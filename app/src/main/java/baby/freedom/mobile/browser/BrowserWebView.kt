@@ -5,7 +5,9 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.util.Log
+import android.view.MotionEvent
 import android.view.View
+import android.view.ViewConfiguration
 import android.view.ViewGroup
 import android.webkit.CookieManager
 import android.webkit.MimeTypeMap
@@ -35,6 +37,7 @@ import java.io.ByteArrayInputStream
 import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
+import kotlin.math.abs
 
 private const val ABOUT_BLANK = "about:blank"
 private const val LOG_TAG = "BrowserWebView"
@@ -343,7 +346,7 @@ fun BrowserWebViewHost(
     }
 }
 
-@SuppressLint("SetJavaScriptEnabled")
+@SuppressLint("SetJavaScriptEnabled", "ClickableViewAccessibility")
 private fun buildRefreshableWebView(
     context: Context,
     state: BrowserState,
@@ -443,12 +446,59 @@ private fun buildRefreshableWebView(
             }
         }
 
+        // Compact-on-scroll for the floating capsule (#30).
+        //
+        // A WebView scrolls itself: it consumes the touch stream in its
+        // own native compositor and reports nothing up Compose's
+        // nested-scroll chain, so the chrome can't observe the gesture
+        // the way a `LazyColumn` would drive a
+        // `TopAppBarScrollBehavior`. Its own scroll callback is the
+        // signal that *is* available, so the collapse is derived from
+        // that — deltas in, one Boolean out (see [CapsuleCollapseState]).
+        //
+        // `setOnScrollChangeListener` rather than a WebView subclass
+        // overriding `onScrollChanged`: same callback, no new type, and
+        // nothing else in the app listens to this view's scroll.
+        val screenDensity = context.resources.displayMetrics.density
+        setOnScrollChangeListener { _, _, scrollY, _, oldScrollY ->
+            state.capsuleCollapse.onScroll(scrollY, oldScrollY, screenDensity)
+        }
+
+        // …and the touch stream that says whether a given scroll is the
+        // user's. The scroll callback alone can't: an animated
+        // programmatic scroll (Chromium pulling a tapped form field into
+        // view, #25's re-scroll when the WebView shrinks for the IME)
+        // arrives as a run of small deltas that looks exactly like a
+        // flick. A drag past the touch slop arms the state machine; the
+        // next touch down disarms it, so a tap's after-effects can't
+        // move the chrome. The listener only observes — it always
+        // returns false, so the WebView handles the gesture as before.
+        val touchSlopPx = ViewConfiguration.get(context).scaledTouchSlop
+        var touchDownY = 0f
+        setOnTouchListener { _, event ->
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    touchDownY = event.y
+                    state.capsuleCollapse.onTouchDown()
+                }
+
+                MotionEvent.ACTION_MOVE ->
+                    if (abs(event.y - touchDownY) > touchSlopPx) {
+                        state.capsuleCollapse.onDragPastSlop()
+                    }
+            }
+            false
+        }
+
         // Force an initial paint so the WebView's compositor surface
         // is valid even before the user submits a URL.
         loadUrl(ABOUT_BLANK)
 
         webViewClient = object : WebViewClient() {
             override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
+                // A new document arrives with the chrome whole, however
+                // far the previous one was scrolled.
+                state.capsuleCollapse.expand()
                 if (url == ABOUT_BLANK) {
                     // `about:blank` is our home sentinel — either the
                     // WebView's forced initial paint, a user-initiated

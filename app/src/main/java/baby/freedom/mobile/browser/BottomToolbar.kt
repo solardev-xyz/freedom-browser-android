@@ -3,7 +3,6 @@ package baby.freedom.mobile.browser
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.IntrinsicSize
@@ -38,11 +37,13 @@ import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.IconButtonDefaults
+import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -51,13 +52,20 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.TransformOrigin
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.boundsInWindow
+import androidx.compose.ui.layout.layout
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.painterResource
@@ -72,11 +80,13 @@ import androidx.compose.ui.unit.IntRect
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.lerp
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupPositionProvider
 import androidx.compose.ui.window.PopupProperties
 import baby.freedom.swarm.NodeInfo
 import baby.freedom.swarm.NodeStatus
+import kotlin.math.roundToInt
 
 /**
  * Height of the floating capsule. The brief allows 52–58 dp; 56 dp is
@@ -116,6 +126,14 @@ private const val CAPSULE_ALPHA = 0.90f
  * nothing shifts when focus, the clear (×) button, the Back control or
  * the protocol badge come and go.
  *
+ * [collapseFraction] drives the compact-on-scroll state (0 = resting,
+ * 1 = compact): the capsule interpolates down to
+ * [CapsuleCompactHeight] and the secondary controls collapse out of
+ * the row, leaving the domain. It is pure geometry — sizes and
+ * positions interpolate, nothing cross-fades — and the layout *slot*
+ * stays [CapsuleHeight] tall throughout, so the capsule shrinks within
+ * a frame that never moves and nothing else on screen shifts.
+ *
  * The caller owns the layout slot (insets, IME padding, max width); this
  * composable only fills whatever width it is given.
  */
@@ -143,71 +161,169 @@ internal fun BottomToolbar(
     onOpenBookmarks: () -> Unit,
     onReload: () -> Unit,
     onNewTab: () -> Unit,
+    collapseFraction: Float = 0f,
     modifier: Modifier = Modifier,
 ) {
-    Surface(
+    // Clamp rather than trust the caller: the collapse is driven by a
+    // spring, and the expressive spatial springs overshoot slightly at
+    // both ends.
+    val collapse = collapseFraction.coerceIn(0f, 1f)
+    val capsuleHeight = lerp(CapsuleHeight, CapsuleCompactHeight, collapse)
+    // Secondary controls finish collapsing before the capsule finishes
+    // shrinking (they're gone by ~⅔ of the way), so the pill always has
+    // somewhere to grow into and the compact bar never looks crowded
+    // mid-transition.
+    val controlScale = (1f - collapse * CONTROL_COLLAPSE_RATE).coerceIn(0f, 1f)
+
+    Box(
+        // The slot keeps its full height in both states. The capsule
+        // shrinks *inside* it, which is what keeps the page, the
+        // progress strip, the snackbar and the IME reserve from moving
+        // when the bar collapses — and what lets the controls keep 48 dp
+        // touch targets while the capsule around them is 44 dp tall.
         modifier = modifier
             .fillMaxWidth()
             .height(CapsuleHeight),
-        shape = CircleShape,
-        color = MaterialTheme.colorScheme.surfaceContainer.copy(alpha = CAPSULE_ALPHA),
-        // Just enough shadow to lift the capsule off the page without
-        // the "heavy shadow" the brief rules out.
-        shadowElevation = 3.dp,
+        contentAlignment = Alignment.Center,
     ) {
-        Row(
+        // The capsule itself is background only: drawn at the
+        // interpolated height, centred in the slot, with the controls
+        // laid out over it rather than inside it.
+        Surface(
             modifier = Modifier
-                .fillMaxSize()
-                .padding(horizontal = 4.dp),
-            // Mixed-height children (a 40 dp pill next to 48 dp icon
-            // buttons) only sit on the capsule's centre line if we say
-            // so explicitly — a Row defaults to Top.
-            verticalAlignment = Alignment.CenterVertically,
+                .fillMaxWidth()
+                .height(capsuleHeight),
+            shape = CircleShape,
+            color = MaterialTheme.colorScheme.surfaceContainer.copy(alpha = CAPSULE_ALPHA),
+            // Just enough shadow to lift the capsule off the page without
+            // the "heavy shadow" the brief rules out.
+            shadowElevation = 3.dp,
+            content = {},
+        )
+
+        // [Surface] used to set this for its content; the content now
+        // sits beside it, so state it.
+        CompositionLocalProvider(
+            LocalContentColor provides MaterialTheme.colorScheme.onSurface,
         ) {
-            // Back replaces Home in the resting bar: history is the
-            // control a reader actually reaches for, and it costs
-            // nothing when there is no history to pop.
-            if (state.canGoBack) {
-                // Expressive shape variants: the icon buttons morph from
-                // round to a squarer pressed shape on touch. Purely
-                // visual — the 48 dp hit target and click handlers are
-                // unchanged.
-                IconButton(onClick = onBack, shapes = IconButtonDefaults.shapes()) {
-                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+            Row(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(horizontal = 4.dp),
+                // Mixed-height children (a 40 dp pill next to 48 dp icon
+                // buttons) only sit on the capsule's centre line if we say
+                // so explicitly — a Row defaults to Top.
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                // Back replaces Home in the resting bar: history is the
+                // control a reader actually reaches for, and it costs
+                // nothing when there is no history to pop.
+                //
+                // Fully-collapsed controls are not composed at all, so a
+                // zero-width Back button can never take a tap meant for
+                // the page or the domain.
+                if (state.canGoBack && controlScale > 0f) {
+                    Box(modifier = Modifier.collapsingControl(controlScale, towardsStart = true)) {
+                        // Expressive shape variants: the icon buttons morph
+                        // from round to a squarer pressed shape on touch.
+                        // Purely visual — the 48 dp hit target and click
+                        // handlers are unchanged.
+                        IconButton(onClick = onBack, shapes = IconButtonDefaults.shapes()) {
+                            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                        }
+                    }
+                }
+
+                AddressField(
+                    state = state,
+                    addressFocused = addressFocused,
+                    addressBarEdited = addressBarEdited,
+                    collapse = collapse,
+                    onAddressFocusChanged = onAddressFocusChanged,
+                    onAddressEditedChanged = onAddressEditedChanged,
+                    onAddressQueryChanged = onAddressQueryChanged,
+                    onSubmit = onSubmit,
+                    modifier = Modifier
+                        .weight(1f)
+                        .padding(horizontal = 4.dp),
+                )
+
+                if (controlScale > 0f) {
+                    Box(
+                        modifier = Modifier.collapsingControl(controlScale, towardsStart = false),
+                    ) {
+                        TabsCountButton(count = tabCount, onClick = onOpenTabs)
+                    }
+
+                    Box(
+                        modifier = Modifier.collapsingControl(controlScale, towardsStart = false),
+                    ) {
+                        OverflowMenuButton(
+                            state = state,
+                            nodeInfo = nodeInfo,
+                            isBookmarked = isBookmarked,
+                            onForward = onForward,
+                            onHome = onHome,
+                            onToggleBookmark = onToggleBookmark,
+                            onOpenSettings = onOpenSettings,
+                            onOpenNode = onOpenNode,
+                            onOpenHistory = onOpenHistory,
+                            onOpenBookmarks = onOpenBookmarks,
+                            onReload = onReload,
+                            onNewTab = onNewTab,
+                        )
+                    }
                 }
             }
-
-            AddressField(
-                state = state,
-                addressFocused = addressFocused,
-                addressBarEdited = addressBarEdited,
-                onAddressFocusChanged = onAddressFocusChanged,
-                onAddressEditedChanged = onAddressEditedChanged,
-                onAddressQueryChanged = onAddressQueryChanged,
-                onSubmit = onSubmit,
-                modifier = Modifier
-                    .weight(1f)
-                    .padding(horizontal = 4.dp),
-            )
-
-            TabsCountButton(count = tabCount, onClick = onOpenTabs)
-
-            OverflowMenuButton(
-                state = state,
-                nodeInfo = nodeInfo,
-                isBookmarked = isBookmarked,
-                onForward = onForward,
-                onHome = onHome,
-                onToggleBookmark = onToggleBookmark,
-                onOpenSettings = onOpenSettings,
-                onOpenNode = onOpenNode,
-                onOpenHistory = onOpenHistory,
-                onOpenBookmarks = onOpenBookmarks,
-                onReload = onReload,
-                onNewTab = onNewTab,
-            )
         }
     }
+}
+
+/**
+ * How much faster the secondary controls collapse than the capsule
+ * shrinks. 1.6 puts them at zero width when the capsule is ~⅔ of the
+ * way to compact.
+ */
+private const val CONTROL_COLLAPSE_RATE = 1.6f
+
+/**
+ * Collapse a control by interpolating its geometry: the slot it
+ * occupies narrows towards zero while the control scales down about
+ * the edge it collapses into. No cross-fade — the brief asks for
+ * position/size interpolation over opacity, and a control that shrinks
+ * into the capsule's edge keeps saying where it went.
+ *
+ * [visible] is 1 at rest and 0 when fully collapsed;
+ * [towardsStart] picks the edge the control retreats to (leading
+ * controls collapse left, trailing controls collapse right).
+ *
+ * Order matters: the scale has to be applied *inside* the narrowing
+ * slot, so `layout` (outer) wraps `graphicsLayer` (inner). Written the
+ * other way round the layer would scale the already-narrowed slot a
+ * second time, and the control would paint at `visible²` of its slot —
+ * a cropped edge fragment beside an empty gap — instead of the whole
+ * control shrinking to fill the slot.
+ */
+private fun Modifier.collapsingControl(visible: Float, towardsStart: Boolean): Modifier {
+    if (visible >= 1f) return this
+    return this
+        .layout { measurable, constraints ->
+            val placeable = measurable.measure(constraints)
+            val width = (placeable.width * visible).roundToInt()
+            layout(width, placeable.height) {
+                // Anchored to the edge it collapses into, which is the
+                // same edge the scale below pivots on — so the drawn
+                // control exactly fills the narrowing slot at every
+                // fraction, and nothing of it lands outside.
+                placeable.place(if (towardsStart) 0 else width - placeable.width, 0)
+            }
+        }
+        .graphicsLayer {
+            scaleX = visible
+            scaleY = visible
+            transformOrigin = TransformOrigin(if (towardsStart) 0f else 1f, 0.5f)
+            clip = true
+        }
 }
 
 /**
@@ -217,12 +333,22 @@ internal fun BottomToolbar(
  * grow when tapped, and the search bar wants to own the whole screen
  * on expansion. A fixed-height Box gives us a rock-steady 40 dp bubble
  * that lives comfortably inside the 56 dp capsule.
+ *
+ * [collapse] (0 at rest, 1 compact) shrinks the *drawn* bubble to
+ * [AddressPillCompactHeight] so it keeps its margins inside the
+ * compact capsule. The Box itself stays [AddressFieldTouchHeight] tall
+ * in both states — the pill is painted at the interpolated height
+ * rather than laid out at it — so the compact bar's one remaining
+ * control keeps a full-width, 48 dp touch target. The domain label is
+ * deliberately *not* interpolated: it is a trust surface and has to
+ * read the same either way.
  */
 @Composable
 private fun AddressField(
     state: BrowserState,
     addressFocused: Boolean,
     addressBarEdited: Boolean,
+    collapse: Float,
     onAddressFocusChanged: (Boolean) -> Unit,
     onAddressEditedChanged: (Boolean) -> Unit,
     onAddressQueryChanged: (String) -> Unit,
@@ -315,12 +441,37 @@ private fun AddressField(
         label = "addressOutline",
     )
 
+    // Drawn (not laid out) pill geometry: the bubble shrinks with the
+    // capsule while the Box that owns the touches keeps its height.
+    val pillHeight = lerp(AddressPillHeight, AddressPillCompactHeight, collapse)
+    val pillFill = colors.surfaceContainerHighest
+
     Box(
         modifier = modifier
-            .height(40.dp)
-            .clip(CircleShape)
-            .background(colors.surfaceContainerHighest)
-            .border(width = 1.5.dp, color = outline, shape = CircleShape),
+            .height(AddressFieldTouchHeight)
+            .drawBehind {
+                val h = pillHeight.toPx()
+                // Centred in the touch box, which is itself centred in
+                // the capsule — so the bubble, the capsule and the text
+                // share one centre line in every state.
+                val top = (size.height - h) / 2f
+                drawRoundRect(
+                    color = pillFill,
+                    topLeft = Offset(0f, top),
+                    size = Size(size.width, h),
+                    cornerRadius = CornerRadius(h / 2f),
+                )
+                if (outline.alpha > 0f) {
+                    val stroke = 1.5.dp.toPx()
+                    drawRoundRect(
+                        color = outline,
+                        topLeft = Offset(stroke / 2f, top + stroke / 2f),
+                        size = Size(size.width - stroke, h - stroke),
+                        cornerRadius = CornerRadius((h - stroke) / 2f),
+                        style = Stroke(width = stroke),
+                    )
+                }
+            },
         contentAlignment = Alignment.CenterStart,
     ) {
         BasicTextField(
