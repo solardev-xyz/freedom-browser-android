@@ -39,6 +39,27 @@ class AddressLabelTest {
     }
 
     @Test
+    fun `a backslash ends the authority on special schemes`() {
+        // WHATWG / Chromium treat `\` as a path separator for special
+        // schemes, so these all load `host` with `/@bank.com/x` as the
+        // path — the label must not read `bank.com` out of them.
+        assertEquals("10.0.2.2", AddressLabel.resting("http://10.0.2.2:8922\\@bank.com/x"))
+        assertEquals("example.com", AddressLabel.resting("https://example.com\\@bank.co.uk/x"))
+        assertEquals("example.com", AddressLabel.resting("https://example.com\\"))
+        // Same for the bare-name form, which UrlParser loads as https.
+        assertEquals("example.com", AddressLabel.resting("example.com\\@bank.com/x"))
+    }
+
+    @Test
+    fun `backslashes are kept inside non-special authorities`() {
+        // `bzz:` is not a special scheme, so its authority is not split
+        // on `\` — but a backslash means it is not a host either, so it
+        // is elided as an id rather than re-read as `bank.com`.
+        assertEquals("bzz://swarm.….com", AddressLabel.resting("bzz://swarm.eth\\@bank.com/x"))
+        assertEquals("bzz://a\\@b.co", AddressLabel.resting("bzz://a\\@b.co/x"))
+    }
+
+    @Test
     fun `bare ens display form keeps the name`() {
         assertEquals("swarm.eth", AddressLabel.resting("swarm.eth"))
         assertEquals("swarm.eth", AddressLabel.resting("swarm.eth/docs/index.html"))
