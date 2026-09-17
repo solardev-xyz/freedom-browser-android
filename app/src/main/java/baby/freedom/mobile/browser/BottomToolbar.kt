@@ -136,8 +136,12 @@ internal fun BottomToolbar(
             onAddressFocusChanged = onAddressFocusChanged,
             onAddressEditedChanged = onAddressEditedChanged,
             onSubmit = onSubmit,
+            // The toolbar's content row is top-aligned, so a child
+            // shorter than the 48 dp icon buttons must centre itself —
+            // without this the 40 dp pill rides 4 dp high.
             modifier = Modifier
                 .weight(1f)
+                .align(Alignment.CenterVertically)
                 .padding(horizontal = 4.dp),
         )
 
