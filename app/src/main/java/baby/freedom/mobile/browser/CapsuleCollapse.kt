@@ -58,6 +58,11 @@ private const val TOP_ZONE_DP = 24f
  * fragment jump, a scroll restore on back/forward, or a JS
  * `scrollIntoView`. Those move the accumulator nowhere: the user never
  * asked for a state change, so they don't get one.
+ *
+ * Note this is only the coarse half of "not a gesture": an animated
+ * programmatic scroll arrives as a run of *small* deltas and sails
+ * straight through it, which is what [onTouchDown]/[onDragPastSlop]
+ * are for.
  */
 private const val JUMP_DP = 160f
 
@@ -90,6 +95,36 @@ internal class CapsuleCollapseState {
     private var travelDp = 0f
 
     /**
+     * `true` once the finger has dragged far enough on the page for the
+     * scrolling that follows to be the user's own. Armed by
+     * [onDragPastSlop], disarmed by the *next* touch down — so the
+     * deltas of a fling keep counting after the finger lifts, while a
+     * plain tap (down, no drag) closes the window before whatever that
+     * tap provoked can move the state.
+     */
+    private var gestureScrolling = false
+
+    /**
+     * A finger went down on the page. Until it drags, nothing the page
+     * scrolls is attributable to the user: a tap on a form field is
+     * followed by Chromium's animated focus-scroll and by #25's
+     * scroll-into-view re-scroll, both of which arrive as runs of small
+     * deltas that [JUMP_DP] can't tell from a flick.
+     */
+    fun onTouchDown() {
+        gestureScrolling = false
+    }
+
+    /**
+     * The finger has travelled past the touch slop, so this is a drag:
+     * the scrolling it causes — including the fling it throws after the
+     * finger lifts — is the gesture the capsule is allowed to react to.
+     */
+    fun onDragPastSlop() {
+        gestureScrolling = true
+    }
+
+    /**
      * Fold one WebView scroll callback into the state.
      *
      * [density] is `displayMetrics.density` (px per dp) — thresholds
@@ -118,6 +153,21 @@ internal class CapsuleCollapseState {
             return
         }
 
+        // Same rule, the other side of it. An animated programmatic
+        // scroll (Chromium's focus-scroll when a form field is tapped,
+        // #25's re-scroll when the WebView shrinks for the IME) lands
+        // as a run of deltas each well under [JUMP_DP], so the only
+        // thing that separates it from a flick is whether a finger was
+        // dragging. Without a drag to explain it the scroll leaves the
+        // state exactly where it was — which matters most while the
+        // keyboard is up, where [BrowserScreen] holds the capsule open
+        // and a flip would stay invisible until the IME closes and the
+        // bar collapsed in the user's face.
+        if (!gestureScrolling) {
+            travelDp = 0f
+            return
+        }
+
         // Direction reversal starts a fresh run, so a flick back up
         // doesn't first have to repay everything the user scrolled
         // down.
@@ -140,6 +190,7 @@ internal class CapsuleCollapseState {
      */
     fun expand() {
         travelDp = 0f
+        gestureScrolling = false
         collapsed = false
     }
 }
