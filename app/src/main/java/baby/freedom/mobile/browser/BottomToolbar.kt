@@ -21,6 +21,7 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Bookmark
@@ -34,8 +35,6 @@ import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.StarBorder
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
-import androidx.compose.material3.FloatingToolbarDefaults
-import androidx.compose.material3.HorizontalFloatingToolbar
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.IconButtonDefaults
@@ -57,6 +56,7 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalDensity
@@ -64,6 +64,7 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardCapitalization
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
@@ -78,17 +79,42 @@ import baby.freedom.swarm.NodeInfo
 import baby.freedom.swarm.NodeStatus
 
 /**
- * The browser chrome: a Material 3 Expressive [HorizontalFloatingToolbar]
- * docked at the bottom of the screen, where a thumb can reach it, holding
- * (left to right) the Home button, the address field, the tab counter and
- * the overflow menu.
+ * Height of the floating capsule. The brief allows 52–58 dp; 56 dp is
+ * the one value in that band that fits a stock 48 dp [IconButton] with
+ * a symmetric 4 dp of breathing room above and below, so every control
+ * keeps its full Material touch target without the capsule growing a
+ * visible gutter.
+ */
+internal val CapsuleHeight = 56.dp
+
+/** Side margin between the capsule and the screen edge (brief: 12–16 dp). */
+internal val CapsuleSideMargin = 14.dp
+
+/** Gap between the capsule and the navigation/gesture inset (brief: 8–12 dp). */
+internal val CapsuleBottomMargin = 10.dp
+
+/**
+ * Capsule background opacity. Low enough that the page reads through as
+ * a faint wash (so the chrome sits *over* the page rather than
+ * replacing a strip of it), high enough that `onSurface` text stays
+ * legible over both a white article and a dark hero image.
+ */
+private const val CAPSULE_ALPHA = 0.90f
+
+/**
+ * The browser chrome: a floating, semi-transparent capsule layered over
+ * an edge-to-edge page, holding (left to right) the Back control (only
+ * while there's history to pop), the address field with its protocol
+ * badge, the tab counter and the overflow menu. Home moved into that
+ * menu — on a page you can reach it in one extra tap, and the resting
+ * bar stays low-density the way the brief asks.
  *
- * The toolbar is a rounded `surfaceContainer` pill on the app
- * background; the address field is a second, darker-on-lighter pill
- * inside it (`surfaceContainerHighest`) that grows a primary-coloured
- * outline while focused. Layout is fixed-height so nothing below or
- * above it shifts when focus, the clear (×) button or the protocol
- * badge come and go.
+ * The capsule is a `surfaceContainer` pill at [CAPSULE_ALPHA] with a
+ * low shadow, not an opaque full-width bar; the address field is a
+ * second, darker pill inside it (`surfaceContainerHighest`) that grows
+ * a primary-coloured outline while focused. Layout is fixed-height so
+ * nothing shifts when focus, the clear (×) button, the Back control or
+ * the protocol badge come and go.
  *
  * The caller owns the layout slot (insets, IME padding, max width); this
  * composable only fills whatever width it is given.
@@ -105,6 +131,7 @@ internal fun BottomToolbar(
     onAddressFocusChanged: (Boolean) -> Unit,
     onAddressEditedChanged: (Boolean) -> Unit,
     onSubmit: (String) -> Unit,
+    onBack: () -> Unit,
     onForward: () -> Unit,
     onHome: () -> Unit,
     onToggleBookmark: () -> Unit,
@@ -117,49 +144,67 @@ internal fun BottomToolbar(
     onNewTab: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    HorizontalFloatingToolbar(
-        expanded = true,
-        modifier = modifier.fillMaxWidth(),
-        colors = FloatingToolbarDefaults.standardFloatingToolbarColors(),
+    Surface(
+        modifier = modifier
+            .fillMaxWidth()
+            .height(CapsuleHeight),
+        shape = CircleShape,
+        color = MaterialTheme.colorScheme.surfaceContainer.copy(alpha = CAPSULE_ALPHA),
+        // Just enough shadow to lift the capsule off the page without
+        // the "heavy shadow" the brief rules out.
+        shadowElevation = 3.dp,
     ) {
-        // Expressive shape variants: the icon buttons morph from round
-        // to a squarer pressed shape on touch. Purely visual — the
-        // 48 dp hit target and click handlers are unchanged.
-        IconButton(onClick = onHome, shapes = IconButtonDefaults.shapes()) {
-            Icon(Icons.Filled.Home, contentDescription = "Home")
-        }
-
-        AddressField(
-            state = state,
-            addressFocused = addressFocused,
-            addressBarEdited = addressBarEdited,
-            onAddressFocusChanged = onAddressFocusChanged,
-            onAddressEditedChanged = onAddressEditedChanged,
-            onSubmit = onSubmit,
-            // The toolbar's content row is top-aligned, so a child
-            // shorter than the 48 dp icon buttons must centre itself —
-            // without this the 40 dp pill rides 4 dp high.
+        Row(
             modifier = Modifier
-                .weight(1f)
-                .align(Alignment.CenterVertically)
+                .fillMaxSize()
                 .padding(horizontal = 4.dp),
-        )
+            // Mixed-height children (a 40 dp pill next to 48 dp icon
+            // buttons) only sit on the capsule's centre line if we say
+            // so explicitly — a Row defaults to Top.
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            // Back replaces Home in the resting bar: history is the
+            // control a reader actually reaches for, and it costs
+            // nothing when there is no history to pop.
+            if (state.canGoBack) {
+                // Expressive shape variants: the icon buttons morph from
+                // round to a squarer pressed shape on touch. Purely
+                // visual — the 48 dp hit target and click handlers are
+                // unchanged.
+                IconButton(onClick = onBack, shapes = IconButtonDefaults.shapes()) {
+                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                }
+            }
 
-        TabsCountButton(count = tabCount, onClick = onOpenTabs)
+            AddressField(
+                state = state,
+                addressFocused = addressFocused,
+                addressBarEdited = addressBarEdited,
+                onAddressFocusChanged = onAddressFocusChanged,
+                onAddressEditedChanged = onAddressEditedChanged,
+                onSubmit = onSubmit,
+                modifier = Modifier
+                    .weight(1f)
+                    .padding(horizontal = 4.dp),
+            )
 
-        OverflowMenuButton(
-            state = state,
-            nodeInfo = nodeInfo,
-            isBookmarked = isBookmarked,
-            onForward = onForward,
-            onToggleBookmark = onToggleBookmark,
-            onOpenSettings = onOpenSettings,
-            onOpenNode = onOpenNode,
-            onOpenHistory = onOpenHistory,
-            onOpenBookmarks = onOpenBookmarks,
-            onReload = onReload,
-            onNewTab = onNewTab,
-        )
+            TabsCountButton(count = tabCount, onClick = onOpenTabs)
+
+            OverflowMenuButton(
+                state = state,
+                nodeInfo = nodeInfo,
+                isBookmarked = isBookmarked,
+                onForward = onForward,
+                onHome = onHome,
+                onToggleBookmark = onToggleBookmark,
+                onOpenSettings = onOpenSettings,
+                onOpenNode = onOpenNode,
+                onOpenHistory = onOpenHistory,
+                onOpenBookmarks = onOpenBookmarks,
+                onReload = onReload,
+                onNewTab = onNewTab,
+            )
+        }
     }
 }
 
@@ -169,7 +214,7 @@ internal fun BottomToolbar(
  * of dp between focused and unfocused, which makes the pill appear to
  * grow when tapped, and the search bar wants to own the whole screen
  * on expansion. A fixed-height Box gives us a rock-steady 40 dp bubble
- * that lives comfortably inside the toolbar's 48 dp content row.
+ * that lives comfortably inside the 56 dp capsule.
  */
 @Composable
 private fun AddressField(
@@ -312,7 +357,26 @@ private fun AddressField(
                         )
                         Spacer(Modifier.width(8.dp))
                     }
+                    // Resting vs editing text. At rest the domain is the
+                    // primary element (see [AddressLabel]); the moment
+                    // the field takes focus the full URL is back, still
+                    // select-alled, so nothing about editing changes.
+                    //
+                    // The text field itself stays composed and laid out
+                    // in both states — it is simply drawn transparent
+                    // under the domain label while resting — so a tap
+                    // anywhere on the pill still lands on it and focuses
+                    // it, exactly as before.
+                    val restingLabel =
+                        if (addressFocused) "" else AddressLabel.resting(fieldValue.text)
                     Box(modifier = Modifier.weight(1f)) {
+                        Box(
+                            modifier = Modifier.graphicsLayer {
+                                alpha = if (restingLabel.isEmpty()) 1f else 0f
+                            },
+                        ) {
+                            innerTextField()
+                        }
                         if (fieldValue.text.isEmpty()) {
                             Text(
                                 text = "Search or type URL",
@@ -320,8 +384,15 @@ private fun AddressField(
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
                             )
+                        } else if (restingLabel.isNotEmpty()) {
+                            Text(
+                                text = restingLabel,
+                                color = colors.onSurface,
+                                fontWeight = FontWeight.Medium,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
                         }
-                        innerTextField()
                     }
                     // Trailing Clear (×) — sized to the pill, never pushes it
                     // taller. Shown only while the user is actively editing
@@ -378,6 +449,7 @@ private fun OverflowMenuButton(
     nodeInfo: NodeInfo,
     isBookmarked: Boolean,
     onForward: () -> Unit,
+    onHome: () -> Unit,
     onToggleBookmark: () -> Unit,
     onOpenSettings: () -> Unit,
     onOpenNode: () -> Unit,
@@ -460,6 +532,16 @@ private fun OverflowMenuButton(
                             onClick = {
                                 menuExpanded = false
                                 onToggleBookmark()
+                            },
+                        )
+                        // Home lives here now that Back owns the
+                        // capsule's left control slot.
+                        DropdownMenuItem(
+                            text = { MenuItemLabel("Home") },
+                            leadingIcon = { Icon(Icons.Filled.Home, contentDescription = null) },
+                            onClick = {
+                                menuExpanded = false
+                                onHome()
                             },
                         )
                         DropdownMenuItem(

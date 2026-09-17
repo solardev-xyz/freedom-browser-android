@@ -10,7 +10,6 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
-import androidx.compose.material3.FloatingToolbarDefaults
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.union
 import androidx.compose.foundation.layout.ime
@@ -18,7 +17,10 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.WindowInsetsSides
+import androidx.compose.foundation.layout.displayCutout
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -56,6 +58,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
@@ -64,6 +67,7 @@ import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import baby.freedom.mobile.data.BrowsingRepository
 import baby.freedom.mobile.data.UrlSuggestion
@@ -85,6 +89,13 @@ import kotlinx.coroutines.launch
  * `about:blank` load.
  */
 const val HOME_URL: String = "about:blank"
+
+/**
+ * Width cap for the floating chrome (capsule + progress strip) so it
+ * doesn't stretch edge to edge in landscape or on a tablet. On a phone
+ * in portrait the cap never kicks in.
+ */
+private val CHROME_MAX_WIDTH = 640.dp
 
 /**
  * Upper bound on how long a `bzz://` submit will sit in "spinner, node
@@ -599,14 +610,59 @@ fun BrowserScreen(
         onDeepLinkHandled()
     }
 
-    // The chrome lives at the bottom of the screen: page content on
-    // top, then the page-load bar, then the floating toolbar. The
-    // Column pads for the system bars *and* the IME, so the toolbar
-    // rides up above the keyboard when the address field takes focus
-    // (the manifest asks for `adjustResize`; with edge-to-edge the
-    // window itself never resizes, Compose's inset padding does the
-    // work).
-    val chromeInsets = WindowInsets.systemBars.union(WindowInsets.ime)
+    // The chrome is a floating capsule layered *over* an edge-to-edge
+    // page — it no longer takes a horizontal slice out of the layout.
+    //
+    // [chromeInsets] keeps the capsule clear of the navigation / gesture
+    // inset, any display cutout, and the keyboard, so it rides up above
+    // the IME when the address field takes focus (the manifest asks for
+    // `adjustResize`; with edge-to-edge the window itself never
+    // resizes, Compose's inset padding does the work).
+    //
+    // [contentInsets] is deliberately *not* the same set: the page runs
+    // behind the navigation bar (that's what makes the chrome read as
+    // floating) but still starts below the status bar and stops above
+    // the keyboard. Keeping the IME inset on the content is what shrinks
+    // the WebView when the keyboard opens, which is the signal
+    // [BrowserWebViewHost]'s scroll-into-view listener keys off.
+    val chromeInsets = WindowInsets.systemBars
+        .union(WindowInsets.displayCutout)
+        .union(WindowInsets.ime)
+        .only(WindowInsetsSides.Bottom + WindowInsetsSides.Horizontal)
+    val contentInsets = WindowInsets.systemBars
+        .union(WindowInsets.displayCutout)
+        .only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal)
+        .union(WindowInsets.ime)
+
+    // While the keyboard is up we stop the content short of the capsule
+    // instead of letting it run underneath.
+    //
+    // This is what keeps PR #25's WebView scroll-into-view fix working.
+    // Chromium scrolls a focused field just clear of the *viewport*
+    // bottom, and `android.webkit.WebView` gives an embedder no way to
+    // inset that viewport (it ignores View padding outright — verified
+    // on the freedom AVD, see the note on the page layer below). With a
+    // full-bleed WebView a field at the very end of a document has no
+    // scroll room left and would sit behind the capsule, unreadable
+    // while typing. Shrinking the WebView for the capsule whenever the
+    // IME is open restores exactly the geometry PR #25 verified, and
+    // costs nothing visually: the strip between keyboard and capsule is
+    // the one place where seeing the page through the chrome buys
+    // least.
+    val density = LocalDensity.current
+    val navInsetPx = WindowInsets.systemBars.getBottom(density)
+    val imeInsetPx = WindowInsets.ime.getBottom(density)
+    val keyboardVisible = imeInsetPx > 0
+    val capsuleFootprint = CapsuleHeight + CapsuleBottomMargin
+    val contentBottomReserve = if (keyboardVisible) capsuleFootprint else 0.dp
+
+    // How much of the content area the capsule still covers once that
+    // reserve is applied — zero while the keyboard is up, its own
+    // footprint plus the navigation inset the content draws behind
+    // otherwise. Native surfaces ([HomeScreen], [SuggestionsPanel]) pad
+    // by it so their last row stays clear of the chrome.
+    val capsuleOverlap = if (keyboardVisible) 0.dp
+    else capsuleFootprint + with(density) { navInsetPx.toDp() }
 
     // "Tap anywhere outside the floating toolbar to dismiss the
     // keyboard". We intercept presses on the Initial pass so we see
@@ -629,100 +685,137 @@ fun BrowserScreen(
         }
     }
 
-    Box(modifier = Modifier.fillMaxSize()) {
-        Column(
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(MaterialTheme.colorScheme.background),
+    ) {
+        // The page fills the whole content area and keeps drawing
+        // underneath the capsule, so the site is visible around and
+        // faintly beneath it.
+        //
+        // The brief also wants the page's *viewport* inset by the
+        // capsule's footprint (the way Chrome insets for its bottom
+        // controls). Chromium's `android.webkit.WebView` gives an
+        // embedder no way to do that: it ignores `View` padding
+        // outright — neither the layout viewport, the scroll extent
+        // nor the clip rect move (verified on the freedom AVD with a
+        // 600 px bottom padding and a `position: fixed; bottom: 0`
+        // probe page: the render was pixel-identical). Browser-
+        // controls insets exist inside Chromium but aren't exposed.
+        // So the inset is applied to the surfaces we *do* control —
+        // [HomeScreen] and [SuggestionsPanel] below, plus the
+        // WebView itself whenever the keyboard is up (see
+        // [contentBottomReserve]) — and page-footer reachability at
+        // rest is left to the compact-on-scroll state from stage 2
+        // (#30), which is how Safari handles it too.
+        //
+        // When the address bar is focused we overlay the suggestions
+        // panel on top of it rather than unmounting the WebView — that
+        // keeps the underlying page alive (scroll position, JS timers,
+        // media) across focus changes.
+        Box(
             modifier = Modifier
                 .fillMaxSize()
-                .background(MaterialTheme.colorScheme.background)
-                .windowInsetsPadding(chromeInsets),
+                .windowInsetsPadding(contentInsets)
+                .padding(bottom = contentBottomReserve)
+                .then(dismissKeyboardOnTap),
         ) {
-            // The WebView fills whatever space is left above the chrome.
-            // When the address bar is focused we overlay the suggestions
-            // panel on top of it rather than unmounting the WebView — that
-            // keeps the underlying page alive (scroll position, JS timers,
-            // media) across focus changes.
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .weight(1f)
-                    .then(dismissKeyboardOnTap),
-            ) {
-                BrowserWebViewHost(
-                    tabs = tabs,
+            BrowserWebViewHost(
+                tabs = tabs,
+                modifier = Modifier.fillMaxSize(),
+            )
+            // Home overlay. Rendered whenever the tab hasn't loaded
+            // a real page (fresh tab, or user navigated home). The
+            // WebView keeps `about:blank` under us — see
+            // [BrowserState.navigateHome] — so there's nothing for
+            // the user to see through this layer.
+            //
+            // The check keys off [BrowserState.url], which stays
+            // empty while the `about:blank` load is in flight
+            // thanks to the ABOUT_BLANK early-returns in
+            // [BrowserWebView]. Additionally guarding on
+            // `addressBarText.isBlank()` hides the overlay the
+            // moment the user hits Go on a typed URL, before the
+            // WebView has a chance to fire onPageStarted and
+            // populate `state.url`.
+            if (isHomeTab) {
+                HomeScreen(
+                    repo = repo,
+                    onOpen = { submit(state, it) },
+                    bottomContentPadding = capsuleOverlap,
                     modifier = Modifier.fillMaxSize(),
                 )
-                // Home overlay. Rendered whenever the tab hasn't loaded
-                // a real page (fresh tab, or user navigated home). The
-                // WebView keeps `about:blank` under us — see
-                // [BrowserState.navigateHome] — so there's nothing for
-                // the user to see through this layer.
-                //
-                // The check keys off [BrowserState.url], which stays
-                // empty while the `about:blank` load is in flight
-                // thanks to the ABOUT_BLANK early-returns in
-                // [BrowserWebView]. Additionally guarding on
-                // `addressBarText.isBlank()` hides the overlay the
-                // moment the user hits Go on a typed URL, before the
-                // WebView has a chance to fire onPageStarted and
-                // populate `state.url`.
-                if (isHomeTab) {
-                    HomeScreen(
-                        repo = repo,
-                        onOpen = { submit(state, it) },
-                        modifier = Modifier.fillMaxSize(),
-                    )
-                }
-                if (addressFocused && addressBarEdited && state.addressBarText.isNotEmpty()) {
-                    SuggestionsPanel(
-                        repo = repo,
-                        query = state.addressBarText,
-                        onPick = { submit(state, it) },
-                        modifier = Modifier.fillMaxSize(),
-                    )
-                }
             }
-
-            // Page-load bar, directly above the toolbar so it reads as
-            // part of the chrome. The wavy indicators are taller than
-            // the old 3 dp hairline (the wave needs room for its
-            // amplitude), so the reserved strip is sized off the
-            // component's own container height rather than a magic
-            // number — the chrome keeps a fixed-height slot so the
-            // content above doesn't jump when loading starts or ends.
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(WavyProgressIndicatorDefaults.LinearContainerHeight)
-                    .then(dismissKeyboardOnTap),
-            ) {
-                if (state.progress in 0..99 || state.resolving) {
-                    if (state.resolving) {
-                        LinearWavyProgressIndicator(modifier = Modifier.fillMaxWidth())
-                    } else {
-                        LinearWavyProgressIndicator(
-                            modifier = Modifier.fillMaxWidth(),
-                            progress = { state.progress / 100f },
-                        )
-                    }
-                }
+            if (addressFocused && addressBarEdited && state.addressBarText.isNotEmpty()) {
+                SuggestionsPanel(
+                    repo = repo,
+                    query = state.addressBarText,
+                    onPick = { submit(state, it) },
+                    bottomContentPadding = capsuleOverlap,
+                    modifier = Modifier.fillMaxSize(),
+                )
             }
+        }
 
-            // The pill floats in a full-width band. Its side gutters and
-            // the padding beneath it are chrome background rather than
-            // toolbar, so a catcher sits *behind* the pill and gives
-            // those areas the same tap-to-dismiss behaviour as the page
-            // above. Behind, not around: taps that land on the pill hit
-            // it first and never reach the catcher, so tapping inside
-            // the address field doesn't bounce its own focus.
-            Box(modifier = Modifier.fillMaxWidth()) {
+        // The floating chrome overlay: page-load bar directly above the
+        // capsule, both capped to the same width so they read as one
+        // floating object rather than a band across the page. Stage 3
+        // (#31) moves progress inside the capsule; until then the wavy
+        // bar keeps its own fixed-height slot so the capsule doesn't
+        // shift when a load starts or ends.
+        //
+        Box(modifier = Modifier.align(Alignment.BottomCenter)) {
+            // Tap-to-dismiss catcher for the whole chrome band — the
+            // progress strip, the capsule's own gutters, the side
+            // margins and the padding beneath it. *Behind* the capsule,
+            // not around it: taps that land on the address pill hit it
+            // first and never reach the catcher, so tapping inside the
+            // field doesn't bounce its own focus.
+            //
+            // Armed only while the keyboard is up. With the keyboard
+            // down this band is page — the capsule floats over live
+            // content now — and an always-on catcher would swallow taps
+            // on links sitting under the chrome.
+            if (keyboardVisible) {
                 Box(
                     modifier = Modifier
                         .matchParentSize()
                         .then(dismissKeyboardOnTap),
                 )
-                // Capped width so the pill doesn't stretch edge to edge
-                // in landscape or on a tablet; on a phone in portrait
-                // the cap never kicks in.
+            }
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .windowInsetsPadding(chromeInsets)
+                    .padding(
+                        start = CapsuleSideMargin,
+                        end = CapsuleSideMargin,
+                        bottom = CapsuleBottomMargin,
+                    ),
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                Box(
+                    modifier = Modifier
+                        // Capped width so the chrome doesn't stretch edge to
+                        // edge in landscape or on a tablet; on a phone in
+                        // portrait the cap never kicks in.
+                        .widthIn(max = CHROME_MAX_WIDTH)
+                        .fillMaxWidth()
+                        .height(WavyProgressIndicatorDefaults.LinearContainerHeight),
+                ) {
+                    if (state.progress in 0..99 || state.resolving) {
+                        if (state.resolving) {
+                            LinearWavyProgressIndicator(modifier = Modifier.fillMaxWidth())
+                        } else {
+                            LinearWavyProgressIndicator(
+                                modifier = Modifier.fillMaxWidth(),
+                                progress = { state.progress / 100f },
+                            )
+                        }
+                    }
+                }
+
                 BottomToolbar(
                     state = state,
                     tabCount = tabs.tabs.size,
@@ -743,14 +836,15 @@ fun BrowserScreen(
                         // through a short coroutine delay so the in-flight
                         // Enter key event is delivered to the TextField
                         // (and consumed there) before submit() clears
-                        // focus. Otherwise the Enter propagates to the
-                        // Home icon button and fires it as a synthetic
+                        // focus. Otherwise the Enter propagates to the next
+                        // focusable icon button and fires it as a synthetic
                         // click.
                         scope.launch {
                             delay(50)
                             submit(state, text)
                         }
                     },
+                    onBack = { state.loadUrl("javascript:history.back();void(0);") },
                     onForward = { state.loadUrl("javascript:history.forward();void(0);") },
                     onHome = {
                         submit(state, tabs.homepageUrl)
@@ -775,26 +869,20 @@ fun BrowserScreen(
                         submit(fresh, tabs.homepageUrl)
                     },
                     modifier = Modifier
-                        .align(Alignment.Center)
-                        .widthIn(max = 640.dp)
-                        .padding(
-                            start = FloatingToolbarDefaults.ScreenOffset,
-                            end = FloatingToolbarDefaults.ScreenOffset,
-                            top = 2.dp,
-                            bottom = 8.dp,
-                        ),
+                        .widthIn(max = CHROME_MAX_WIDTH)
+                        .fillMaxWidth(),
                 )
             }
         }
 
-        // Snackbars pop up above the toolbar rather than under it.
+        // Snackbars pop up above the capsule rather than under it.
         SnackbarHost(
             hostState = snackbarHostState,
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .windowInsetsPadding(chromeInsets)
                 .padding(
-                    bottom = FloatingToolbarDefaults.ContainerSize + 8.dp +
+                    bottom = CapsuleHeight + CapsuleBottomMargin +
                         WavyProgressIndicatorDefaults.LinearContainerHeight,
                 ),
         ) { data -> Snackbar(snackbarData = data) }
@@ -878,6 +966,7 @@ private fun SuggestionsPanel(
     repo: BrowsingRepository,
     query: String,
     onPick: (String) -> Unit,
+    bottomContentPadding: Dp,
     modifier: Modifier = Modifier,
 ) {
     // Re-subscribe when the query changes; Room's Flow keeps emitting
@@ -896,13 +985,23 @@ private fun SuggestionsPanel(
                 style = MaterialTheme.typography.bodyMedium,
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
-                    .padding(bottom = 32.dp, start = 16.dp, end = 16.dp),
+                    .padding(
+                        bottom = 32.dp + bottomContentPadding,
+                        start = 16.dp,
+                        end = 16.dp,
+                    ),
             )
         } else {
             LazyColumn(
                 modifier = Modifier.fillMaxSize(),
                 reverseLayout = true,
-                contentPadding = PaddingValues(vertical = 8.dp),
+                // The capsule floats over this panel — keep the
+                // best-match row (which sits at the bottom, nearest the
+                // thumb) clear of it.
+                contentPadding = PaddingValues(
+                    top = 8.dp,
+                    bottom = 8.dp + bottomContentPadding,
+                ),
             ) {
                 items(
                     items = suggestions,
