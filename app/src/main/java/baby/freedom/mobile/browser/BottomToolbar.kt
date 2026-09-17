@@ -424,7 +424,16 @@ private fun AddressField(
                                 color = colors.onSurface,
                                 fontWeight = FontWeight.Medium,
                                 maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
+                                // Middle, not tail: a name too long for
+                                // the pill is almost always an ENS
+                                // subname chain, and its *tail* is the
+                                // part that says who is being trusted.
+                                // `long.prefix.attacker.eth` tail-
+                                // ellipsised reads `long.prefix…`, which
+                                // is exactly the half an attacker gets to
+                                // choose; eliding the middle keeps the
+                                // parent name and TLD on screen.
+                                overflow = TextOverflow.MiddleEllipsis,
                             )
                         }
                     }

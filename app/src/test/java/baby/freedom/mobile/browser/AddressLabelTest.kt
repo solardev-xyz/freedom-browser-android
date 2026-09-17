@@ -69,6 +69,21 @@ class AddressLabelTest {
     }
 
     @Test
+    fun `ens subnames are never collapsed into their parent`() {
+        // Each ENS label is its own name with its own owner and
+        // resolver, so `pay.vitalik.eth` must not rest on the name
+        // `vitalik.eth` — the subname's contenthash can point anywhere.
+        assertEquals("pay.vitalik.eth", AddressLabel.resting("pay.vitalik.eth"))
+        assertEquals("pay.vitalik.eth", AddressLabel.resting("pay.vitalik.eth/donate"))
+        assertEquals("pay.vitalik.eth", AddressLabel.resting("ens://PAY.vitalik.eth/donate"))
+        assertEquals("a.b.swarm.eth", AddressLabel.resting("bzz://a.b.swarm.eth/docs"))
+        assertEquals("shop.foo.box", AddressLabel.resting("shop.foo.box/x"))
+        // `www` is a subname like any other under ENS, not an alias for
+        // the parent the way DNS convention has it.
+        assertEquals("www.vitalik.eth", AddressLabel.resting("https://www.vitalik.eth/x"))
+    }
+
+    @Test
     fun `content hashes show the scheme and an elided id`() {
         val hash = "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90"
         assertEquals("bzz://a1b2c3…8f90", AddressLabel.resting("bzz://$hash/index.html"))

@@ -20,6 +20,7 @@ package baby.freedom.mobile.browser
  *   `https://en.wikipedia.org/wiki/X` → `wikipedia.org`
  *   `https://foo.bbc.co.uk/x` → `bbc.co.uk` (compound public suffix)
  *   `swarm.eth/docs` / `bzz://swarm.eth` → `swarm.eth`
+ *   `pay.vitalik.eth/x` → `pay.vitalik.eth` (ENS names never collapse)
  *   `bzz://a1b2…f9/index.html` → `bzz://a1b2c3…d4e5`
  *   `http://127.0.0.1:1633/x` → `127.0.0.1`
  *
@@ -47,6 +48,23 @@ object AddressLabel {
     )
 
     /**
+     * TLDs whose names are ENS names rather than DNS domains (the two
+     * [baby.freedom.mobile.ens.EnsInput] accepts).
+     *
+     * DNS has a registrable-domain boundary — everything under
+     * `example.com` is `example.com`'s to give away, so collapsing
+     * `a.b.example.com` to `example.com` still names the party the user
+     * trusts. ENS has no such boundary: every label is a name in its
+     * own right, with its own owner and its own resolver, and a subname
+     * can be emancipated from its parent (NameWrapper) or minted by an
+     * open subname registrar. `pay.vitalik.eth` is therefore *not*
+     * vitalik.eth and may point its contenthash anywhere; folding it
+     * into a bold `vitalik.eth` would have the capsule vouch for a name
+     * the user is not on. ENS names are shown whole.
+     */
+    private val ENS_TLDS: Set<String> = setOf("eth", "box")
+
+    /**
      * The WHATWG URL Standard's *special* schemes — the ones Chromium
      * parses with the backslash-as-path-separator rule. See
      * [authorityOf].
@@ -72,23 +90,35 @@ object AddressLabel {
             // what ENS navigations put in the bar. [UrlParser] loads
             // these as `https://…`, i.e. as a special scheme.
             val authority = authorityOf(raw, backslashSeparates = true)
-            return if (looksLikeHost(authority)) registrableHost(authority) else raw
+            return if (looksLikeHost(authority)) hostLabel(authority) else raw
         }
 
         val scheme = raw.substring(0, sep).lowercase()
         val authority = authorityOf(raw.substring(sep + 3), scheme in SPECIAL_SCHEMES)
         if (authority.isEmpty()) return raw
         return when (scheme) {
-            "http", "https" -> registrableHost(authority)
+            "http", "https" -> hostLabel(authority)
             // Content-addressed schemes carry either an ENS name (show
             // the name — the protocol badge already says which network
             // served it) or a raw hash / CID, which is only ever
             // recognisable by its head and tail.
             "bzz", "ipfs", "ipns", "ens" ->
-                if (looksLikeHost(authority)) registrableHost(authority)
+                if (looksLikeHost(authority)) hostLabel(authority)
                 else "$scheme://${elideId(authority)}"
             else -> raw
         }
+    }
+
+    /**
+     * The name the capsule rests on for [host]: the registrable domain
+     * for DNS, the *whole* name for ENS (see [ENS_TLDS]) — including
+     * any `www` label, which under `.eth` is a subname like any other
+     * rather than the conventional alias DNS makes it.
+     */
+    private fun hostLabel(host: String): String {
+        val h = hostOnly(host).lowercase().trimEnd('.')
+        if (h.substringAfterLast('.', "") in ENS_TLDS) return h
+        return registrableHost(h)
     }
 
     /**
