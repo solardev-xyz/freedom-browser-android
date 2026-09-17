@@ -81,6 +81,15 @@ class BrowserState(val id: Long) {
         internal set
 
     /**
+     * Compact-on-scroll state of the floating capsule for this tab.
+     * Fed by the tab's WebView scroll callbacks (see
+     * [BrowserWebViewHost]) and read by the chrome in [BrowserScreen].
+     * Per-tab, because scroll position is: switching to a tab the user
+     * left at the top of a page shows that tab's chrome at rest.
+     */
+    internal val capsuleCollapse = CapsuleCollapseState()
+
+    /**
      * Most recent page-preview bitmap for this tab, shown in the tab
      * switcher grid. Captured from the live WebView after each successful
      * load and whenever the user opens the switcher (so the thumbnail
@@ -185,6 +194,7 @@ class BrowserState(val id: Long) {
      */
     fun navigateHome() {
         cancelPendingProbe()
+        capsuleCollapse.expand()
         override = null
         url = ""
         title = ""
@@ -225,6 +235,7 @@ class BrowserState(val id: Long) {
     /** Tokens the WebView client should not treat as "new" navigations. */
     fun reset() {
         cancelPendingProbe()
+        capsuleCollapse.expand()
         url = ""
         title = ""
         progress = -1

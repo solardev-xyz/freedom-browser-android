@@ -720,23 +720,58 @@ fun BrowserScreen(
     val imeInsetPx = WindowInsets.ime.getBottom(density)
     val keyboardVisible = imeInsetPx > 0
 
-    // The editing morph, as a single 0→1 number every piece of the
-    // capsule's geometry is derived from: its height and the address
-    // pill's height inside [BottomToolbar], its side margins here.
-    // Focusing the field doesn't swap in a different composable — the
-    // same capsule interpolates size and position, which is what makes
-    // the editor read as the bar transforming rather than a new screen.
+    // The capsule's geometry is driven by exactly two 0→1 fractions,
+    // and they are one model rather than two (see [capsuleDrawnHeight]):
+    // the capsule has three heights — 44 dp compact, 56 dp resting,
+    // 64 dp editing — and these two numbers say which.
     //
-    // Spring, not tween, and the expressive motion scheme's spatial spec
-    // rather than a hand-rolled one: it's the same curve every other M3
-    // Expressive component in the app moves on, and it overshoots very
-    // slightly, so the bar feels like it *inflates* into the editor.
+    // Both spring on the expressive motion scheme's spatial spec rather
+    // than a hand-rolled curve: it's the one every other M3 Expressive
+    // component in the app moves on, and it overshoots very slightly, so
+    // the bar reads as settling rather than snapping.
+
+    // The editing morph. Focusing the field doesn't swap in a different
+    // composable — the same capsule interpolates size and position,
+    // which is what makes the editor read as the bar transforming rather
+    // than a new screen. It drives the capsule's height and the address
+    // pill's height inside [BottomToolbar], and its side margins here.
     val editProgress by animateFloatAsState(
         targetValue = if (addressFocused) 1f else 0f,
         animationSpec = MaterialTheme.motionScheme.defaultSpatialSpec(),
         label = "capsuleEditMorph",
     )
-    val capsuleHeight = lerp(CapsuleHeight, CapsuleEditingHeight, editProgress)
+
+    // Compact-on-scroll (#30). The tab's WebView feeds
+    // [CapsuleCollapseState] its own scroll deltas — Chromium's WebView
+    // doesn't report scrolling up Compose's nested-scroll chain, so
+    // there is nothing else to key off — and the chrome interpolates
+    // between its resting and compact geometry from the Boolean that
+    // comes out.
+    //
+    // Three states override it back to resting-or-editing, because in
+    // all three the bar is the thing the user is dealing with rather
+    // than the page: the address field has focus (the capsule is
+    // morphing into the editor, and **editing always wins over
+    // compact**), the keyboard is up, or the tab is on the home surface
+    // (nothing is scrolling). Holding it at 0 under focus is also what
+    // lets [capsuleDrawnHeight] compose the two fractions instead of
+    // arbitrating between them.
+    val capsuleCollapsed =
+        state.capsuleCollapse.collapsed && !addressFocused && !keyboardVisible && !isHomeTab
+    val collapseFraction by animateFloatAsState(
+        targetValue = if (capsuleCollapsed) 1f else 0f,
+        animationSpec = MaterialTheme.motionScheme.defaultSpatialSpec(),
+        label = "capsuleCollapse",
+    )
+
+    // The slot the capsule occupies — resting height, growing only for
+    // the editing morph. Compacting shrinks the capsule *inside* this,
+    // so a flick moves the bar and nothing else: not the snackbar below,
+    // not the page behind it. That was stage 2's rule when a progress
+    // strip still sat above the capsule, and it holds more strictly now
+    // that the strip is gone and progress is drawn on the capsule's own
+    // edge.
+    val capsuleSlot = capsuleSlotHeight(editProgress)
     val capsuleSideMargin =
         lerp(CapsuleSideMargin, CapsuleEditingSideMargin, editProgress)
 
@@ -905,6 +940,7 @@ fun BrowserScreen(
                     addressFocused = addressFocused,
                     addressBarEdited = addressBarEdited,
                     editProgress = editProgress,
+                    collapseFraction = collapseFraction,
                     onAddressFocusChanged = { focused ->
                         addressFocused = focused
                         // Losing focus always resets the "has the user typed?"
@@ -977,14 +1013,15 @@ fun BrowserScreen(
         }
 
         // Snackbars pop up above the capsule rather than under it —
-        // tracking its animated height so they stay clear of it through
-        // the editing morph too.
+        // tracking the capsule's *slot* rather than its drawn height, so
+        // they follow the editing morph as the bar inflates but sit
+        // perfectly still when it compacts on scroll.
         SnackbarHost(
             hostState = snackbarHostState,
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .windowInsetsPadding(chromeInsets)
-                .padding(bottom = capsuleHeight + CapsuleBottomMargin),
+                .padding(bottom = capsuleSlot + CapsuleBottomMargin),
         ) { data -> Snackbar(snackbarData = data) }
     }
 
