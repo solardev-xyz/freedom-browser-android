@@ -297,27 +297,32 @@ private const val CONTROL_COLLAPSE_RATE = 1.6f
  * [towardsStart] picks the edge the control retreats to (leading
  * controls collapse left, trailing controls collapse right).
  *
- * The layer clips, so the shrinking control neither paints nor takes
- * touches outside the width its slot currently reports.
+ * Order matters: the scale has to be applied *inside* the narrowing
+ * slot, so `layout` (outer) wraps `graphicsLayer` (inner). Written the
+ * other way round the layer would scale the already-narrowed slot a
+ * second time, and the control would paint at `visible²` of its slot —
+ * a cropped edge fragment beside an empty gap — instead of the whole
+ * control shrinking to fill the slot.
  */
 private fun Modifier.collapsingControl(visible: Float, towardsStart: Boolean): Modifier {
     if (visible >= 1f) return this
     return this
-        .graphicsLayer {
-            scaleX = visible
-            scaleY = visible
-            transformOrigin = TransformOrigin(if (towardsStart) 0f else 1f, 0.5f)
-            clip = true
-        }
         .layout { measurable, constraints ->
             val placeable = measurable.measure(constraints)
             val width = (placeable.width * visible).roundToInt()
             layout(width, placeable.height) {
                 // Anchored to the edge it collapses into, which is the
-                // same edge the scale pivots on — so the drawn control
-                // exactly fills the narrowing slot at every fraction.
+                // same edge the scale below pivots on — so the drawn
+                // control exactly fills the narrowing slot at every
+                // fraction, and nothing of it lands outside.
                 placeable.place(if (towardsStart) 0 else width - placeable.width, 0)
             }
+        }
+        .graphicsLayer {
+            scaleX = visible
+            scaleY = visible
+            transformOrigin = TransformOrigin(if (towardsStart) 0f else 1f, 0.5f)
+            clip = true
         }
 }
 
