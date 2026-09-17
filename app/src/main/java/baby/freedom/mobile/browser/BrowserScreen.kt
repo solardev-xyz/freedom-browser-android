@@ -1,7 +1,6 @@
 package baby.freedom.mobile.browser
 
 import androidx.activity.compose.BackHandler
-import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
@@ -9,8 +8,13 @@ import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
+import androidx.compose.material3.FloatingToolbarDefaults
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.union
+import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
@@ -22,34 +26,18 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.systemBars
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.BasicTextField
-import androidx.compose.foundation.text.KeyboardActions
-import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowForward
-import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Bookmark
-import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Home
-import androidx.compose.material.icons.filled.Menu
-import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material.icons.filled.Star
-import androidx.compose.material.icons.filled.StarBorder
-import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
-import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.LinearWavyProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Snackbar
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
-import androidx.compose.material3.Surface
-import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.Text
 import androidx.compose.material3.WavyProgressIndicatorDefaults
 import androidx.compose.runtime.Composable
@@ -57,45 +45,26 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.focus.FocusRequester
-import androidx.compose.ui.focus.focusRequester
-import androidx.compose.ui.focus.onFocusChanged
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.layout.boundsInWindow
-import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
-import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.TextRange
-import androidx.compose.ui.text.input.ImeAction
-import androidx.compose.ui.text.input.KeyboardCapitalization
-import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.IntOffset
-import androidx.compose.ui.unit.IntRect
-import androidx.compose.ui.unit.IntSize
-import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.window.Popup
-import androidx.compose.ui.window.PopupPositionProvider
-import androidx.compose.ui.window.PopupProperties
 import baby.freedom.mobile.data.BrowsingRepository
 import baby.freedom.mobile.data.UrlSuggestion
 import baby.freedom.mobile.ens.EnsInput
@@ -166,12 +135,12 @@ private fun contentUriForSubmit(url: String): String? {
  * actually served the page, so we can tell a Swarm-resolved name from
  * an IPFS-resolved one without re-running the ENS lookup.
  */
-private data class ProtocolBadge(
+internal data class ProtocolBadge(
     @androidx.annotation.DrawableRes val drawableRes: Int,
     val contentDescription: String,
 )
 
-private fun protocolBadgeFor(state: BrowserState): ProtocolBadge? {
+internal fun protocolBadgeFor(state: BrowserState): ProtocolBadge? {
     val url = state.url
     if (url.startsWith("bzz://")) return SWARM_BADGE
     if (url.startsWith("ipfs://") || url.startsWith("ipns://")) return IPFS_BADGE
@@ -253,7 +222,7 @@ private suspend fun awaitIpfsRunning(
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 fun BrowserScreen(
     nodeInfo: NodeInfo,
@@ -630,97 +599,29 @@ fun BrowserScreen(
         onDeepLinkHandled()
     }
 
+    // The chrome lives at the bottom of the screen: page content on
+    // top, then the page-load bar, then the floating toolbar. The
+    // Column pads for the system bars *and* the IME, so the toolbar
+    // rides up above the keyboard when the address field takes focus
+    // (the manifest asks for `adjustResize`; with edge-to-edge the
+    // window itself never resizes, Compose's inset padding does the
+    // work).
+    val chromeInsets = WindowInsets.systemBars.union(WindowInsets.ime)
     Box(modifier = Modifier.fillMaxSize()) {
         Column(
             modifier = Modifier
                 .fillMaxSize()
                 .background(MaterialTheme.colorScheme.background)
-                .windowInsetsPadding(WindowInsets.systemBars),
+                .windowInsetsPadding(chromeInsets),
         ) {
-            TopBar(
-                state = state,
-                tabCount = tabs.tabs.size,
-                peerCount = nodeInfo.connectedPeers,
-                isBookmarked = isBookmarked,
-                addressFocused = addressFocused,
-                addressBarEdited = addressBarEdited,
-                onAddressFocusChanged = { focused ->
-                    addressFocused = focused
-                    // Losing focus always resets the "has the user typed?"
-                    // latch so the next tap starts clean (select-all, no
-                    // dropdown) regardless of what was typed last time.
-                    if (!focused) addressBarEdited = false
-                },
-                onAddressEditedChanged = { addressBarEdited = it },
-                onSubmit = { text ->
-                    // Called from the TextField's IME Go action. Bounce
-                    // through a short coroutine delay so the in-flight
-                    // Enter key event is delivered to the TextField
-                    // (and consumed there) before submit() clears
-                    // focus. Otherwise the Enter propagates to the
-                    // Home icon button and fires it as a synthetic
-                    // click.
-                    scope.launch {
-                        delay(50)
-                        submit(state, text)
-                    }
-                },
-                onForward = { state.loadUrl("javascript:history.forward();void(0);") },
-                onHome = {
-                    submit(state, tabs.homepageUrl)
-                },
-                onToggleBookmark = {
-                    val url = state.url
-                    if (url.isBlank()) return@TopBar
-                    if (isBookmarked) repo.unbookmark(url)
-                    else repo.bookmark(url, state.title)
-                },
-                onOpenSettings = { showSettings = true },
-                onOpenNode = { showNode = true },
-                onOpenTabs = { showTabSwitcher = true },
-                onOpenHistory = { showHistory = true },
-                onOpenBookmarks = { showBookmarks = true },
-                onReload = {
-                    val url = state.url.ifBlank { state.addressBarText }
-                    if (url.isNotBlank()) submit(state, url)
-                },
-                onNewTab = {
-                    val fresh = tabs.newTab()
-                    submit(fresh, tabs.homepageUrl)
-                },
-            )
-
-            // Page-load bar. The wavy indicators are taller than the old
-            // 3 dp hairline (the wave needs room for its amplitude), so
-            // the reserved strip is sized off the component's own
-            // container height rather than a magic number — the chrome
-            // still keeps a fixed-height slot so the WebView below
-            // doesn't jump when loading starts or ends.
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(WavyProgressIndicatorDefaults.LinearContainerHeight),
-            ) {
-                if (state.progress in 0..99 || state.resolving) {
-                    if (state.resolving) {
-                        LinearWavyProgressIndicator(modifier = Modifier.fillMaxWidth())
-                    } else {
-                        LinearWavyProgressIndicator(
-                            modifier = Modifier.fillMaxWidth(),
-                            progress = { state.progress / 100f },
-                        )
-                    }
-                }
-            }
-
-            // The WebView fills whatever space is left under the top chrome.
+            // The WebView fills whatever space is left above the chrome.
             // When the address bar is focused we overlay the suggestions
             // panel on top of it rather than unmounting the WebView — that
             // keeps the underlying page alive (scroll position, JS timers,
             // media) across focus changes.
             //
-            // The pointer-input modifier gives us "tap anywhere below the
-            // address bar to dismiss the keyboard" behaviour. We intercept
+            // The pointer-input modifier gives us "tap anywhere outside
+            // the toolbar to dismiss the keyboard" behaviour. We intercept
             // presses on the Initial pass so we see them before the
             // WebView/HomeScreen children, but we never consume — the
             // child still receives the tap normally. Clearing focus is a
@@ -728,7 +629,8 @@ fun BrowserScreen(
             // bar idle) pays only the cost of the gesture loop.
             Box(
                 modifier = Modifier
-                    .fillMaxSize()
+                    .fillMaxWidth()
+                    .weight(1f)
                     .pointerInput(Unit) {
                         awaitEachGesture {
                             awaitFirstDown(
@@ -774,21 +676,107 @@ fun BrowserScreen(
                     )
                 }
             }
+
+            // Page-load bar, directly above the toolbar so it reads as
+            // part of the chrome. The wavy indicators are taller than
+            // the old 3 dp hairline (the wave needs room for its
+            // amplitude), so the reserved strip is sized off the
+            // component's own container height rather than a magic
+            // number — the chrome keeps a fixed-height slot so the
+            // content above doesn't jump when loading starts or ends.
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(WavyProgressIndicatorDefaults.LinearContainerHeight),
+            ) {
+                if (state.progress in 0..99 || state.resolving) {
+                    if (state.resolving) {
+                        LinearWavyProgressIndicator(modifier = Modifier.fillMaxWidth())
+                    } else {
+                        LinearWavyProgressIndicator(
+                            modifier = Modifier.fillMaxWidth(),
+                            progress = { state.progress / 100f },
+                        )
+                    }
+                }
+            }
+
+            // Capped width so the pill doesn't stretch edge to edge in
+            // landscape or on a tablet; on a phone in portrait the cap
+            // never kicks in.
+            BottomToolbar(
+                state = state,
+                tabCount = tabs.tabs.size,
+                nodeInfo = nodeInfo,
+                isBookmarked = isBookmarked,
+                addressFocused = addressFocused,
+                addressBarEdited = addressBarEdited,
+                onAddressFocusChanged = { focused ->
+                    addressFocused = focused
+                    // Losing focus always resets the "has the user typed?"
+                    // latch so the next tap starts clean (select-all, no
+                    // dropdown) regardless of what was typed last time.
+                    if (!focused) addressBarEdited = false
+                },
+                onAddressEditedChanged = { addressBarEdited = it },
+                onSubmit = { text ->
+                    // Called from the TextField's IME Go action. Bounce
+                    // through a short coroutine delay so the in-flight
+                    // Enter key event is delivered to the TextField
+                    // (and consumed there) before submit() clears
+                    // focus. Otherwise the Enter propagates to the
+                    // Home icon button and fires it as a synthetic
+                    // click.
+                    scope.launch {
+                        delay(50)
+                        submit(state, text)
+                    }
+                },
+                onForward = { state.loadUrl("javascript:history.forward();void(0);") },
+                onHome = {
+                    submit(state, tabs.homepageUrl)
+                },
+                onToggleBookmark = {
+                    val url = state.url
+                    if (url.isBlank()) return@BottomToolbar
+                    if (isBookmarked) repo.unbookmark(url)
+                    else repo.bookmark(url, state.title)
+                },
+                onOpenSettings = { showSettings = true },
+                onOpenNode = { showNode = true },
+                onOpenTabs = { showTabSwitcher = true },
+                onOpenHistory = { showHistory = true },
+                onOpenBookmarks = { showBookmarks = true },
+                onReload = {
+                    val url = state.url.ifBlank { state.addressBarText }
+                    if (url.isNotBlank()) submit(state, url)
+                },
+                onNewTab = {
+                    val fresh = tabs.newTab()
+                    submit(fresh, tabs.homepageUrl)
+                },
+                modifier = Modifier
+                    .align(Alignment.CenterHorizontally)
+                    .widthIn(max = 640.dp)
+                    .padding(
+                        start = FloatingToolbarDefaults.ScreenOffset,
+                        end = FloatingToolbarDefaults.ScreenOffset,
+                        top = 2.dp,
+                        bottom = 8.dp,
+                    ),
+            )
         }
 
-        NodeStatusDot(
-            nodeInfo = nodeInfo,
-            modifier = Modifier
-                .align(Alignment.TopEnd)
-                .windowInsetsPadding(WindowInsets.systemBars)
-                .padding(top = 4.dp, end = 6.dp),
-        )
-
+        // Snackbars pop up above the toolbar rather than under it.
         SnackbarHost(
             hostState = snackbarHostState,
             modifier = Modifier
                 .align(Alignment.BottomCenter)
-                .windowInsetsPadding(WindowInsets.systemBars),
+                .windowInsetsPadding(chromeInsets)
+                .padding(
+                    bottom = FloatingToolbarDefaults.ContainerSize + 8.dp +
+                        WavyProgressIndicatorDefaults.LinearContainerHeight,
+                ),
         ) { data -> Snackbar(snackbarData = data) }
     }
 
@@ -856,430 +844,12 @@ fun BrowserScreen(
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-private fun TopBar(
-    state: BrowserState,
-    tabCount: Int,
-    peerCount: Long,
-    isBookmarked: Boolean,
-    addressFocused: Boolean,
-    addressBarEdited: Boolean,
-    onAddressFocusChanged: (Boolean) -> Unit,
-    onAddressEditedChanged: (Boolean) -> Unit,
-    onSubmit: (String) -> Unit,
-    onForward: () -> Unit,
-    onHome: () -> Unit,
-    onToggleBookmark: () -> Unit,
-    onOpenSettings: () -> Unit,
-    onOpenNode: () -> Unit,
-    onOpenTabs: () -> Unit,
-    onOpenHistory: () -> Unit,
-    onOpenBookmarks: () -> Unit,
-    onReload: () -> Unit,
-    onNewTab: () -> Unit,
-) {
-    var menuExpanded by remember { mutableStateOf(false) }
-    val focusRequester = remember { FocusRequester() }
-    // Local [TextFieldValue] so we can steer the selection (e.g. select
-    // all on focus). We keep it in sync with [state.addressBarText],
-    // which is the source of truth for submit / external updates
-    // (navigation events, ENS resolution).
-    //
-    // Keyed on [state.id] so that switching tabs re-initialises
-    // `fieldValue` from the new tab's `addressBarText` *synchronously*,
-    // inside composition. Without the key, the remembered value would
-    // carry over the previous tab's text and only be corrected on the
-    // next composition pass once the `LaunchedEffect` below ran — which
-    // briefly rendered the stale URL inside the newly-active tab's
-    // pill.
-    var fieldValue by remember(state.id) {
-        mutableStateOf(
-            TextFieldValue(
-                text = state.addressBarText,
-                selection = TextRange(state.addressBarText.length),
-            ),
-        )
-    }
-
-    // External → internal sync. Fires when the webview updates the
-    // displayed URL, when the user hits × (see below), or when submit()
-    // rewrites the bar with a canonical / ENS form. Keyed on the tab
-    // id too so that when the active tab changes the new tab's own
-    // sync state is tracked from scratch (otherwise a key based purely
-    // on `state.addressBarText` would miss an update that happens to
-    // land on the *same* string the previous tab had).
-    LaunchedEffect(state.id, state.addressBarText) {
-        if (fieldValue.text != state.addressBarText) {
-            // Park the cursor at position 0 so long URLs horizontally
-            // scroll to their *start* rather than their tail — the
-            // domain is what the user cares about, so keeping e.g.
-            // `https://example.com/...` visible beats showing the end
-            // of a deep query string with the scheme pushed off-screen.
-            fieldValue = TextFieldValue(
-                text = state.addressBarText,
-                selection = TextRange.Zero,
-            )
-        }
-    }
-
-    // Select-all on focus, park cursor at 0 on focus loss.
-    //
-    // Running the select-all in a LaunchedEffect (rather than from
-    // `onFocusChanged`) makes sure we apply *after* any tap-to-place-
-    // cursor selection the framework might set during the focus-
-    // granting gesture — otherwise the cursor can land wherever the
-    // user happened to tap inside the pill.
-    //
-    // On focus loss we reset the selection to position 0 so long URLs
-    // horizontally scroll to their *start* rather than their tail. The
-    // domain is what the user cares about, so keeping e.g.
-    // `https://example.com/...` visible beats showing the end of a
-    // deep path with the scheme pushed off-screen.
-    LaunchedEffect(addressFocused) {
-        fieldValue = if (addressFocused && fieldValue.text.isNotEmpty()) {
-            fieldValue.copy(selection = TextRange(0, fieldValue.text.length))
-        } else {
-            fieldValue.copy(selection = TextRange.Zero)
-        }
-    }
-
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(start = 8.dp, end = 8.dp, top = 4.dp, bottom = 1.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        // Expressive shape variants: the icon buttons morph from round
-        // to a squarer pressed shape on touch. Purely visual — the
-        // 48 dp hit target and click handlers are unchanged.
-        IconButton(onClick = onHome, shapes = IconButtonDefaults.shapes()) {
-            Icon(Icons.Filled.Home, contentDescription = "Home")
-        }
-
-        // Custom-built address pill. We can't use M3's `TextField` here
-        // because its filled variant's content padding shifts by a couple
-        // of dp between focused / unfocused, which makes the pill appear
-        // to grow when tapped. `BasicTextField` + a fixed-height Box gives
-        // us a rock-steady 40 dp bubble.
-        val onSurfaceVariant = MaterialTheme.colorScheme.onSurfaceVariant
-        val textStyle = LocalTextStyle.current.copy(
-            color = MaterialTheme.colorScheme.onSurface,
-        )
-        Box(
-            modifier = Modifier
-                .weight(1f)
-                .height(40.dp)
-                .clip(RoundedCornerShape(20.dp))
-                .background(MaterialTheme.colorScheme.surfaceVariant),
-            contentAlignment = Alignment.CenterStart,
-        ) {
-            BasicTextField(
-                value = fieldValue,
-                onValueChange = { newValue ->
-                    val textChanged = newValue.text != fieldValue.text
-                    fieldValue = newValue
-                    if (textChanged) {
-                        state.addressBarText = newValue.text
-                        onAddressEditedChanged(true)
-                    }
-                },
-                singleLine = true,
-                textStyle = textStyle,
-                cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .focusRequester(focusRequester)
-                    .onFocusChanged { onAddressFocusChanged(it.isFocused) },
-                keyboardOptions = KeyboardOptions(
-                    capitalization = KeyboardCapitalization.None,
-                    autoCorrectEnabled = false,
-                    imeAction = ImeAction.Go,
-                ),
-                keyboardActions = KeyboardActions(
-                    onGo = { onSubmit(fieldValue.text) },
-                ),
-                decorationBox = { innerTextField ->
-                    // Protocol badge: the pill grows a Swarm hex mark or
-                    // the IPFS cube on the left whenever the *loaded*
-                    // page origin is one of our embedded gateways. For
-                    // `ens://` names we look at the active display
-                    // override — its `baseUrl` is the gateway that
-                    // actually served the page, which tells us whether
-                    // the contenthash resolved to Swarm or IPFS.
-                    // Mirrors `.protocol-icon[data-protocol='swarm'|'ipfs'|'ipns']`
-                    // in freedom-browser's desktop address bar.
-                    val badge = protocolBadgeFor(state)
-                    Row(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .padding(
-                                start = if (badge != null) 10.dp else 16.dp,
-                                end = 4.dp,
-                            ),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        if (badge != null) {
-                            Image(
-                                painter = painterResource(badge.drawableRes),
-                                contentDescription = badge.contentDescription,
-                                modifier = Modifier.size(16.dp),
-                            )
-                            Spacer(Modifier.width(8.dp))
-                        }
-                        Box(modifier = Modifier.weight(1f)) {
-                            if (fieldValue.text.isEmpty()) {
-                                Text(
-                                    text = "Search or enter address",
-                                    color = onSurfaceVariant,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
-                                )
-                            }
-                            innerTextField()
-                        }
-                        // Trailing Clear (×) — sized to the pill, never pushes it
-                        // taller. Shown only while the user is actively editing
-                        // (focused + typed something). Loading state is
-                        // communicated by the LinearProgressIndicator below
-                        // the top bar, so the pill doesn't need its own
-                        // spinner.
-                        //
-                        // The `addressBarEdited` guard matters once the user
-                        // submits: submit() resets that flag (to dismiss the
-                        // suggestions panel) but intentionally leaves focus
-                        // alone, so without this check the × would stay
-                        // visible while the page is already loading.
-                        Box(
-                            modifier = Modifier.size(32.dp),
-                            contentAlignment = Alignment.Center,
-                        ) {
-                            if (addressFocused && addressBarEdited && fieldValue.text.isNotEmpty()) {
-                                IconButton(
-                                    onClick = {
-                                        fieldValue = TextFieldValue("")
-                                        state.addressBarText = ""
-                                        // × is a "start over" gesture — drop the
-                                        // suggestions panel and wait for the next
-                                        // keystroke before showing it again.
-                                        onAddressEditedChanged(false)
-                                    },
-                                    shapes = IconButtonDefaults.shapes(),
-                                    modifier = Modifier.size(32.dp),
-                                ) {
-                                    Icon(
-                                        Icons.Filled.Clear,
-                                        contentDescription = "Clear",
-                                        modifier = Modifier.size(18.dp),
-                                    )
-                                }
-                            }
-                        }
-                    }
-                },
-            )
-        }
-
-        TabsCountButton(
-            count = tabCount,
-            onClick = onOpenTabs,
-            modifier = Modifier.padding(start = 10.dp),
-        )
-
-        // We hand-roll the anchor positioning rather than rely on
-        // Material3's [DropdownMenu]: its Popup mis-anchors on the very
-        // first open (appears pinned to the top of the content area
-        // instead of below the hamburger) and only recovers on
-        // subsequent opens. Tracking the IconButton's window bounds
-        // ourselves via [onGloballyPositioned] and feeding them to a
-        // [Popup] + custom [PopupPositionProvider] produces a stable
-        // anchor from the first frame.
-        var anchorBounds by remember { mutableStateOf<IntRect?>(null) }
-        Box(
-            modifier = Modifier.onGloballyPositioned { coords ->
-                val r = coords.boundsInWindow()
-                anchorBounds = IntRect(
-                    r.left.toInt(), r.top.toInt(),
-                    r.right.toInt(), r.bottom.toInt(),
-                )
-            },
-        ) {
-            IconButton(
-                onClick = { menuExpanded = true },
-                shapes = IconButtonDefaults.shapes(),
-                modifier = Modifier.padding(start = 2.dp),
-            ) {
-                Icon(Icons.Filled.Menu, contentDescription = "Menu")
-            }
-            if (menuExpanded && anchorBounds != null) {
-                Popup(
-                    popupPositionProvider = AnchoredBelowRightProvider(anchorBounds!!),
-                    onDismissRequest = { menuExpanded = false },
-                    properties = PopupProperties(focusable = true),
-                ) {
-                    Surface(
-                        shape = MaterialTheme.shapes.small,
-                        color = MaterialTheme.colorScheme.surfaceContainer,
-                        tonalElevation = 3.dp,
-                        shadowElevation = 3.dp,
-                    ) {
-                        // [IntrinsicSize.Max] makes the Column size to
-                        // its widest child's natural width. Without
-                        // this, [DropdownMenuItem] uses fillMaxWidth
-                        // internally and the popup grows to the window.
-                        Column(
-                            modifier = Modifier
-                                .width(IntrinsicSize.Max)
-                                .padding(vertical = 8.dp),
-                        ) {
-                DropdownMenuItem(
-                    text = { MenuItemLabel(if (isBookmarked) "Remove bookmark" else "Add bookmark") },
-                    leadingIcon = {
-                        Icon(
-                            imageVector = if (isBookmarked) Icons.Filled.Star
-                            else Icons.Filled.StarBorder,
-                            contentDescription = null,
-                            tint = if (isBookmarked) MaterialTheme.colorScheme.primary
-                            else MaterialTheme.colorScheme.onSurface,
-                        )
-                    },
-                    enabled = state.url.isNotBlank(),
-                    onClick = {
-                        menuExpanded = false
-                        onToggleBookmark()
-                    },
-                )
-                DropdownMenuItem(
-                    text = { MenuItemLabel("Forward") },
-                    leadingIcon = {
-                        Icon(
-                            Icons.AutoMirrored.Filled.ArrowForward,
-                            contentDescription = null,
-                        )
-                    },
-                    enabled = state.canGoForward,
-                    onClick = {
-                        menuExpanded = false
-                        onForward()
-                    },
-                )
-                DropdownMenuItem(
-                    text = { MenuItemLabel("New tab") },
-                    leadingIcon = { Icon(Icons.Filled.Add, contentDescription = null) },
-                    onClick = {
-                        menuExpanded = false
-                        onNewTab()
-                    },
-                )
-                DropdownMenuItem(
-                    text = { MenuItemLabel("Reload") },
-                    leadingIcon = { Icon(Icons.Filled.Refresh, contentDescription = null) },
-                    onClick = {
-                        menuExpanded = false
-                        onReload()
-                    },
-                )
-                DropdownMenuItem(
-                    text = { MenuItemLabel("History") },
-                    leadingIcon = {
-                        Icon(Icons.Filled.History, contentDescription = null)
-                    },
-                    onClick = {
-                        menuExpanded = false
-                        onOpenHistory()
-                    },
-                )
-                DropdownMenuItem(
-                    text = { MenuItemLabel("Bookmarks") },
-                    leadingIcon = {
-                        Icon(Icons.Filled.Bookmark, contentDescription = null)
-                    },
-                    onClick = {
-                        menuExpanded = false
-                        onOpenBookmarks()
-                    },
-                )
-                DropdownMenuItem(
-                    text = { MenuItemLabel("Settings") },
-                    leadingIcon = {
-                        Icon(Icons.Filled.Settings, contentDescription = null)
-                    },
-                    onClick = {
-                        menuExpanded = false
-                        onOpenSettings()
-                    },
-                )
-                DropdownMenuItem(
-                    text = {
-                        MenuItemLabel(
-                            if (peerCount == 1L) "1 peer" else "$peerCount peers",
-                        )
-                    },
-                    leadingIcon = {
-                        Icon(
-                            painter = painterResource(baby.freedom.mobile.R.drawable.ic_nodes),
-                            contentDescription = null,
-                        )
-                    },
-                    onClick = {
-                        menuExpanded = false
-                        onOpenNode()
-                    },
-                )
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-/**
- * Text label for a [DropdownMenuItem] that carries its own trailing
- * padding. Every label wears the same end-inset, so [IntrinsicSize.Max]
- * on the parent Column grows the whole popup past the bare-text width
- * and keeps long labels like "Bookmark" from hugging the right edge.
- */
-@Composable
-private fun MenuItemLabel(text: String) {
-    Text(
-        text = text,
-        modifier = Modifier.padding(end = 32.dp),
-    )
-}
-
-/**
- * Places a [Popup] flush against an anchor's bottom edge and its right
- * edge (LTR) / left edge (RTL), clamping to the window so the popup
- * never runs off-screen on smaller devices. The anchor bounds are
- * captured by the caller via [Modifier.onGloballyPositioned]; we
- * deliberately ignore the [anchorBounds] argument the framework hands
- * in, since that's the very value that mis-fires on the first open for
- * Material3's default [androidx.compose.material3.DropdownMenu].
- */
-private class AnchoredBelowRightProvider(
-    private val anchor: IntRect,
-) : PopupPositionProvider {
-    override fun calculatePosition(
-        anchorBounds: IntRect,
-        windowSize: IntSize,
-        layoutDirection: LayoutDirection,
-        popupContentSize: IntSize,
-    ): IntOffset {
-        val x = when (layoutDirection) {
-            LayoutDirection.Ltr -> anchor.right - popupContentSize.width
-            LayoutDirection.Rtl -> anchor.left
-        }.coerceIn(0, (windowSize.width - popupContentSize.width).coerceAtLeast(0))
-        val y = anchor.bottom
-            .coerceIn(0, (windowSize.height - popupContentSize.height).coerceAtLeast(0))
-        return IntOffset(x, y)
-    }
-}
-
 /**
  * Opaque panel that overlays the WebView while the address bar is
  * focused, showing bookmarks + recent history that match what the user
- * has typed so far. Picking a row dispatches the canonical URL back to
+ * has typed so far. The list is reversed so the best match sits right
+ * above the (bottom) address bar and the thumb, with weaker matches
+ * stacking upwards. Picking a row dispatches the canonical URL back to
  * the browser's `submit` path, which hides the keyboard and clears
  * focus (and therefore dismisses this panel).
  */
@@ -1305,11 +875,15 @@ private fun SuggestionsPanel(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 style = MaterialTheme.typography.bodyMedium,
                 modifier = Modifier
-                    .align(Alignment.TopCenter)
-                    .padding(top = 32.dp, start = 16.dp, end = 16.dp),
+                    .align(Alignment.BottomCenter)
+                    .padding(bottom = 32.dp, start = 16.dp, end = 16.dp),
             )
         } else {
-            LazyColumn(modifier = Modifier.fillMaxSize()) {
+            LazyColumn(
+                modifier = Modifier.fillMaxSize(),
+                reverseLayout = true,
+                contentPadding = PaddingValues(vertical = 8.dp),
+            ) {
                 items(
                     items = suggestions,
                     key = { s -> s.source.name + "|" + s.url },
@@ -1340,7 +914,8 @@ private fun SuggestionRow(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .background(MaterialTheme.colorScheme.background)
+            .padding(horizontal = 8.dp)
+            .clip(MaterialTheme.shapes.medium)
             .clickable(onClick = onClick)
             .padding(horizontal = 16.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -1401,23 +976,3 @@ private fun highlightedText(text: String, needle: String): AnnotatedString {
         }
     }
 }
-
-@Composable
-private fun NodeStatusDot(
-    nodeInfo: NodeInfo,
-    modifier: Modifier = Modifier,
-) {
-    val color = when (nodeInfo.status) {
-        NodeStatus.Running -> Color(0xFF22C55E)
-        NodeStatus.Starting -> Color(0xFFF59E0B)
-        NodeStatus.Stopped -> Color(0xFF94A3B8)
-        NodeStatus.Error -> Color(0xFFEF4444)
-    }
-    Box(
-        modifier = modifier
-            .size(8.dp)
-            .clip(RoundedCornerShape(50))
-            .background(color),
-    )
-}
-
