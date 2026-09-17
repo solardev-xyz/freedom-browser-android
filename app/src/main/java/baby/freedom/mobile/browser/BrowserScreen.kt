@@ -154,6 +154,27 @@ internal fun pendingAddressBarText(
 }
 
 /**
+ * Whether a keyboard that has just gone away should take the address
+ * bar's focus — and with it the capsule's editing morph — with it.
+ *
+ * The IME swallows the back press (or swipe-down) that closes it, so
+ * the app never sees the gesture; all it observes is the IME inset
+ * dropping to zero while the field still holds focus. Without this the
+ * capsule would stay in its 64 dp editor form, chrome-less, with the
+ * keyboard already down.
+ *
+ * [keyboardWasSeen] is what keeps it from firing on the *way in*:
+ * focus arrives several frames before the IME animates up, and on a
+ * device with a hardware keyboard it may never come up at all. Only a
+ * keyboard that was observed open counts as one the user dismissed.
+ */
+internal fun imeDismissalEndsEditing(
+    addressFocused: Boolean,
+    keyboardVisible: Boolean,
+    keyboardWasSeen: Boolean,
+): Boolean = addressFocused && !keyboardVisible && keyboardWasSeen
+
+/**
  * Classify a submitted URL as a content-addressed (bzz / ipfs / ipns)
  * destination that should go through the probe-gated navigation path,
  * or return `null` for "treat as a plain URL". Accepts both the
@@ -719,6 +740,38 @@ fun BrowserScreen(
     val navInsetPx = WindowInsets.systemBars.getBottom(density)
     val imeInsetPx = WindowInsets.ime.getBottom(density)
     val keyboardVisible = imeInsetPx > 0
+
+    // Dismissing the keyboard is dismissing the editor.
+    //
+    // The system back press (and the swipe-down gesture) that closes an
+    // open IME is consumed by the IME itself, so neither the
+    // [BackHandler] above nor the address field hears about it: focus
+    // survives, and the capsule would stay stretched into its full
+    // editing morph — no Back, no tab counter, no overflow, because at
+    // `editProgress == 1` those controls aren't composed at all — with
+    // the keyboard already gone. The next back press would then reach
+    // the [BackHandler] and navigate page history underneath a still-
+    // open editor. Dropping focus when the keyboard goes puts the
+    // capsule back at rest on that first press, which is also what the
+    // tap-outside catcher below already does.
+    //
+    // Latched on having actually *seen* the keyboard: focus lands
+    // several frames before the IME animates in, and a device driven by
+    // a hardware keyboard may never raise one at all — in neither case
+    // may we bounce the focus the user just asked for (see
+    // [imeDismissalEndsEditing]).
+    var keyboardSeenWhileEditing by remember { mutableStateOf(false) }
+    LaunchedEffect(addressFocused, keyboardVisible) {
+        if (imeDismissalEndsEditing(
+                addressFocused = addressFocused,
+                keyboardVisible = keyboardVisible,
+                keyboardWasSeen = keyboardSeenWhileEditing,
+            )
+        ) {
+            focusManager.clearFocus()
+        }
+        keyboardSeenWhileEditing = addressFocused && keyboardVisible
+    }
 
     // The capsule's geometry is driven by exactly two 0→1 fractions,
     // and they are one model rather than two (see [capsuleDrawnHeight]):
