@@ -57,6 +57,17 @@ class TabsState(
     var clearWebViewData: (() -> Unit)? = null
 
     /**
+     * Hook installed by the [BrowserWebViewHost] so the capsule's Stop
+     * control can abort the given tab's in-flight load. Only the host
+     * knows which physical [android.webkit.WebView] backs a tab, and
+     * `stopLoading()` has to be called on that instance — the tab state
+     * itself can't do it. `null` before the host has composed, or after
+     * it disposes.
+     */
+    @Volatile
+    var stopLoading: ((BrowserState) -> Unit)? = null
+
+    /**
      * Hook installed by [BrowserScreen] so the WebView layer can bounce
      * `bzz://` / `ens://` navigations (in-page link clicks, error-page
      * "Try Again" button) back through the screen's probe-gated submit

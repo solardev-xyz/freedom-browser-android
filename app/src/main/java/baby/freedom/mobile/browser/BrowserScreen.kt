@@ -1,6 +1,7 @@
 package baby.freedom.mobile.browser
 
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
@@ -35,13 +36,11 @@ import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
-import androidx.compose.material3.LinearWavyProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Snackbar
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
-import androidx.compose.material3.WavyProgressIndicatorDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -69,6 +68,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.lerp
 import baby.freedom.mobile.data.BrowsingRepository
 import baby.freedom.mobile.data.UrlSuggestion
 import baby.freedom.mobile.ens.EnsInput
@@ -91,9 +91,9 @@ import kotlinx.coroutines.launch
 const val HOME_URL: String = "about:blank"
 
 /**
- * Width cap for the floating chrome (capsule + progress strip) so it
- * doesn't stretch edge to edge in landscape or on a tablet. On a phone
- * in portrait the cap never kicks in.
+ * Width cap for the floating capsule so it doesn't stretch edge to edge
+ * in landscape or on a tablet. On a phone in portrait the cap never
+ * kicks in.
  */
 private val CHROME_MAX_WIDTH = 640.dp
 
@@ -719,7 +719,33 @@ fun BrowserScreen(
     val navInsetPx = WindowInsets.systemBars.getBottom(density)
     val imeInsetPx = WindowInsets.ime.getBottom(density)
     val keyboardVisible = imeInsetPx > 0
-    val capsuleFootprint = CapsuleHeight + CapsuleBottomMargin
+
+    // The editing morph, as a single 0→1 number every piece of the
+    // capsule's geometry is derived from: its height and the address
+    // pill's height inside [BottomToolbar], its side margins here.
+    // Focusing the field doesn't swap in a different composable — the
+    // same capsule interpolates size and position, which is what makes
+    // the editor read as the bar transforming rather than a new screen.
+    //
+    // Spring, not tween, and the expressive motion scheme's spatial spec
+    // rather than a hand-rolled one: it's the same curve every other M3
+    // Expressive component in the app moves on, and it overshoots very
+    // slightly, so the bar feels like it *inflates* into the editor.
+    val editProgress by animateFloatAsState(
+        targetValue = if (addressFocused) 1f else 0f,
+        animationSpec = MaterialTheme.motionScheme.defaultSpatialSpec(),
+        label = "capsuleEditMorph",
+    )
+    val capsuleHeight = lerp(CapsuleHeight, CapsuleEditingHeight, editProgress)
+    val capsuleSideMargin =
+        lerp(CapsuleSideMargin, CapsuleEditingSideMargin, editProgress)
+
+    // Deliberately the *settled* editing height rather than the animated
+    // one: this padding shrinks the WebView, and re-laying Chromium out
+    // on every frame of the morph is far more expensive than the 8 dp it
+    // would buy — and the keyboard is on its way over that strip anyway.
+    val capsuleFootprint =
+        (if (keyboardVisible) CapsuleEditingHeight else CapsuleHeight) + CapsuleBottomMargin
     val contentBottomReserve = if (keyboardVisible) capsuleFootprint else 0.dp
 
     // How much of the content area the capsule still covers once that
@@ -824,17 +850,17 @@ fun BrowserScreen(
             }
         }
 
-        // The floating chrome overlay: page-load bar directly above the
-        // capsule, both capped to the same width so they read as one
-        // floating object rather than a band across the page. Stage 3
-        // (#31) moves progress inside the capsule; until then the wavy
-        // bar keeps its own fixed-height slot so the capsule doesn't
-        // shift when a load starts or ends.
-        //
+        // The floating chrome overlay: just the capsule now. Page-load
+        // progress used to be a wavy strip in its own fixed-height slot
+        // directly above it; it is drawn along the capsule's own edge
+        // instead (see [BottomToolbar]), which is both what the brief
+        // asks for and strictly better at "no layout shifts" — an
+        // overlay on fixed geometry can't move anything, whereas the
+        // strip's reserved slot was 14 dp of permanently dead band.
         Box(modifier = Modifier.align(Alignment.BottomCenter)) {
             // Tap-to-dismiss catcher for the whole chrome band — the
-            // progress strip, the capsule's own gutters, the side
-            // margins and the padding beneath it. *Behind* the capsule,
+            // capsule's own gutters, the side margins and the padding
+            // beneath it. *Behind* the capsule,
             // not around it: taps that land on the address pill hit it
             // first and never reach the catcher, so tapping inside the
             // field doesn't bounce its own focus.
@@ -854,34 +880,17 @@ fun BrowserScreen(
                 modifier = Modifier
                     .fillMaxWidth()
                     .windowInsetsPadding(chromeInsets)
+                    // The side margins interpolate with the morph, so
+                    // the capsule *reaches* towards the screen edges as
+                    // it opens into the editor instead of a wider bar
+                    // being swapped in underneath the old one.
                     .padding(
-                        start = CapsuleSideMargin,
-                        end = CapsuleSideMargin,
+                        start = capsuleSideMargin,
+                        end = capsuleSideMargin,
                         bottom = CapsuleBottomMargin,
                     ),
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
-                Box(
-                    modifier = Modifier
-                        // Capped width so the chrome doesn't stretch edge to
-                        // edge in landscape or on a tablet; on a phone in
-                        // portrait the cap never kicks in.
-                        .widthIn(max = CHROME_MAX_WIDTH)
-                        .fillMaxWidth()
-                        .height(WavyProgressIndicatorDefaults.LinearContainerHeight),
-                ) {
-                    if (state.progress in 0..99 || state.resolving) {
-                        if (state.resolving) {
-                            LinearWavyProgressIndicator(modifier = Modifier.fillMaxWidth())
-                        } else {
-                            LinearWavyProgressIndicator(
-                                modifier = Modifier.fillMaxWidth(),
-                                progress = { state.progress / 100f },
-                            )
-                        }
-                    }
-                }
-
                 BottomToolbar(
                     state = state,
                     tabCount = tabs.tabs.size,
@@ -889,6 +898,7 @@ fun BrowserScreen(
                     isBookmarked = isBookmarked,
                     addressFocused = addressFocused,
                     addressBarEdited = addressBarEdited,
+                    editProgress = editProgress,
                     onAddressFocusChanged = { focused ->
                         addressFocused = focused
                         // Losing focus always resets the "has the user typed?"
@@ -936,6 +946,19 @@ fun BrowserScreen(
                         val url = state.url.ifBlank { state.addressBarText }
                         if (url.isNotBlank()) submit(state, url)
                     },
+                    // Stop covers both halves of a load: the WebView's
+                    // own fetch, and the indeterminate phase in front of
+                    // it (ENS resolve / gateway warm-up) that runs on a
+                    // coroutine before the WebView is ever handed a URL.
+                    // Clearing the counters here as well as cancelling
+                    // means the capsule's edge trace goes out on the
+                    // frame of the tap rather than whenever Chromium
+                    // gets round to its final progress callback.
+                    onStop = {
+                        state.cancelPendingProbe()
+                        tabs.stopLoading?.invoke(state)
+                        state.stopProgress()
+                    },
                     onNewTab = {
                         val fresh = tabs.newTab()
                         submit(fresh, tabs.homepageUrl)
@@ -947,16 +970,15 @@ fun BrowserScreen(
             }
         }
 
-        // Snackbars pop up above the capsule rather than under it.
+        // Snackbars pop up above the capsule rather than under it —
+        // tracking its animated height so they stay clear of it through
+        // the editing morph too.
         SnackbarHost(
             hostState = snackbarHostState,
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .windowInsetsPadding(chromeInsets)
-                .padding(
-                    bottom = CapsuleHeight + CapsuleBottomMargin +
-                        WavyProgressIndicatorDefaults.LinearContainerHeight,
-                ),
+                .padding(bottom = capsuleHeight + CapsuleBottomMargin),
         ) { data -> Snackbar(snackbarData = data) }
     }
 
