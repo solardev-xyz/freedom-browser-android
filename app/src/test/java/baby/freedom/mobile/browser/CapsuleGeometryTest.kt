@@ -229,6 +229,52 @@ class CapsuleGeometryTest {
     }
 
     @Test
+    fun `the flanking controls are drawn on that same centre line`() {
+        // The controls' boxes fill the slot, so left alone they stay on
+        // the slot's centre line while the capsule under them rides
+        // down: mid-collapse the still-visible Back / tabs / menu icons
+        // would float above the centre line of the capsule and label
+        // they sit on. They take the capsule's own anchor, whole.
+        for (edit in listOf(0f, 0.5f, 1f)) {
+            for (step in 0..10) {
+                val collapse = step / 10f
+                assertEquals(
+                    "control left the capsule's centre line at " +
+                        "collapse=$collapse edit=$edit",
+                    capsuleBottomAnchor(collapse, edit).value,
+                    capsuleControlTopShift(collapse, edit).value,
+                    0.001f,
+                )
+            }
+        }
+        // Nothing to follow in the two states that fill the slot.
+        assertEquals(0.dp, capsuleControlTopShift(collapse = 0f, editProgress = 0f))
+        assertEquals(0.dp, capsuleControlTopShift(collapse = 0f, editProgress = 1f))
+        assertEquals(12.dp, capsuleControlTopShift(collapse = 1f, editProgress = 0f))
+    }
+
+    @Test
+    fun `a control still on screen is never drawn outside its touch box`() {
+        // The control's shift is a drawing offset — its touch box does
+        // not move — so it may only be spent on room the shrinking
+        // control has already given back. The controls leave faster than
+        // the capsule drops ([capsulePillSlotScale] against the anchor),
+        // so a control scaled about the centre of a 48 dp box stays
+        // inside that box for every fraction it is still visible.
+        val box = AddressFieldTouchHeight.value
+        for (step in 0..20) {
+            val collapse = step / 20f
+            val scale = capsulePillSlotScale(collapse)
+            if (scale <= 0f) continue
+            assertTrue(
+                "control drawn outside its touch box at collapse=$collapse",
+                capsuleControlTopShift(collapse, 0f).value + box * scale / 2f <=
+                    box / 2f + 0.001f,
+            )
+        }
+    }
+
+    @Test
     fun `the pill never outgrows its touch target`() {
         // The pill is drawn inside a box that stays
         // [AddressFieldTouchHeight] tall in every state, so neither

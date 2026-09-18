@@ -314,6 +314,29 @@ internal fun addressPillTopShift(collapse: Float, editProgress: Float): Dp =
         addressFieldTouchShift(collapse, editProgress)
 
 /**
+ * How far below their slot's centre line the flanking controls are
+ * *drawn* — the control-side counterpart of [addressPillTopShift].
+ *
+ * The controls' boxes fill the slot, so left alone they stay on the
+ * slot's centre line while the capsule under them rides down to the
+ * slot's bottom edge: mid-collapse the still-visible Back / tabs / menu
+ * icons float above the centre line of the capsule and label they belong
+ * to, by up to the anchor's value at the fraction where the last of them
+ * leaves. Giving them the capsule's own anchor keeps every drawn thing —
+ * bubble, label and controls — on one centre line at every frame, not
+ * just at the settled ends.
+ *
+ * It is the *whole* anchor, not the split [addressFieldTouchShift] /
+ * [addressPillTopShift] the pill takes, because it is a drawing offset
+ * throughout ([Modifier.collapsingControl] applies it inside the same
+ * layer that scales the control): the 48 dp touch boxes stay put in the
+ * slot, and a control drawn at [capsulePillSlotScale] of its size is far
+ * inside its own box anyway.
+ */
+internal fun capsuleControlTopShift(collapse: Float, editProgress: Float): Dp =
+    capsuleBottomAnchor(collapse, editProgress)
+
+/**
  * How much faster the flanking controls leave than the capsule changes
  * height. 1.6 puts them at zero width when the transition — *either*
  * transition — is about ⅔ of the way through, so the address pill
@@ -934,6 +957,11 @@ internal fun BottomToolbar(
     // between the two states.
     val controlScale =
         (1f - max(collapse, edit) * CONTROL_COLLAPSE_RATE).coerceIn(0f, 1f)
+    // And how far down they are drawn while they are still on screen:
+    // the capsule's own anchor, so a control mid-collapse sits on the
+    // capsule's centre line rather than on the slot's. See
+    // [capsuleControlTopShift].
+    val controlTopShift = capsuleControlTopShift(collapse, edit)
 
     // Derived, not read straight: `isCapsuleLoading` looks at
     // `state.progress`, and reading that here would put every single
@@ -1051,8 +1079,12 @@ internal fun BottomToolbar(
                     // surface (see [capsuleGutterHandover]).
                     .padding(horizontal = capsuleControlGutter(collapse)),
                 // Mixed-height children (a 40 dp pill next to 48 dp icon
-                // buttons) only sit on the capsule's centre line if we say
-                // so explicitly — a Row defaults to Top.
+                // buttons) only sit on the slot's centre line if we say
+                // so explicitly — a Row defaults to Top. The capsule's
+                // own centre line is that one plus the anchor, which
+                // every child takes for itself: the pill through
+                // [addressPillTopShift], the controls through
+                // [capsuleControlTopShift].
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 // Back replaces Home in the resting bar: history is the
@@ -1064,7 +1096,13 @@ internal fun BottomToolbar(
                 // the page or the domain, and the overflow menu's popup
                 // anchor goes away with the button it belongs to.
                 if (state.canGoBack && controlScale > 0f) {
-                    Box(modifier = Modifier.collapsingControl(controlScale, towardsStart = true)) {
+                    Box(
+                        modifier = Modifier.collapsingControl(
+                            controlScale,
+                            towardsStart = true,
+                            topShift = controlTopShift,
+                        ),
+                    ) {
                         // Expressive shape variants: the icon buttons morph
                         // from round to a squarer pressed shape on touch.
                         // Purely visual — the 48 dp hit target and click
@@ -1103,13 +1141,21 @@ internal fun BottomToolbar(
 
                 if (controlScale > 0f) {
                     Box(
-                        modifier = Modifier.collapsingControl(controlScale, towardsStart = false),
+                        modifier = Modifier.collapsingControl(
+                            controlScale,
+                            towardsStart = false,
+                            topShift = controlTopShift,
+                        ),
                     ) {
                         TabsCountButton(count = tabCount, onClick = onOpenTabs)
                     }
 
                     Box(
-                        modifier = Modifier.collapsingControl(controlScale, towardsStart = false),
+                        modifier = Modifier.collapsingControl(
+                            controlScale,
+                            towardsStart = false,
+                            topShift = controlTopShift,
+                        ),
                     ) {
                         OverflowMenuButton(
                             state = state,
@@ -1194,7 +1240,11 @@ internal fun BottomToolbar(
  *
  * [visible] is 1 at rest and 0 when fully collapsed;
  * [towardsStart] picks the edge the control retreats to (leading
- * controls collapse left, trailing controls collapse right).
+ * controls collapse left, trailing controls collapse right);
+ * [topShift] rides the control down onto the capsule's centre line as
+ * the capsule drops onto the slot's bottom edge (see
+ * [capsuleControlTopShift]) — drawing only, so the control's touch box
+ * stays where the slot put it.
  *
  * Order matters: the scale has to be applied *inside* the narrowing
  * slot, so `layout` (outer) wraps `graphicsLayer` (inner). Written the
@@ -1203,8 +1253,12 @@ internal fun BottomToolbar(
  * a cropped edge fragment beside an empty gap — instead of the whole
  * control shrinking to fill the slot.
  */
-private fun Modifier.collapsingControl(visible: Float, towardsStart: Boolean): Modifier {
-    if (visible >= 1f) return this
+private fun Modifier.collapsingControl(
+    visible: Float,
+    towardsStart: Boolean,
+    topShift: Dp = 0.dp,
+): Modifier {
+    if (visible >= 1f && topShift == 0.dp) return this
     return this
         .layout { measurable, constraints ->
             val placeable = measurable.measure(constraints)
@@ -1220,6 +1274,10 @@ private fun Modifier.collapsingControl(visible: Float, towardsStart: Boolean): M
         .graphicsLayer {
             scaleX = visible
             scaleY = visible
+            // Applied outside the scale by the layer's own matrix, so
+            // the control travels the anchor's full distance whatever
+            // it has shrunk to.
+            translationY = topShift.toPx()
             transformOrigin = TransformOrigin(if (towardsStart) 0f else 1f, 0.5f)
             clip = true
         }
