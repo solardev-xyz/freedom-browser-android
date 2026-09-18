@@ -805,7 +805,7 @@ fun BrowserScreen(
 
     // The capsule's geometry is driven by exactly two 0→1 fractions,
     // and they are one model rather than two (see [capsuleDrawnHeight]):
-    // the capsule has three heights — 44 dp compact, 56 dp resting,
+    // the capsule has three heights — 32 dp compact, 56 dp resting,
     // 64 dp editing — and these two numbers say which.
     //
     // Both spring on the expressive motion scheme's spatial spec rather
