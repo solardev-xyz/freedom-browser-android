@@ -130,14 +130,35 @@ import kotlin.math.roundToInt
 internal val CapsuleHeight = 56.dp
 
 /**
- * Height of the capsule in its compact (scrolled) state. The brief
- * allows 40–44 dp; 44 dp is the top of that band, which leaves the
- * compact label room to step down exactly one type size (see
- * [addressLabelFontSize]) rather than the two a 40 dp bar would invite —
- * the label is a trust surface ([AddressLabel]) and a shrunken domain is
- * a harder one to read.
+ * Air above and below the compact label's line box, per side — the whole
+ * vertical padding the minimised capsule has.
+ *
+ * Six dp is what is left of iOS Safari's minimised bar once the tray and
+ * the controls are gone: a pill that hugs the domain with a few points of
+ * air rather than a bar that happens to contain one.
  */
-internal val CapsuleCompactHeight = 44.dp
+internal val CapsuleCompactVerticalPadding = 6.dp
+
+/**
+ * Height of the capsule in its compact (scrolled) state: the compact
+ * label's **line box** plus [CapsuleCompactVerticalPadding] top and
+ * bottom, and nothing else.
+ *
+ * The line box is the one the label is actually laid out in — 20 sp at
+ * the compact type size (see [AddressLabelCompactLineHeight]), i.e. 20 dp
+ * at `fontScale == 1` — so 20 + 2 × 6 = **32 dp**. Which is also, exactly,
+ * the height the address pill was already drawn at inside the old 44 dp
+ * capsule: now that the compact capsule is one opaque surface (#46) the
+ * pill *is* the capsule, so the tray's 6 dp of rim above and below it was
+ * the only thing left to take away.
+ *
+ * This supersedes the 40–44 dp band from #30/#40/#45. That band sized the
+ * minimised bar as a smaller *bar*; the point of losing the rim was to
+ * stop it being a bar at all. The touch target is unaffected — it comes
+ * from the 56 dp slot and [AddressFieldTouchHeight], never from the drawn
+ * height (see [capsuleBottomAnchor]).
+ */
+internal val CapsuleCompactHeight = 32.dp
 
 /**
  * Height of the capsule once it has morphed into the address editor.
@@ -163,8 +184,15 @@ internal val CapsuleBottomMargin = 10.dp
 /** Address pill height inside the resting (56 dp) capsule. */
 internal val AddressPillHeight = 40.dp
 
-/** Address pill height inside the compact (44 dp) capsule. */
-internal val AddressPillCompactHeight = 32.dp
+/**
+ * Address pill height inside the compact capsule — the same 32 dp it has
+ * always been drawn at, and now the capsule's own height too: the
+ * compact capsule is a single opaque surface (#46) wrapped tight to the
+ * label (#47), so the pill and the capsule are one shape with no gutter
+ * between them. Stated as the capsule height rather than repeated, so
+ * the two can't drift apart and leave a rim behind.
+ */
+internal val AddressPillCompactHeight = CapsuleCompactHeight
 
 /** Address pill height inside the editing (64 dp) capsule. */
 internal val AddressPillEditingHeight = 48.dp
@@ -198,14 +226,17 @@ internal fun capsuleSlotHeight(editProgress: Float): Dp =
  * scroll driver and an editing driver arguing over the same pixels.
  *
  * It reads outwards from the slot: [editProgress] grows 56 → 64 dp,
- * then [collapse] shrinks whatever that gives towards 44 dp. The two
+ * then [collapse] shrinks whatever that gives towards 32 dp. The two
  * can't fight over the result, because [BrowserScreen] holds `collapse`
  * at 0 whenever the address bar has focus — **editing always wins over
- * compact** — so the settled values are exactly 44 ← 56 → 64. Composing
+ * compact** — so the settled values are exactly 32 ← 56 → 64. Composing
  * them rather than picking one keeps the handover continuous: tapping a
  * compact bar springs `collapse` back down while `editProgress` comes
- * up, and the capsule travels 44 → 64 without a discontinuity in the
+ * up, and the capsule travels 32 → 64 without a discontinuity in the
  * frame where they cross.
+ *
+ * Where in the slot that height is drawn is [capsuleBottomAnchor]'s job:
+ * the capsule shrinks *upwards*, off a bottom edge that never moves.
  */
 internal fun capsuleDrawnHeight(collapse: Float, editProgress: Float): Dp =
     lerp(capsuleSlotHeight(editProgress), CapsuleCompactHeight, collapse.coerceIn(0f, 1f))
@@ -214,7 +245,8 @@ internal fun capsuleDrawnHeight(collapse: Float, editProgress: Float): Dp =
  * The address pill's drawn height, derived from the same two morphs by
  * the same rule as [capsuleDrawnHeight]. It tracks the capsule so the
  * gutter above and below the pill stays even in every state (8 dp at
- * rest and while editing, 6 dp compact), and it is only ever *drawn* at
+ * rest and while editing, none at all when compact — there the pill and
+ * the capsule are the same 32 dp shape), and it is only ever *drawn* at
  * this height — see [AddressFieldTouchHeight].
  */
 internal fun addressPillHeight(collapse: Float, editProgress: Float): Dp =
@@ -223,6 +255,63 @@ internal fun addressPillHeight(collapse: Float, editProgress: Float): Dp =
         AddressPillCompactHeight,
         collapse.coerceIn(0f, 1f),
     )
+
+/**
+ * How far *below the slot's centre line* the drawn capsule sits — the
+ * bottom-anchor rule, expressed as the one offset everything drawn
+ * inside the capsule shares.
+ *
+ * The capsule is centred in its slot by default, which is right for the
+ * two states that fill it (resting and editing are both exactly
+ * [capsuleSlotHeight] tall, so this is 0 for both). Compacting is the
+ * one state that leaves room over, and it spends all of it at the top:
+ * the minimised capsule keeps its bottom edge exactly where the resting
+ * capsule's was — [CapsuleBottomMargin] above the navigation inset — and
+ * shrinks *upwards*, the way iOS Safari's minimised bar stays down by
+ * the gesture bar instead of floating into the middle of the space the
+ * full bar used to occupy.
+ *
+ * The slot itself is untouched by any of this (stage 2/3's rule): it is
+ * still 56 dp, so nothing outside it moves on a scroll. Only where the
+ * capsule is painted inside it changes, and continuously — the offset is
+ * a function of the same two fractions the heights are, so the collapse
+ * interpolates height and anchor together rather than sliding the bar
+ * down at some threshold.
+ */
+internal fun capsuleBottomAnchor(collapse: Float, editProgress: Float): Dp =
+    (capsuleSlotHeight(editProgress) - capsuleDrawnHeight(collapse, editProgress)) / 2f
+
+/**
+ * The part of [capsuleBottomAnchor] the address field's *touch box*
+ * follows, so the 48 dp band stays over the shrinking capsule.
+ *
+ * The box is [AddressFieldTouchHeight] tall in every state and must stay
+ * inside the slot — a touch band hanging out of the chrome would be
+ * taking presses from the page below it — so it can only travel as far
+ * as the slot's own bottom edge allows: 4 dp in the resting slot, where
+ * a 48 dp box in 56 dp has 4 dp of slack under it. That is enough for
+ * the band to cover the compact capsule edge to edge (it spans the
+ * bottom 48 dp of the slot, the capsule the bottom 32), with the
+ * remainder — [addressPillTopShift] — taken up in drawing.
+ */
+internal fun addressFieldTouchShift(collapse: Float, editProgress: Float): Dp =
+    capsuleBottomAnchor(collapse, editProgress)
+        .coerceAtMost((capsuleSlotHeight(editProgress) - AddressFieldTouchHeight) / 2f)
+        .coerceAtLeast(0.dp)
+
+/**
+ * The rest of [capsuleBottomAnchor]: how far below its touch box's
+ * centre line the pill — and the label inside it — is drawn.
+ *
+ * Together with [addressFieldTouchShift] this adds up to exactly the
+ * capsule's own anchor, which is what keeps the bubble, the capsule and
+ * the label sharing one centre line in every state. It is a *drawing*
+ * offset, like [addressPillSideInset] is on the other axis: the box that
+ * owns the taps is unmoved by it.
+ */
+internal fun addressPillTopShift(collapse: Float, editProgress: Float): Dp =
+    capsuleBottomAnchor(collapse, editProgress) -
+        addressFieldTouchShift(collapse, editProgress)
 
 /**
  * How much faster the flanking controls leave than the capsule changes
@@ -242,8 +331,15 @@ private const val CONTROL_COLLAPSE_RATE = 1.6f
  * what [capsuleLabelInset] settles at, so the settled compact capsule is
  * the label plus this much air on either side and the label needs no
  * ellipsis to fit.
+ *
+ * Twelve dp, down from the 20 dp the capsule carried while it was still
+ * a 44 dp bar: on a pill that is only [CapsuleCompactHeight] tall, 20 dp
+ * of side air is wider than the air above and below the label put
+ * together, and the capsule reads as a lozenge with a domain rattling
+ * around in it. Twice the vertical padding is as much as the shape can
+ * take and still hug the label.
  */
-internal val CapsuleCompactSidePadding = 20.dp
+internal val CapsuleCompactSidePadding = 12.dp
 
 /** Gutter between the capsule's edge and the controls laid out over it. */
 private val CapsuleRowPadding = 4.dp
@@ -347,11 +443,19 @@ internal fun addressLabelPadding(collapse: Float, restingInset: Dp): Dp =
 
 /**
  * Narrowest the compact capsule ever gets. Safari's minimised bar keeps
- * a recognisable pill even for a three-letter host, and a 120 dp capsule
- * still leaves the label's tap surface ~104 × 48 dp — a full Material
- * touch target for the tap that expands it.
+ * a recognisable pill even for a three-letter host, and 88 dp still
+ * leaves the whole capsule answering the expand tap over an 88 × 48 dp
+ * band — comfortably past Material's 48 dp target.
+ *
+ * Down from 120 dp with the padding: a floor set for a 20 dp-padded
+ * capsule would now be doing the padding's old job — holding a short
+ * host in the middle of air it didn't ask for — and a floor that is
+ * routinely wider than the label plus its padding is not a floor, it is
+ * a fixed width. At 12 dp of padding, 88 dp is reached by any host of
+ * about nine 14 sp characters or more, so on real pages it is the label
+ * that sizes the capsule and the floor only catches the stubs.
  */
-internal val CapsuleCompactMinWidth = 120.dp
+internal val CapsuleCompactMinWidth = 88.dp
 
 /**
  * Slack added to the wrapped compact width, on top of the padding.
@@ -390,6 +494,24 @@ internal val AddressLabelRestingFontSize = 16.sp
 internal val AddressLabelCompactFontSize = 14.sp
 
 /**
+ * Line height of the domain label at rest — `bodyLarge`'s own, i.e. what
+ * the label has always been laid out with, stated here for the same
+ * reason [AddressLabelRestingFontSize] is and pinned by the same test.
+ */
+internal val AddressLabelRestingLineHeight = 24.sp
+
+/**
+ * Line height of the domain label when fully compact: `bodyMedium`'s,
+ * the other half of the one type step the compact label takes. Until
+ * #47 only the font size stepped down and the line box stayed
+ * `bodyLarge`'s 24 sp — which left the compact label sitting in a box
+ * 4 sp taller than its own type, and made "the capsule is the label's
+ * line box plus 6 dp" (see [CapsuleCompactHeight]) a claim about a
+ * number nothing on screen actually used.
+ */
+internal val AddressLabelCompactLineHeight = 20.sp
+
+/**
  * Size the domain label is drawn at, interpolated along the collapse so
  * the label morphs with the capsule rather than snapping a size at some
  * threshold.
@@ -398,6 +520,18 @@ internal fun addressLabelFontSize(collapse: Float): TextUnit =
     lerp(
         AddressLabelRestingFontSize,
         AddressLabelCompactFontSize,
+        collapse.coerceIn(0f, 1f),
+    )
+
+/**
+ * The label's line box along the same collapse — interpolated with the
+ * font size, so the box the type sits in never leads or lags the type
+ * itself as the capsule closes around it.
+ */
+internal fun addressLabelLineHeight(collapse: Float): TextUnit =
+    lerp(
+        AddressLabelRestingLineHeight,
+        AddressLabelCompactLineHeight,
         collapse.coerceIn(0f, 1f),
     )
 
@@ -414,9 +548,9 @@ internal fun addressLabelFontSize(collapse: Float): TextUnit =
  * does at rest. Plus [CapsuleCompactLabelSlack], so that a label the
  * capsule *was* sized to fit doesn't ellipsise on a rounded pixel.
  *
- * The floor yields to the ceiling: on a window too narrow for 120 dp of
- * capsule, the resting width wins, because a "compact" bar wider than
- * the bar it came from is not a collapse.
+ * The floor yields to the ceiling: on a window too narrow for
+ * [CapsuleCompactMinWidth] of capsule, the resting width wins, because a
+ * "compact" bar wider than the bar it came from is not a collapse.
  */
 internal fun compactCapsuleWidth(labelWidth: Dp, restingWidth: Dp): Dp {
     val wrapped = labelWidth.coerceAtLeast(0.dp) +
@@ -714,13 +848,16 @@ internal fun capsuleFill(collapse: Float, colors: ColorScheme): Color = lerp(
  * translucent rim around it (see [capsuleFill]).
  *
  * The capsule has exactly three heights and one model that produces
- * them (see [capsuleDrawnHeight]): 44 dp **compact**, 56 dp **resting**,
+ * them (see [capsuleDrawnHeight]): 32 dp **compact**, 56 dp **resting**,
  * 64 dp **editing**. Two callers-supplied fractions drive it and
  * nothing else does:
  *
  * **[collapseFraction]** (0 resting, 1 compact) is the compact-on-scroll
  * state. The capsule shrinks *inside* a layout slot that keeps its
- * resting height, so a flick moves the bar and nothing else on screen.
+ * resting height, so a flick moves the bar and nothing else on screen —
+ * and it shrinks *upwards* off a fixed bottom edge (see
+ * [capsuleBottomAnchor]), so the minimised bar stays down by the gesture
+ * bar rather than drifting into the middle of the slot.
  *
  * **[editProgress]** (0 at rest, 1 in the editor) is the editing morph —
  * the same object inflating, not a second screen. It grows the slot as
@@ -782,6 +919,11 @@ internal fun BottomToolbar(
     val edit = editProgress.coerceIn(0f, 1f)
     val slotHeight = capsuleSlotHeight(edit)
     val drawnHeight = capsuleDrawnHeight(collapse, edit)
+    // Everything the capsule draws is centred in the slot and then
+    // pushed down by this, which is zero in both states that fill the
+    // slot and (56 − 32) / 2 when fully compact: the bar shrinks off a
+    // bottom edge that never moves. See [capsuleBottomAnchor].
+    val bottomAnchor = capsuleBottomAnchor(collapse, edit)
 
     // How much of their resting size the flanking controls still have —
     // one number for both transitions, because they leave the same way
@@ -826,6 +968,7 @@ internal fun BottomToolbar(
     val compactLabelStyle = remember(labelStyle) {
         labelStyle.copy(
             fontSize = AddressLabelCompactFontSize,
+            lineHeight = AddressLabelCompactLineHeight,
             fontWeight = FontWeight.Medium,
         )
     }
@@ -849,12 +992,12 @@ internal fun BottomToolbar(
 
     BoxWithConstraints(
         // The slot the capsule lives in. Compacting shrinks the capsule
-        // *inside* it — in width now as well as height — which is what
-        // keeps the page, the snackbar and the IME reserve from moving
-        // when the bar collapses, and what lets the controls keep 48 dp
-        // touch targets while the capsule around them is only 44 dp
-        // tall. Editing is the one transition that grows it (see
-        // [capsuleSlotHeight]).
+        // *inside* it — in width and height, and towards its bottom edge
+        // — which is what keeps the page, the snackbar and the IME
+        // reserve from moving when the bar collapses, and what lets the
+        // controls keep 48 dp touch targets while the capsule around
+        // them is only 32 dp tall. Editing is the one transition that
+        // grows it (see [capsuleSlotHeight]).
         modifier = modifier
             .fillMaxWidth()
             .height(slotHeight),
@@ -872,12 +1015,14 @@ internal fun BottomToolbar(
         )
 
         // The capsule itself is background only: drawn at the
-        // interpolated height and width, centred in the slot, with the
-        // controls laid out over it rather than inside it.
+        // interpolated height and width, centred in the slot and then
+        // dropped onto the slot's bottom edge by [capsuleBottomAnchor],
+        // with the controls laid out over it rather than inside it.
         Surface(
             modifier = Modifier
                 .width(drawnWidth)
-                .height(drawnHeight),
+                .height(drawnHeight)
+                .offset(y = bottomAnchor),
             shape = CircleShape,
             // Translucent `surfaceContainer` tray at rest, morphing into
             // the address field's own opaque fill as the bar compacts —
@@ -896,7 +1041,7 @@ internal fun BottomToolbar(
                 // The width tracks the capsule; the height stays the
                 // slot's, so the 48 dp touch boxes inside keep their
                 // full height even while the capsule around them is
-                // 44 dp tall.
+                // 32 dp tall.
                 modifier = Modifier
                     .fillMaxHeight()
                     .width(drawnWidth)
@@ -947,7 +1092,13 @@ internal fun BottomToolbar(
                     onExpandCapsule = onExpandCapsule,
                     modifier = Modifier
                         .weight(1f)
-                        .padding(horizontal = capsuleFieldGutter(collapse)),
+                        .padding(horizontal = capsuleFieldGutter(collapse))
+                        // The 48 dp touch band follows the capsule down
+                        // as far as the slot lets it, so a compact
+                        // capsule sitting on the slot's bottom edge is
+                        // covered edge to edge by the band that answers
+                        // the two-step tap — see [addressFieldTouchShift].
+                        .offset(y = addressFieldTouchShift(collapse, edit)),
                 )
 
                 if (controlScale > 0f) {
@@ -989,8 +1140,10 @@ internal fun BottomToolbar(
         // underneath it still take every tap.
         //
         // Because it is measured from `size`, the trace re-traces
-        // whatever shape the capsule currently is: 44 dp compact, 56 dp
-        // at rest, 64 dp editing, and every frame in between.
+        // whatever shape the capsule currently is: 32 dp compact, 56 dp
+        // at rest, 64 dp editing, and every frame in between — and it
+        // carries the capsule's own bottom anchor, so it stays on the
+        // outline rather than beside it.
         //
         // `state.progress` is read inside the draw lambda (and only as a
         // boundary, through `loading` above), so a ticking load
@@ -1000,6 +1153,7 @@ internal fun BottomToolbar(
                 modifier = Modifier
                     .width(drawnWidth)
                     .height(drawnHeight)
+                    .offset(y = bottomAnchor)
                     .drawWithCache {
                         // The outline only changes when the capsule's
                         // size does, so it is traced and measured here in
@@ -1176,11 +1330,13 @@ private fun capsuleHalves(size: Size, strokeWidth: Float): List<Path> {
  * of dp between focused and unfocused, which makes the pill appear to
  * grow when tapped, and the search bar wants to own the whole screen
  * on expansion. A bubble we paint ourselves gives a rock-steady 40 dp
- * pill inside the 56 dp resting capsule, 32 dp inside the 44 dp compact
- * one and 48 dp inside the 64 dp editing one — see [addressPillHeight],
- * which is the capsule's own height rule applied one level down, so the
- * gutter above and below the pill stays even in every state and the
- * pill is exactly centred for every frame of either morph.
+ * pill inside the 56 dp resting capsule, 32 dp inside the 32 dp compact
+ * one (there the pill *is* the capsule) and 48 dp inside the 64 dp
+ * editing one — see [addressPillHeight], which is the capsule's own
+ * height rule applied one level down, so the gutter above and below the
+ * pill stays even in every state and the pill is centred on the
+ * capsule — [addressPillTopShift] included — for every frame of either
+ * morph.
  *
  * The bubble is *drawn*, not laid out: the Box stays
  * [AddressFieldTouchHeight] tall throughout, so neither shrinking the
@@ -1330,7 +1486,16 @@ private fun AddressField(
     // is drawn inset by exactly what the box gained.
     val pillHeight = addressPillHeight(collapse, editProgress)
     val pillSideInset = addressPillSideInset(collapse)
+    // The vertical counterpart of that inset: the touch box has already
+    // followed the capsule as far down the slot as it may
+    // ([addressFieldTouchShift]), and this is the rest of the capsule's
+    // bottom anchor, applied in drawing only.
+    val pillTopShift = addressPillTopShift(collapse, editProgress)
     val pillSideInsetPx = with(LocalDensity.current) { pillSideInset.roundToPx() }
+    val pillTopPx = with(LocalDensity.current) {
+        ((AddressFieldTouchHeight - pillHeight) / 2f + pillTopShift).roundToPx()
+    }
+    val pillHeightPx = with(LocalDensity.current) { pillHeight.roundToPx() }
     val pillFill = colors.surfaceContainerHighest
 
     // How much of themselves the pill's own two slots still have — see
@@ -1346,17 +1511,19 @@ private fun AddressField(
                 // anchoring on the bubble rather than on the touch box
                 // around it.
                 pillBounds = IntRect(
-                    r.left.toInt() + pillSideInsetPx, r.top.toInt(),
-                    r.right.toInt() - pillSideInsetPx, r.bottom.toInt(),
+                    r.left.toInt() + pillSideInsetPx, r.top.toInt() + pillTopPx,
+                    r.right.toInt() - pillSideInsetPx,
+                    r.top.toInt() + pillTopPx + pillHeightPx,
                 )
             }
             .drawBehind {
                 val h = pillHeight.toPx()
                 val inset = pillSideInset.toPx()
-                // Centred in the touch box, which is itself centred in
-                // the capsule — so the bubble, the capsule and the text
-                // share one centre line in every state.
-                val top = (size.height - h) / 2f
+                // Centred in the touch box and then dropped by whatever
+                // is left of the capsule's bottom anchor — so the
+                // bubble, the capsule and the text share one centre line
+                // in every state, compact included.
+                val top = (size.height - h) / 2f + pillTopShift.toPx()
                 drawRoundRect(
                     color = pillFill,
                     topLeft = Offset(inset, top),
@@ -1418,6 +1585,11 @@ private fun AddressField(
                 Row(
                     modifier = Modifier
                         .fillMaxSize()
+                        // Rides the same drawing shift as the bubble it
+                        // sits in, so the label stays on the compact
+                        // capsule's centre line rather than on the touch
+                        // box's ([addressPillTopShift]).
+                        .offset(y = pillTopShift)
                         // Asymmetric at rest (16 dp of start padding
                         // against the trailing slot's own 32 dp),
                         // symmetric when compact — which is what lets
@@ -1501,8 +1673,13 @@ private fun AddressField(
                                 fontWeight = FontWeight.Medium,
                                 // One type size down at full collapse,
                                 // interpolated on the way there so the
-                                // label morphs with the capsule.
+                                // label morphs with the capsule. The
+                                // line box steps with it (bodyLarge's
+                                // 24 sp → bodyMedium's 20 sp), because
+                                // the compact capsule is sized *from*
+                                // that box — see [CapsuleCompactHeight].
                                 fontSize = addressLabelFontSize(collapse),
+                                lineHeight = addressLabelLineHeight(collapse),
                                 // Start-aligned at rest, centred in the
                                 // compact capsule (whose label padding
                                 // is symmetric by then), and *slid*

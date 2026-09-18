@@ -11,11 +11,12 @@ import org.junit.Test
  * The Safari-style minimised capsule (#40): what the compact state is
  * *shaped* like, and what a tap on it does.
  *
- * Stage 2/3's height model is tested in [CapsuleGeometryTest] and is
- * deliberately untouched here — 44 / 56 / 64 dp, the slot that never
- * moves for a scroll, editing winning over compact. What this pins down
- * is the other two things that now interpolate along the collapse (the
- * capsule's *width* and the label's type size) plus the two-step tap.
+ * Stage 2/3's height model (and #47's bottom anchor) is tested in
+ * [CapsuleGeometryTest] and is deliberately untouched here — 32 / 56 /
+ * 64 dp, the slot that never moves for a scroll, editing winning over
+ * compact. What this pins down is the other two things that interpolate
+ * along the collapse (the capsule's *width* and the label's type) plus
+ * the two-step tap.
  */
 class CapsuleCompactStateTest {
 
@@ -224,6 +225,11 @@ class CapsuleCompactStateTest {
         assertEquals(16.dp + CapsuleFieldSideGutter, capsuleLabelInset(0f, 16.dp))
         assertEquals(CapsuleCompactSidePadding, capsuleLabelInset(1f, 16.dp))
         assertEquals(CapsuleCompactSidePadding, capsuleLabelInset(1f, 4.dp))
+        // #47: the compact capsule hugs the label with 12 dp of air per
+        // side — twice the 6 dp it keeps above and below it, and the
+        // most a pill this short can carry and still read as hugging.
+        assertEquals(12.dp, CapsuleCompactSidePadding)
+        assertEquals(CapsuleCompactVerticalPadding * 2, CapsuleCompactSidePadding)
         for (step in 0..20) {
             val collapse = step / 20f
             val padding = addressLabelPadding(collapse, 16.dp)
@@ -266,7 +272,7 @@ class CapsuleCompactStateTest {
             CapsuleCompactMinWidth,
             compactCapsuleWidth(labelWidth = 20.dp, restingWidth = restingWidth),
         )
-        assertEquals(120.dp, CapsuleCompactMinWidth)
+        assertEquals(88.dp, CapsuleCompactMinWidth)
         // The floor is the *only* thing an empty label can reach for
         // (the home tab never collapses, but the geometry may not depend
         // on that).
@@ -274,6 +280,26 @@ class CapsuleCompactStateTest {
             CapsuleCompactMinWidth,
             compactCapsuleWidth(labelWidth = 0.dp, restingWidth = restingWidth),
         )
+    }
+
+    @Test
+    fun `a real host sizes the capsule, not the floor`() {
+        // What the smaller floor is for: past a handful of characters
+        // it is the label that decides the width, so the floor only
+        // catches stubs rather than quietly becoming a fixed width.
+        // `example.com` measures ~78 dp at the compact type size on a
+        // 420 dpi phone, `documentation.swarm.eth` ~163 dp.
+        for (labelWidth in listOf(78.dp, 163.dp)) {
+            val width = compactCapsuleWidth(labelWidth, restingWidth)
+            assertTrue(
+                "the floor took over at labelWidth=$labelWidth",
+                width > CapsuleCompactMinWidth,
+            )
+            assertEquals(
+                labelWidth + CapsuleCompactSidePadding * 2 + 2.dp,
+                width,
+            )
+        }
     }
 
     @Test
@@ -286,7 +312,7 @@ class CapsuleCompactStateTest {
         )
         // …and on a window too narrow for the floor, the ceiling wins:
         // a "compact" bar wider than the resting one is not a collapse.
-        assertEquals(90.dp, compactCapsuleWidth(labelWidth = 4.dp, restingWidth = 90.dp))
+        assertEquals(60.dp, compactCapsuleWidth(labelWidth = 4.dp, restingWidth = 60.dp))
     }
 
     @Test
@@ -340,6 +366,28 @@ class CapsuleCompactStateTest {
         // shrink further than the brief allows.
         assertEquals(16.sp, AddressLabelRestingFontSize)
         assertEquals(14.sp, AddressLabelCompactFontSize)
+        // The line box steps with the type (#47) — the compact capsule
+        // is measured from it, so it may not stay behind at bodyLarge's.
+        assertEquals(24.sp, AddressLabelRestingLineHeight)
+        assertEquals(20.sp, AddressLabelCompactLineHeight)
+        assertEquals(AddressLabelRestingLineHeight, addressLabelLineHeight(0f))
+        assertEquals(AddressLabelCompactLineHeight, addressLabelLineHeight(1f))
+    }
+
+    @Test
+    fun `the line box morphs with the type rather than snapping`() {
+        assertEquals(22.sp, addressLabelLineHeight(0.5f))
+        var previous = addressLabelLineHeight(0f)
+        for (step in 1..20) {
+            val line = addressLabelLineHeight(step / 20f)
+            assertTrue("line box grew at step $step", line.value <= previous.value)
+            assertTrue("line box jumped at step $step", previous.value - line.value < 0.5f)
+            previous = line
+        }
+        assertEquals(AddressLabelCompactLineHeight, previous)
+        // Overshooting springs can't take it past either end.
+        assertEquals(AddressLabelCompactLineHeight, addressLabelLineHeight(1.08f))
+        assertEquals(AddressLabelRestingLineHeight, addressLabelLineHeight(-0.08f))
     }
 
     @Test
@@ -351,6 +399,8 @@ class CapsuleCompactStateTest {
         // interpolation from silently drifting off the shipped size.
         assertEquals(Typography().bodyLarge.fontSize, AddressLabelRestingFontSize)
         assertEquals(Typography().bodyMedium.fontSize, AddressLabelCompactFontSize)
+        assertEquals(Typography().bodyLarge.lineHeight, AddressLabelRestingLineHeight)
+        assertEquals(Typography().bodyMedium.lineHeight, AddressLabelCompactLineHeight)
     }
 
     @Test
