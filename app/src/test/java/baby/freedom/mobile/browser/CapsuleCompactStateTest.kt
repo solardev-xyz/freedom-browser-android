@@ -87,6 +87,86 @@ class CapsuleCompactStateTest {
         )
     }
 
+    // ---- tap surface -----------------------------------------------
+
+    @Test
+    fun `the capsule's gutters stay the controls' while a control is on screen`() {
+        // Nothing may move under a half-collapsed bar: for as long as
+        // there is a flanking control, the air around it is its own.
+        val controlsGone = 1f / 1.6f
+        for (step in 0..10) {
+            val collapse = controlsGone * step / 10f
+            assertEquals(
+                "handover at collapse=$collapse",
+                0f,
+                capsuleGutterHandover(collapse),
+                0f,
+            )
+        }
+        assertEquals(4.dp, capsuleControlGutter(0f))
+        assertEquals(4.dp, capsuleFieldGutter(0f))
+        assertEquals(8.dp, CapsuleFieldSideGutter)
+        assertEquals(0.dp, addressPillSideInset(0f))
+    }
+
+    @Test
+    fun `the compact pill is tap surface from edge to edge`() {
+        // Once the controls are gone their gutters are nobody's, and the
+        // field's touch box takes them — which is what stops a tap near
+        // the compact capsule's rim from falling through to the text
+        // field (opening the editor on what should be the expand-only
+        // first tap) or doing nothing at all.
+        assertEquals(1f, capsuleGutterHandover(1f), 0f)
+        assertEquals(0.dp, capsuleControlGutter(1f))
+        assertEquals(0.dp, capsuleFieldGutter(1f))
+        assertEquals(CapsuleFieldSideGutter, addressPillSideInset(1f))
+    }
+
+    @Test
+    fun `the handover gives back in drawing exactly what it takes in layout`() {
+        // The pill is painted where it has always been painted: whatever
+        // the touch box swallows, the drawn inset returns.
+        for (step in 0..20) {
+            val collapse = step / 20f
+            assertEquals(
+                "pill edge moved at collapse=$collapse",
+                CapsuleFieldSideGutter.value,
+                capsuleControlGutter(collapse).value +
+                    capsuleFieldGutter(collapse).value +
+                    addressPillSideInset(collapse).value,
+                0.001f,
+            )
+        }
+        // And an overshooting spring can neither widen the box past the
+        // gutters nor push the pill out of it.
+        assertEquals(CapsuleFieldSideGutter, addressPillSideInset(1.08f))
+        assertEquals(0.dp, addressPillSideInset(-0.08f))
+    }
+
+    @Test
+    fun `the label does not move when the box under it widens`() {
+        // The label's inset is measured from the *capsule's* edge, so it
+        // is unaffected by the handover: 24 dp at rest (16 dp of pill
+        // padding over the 8 dp of gutter), the symmetric compact side
+        // padding when collapsed.
+        assertEquals(16.dp + CapsuleFieldSideGutter, capsuleLabelInset(0f, 16.dp))
+        assertEquals(CapsuleCompactSidePadding, capsuleLabelInset(1f, 16.dp))
+        assertEquals(CapsuleCompactSidePadding, capsuleLabelInset(1f, 4.dp))
+        for (step in 0..20) {
+            val collapse = step / 20f
+            val padding = addressLabelPadding(collapse, 16.dp)
+            assertTrue("negative label padding at collapse=$collapse", padding >= 0.dp)
+            assertEquals(
+                "label moved at collapse=$collapse",
+                capsuleLabelInset(collapse, 16.dp).value,
+                padding.value +
+                    capsuleControlGutter(collapse).value +
+                    capsuleFieldGutter(collapse).value,
+                0.001f,
+            )
+        }
+    }
+
     // ---- width -----------------------------------------------------
 
     @Test
