@@ -808,6 +808,15 @@ private fun buildRefreshableWebView(
                 // aborted, it is merely quick: its visit is parked and
                 // recorded by `onPageCommitVisible` instead of being
                 // dropped here (see [visitToFlush]).
+                //
+                // Known and pre-existing, tracked as #53: a *streaming*
+                // load stopped mid-body that then completes server-side
+                // gets a second `onPageFinished` with `currentLoadCommitted`
+                // already true, so the committed branch below records the
+                // same visit twice. The park is single-shot by construction
+                // ([PendingVisitSlot]); this branch has no per-document
+                // token, and giving it one means touching the Stop/abort
+                // latch from #41 — so it is left to #53.
                 if (display.isNotBlank() &&
                     !ErrorPage.isErrorPage(url) &&
                     isCurrent
