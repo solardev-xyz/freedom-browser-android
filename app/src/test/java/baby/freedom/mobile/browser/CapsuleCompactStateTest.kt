@@ -125,74 +125,34 @@ class CapsuleCompactStateTest {
     }
 
     @Test
-    fun `the tap surface stands back from a trailing control that is there`() {
-        // At rest Reload / Stop / × owns its 32 dp slot and the 4 dp of
-        // air out to the pill's edge, and the tap surface leaves both
-        // alone — the label's tap must not swallow the reload button.
+    fun `the trailing control is all the gesture surface ever gives up`() {
+        // The surface runs the pill's full width in every state; the one
+        // thing that keeps its own taps is Reload / Stop / ×, and it
+        // keeps them by being composed *over* the surface rather than by
+        // the surface standing back from it (#42). So the only strip of
+        // pill that is not the surface's is the slot itself: 32 dp at
+        // rest, and the 4 dp of air outboard of it — where a long-press
+        // used to reach the text field and raise the platform's selection
+        // UI — is the surface's like the rest of the pill.
         assertEquals(1f, capsulePillSlotScale(0f), 0f)
-        assertEquals(
-            32.dp + addressLabelPadding(0f, 4.dp),
-            capsuleTapSurfaceStandback(collapse = 0f, addressFocused = false),
-        )
+        assertEquals(4.dp, addressLabelPadding(0f, 4.dp))
     }
 
     @Test
-    fun `no strip of the pill falls through once the tap means Expand`() {
-        // The air outboard of the trailing slot is past the button, so
-        // standing back from it hands it to nobody: a press there reaches
-        // the transparent text field and opens the editor on what the
-        // two-step tap had decided was an expand-only first tap. From the
-        // moment the tap means Expand, the surface therefore runs the
-        // full width.
-        for (step in 0..40) {
-            val collapse = step / 40f
-            if (capsuleTapAction(collapse, addressFocused = false) != CapsuleTapAction.Expand) {
-                continue
-            }
-            assertEquals(
-                "expand-only tap with a dead strip at collapse=$collapse",
-                0.dp,
-                capsuleTapSurfaceStandback(collapse, addressFocused = false),
-            )
-        }
-    }
-
-    @Test
-    fun `the expand window opens while the trailing slot is still retreating`() {
-        // What makes the test above more than a tautology: between
-        // half-collapsed and the fraction where the slots finish
-        // retreating, the tap already means Expand *and* the slot is
-        // still on screen — which is exactly the band that used to keep
-        // a standback (and with it a hole in the compact pill).
+    fun `the trailing slot is gone well before the capsule settles compact`() {
+        // Which is what makes "the compact pill is the surface, edge to
+        // edge" true without exception: by the time the capsule is
+        // anywhere near settled there is no control left to compose over
+        // it, so a long-press anywhere on it is the URL menu's.
         val slotsGone = (0..100).map { it / 100f }.first { capsulePillSlotScale(it) <= 0f }
         assertTrue(
             "the slots should outlast half the collapse",
             slotsGone > CAPSULE_TAP_EXPAND_ABOVE,
         )
-        val midRetreat = (CAPSULE_TAP_EXPAND_ABOVE + slotsGone) / 2f
-        assertEquals(
-            CapsuleTapAction.Expand,
-            capsuleTapAction(midRetreat, addressFocused = false),
-        )
-        assertTrue(
-            "the trailing slot should still be shrinking at collapse=$midRetreat",
-            capsulePillSlotScale(midRetreat) > 0f,
-        )
-        assertEquals(0.dp, capsuleTapSurfaceStandback(midRetreat, addressFocused = false))
-    }
-
-    @Test
-    fun `the standback never outgrows the slot it protects`() {
-        val atRest = capsuleTapSurfaceStandback(collapse = 0f, addressFocused = false)
-        for (step in -2..22) {
-            val collapse = step / 20f
-            val standback = capsuleTapSurfaceStandback(collapse, addressFocused = false)
-            assertTrue("negative standback at collapse=$collapse", standback >= 0.dp)
-            assertTrue("standback grew at collapse=$collapse", standback <= atRest)
-        }
-        // A fully compact capsule is tap surface edge to edge.
-        assertEquals(0.dp, capsuleTapSurfaceStandback(1f, addressFocused = false))
-        assertEquals(0.dp, capsuleTapSurfaceStandback(1.08f, addressFocused = false))
+        assertTrue("the slots should be gone before the capsule settles", slotsGone < 1f)
+        assertEquals(0f, capsulePillSlotScale(1f), 0f)
+        // And an overshooting spring can't bring it back.
+        assertEquals(0f, capsulePillSlotScale(1.08f), 0f)
     }
 
     @Test

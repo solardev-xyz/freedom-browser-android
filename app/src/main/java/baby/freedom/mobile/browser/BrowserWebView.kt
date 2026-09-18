@@ -186,6 +186,58 @@ internal fun visitToFlush(pending: PendingVisit?, committedUrl: String?): Pendin
     pending?.takeIf { it.rawUrl == committedUrl }
 
 /**
+ * The parked visit's whole life — parked by a finish that beat its own
+ * paint, flushed by that paint, and dropped by anything else.
+ *
+ * Single-shot, because a park that outlives its own navigation records a
+ * page twice (#43). [flush] empties the slot whether or not the paint
+ * matched, and [clear] empties it whenever another document takes the
+ * screen: a page that never painted before the next one started is the
+ * aborted case the whole gate exists for, and holding on to it means a
+ * later visit to the same URL flushes the stale park on its paint *and*
+ * records its own finish — two rows for one visit, the first of which
+ * never displayed.
+ *
+ * The narrow sequence that got there: page A finishes before it paints
+ * (parked), the user taps Home before A's paint arrives, and the
+ * `about:blank` branches — which return early rather than flush — left
+ * the park standing. It is a lifecycle rather than a `var` so that
+ * "recorded exactly once per committed document" is a property of the
+ * type and not of remembering to null a field in four callbacks.
+ */
+internal class PendingVisitSlot {
+    private var parked: PendingVisit? = null
+
+    /** What is currently parked, if anything. For tests and assertions. */
+    val pending: PendingVisit?
+        get() = parked
+
+    /** Park [visit] until the paint it is waiting for arrives. */
+    fun park(visit: PendingVisit) {
+        parked = visit
+    }
+
+    /**
+     * A new document is starting: whatever is parked belongs to the
+     * previous one and never painted, so it goes no further.
+     */
+    fun clear() {
+        parked = null
+    }
+
+    /**
+     * The paint for [committedUrl] landed: the row to record, if the park
+     * was waiting for exactly this document ([visitToFlush]). Empties the
+     * slot either way — the park gets one paint to be redeemed by.
+     */
+    fun flush(committedUrl: String?): PendingVisit? {
+        val flushed = visitToFlush(parked, committedUrl)
+        parked = null
+        return flushed
+    }
+}
+
+/**
  * What [BrowserState.progress] should become for a chrome-client
  * `onProgressChanged([newProgress])`.
  *
@@ -466,8 +518,10 @@ private fun buildRefreshableWebView(
     // `onPageCommitVisible` says the page really is on screen (see
     // [visitToFlush]). Without it the fastest pages — the ones that
     // finish loading in the millisecond before the compositor's first
-    // frame — were dropped from history by the gate above.
-    var pendingVisit: PendingVisit? = null
+    // frame — were dropped from history by the gate above. Single-shot:
+    // one paint to be redeemed by, and every navigation that starts
+    // empties it (see [PendingVisitSlot]).
+    val pendingVisit = PendingVisitSlot()
 
     // The dweb URL we already prompted a node recovery + retry for. A
     // main-frame load through the interceptor that dies mid-body
@@ -605,9 +659,22 @@ private fun buildRefreshableWebView(
                     state.progress = -1
                     lastLoadedDisplayUrl = null
                     currentLoadCommitted = false
+                    // Home is a navigation like any other: a page that
+                    // finished but had not painted when the user tapped it
+                    // never displayed, and the `about:blank` branch of
+                    // `onPageCommitVisible` returns early rather than
+                    // flushing — so without this the park would sit there
+                    // until some later visit to the same URL painted, and
+                    // be recorded a second time (#43).
+                    pendingVisit.clear()
                     return
                 }
                 currentLoadCommitted = false
+                // Whatever is parked belongs to the document this one is
+                // replacing, and it never painted (a paint is what would
+                // have flushed it). Dropping it here is what keeps the
+                // park single-shot: it cannot survive its own navigation.
+                pendingVisit.clear()
                 // Entering a virtual origin: expire anything page JS
                 // managed to plant via document.cookie before this
                 // page gets a chance to read it.
@@ -656,8 +723,7 @@ private fun buildRefreshableWebView(
                 // this is the moment it becomes real. Anything parked
                 // that *isn't* this document never painted, so it goes
                 // no further either way.
-                val flushed = visitToFlush(pendingVisit, url)
-                pendingVisit = null
+                val flushed = pendingVisit.flush(url)
                 if (flushed != null) repo.recordVisit(flushed.display, flushed.title)
             }
 
@@ -681,6 +747,13 @@ private fun buildRefreshableWebView(
                     state.canGoBack = view?.canGoBack() == true
                     state.canGoForward = view?.canGoForward() == true
                     state.progress = -1
+                    // …and drop the park for the same reason as the
+                    // `onPageStarted` branch: home has the screen now, so
+                    // a page that finished but had not painted by the
+                    // time the user left it never will (#43). This is the
+                    // branch that catches the *back* gesture onto the
+                    // blank entry, which gets no `onPageStarted` at all.
+                    pendingVisit.clear()
                     return
                 }
                 // Dismiss the pull-to-refresh spinner once the page has
@@ -735,6 +808,15 @@ private fun buildRefreshableWebView(
                 // aborted, it is merely quick: its visit is parked and
                 // recorded by `onPageCommitVisible` instead of being
                 // dropped here (see [visitToFlush]).
+                //
+                // Known and pre-existing, tracked as #53: a *streaming*
+                // load stopped mid-body that then completes server-side
+                // gets a second `onPageFinished` with `currentLoadCommitted`
+                // already true, so the committed branch below records the
+                // same visit twice. The park is single-shot by construction
+                // ([PendingVisitSlot]); this branch has no per-document
+                // token, and giving it one means touching the Stop/abort
+                // latch from #41 — so it is left to #53.
                 if (display.isNotBlank() &&
                     !ErrorPage.isErrorPage(url) &&
                     isCurrent
@@ -742,7 +824,7 @@ private fun buildRefreshableWebView(
                     if (currentLoadCommitted) {
                         repo.recordVisit(display, state.title)
                     } else if (url != null) {
-                        pendingVisit = PendingVisit(url, display, state.title)
+                        pendingVisit.park(PendingVisit(url, display, state.title))
                     }
                 }
 

@@ -67,6 +67,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.BiasAlignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.drawWithCache
 import androidx.compose.ui.focus.FocusRequester
@@ -782,37 +783,6 @@ internal fun capsulePillSlotScale(collapse: Float): Float =
     (1f - collapse * CONTROL_COLLAPSE_RATE).coerceIn(0f, 1f)
 
 /**
- * How far the capsule's tap surface stands back from the pill's trailing
- * edge, so the trailing control keeps answering for its own slot.
- *
- * The surface covers the pill edge to edge except for this: the trailing
- * slot ([capsulePillSlotScale] of it, since the slot narrows as it
- * retreats) plus the air between that slot and the pill's edge, which is
- * *outboard* of the button and so cannot be reclaimed without covering
- * the button itself.
- *
- * Which is why the standback goes to zero the moment the tap is an
- * [CapsuleTapAction.Expand]. Held back, that outboard strip is nobody's:
- * it is past the shrinking button, so a press there falls through to the
- * transparent text field underneath and opens the editor and the keyboard
- * on what the two-step tap had decided was an expand-only first tap.
- * Between half-collapsed and `1 / CONTROL_COLLAPSE_RATE` — the frames
- * where the tap already means Expand but the slot has not finished
- * retreating — that would be a ~8 dp hole in the rule that *every* pixel
- * of a mostly-compact pill expands the bar. The button it covers there is
- * a ≤ 6 dp sliver mid-spring, far too small to aim at and never at rest
- * (the fraction only settles at 0 or 1), so the whole pill answering the
- * expand is the better trade.
- */
-internal fun capsuleTapSurfaceStandback(collapse: Float, addressFocused: Boolean): Dp {
-    val slotScale = capsulePillSlotScale(collapse)
-    val expands = capsuleTapAction(collapse, addressFocused) == CapsuleTapAction.Expand
-    if (slotScale <= 0f || expands) return 0.dp
-    return CapsuleTrailingSlotSize * slotScale +
-        addressLabelPadding(collapse, AddressPillTrailingInset)
-}
-
-/**
  * Stroke of the load-progress trace that runs along the capsule's own
  * outline. Thin enough to read as a highlight on the edge rather than a
  * second border; drawn *over* the capsule, so it costs no layout height
@@ -1428,6 +1398,21 @@ private fun Modifier.collapsingControl(
 }
 
 /**
+ * The address pill's trailing slot — Clear / Stop / Reload — as a box of
+ * its own, retreating into the pill's trailing edge with everything else
+ * the compact capsule drops ([capsulePillSlotScale]).
+ *
+ * Stated once because the slot is laid out twice: the label's row
+ * reserves it (so the URL beside it never re-wraps when Reload becomes
+ * Stop, and so the reservation is exactly as wide as the thing filling
+ * it), and the control itself is composed over the pill's gesture
+ * surface, which has to be *above* the text field and so cannot be
+ * inside the row. See [AddressField].
+ */
+private fun Modifier.capsuleTrailingSlot(slotScale: Float): Modifier =
+    collapsingControl(slotScale, towardsStart = false).size(CapsuleTrailingSlotSize)
+
+/**
  * Phase of the indeterminate edge sweep, 0..1 per lap. Kept in its own
  * composable so the infinite transition is only created while a tab is
  * actually resolving.
@@ -1928,6 +1913,15 @@ private fun AddressField(
                     // beside it doesn't re-wrap or re-ellipsise when a
                     // load starts or finishes.
                     //
+                    // Reserved here, *filled* outside the field: the
+                    // control has to sit above the pill's gesture surface
+                    // to keep its own taps, and that surface has to sit
+                    // above the text field (see below). So what the row
+                    // lays out is the empty slot, and the button is
+                    // composed over it with the same
+                    // [Modifier.capsuleTrailingSlot] — one box, laid out
+                    // twice, so the two can't drift apart.
+                    //
                     // The one thing that moves it is the collapse: the
                     // slot retreats into the pill's trailing edge along
                     // with the badge, because a minimised bar that is
@@ -1937,60 +1931,8 @@ private fun AddressField(
                     // way it restores Back, the tab counter and the
                     // menu — and the load's own progress keeps being
                     // drawn on the compact capsule's edge throughout.
-                    //
-                    // Which control: see [capsuleTrailingControl]. The
-                    // `addressBarEdited` guard inside it matters once the
-                    // user submits — submit() resets that flag (to
-                    // dismiss the suggestions panel) but intentionally
-                    // leaves focus alone, so without the check the ×
-                    // would stay visible while the page is already
-                    // loading; now that slot correctly becomes Stop.
-                    val trailing = capsuleTrailingControl(
-                        addressFocused = addressFocused,
-                        addressBarEdited = addressBarEdited,
-                        editBufferEmpty = fieldValue.text.isEmpty(),
-                        loading = loading,
-                        // Reload needs something to reload: either a
-                        // loaded page or a committed address. Mirrors
-                        // the guard on [BrowserScreen]'s onReload.
-                        canReload = state.url.isNotBlank() ||
-                            state.addressBarText.isNotBlank(),
-                    )
                     if (slotScale > 0f) {
-                        Box(
-                            modifier = Modifier
-                                .collapsingControl(slotScale, towardsStart = false)
-                                .size(CapsuleTrailingSlotSize),
-                            contentAlignment = Alignment.Center,
-                        ) {
-                            when (trailing) {
-                                CapsuleTrailingControl.None -> Unit
-                                CapsuleTrailingControl.Clear -> CapsuleTrailingButton(
-                                    icon = Icons.Filled.Clear,
-                                    contentDescription = "Clear",
-                                    onClick = {
-                                        fieldValue = TextFieldValue("")
-                                        onAddressQueryChanged("")
-                                        // × is a "start over" gesture — drop
-                                        // the suggestions panel and wait for
-                                        // the next keystroke before showing
-                                        // it again.
-                                        onAddressEditedChanged(false)
-                                    },
-                                )
-                                CapsuleTrailingControl.Stop -> CapsuleTrailingButton(
-                                    icon = Icons.Filled.Close,
-                                    contentDescription = "Stop loading",
-                                    tint = colors.primary,
-                                    onClick = onStop,
-                                )
-                                CapsuleTrailingControl.Reload -> CapsuleTrailingButton(
-                                    icon = Icons.Filled.Refresh,
-                                    contentDescription = "Reload",
-                                    onClick = onReload,
-                                )
-                            }
-                        }
+                        Box(modifier = Modifier.capsuleTrailingSlot(slotScale))
                     }
                 }
             },
@@ -2008,22 +1950,22 @@ private fun AddressField(
         // isn't even editable text yet.
         //
         // It covers the touch box **edge to edge** rather than just the
-        // label's own layout box. The pill's paddings are part of the
-        // pill the user is aiming at, and a press that landed in one used
-        // to fall through to the text field underneath: on a compact
-        // capsule that opened the editor and the keyboard on what should
-        // have been the first, expand-only tap, and it raised raw text
-        // selection on what should have been the URL-actions long-press.
-        // The one thing the surface stands back from is the trailing
-        // control slot, which has its own button to answer for Reload /
-        // Stop / Clear; once that slot has retreated into the pill's edge
-        // (`slotScale == 0`, i.e. the compact bar) — or as soon as the tap
-        // means Expand, whichever comes first, see
-        // [capsuleTapSurfaceStandback] — there is nothing to stand back
-        // from and the surface runs the full width — which,
-        // together with [capsuleGutterHandover] widening the box into the
-        // capsule's gutters, makes every pixel of the compact pill answer
-        // the tap.
+        // label's own layout box, in every state — resting, compact and
+        // every frame between. The pill's paddings are part of the pill
+        // the user is aiming at, and a press that landed in one used to
+        // fall through to the text field underneath: on a compact capsule
+        // that opened the editor and the keyboard on what should have
+        // been the first, expand-only tap, and anywhere it raised raw
+        // text selection — the platform's own Copy/Paste toolbar and two
+        // selection handles floating over the page — on what should have
+        // been the URL-actions long-press (#42). Nothing stands back from
+        // the trailing control any more: the control is composed *over*
+        // this surface instead (see below), so it keeps answering for
+        // Reload / Stop / Clear without the surface having to leave a
+        // strip of pill — its own 4 dp of outboard air — to the field.
+        // Together with [capsuleGutterHandover] widening the box into the
+        // capsule's gutters, that makes every pixel of the pill the
+        // user's, in both gestures.
         //
         // Composed only while the field is unfocused, so the moment the
         // capsule becomes the editor it is gone and every touch inside
@@ -2044,12 +1986,6 @@ private fun AddressField(
             Box(
                 modifier = Modifier
                     .matchParentSize()
-                    // What the trailing control still owns: its own slot
-                    // plus the air between it and the pill's edge — and
-                    // nothing at all once the tap means Expand, so that
-                    // strip can't fall through to the field underneath.
-                    // See [capsuleTapSurfaceStandback].
-                    .padding(end = capsuleTapSurfaceStandback(collapse, addressFocused))
                     .combinedClickable(
                         interactionSource = pillInteractionSource,
                         // No ripple: the pill is a painted bubble, and a
@@ -2081,6 +2017,83 @@ private fun AddressField(
                         },
                     ),
             )
+        }
+
+        // The trailing control, filling the slot the label's row reserved
+        // for it — composed here, last, so it sits above the gesture
+        // surface: the surface covers the pill edge to edge, and the one
+        // thing inside the pill that has to keep its own taps is this
+        // button. Hit-testing takes the topmost sibling, so Reload / Stop
+        // / × answer here while every other pixel of the pill answers the
+        // surface below, and the text field — bottom of the stack, and
+        // not editable text until it is focused — answers nowhere at all.
+        //
+        // Positioned from the pill's trailing edge exactly as the row
+        // positioned it: the slot's own box ([Modifier.capsuleTrailingSlot],
+        // the same one the reservation uses), inset by the row's trailing
+        // padding, on the label's centre line ([addressPillTopShift], the
+        // row's own offset).
+        //
+        // Clipped to that slot while the surface is there. A Material
+        // icon button quietly claims a 48 dp touch target around its
+        // 32 dp self, which over the surface would hand it ~8 dp of label
+        // on one side and the pill's outboard air on the other — the very
+        // strip #42 is about. Focused, there is no surface to take it
+        // from and the × keeps the full target.
+        //
+        // Which control: see [capsuleTrailingControl]. The
+        // `addressBarEdited` guard inside it matters once the user
+        // submits — submit() resets that flag (to dismiss the suggestions
+        // panel) but intentionally leaves focus alone, so without the
+        // check the × would stay visible while the page is already
+        // loading; now that slot correctly becomes Stop.
+        val trailing = capsuleTrailingControl(
+            addressFocused = addressFocused,
+            addressBarEdited = addressBarEdited,
+            editBufferEmpty = fieldValue.text.isEmpty(),
+            loading = loading,
+            // Reload needs something to reload: either a loaded page or a
+            // committed address. Mirrors the guard on [BrowserScreen]'s
+            // onReload.
+            canReload = state.url.isNotBlank() || state.addressBarText.isNotBlank(),
+        )
+        if (slotScale > 0f) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.CenterEnd)
+                    .offset(y = pillTopShift)
+                    .padding(end = addressLabelPadding(collapse, AddressPillTrailingInset))
+                    .then(if (addressFocused) Modifier else Modifier.clipToBounds())
+                    .capsuleTrailingSlot(slotScale),
+                contentAlignment = Alignment.Center,
+            ) {
+                when (trailing) {
+                    CapsuleTrailingControl.None -> Unit
+                    CapsuleTrailingControl.Clear -> CapsuleTrailingButton(
+                        icon = Icons.Filled.Clear,
+                        contentDescription = "Clear",
+                        onClick = {
+                            fieldValue = TextFieldValue("")
+                            onAddressQueryChanged("")
+                            // × is a "start over" gesture — drop the
+                            // suggestions panel and wait for the next
+                            // keystroke before showing it again.
+                            onAddressEditedChanged(false)
+                        },
+                    )
+                    CapsuleTrailingControl.Stop -> CapsuleTrailingButton(
+                        icon = Icons.Filled.Close,
+                        contentDescription = "Stop loading",
+                        tint = colors.primary,
+                        onClick = onStop,
+                    )
+                    CapsuleTrailingControl.Reload -> CapsuleTrailingButton(
+                        icon = Icons.Filled.Refresh,
+                        contentDescription = "Reload",
+                        onClick = onReload,
+                    )
+                }
+            }
         }
 
         // The long-press menu. Anchored on the pill's own bounds, above
