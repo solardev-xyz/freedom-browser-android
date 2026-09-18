@@ -180,9 +180,20 @@ internal fun finishedLoadIsCurrent(finishedUrl: String?, currentUrl: String?): B
  * resolves must still land on `swarm.eth`.
  *
  * The probe's own navigation is not somebody else's: [probeTarget] is
- * the URL it will hand the WebView, so its commit leaves it alone. (In
- * practice `loadUrl` has already deregistered it by then — this is the
- * belt to that braces.)
+ * the URL it will hand the WebView, so its commit leaves it alone.
+ * Today that never actually fires for the probe's own commit — a probe
+ * navigates through [BrowserState.loadUrl], which deregisters it before
+ * the WebView is even asked to load, so by the time the commit arrives
+ * there is no probe left to spare. It is kept as the belt to those
+ * braces: a probe that ever learns to navigate by some other door must
+ * still not cancel itself.
+ *
+ * What the clause does do today is spare a page's probe when some
+ * *other* navigation commits exactly the address the probe is headed
+ * for — deliberate, and narrow: the tab is already at the probe's
+ * destination, so the probe can only re-land it there or, if the
+ * content never resolves, swap it for the error page naming that same
+ * address.
  */
 internal fun commitCancelsPendingProbe(
     probeSource: SubmitSource?,

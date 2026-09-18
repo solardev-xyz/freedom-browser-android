@@ -179,6 +179,10 @@ class RendererSubmitTest {
 
     @Test
     fun `a probe's own navigation is not the one that supersedes it`() {
+        // Belt, not braces: a probe navigates via `loadUrl`, which
+        // deregisters it before the load starts, so in practice no
+        // probe is still pending when its own destination commits (see
+        // [commitCancelsPendingProbe]).
         assertFalse(
             commitCancelsPendingProbe(
                 probeSource = SubmitSource.Renderer,
@@ -277,10 +281,15 @@ class RendererSubmitTest {
     }
 
     @Test
-    fun `the user's probe still survives a trip through home`() {
-        // The user types `swarm.eth` and taps Home while it resolves:
-        // the resolve is still theirs, and only their next submit or
-        // Stop ends it.
+    fun `a page's trip to the blank entry leaves the user's probe alone`() {
+        // Not a Home *tap*: that is the user's own submit, and it ends
+        // their own probe twice over — `submit` cancels before it routes
+        // anywhere, and `navigateHome` cancels again. What survives a
+        // blank commit is the probe nobody submitted over: the user
+        // types `swarm.eth` and, while it resolves, the page they are
+        // leaving runs `history.back()` onto the blank home entry. The
+        // resolve is still theirs, and only their next submit or Stop
+        // ends it.
         assertFalse(
             commitCancelsPendingProbe(
                 probeSource = SubmitSource.User,
@@ -288,6 +297,27 @@ class RendererSubmitTest {
                 committedUrl = "about:blank",
             ),
         )
+    }
+
+    @Test
+    fun `tapping Home ends the user's own probe`() {
+        // The other half of the rule above, and the reason the test
+        // before it is not about the Home button: the toolbar's Home
+        // goes through the user's own submit, which cancels on its way
+        // through, and this is the second cancel on the same tap. A
+        // user probe that
+        // outlived a Home tap would navigate the tab off Home minutes
+        // after they asked to be there.
+        val state = BrowserState(id = 1L)
+        val probe = Job()
+        state.beginPendingProbe(probe, SubmitSource.User, target = "ens://swarm.eth")
+
+        state.navigateHome()
+
+        assertTrue(probe.isCancelled)
+        assertNull(state.pendingProbeJob)
+        assertNull(state.pendingProbeSource)
+        assertNull(state.pendingProbeTarget)
     }
 
     @Test
