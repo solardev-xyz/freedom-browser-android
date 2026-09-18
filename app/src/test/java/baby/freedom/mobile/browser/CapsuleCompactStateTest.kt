@@ -405,17 +405,47 @@ class CapsuleCompactStateTest {
         // inset in front, and behind it 4 dp of pill inset, the 32 dp
         // trailing slot, 4 dp of field gutter, tabs and overflow, 4 dp
         // of capsule gutter.
-        val max = addressLabelMaxWidth(restingWidth, canGoBack = true, hasBadge = false)
+        val max = addressLabelMaxWidth(restingWidth, hasBadge = false)
         assertEquals(restingWidth - 212.dp, max)
         assertTrue("a phone-width bar must leave room for a domain", max > 120.dp)
-        // Losing the Back button gives the label its 48 dp.
-        assertEquals(
-            max + CapsuleControlSize,
-            addressLabelMaxWidth(restingWidth, canGoBack = false, hasBadge = false),
-        )
+        // The badge takes its 18 dp net out of the same width.
+        assertEquals(max - 18.dp, addressLabelMaxWidth(restingWidth, hasBadge = true))
         // …and on a window narrower than its own chrome it bottoms out
         // rather than going negative.
-        assertEquals(0.dp, addressLabelMaxWidth(60.dp, canGoBack = true, hasBadge = false))
+        assertEquals(0.dp, addressLabelMaxWidth(60.dp, hasBadge = false))
+    }
+
+    @Test
+    fun `history appearing under a compact bar cannot re-ellipsise the label`() {
+        // `canGoBack` is the one thing in the resting row that flips
+        // while the domain stays put — an in-page `pushState` gives the
+        // tab its first history entry without changing the host — and it
+        // flips while the Back button it belongs to is not even on
+        // screen. So the width the ellipsis is settled against reserves
+        // the button's slot either way: it is the *narrower* of the two
+        // rows, the one with a Back button in it.
+        //
+        // Everything behind the label — 4 dp of pill inset, the 32 dp
+        // trailing slot, 4 dp of field gutter, tabs and overflow, 4 dp
+        // of capsule gutter.
+        val behind = 140.dp
+        val withHistory =
+            restingWidth - addressLabelRestingInset(canGoBack = true, hasBadge = false) - behind
+        val withoutHistory =
+            restingWidth - addressLabelRestingInset(canGoBack = false, hasBadge = false) - behind
+        assertEquals(withHistory + CapsuleControlSize, withoutHistory)
+        // A threshold that followed the history state would re-ellipsise
+        // a long name mid-session and step the compact capsule — which
+        // is sized from that one layout — by the button's 48 dp in a
+        // single unanimated frame. It takes the narrower row instead.
+        assertEquals(withHistory, addressLabelMaxWidth(restingWidth, hasBadge = false))
+        // The resting *inset* does still follow the button — there the
+        // button is on screen, taking the room it moved the label out of.
+        assertTrue(
+            "the Back button still moves the resting label",
+            addressLabelRestingInset(canGoBack = true, hasBadge = false) >
+                addressLabelRestingInset(canGoBack = false, hasBadge = false),
+        )
     }
 
     @Test

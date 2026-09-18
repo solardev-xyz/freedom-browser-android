@@ -96,6 +96,9 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.semantics.isTraversalGroup
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.traversalIndex
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.input.ImeAction
@@ -637,14 +640,28 @@ internal fun addressLabelRestingInset(canGoBack: Boolean, hasBadge: Boolean): Dp
  * and elided forms halfway through a collapse. The compact capsule is
  * then sized to whatever that one layout came out as, so a label the
  * capsule was built to hold cannot elide inside it either.
+ *
+ * The Back button's slot is reserved here **whether or not there is
+ * history to pop**, which is the one place this parts company with
+ * [addressLabelRestingInset]. `canGoBack` is the only thing in the
+ * resting row that flips while the label itself stays put — an in-page
+ * `pushState` gives a tab its first history entry without changing the
+ * domain — and the compact capsule is sized from this one layout, so
+ * letting the threshold follow it would re-ellipsise a long name and
+ * step the compact capsule by the Back button's 48 dp in a single
+ * frame, with no animation and no Back button on screen to explain it.
+ * Reserved either way, what the label *says* depends only on the domain
+ * and the window; only where it starts from still follows the button,
+ * and there the button is on screen taking the room. The cost is a
+ * domain between the two thresholds eliding on a tab with no history —
+ * a settled ellipsis is worth more than the last 48 dp.
  */
 internal fun addressLabelMaxWidth(
     restingWidth: Dp,
-    canGoBack: Boolean,
     hasBadge: Boolean,
 ): Dp = (
     restingWidth -
-        addressLabelRestingInset(canGoBack, hasBadge) -
+        addressLabelRestingInset(canGoBack = true, hasBadge = hasBadge) -
         AddressPillTrailingInset -
         CapsuleTrailingSlotSize -
         CapsuleFieldPadding -
@@ -696,6 +713,29 @@ internal fun addressLabelCenterOffset(
     0.dp,
     collapse.coerceIn(0f, 1f),
 )
+
+/**
+ * The order an accessibility service reads the capsule's children in.
+ *
+ * Stated rather than inherited, because the label's *drawing* order is
+ * now the opposite of its reading order: the domain is a sibling of the
+ * capsule, composed after the controls so that it paints over them
+ * (#55), and a service left to the default order therefore announces it
+ * **after** the tabs and overflow buttons — the bar's primary trust
+ * element arriving at the end of the swipe, behind two buttons that say
+ * nothing about where the user is. (Confirmed on the AVD: the label was
+ * the last node in the bar's `uiautomator` dump.)
+ *
+ * The order stated here is the one the bar has always read in: the
+ * domain right after Back and ahead of the field it labels, with the
+ * trailing controls last. It is the capsule's own reading order, so the
+ * capsule is the traversal group that carries it.
+ */
+private const val CapsuleOrderBack = 0f
+private const val CapsuleOrderLabel = 1f
+private const val CapsuleOrderField = 2f
+private const val CapsuleOrderTabs = 3f
+private const val CapsuleOrderOverflow = 4f
 
 /**
  * Narrowest the compact capsule ever gets. Safari's minimised bar keeps
@@ -1269,7 +1309,10 @@ internal fun BottomToolbar(
         // grows it (see [capsuleSlotHeight]).
         modifier = modifier
             .fillMaxWidth()
-            .height(slotHeight),
+            .height(slotHeight)
+            // One bar, read in the order it is laid out rather than in
+            // the order it is painted — see [CapsuleOrderLabel].
+            .semantics { isTraversalGroup = true },
         contentAlignment = Alignment.Center,
     ) {
         // The resting width is whatever the caller's slot offers; the
@@ -1283,7 +1326,6 @@ internal fun BottomToolbar(
         // narrows (see [addressLabelMaxWidth]).
         val labelMaxWidth = addressLabelMaxWidth(
             restingWidth = restingWidth,
-            canGoBack = state.canGoBack,
             hasBadge = badge != null,
         )
         val labelWidth = remember(restingLabel, restingLabelStyle, labelMaxWidth, density) {
@@ -1366,11 +1408,13 @@ internal fun BottomToolbar(
                 // anchor goes away with the button it belongs to.
                 if (state.canGoBack && controlScale > 0f) {
                     Box(
-                        modifier = Modifier.collapsingControl(
-                            controlScale,
-                            towardsStart = true,
-                            topShift = controlTopShift,
-                        ),
+                        modifier = Modifier
+                            .collapsingControl(
+                                controlScale,
+                                towardsStart = true,
+                                topShift = controlTopShift,
+                            )
+                            .semantics { traversalIndex = CapsuleOrderBack },
                     ) {
                         // Expressive shape variants: the icon buttons morph
                         // from round to a squarer pressed shape on touch.
@@ -1406,26 +1450,31 @@ internal fun BottomToolbar(
                         // sitting on the slot's bottom edge is covered
                         // edge to edge by the band that answers the
                         // two-step tap — see [addressFieldTouchShift].
-                        .offset(y = addressFieldTouchShift(collapse, edit, compactHeight)),
+                        .offset(y = addressFieldTouchShift(collapse, edit, compactHeight))
+                        .semantics { traversalIndex = CapsuleOrderField },
                 )
 
                 if (controlScale > 0f) {
                     Box(
-                        modifier = Modifier.collapsingControl(
-                            controlScale,
-                            towardsStart = false,
-                            topShift = controlTopShift,
-                        ),
+                        modifier = Modifier
+                            .collapsingControl(
+                                controlScale,
+                                towardsStart = false,
+                                topShift = controlTopShift,
+                            )
+                            .semantics { traversalIndex = CapsuleOrderTabs },
                     ) {
                         TabsCountButton(count = tabCount, onClick = onOpenTabs)
                     }
 
                     Box(
-                        modifier = Modifier.collapsingControl(
-                            controlScale,
-                            towardsStart = false,
-                            topShift = controlTopShift,
-                        ),
+                        modifier = Modifier
+                            .collapsingControl(
+                                controlScale,
+                                towardsStart = false,
+                                topShift = controlTopShift,
+                            )
+                            .semantics { traversalIndex = CapsuleOrderOverflow },
                     ) {
                         OverflowMenuButton(
                             state = state,
@@ -1515,7 +1564,21 @@ internal fun BottomToolbar(
                         transformOrigin = TransformOrigin(0.5f, 0.5f)
                         translationX = labelOffset.toPx() * labelDirection
                         translationY = bottomAnchor.toPx()
-                    },
+                    }
+                    // Painted last, read second — the domain is the one
+                    // thing in the bar a screen-reader user is here for
+                    // (see [CapsuleOrderLabel]).
+                    //
+                    // *Inside* the layer, not outside it: a semantics
+                    // node reports the bounds of the coordinator it sits
+                    // on, so hung in front of the `graphicsLayer` it
+                    // would hand the accessibility focus rectangle the
+                    // label's untranslated layout box — dead centre of
+                    // the slot — instead of the pixels the label is
+                    // actually drawn on (seen in the AVD's `uiautomator`
+                    // dump as the label's bounds jumping 89 px right of
+                    // its ink).
+                    .semantics { traversalIndex = CapsuleOrderLabel },
             )
         }
 
