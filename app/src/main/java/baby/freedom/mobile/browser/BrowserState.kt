@@ -61,6 +61,26 @@ class BrowserState(val id: Long) {
     var resolving by mutableStateOf(false)
         internal set
 
+    /**
+     * True between a Stop tap and the tab's next navigation.
+     *
+     * Chromium answers `stopLoading()` on an *uncommitted* navigation
+     * with one last `onProgressChanged` carrying whatever percentage
+     * the aborted fetch had reached — and then, because that document
+     * never commits and never finishes, nothing further. Left alone,
+     * that single late callback re-lights the capsule's edge trace and
+     * puts the Stop control back in the trailing slot for good (#41).
+     * It is the same late-progress quirk the home path already guards
+     * against in [BrowserWebViewHost]'s chrome client; this latch is
+     * the general form of that guard.
+     *
+     * Set by [stopProgress], cleared by anything that starts a fresh
+     * load: [loadUrl], a renderer-initiated main-frame navigation, and
+     * navigation commit itself.
+     */
+    var loadAborted by mutableStateOf(false)
+        internal set
+
     var canGoBack by mutableStateOf(false)
         internal set
     var canGoForward by mutableStateOf(false)
@@ -140,6 +160,9 @@ class BrowserState(val id: Long) {
      */
     fun loadUrl(url: String, displayPrefix: String? = null) {
         cancelPendingProbe()
+        // A new load supersedes whatever the last Stop aborted, so the
+        // progress latch opens again.
+        loadAborted = false
         val loadable = Gateways.toLoadable(url)
         pendingUrl = loadable
         if (displayPrefix != null) {
@@ -216,6 +239,9 @@ class BrowserState(val id: Long) {
     fun stopProgress() {
         progress = -1
         resolving = false
+        // …and keep it cleared: see [loadAborted] for the late
+        // callback this latches out.
+        loadAborted = true
     }
 
     /**
@@ -240,6 +266,7 @@ class BrowserState(val id: Long) {
         title = ""
         progress = -1
         resolving = false
+        loadAborted = false
         canGoBack = false
         canGoForward = false
         override = null

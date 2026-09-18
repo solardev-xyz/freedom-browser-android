@@ -94,6 +94,53 @@ class StopRollbackTest {
     }
 
     @Test
+    fun `a stopped load's late progress callback may not re-light the capsule`() {
+        // The other half of the same abort: Chromium answers
+        // `stopLoading()` on an uncommitted navigation with one last
+        // progress callback carrying the percentage it died at — not
+        // 100, and never followed by anything, since that document
+        // neither commits nor finishes. Adopted, it puts the trace and
+        // the Stop control back for good (#41).
+        assertEquals(
+            -1,
+            progressForCallback(newProgress = 37, isHomeSentinel = false, aborted = true),
+        )
+    }
+
+    @Test
+    fun `an ordinary progress callback still draws`() {
+        assertEquals(
+            37,
+            progressForCallback(newProgress = 37, isHomeSentinel = false, aborted = false),
+        )
+        // Both ends of Chromium's counter are the idle sentinel.
+        assertEquals(
+            -1,
+            progressForCallback(newProgress = 100, isHomeSentinel = false, aborted = false),
+        )
+        // …and the home overlay is never a loading page.
+        assertEquals(
+            -1,
+            progressForCallback(newProgress = 37, isHomeSentinel = true, aborted = false),
+        )
+    }
+
+    @Test
+    fun `stop latches the tab, a fresh navigation opens it again`() {
+        val state = BrowserState(id = 1L)
+        assertFalse(state.loadAborted)
+
+        state.stopProgress()
+        assertTrue(state.loadAborted)
+        assertEquals(-1, state.progress)
+
+        // Reload / a typed URL / Home all route through loadUrl, so the
+        // next load's progress is drawn as normal.
+        state.loadUrl("https://example.com")
+        assertFalse(state.loadAborted)
+    }
+
+    @Test
     fun `a first navigation with nothing committed keeps what the user asked for`() {
         // Fresh tab, stopped mid-resolve: there is no previous page for
         // the label to misdescribe, and the pending address is the only
