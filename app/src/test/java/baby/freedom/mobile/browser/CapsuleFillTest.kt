@@ -38,8 +38,8 @@ class CapsuleFillTest {
         for ((name, colors) in schemes) {
             assertSameColor(
                 "the $name fill is not a pure function of the scheme",
-                capsuleFill(colors),
-                capsuleFill(colors),
+                capsuleFill(colors, blurred = true),
+                capsuleFill(colors, blurred = true),
             )
         }
     }
@@ -47,7 +47,7 @@ class CapsuleFillTest {
     @Test
     fun `the page reads through every surface, on both schemes`() {
         for ((name, colors) in schemes) {
-            val fill = capsuleFill(colors)
+            val fill = capsuleFill(colors, blurred = true)
             assertTrue(
                 "the $name surface should let the page through",
                 fill.alpha < 1f,
@@ -63,12 +63,12 @@ class CapsuleFillTest {
         assertSameColor(
             "light surface",
             FreedomLightColors.surface.copy(alpha = 0.68f),
-            capsuleFill(FreedomLightColors),
+            capsuleFill(FreedomLightColors, blurred = true),
         )
         assertSameColor(
             "dark surface",
             FreedomDarkColors.surfaceContainer.copy(alpha = 0.72f),
-            capsuleFill(FreedomDarkColors),
+            capsuleFill(FreedomDarkColors, blurred = true),
         )
     }
 
@@ -81,10 +81,44 @@ class CapsuleFillTest {
         for ((name, colors) in schemes) {
             assertSameColor(
                 "the compact $name pill changed colour",
-                capsuleFill(colors),
-                capsuleFill(colors),
+                capsuleFill(colors, blurred = true),
+                capsuleFill(colors, blurred = true),
             )
         }
+    }
+
+    @Test
+    fun `a device with no blur gets an opaquer light surface`() {
+        // Android 11 has no `RenderEffect.createBlurEffect`, so
+        // `rememberCapsuleBackdrop()` hands back null and the surfaces are
+        // a plain fill. 0.68 is an alpha the blur pays for: without it the
+        // page keeps its edges and reads through the field, so the light
+        // scheme falls back to the 0.94 the single capsule wore before
+        // #60.
+        val blurred = capsuleFill(FreedomLightColors, blurred = true)
+        val plain = capsuleFill(FreedomLightColors, blurred = false)
+        assertSameColor(
+            "the unblurred light surface",
+            FreedomLightColors.surface.copy(alpha = 0.94f),
+            plain,
+        )
+        assertTrue(
+            "an unblurred surface must not be the blurred one's alpha",
+            plain.alpha > blurred.alpha,
+        )
+        assertTrue("the unblurred surface stopped being glass", plain.alpha < 1f)
+    }
+
+    @Test
+    fun `the dark surface never leaned on the blur`() {
+        // Only light's alpha is the blur's to lend — a dark surface is
+        // unmistakable over any page, so taking the blur away changes
+        // nothing about it.
+        assertSameColor(
+            "the dark fill moved when the blur went away",
+            capsuleFill(FreedomDarkColors, blurred = true),
+            capsuleFill(FreedomDarkColors, blurred = false),
+        )
     }
 
     @Test
@@ -114,7 +148,7 @@ class CapsuleFillTest {
         assertTrue("the dark scheme should not be light", !dark.isLight)
         assertTrue(
             "the dark surface should be the more opaque of the two",
-            capsuleFill(dark).alpha > capsuleFill(light).alpha,
+            capsuleFill(dark, blurred = true).alpha > capsuleFill(light, blurred = true).alpha,
         )
         assertTrue(
             "a dark surface needs the stronger hairline",

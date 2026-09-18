@@ -1138,10 +1138,26 @@ private const val CAPSULE_ALPHA_DARK = 0.72f
  * 0.94 is the blur behind it ([CapsuleBlurRadius]): a blurred backdrop
  * has no edges left to read as text through the fill, so the surface
  * stays a surface at an alpha that would otherwise have it dissolving
- * into the page. Devices with no blur to give fall back to a plain fill
- * — see [CapsuleBackdrop].
+ * into the page.
  */
 private const val CAPSULE_ALPHA_LIGHT = 0.68f
+
+/**
+ * Surface opacity on the **light** scheme where there is *no* blur to
+ * stand on — Android 11, the `minSdk`, where
+ * `RenderEffect.createBlurEffect` does not exist and
+ * [rememberCapsuleBackdrop] hands back `null`.
+ *
+ * The 0.68 above is an alpha the blur pays for: take the blur away and
+ * the page keeps its edges, so a busy light page reads straight through
+ * the field — the one surface that must not be ambiguous about what it
+ * is saying. So the no-blur path falls back to the 0.94 the single
+ * capsule wore before #60, which is the same trade the old chrome made
+ * on every device: a fill opaque enough to be a surface on its own.
+ * Dark is unaffected — [CAPSULE_ALPHA_DARK] never leaned on the blur to
+ * separate a dark surface from a page.
+ */
+private const val CAPSULE_ALPHA_LIGHT_UNBLURRED = 0.94f
 
 /**
  * Contrast of the hairline around each surface, per scheme: a 6 %
@@ -1185,12 +1201,19 @@ private val CapsuleShadowLight = 6.dp
  *
  * `surface` on light is the scheme's white; `surfaceContainer` on dark is
  * the tone the capsule has always been. Both at [CAPSULE_ALPHA_LIGHT] /
- * [CAPSULE_ALPHA_DARK], over whatever [CapsuleBackdrop] managed to blur
- * underneath them.
+ * [CAPSULE_ALPHA_DARK] — except that light's alpha is the blur's to
+ * lend: [blurred] is false where the device has no [CapsuleBackdrop] to
+ * give (Android 11), and the light fill goes back to the opaque
+ * [CAPSULE_ALPHA_LIGHT_UNBLURRED] it can carry on its own.
  */
-internal fun capsuleFill(colors: ColorScheme): Color =
-    if (colors.isLight) colors.surface.copy(alpha = CAPSULE_ALPHA_LIGHT)
-    else colors.surfaceContainer.copy(alpha = CAPSULE_ALPHA_DARK)
+internal fun capsuleFill(colors: ColorScheme, blurred: Boolean): Color =
+    if (colors.isLight) {
+        colors.surface.copy(
+            alpha = if (blurred) CAPSULE_ALPHA_LIGHT else CAPSULE_ALPHA_LIGHT_UNBLURRED,
+        )
+    } else {
+        colors.surfaceContainer.copy(alpha = CAPSULE_ALPHA_DARK)
+    }
 
 /** The hairline around that fill — see [CAPSULE_BORDER_ALPHA_LIGHT]. */
 internal fun capsuleBorder(colors: ColorScheme): Color = colors.onSurface.copy(
@@ -1219,8 +1242,10 @@ internal fun capsuleBorder(colors: ColorScheme): Color = colors.onSurface.copy(
  * median frame while scrolling.
  *
  * `null` below Android 12, where `RenderEffect.createBlurEffect` does not
- * exist: there the surfaces are drawn as a plain semi-transparent fill,
- * which is exactly what the capsule has always been.
+ * exist: there the surfaces are drawn as a plain semi-transparent fill —
+ * and on the light scheme at the opaquer
+ * [CAPSULE_ALPHA_LIGHT_UNBLURRED], since the alpha the blurred surface
+ * gets away with is the blur's doing (see [capsuleFill]).
  */
 @Stable
 internal class CapsuleBackdrop(
@@ -1312,7 +1337,7 @@ private fun CapsuleSurface(
     modifier: Modifier = Modifier,
 ) {
     val colors = MaterialTheme.colorScheme
-    val fill = capsuleFill(colors)
+    val fill = capsuleFill(colors, blurred = backdrop != null)
     val border = capsuleBorder(colors)
     val elevation = if (colors.isLight) CapsuleShadowLight else CapsuleShadowDark
     // The surface's own position, kept out of composition for the same

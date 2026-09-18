@@ -870,8 +870,9 @@ fun BrowserScreen(
 
     // The capsule's geometry is driven by exactly two 0→1 fractions,
     // and they are one model rather than two (see [capsuleDrawnHeight]):
-    // the capsule has three heights — 32 dp compact, 56 dp resting,
-    // 64 dp editing — and these two numbers say which.
+    // the capsule has three drawn heights — 32 dp compact, 44 dp
+    // resting, 64 dp editing, all inside a 48 dp slot — and these two
+    // numbers say which.
     //
     // Both spring on the expressive motion scheme's spatial spec rather
     // than a hand-rolled curve: it's the one every other M3 Expressive
