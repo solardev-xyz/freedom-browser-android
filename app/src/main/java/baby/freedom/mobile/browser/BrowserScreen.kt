@@ -691,7 +691,10 @@ fun BrowserScreen(
                     target.finishPendingProbe(coroutineContext.job)
                 }
             }
-            target.beginPendingProbe(ensProbe, source)
+            // The destination this probe navigates to if it resolves —
+            // so its own commit isn't mistaken for the navigation that
+            // superseded it (#54, see [commitCancelsPendingProbe]).
+            target.beginPendingProbe(ensProbe, source, target = "ens://$name$suffix")
             return
         }
 
@@ -730,7 +733,7 @@ fun BrowserScreen(
                     target.finishPendingProbe(coroutineContext.job)
                 }
             }
-            target.beginPendingProbe(contentProbe, source)
+            target.beginPendingProbe(contentProbe, source, target = contentUri)
             return
         }
 

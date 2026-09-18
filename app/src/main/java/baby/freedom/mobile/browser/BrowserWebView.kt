@@ -159,6 +159,50 @@ internal fun finishedLoadIsCurrent(finishedUrl: String?, currentUrl: String?): B
     finishedUrl == null || currentUrl == null || finishedUrl == currentUrl
 
 /**
+ * Does a main-frame commit of [committedUrl] end the tab's pending
+ * probe — the one asked for by [probeSource], aimed at [probeTarget]?
+ *
+ * A probe outlives the submit that started it by design: it waits for
+ * the node to be ready (up to `NODE_READY_TIMEOUT_MS`, longer on a cold
+ * node) and only then navigates the tab. Nothing about that is safe to
+ * carry across a *different* navigation: a page that asked for
+ * `ens://…` in the gap before the user's own plain http(s) Go unloaded
+ * it — the http(s) path registers no probe of its own, so there is no
+ * submit to supersede it — would otherwise get to move the tab a minute
+ * and a half after the page that asked is gone (#54).
+ *
+ * Whose probe dies on a commit is the same question
+ * [submitSupersedesPendingProbe] answers for submits, and the answer is
+ * the same shape: a page's probe belongs to the document that asked for
+ * it and goes when that document does, while a probe the *user* asked
+ * for is theirs to end — by their next submit, or by Stop. The user
+ * typing `swarm.eth` and tapping a link on the old page while it
+ * resolves must still land on `swarm.eth`.
+ *
+ * The probe's own navigation is not somebody else's: [probeTarget] is
+ * the URL it will hand the WebView, so its commit leaves it alone.
+ * Today that never actually fires for the probe's own commit — a probe
+ * navigates through [BrowserState.loadUrl], which deregisters it before
+ * the WebView is even asked to load, so by the time the commit arrives
+ * there is no probe left to spare. It is kept as the belt to those
+ * braces: a probe that ever learns to navigate by some other door must
+ * still not cancel itself.
+ *
+ * What the clause does do today is spare a page's probe when some
+ * *other* navigation commits exactly the address the probe is headed
+ * for — deliberate, and narrow: the tab is already at the probe's
+ * destination, so the probe can only re-land it there or, if the
+ * content never resolves, swap it for the error page naming that same
+ * address.
+ */
+internal fun commitCancelsPendingProbe(
+    probeSource: SubmitSource?,
+    probeTarget: String?,
+    committedUrl: String?,
+): Boolean = probeSource == SubmitSource.Renderer &&
+    (committedUrl == null || probeTarget == null || committedUrl != probeTarget)
+
+/**
  * A finished load that is only waiting on first paint before it counts
  * as a visit: the raw URL the finish was for, plus the history row it
  * would write.
@@ -172,7 +216,7 @@ internal data class PendingVisit(val rawUrl: String, val display: String, val ti
  * `onPageFinished` and `onPageCommitVisible` come in no guaranteed
  * order. On a small, fast page — a local gateway page, a 2 kB document —
  * the load event can beat the compositor's first frame by a millisecond,
- * and the `currentLoadCommitted` gate that exists to keep *aborted*
+ * and the [CommittedVisitGate] that exists to keep *aborted*
  * loads out of history then silently drops a page the user really did
  * visit. So a finish that is history-worthy in every other respect is
  * parked instead of discarded, and recorded here once the paint it was
@@ -234,6 +278,70 @@ internal class PendingVisitSlot {
         val flushed = visitToFlush(parked, committedUrl)
         parked = null
         return flushed
+    }
+}
+
+/**
+ * Has the document now on screen painted, and has its visit been
+ * written yet?
+ *
+ * The first half is the gate that keeps *aborted* navigations out of
+ * history: a load the user stopped, or one a second navigation
+ * superseded, still gets a synthetic `onPageFinished`, but it never
+ * reaches first paint — so only a finish for a document that
+ * [commit]ted may be recorded (see [PendingVisit] for the other side of
+ * that rule, the finish that merely beat its own paint).
+ *
+ * The second half is `once` (#53). `onPageFinished` is not once per
+ * document: a *streaming* load stopped mid-body that then completes
+ * server-side fires it a second time, with the same URL, the same
+ * `getUrl()`, and the document still committed — and the committed
+ * branch, having no way to tell the second finish from the first, wrote
+ * the user's one visit into history twice. [recordOnce] is that way.
+ *
+ * The token it keys on is the row itself — the display URL that would
+ * be written. Not a bare "already recorded" flag: a same-document
+ * navigation (`history.pushState`, a hash link) gets its own
+ * `onPageFinished` without an intervening `onPageStarted`, and it is a
+ * different address, so it is a visit and goes on being recorded as one
+ * (verified on the freedom AVD). Only a finish that would write the row
+ * this document already wrote is the duplicate #53 is about.
+ *
+ * Stop is untouched by this. The abort rules from #41 live on
+ * [BrowserState.loadAborted] and on the commit half above: a stopped
+ * load that never painted is still not recorded, and a stopped load
+ * that *had* painted is still the visit it was — recorded once, by
+ * whichever of its finishes arrives first.
+ */
+internal class CommittedVisitGate {
+    private var committed = false
+    private var recordedDisplay: String? = null
+
+    /** Has the document on screen painted? */
+    val isCommitted: Boolean
+        get() = committed
+
+    /** A new document is starting: it has neither painted nor recorded. */
+    fun startNavigation() {
+        committed = false
+        recordedDisplay = null
+    }
+
+    /** First paint (`onPageCommitVisible`) of the document on screen. */
+    fun commit() {
+        committed = true
+    }
+
+    /**
+     * Claim the history row [display] for the document on screen:
+     * `true` once per row, `false` for a finish that would write the
+     * same row again (and for any finish before the paint — that one is
+     * [PendingVisit]'s).
+     */
+    fun recordOnce(display: String): Boolean {
+        if (!committed || recordedDisplay == display) return false
+        recordedDisplay = display
+        return true
     }
 }
 
@@ -504,15 +612,17 @@ private fun buildRefreshableWebView(
     // belongs to.
     var lastLoadedDisplayUrl: String? = null
 
-    // Flips to `true` once the current navigation has actually started
-    // painting (see `onPageCommitVisible`) and flips back to `false` in
-    // `onPageStarted`. Used by `onPageFinished` to suppress history
-    // recording for aborted loads — e.g. the user tapped Home while
-    // `spiegel.de` was still fetching; Chromium fires a synthetic
-    // `onPageFinished` for the cancelled page, but since it never
-    // committed (never reached first paint) we don't want a stub
-    // history entry with no real title.
-    var currentLoadCommitted: Boolean = false
+    // "The document on screen has painted, and has not been written to
+    // history yet." Commits in `onPageCommitVisible`, resets in
+    // `onPageStarted`, and is read by `onPageFinished`: it suppresses
+    // history for aborted loads — the user tapped Home while
+    // `spiegel.de` was still fetching, so Chromium fires a synthetic
+    // `onPageFinished` for a page that never committed and we don't
+    // want a stub entry with no real title — and it holds the one
+    // record slot a committed document gets, so a second finish for
+    // the same document can't record it twice (#53, see
+    // [CommittedVisitGate]).
+    val visitGate = CommittedVisitGate()
 
     // A finish that arrived before its first paint, parked until
     // `onPageCommitVisible` says the page really is on screen (see
@@ -637,6 +747,30 @@ private fun buildRefreshableWebView(
         loadUrl(ABOUT_BLANK)
 
         webViewClient = object : WebViewClient() {
+            // A probe the *page* asked for belongs to the page that
+            // asked: any document that replaces it takes the probe with
+            // it rather than letting it navigate the tab up to 90 s
+            // later (#54). A probe the user asked for survives — only
+            // their own next submit or Stop ends that one.
+            //
+            // Every main-frame commit runs this, `about:blank` very much
+            // included: home is a document like any other, and the blank
+            // entry is reachable both by a Home tap (which starts) and
+            // by a back gesture onto it (which only finishes). A page
+            // that asked for `bzz://…` and then called `history.back()`
+            // onto home would otherwise sit on Home with the probe still
+            // resolving, and be navigated off it minutes later.
+            fun cancelProbeSupersededBy(committedUrl: String?) {
+                if (commitCancelsPendingProbe(
+                        probeSource = state.pendingProbeSource,
+                        probeTarget = state.pendingProbeTarget,
+                        committedUrl = committedUrl,
+                    )
+                ) {
+                    state.cancelPendingProbe()
+                }
+            }
+
             override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
                 // A new document arrives with the chrome whole, however
                 // far the previous one was scrolled…
@@ -645,6 +779,10 @@ private fun buildRefreshableWebView(
                 // last Stop aborted, this document is a load of its own
                 // and its percentages are worth drawing (#41).
                 state.loadAborted = false
+                // …and above the home branch below, because the blank
+                // entry ends a page's probe exactly like any other
+                // document does (see [cancelProbeSupersededBy]).
+                cancelProbeSupersededBy(url)
                 if (url == ABOUT_BLANK) {
                     // `about:blank` is our home sentinel — either the
                     // WebView's forced initial paint, a user-initiated
@@ -658,7 +796,7 @@ private fun buildRefreshableWebView(
                     state.addressBarText = ""
                     state.progress = -1
                     lastLoadedDisplayUrl = null
-                    currentLoadCommitted = false
+                    visitGate.startNavigation()
                     // Home is a navigation like any other: a page that
                     // finished but had not painted when the user tapped it
                     // never displayed, and the `about:blank` branch of
@@ -669,7 +807,7 @@ private fun buildRefreshableWebView(
                     pendingVisit.clear()
                     return
                 }
-                currentLoadCommitted = false
+                visitGate.startNavigation()
                 // Whatever is parked belongs to the document this one is
                 // replacing, and it never painted (a paint is what would
                 // have flushed it). Dropping it here is what keeps the
@@ -718,13 +856,21 @@ private fun buildRefreshableWebView(
 
             override fun onPageCommitVisible(view: WebView?, url: String?) {
                 if (url == ABOUT_BLANK) return
-                currentLoadCommitted = true
+                visitGate.commit()
                 // A finish that beat this paint left its visit parked;
                 // this is the moment it becomes real. Anything parked
                 // that *isn't* this document never painted, so it goes
                 // no further either way.
+                //
+                // The row it writes is this document's one row, so it
+                // claims the gate's record slot as well — otherwise a
+                // second finish for the same document (the streaming
+                // case in #53) would find the slot untouched and record
+                // the same visit again.
                 val flushed = pendingVisit.flush(url)
-                if (flushed != null) repo.recordVisit(flushed.display, flushed.title)
+                if (flushed != null && visitGate.recordOnce(flushed.display)) {
+                    repo.recordVisit(flushed.display, flushed.title)
+                }
             }
 
             override fun onPageFinished(view: WebView?, url: String?) {
@@ -754,6 +900,14 @@ private fun buildRefreshableWebView(
                     // branch that catches the *back* gesture onto the
                     // blank entry, which gets no `onPageStarted` at all.
                     pendingVisit.clear()
+                    // …and for the same reason a page's probe ends here
+                    // too: `location.href='bzz://…'` followed by
+                    // `history.back()` onto home reaches the blank entry
+                    // through this branch only, and a probe that outlived
+                    // it would navigate the tab off Home minutes later —
+                    // the hijack #54 is about (see
+                    // [cancelProbeSupersededBy]).
+                    cancelProbeSupersededBy(url)
                     return
                 }
                 // Dismiss the pull-to-refresh spinner once the page has
@@ -798,31 +952,33 @@ private fun buildRefreshableWebView(
                 // deliberately kept out of history — it's a transient
                 // state, not a destination the user meant to visit.
                 //
-                // `currentLoadCommitted` is only reset by `onPageStarted`,
+                // The gate's commit half is only reset by `onPageStarted`,
                 // which an aborted load never gets — so on its synthetic
-                // finish the flag is still the *previous* page's `true`,
-                // and without [finishedLoadIsCurrent] the abandoned URL
-                // went into history under the old page's title.
+                // finish the document on screen is still the *previous*
+                // page's committed one, and without [finishedLoadIsCurrent]
+                // the abandoned URL went into history under the old page's
+                // title.
                 //
                 // A load that finishes *before* its first paint is not
                 // aborted, it is merely quick: its visit is parked and
                 // recorded by `onPageCommitVisible` instead of being
                 // dropped here (see [visitToFlush]).
                 //
-                // Known and pre-existing, tracked as #53: a *streaming*
-                // load stopped mid-body that then completes server-side
-                // gets a second `onPageFinished` with `currentLoadCommitted`
-                // already true, so the committed branch below records the
-                // same visit twice. The park is single-shot by construction
-                // ([PendingVisitSlot]); this branch has no per-document
-                // token, and giving it one means touching the Stop/abort
-                // latch from #41 — so it is left to #53.
+                // And the committed branch writes each row once, not once
+                // per finish: `onPageFinished` fires twice for a streaming
+                // load that was stopped mid-body and then completed
+                // server-side — same URL, same `getUrl()`, still committed
+                // — which recorded the visit twice (#53). The row is
+                // claimed by whichever of those arrives first; a
+                // *different* row (a pushState / hash navigation inside the
+                // same document) is still a visit of its own (see
+                // [CommittedVisitGate]).
                 if (display.isNotBlank() &&
                     !ErrorPage.isErrorPage(url) &&
                     isCurrent
                 ) {
-                    if (currentLoadCommitted) {
-                        repo.recordVisit(display, state.title)
+                    if (visitGate.isCommitted) {
+                        if (visitGate.recordOnce(display)) repo.recordVisit(display, state.title)
                     } else if (url != null) {
                         pendingVisit.park(PendingVisit(url, display, state.title))
                     }

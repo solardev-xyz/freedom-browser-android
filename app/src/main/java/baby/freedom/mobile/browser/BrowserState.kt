@@ -151,14 +151,28 @@ class BrowserState(val id: Long) {
         private set
 
     /**
+     * The URL [pendingProbeJob] will hand to the WebView if it succeeds,
+     * in the loadable form `onPageStarted` reports — so a commit can be
+     * told apart from the probe's own navigation (see
+     * [commitCancelsPendingProbe]). `null` when no probe is in flight,
+     * or when the probe's destination isn't known up front.
+     */
+    @Volatile
+    internal var pendingProbeTarget: String? = null
+        private set
+
+    /**
      * Register [job] as this tab's in-flight probe, asked for by
-     * [source]. The caller decides whether an existing probe may be
-     * superseded (see [submitSupersedesPendingProbe]) and cancels it via
+     * [source] and aimed at [target] (the canonical URL it will load —
+     * `bzz://…`, `ens://…`; stored in its loadable form). The caller
+     * decides whether an existing probe may be superseded (see
+     * [submitSupersedesPendingProbe]) and cancels it via
      * [cancelPendingProbe] first.
      */
-    internal fun beginPendingProbe(job: Job, source: SubmitSource) {
+    internal fun beginPendingProbe(job: Job, source: SubmitSource, target: String? = null) {
         pendingProbeJob = job
         pendingProbeSource = source
+        pendingProbeTarget = target?.let { Gateways.toLoadable(it) }
     }
 
     /**
@@ -175,17 +189,21 @@ class BrowserState(val id: Long) {
         if (pendingProbeJob !== job) return
         pendingProbeJob = null
         pendingProbeSource = null
+        pendingProbeTarget = null
     }
 
     /**
      * Cancel any in-flight [pendingProbeJob]. No-op if there isn't one.
      * Called from [loadUrl] so a fresh navigation supersedes whatever
-     * probe the tab was previously waiting on.
+     * probe the tab was previously waiting on, and from navigation
+     * commit for a probe the *page* started (#54, see
+     * [commitCancelsPendingProbe]).
      */
     fun cancelPendingProbe() {
         val job = pendingProbeJob
         pendingProbeJob = null
         pendingProbeSource = null
+        pendingProbeTarget = null
         job?.cancel()
     }
 

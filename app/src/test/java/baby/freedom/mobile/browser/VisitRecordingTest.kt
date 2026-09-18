@@ -1,7 +1,9 @@
 package baby.freedom.mobile.browser
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -125,5 +127,118 @@ class VisitRecordingTest {
         slot.clear()
         slot.park(visit)
         assertEquals(visit, slot.flush(visit.rawUrl))
+    }
+
+    // ---- the committed branch's own single shot (#53) ---------------
+    //
+    // The park above is one row per *park*. The committed branch needed
+    // the same guarantee per *row*: `onPageFinished` is not once per
+    // document — a streaming load stopped mid-body that then completes
+    // server-side fires it twice, with the same URL, the same
+    // `getUrl()`, and the document still committed.
+
+    private val display = visit.display
+    private val other = "127.0.0.1:8773/white.html#section"
+
+    @Test
+    fun `an uncommitted document records nothing`() {
+        // The aborted case the gate exists for: no paint, no row —
+        // that finish is the park's business, not this branch's.
+        val gate = CommittedVisitGate()
+        gate.startNavigation()
+        assertFalse(gate.isCommitted)
+        assertFalse(gate.recordOnce(display))
+    }
+
+    @Test
+    fun `a committed document records its row exactly once`() {
+        val gate = CommittedVisitGate()
+        gate.startNavigation()
+        gate.commit()
+        assertTrue(gate.isCommitted)
+        assertTrue(gate.recordOnce(display))
+        assertFalse(gate.recordOnce(display))
+        // …and stays committed, so a second finish still takes the
+        // committed branch rather than parking itself for a paint that
+        // has already happened.
+        assertTrue(gate.isCommitted)
+    }
+
+    @Test
+    fun `the stopped-then-completed streaming load is one history row`() {
+        // The whole of #53, callback by callback.
+        val gate = CommittedVisitGate()
+        // onPageStarted — the document begins.
+        gate.startNavigation()
+        // onPageCommitVisible — the body starts painting.
+        gate.commit()
+        // Stop mid-body: Chromium finishes the load it aborted…
+        assertTrue(gate.recordOnce(display))
+        // …and then the server completes the same response and a second
+        // onPageFinished lands for the very same document.
+        assertFalse(gate.recordOnce(display))
+    }
+
+    @Test
+    fun `a same-document navigation is still a visit of its own`() {
+        // `history.pushState` and hash links finish without an
+        // intervening `onPageStarted`, so a bare "already recorded"
+        // latch would have dropped them from history (they record today
+        // — verified on the freedom AVD). A different row is a different
+        // visit; only the same row twice is #53.
+        val gate = CommittedVisitGate()
+        gate.startNavigation()
+        gate.commit()
+        assertTrue(gate.recordOnce(display))
+        assertTrue(gate.recordOnce(other))
+        assertFalse(gate.recordOnce(other))
+    }
+
+    @Test
+    fun `a re-commit of the same document does not refill the slot`() {
+        // Only a navigation refills it. `onPageCommitVisible` firing
+        // again for the document already on screen is not one.
+        val gate = CommittedVisitGate()
+        gate.startNavigation()
+        gate.commit()
+        assertTrue(gate.recordOnce(display))
+        gate.commit()
+        assertFalse(gate.recordOnce(display))
+    }
+
+    @Test
+    fun `the next navigation gets a row of its own`() {
+        // Reload, or a second visit to the same URL: one visit, one
+        // row, every time.
+        val gate = CommittedVisitGate()
+        gate.startNavigation()
+        gate.commit()
+        assertTrue(gate.recordOnce(display))
+
+        gate.startNavigation()
+        assertFalse(gate.isCommitted)
+        assertFalse(gate.recordOnce(display))
+        gate.commit()
+        assertTrue(gate.recordOnce(display))
+    }
+
+    @Test
+    fun `a parked visit's flush spends the document's row too`() {
+        // The fast page: its finish parked, its paint recorded it. A
+        // second finish for that same document then finds the row
+        // already written — without which #53's double row came back by
+        // the other door.
+        val gate = CommittedVisitGate()
+        val slot = PendingVisitSlot()
+        gate.startNavigation()
+        // onPageFinished before the paint: parked, nothing recorded.
+        assertFalse(gate.isCommitted)
+        slot.park(visit)
+        // onPageCommitVisible: the park becomes the document's row.
+        gate.commit()
+        assertEquals(visit, slot.flush(visit.rawUrl))
+        assertTrue(gate.recordOnce(visit.display))
+        // The streaming second finish: committed, but spent.
+        assertFalse(gate.recordOnce(visit.display))
     }
 }
