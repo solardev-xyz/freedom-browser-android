@@ -14,8 +14,8 @@ android {
         applicationId = "baby.freedom.mobile"
         minSdk = 30
         targetSdk = 37
-        versionCode = 14
-        versionName = "0.5.4"
+        versionCode = 15
+        versionName = "0.5.5"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
