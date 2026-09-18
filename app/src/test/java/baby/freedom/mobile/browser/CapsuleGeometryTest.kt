@@ -1,5 +1,7 @@
 package baby.freedom.mobile.browser
 
+import androidx.compose.ui.unit.Density
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -25,8 +27,38 @@ import org.junit.Test
 class CapsuleGeometryTest {
 
     /** Gutter between the capsule's edge and the pill's, top and bottom. */
-    private fun gutter(collapse: Float, edit: Float) =
-        (capsuleDrawnHeight(collapse, edit) - addressPillHeight(collapse, edit)) / 2f
+    private fun gutter(collapse: Float, edit: Float, compact: Dp = CapsuleCompactHeight) =
+        (
+            capsuleDrawnHeight(collapse, edit, compact) -
+                addressPillHeight(collapse, edit, compact)
+            ) / 2f
+
+    /**
+     * The label's compact line box at a system font scale, read exactly
+     * the way [BottomToolbar] reads it: the 20 sp line height through the
+     * density.
+     *
+     * That curve is non-linear here too: the ui-unit [Density] factory
+     * puts a `FontScaleConverter` behind `toDp` on the JVM exactly as the
+     * platform does on API 34+, so the 20 sp box is 23.6 dp at scale 1.3
+     * and 34 dp at 2.0 — not the 26 and 40 dp a linear scale would give.
+     * Every expected value below is read off that curve, which is
+     * precisely why the app asks the density rather than multiplying the
+     * scale itself; do not recompute one by hand.
+     */
+    private fun lineBox(fontScale: Float): Dp =
+        with(Density(density = 2.625f, fontScale = fontScale)) {
+            AddressLabelCompactLineHeight.toDp()
+        }
+
+    /** The compact capsule's height at that scale. */
+    private fun compact(fontScale: Float): Dp = capsuleCompactHeight(lineBox(fontScale))
+
+    /**
+     * Every scale the system offers, from the smallest setting to the
+     * accessibility maximum (`settings put system font_scale 2.0`).
+     */
+    private val fontScales = listOf(0.85f, 1f, 1.15f, 1.3f, 1.5f, 1.8f, 2f)
 
     @Test
     fun `the capsule has exactly three settled heights`() {
@@ -116,6 +148,233 @@ class CapsuleGeometryTest {
         // And the line box is a real one — the size the compact label is
         // actually laid out at, not a number picked to make the sum work.
         assertEquals(AddressLabelCompactLineHeight, addressLabelLineHeight(1f))
+        // The constant is the *unscaled* endpoint: at `fontScale == 1`
+        // the derivation and it are the same number.
+        assertEquals(CapsuleCompactHeight, compact(1f))
+        assertEquals(20.dp, lineBox(1f))
+    }
+
+    // ---- font scale (#49) ------------------------------------------
+
+    @Test
+    fun `the six dp of air survives every font scale`() {
+        // #49: the line box is stated in sp, so it grows with the system
+        // font scale. A fixed 32 dp capsule would swallow the air to feed
+        // it — at scale 2.0 the 20 sp box is 34 dp, i.e. 2 dp taller than
+        // the whole capsule. The capsule grows with the box instead.
+        for (scale in fontScales) {
+            val box = lineBox(scale)
+            val height = compact(scale)
+            assertEquals(
+                "air above/below the label changed at fontScale=$scale",
+                CapsuleCompactVerticalPadding.value,
+                (height - box).value / 2f,
+                0.001f,
+            )
+        }
+        // The values that pin the ends of that, on the platform's
+        // non-linear curve: 32 dp at the default scale, 35.6 dp at 1.3,
+        // 46 dp at the 2.0 maximum. The boxes they are the air around are
+        // that same curve's, not a multiplication — pinned here so the
+        // sums above can only be read off it.
+        assertEquals(20.dp, lineBox(1f))
+        assertEquals(23.6f, lineBox(1.3f).value, 0.01f)
+        assertEquals(34.dp, lineBox(2f))
+        assertEquals(32.dp, compact(1f))
+        assertEquals(35.6f, compact(1.3f).value, 0.01f)
+        assertEquals(46.dp, compact(2f))
+    }
+
+    @Test
+    fun `the compact capsule never outgrows the slot it shrinks inside`() {
+        // A "compact" capsule taller than the resting one is not a
+        // collapse — and it would push the bottom anchor negative, i.e.
+        // the bar out of its slot. Past ~2.2 the line box stops growing
+        // rather than the capsule leaving the slot.
+        for (scale in fontScales + listOf(2.5f, 3f, 10f)) {
+            val height = compact(scale)
+            assertTrue(
+                "compact capsule left the slot at fontScale=$scale ($height)",
+                height <= CapsuleHeight,
+            )
+            assertTrue(
+                "compact capsule stopped hugging at fontScale=$scale",
+                height >= CapsuleCompactVerticalPadding * 2,
+            )
+        }
+        assertEquals(CapsuleHeight, compact(10f))
+        // And the label is told the clamped box too, so the type can't go
+        // on growing out of the shape built to hold it.
+        assertEquals(
+            CapsuleHeight - CapsuleCompactVerticalPadding * 2,
+            compactLabelLineBox(200.dp),
+        )
+    }
+
+    @Test
+    fun `the resting and editing heights ignore the font scale`() {
+        // Only the compact end is the label's; the other two are sized by
+        // the controls they hold.
+        for (scale in fontScales) {
+            val compactHeight = compact(scale)
+            assertEquals(
+                CapsuleHeight,
+                capsuleDrawnHeight(collapse = 0f, editProgress = 0f, compactHeight = compactHeight),
+            )
+            assertEquals(
+                CapsuleEditingHeight,
+                capsuleDrawnHeight(collapse = 0f, editProgress = 1f, compactHeight = compactHeight),
+            )
+            assertEquals(CapsuleHeight, capsuleSlotHeight(0f))
+            assertEquals(CapsuleEditingHeight, capsuleSlotHeight(1f))
+        }
+    }
+
+    @Test
+    fun `the capsule's bottom edge never moves at any font scale`() {
+        // #47/#48's rule, re-checked at every scale: whatever the compact
+        // height is, the anchor gives back exactly half the slack, so the
+        // drawn bottom edge — and [CapsuleBottomMargin]'s gap to the
+        // navigation inset under it — is the slot's own.
+        for (scale in fontScales) {
+            val compactHeight = compact(scale)
+            for (step in 0..20) {
+                val collapse = step / 20f
+                assertEquals(
+                    "capsule bottom moved at collapse=$collapse fontScale=$scale",
+                    capsuleSlotHeight(0f).value,
+                    capsuleBottomAnchor(collapse, 0f, compactHeight).value * 2f +
+                        capsuleDrawnHeight(collapse, 0f, compactHeight).value,
+                    0.001f,
+                )
+            }
+            assertTrue(
+                "negative anchor at fontScale=$scale",
+                capsuleBottomAnchor(1f, 0f, compactHeight) >= 0.dp,
+            )
+        }
+        // A taller capsule is a smaller anchor by exactly as much.
+        assertEquals(12.dp, capsuleBottomAnchor(1f, 0f, compact(1f)))
+        assertEquals(10.2f, capsuleBottomAnchor(1f, 0f, compact(1.3f)).value, 0.01f)
+        assertEquals(5.dp, capsuleBottomAnchor(1f, 0f, compact(2f)))
+    }
+
+    @Test
+    fun `the touch band still covers the whole compact capsule at every scale`() {
+        // The band answers the two-step tap, so every pixel of the pill
+        // the user can see has to be inside it — including at a scale
+        // where the capsule is taller than Material's 48 dp and the band
+        // has to grow with it ([addressFieldTouchHeight]).
+        for (scale in fontScales + listOf(2.5f, 3f)) {
+            val compactHeight = compact(scale)
+            val band = addressFieldTouchHeight(compactHeight)
+            val slot = capsuleSlotHeight(0f)
+            assertTrue(
+                "touch band shrank below 48 dp at fontScale=$scale",
+                band >= AddressFieldTouchHeight,
+            )
+            assertTrue("touch band left the slot at fontScale=$scale", band <= slot)
+            val bandTop = (slot - band) / 2f + addressFieldTouchShift(1f, 0f, compactHeight)
+            val capsuleTop = (slot - capsuleDrawnHeight(1f, 0f, compactHeight)) / 2f +
+                capsuleBottomAnchor(1f, 0f, compactHeight)
+            assertTrue("band starts below the capsule at fontScale=$scale", bandTop <= capsuleTop)
+            assertEquals(
+                "band must reach the capsule's bottom edge at fontScale=$scale",
+                slot.value,
+                (bandTop + band).value,
+                0.001f,
+            )
+        }
+        // It is exactly the 48 dp it always was at every scale the
+        // settings offer — the compact capsule is 46 dp even at the
+        // maximum — and only grows past that, where a linear font scale
+        // would otherwise leave the top of the pill untappable.
+        assertEquals(AddressFieldTouchHeight, addressFieldTouchHeight(compact(1f)))
+        assertEquals(AddressFieldTouchHeight, addressFieldTouchHeight(compact(1.3f)))
+        assertEquals(AddressFieldTouchHeight, addressFieldTouchHeight(compact(2f)))
+        assertEquals(CapsuleHeight, addressFieldTouchHeight(compact(3f)))
+    }
+
+    @Test
+    fun `the pill is still the compact capsule at every font scale`() {
+        for (scale in fontScales) {
+            val compactHeight = compact(scale)
+            assertEquals(
+                "pill and capsule drifted apart at fontScale=$scale",
+                compactHeight,
+                addressPillHeight(collapse = 1f, editProgress = 0f, compactHeight = compactHeight),
+            )
+            assertEquals(0.dp, gutter(collapse = 1f, edit = 0f, compact = compactHeight))
+            // And it is never painted outside the box that owns the taps.
+            for (edit in listOf(0f, 0.5f, 1f)) {
+                for (collapse in listOf(0f, 0.5f, 1f)) {
+                    assertTrue(
+                        "pill overflows its touch box at fontScale=$scale " +
+                            "edit=$edit collapse=$collapse",
+                        addressPillHeight(collapse, edit, compactHeight) <=
+                            addressFieldTouchHeight(compactHeight),
+                    )
+                }
+            }
+        }
+    }
+
+    @Test
+    fun `the pill keeps the capsule's centre line at every font scale`() {
+        // The anchor stays split between the touch box's layout shift and
+        // the bubble's drawing shift whatever the scale has done to the
+        // heights, or the label drifts off the shape it is supposed to be.
+        for (scale in fontScales) {
+            val compactHeight = compact(scale)
+            for (edit in listOf(0f, 0.5f, 1f)) {
+                for (step in 0..10) {
+                    val collapse = step / 10f
+                    assertEquals(
+                        "pill left the capsule's centre line at fontScale=$scale " +
+                            "collapse=$collapse edit=$edit",
+                        capsuleBottomAnchor(collapse, edit, compactHeight).value,
+                        addressFieldTouchShift(collapse, edit, compactHeight).value +
+                            addressPillTopShift(collapse, edit, compactHeight).value,
+                        0.001f,
+                    )
+                    assertEquals(
+                        "control left the capsule's centre line at fontScale=$scale " +
+                            "collapse=$collapse edit=$edit",
+                        capsuleBottomAnchor(collapse, edit, compactHeight).value,
+                        capsuleControlTopShift(collapse, edit, compactHeight).value,
+                        0.001f,
+                    )
+                }
+            }
+        }
+    }
+
+    @Test
+    fun `the label's line box and the capsule are the same number`() {
+        // What went wrong in #48 was the two being stated separately: the
+        // capsule said 32 dp, the label said 20 sp, and they only agreed
+        // at one font scale. They are now one derivation.
+        for (scale in fontScales + listOf(3f)) {
+            val density = Density(density = 2.625f, fontScale = scale)
+            val box = with(density) { compactLabelLineBox(AddressLabelCompactLineHeight.toDp()) }
+            val labelLineHeight = with(density) { box.toSp() }
+            assertEquals(
+                "label and capsule disagree at fontScale=$scale",
+                capsuleCompactHeight(with(density) { AddressLabelCompactLineHeight.toDp() }),
+                box + CapsuleCompactVerticalPadding * 2,
+            )
+            assertEquals(
+                "label's compact line height is not its line box at fontScale=$scale",
+                box.value,
+                with(density) { addressLabelLineHeight(1f, labelLineHeight).toDp() }.value,
+                0.001f,
+            )
+            // Resting is untouched by any of it.
+            assertEquals(
+                AddressLabelRestingLineHeight,
+                addressLabelLineHeight(0f, labelLineHeight),
+            )
+        }
     }
 
     // ---- bottom anchor ---------------------------------------------
