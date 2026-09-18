@@ -36,9 +36,15 @@ class CapsuleGeometryTest {
     /**
      * The label's compact line box at a system font scale, read exactly
      * the way [BottomToolbar] reads it: the 20 sp line height through the
-     * density. (A JVM [Density] scales linearly; on API 34+ the platform
-     * curve may differ, which is precisely why the app asks the density
-     * rather than multiplying the scale itself.)
+     * density.
+     *
+     * That curve is non-linear here too: the ui-unit [Density] factory
+     * puts a `FontScaleConverter` behind `toDp` on the JVM exactly as the
+     * platform does on API 34+, so the 20 sp box is 23.6 dp at scale 1.3
+     * and 34 dp at 2.0 — not the 26 and 40 dp a linear scale would give.
+     * Every expected value below is read off that curve, which is
+     * precisely why the app asks the density rather than multiplying the
+     * scale itself; do not recompute one by hand.
      */
     private fun lineBox(fontScale: Float): Dp =
         with(Density(density = 2.625f, fontScale = fontScale)) {
@@ -168,7 +174,12 @@ class CapsuleGeometryTest {
         }
         // The values that pin the ends of that, on the platform's
         // non-linear curve: 32 dp at the default scale, 35.6 dp at 1.3,
-        // 46 dp at the 2.0 maximum.
+        // 46 dp at the 2.0 maximum. The boxes they are the air around are
+        // that same curve's, not a multiplication — pinned here so the
+        // sums above can only be read off it.
+        assertEquals(20.dp, lineBox(1f))
+        assertEquals(23.6f, lineBox(1.3f).value, 0.01f)
+        assertEquals(34.dp, lineBox(2f))
         assertEquals(32.dp, compact(1f))
         assertEquals(35.6f, compact(1.3f).value, 0.01f)
         assertEquals(46.dp, compact(2f))
