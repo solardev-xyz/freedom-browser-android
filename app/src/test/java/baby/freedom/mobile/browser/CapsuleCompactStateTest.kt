@@ -1,5 +1,6 @@
 package baby.freedom.mobile.browser
 
+import androidx.compose.material3.Typography
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import org.junit.Assert.assertEquals
@@ -263,16 +264,27 @@ class CapsuleCompactStateTest {
         assertEquals(AddressLabelRestingFontSize, addressLabelFontSize(0f))
         assertEquals(AddressLabelCompactFontSize, addressLabelFontSize(1f))
         // The resting size is what the label has always rendered at, and
-        // the compact one is one step down the M3 scale (bodyMedium →
-        // bodySmall). Pinned, because a trust surface may not quietly
+        // the compact one is one step down the M3 scale (bodyLarge →
+        // bodyMedium). Pinned, because a trust surface may not quietly
         // shrink further than the brief allows.
-        assertEquals(14.sp, AddressLabelRestingFontSize)
-        assertEquals(12.sp, AddressLabelCompactFontSize)
+        assertEquals(16.sp, AddressLabelRestingFontSize)
+        assertEquals(14.sp, AddressLabelCompactFontSize)
+    }
+
+    @Test
+    fun `the resting label is the size the theme gives every label`() {
+        // The label sets no size of its own before this stage, so it
+        // renders at whatever `LocalTextStyle` is — and `MaterialTheme`
+        // provides that as `typography.bodyLarge`. Reading the theme's
+        // own number here is what keeps the resting end of the
+        // interpolation from silently drifting off the shipped size.
+        assertEquals(Typography().bodyLarge.fontSize, AddressLabelRestingFontSize)
+        assertEquals(Typography().bodyMedium.fontSize, AddressLabelCompactFontSize)
     }
 
     @Test
     fun `the label size morphs rather than snaps`() {
-        assertEquals(13.sp, addressLabelFontSize(0.5f))
+        assertEquals(15.sp, addressLabelFontSize(0.5f))
         var previous = addressLabelFontSize(0f)
         for (step in 1..20) {
             val size = addressLabelFontSize(step / 20f)

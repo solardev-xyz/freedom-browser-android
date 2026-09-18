@@ -366,23 +366,26 @@ internal val CapsuleCompactMinWidth = 120.dp
 private val CapsuleCompactLabelSlack = 2.dp
 
 /**
- * Font size of the domain label at rest: what it has always rendered at
- * (nothing in the app provides `LocalTextStyle`, so the label inherits
- * Compose's 14 sp default — `bodyMedium` on the M3 scale). Stated here
- * rather than inherited now that the other end of the interpolation is
- * explicit.
+ * Font size of the domain label at rest: what it has always rendered
+ * at. The label states no size of its own, so it inherits
+ * `LocalTextStyle` — and `MaterialTheme` (via `MaterialExpressiveTheme`,
+ * see `FreedomTheme`) provides that as `typography.bodyLarge`, i.e.
+ * **16 sp**, not Compose's bare 14 sp default. Stated here rather than
+ * inherited now that the other end of the interpolation is explicit —
+ * and pinned by a test against `Typography().bodyLarge`, because the
+ * resting label is the trust surface and may not shrink by accident.
  */
-internal val AddressLabelRestingFontSize = 14.sp
+internal val AddressLabelRestingFontSize = 16.sp
 
 /**
  * Font size of the domain label when fully compact — one step down the
- * M3 type scale (`bodyMedium` → `bodySmall`/`labelMedium`). The compact
- * bar says less *and* says it smaller, which is the one thing stage 2
- * deliberately didn't do; what makes it safe is that it says the same
- * *string* ([AddressLabel.resting], middle-ellipsised), so the trust
- * surface is unchanged — only its type size moves, and only by one step.
+ * M3 type scale (`bodyLarge` → `bodyMedium`). The compact bar says less
+ * *and* says it smaller, which is the one thing stage 2 deliberately
+ * didn't do; what makes it safe is that it says the same *string*
+ * ([AddressLabel.resting], middle-ellipsised), so the trust surface is
+ * unchanged — only its type size moves, and only by one step.
  */
-internal val AddressLabelCompactFontSize = 12.sp
+internal val AddressLabelCompactFontSize = 14.sp
 
 /**
  * Size the domain label is drawn at, interpolated along the collapse so
