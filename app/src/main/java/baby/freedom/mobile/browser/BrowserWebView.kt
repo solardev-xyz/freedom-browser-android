@@ -775,11 +775,11 @@ private fun buildRefreshableWebView(
                 // Falls back to a direct gateway load if no submit hook
                 // is wired (defensive — the hook is installed before the
                 // first tab ever renders).
-                if (target.startsWith("bzz://") ||
-                    target.startsWith("ipfs://") ||
-                    target.startsWith("ipns://") ||
-                    target.startsWith("ens://")
-                ) {
+                //
+                // Main frame only: the submit flow navigates the whole
+                // tab, which is never what a subframe asked for (#36 —
+                // see [submitDetourForNavigation]).
+                if (submitDetourForNavigation(target, request.isForMainFrame)) {
                     onSubmitUrl(state, target)
                     return true
                 }
@@ -997,6 +997,35 @@ private val ESCAPE_RETRY_DELAYS_MS: LongArray = longArrayOf(
 // Schemes whose subresource requests we answer with a redirect to the
 // virtual-origin equivalent (`<img src="bzz://…">` inside a page).
 private val CONTENT_SCHEMES = setOf("bzz", "ipfs", "ipns", "ens")
+
+/**
+ * Does a navigation request for [url] belong in the screen's submit
+ * flow — the probe gate the address bar uses — rather than in
+ * Chromium's own hands?
+ *
+ * True only for a *main-frame* content-scheme navigation. The detour
+ * ends in `submit()`, which moves the whole tab: that is the right
+ * answer for a link the user tapped or an error page's "Try Again", and
+ * the wrong one for anything else in the document. An
+ * `<iframe src="bzz://…">` is a subframe asking for a subframe's worth
+ * of content; routing it through the submit flow navigated the entire
+ * tab to the iframe's URL, so any page — including a plain https one —
+ * could move the tab by embedding one frame, and since renderer submits
+ * stopped naming their destination early (#34) the pill would keep
+ * reading like the old page for the whole resolve + probe window (#36).
+ *
+ * Returning `false` doesn't drop the subframe load: the request falls
+ * through to [interceptVirtualRequest], which serves content-scheme
+ * URLs off the local gateway — the same path that already renders
+ * `<img src="bzz://…">` (see its "scheme-URL subresources" case). The
+ * frame gets its content, the tab stays where the user left it.
+ */
+internal fun submitDetourForNavigation(url: String, isForMainFrame: Boolean): Boolean {
+    if (!isForMainFrame) return false
+    val schemeEnd = url.indexOf("://")
+    if (schemeEnd <= 0) return false
+    return url.substring(0, schemeEnd).lowercase() in CONTENT_SCHEMES
+}
 
 /**
  * Answer a CORS preflight locally. Permissive by policy: content on

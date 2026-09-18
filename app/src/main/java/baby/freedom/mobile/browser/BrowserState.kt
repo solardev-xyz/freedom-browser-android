@@ -120,10 +120,11 @@ class BrowserState(val id: Long) {
         internal set
 
     /**
-     * In-flight [GatewayProbe] job for this tab (if any). Set by
-     * [BrowserScreen] when a bzz / ens-to-bzz navigation enters the
-     * "peers warming up" gate, and cleared either by the probe finishing
-     * or by [cancelPendingProbe].
+     * In-flight [GatewayProbe] job for this tab (if any). Registered by
+     * [BrowserScreen] via [beginPendingProbe] when a bzz / ens-to-bzz
+     * navigation enters the "peers warming up" gate, and cleared either
+     * by the probe finishing ([finishPendingProbe]) or by
+     * [cancelPendingProbe].
      *
      * Held on the per-tab state (rather than, say, a
      * `BrowserScreen`-level `remember`) so that switching tabs while a
@@ -132,6 +133,49 @@ class BrowserState(val id: Long) {
      */
     @Volatile
     var pendingProbeJob: Job? = null
+        private set
+
+    /**
+     * Who asked for the navigation [pendingProbeJob] is gating — the
+     * user, or the page currently on screen. `null` when no probe is in
+     * flight.
+     *
+     * Kept next to the job because "may this submit cancel that probe?"
+     * is answered from it: a page looping `location.href='ens://…'`
+     * would otherwise re-arm the gate on every tick and a typed
+     * navigation away from that page could never finish (#35, see
+     * [submitSupersedesPendingProbe]).
+     */
+    @Volatile
+    internal var pendingProbeSource: SubmitSource? = null
+        private set
+
+    /**
+     * Register [job] as this tab's in-flight probe, asked for by
+     * [source]. The caller decides whether an existing probe may be
+     * superseded (see [submitSupersedesPendingProbe]) and cancels it via
+     * [cancelPendingProbe] first.
+     */
+    internal fun beginPendingProbe(job: Job, source: SubmitSource) {
+        pendingProbeJob = job
+        pendingProbeSource = source
+    }
+
+    /**
+     * Clear the registration above once [job] has run to completion —
+     * but only if it is *still* the tab's probe.
+     *
+     * A cancelled coroutine's `finally` block runs a beat after the
+     * submit that cancelled it has already registered its own probe, so
+     * an unconditional clear would deregister the *new* probe and leave
+     * the tab looking idle while it is still resolving — which is
+     * exactly the state a renderer submit is allowed to cancel.
+     */
+    internal fun finishPendingProbe(job: Job) {
+        if (pendingProbeJob !== job) return
+        pendingProbeJob = null
+        pendingProbeSource = null
+    }
 
     /**
      * Cancel any in-flight [pendingProbeJob]. No-op if there isn't one.
@@ -141,6 +185,7 @@ class BrowserState(val id: Long) {
     fun cancelPendingProbe() {
         val job = pendingProbeJob
         pendingProbeJob = null
+        pendingProbeSource = null
         job?.cancel()
     }
 
