@@ -762,13 +762,6 @@ private fun buildRefreshableWebView(
                 request: WebResourceRequest?,
             ): Boolean {
                 val target = request?.url?.toString() ?: return false
-                // A link tap (or any other renderer-initiated main-frame
-                // navigation) is a fresh load, and its progress starts
-                // ticking well before `onPageStarted` commits it — so
-                // open the Stop latch here rather than at commit, or
-                // the first seconds of the page the user tapped into
-                // would draw no trace at all (#41).
-                if (request.isForMainFrame) state.loadAborted = false
                 // Route bzz:// and ens:// through the screen's submit flow
                 // so in-page clicks + error-page "Try Again" go through
                 // the same GatewayProbe gate the top address bar uses.
@@ -779,7 +772,14 @@ private fun buildRefreshableWebView(
                 // Main frame only: the submit flow navigates the whole
                 // tab, which is never what a subframe asked for (#36 —
                 // see [submitDetourForNavigation]).
-                if (submitDetourForNavigation(target, request.isForMainFrame)) {
+                val detoured = submitDetourForNavigation(target, request.isForMainFrame)
+                // Decided *after* the detour, so a submit the #35 gate
+                // ignores leaves the latch as it found it (see
+                // [navigationOpensStopLatch]).
+                if (navigationOpensStopLatch(request.isForMainFrame, detoured)) {
+                    state.loadAborted = false
+                }
+                if (detoured) {
                     onSubmitUrl(state, target)
                     return true
                 }
@@ -1026,6 +1026,28 @@ internal fun submitDetourForNavigation(url: String, isForMainFrame: Boolean): Bo
     if (schemeEnd <= 0) return false
     return url.substring(0, schemeEnd).lowercase() in CONTENT_SCHEMES
 }
+
+/**
+ * Whether a navigation arriving at `shouldOverrideUrlLoading` should
+ * open the Stop latch ([BrowserState.loadAborted]) there and then.
+ *
+ * Only one that Chromium is about to perform itself. Such a load starts
+ * ticking progress well before `onPageStarted` commits it, so waiting
+ * for commit would leave the first seconds of the page the user tapped
+ * into drawing no trace at all (#41).
+ *
+ * A [detoured] navigation performs nothing here: it is handed to
+ * `submit()`, which the #35 gate may ignore outright — a page looping
+ * `location.href='ens://…'` on top of the user's own pending probe
+ * navigates nowhere, and opening the latch for it would un-latch the
+ * load the user stopped, letting Chromium's one late
+ * `onProgressChanged` re-light the capsule trace. When the submit *is*
+ * accepted it reaches [BrowserState.loadUrl], which opens the latch as
+ * part of actually scheduling the load — so the accepted case loses
+ * nothing by waiting.
+ */
+internal fun navigationOpensStopLatch(isForMainFrame: Boolean, detoured: Boolean): Boolean =
+    isForMainFrame && !detoured
 
 /**
  * Answer a CORS preflight locally. Permissive by policy: content on

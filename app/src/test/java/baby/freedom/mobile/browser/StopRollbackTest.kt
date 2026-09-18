@@ -141,6 +141,47 @@ class StopRollbackTest {
     }
 
     @Test
+    fun `a navigation Chromium performs itself opens the latch at request time`() {
+        // A link tap into an ordinary page starts ticking progress
+        // before `onPageStarted`, so the latch has to open in
+        // `shouldOverrideUrlLoading` or the first seconds draw nothing
+        // (#41). Subresources never touch it.
+        assertTrue(navigationOpensStopLatch(isForMainFrame = true, detoured = false))
+        assertFalse(navigationOpensStopLatch(isForMainFrame = false, detoured = false))
+    }
+
+    @Test
+    fun `a detoured navigation leaves the latch to the load it may never start`() {
+        // The detour hands the URL to `submit()`, which the #35 gate
+        // ignores when the tab's pending probe is the user's own: a page
+        // looping `location.href='ens://…'` navigates nowhere, so
+        // opening the latch for it would un-latch the load the user
+        // stopped and let Chromium's one late progress callback re-light
+        // the trace. An accepted submit opens the latch through
+        // [BrowserState.loadUrl] instead.
+        assertFalse(navigationOpensStopLatch(isForMainFrame = true, detoured = true))
+
+        val state = BrowserState(id = 1L)
+        state.stopProgress()
+        assertTrue(state.loadAborted)
+        // The tick the gate ignores: no navigation, so no latch change.
+        assertFalse(
+            navigationOpensStopLatch(
+                isForMainFrame = true,
+                detoured = submitDetourForNavigation("ens://attacker.eth", isForMainFrame = true),
+            ),
+        )
+        assertTrue(state.loadAborted)
+        assertEquals(
+            -1,
+            progressForCallback(newProgress = 37, isHomeSentinel = false, aborted = state.loadAborted),
+        )
+        // …and the accepted submit's own load still opens it.
+        state.loadUrl("ens://mysite.eth")
+        assertFalse(state.loadAborted)
+    }
+
+    @Test
     fun `a first navigation with nothing committed keeps what the user asked for`() {
         // Fresh tab, stopped mid-resolve: there is no previous page for
         // the label to misdescribe, and the pending address is the only
