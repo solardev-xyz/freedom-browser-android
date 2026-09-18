@@ -259,6 +259,38 @@ class RendererSubmitTest {
     }
 
     @Test
+    fun `landing on the blank home entry ends a page's probe too`() {
+        // Home is a document like any other. The hole this closes: a
+        // page runs `location.href='bzz://…'` and then `history.back()`
+        // onto the blank home entry — a renderer-initiated history
+        // navigation that fires no `onPageStarted` at all, only
+        // `onPageFinished`. Both `about:blank` branches must cancel, or
+        // the tab sits on Home with the capsule still resolving and is
+        // navigated off it minutes later.
+        assertTrue(
+            commitCancelsPendingProbe(
+                probeSource = SubmitSource.Renderer,
+                probeTarget = probeTarget,
+                committedUrl = "about:blank",
+            ),
+        )
+    }
+
+    @Test
+    fun `the user's probe still survives a trip through home`() {
+        // The user types `swarm.eth` and taps Home while it resolves:
+        // the resolve is still theirs, and only their next submit or
+        // Stop ends it.
+        assertFalse(
+            commitCancelsPendingProbe(
+                probeSource = SubmitSource.User,
+                probeTarget = probeTarget,
+                committedUrl = "about:blank",
+            ),
+        )
+    }
+
+    @Test
     fun `the same commit leaves the user's probe running`() {
         val state = BrowserState(id = 1L)
         val probe = Job()

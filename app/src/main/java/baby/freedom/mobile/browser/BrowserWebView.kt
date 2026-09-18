@@ -736,6 +736,30 @@ private fun buildRefreshableWebView(
         loadUrl(ABOUT_BLANK)
 
         webViewClient = object : WebViewClient() {
+            // A probe the *page* asked for belongs to the page that
+            // asked: any document that replaces it takes the probe with
+            // it rather than letting it navigate the tab up to 90 s
+            // later (#54). A probe the user asked for survives — only
+            // their own next submit or Stop ends that one.
+            //
+            // Every main-frame commit runs this, `about:blank` very much
+            // included: home is a document like any other, and the blank
+            // entry is reachable both by a Home tap (which starts) and
+            // by a back gesture onto it (which only finishes). A page
+            // that asked for `bzz://…` and then called `history.back()`
+            // onto home would otherwise sit on Home with the probe still
+            // resolving, and be navigated off it minutes later.
+            fun cancelProbeSupersededBy(committedUrl: String?) {
+                if (commitCancelsPendingProbe(
+                        probeSource = state.pendingProbeSource,
+                        probeTarget = state.pendingProbeTarget,
+                        committedUrl = committedUrl,
+                    )
+                ) {
+                    state.cancelPendingProbe()
+                }
+            }
+
             override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
                 // A new document arrives with the chrome whole, however
                 // far the previous one was scrolled…
@@ -744,6 +768,10 @@ private fun buildRefreshableWebView(
                 // last Stop aborted, this document is a load of its own
                 // and its percentages are worth drawing (#41).
                 state.loadAborted = false
+                // …and above the home branch below, because the blank
+                // entry ends a page's probe exactly like any other
+                // document does (see [cancelProbeSupersededBy]).
+                cancelProbeSupersededBy(url)
                 if (url == ABOUT_BLANK) {
                     // `about:blank` is our home sentinel — either the
                     // WebView's forced initial paint, a user-initiated
@@ -774,19 +802,6 @@ private fun buildRefreshableWebView(
                 // have flushed it). Dropping it here is what keeps the
                 // park single-shot: it cannot survive its own navigation.
                 pendingVisit.clear()
-                // A probe the *page* asked for belongs to the page that
-                // asked: this document replaces it, so the probe goes
-                // with it rather than navigating the tab up to 90 s
-                // later (#54). A probe the user asked for survives —
-                // only their own next submit or Stop ends that one.
-                if (commitCancelsPendingProbe(
-                        probeSource = state.pendingProbeSource,
-                        probeTarget = state.pendingProbeTarget,
-                        committedUrl = url,
-                    )
-                ) {
-                    state.cancelPendingProbe()
-                }
                 // Entering a virtual origin: expire anything page JS
                 // managed to plant via document.cookie before this
                 // page gets a chance to read it.
@@ -874,6 +889,14 @@ private fun buildRefreshableWebView(
                     // branch that catches the *back* gesture onto the
                     // blank entry, which gets no `onPageStarted` at all.
                     pendingVisit.clear()
+                    // …and for the same reason a page's probe ends here
+                    // too: `location.href='bzz://…'` followed by
+                    // `history.back()` onto home reaches the blank entry
+                    // through this branch only, and a probe that outlived
+                    // it would navigate the tab off Home minutes later —
+                    // the hijack #54 is about (see
+                    // [cancelProbeSupersededBy]).
+                    cancelProbeSupersededBy(url)
                     return
                 }
                 // Dismiss the pull-to-refresh spinner once the page has
