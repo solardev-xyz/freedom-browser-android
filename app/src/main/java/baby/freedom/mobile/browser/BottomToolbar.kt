@@ -488,6 +488,52 @@ internal fun capsuleTapAction(collapse: Float, addressFocused: Boolean): Capsule
 }
 
 /**
+ * How much of themselves the address pill's own two slots — the protocol
+ * badge and the trailing Reload / Stop / Clear — still have.
+ *
+ * Driven by `collapse` *only*, not by `max(collapse, edit)` like the
+ * flanking controls: the editor needs its trailing × and the badge keeps
+ * vouching for the origin while the full URL is on screen, so inflating
+ * the capsule must leave both alone. The rate is the flanking controls'
+ * own ([Modifier.collapsingControl]), so everything the compact bar drops
+ * leaves at one speed and they are all gone together at
+ * `1 / CONTROL_COLLAPSE_RATE` of the collapse.
+ */
+internal fun capsulePillSlotScale(collapse: Float): Float =
+    (1f - collapse * CONTROL_COLLAPSE_RATE).coerceIn(0f, 1f)
+
+/**
+ * How far the capsule's tap surface stands back from the pill's trailing
+ * edge, so the trailing control keeps answering for its own slot.
+ *
+ * The surface covers the pill edge to edge except for this: the trailing
+ * slot ([capsulePillSlotScale] of it, since the slot narrows as it
+ * retreats) plus the air between that slot and the pill's edge, which is
+ * *outboard* of the button and so cannot be reclaimed without covering
+ * the button itself.
+ *
+ * Which is why the standback goes to zero the moment the tap is an
+ * [CapsuleTapAction.Expand]. Held back, that outboard strip is nobody's:
+ * it is past the shrinking button, so a press there falls through to the
+ * transparent text field underneath and opens the editor and the keyboard
+ * on what the two-step tap had decided was an expand-only first tap.
+ * Between half-collapsed and `1 / CONTROL_COLLAPSE_RATE` — the frames
+ * where the tap already means Expand but the slot has not finished
+ * retreating — that would be a ~8 dp hole in the rule that *every* pixel
+ * of a mostly-compact pill expands the bar. The button it covers there is
+ * a ≤ 6 dp sliver mid-spring, far too small to aim at and never at rest
+ * (the fraction only settles at 0 or 1), so the whole pill answering the
+ * expand is the better trade.
+ */
+internal fun capsuleTapSurfaceStandback(collapse: Float, addressFocused: Boolean): Dp {
+    val slotScale = capsulePillSlotScale(collapse)
+    val expands = capsuleTapAction(collapse, addressFocused) == CapsuleTapAction.Expand
+    if (slotScale <= 0f || expands) return 0.dp
+    return CapsuleTrailingSlotSize * slotScale +
+        addressLabelPadding(collapse, AddressPillTrailingInset)
+}
+
+/**
  * Stroke of the load-progress trace that runs along the capsule's own
  * outline. Thin enough to read as a highlight on the edge rather than a
  * second border; drawn *over* the capsule, so it costs no layout height
@@ -1240,14 +1286,9 @@ private fun AddressField(
     val pillSideInsetPx = with(LocalDensity.current) { pillSideInset.roundToPx() }
     val pillFill = colors.surfaceContainerHighest
 
-    // How much of themselves the pill's own two slots still have. Driven
-    // by `collapse` *only*, not by `max(collapse, edit)` like the
-    // flanking controls: the editor needs its trailing × and the badge
-    // keeps vouching for the origin while the full URL is on screen, so
-    // inflating the capsule must leave both alone. The rate is the
-    // flanking controls' own, so everything the compact bar drops leaves
-    // at one speed.
-    val slotScale = (1f - collapse * CONTROL_COLLAPSE_RATE).coerceIn(0f, 1f)
+    // How much of themselves the pill's own two slots still have — see
+    // [capsulePillSlotScale] for why this one is the collapse alone.
+    val slotScale = capsulePillSlotScale(collapse)
 
     Box(
         modifier = modifier
@@ -1540,8 +1581,10 @@ private fun AddressField(
         // The one thing the surface stands back from is the trailing
         // control slot, which has its own button to answer for Reload /
         // Stop / Clear; once that slot has retreated into the pill's edge
-        // (`slotScale == 0`, i.e. the compact bar) there is nothing to
-        // stand back from and the surface runs the full width — which,
+        // (`slotScale == 0`, i.e. the compact bar) — or as soon as the tap
+        // means Expand, whichever comes first, see
+        // [capsuleTapSurfaceStandback] — there is nothing to stand back
+        // from and the surface runs the full width — which,
         // together with [capsuleGutterHandover] widening the box into the
         // capsule's gutters, makes every pixel of the compact pill answer
         // the tap.
@@ -1566,15 +1609,11 @@ private fun AddressField(
                 modifier = Modifier
                     .matchParentSize()
                     // What the trailing control still owns: its own slot
-                    // plus the air between it and the pill's edge.
-                    .padding(
-                        end = if (slotScale > 0f) {
-                            CapsuleTrailingSlotSize * slotScale +
-                                addressLabelPadding(collapse, AddressPillTrailingInset)
-                        } else {
-                            0.dp
-                        },
-                    )
+                    // plus the air between it and the pill's edge — and
+                    // nothing at all once the tap means Expand, so that
+                    // strip can't fall through to the field underneath.
+                    // See [capsuleTapSurfaceStandback].
+                    .padding(end = capsuleTapSurfaceStandback(collapse, addressFocused))
                     .combinedClickable(
                         interactionSource = pillInteractionSource,
                         // No ripple: the pill is a painted bubble, and a
