@@ -12,10 +12,12 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -61,6 +63,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.BiasAlignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
@@ -90,6 +93,7 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.TextRange
+import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.font.FontWeight
@@ -100,14 +104,17 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntRect
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.LayoutDirection
+import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.lerp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupPositionProvider
 import androidx.compose.ui.window.PopupProperties
 import baby.freedom.mobile.ui.isLight
 import baby.freedom.swarm.NodeInfo
 import baby.freedom.swarm.NodeStatus
+import kotlin.math.ceil
 import kotlin.math.max
 import kotlin.math.roundToInt
 
@@ -122,10 +129,11 @@ internal val CapsuleHeight = 56.dp
 
 /**
  * Height of the capsule in its compact (scrolled) state. The brief
- * allows 40–44 dp; 44 dp is the top of that band, which is what keeps
- * the domain label the same size it is at rest — the compact bar says
- * less, it must not say it *smaller* (see [AddressLabel]: the label is
- * a trust surface, and a shrunken domain is a harder one to read).
+ * allows 40–44 dp; 44 dp is the top of that band, which leaves the
+ * compact label room to step down exactly one type size (see
+ * [addressLabelFontSize]) rather than the two a 40 dp bar would invite —
+ * the label is a trust surface ([AddressLabel]) and a shrunken domain is
+ * a harder one to read.
  */
 internal val CapsuleCompactHeight = 44.dp
 
@@ -222,6 +230,308 @@ internal fun addressPillHeight(collapse: Float, editProgress: Float): Dp =
  * editor ever looks crowded mid-morph.
  */
 private const val CONTROL_COLLAPSE_RATE = 1.6f
+
+/**
+ * Padding the compact capsule wraps its label with, per side — capsule
+ * edge to the first glyph of the domain.
+ *
+ * It is the whole side inset, not a padding applied somewhere inside:
+ * [compactCapsuleWidth] adds `2 ×` this to the measured label, and it is
+ * what [capsuleLabelInset] settles at, so the settled compact capsule is
+ * the label plus this much air on either side and the label needs no
+ * ellipsis to fit.
+ */
+internal val CapsuleCompactSidePadding = 20.dp
+
+/** Gutter between the capsule's edge and the controls laid out over it. */
+private val CapsuleRowPadding = 4.dp
+
+/** Gutter between those controls and the address pill. */
+private val CapsuleFieldPadding = 4.dp
+
+/**
+ * The pill's own trailing slot — Clear / Stop / Reload, or empty. Always
+ * reserved at this width whatever it currently holds, so nothing in the
+ * pill re-wraps when a load starts or finishes.
+ */
+private val CapsuleTrailingSlotSize = 32.dp
+
+/** Pill-edge to label inset at rest. */
+private val AddressPillLabelInset = 16.dp
+
+/** The same, with the protocol badge filling part of it. */
+private val AddressPillLabelInsetWithBadge = 10.dp
+
+/** Pill-edge to trailing-slot inset at rest. */
+private val AddressPillTrailingInset = 4.dp
+
+/**
+ * The two gutters between the capsule's edge and the address field's
+ * touch box, added up — what the flanking controls' air costs the field
+ * on either side.
+ */
+internal val CapsuleFieldSideGutter = CapsuleRowPadding + CapsuleFieldPadding
+
+/**
+ * How much of [CapsuleFieldSideGutter] the address field's touch box has
+ * taken over.
+ *
+ * The gutters are the flanking controls' air, and while any control is
+ * still on screen they stay theirs — nothing moves under a
+ * half-collapsed bar. Once the controls have retreated into the
+ * capsule's edges (which they finish doing at `1 / CONTROL_COLLAPSE_RATE`
+ * of the collapse, see [Modifier.collapsingControl]) that air belongs to
+ * nobody, and the compact capsule is *all* address bar: the field's box
+ * grows into it, so every pixel of the pill the user can see answers the
+ * two-step tap instead of falling through to the text field underneath.
+ *
+ * Nothing about the capsule moves when it does — [addressPillSideInset]
+ * gives back in drawing exactly what this takes in layout. It is the
+ * width counterpart of what the height has always done: a touch box that
+ * stays [AddressFieldTouchHeight] tall with a 32 / 40 / 48 dp pill
+ * painted inside it.
+ */
+internal fun capsuleGutterHandover(collapse: Float): Float {
+    val controlsGone = 1f / CONTROL_COLLAPSE_RATE
+    return ((collapse.coerceIn(0f, 1f) - controlsGone) / (1f - controlsGone))
+        .coerceIn(0f, 1f)
+}
+
+/** How much of [CapsuleRowPadding] is still the flanking controls'. */
+internal fun capsuleControlGutter(collapse: Float): Dp =
+    lerp(CapsuleRowPadding, 0.dp, capsuleGutterHandover(collapse))
+
+/** How much of [CapsuleFieldPadding] is still the flanking controls'. */
+internal fun capsuleFieldGutter(collapse: Float): Dp =
+    lerp(CapsuleFieldPadding, 0.dp, capsuleGutterHandover(collapse))
+
+/**
+ * How far inside its touch box the address pill is *drawn* — exactly the
+ * gutter the box has swallowed ([capsuleGutterHandover]), so the painted
+ * pill stays where it was whatever the handover is doing.
+ */
+internal fun addressPillSideInset(collapse: Float): Dp =
+    CapsuleFieldSideGutter - capsuleControlGutter(collapse) - capsuleFieldGutter(collapse)
+
+/**
+ * Capsule-edge to label inset, per side.
+ *
+ * Asymmetric at rest — [restingInset] is 16 dp of start padding against
+ * the trailing slot's own 32 dp, 10 dp when the protocol badge is there
+ * to fill it, 4 dp on the trailing side — and symmetric
+ * [CapsuleCompactSidePadding] when compact, because the compact label is
+ * centred.
+ *
+ * Measured from the *capsule's* edge rather than from the field's box,
+ * which is what lets [capsuleGutterHandover] grow the box underneath the
+ * label without the label moving: the padding actually applied is this
+ * less whatever gutter is left outside the box.
+ */
+internal fun capsuleLabelInset(collapse: Float, restingInset: Dp): Dp =
+    lerp(
+        restingInset + CapsuleFieldSideGutter,
+        CapsuleCompactSidePadding,
+        collapse.coerceIn(0f, 1f),
+    )
+
+/**
+ * [capsuleLabelInset] expressed as a padding inside the address field's
+ * own box — the label's distance from the capsule edge, less the part of
+ * that distance the box already spans.
+ */
+internal fun addressLabelPadding(collapse: Float, restingInset: Dp): Dp =
+    capsuleLabelInset(collapse, restingInset) -
+        (CapsuleFieldSideGutter - addressPillSideInset(collapse))
+
+/**
+ * Narrowest the compact capsule ever gets. Safari's minimised bar keeps
+ * a recognisable pill even for a three-letter host, and a 120 dp capsule
+ * still leaves the label's tap surface ~104 × 48 dp — a full Material
+ * touch target for the tap that expands it.
+ */
+internal val CapsuleCompactMinWidth = 120.dp
+
+/**
+ * Slack added to the wrapped compact width, on top of the padding.
+ *
+ * The label's own box is what is left of the capsule after three dp
+ * paddings on each side, and *each* of those rounds to whole pixels at
+ * layout time — as does the capsule width itself. Sized to the label
+ * exactly, the box can therefore come out a pixel short of the text it
+ * was measured from, and the label middle-ellipsises inside a capsule
+ * built to fit it whole (seen on the AVD: `docs.s…rm.eth` in a 149 dp
+ * capsule). Two dp is more than the rounding can ever lose and less than
+ * a glyph.
+ */
+private val CapsuleCompactLabelSlack = 2.dp
+
+/**
+ * Font size of the domain label at rest: what it has always rendered
+ * at. The label states no size of its own, so it inherits
+ * `LocalTextStyle` — and `MaterialTheme` (via `MaterialExpressiveTheme`,
+ * see `FreedomTheme`) provides that as `typography.bodyLarge`, i.e.
+ * **16 sp**, not Compose's bare 14 sp default. Stated here rather than
+ * inherited now that the other end of the interpolation is explicit —
+ * and pinned by a test against `Typography().bodyLarge`, because the
+ * resting label is the trust surface and may not shrink by accident.
+ */
+internal val AddressLabelRestingFontSize = 16.sp
+
+/**
+ * Font size of the domain label when fully compact — one step down the
+ * M3 type scale (`bodyLarge` → `bodyMedium`). The compact bar says less
+ * *and* says it smaller, which is the one thing stage 2 deliberately
+ * didn't do; what makes it safe is that it says the same *string*
+ * ([AddressLabel.resting], middle-ellipsised), so the trust surface is
+ * unchanged — only its type size moves, and only by one step.
+ */
+internal val AddressLabelCompactFontSize = 14.sp
+
+/**
+ * Size the domain label is drawn at, interpolated along the collapse so
+ * the label morphs with the capsule rather than snapping a size at some
+ * threshold.
+ */
+internal fun addressLabelFontSize(collapse: Float): TextUnit =
+    lerp(
+        AddressLabelRestingFontSize,
+        AddressLabelCompactFontSize,
+        collapse.coerceIn(0f, 1f),
+    )
+
+/**
+ * Width the capsule settles at when fully compact: the label plus
+ * [CapsuleCompactSidePadding] on either side, never narrower than
+ * [CapsuleCompactMinWidth] and never wider than the resting width it
+ * shrank from.
+ *
+ * [labelWidth] is the *measured* width of the compact label at its
+ * compact type size (see [addressLabelFontSize]), so a short host gives
+ * a short capsule and a long ENS name gives a longer one — up to the
+ * resting width, past which the label middle-ellipsises exactly as it
+ * does at rest. Plus [CapsuleCompactLabelSlack], so that a label the
+ * capsule *was* sized to fit doesn't ellipsise on a rounded pixel.
+ *
+ * The floor yields to the ceiling: on a window too narrow for 120 dp of
+ * capsule, the resting width wins, because a "compact" bar wider than
+ * the bar it came from is not a collapse.
+ */
+internal fun compactCapsuleWidth(labelWidth: Dp, restingWidth: Dp): Dp {
+    val wrapped = labelWidth.coerceAtLeast(0.dp) +
+        CapsuleCompactSidePadding * 2 + CapsuleCompactLabelSlack
+    val floor = CapsuleCompactMinWidth.coerceAtMost(restingWidth)
+    return wrapped.coerceIn(floor, restingWidth.coerceAtLeast(floor))
+}
+
+/**
+ * Width the capsule is actually drawn at — the width counterpart of
+ * [capsuleDrawnHeight], and the *only* thing about the compact state
+ * that is new geometry rather than the stage 2/3 model.
+ *
+ * It shrinks towards [compactWidth] inside a layout slot that keeps
+ * spanning the full resting width, so this is still the same rule as the
+ * height: **nothing outside the slot moves on scroll**, the capsule just
+ * occupies less of it. The editing morph doesn't appear here at all —
+ * the caller holds `collapse` at 0 whenever the field has focus (editing
+ * wins over compact), so the editor always opens at the full resting
+ * width, and the side margins it reaches into are the caller's.
+ */
+internal fun capsuleDrawnWidth(collapse: Float, restingWidth: Dp, compactWidth: Dp): Dp =
+    lerp(
+        restingWidth,
+        compactWidth.coerceAtMost(restingWidth),
+        collapse.coerceIn(0f, 1f),
+    )
+
+/**
+ * What a tap on the capsule's domain label does.
+ *
+ * Safari's minimised bar takes two taps to edit, and so does this one:
+ * the compact capsule is too small a target to hand straight to a
+ * keyboard, and a user reaching for a bar that has shrunk out from under
+ * their thumb is usually reaching for the *bar* (Back, tabs, the menu),
+ * not for the address editor.
+ */
+internal enum class CapsuleTapAction {
+    /**
+     * Restore the resting capsule and stop there — no focus, no
+     * keyboard, no suggestions panel. The controls come back with it, so
+     * the second tap has a full-size target to land on.
+     */
+    Expand,
+
+    /** Enter editing: focus the field, select all, raise the keyboard. */
+    Edit,
+}
+
+/**
+ * Past this much collapse a tap expands rather than edits. Half-way is
+ * the honest place to put it: the fraction comes off a spring, and the
+ * user is aiming at whatever the capsule looks like *now* — mostly
+ * compact, they get the expand; mostly resting, they get the editor.
+ */
+internal const val CAPSULE_TAP_EXPAND_ABOVE = 0.5f
+
+/**
+ * Decide the two-step tap. [collapse] is the same fraction the geometry
+ * is drawn from, so the decision matches what the user can see.
+ *
+ * [addressFocused] keeps the **editing wins over compact** rule true
+ * here as well: a focused capsule is the editor, and a tap inside the
+ * editor is never a request to expand it (the caller holds `collapse` at
+ * 0 under focus, so this only matters if that guard is ever lost).
+ */
+internal fun capsuleTapAction(collapse: Float, addressFocused: Boolean): CapsuleTapAction = when {
+    addressFocused -> CapsuleTapAction.Edit
+    collapse > CAPSULE_TAP_EXPAND_ABOVE -> CapsuleTapAction.Expand
+    else -> CapsuleTapAction.Edit
+}
+
+/**
+ * How much of themselves the address pill's own two slots — the protocol
+ * badge and the trailing Reload / Stop / Clear — still have.
+ *
+ * Driven by `collapse` *only*, not by `max(collapse, edit)` like the
+ * flanking controls: the editor needs its trailing × and the badge keeps
+ * vouching for the origin while the full URL is on screen, so inflating
+ * the capsule must leave both alone. The rate is the flanking controls'
+ * own ([Modifier.collapsingControl]), so everything the compact bar drops
+ * leaves at one speed and they are all gone together at
+ * `1 / CONTROL_COLLAPSE_RATE` of the collapse.
+ */
+internal fun capsulePillSlotScale(collapse: Float): Float =
+    (1f - collapse * CONTROL_COLLAPSE_RATE).coerceIn(0f, 1f)
+
+/**
+ * How far the capsule's tap surface stands back from the pill's trailing
+ * edge, so the trailing control keeps answering for its own slot.
+ *
+ * The surface covers the pill edge to edge except for this: the trailing
+ * slot ([capsulePillSlotScale] of it, since the slot narrows as it
+ * retreats) plus the air between that slot and the pill's edge, which is
+ * *outboard* of the button and so cannot be reclaimed without covering
+ * the button itself.
+ *
+ * Which is why the standback goes to zero the moment the tap is an
+ * [CapsuleTapAction.Expand]. Held back, that outboard strip is nobody's:
+ * it is past the shrinking button, so a press there falls through to the
+ * transparent text field underneath and opens the editor and the keyboard
+ * on what the two-step tap had decided was an expand-only first tap.
+ * Between half-collapsed and `1 / CONTROL_COLLAPSE_RATE` — the frames
+ * where the tap already means Expand but the slot has not finished
+ * retreating — that would be a ~8 dp hole in the rule that *every* pixel
+ * of a mostly-compact pill expands the bar. The button it covers there is
+ * a ≤ 6 dp sliver mid-spring, far too small to aim at and never at rest
+ * (the fraction only settles at 0 or 1), so the whole pill answering the
+ * expand is the better trade.
+ */
+internal fun capsuleTapSurfaceStandback(collapse: Float, addressFocused: Boolean): Dp {
+    val slotScale = capsulePillSlotScale(collapse)
+    val expands = capsuleTapAction(collapse, addressFocused) == CapsuleTapAction.Expand
+    if (slotScale <= 0f || expands) return 0.dp
+    return CapsuleTrailingSlotSize * slotScale +
+        addressLabelPadding(collapse, AddressPillTrailingInset)
+}
 
 /**
  * Stroke of the load-progress trace that runs along the capsule's own
@@ -416,6 +726,7 @@ internal fun BottomToolbar(
     onReload: () -> Unit,
     onStop: () -> Unit,
     onNewTab: () -> Unit,
+    onExpandCapsule: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     // Clamp rather than trust the caller: both fractions are driven by
@@ -454,24 +765,72 @@ internal fun BottomToolbar(
     val progressColor = MaterialTheme.colorScheme.primary
     val progressStrokePx = with(LocalDensity.current) { CapsuleProgressStroke.toPx() }
 
-    Box(
+    // The label the capsule shows while it isn't being edited — the
+    // committed address reduced to a domain, which is also the string
+    // the compact capsule sizes itself to. Computed here rather than
+    // inside [AddressField] because the width has to be known one level
+    // up, where the capsule is laid out.
+    val restingLabel = remember(state.addressBarText) {
+        AddressLabel.resting(state.addressBarText)
+    }
+    val labelStyle = LocalTextStyle.current
+    // What the label looks like at full collapse. Measuring at the
+    // *compact* size is the point: the settled compact capsule wraps the
+    // settled compact label.
+    val compactLabelStyle = remember(labelStyle) {
+        labelStyle.copy(
+            fontSize = AddressLabelCompactFontSize,
+            fontWeight = FontWeight.Medium,
+        )
+    }
+    val textMeasurer = rememberTextMeasurer()
+    val density = LocalDensity.current
+    val compactLabelWidth = remember(restingLabel, compactLabelStyle, density) {
+        if (restingLabel.isEmpty()) 0.dp
+        else with(density) {
+            val px = textMeasurer.measure(
+                text = restingLabel,
+                style = compactLabelStyle,
+                maxLines = 1,
+                softWrap = false,
+            ).size.width
+            // Ceiled to whole dp: the width this feeds is turned back
+            // into px at layout time, and losing a fraction there would
+            // middle-ellipsise a label the capsule was sized to fit.
+            ceil(px.toDp().value).dp
+        }
+    }
+
+    BoxWithConstraints(
         // The slot the capsule lives in. Compacting shrinks the capsule
-        // *inside* it, which is what keeps the page, the snackbar and
-        // the IME reserve from moving when the bar collapses — and what
-        // lets the controls keep 48 dp touch targets while the capsule
-        // around them is only 44 dp tall. Editing is the one transition
-        // that grows it (see [capsuleSlotHeight]).
+        // *inside* it — in width now as well as height — which is what
+        // keeps the page, the snackbar and the IME reserve from moving
+        // when the bar collapses, and what lets the controls keep 48 dp
+        // touch targets while the capsule around them is only 44 dp
+        // tall. Editing is the one transition that grows it (see
+        // [capsuleSlotHeight]).
         modifier = modifier
             .fillMaxWidth()
             .height(slotHeight),
         contentAlignment = Alignment.Center,
     ) {
+        // The resting width is whatever the caller's slot offers; the
+        // compact one is the label plus its padding. Centred in the slot
+        // by the Box, so the capsule stays bottom-centred on screen as
+        // it narrows.
+        val restingWidth = maxWidth
+        val drawnWidth = capsuleDrawnWidth(
+            collapse = collapse,
+            restingWidth = restingWidth,
+            compactWidth = compactCapsuleWidth(compactLabelWidth, restingWidth),
+        )
+
         // The capsule itself is background only: drawn at the
-        // interpolated height, centred in the slot, with the controls
-        // laid out over it rather than inside it.
+        // interpolated height and width, centred in the slot, with the
+        // controls laid out over it rather than inside it.
         Surface(
             modifier = Modifier
-                .fillMaxWidth()
+                .width(drawnWidth)
                 .height(drawnHeight),
             shape = CircleShape,
             color = MaterialTheme.colorScheme.surfaceContainer.copy(
@@ -487,9 +846,18 @@ internal fun BottomToolbar(
             LocalContentColor provides MaterialTheme.colorScheme.onSurface,
         ) {
             Row(
+                // The width tracks the capsule; the height stays the
+                // slot's, so the 48 dp touch boxes inside keep their
+                // full height even while the capsule around them is
+                // 44 dp tall.
                 modifier = Modifier
-                    .fillMaxSize()
-                    .padding(horizontal = 4.dp),
+                    .fillMaxHeight()
+                    .width(drawnWidth)
+                    // The gutter is the controls' own air, and it is
+                    // theirs for as long as there is a control to give it
+                    // to; once they are gone it becomes address-bar touch
+                    // surface (see [capsuleGutterHandover]).
+                    .padding(horizontal = capsuleControlGutter(collapse)),
                 // Mixed-height children (a 40 dp pill next to 48 dp icon
                 // buttons) only sit on the capsule's centre line if we say
                 // so explicitly — a Row defaults to Top.
@@ -517,6 +885,7 @@ internal fun BottomToolbar(
 
                 AddressField(
                     state = state,
+                    restingLabel = restingLabel,
                     addressFocused = addressFocused,
                     addressBarEdited = addressBarEdited,
                     collapse = collapse,
@@ -528,9 +897,10 @@ internal fun BottomToolbar(
                     onSubmit = onSubmit,
                     onReload = onReload,
                     onStop = onStop,
+                    onExpandCapsule = onExpandCapsule,
                     modifier = Modifier
                         .weight(1f)
-                        .padding(horizontal = 4.dp),
+                        .padding(horizontal = capsuleFieldGutter(collapse)),
                 )
 
                 if (controlScale > 0f) {
@@ -581,7 +951,7 @@ internal fun BottomToolbar(
         if (loading) {
             Box(
                 modifier = Modifier
-                    .fillMaxWidth()
+                    .width(drawnWidth)
                     .height(drawnHeight)
                     .drawWithCache {
                         // The outline only changes when the capsule's
@@ -769,12 +1139,20 @@ private fun capsuleHalves(size: Size, strokeWidth: Float): List<Path> {
  * [AddressFieldTouchHeight] tall throughout, so neither shrinking the
  * capsule nor inflating it ever changes the size of the tap target, and
  * the compact bar's one remaining control keeps a full-width 48 dp one.
- * The domain label is deliberately *not* interpolated either: it is a
- * trust surface and has to read the same at every height.
+ *
+ * Collapsing also takes the pill down to the domain and nothing else:
+ * the protocol badge's leading slot and the trailing Reload/Stop slot
+ * both retreat into the pill's edges through the same
+ * [Modifier.collapsingControl] the flanking controls use, the label
+ * centres itself in what is left, and its type steps down one size (see
+ * [addressLabelFontSize]). The *string* is untouched —
+ * [AddressLabel.resting] with the same middle ellipsis — because that is
+ * the part that is a trust surface.
  */
 @Composable
 private fun AddressField(
     state: BrowserState,
+    restingLabel: String,
     addressFocused: Boolean,
     addressBarEdited: Boolean,
     collapse: Float,
@@ -786,6 +1164,7 @@ private fun AddressField(
     onSubmit: (String) -> Unit,
     onReload: () -> Unit,
     onStop: () -> Unit,
+    onExpandCapsule: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val focusRequester = remember { FocusRequester() }
@@ -899,38 +1278,50 @@ private fun AddressField(
 
     // Drawn (not laid out) pill geometry: the bubble follows the capsule
     // through both morphs while the Box that owns the touches keeps its
-    // height.
+    // height — and, once the flanking controls are gone, widens into the
+    // gutters they left behind ([capsuleGutterHandover]) while the bubble
+    // is drawn inset by exactly what the box gained.
     val pillHeight = addressPillHeight(collapse, editProgress)
+    val pillSideInset = addressPillSideInset(collapse)
+    val pillSideInsetPx = with(LocalDensity.current) { pillSideInset.roundToPx() }
     val pillFill = colors.surfaceContainerHighest
+
+    // How much of themselves the pill's own two slots still have — see
+    // [capsulePillSlotScale] for why this one is the collapse alone.
+    val slotScale = capsulePillSlotScale(collapse)
 
     Box(
         modifier = modifier
             .height(AddressFieldTouchHeight)
             .onGloballyPositioned { coords ->
                 val r = coords.boundsInWindow()
+                // The *drawn* pill's bounds, so the long-press menu keeps
+                // anchoring on the bubble rather than on the touch box
+                // around it.
                 pillBounds = IntRect(
-                    r.left.toInt(), r.top.toInt(),
-                    r.right.toInt(), r.bottom.toInt(),
+                    r.left.toInt() + pillSideInsetPx, r.top.toInt(),
+                    r.right.toInt() - pillSideInsetPx, r.bottom.toInt(),
                 )
             }
             .drawBehind {
                 val h = pillHeight.toPx()
+                val inset = pillSideInset.toPx()
                 // Centred in the touch box, which is itself centred in
                 // the capsule — so the bubble, the capsule and the text
                 // share one centre line in every state.
                 val top = (size.height - h) / 2f
                 drawRoundRect(
                     color = pillFill,
-                    topLeft = Offset(0f, top),
-                    size = Size(size.width, h),
+                    topLeft = Offset(inset, top),
+                    size = Size(size.width - inset * 2f, h),
                     cornerRadius = CornerRadius(h / 2f),
                 )
                 if (outline.alpha > 0f) {
                     val stroke = 1.5.dp.toPx()
                     drawRoundRect(
                         color = outline,
-                        topLeft = Offset(stroke / 2f, top + stroke / 2f),
-                        size = Size(size.width - stroke, h - stroke),
+                        topLeft = Offset(inset + stroke / 2f, top + stroke / 2f),
+                        size = Size(size.width - inset * 2f - stroke, h - stroke),
                         cornerRadius = CornerRadius((h - stroke) / 2f),
                         style = Stroke(width = stroke),
                     )
@@ -980,19 +1371,43 @@ private fun AddressField(
                 Row(
                     modifier = Modifier
                         .fillMaxSize()
+                        // Asymmetric at rest (16 dp of start padding
+                        // against the trailing slot's own 32 dp),
+                        // symmetric when compact — which is what lets
+                        // the label centre in the capsule rather than in
+                        // a box that is off-centre to begin with. Both
+                        // ends are measured from the *capsule's* edge
+                        // (see [capsuleLabelInset]), so the label sits
+                        // where it always did while the box underneath it
+                        // widens into the gutters.
                         .padding(
-                            start = if (badge != null) 10.dp else 16.dp,
-                            end = 4.dp,
+                            start = addressLabelPadding(
+                                collapse,
+                                if (badge != null) AddressPillLabelInsetWithBadge
+                                else AddressPillLabelInset,
+                            ),
+                            end = addressLabelPadding(collapse, AddressPillTrailingInset),
                         ),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    if (badge != null) {
-                        Image(
-                            painter = painterResource(badge.drawableRes),
-                            contentDescription = badge.contentDescription,
-                            modifier = Modifier.size(16.dp),
-                        )
-                        Spacer(Modifier.width(8.dp))
+                    // The badge (and the gap after it) is one slot that
+                    // retreats into the pill's leading edge as the bar
+                    // collapses — the compact capsule shows the domain
+                    // and nothing else. Zero-width means not composed,
+                    // so it can't take a tap meant for the label.
+                    if (badge != null && slotScale > 0f) {
+                        Row(
+                            modifier = Modifier
+                                .collapsingControl(slotScale, towardsStart = true),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Image(
+                                painter = painterResource(badge.drawableRes),
+                                contentDescription = badge.contentDescription,
+                                modifier = Modifier.size(16.dp),
+                            )
+                            Spacer(Modifier.width(8.dp))
+                        }
                     }
                     // Resting vs editing text. At rest the domain is the
                     // primary element (see [AddressLabel]); the moment
@@ -1010,14 +1425,13 @@ private fun AddressField(
                     // domain is the capsule asserting "this is the site
                     // you are on", and only a loaded (or just-submitted)
                     // URL earns that.
-                    val restingLabel =
-                        if (addressFocused) "" else AddressLabel.resting(state.addressBarText)
+                    val label = if (addressFocused) "" else restingLabel
                     // Blank label at rest means a blank address (the
                     // home tab) — [AddressLabel.resting] passes
                     // everything else through — so the placeholder is
                     // the right thing to draw underneath.
                     val showPlaceholder =
-                        if (addressFocused) fieldValue.text.isEmpty() else restingLabel.isEmpty()
+                        if (addressFocused) fieldValue.text.isEmpty() else label.isEmpty()
                     Box(modifier = Modifier.weight(1f)) {
                         Box(
                             modifier = Modifier.graphicsLayer {
@@ -1033,11 +1447,28 @@ private fun AddressField(
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
                             )
-                        } else if (restingLabel.isNotEmpty()) {
+                        } else if (label.isNotEmpty()) {
                             Text(
-                                text = restingLabel,
+                                text = label,
                                 color = colors.onSurface,
                                 fontWeight = FontWeight.Medium,
+                                // One type size down at full collapse,
+                                // interpolated on the way there so the
+                                // label morphs with the capsule.
+                                fontSize = addressLabelFontSize(collapse),
+                                // Start-aligned at rest, centred in the
+                                // compact capsule (whose label padding
+                                // is symmetric by then), and *slid*
+                                // between the two rather than switched:
+                                // a bias of -1 is the start edge and 0
+                                // the centre, so the label travels with
+                                // the narrowing capsule instead of
+                                // jumping the moment the collapse
+                                // begins. The Text still wraps its own
+                                // width inside the same box, so the
+                                // middle ellipsis measures against
+                                // exactly what it did before.
+                                modifier = Modifier.align(BiasAlignment(-1f + collapse, 0f)),
                                 maxLines = 1,
                                 // Middle, not tail: a name too long for
                                 // the pill is almost always an ENS
@@ -1051,64 +1482,6 @@ private fun AddressField(
                                 overflow = TextOverflow.MiddleEllipsis,
                             )
                         }
-                        // Long-press surface over the resting label.
-                        //
-                        // A sibling laid over the (transparent) text
-                        // field rather than a modifier on the Box around
-                        // it: Compose hit-tests children before their
-                        // parent, so a modifier here would never see a
-                        // press the field itself takes first. On top, it
-                        // gets the gesture — and with it the chance to
-                        // keep the field's *own* long-press (selection
-                        // handles, magnifier) off a label that isn't
-                        // even editable text yet.
-                        //
-                        // Composed only while the field is unfocused, so
-                        // the moment the capsule becomes the editor it is
-                        // gone and every touch inside the pill is the
-                        // text field's again — cursor placement, drag
-                        // selection, the lot. That is also what keeps the
-                        // gesture off stage 2's scroll wiring: it lives
-                        // inside the capsule, never over the page, so the
-                        // WebView's own onTouchDown / onDragPastSlop
-                        // stream is untouched.
-                        //
-                        // `onClick` is the existing tap-to-edit, stated
-                        // explicitly now that the tap lands here instead:
-                        // request focus (which select-alls, see above)
-                        // and raise the keyboard.
-                        if (!addressFocused) {
-                            Box(
-                                modifier = Modifier
-                                    .matchParentSize()
-                                    .combinedClickable(
-                                        interactionSource = pillInteractionSource,
-                                        // No ripple: the pill is a
-                                        // painted bubble, and a
-                                        // rectangular ripple inside it
-                                        // would be the one square corner
-                                        // in the whole capsule.
-                                        indication = null,
-                                        onClickLabel = "Edit address",
-                                        onLongClickLabel = "URL actions",
-                                        onLongClick = {
-                                            urlActionsCanPaste = context.clipboardHasText()
-                                            // Nothing to copy and nothing
-                                            // to paste is an empty menu;
-                                            // a long-press that opens one
-                                            // is worse than one that does
-                                            // nothing.
-                                            if (actionUrl != null || urlActionsCanPaste) {
-                                                urlActionsOpen = true
-                                            }
-                                        },
-                                        onClick = {
-                                            focusRequester.requestFocus()
-                                            keyboardController?.show()
-                                        },
-                                    ),
-                            )
-                        }
                     }
                     // Trailing control slot — sized to the pill, never
                     // pushes it taller, and *always* reserved at the same
@@ -1118,6 +1491,16 @@ private fun AddressField(
                     // into a slot that was already there, and the URL
                     // beside it doesn't re-wrap or re-ellipsise when a
                     // load starts or finishes.
+                    //
+                    // The one thing that moves it is the collapse: the
+                    // slot retreats into the pill's trailing edge along
+                    // with the badge, because a minimised bar that is
+                    // the domain *and a button* is neither minimised nor
+                    // centred. Nothing is lost — the tap that brings the
+                    // bar back brings Reload/Stop back with it, the same
+                    // way it restores Back, the tab counter and the
+                    // menu — and the load's own progress keeps being
+                    // drawn on the compact capsule's edge throughout.
                     //
                     // Which control: see [capsuleTrailingControl]. The
                     // `addressBarEdited` guard inside it matters once the
@@ -1137,40 +1520,132 @@ private fun AddressField(
                         canReload = state.url.isNotBlank() ||
                             state.addressBarText.isNotBlank(),
                     )
-                    Box(
-                        modifier = Modifier.size(32.dp),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        when (trailing) {
-                            CapsuleTrailingControl.None -> Unit
-                            CapsuleTrailingControl.Clear -> CapsuleTrailingButton(
-                                icon = Icons.Filled.Clear,
-                                contentDescription = "Clear",
-                                onClick = {
-                                    fieldValue = TextFieldValue("")
-                                    onAddressQueryChanged("")
-                                    // × is a "start over" gesture — drop the
-                                    // suggestions panel and wait for the next
-                                    // keystroke before showing it again.
-                                    onAddressEditedChanged(false)
-                                },
-                            )
-                            CapsuleTrailingControl.Stop -> CapsuleTrailingButton(
-                                icon = Icons.Filled.Close,
-                                contentDescription = "Stop loading",
-                                tint = colors.primary,
-                                onClick = onStop,
-                            )
-                            CapsuleTrailingControl.Reload -> CapsuleTrailingButton(
-                                icon = Icons.Filled.Refresh,
-                                contentDescription = "Reload",
-                                onClick = onReload,
-                            )
+                    if (slotScale > 0f) {
+                        Box(
+                            modifier = Modifier
+                                .collapsingControl(slotScale, towardsStart = false)
+                                .size(CapsuleTrailingSlotSize),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            when (trailing) {
+                                CapsuleTrailingControl.None -> Unit
+                                CapsuleTrailingControl.Clear -> CapsuleTrailingButton(
+                                    icon = Icons.Filled.Clear,
+                                    contentDescription = "Clear",
+                                    onClick = {
+                                        fieldValue = TextFieldValue("")
+                                        onAddressQueryChanged("")
+                                        // × is a "start over" gesture — drop
+                                        // the suggestions panel and wait for
+                                        // the next keystroke before showing
+                                        // it again.
+                                        onAddressEditedChanged(false)
+                                    },
+                                )
+                                CapsuleTrailingControl.Stop -> CapsuleTrailingButton(
+                                    icon = Icons.Filled.Close,
+                                    contentDescription = "Stop loading",
+                                    tint = colors.primary,
+                                    onClick = onStop,
+                                )
+                                CapsuleTrailingControl.Reload -> CapsuleTrailingButton(
+                                    icon = Icons.Filled.Refresh,
+                                    contentDescription = "Reload",
+                                    onClick = onReload,
+                                )
+                            }
                         }
                     }
                 }
             },
         )
+
+        // The capsule's tap surface: the two-step tap and the long-press
+        // URL actions, over the whole pill.
+        //
+        // A sibling laid over the (transparent) text field rather than a
+        // modifier on the Box around it: Compose hit-tests children
+        // before their parent, so a modifier there would never see a
+        // press the field itself takes first. On top, it gets the
+        // gesture — and with it the chance to keep the field's *own*
+        // long-press (selection handles, magnifier) off a label that
+        // isn't even editable text yet.
+        //
+        // It covers the touch box **edge to edge** rather than just the
+        // label's own layout box. The pill's paddings are part of the
+        // pill the user is aiming at, and a press that landed in one used
+        // to fall through to the text field underneath: on a compact
+        // capsule that opened the editor and the keyboard on what should
+        // have been the first, expand-only tap, and it raised raw text
+        // selection on what should have been the URL-actions long-press.
+        // The one thing the surface stands back from is the trailing
+        // control slot, which has its own button to answer for Reload /
+        // Stop / Clear; once that slot has retreated into the pill's edge
+        // (`slotScale == 0`, i.e. the compact bar) — or as soon as the tap
+        // means Expand, whichever comes first, see
+        // [capsuleTapSurfaceStandback] — there is nothing to stand back
+        // from and the surface runs the full width — which,
+        // together with [capsuleGutterHandover] widening the box into the
+        // capsule's gutters, makes every pixel of the compact pill answer
+        // the tap.
+        //
+        // Composed only while the field is unfocused, so the moment the
+        // capsule becomes the editor it is gone and every touch inside
+        // the pill is the text field's again — cursor placement, drag
+        // selection, the lot. That is also what keeps the gesture off
+        // stage 2's scroll wiring: it lives inside the capsule, never
+        // over the page, so the WebView's own onTouchDown /
+        // onDragPastSlop stream is untouched.
+        //
+        // `onClick` is the **two-step tap**: on a compact capsule it only
+        // expands the bar back to its resting state — no focus, no
+        // keyboard, no suggestions panel — and it is the *second* tap, on
+        // the full-size bar, that opens the editor (request focus, which
+        // select-alls, and raise the keyboard). See [capsuleTapAction];
+        // the long-press is deliberately outside that split and offers
+        // copy / share / paste-and-go in either state.
+        if (!addressFocused) {
+            Box(
+                modifier = Modifier
+                    .matchParentSize()
+                    // What the trailing control still owns: its own slot
+                    // plus the air between it and the pill's edge — and
+                    // nothing at all once the tap means Expand, so that
+                    // strip can't fall through to the field underneath.
+                    // See [capsuleTapSurfaceStandback].
+                    .padding(end = capsuleTapSurfaceStandback(collapse, addressFocused))
+                    .combinedClickable(
+                        interactionSource = pillInteractionSource,
+                        // No ripple: the pill is a painted bubble, and a
+                        // rectangular ripple inside it would be the one
+                        // square corner in the whole capsule.
+                        indication = null,
+                        onClickLabel = when (capsuleTapAction(collapse, addressFocused)) {
+                            CapsuleTapAction.Expand -> "Expand address bar"
+                            CapsuleTapAction.Edit -> "Edit address"
+                        },
+                        onLongClickLabel = "URL actions",
+                        onLongClick = {
+                            urlActionsCanPaste = context.clipboardHasText()
+                            // Nothing to copy and nothing to paste is an
+                            // empty menu; a long-press that opens one is
+                            // worse than one that does nothing.
+                            if (actionUrl != null || urlActionsCanPaste) {
+                                urlActionsOpen = true
+                            }
+                        },
+                        onClick = {
+                            when (capsuleTapAction(collapse, addressFocused)) {
+                                CapsuleTapAction.Expand -> onExpandCapsule()
+                                CapsuleTapAction.Edit -> {
+                                    focusRequester.requestFocus()
+                                    keyboardController?.show()
+                                }
+                            }
+                        },
+                    ),
+            )
+        }
 
         // The long-press menu. Anchored on the pill's own bounds, above
         // the capsule; dismissed by a tap outside or by the system back
