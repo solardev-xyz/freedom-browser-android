@@ -318,36 +318,24 @@ class CapsuleCompactStateTest {
 
     @Test
     fun `the label steps down exactly one type size`() {
-        assertEquals(AddressLabelRestingFontSize, addressLabelFontSize(0f))
-        assertEquals(AddressLabelCompactFontSize, addressLabelFontSize(1f))
         // The resting size is what the label has always rendered at, and
         // the compact one is one step down the M3 scale (bodyLarge →
         // bodyMedium). Pinned, because a trust surface may not quietly
         // shrink further than the brief allows.
         assertEquals(16.sp, AddressLabelRestingFontSize)
         assertEquals(14.sp, AddressLabelCompactFontSize)
-        // The line box steps with the type (#47) — the compact capsule
-        // is measured from it, so it may not stay behind at bodyLarge's.
         assertEquals(24.sp, AddressLabelRestingLineHeight)
         assertEquals(20.sp, AddressLabelCompactLineHeight)
-        assertEquals(AddressLabelRestingLineHeight, addressLabelLineHeight(0f))
-        assertEquals(AddressLabelCompactLineHeight, addressLabelLineHeight(1f))
-    }
-
-    @Test
-    fun `the line box morphs with the type rather than snapping`() {
-        assertEquals(22.sp, addressLabelLineHeight(0.5f))
-        var previous = addressLabelLineHeight(0f)
-        for (step in 1..20) {
-            val line = addressLabelLineHeight(step / 20f)
-            assertTrue("line box grew at step $step", line.value <= previous.value)
-            assertTrue("line box jumped at step $step", previous.value - line.value < 0.5f)
-            previous = line
-        }
-        assertEquals(AddressLabelCompactLineHeight, previous)
-        // Overshooting springs can't take it past either end.
-        assertEquals(AddressLabelCompactLineHeight, addressLabelLineHeight(1.08f))
-        assertEquals(AddressLabelRestingLineHeight, addressLabelLineHeight(-0.08f))
+        // …and the step is taken as a scale, not as a second text layout
+        // (#55): one at rest, exactly 14/16 when compact.
+        assertEquals(1f, addressLabelScale(0f), 0f)
+        assertEquals(AddressLabelCompactScale, addressLabelScale(1f), 0f)
+        assertEquals(
+            AddressLabelCompactFontSize.value / AddressLabelRestingFontSize.value,
+            AddressLabelCompactScale,
+            0f,
+        )
+        assertEquals(0.875f, AddressLabelCompactScale, 1e-6f)
     }
 
     @Test
@@ -364,21 +352,163 @@ class CapsuleCompactStateTest {
     }
 
     @Test
-    fun `the label size morphs rather than snaps`() {
-        assertEquals(15.sp, addressLabelFontSize(0.5f))
-        var previous = addressLabelFontSize(0f)
+    fun `the label scale morphs rather than snaps`() {
+        assertEquals((1f + AddressLabelCompactScale) / 2f, addressLabelScale(0.5f), 1e-6f)
+        var previous = addressLabelScale(0f)
         for (step in 1..20) {
-            val size = addressLabelFontSize(step / 20f)
-            assertTrue("label grew at step $step", size.value <= previous.value)
-            assertTrue("label jumped at step $step", previous.value - size.value < 0.5f)
-            previous = size
+            val scale = addressLabelScale(step / 20f)
+            assertTrue("label grew at step $step", scale <= previous)
+            assertTrue("label jumped at step $step", previous - scale < 0.05f)
+            previous = scale
         }
-        assertEquals(AddressLabelCompactFontSize, previous)
+        assertEquals(AddressLabelCompactScale, previous, 1e-6f)
     }
 
     @Test
     fun `an overshooting spring cannot shrink the label further`() {
-        assertEquals(AddressLabelCompactFontSize, addressLabelFontSize(1.08f))
-        assertEquals(AddressLabelRestingFontSize, addressLabelFontSize(-0.08f))
+        assertEquals(AddressLabelCompactScale, addressLabelScale(1.08f), 0f)
+        assertEquals(1f, addressLabelScale(-0.08f), 0f)
+    }
+
+    // ---- where the label sits (#55) --------------------------------
+
+    /** A label that fits: `rfc-editor.org` at 16 sp on a 420 dpi phone. */
+    private val labelWidth = 99.dp
+
+    private fun offset(collapse: Float, canGoBack: Boolean = true) =
+        addressLabelCenterOffset(
+            collapse = collapse,
+            restingInset = addressLabelRestingInset(canGoBack, hasBadge = false),
+            restingWidth = restingWidth,
+            labelWidth = labelWidth,
+        )
+
+    @Test
+    fun `the resting inset is the whole row in front of the label`() {
+        // 4 dp of capsule gutter, the Back button's 48 dp slot, 4 dp of
+        // field gutter and the pill's own 16 dp label inset.
+        assertEquals(72.dp, addressLabelRestingInset(canGoBack = true, hasBadge = false))
+        // No history to pop: the label starts where the Back button would
+        // have.
+        assertEquals(24.dp, addressLabelRestingInset(canGoBack = false, hasBadge = false))
+        // The badge trades 6 dp of the inset for its 16 dp mark and the
+        // 8 dp of air after it, so it costs the label 18 dp net.
+        assertEquals(
+            addressLabelRestingInset(canGoBack = true, hasBadge = false) + 18.dp,
+            addressLabelRestingInset(canGoBack = true, hasBadge = true),
+        )
+    }
+
+    @Test
+    fun `the label is laid out against the resting width and nothing else`() {
+        // Everything beside the label at rest, added up: the resting
+        // inset in front, and behind it 4 dp of pill inset, the 32 dp
+        // trailing slot, 4 dp of field gutter, tabs and overflow, 4 dp
+        // of capsule gutter.
+        val max = addressLabelMaxWidth(restingWidth, hasBadge = false)
+        assertEquals(restingWidth - 212.dp, max)
+        assertTrue("a phone-width bar must leave room for a domain", max > 120.dp)
+        // The badge takes its 18 dp net out of the same width.
+        assertEquals(max - 18.dp, addressLabelMaxWidth(restingWidth, hasBadge = true))
+        // …and on a window narrower than its own chrome it bottoms out
+        // rather than going negative.
+        assertEquals(0.dp, addressLabelMaxWidth(60.dp, hasBadge = false))
+    }
+
+    @Test
+    fun `history appearing under a compact bar cannot re-ellipsise the label`() {
+        // `canGoBack` is the one thing in the resting row that flips
+        // while the domain stays put — an in-page `pushState` gives the
+        // tab its first history entry without changing the host — and it
+        // flips while the Back button it belongs to is not even on
+        // screen. So the width the ellipsis is settled against reserves
+        // the button's slot either way: it is the *narrower* of the two
+        // rows, the one with a Back button in it.
+        //
+        // Everything behind the label — 4 dp of pill inset, the 32 dp
+        // trailing slot, 4 dp of field gutter, tabs and overflow, 4 dp
+        // of capsule gutter.
+        val behind = 140.dp
+        val withHistory =
+            restingWidth - addressLabelRestingInset(canGoBack = true, hasBadge = false) - behind
+        val withoutHistory =
+            restingWidth - addressLabelRestingInset(canGoBack = false, hasBadge = false) - behind
+        assertEquals(withHistory + CapsuleControlSize, withoutHistory)
+        // A threshold that followed the history state would re-ellipsise
+        // a long name mid-session and step the compact capsule — which
+        // is sized from that one layout — by the button's 48 dp in a
+        // single unanimated frame. It takes the narrower row instead.
+        assertEquals(withHistory, addressLabelMaxWidth(restingWidth, hasBadge = false))
+        // The resting *inset* does still follow the button — there the
+        // button is on screen, taking the room it moved the label out of.
+        assertTrue(
+            "the Back button still moves the resting label",
+            addressLabelRestingInset(canGoBack = true, hasBadge = false) >
+                addressLabelRestingInset(canGoBack = false, hasBadge = false),
+        )
+    }
+
+    @Test
+    fun `the label's two settled positions are the ones it has always had`() {
+        // At rest: its leading edge is the resting inset in from the
+        // capsule's, i.e. its centre is half a label further in still.
+        assertEquals(
+            addressLabelRestingInset(canGoBack = true, hasBadge = false) +
+                labelWidth / 2f - restingWidth / 2f,
+            offset(0f),
+        )
+        // Compact: dead centre, because `compactCapsuleWidth` sizes the
+        // capsule *from* this label.
+        assertEquals(0.dp, offset(1f))
+    }
+
+    @Test
+    fun `the label's x is one function of the collapse`() {
+        // The whole point of #55: affine in the fraction, so the label
+        // cannot run ahead of the capsule and fall back. Any three
+        // samples must be collinear.
+        val a = offset(0f).value
+        val b = offset(1f).value
+        for (step in 0..20) {
+            val c = step / 20f
+            assertEquals(
+                "label left the straight line at collapse=$c",
+                a + (b - a) * c,
+                offset(c).value,
+                0.001f,
+            )
+        }
+        // Monotone with it, too — it never doubles back.
+        var previous = offset(0f)
+        for (step in 1..20) {
+            val next = offset(step / 20f)
+            assertTrue("the label moved backwards at step $step", next >= previous)
+            previous = next
+        }
+    }
+
+    @Test
+    fun `an overshooting spring cannot push the label past either end`() {
+        assertEquals(offset(1f), offset(1.08f))
+        assertEquals(offset(0f), offset(-0.08f))
+    }
+
+    @Test
+    fun `a label the capsule was sized for is centred in it`() {
+        // The compact capsule is the scaled label plus 12 dp a side (and
+        // the rounding slack), and the label's offset is 0 there — so the
+        // air either side of it is the same air, which is what "hugs its
+        // label" means.
+        val compactLabel = labelWidth * AddressLabelCompactScale
+        val capsule = compactCapsuleWidth(compactLabel, restingWidth)
+        assertEquals(0.dp, offset(1f))
+        assertEquals(
+            (capsule - compactLabel) / 2f,
+            (capsule - compactLabel) / 2f - offset(1f),
+        )
+        assertTrue(
+            "the capsule must still hold the label it was measured from",
+            capsule >= compactLabel + CapsuleCompactSidePadding * 2,
+        )
     }
 }

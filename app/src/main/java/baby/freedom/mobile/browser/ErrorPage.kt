@@ -76,7 +76,12 @@ object ErrorPage {
             if (eq < 0) continue
             if (part.substring(0, eq) != "url") continue
             return runCatching {
-                URLDecoder.decode(part.substring(eq + 1), Charsets.UTF_8)
+                // The `Charset` overloads of [URLDecoder] / [URLEncoder]
+                // are API 33; `minSdk` is 30 and the library isn't
+                // desugared, so on 30–32 they are a `NoSuchMethodError`
+                // on the error page itself. The name overloads have
+                // been there since API 1 and decode identically.
+                URLDecoder.decode(part.substring(eq + 1), "UTF-8")
             }.getOrNull()
         }
         return null
@@ -86,6 +91,8 @@ object ErrorPage {
     // x-www-form-urlencoded`, which encodes ' ' as '+' rather than '%20';
     // that's fine for our query-string use but we flip it back so the
     // error-page script decodes displayable URLs cleanly.
+    //
+    // Name overload, not `Charsets.UTF_8` — see [displayUrlFor].
     private fun encode(s: String): String =
-        URLEncoder.encode(s, Charsets.UTF_8).replace("+", "%20")
+        URLEncoder.encode(s, "UTF-8").replace("+", "%20")
 }

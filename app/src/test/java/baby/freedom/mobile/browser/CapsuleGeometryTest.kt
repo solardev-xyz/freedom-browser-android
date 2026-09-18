@@ -3,6 +3,7 @@ package baby.freedom.mobile.browser
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -145,9 +146,11 @@ class CapsuleGeometryTest {
             AddressLabelCompactLineHeight.value.dp + CapsuleCompactVerticalPadding * 2,
             CapsuleCompactHeight,
         )
-        // And the line box is a real one — the size the compact label is
-        // actually laid out at, not a number picked to make the sum work.
-        assertEquals(AddressLabelCompactLineHeight, addressLabelLineHeight(1f))
+        // And the line box is a real one — the line box of the type size
+        // the compact label settles at (`bodyMedium`'s, pinned against
+        // the theme in [CapsuleCompactStateTest]), not a number picked
+        // to make the sum work.
+        assertEquals(20.sp, AddressLabelCompactLineHeight)
         // The constant is the *unscaled* endpoint: at `fontScale == 1`
         // the derivation and it are the same number.
         assertEquals(CapsuleCompactHeight, compact(1f))
@@ -357,22 +360,22 @@ class CapsuleGeometryTest {
         for (scale in fontScales + listOf(3f)) {
             val density = Density(density = 2.625f, fontScale = scale)
             val box = with(density) { compactLabelLineBox(AddressLabelCompactLineHeight.toDp()) }
-            val labelLineHeight = with(density) { box.toSp() }
             assertEquals(
                 "label and capsule disagree at fontScale=$scale",
                 capsuleCompactHeight(with(density) { AddressLabelCompactLineHeight.toDp() }),
                 box + CapsuleCompactVerticalPadding * 2,
             )
+            // The label's own type is the same derivation seen from the
+            // other side: it is laid out once at the resting size and
+            // scaled (#55), so the size it settles at is the compact one
+            // at every font scale, and the box the capsule is built from
+            // is the box that type asks for.
             assertEquals(
-                "label's compact line height is not its line box at fontScale=$scale",
-                box.value,
-                with(density) { addressLabelLineHeight(1f, labelLineHeight).toDp() }.value,
+                "the compact label is not one type step down at fontScale=$scale",
+                with(density) { AddressLabelCompactFontSize.toPx() },
+                with(density) { AddressLabelRestingFontSize.toPx() } *
+                    addressLabelScale(1f, with(density) { addressLabelCompactScale() }),
                 0.001f,
-            )
-            // Resting is untouched by any of it.
-            assertEquals(
-                AddressLabelRestingLineHeight,
-                addressLabelLineHeight(0f, labelLineHeight),
             )
         }
     }

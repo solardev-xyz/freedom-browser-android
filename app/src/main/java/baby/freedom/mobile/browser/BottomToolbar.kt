@@ -25,6 +25,7 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
@@ -64,7 +65,6 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
-import androidx.compose.ui.BiasAlignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
@@ -93,8 +93,12 @@ import androidx.compose.ui.layout.layout
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.semantics.isTraversalGroup
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.traversalIndex
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.input.ImeAction
@@ -102,15 +106,17 @@ import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Constraints
+import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntRect
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.LayoutDirection
-import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.lerp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.util.lerp
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupPositionProvider
 import androidx.compose.ui.window.PopupProperties
@@ -474,6 +480,18 @@ private const val CONTROL_COLLAPSE_RATE = 1.6f
  */
 internal val CapsuleCompactSidePadding = 12.dp
 
+/**
+ * Width of one flanking control's slot at rest — Back, tabs, overflow.
+ *
+ * `IconButton` has no size of its own to read here; what it measures is
+ * Material's minimum interactive component size, which every one of the
+ * capsule's controls is laid out at. Stated so that
+ * [addressLabelRestingInset] and [addressLabelMaxWidth] can describe
+ * where the resting label sits without measuring the row, and pinned to
+ * the pixel by the AVD strip in #55.
+ */
+internal val CapsuleControlSize = 48.dp
+
 /** Gutter between the capsule's edge and the controls laid out over it. */
 private val CapsuleRowPadding = 4.dp
 
@@ -495,6 +513,12 @@ private val AddressPillLabelInsetWithBadge = 10.dp
 
 /** Pill-edge to trailing-slot inset at rest. */
 private val AddressPillTrailingInset = 4.dp
+
+/** The protocol badge's own mark. */
+private val AddressPillBadgeSize = 16.dp
+
+/** …and the air between it and the first glyph of the domain. */
+private val AddressPillBadgeGap = 8.dp
 
 /**
  * The two gutters between the capsule's edge and the address field's
@@ -545,18 +569,25 @@ internal fun addressPillSideInset(collapse: Float): Dp =
     CapsuleFieldSideGutter - capsuleControlGutter(collapse) - capsuleFieldGutter(collapse)
 
 /**
- * Capsule-edge to label inset, per side.
+ * Capsule-edge to pill-content inset, per side — the protocol badge, the
+ * placeholder and the trailing slot.
  *
  * Asymmetric at rest — [restingInset] is 16 dp of start padding against
  * the trailing slot's own 32 dp, 10 dp when the protocol badge is there
  * to fill it, 4 dp on the trailing side — and symmetric
- * [CapsuleCompactSidePadding] when compact, because the compact label is
- * centred.
+ * [CapsuleCompactSidePadding] when compact.
  *
  * Measured from the *capsule's* edge rather than from the field's box,
  * which is what lets [capsuleGutterHandover] grow the box underneath the
- * label without the label moving: the padding actually applied is this
- * less whatever gutter is left outside the box.
+ * pill's content without that content moving: the padding actually
+ * applied is this less whatever gutter is left outside the box.
+ *
+ * The **domain label** is not one of the things this positions any more
+ * (#55): it is drawn against the capsule itself, from
+ * [addressLabelCenterOffset], so that its x is one function of the
+ * collapse rather than this interpolation composed with three others.
+ * Its resting end is still exactly this inset's, by construction — see
+ * [addressLabelRestingInset].
  */
 internal fun capsuleLabelInset(collapse: Float, restingInset: Dp): Dp =
     lerp(
@@ -567,12 +598,144 @@ internal fun capsuleLabelInset(collapse: Float, restingInset: Dp): Dp =
 
 /**
  * [capsuleLabelInset] expressed as a padding inside the address field's
- * own box — the label's distance from the capsule edge, less the part of
- * that distance the box already spans.
+ * own box — the content's distance from the capsule edge, less the part
+ * of that distance the box already spans.
  */
 internal fun addressLabelPadding(collapse: Float, restingInset: Dp): Dp =
     capsuleLabelInset(collapse, restingInset) -
         (CapsuleFieldSideGutter - addressPillSideInset(collapse))
+
+/**
+ * Capsule-edge to the first glyph of the domain, **at rest** — the whole
+ * chain the resting row lays out in front of the label, added up: the
+ * capsule's own gutter, the Back button's slot if there is one, the
+ * field's gutter, the pill's label inset, and the protocol badge with
+ * its gap when the origin has earned one.
+ *
+ * Stated once so [addressLabelCenterOffset] can name the resting end of
+ * the label's travel without re-deriving it from the row it no longer
+ * lives in. It is the resting *settled* position and nothing else: the
+ * numbers in it are exactly the ones the row is built from, so the label
+ * lands on the pixel it has always landed on.
+ */
+internal fun addressLabelRestingInset(canGoBack: Boolean, hasBadge: Boolean): Dp =
+    CapsuleRowPadding +
+        (if (canGoBack) CapsuleControlSize else 0.dp) +
+        CapsuleFieldPadding +
+        (if (hasBadge) AddressPillLabelInsetWithBadge + AddressPillBadgeSize + AddressPillBadgeGap
+        else AddressPillLabelInset)
+
+/**
+ * Widest the domain label is ever laid out — what is left of the resting
+ * capsule once everything beside the label has taken its share:
+ * [addressLabelRestingInset] in front of it, and behind it the pill's
+ * trailing inset, the always-reserved trailing slot, the field's and the
+ * capsule's gutters and the tabs / overflow buttons.
+ *
+ * The label is laid out against this **and nothing else**, at every
+ * collapse fraction (#55). The middle ellipsis is therefore decided once
+ * — off the resting width, exactly where it has always been decided —
+ * rather than re-evaluated every frame against a box that is busy
+ * narrowing, which is what made a long ENS name flicker between its full
+ * and elided forms halfway through a collapse. The compact capsule is
+ * then sized to whatever that one layout came out as, so a label the
+ * capsule was built to hold cannot elide inside it either.
+ *
+ * The Back button's slot is reserved here **whether or not there is
+ * history to pop**, which is the one place this parts company with
+ * [addressLabelRestingInset]. `canGoBack` is the only thing in the
+ * resting row that flips while the label itself stays put — an in-page
+ * `pushState` gives a tab its first history entry without changing the
+ * domain — and the compact capsule is sized from this one layout, so
+ * letting the threshold follow it would re-ellipsise a long name and
+ * step the compact capsule by the Back button's 48 dp in a single
+ * frame, with no animation and no Back button on screen to explain it.
+ * Reserved either way, what the label *says* depends only on the domain
+ * and the window; only where it starts from still follows the button,
+ * and there the button is on screen taking the room. The cost is a
+ * domain between the two thresholds eliding on a tab with no history —
+ * a settled ellipsis is worth more than the last 48 dp.
+ */
+internal fun addressLabelMaxWidth(
+    restingWidth: Dp,
+    hasBadge: Boolean,
+): Dp = (
+    restingWidth -
+        addressLabelRestingInset(canGoBack = true, hasBadge = hasBadge) -
+        AddressPillTrailingInset -
+        CapsuleTrailingSlotSize -
+        CapsuleFieldPadding -
+        CapsuleControlSize * 2 -
+        CapsuleRowPadding
+    ).coerceAtLeast(0.dp)
+
+/**
+ * **The** domain label's horizontal geometry: how far the centre of the
+ * label's layout box sits from the capsule's own centre line, at a given
+ * collapse.
+ *
+ * One function of one fraction, which is the point (#55). Before this
+ * the label's x was whatever fell out of composing an alignment bias
+ * that slid −1 → 0, a start padding that interpolated on its own curve,
+ * a Back button and a protocol badge that retreated on a third
+ * ([CONTROL_COLLAPSE_RATE]), a gutter handover that only starts at ⅝ of
+ * the collapse, and a text box that re-measured every frame — five
+ * curves and a re-layout, which on the AVD put the label up to 9.5 dp
+ * ahead of where a single shared fraction would have it, and then let it
+ * fall back. Reduced to this lerp, the label's x is affine in the
+ * collapse, so it cannot wander off whatever the capsule is doing.
+ *
+ * The capsule is centred in its slot in every state, so the capsule's
+ * centre line *is* the slot's and this offset is all there is to say.
+ * The two ends:
+ *
+ *  - **resting** — the label starts [restingInset] in from the capsule's
+ *    leading edge, so its centre is half a label further in still, less
+ *    half the resting capsule.
+ *  - **compact** — dead centre, because [compactCapsuleWidth] sizes the
+ *    compact capsule *from* this label: centre of the drawn capsule
+ *    minus half the measured label is the capsule's own centre.
+ *
+ * [labelWidth] is the label's **layout** width — its width at the
+ * resting type size, which is what the layout keeps at every fraction
+ * since the compact step is a scale about the centre
+ * ([addressLabelScale]) rather than a second layout. Scaling about the
+ * centre leaves the centre where it is, so this stays true of the drawn
+ * ink too.
+ */
+internal fun addressLabelCenterOffset(
+    collapse: Float,
+    restingInset: Dp,
+    restingWidth: Dp,
+    labelWidth: Dp,
+): Dp = lerp(
+    restingInset + labelWidth / 2f - restingWidth / 2f,
+    0.dp,
+    collapse.coerceIn(0f, 1f),
+)
+
+/**
+ * The order an accessibility service reads the capsule's children in.
+ *
+ * Stated rather than inherited, because the label's *drawing* order is
+ * now the opposite of its reading order: the domain is a sibling of the
+ * capsule, composed after the controls so that it paints over them
+ * (#55), and a service left to the default order therefore announces it
+ * **after** the tabs and overflow buttons — the bar's primary trust
+ * element arriving at the end of the swipe, behind two buttons that say
+ * nothing about where the user is. (Confirmed on the AVD: the label was
+ * the last node in the bar's `uiautomator` dump.)
+ *
+ * The order stated here is the one the bar has always read in: the
+ * domain right after Back and ahead of the field it labels, with the
+ * trailing controls last. It is the capsule's own reading order, so the
+ * capsule is the traversal group that carries it.
+ */
+private const val CapsuleOrderBack = 0f
+private const val CapsuleOrderLabel = 1f
+private const val CapsuleOrderField = 2f
+private const val CapsuleOrderTabs = 3f
+private const val CapsuleOrderOverflow = 4f
 
 /**
  * Narrowest the compact capsule ever gets. Safari's minimised bar keeps
@@ -645,39 +808,53 @@ internal val AddressLabelRestingLineHeight = 24.sp
 internal val AddressLabelCompactLineHeight = 20.sp
 
 /**
- * Size the domain label is drawn at, interpolated along the collapse so
- * the label morphs with the capsule rather than snapping a size at some
- * threshold.
+ * The compact type size as a fraction of the resting one — one M3 step,
+ * 14 / 16.
+ *
+ * The step is taken as a *scale* rather than as a second text layout
+ * (#55). Interpolating `fontSize` and `lineHeight` along the collapse
+ * re-lays-out the label at a fractional sp on every frame, and text
+ * layout snaps to whole-pixel glyph advances and integer font metrics:
+ * the ink box therefore steps rather than glides — measured on the AVD
+ * as a baseline that lands on four or five discrete rows and a label
+ * width that goes *back up* mid-transition (227 → 226 → 227 px) as the
+ * rounding flips. The glyphs are the same shapes at both ends either
+ * way, so scaling one layout gets there continuously and settles on
+ * exactly the same type size.
  */
-internal fun addressLabelFontSize(collapse: Float): TextUnit =
-    lerp(
-        AddressLabelRestingFontSize,
-        AddressLabelCompactFontSize,
-        collapse.coerceIn(0f, 1f),
-    )
+internal val AddressLabelCompactScale: Float =
+    AddressLabelCompactFontSize.value / AddressLabelRestingFontSize.value
 
 /**
- * The label's line box along the same collapse — interpolated with the
- * font size, so the box the type sits in never leads or lags the type
- * itself as the capsule closes around it.
+ * …and the same ratio read off the density actually in force, which is
+ * the one the label is scaled by.
  *
- * [compactLineHeight] is the compact end, and the capsule is sized from
- * exactly the same number ([capsuleCompactHeight]) rather than from
- * [AddressLabelCompactLineHeight] directly: it is `sp`, so at a font
- * scale past ~2.2 the clamp in [compactLabelLineBox] holds the line box
- * where the slot ends, and the label has to be told about that too or the
- * type would go on growing out of the shape built to hold it. Up to
- * there — which is every scale the accessibility settings offer — it is
- * `bodyMedium`'s own 20 sp, the default.
+ * `sp` is not linear in the font scale: Android 14 converts it through a
+ * per-scale curve, so at `fontScale = 1.15` the theme's 16 sp is 18.1 dp
+ * while its 14 sp is 16.4 dp — a ratio of 0.906, not 0.875. Taking the
+ * ratio through [Density] (the same conversion [capsuleCompactHeight]
+ * goes through, see #49/#50) is what keeps the *settled* compact label
+ * exactly `bodyMedium`'s own size at every scale rather than only at
+ * the default one.
  */
-internal fun addressLabelLineHeight(
+internal fun Density.addressLabelCompactScale(): Float =
+    AddressLabelCompactFontSize.toPx() / AddressLabelRestingFontSize.toPx()
+
+/**
+ * How much of its resting size the domain label is drawn at — 1 at rest,
+ * [compactScale] when fully compact, about the label's own centre (see
+ * the `graphicsLayer` in [FloatingCapsule]).
+ *
+ * Scaling about the centre is what keeps the *baseline* honest: the
+ * distance from the centre of a line box to its baseline is
+ * `(ascent − descent) / 2`, which depends only on the type size, so a
+ * uniformly scaled 16 sp layout puts its baseline exactly where a 14 sp
+ * layout would — whatever line box either of them is sitting in.
+ */
+internal fun addressLabelScale(
     collapse: Float,
-    compactLineHeight: TextUnit = AddressLabelCompactLineHeight,
-): TextUnit = lerp(
-    AddressLabelRestingLineHeight,
-    compactLineHeight,
-    collapse.coerceIn(0f, 1f),
-)
+    compactScale: Float = AddressLabelCompactScale,
+): Float = lerp(1f, compactScale, collapse.coerceIn(0f, 1f))
 
 /**
  * Width the capsule settles at when fully compact: the label plus
@@ -1048,10 +1225,6 @@ internal fun BottomToolbar(
         compactLabelLineBox(AddressLabelCompactLineHeight.toDp())
     }
     val compactHeight = compactLineBox + CapsuleCompactVerticalPadding * 2
-    // And the line height the label is actually told to use — the same
-    // box the capsule was sized from, so the two cannot disagree even
-    // where the clamp bites. See [addressLabelLineHeight].
-    val compactLineHeight = with(density) { compactLineBox.toSp() }
     val slotHeight = capsuleSlotHeight(edit)
     val drawnHeight = capsuleDrawnHeight(collapse, edit, compactHeight)
     // Everything the capsule draws is centred in the slot and then
@@ -1102,33 +1275,29 @@ internal fun BottomToolbar(
     val restingLabel = remember(state.addressBarText) {
         AddressLabel.resting(state.addressBarText)
     }
+    // The one style the label is ever laid out in — the resting one. The
+    // compact step is a scale about the label's centre, not a second
+    // layout, so this is the style at every collapse fraction and the
+    // measurement below is the width the label keeps throughout (#55).
     val labelStyle = LocalTextStyle.current
-    // What the label looks like at full collapse. Measuring at the
-    // *compact* size is the point: the settled compact capsule wraps the
-    // settled compact label.
-    val compactLabelStyle = remember(labelStyle, compactLineHeight) {
+    val restingLabelStyle = remember(labelStyle) {
         labelStyle.copy(
-            fontSize = AddressLabelCompactFontSize,
-            lineHeight = compactLineHeight,
+            fontSize = AddressLabelRestingFontSize,
+            lineHeight = AddressLabelRestingLineHeight,
             fontWeight = FontWeight.Medium,
         )
     }
     val textMeasurer = rememberTextMeasurer()
-    val compactLabelWidth = remember(restingLabel, compactLabelStyle, density) {
-        if (restingLabel.isEmpty()) 0.dp
-        else with(density) {
-            val px = textMeasurer.measure(
-                text = restingLabel,
-                style = compactLabelStyle,
-                maxLines = 1,
-                softWrap = false,
-            ).size.width
-            // Ceiled to whole dp: the width this feeds is turned back
-            // into px at layout time, and losing a fraction there would
-            // middle-ellipsise a label the capsule was sized to fit.
-            ceil(px.toDp().value).dp
-        }
-    }
+    // Which of the things that sit in front of the label at rest are
+    // actually there — the Back button and the protocol badge both take
+    // room from it, and both are known here (see
+    // [addressLabelRestingInset]).
+    val badge = protocolBadgeFor(state)
+    val labelRestingInset = addressLabelRestingInset(state.canGoBack, badge != null)
+    // How far the settled compact label is scaled down from the settled
+    // resting one, read off this density rather than assumed to be 14/16
+    // (see [Density.addressLabelCompactScale]).
+    val labelCompactScale = with(density) { addressLabelCompactScale() }
 
     BoxWithConstraints(
         // The slot the capsule lives in. Compacting shrinks the capsule
@@ -1140,7 +1309,10 @@ internal fun BottomToolbar(
         // grows it (see [capsuleSlotHeight]).
         modifier = modifier
             .fillMaxWidth()
-            .height(slotHeight),
+            .height(slotHeight)
+            // One bar, read in the order it is laid out rather than in
+            // the order it is painted — see [CapsuleOrderLabel].
+            .semantics { isTraversalGroup = true },
         contentAlignment = Alignment.Center,
     ) {
         // The resting width is whatever the caller's slot offers; the
@@ -1148,6 +1320,33 @@ internal fun BottomToolbar(
         // by the Box, so the capsule stays bottom-centred on screen as
         // it narrows.
         val restingWidth = maxWidth
+        // The one width the label is ever laid out against, and the one
+        // layout that comes out of it — the middle ellipsis is settled
+        // here, at the resting width, and never re-asked as the capsule
+        // narrows (see [addressLabelMaxWidth]).
+        val labelMaxWidth = addressLabelMaxWidth(
+            restingWidth = restingWidth,
+            hasBadge = badge != null,
+        )
+        val labelWidth = remember(restingLabel, restingLabelStyle, labelMaxWidth, density) {
+            if (restingLabel.isEmpty()) 0.dp
+            else with(density) {
+                textMeasurer.measure(
+                    text = restingLabel,
+                    style = restingLabelStyle,
+                    maxLines = 1,
+                    softWrap = false,
+                    constraints = Constraints(maxWidth = labelMaxWidth.roundToPx()),
+                ).size.width.toDp()
+            }
+        }
+        // …and what that same layout covers once it has been scaled down
+        // to the compact type size, which is what the compact capsule is
+        // built to wrap. Ceiled to whole dp: the width this feeds is
+        // turned back into px at layout time, and losing a fraction
+        // there would leave the capsule a pixel short of the label it
+        // was measured from.
+        val compactLabelWidth = ceil(labelWidth.value * labelCompactScale).dp
         val drawnWidth = capsuleDrawnWidth(
             collapse = collapse,
             restingWidth = restingWidth,
@@ -1209,11 +1408,13 @@ internal fun BottomToolbar(
                 // anchor goes away with the button it belongs to.
                 if (state.canGoBack && controlScale > 0f) {
                     Box(
-                        modifier = Modifier.collapsingControl(
-                            controlScale,
-                            towardsStart = true,
-                            topShift = controlTopShift,
-                        ),
+                        modifier = Modifier
+                            .collapsingControl(
+                                controlScale,
+                                towardsStart = true,
+                                topShift = controlTopShift,
+                            )
+                            .semantics { traversalIndex = CapsuleOrderBack },
                     ) {
                         // Expressive shape variants: the icon buttons morph
                         // from round to a squarer pressed shape on touch.
@@ -1233,7 +1434,6 @@ internal fun BottomToolbar(
                     collapse = collapse,
                     editProgress = edit,
                     compactHeight = compactHeight,
-                    compactLineHeight = compactLineHeight,
                     loading = loading,
                     onAddressFocusChanged = onAddressFocusChanged,
                     onAddressEditedChanged = onAddressEditedChanged,
@@ -1250,26 +1450,31 @@ internal fun BottomToolbar(
                         // sitting on the slot's bottom edge is covered
                         // edge to edge by the band that answers the
                         // two-step tap — see [addressFieldTouchShift].
-                        .offset(y = addressFieldTouchShift(collapse, edit, compactHeight)),
+                        .offset(y = addressFieldTouchShift(collapse, edit, compactHeight))
+                        .semantics { traversalIndex = CapsuleOrderField },
                 )
 
                 if (controlScale > 0f) {
                     Box(
-                        modifier = Modifier.collapsingControl(
-                            controlScale,
-                            towardsStart = false,
-                            topShift = controlTopShift,
-                        ),
+                        modifier = Modifier
+                            .collapsingControl(
+                                controlScale,
+                                towardsStart = false,
+                                topShift = controlTopShift,
+                            )
+                            .semantics { traversalIndex = CapsuleOrderTabs },
                     ) {
                         TabsCountButton(count = tabCount, onClick = onOpenTabs)
                     }
 
                     Box(
-                        modifier = Modifier.collapsingControl(
-                            controlScale,
-                            towardsStart = false,
-                            topShift = controlTopShift,
-                        ),
+                        modifier = Modifier
+                            .collapsingControl(
+                                controlScale,
+                                towardsStart = false,
+                                topShift = controlTopShift,
+                            )
+                            .semantics { traversalIndex = CapsuleOrderOverflow },
                     ) {
                         OverflowMenuButton(
                             state = state,
@@ -1288,6 +1493,93 @@ internal fun BottomToolbar(
                     }
                 }
             }
+        }
+
+        // The domain label.
+        //
+        // A sibling of the capsule rather than a child of the address
+        // pill's row (#55), because that is what lets it have *one*
+        // geometry: the capsule is centred in this slot in every state,
+        // so a child centred in the same slot and pushed by
+        // [addressLabelCenterOffset] is placed against the capsule's own
+        // centre line, and nothing the Back button, the badge, the
+        // trailing slot or the gutter handover do on the way can move
+        // it. Vertically it takes the capsule's own bottom anchor, the
+        // same number the pill and the controls take.
+        //
+        // It is drawn, not laid out: no pointer input, so it is not a
+        // hit target and the tap still lands on the text field beneath
+        // it — exactly as it did while it was drawn over the field
+        // inside the pill.
+        //
+        // The label is derived from the tab's committed address, never
+        // from the edit buffer: a bold bare domain is the capsule
+        // asserting "this is the site you are on", and only a loaded (or
+        // just-submitted) URL earns that. The moment the field takes
+        // focus it gives way to the full URL in the editor.
+        if (!addressFocused && restingLabel.isNotEmpty()) {
+            val labelOffset = addressLabelCenterOffset(
+                collapse = collapse,
+                restingInset = labelRestingInset,
+                restingWidth = restingWidth,
+                labelWidth = labelWidth,
+            )
+            // The offset is measured from the capsule's *leading* edge,
+            // and a layer's translation is not mirrored for us the way
+            // an alignment bias or a `start` padding would be.
+            val labelDirection =
+                if (LocalLayoutDirection.current == LayoutDirection.Rtl) -1f else 1f
+            Text(
+                text = restingLabel,
+                color = MaterialTheme.colorScheme.onSurface,
+                fontWeight = FontWeight.Medium,
+                // One layout, at the resting type size, at every
+                // fraction of the collapse — the step down to
+                // `bodyMedium` is the scale below, not a re-layout. See
+                // [AddressLabelCompactScale].
+                fontSize = AddressLabelRestingFontSize,
+                lineHeight = AddressLabelRestingLineHeight,
+                maxLines = 1,
+                softWrap = false,
+                // Middle, not tail: a name too long for the pill is
+                // almost always an ENS subname chain, and its *tail* is
+                // the part that says who is being trusted.
+                // `long.prefix.attacker.eth` tail-ellipsised reads
+                // `long.prefix…`, which is exactly the half an attacker
+                // gets to choose; eliding the middle keeps the parent
+                // name and TLD on screen.
+                overflow = TextOverflow.MiddleEllipsis,
+                modifier = Modifier
+                    .align(Alignment.Center)
+                    .widthIn(max = labelMaxWidth)
+                    // Both the travel and the type step live in the
+                    // layer, so they are sub-pixel and the label is
+                    // never re-laid-out mid-transition. The pivot is the
+                    // label's own centre, which is the point
+                    // [addressLabelCenterOffset] positions.
+                    .graphicsLayer {
+                        val scale = addressLabelScale(collapse, labelCompactScale)
+                        scaleX = scale
+                        scaleY = scale
+                        transformOrigin = TransformOrigin(0.5f, 0.5f)
+                        translationX = labelOffset.toPx() * labelDirection
+                        translationY = bottomAnchor.toPx()
+                    }
+                    // Painted last, read second — the domain is the one
+                    // thing in the bar a screen-reader user is here for
+                    // (see [CapsuleOrderLabel]).
+                    //
+                    // *Inside* the layer, not outside it: a semantics
+                    // node reports the bounds of the coordinator it sits
+                    // on, so hung in front of the `graphicsLayer` it
+                    // would hand the accessibility focus rectangle the
+                    // label's untranslated layout box — dead centre of
+                    // the slot — instead of the pixels the label is
+                    // actually drawn on (seen in the AVD's `uiautomator`
+                    // dump as the label's bounds jumping 89 px right of
+                    // its ink).
+                    .semantics { traversalIndex = CapsuleOrderLabel },
+            )
         }
 
         // Load progress, stroked along the capsule's *current* outline.
@@ -1549,7 +1841,6 @@ private fun AddressField(
     collapse: Float,
     editProgress: Float,
     compactHeight: Dp,
-    compactLineHeight: TextUnit,
     loading: Boolean,
     onAddressFocusChanged: (Boolean) -> Unit,
     onAddressEditedChanged: (Boolean) -> Unit,
@@ -1817,9 +2108,9 @@ private fun AddressField(
                             Image(
                                 painter = painterResource(badge.drawableRes),
                                 contentDescription = badge.contentDescription,
-                                modifier = Modifier.size(16.dp),
+                                modifier = Modifier.size(AddressPillBadgeSize),
                             )
-                            Spacer(Modifier.width(8.dp))
+                            Spacer(Modifier.width(AddressPillBadgeGap))
                         }
                     }
                     // Resting vs editing text. At rest the domain is the
@@ -1833,18 +2124,20 @@ private fun AddressField(
                     // anywhere on the pill still lands on it and focuses
                     // it, exactly as before.
                     //
-                    // The label is derived from the tab's committed
-                    // address, never from the edit buffer: a bold bare
-                    // domain is the capsule asserting "this is the site
-                    // you are on", and only a loaded (or just-submitted)
-                    // URL earns that.
-                    val label = if (addressFocused) "" else restingLabel
+                    // The domain label itself is drawn one level up,
+                    // against the capsule rather than against this row,
+                    // so that its geometry can be one function of the
+                    // collapse (#55) — see [FloatingCapsule]. What is
+                    // left here is the box it used to share with the
+                    // field: the field, and the placeholder for when
+                    // there is no address to show.
+                    //
                     // Blank label at rest means a blank address (the
                     // home tab) — [AddressLabel.resting] passes
                     // everything else through — so the placeholder is
                     // the right thing to draw underneath.
                     val showPlaceholder =
-                        if (addressFocused) fieldValue.text.isEmpty() else label.isEmpty()
+                        if (addressFocused) fieldValue.text.isEmpty() else restingLabel.isEmpty()
                     Box(modifier = Modifier.weight(1f)) {
                         Box(
                             modifier = Modifier.graphicsLayer {
@@ -1859,48 +2152,6 @@ private fun AddressField(
                                 color = colors.onSurfaceVariant,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
-                            )
-                        } else if (label.isNotEmpty()) {
-                            Text(
-                                text = label,
-                                color = colors.onSurface,
-                                fontWeight = FontWeight.Medium,
-                                // One type size down at full collapse,
-                                // interpolated on the way there so the
-                                // label morphs with the capsule. The
-                                // line box steps with it (bodyLarge's
-                                // 24 sp → bodyMedium's 20 sp), because
-                                // the compact capsule is sized *from*
-                                // that box — see [capsuleCompactHeight].
-                                fontSize = addressLabelFontSize(collapse),
-                                lineHeight = addressLabelLineHeight(
-                                    collapse,
-                                    compactLineHeight,
-                                ),
-                                // Start-aligned at rest, centred in the
-                                // compact capsule (whose label padding
-                                // is symmetric by then), and *slid*
-                                // between the two rather than switched:
-                                // a bias of -1 is the start edge and 0
-                                // the centre, so the label travels with
-                                // the narrowing capsule instead of
-                                // jumping the moment the collapse
-                                // begins. The Text still wraps its own
-                                // width inside the same box, so the
-                                // middle ellipsis measures against
-                                // exactly what it did before.
-                                modifier = Modifier.align(BiasAlignment(-1f + collapse, 0f)),
-                                maxLines = 1,
-                                // Middle, not tail: a name too long for
-                                // the pill is almost always an ENS
-                                // subname chain, and its *tail* is the
-                                // part that says who is being trusted.
-                                // `long.prefix.attacker.eth` tail-
-                                // ellipsised reads `long.prefix…`, which
-                                // is exactly the half an attacker gets to
-                                // choose; eliding the middle keeps the
-                                // parent name and TLD on screen.
-                                overflow = TextOverflow.MiddleEllipsis,
                             )
                         }
                     }
