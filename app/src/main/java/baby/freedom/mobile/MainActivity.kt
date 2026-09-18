@@ -11,9 +11,13 @@ import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalView
+import androidx.core.view.WindowCompat
 import androidx.lifecycle.lifecycleScope
 import baby.freedom.mobile.browser.BrowserScreen
 import baby.freedom.mobile.browser.Gateways
@@ -25,6 +29,7 @@ import baby.freedom.mobile.node.INodeCallback
 import baby.freedom.mobile.node.INodeService
 import baby.freedom.mobile.node.NodeService
 import baby.freedom.mobile.ui.FreedomTheme
+import baby.freedom.mobile.ui.isLight
 import baby.freedom.swarm.IpfsInfo
 import baby.freedom.swarm.NodeInfo
 import kotlinx.coroutines.Dispatchers
@@ -126,6 +131,7 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             FreedomTheme {
+                SystemBarsForScheme()
                 Surface(
                     modifier = Modifier.fillMaxSize(),
                     color = MaterialTheme.colorScheme.background,
@@ -148,6 +154,36 @@ class MainActivity : ComponentActivity() {
                         onRecoverNodes = ::onRecoverNodes,
                     )
                 }
+            }
+        }
+    }
+
+    /**
+     * Tint the (transparent, edge-to-edge) system bars' icons for the
+     * scheme currently being drawn under them: dark icons on the light
+     * scheme, light icons on the dark one.
+     *
+     * `values/themes.xml` and `values-night/themes.xml` already state
+     * this, but only for the *first* frame — the manifest keeps
+     * `uiMode` in `configChanges`, so flipping the system theme while
+     * the app is running re-themes Compose without recreating the
+     * window, and the window's own attributes stay on whatever they
+     * were created with. That left white status-bar icons on a
+     * near-white surface (verified on the freedom AVD with
+     * `cmd uimode night no`). Driving them from the active
+     * [androidx.compose.material3.ColorScheme] instead keeps them
+     * right across a live switch, and keys them off the same thing
+     * every other light/dark decision in the app reads.
+     */
+    @Composable
+    private fun SystemBarsForScheme() {
+        val lightScheme = MaterialTheme.colorScheme.isLight
+        val view = LocalView.current
+        LaunchedEffect(lightScheme, view) {
+            if (view.isInEditMode) return@LaunchedEffect
+            WindowCompat.getInsetsController(window, view).apply {
+                isAppearanceLightStatusBars = lightScheme
+                isAppearanceLightNavigationBars = lightScheme
             }
         }
     }

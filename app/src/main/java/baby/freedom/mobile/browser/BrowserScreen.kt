@@ -154,6 +154,36 @@ internal fun pendingAddressBarText(
 }
 
 /**
+ * A tab's committed address ([BrowserState.addressBarText]) after the
+ * user hits **Stop**.
+ *
+ * [pendingAddressBarText] lets a *user-named* destination into the bar
+ * before it commits — the user supplied the string, so echoing it back
+ * vouches for nobody. Stop cancels that navigation, and what the bar
+ * would otherwise be left holding is the name of a site that never
+ * loaded, in bold, over the previous site's content: the capsule
+ * vouching for a page the user cannot see, with a reload control beside
+ * it that would fetch the *old* page. Reverting to [committedUrl] —
+ * which [BrowserWebView] writes in the same display form at navigation
+ * commit, and which [finishedLoadIsCurrent] keeps an aborted load's
+ * `onPageFinished` from overwriting a beat later — puts label, page and
+ * reload target back in agreement, the way Chrome and Safari revert the
+ * omnibox on stop.
+ *
+ * A blank [committedUrl] means there is nothing committed to fall back
+ * to (a fresh tab's first navigation, stopped mid-resolve). The pending
+ * address stays: it is the only thing left that says what the user asked
+ * for and the only thing reload could re-try, and no *other* page's
+ * content is on screen for it to misdescribe.
+ *
+ * After a commit this is a no-op by construction — `onPageStarted` has
+ * already written the same string into both — so Stop needs no separate
+ * "has it committed yet?" test.
+ */
+internal fun addressBarTextAfterStop(committedUrl: String, pending: String): String =
+    if (committedUrl.isNotBlank()) committedUrl else pending
+
+/**
  * Whether a keyboard that has just gone away should take the address
  * bar's focus — and with it the capsule's editing morph — with it.
  *
@@ -1053,6 +1083,13 @@ fun BrowserScreen(
                         state.cancelPendingProbe()
                         tabs.stopLoading?.invoke(state)
                         state.stopProgress()
+                        // …and give the label back to the page that is
+                        // actually on screen if the cancelled navigation
+                        // never got to commit (#39).
+                        state.addressBarText = addressBarTextAfterStop(
+                            committedUrl = state.url,
+                            pending = state.addressBarText,
+                        )
                     },
                     onNewTab = {
                         val fresh = tabs.newTab()

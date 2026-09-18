@@ -138,6 +138,80 @@ internal fun encodePngBytes(bitmap: Bitmap): ByteArray? {
     }
 }
 
+/**
+ * Does an `onPageFinished` for [finishedUrl] describe the document the
+ * WebView is actually showing ([currentUrl], i.e. `WebView.getUrl()`)?
+ *
+ * Chromium fires a synthetic `onPageFinished` for a navigation that was
+ * aborted before it committed — the user hit Stop, or a second
+ * navigation superseded the first — carrying the URL of the page that
+ * never loaded, while `getUrl()` goes on naming the page still on
+ * screen. Only a finish that passes this test may write the tab's
+ * committed address: adopting an aborted one renames the tab after a
+ * site it never visited, and the bold domain label is the capsule
+ * asserting "this is the site you are on" (#39).
+ *
+ * A `null` on either side means the WebView isn't telling us anything
+ * to the contrary, so the finish is taken at face value — the same
+ * behaviour as before this guard existed.
+ */
+internal fun finishedLoadIsCurrent(finishedUrl: String?, currentUrl: String?): Boolean =
+    finishedUrl == null || currentUrl == null || finishedUrl == currentUrl
+
+/**
+ * A finished load that is only waiting on first paint before it counts
+ * as a visit: the raw URL the finish was for, plus the history row it
+ * would write.
+ */
+internal data class PendingVisit(val rawUrl: String, val display: String, val title: String)
+
+/**
+ * The visit [pending] flushes when [committedUrl] paints, or `null` when
+ * that paint belongs to some other document.
+ *
+ * `onPageFinished` and `onPageCommitVisible` come in no guaranteed
+ * order. On a small, fast page — a local gateway page, a 2 kB document —
+ * the load event can beat the compositor's first frame by a millisecond,
+ * and the `currentLoadCommitted` gate that exists to keep *aborted*
+ * loads out of history then silently drops a page the user really did
+ * visit. So a finish that is history-worthy in every other respect is
+ * parked instead of discarded, and recorded here once the paint it was
+ * waiting for arrives. A load that never paints — the aborted case the
+ * gate is for — never flushes.
+ *
+ * The match is on the raw URL, so a paint belonging to the *next*
+ * navigation can't adopt the previous one's row.
+ */
+internal fun visitToFlush(pending: PendingVisit?, committedUrl: String?): PendingVisit? =
+    pending?.takeIf { it.rawUrl == committedUrl }
+
+/**
+ * What [BrowserState.progress] should become for a chrome-client
+ * `onProgressChanged([newProgress])`.
+ *
+ * `-1` is the idle sentinel the capsule reads as "not loading", so both
+ * ends of Chromium's 0..100 counter fold into it, and so do the two
+ * callbacks that describe a load nobody is waiting on any more:
+ *
+ *  - [isHomeSentinel]: the `about:blank` home page is an overlay, not a
+ *    loading page — and a real load aborted by a Home tap goes on
+ *    reporting progress against the blank document that replaced it.
+ *  - [aborted]: the user hit Stop. On an uncommitted navigation
+ *    Chromium answers `stopLoading()` with a final progress callback
+ *    carrying the percentage the fetch died at — never 100, and never
+ *    followed by anything, because that document neither commits nor
+ *    finishes. Adopting it re-lights the capsule's trace and swaps
+ *    Reload back out for Stop indefinitely (#41).
+ */
+internal fun progressForCallback(
+    newProgress: Int,
+    isHomeSentinel: Boolean,
+    aborted: Boolean,
+): Int = when {
+    isHomeSentinel || aborted -> -1
+    else -> if (newProgress in 1..99) newProgress else -1
+}
+
 internal fun captureThumbnail(view: WebView, state: BrowserState) {
     val w = view.width
     val h = view.height
@@ -388,6 +462,13 @@ private fun buildRefreshableWebView(
     // history entry with no real title.
     var currentLoadCommitted: Boolean = false
 
+    // A finish that arrived before its first paint, parked until
+    // `onPageCommitVisible` says the page really is on screen (see
+    // [visitToFlush]). Without it the fastest pages — the ones that
+    // finish loading in the millisecond before the compositor's first
+    // frame — were dropped from history by the gate above.
+    var pendingVisit: PendingVisit? = null
+
     // The dweb URL we already prompted a node recovery + retry for. A
     // main-frame load through the interceptor that dies mid-body
     // (Chromium's generic -1) is the signature of a node sitting on
@@ -504,8 +585,12 @@ private fun buildRefreshableWebView(
         webViewClient = object : WebViewClient() {
             override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
                 // A new document arrives with the chrome whole, however
-                // far the previous one was scrolled.
+                // far the previous one was scrolled…
                 state.capsuleCollapse.expand()
+                // …and with the progress latch open again: whatever the
+                // last Stop aborted, this document is a load of its own
+                // and its percentages are worth drawing (#41).
+                state.loadAborted = false
                 if (url == ABOUT_BLANK) {
                     // `about:blank` is our home sentinel — either the
                     // WebView's forced initial paint, a user-initiated
@@ -567,6 +652,13 @@ private fun buildRefreshableWebView(
             override fun onPageCommitVisible(view: WebView?, url: String?) {
                 if (url == ABOUT_BLANK) return
                 currentLoadCommitted = true
+                // A finish that beat this paint left its visit parked;
+                // this is the moment it becomes real. Anything parked
+                // that *isn't* this document never painted, so it goes
+                // no further either way.
+                val flushed = visitToFlush(pendingVisit, url)
+                pendingVisit = null
+                if (flushed != null) repo.recordVisit(flushed.display, flushed.title)
             }
 
             override fun onPageFinished(view: WebView?, url: String?) {
@@ -603,13 +695,28 @@ private fun buildRefreshableWebView(
                 // `lastLoadedDisplayUrl` so the error-page guards
                 // elsewhere still fire.
                 val uiDisplay = ErrorPage.displayUrlFor(url) ?: display
-                state.url = uiDisplay
-                lastLoadedDisplayUrl = display
-                state.title = sanitizeTitle(view?.title, url)
+                // …but only if this finish belongs to the document that
+                // is actually on screen. An aborted navigation — the
+                // user hitting Stop, or a second navigation superseding
+                // the first — still gets its own `onPageFinished`, with
+                // a URL that never committed and never painted a pixel
+                // (verified on the freedom AVD: no `onPageStarted`, no
+                // `onPageCommitVisible`, then `onPageFinished` for the
+                // abandoned URL while `getUrl()` still names the old
+                // page). Adopting it would rename the tab after a site
+                // it never loaded — the bold label, the reload target
+                // and the content on screen all disagreeing until the
+                // next navigation happened to fix them (#39).
+                val isCurrent = finishedLoadIsCurrent(url, view?.url)
+                if (isCurrent) {
+                    state.url = uiDisplay
+                    lastLoadedDisplayUrl = display
+                    state.title = sanitizeTitle(view?.title, url)
+                    state.addressBarText = uiDisplay
+                }
                 state.canGoBack = view?.canGoBack() == true
                 state.canGoForward = view?.canGoForward() == true
                 state.progress = -1
-                state.addressBarText = uiDisplay
                 // Record the *displayed* URL (bzz://, ens://, https://) — not
                 // the gateway-rewritten one — so history reflects what the
                 // user actually visited. The local home page is hidden from
@@ -617,11 +724,26 @@ private fun buildRefreshableWebView(
                 // clutter the history either. The error page is also
                 // deliberately kept out of history — it's a transient
                 // state, not a destination the user meant to visit.
+                //
+                // `currentLoadCommitted` is only reset by `onPageStarted`,
+                // which an aborted load never gets — so on its synthetic
+                // finish the flag is still the *previous* page's `true`,
+                // and without [finishedLoadIsCurrent] the abandoned URL
+                // went into history under the old page's title.
+                //
+                // A load that finishes *before* its first paint is not
+                // aborted, it is merely quick: its visit is parked and
+                // recorded by `onPageCommitVisible` instead of being
+                // dropped here (see [visitToFlush]).
                 if (display.isNotBlank() &&
                     !ErrorPage.isErrorPage(url) &&
-                    currentLoadCommitted
+                    isCurrent
                 ) {
-                    repo.recordVisit(display, state.title)
+                    if (currentLoadCommitted) {
+                        repo.recordVisit(display, state.title)
+                    } else if (url != null) {
+                        pendingVisit = PendingVisit(url, display, state.title)
+                    }
                 }
 
                 // Give the renderer a beat to paint, then capture a
@@ -640,6 +762,13 @@ private fun buildRefreshableWebView(
                 request: WebResourceRequest?,
             ): Boolean {
                 val target = request?.url?.toString() ?: return false
+                // A link tap (or any other renderer-initiated main-frame
+                // navigation) is a fresh load, and its progress starts
+                // ticking well before `onPageStarted` commits it — so
+                // open the Stop latch here rather than at commit, or
+                // the first seconds of the page the user tapped into
+                // would draw no trace at all (#41).
+                if (request.isForMainFrame) state.loadAborted = false
                 // Route bzz:// and ens:// through the screen's submit flow
                 // so in-page clicks + error-page "Try Again" go through
                 // the same GatewayProbe gate the top address bar uses.
@@ -734,12 +863,17 @@ private fun buildRefreshableWebView(
                 // against late callbacks from an aborted real-page
                 // load arriving after the user has already tapped
                 // Home (see the stopLoading() above navCounter
-                // collection).
-                if (view?.url == ABOUT_BLANK) {
-                    state.progress = -1
-                    return
-                }
-                state.progress = if (newProgress in 1..99) newProgress else -1
+                // collection). Stop takes the same guard via
+                // [BrowserState.loadAborted] — a stopped navigation
+                // that never committed gets one last progress callback
+                // carrying the percentage it died at, and no callback
+                // ever after it, so adopting it would leave the capsule
+                // lit and stuck on Stop for good (#41).
+                state.progress = progressForCallback(
+                    newProgress = newProgress,
+                    isHomeSentinel = view?.url == ABOUT_BLANK,
+                    aborted = state.loadAborted,
+                )
             }
 
             override fun onReceivedTitle(view: WebView?, title: String?) {
@@ -797,7 +931,13 @@ private fun buildRefreshableWebView(
     }
 
     refreshLayout.addView(webView)
-    refreshLayout.setOnRefreshListener { webView.reload() }
+    refreshLayout.setOnRefreshListener {
+        // Pull-to-refresh reloads the WebView directly rather than
+        // going through [BrowserState.loadUrl], so it has to open the
+        // Stop latch itself (#41).
+        state.loadAborted = false
+        webView.reload()
+    }
     // Only arm the pull-down gesture when the WebView is scrolled to the
     // top. Without this override SwipeRefreshLayout can trigger in the
     // middle of a page because WebView's canScrollUp reporting is flaky

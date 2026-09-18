@@ -43,6 +43,7 @@ import baby.freedom.mobile.R
 import baby.freedom.mobile.data.BookmarkEntry
 import baby.freedom.mobile.data.BrowsingRepository
 import baby.freedom.mobile.data.HistoryEntry
+import baby.freedom.mobile.ui.isLight
 
 /**
  * Opaque home surface that overlays the WebView whenever the active
@@ -82,11 +83,19 @@ fun HomeScreen(
         // home.html painted with `background-size: cover; opacity: 0.6`
         // behind the logo. Sits under everything and never captures
         // input (no [clickable] / [pointerInput]).
+        //
+        // The image is mid-to-dark in tone, so the opacity that makes it
+        // a subtle texture on a dark background makes it the *whole*
+        // background on a light one — dark enough to swallow the black
+        // wordmark and the body copy that are picked for a light
+        // surface. On the light scheme it drops to a wash, which is the
+        // same decoration doing the same job at the tone that scheme can
+        // carry.
         Image(
             painter = painterResource(id = R.drawable.home_background),
             contentDescription = null,
             contentScale = ContentScale.Crop,
-            alpha = 0.6f,
+            alpha = if (MaterialTheme.colorScheme.isLight) 0.2f else 0.6f,
             modifier = Modifier.fillMaxSize(),
         )
 
@@ -128,10 +137,11 @@ private const val RECENT_LIMIT = 8
 @Composable
 private fun HomeHero(modifier: Modifier = Modifier) {
     // Drive logo selection off the active Compose theme rather than
-    // `isSystemInDarkTheme()` — the app forces a dark color scheme
-    // regardless of the OS setting (see MainActivity), so reading the
-    // system flag would pick the black wordmark on a light-mode
-    // device and make the logo disappear on our dark background.
+    // `isSystemInDarkTheme()`. The two now agree by default (the theme
+    // follows the system setting), but the scheme is still the honest
+    // source: it is the thing this wordmark is actually being drawn on,
+    // and an explicit `FreedomTheme(darkTheme = …)` — a preview, a
+    // screenshot test — must not make the logo disappear.
     val logo = if (MaterialTheme.colorScheme.background.luminance() < 0.5f) {
         R.drawable.ic_freedom_wordmark_dark
     } else {
