@@ -43,6 +43,7 @@ import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.StarBorder
+import androidx.compose.material3.ColorScheme
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
 import androidx.compose.material3.Icon
@@ -84,6 +85,7 @@ import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.layout
@@ -653,6 +655,45 @@ private val CapsuleShadowDark = 3.dp
 private val CapsuleShadowLight = 6.dp
 
 /**
+ * Fill of the outer capsule at a given collapse fraction.
+ *
+ * At rest it is what it has always been: `surfaceContainer` at the
+ * scheme's alpha ([CAPSULE_ALPHA_LIGHT] / [CAPSULE_ALPHA_DARK]), a
+ * translucent tray with the darker address pill
+ * (`surfaceContainerHighest`, opaque) sitting inside it. Two surfaces,
+ * which is right while the capsule is a *bar*: the pill has to be
+ * distinguishable from the controls flanking it.
+ *
+ * Compact, there is nothing left to distinguish it from — the controls
+ * are gone and the capsule has wrapped itself to the domain — so the
+ * outer surface stops being a tray and starts reading as a translucent
+ * rim around a small pill: two nested shapes where Safari shows one. So
+ * the compact capsule is the *address field's* colour, and only that
+ * colour.
+ *
+ * Interpolated rather than switched, in both channels at once: the fill
+ * walks `surfaceContainer` → `surfaceContainerHighest` while the alpha
+ * walks 0.94 / 0.90 → 1, so the rim doesn't blink out at a threshold, it
+ * dissolves into the pill. And because the two fills converge rather
+ * than one being removed, the inset between them stops being visible
+ * exactly when they meet — the compact capsule is one colour edge to
+ * edge, with no geometry needing to move for it (the pill keeps the
+ * 32 dp height and the tap surface, the shadow keeps lifting the whole
+ * thing off a same-tone page, and the load trace still runs along the
+ * one outline that is left).
+ *
+ * Editing never reaches this: the caller holds `collapse` at 0 whenever
+ * the field has focus, so the editor keeps the resting two-surface look.
+ */
+internal fun capsuleFill(collapse: Float, colors: ColorScheme): Color = lerp(
+    colors.surfaceContainer.copy(
+        alpha = if (colors.isLight) CAPSULE_ALPHA_LIGHT else CAPSULE_ALPHA_DARK,
+    ),
+    colors.surfaceContainerHighest,
+    collapse.coerceIn(0f, 1f),
+)
+
+/**
  * The browser chrome: a floating, semi-transparent capsule layered over
  * an edge-to-edge page, holding (left to right) the Back control (only
  * while there's history to pop), the address field with its protocol
@@ -660,12 +701,17 @@ private val CapsuleShadowLight = 6.dp
  * menu — on a page you can reach it in one extra tap, and the resting
  * bar stays low-density the way the brief asks.
  *
- * The capsule is a `surfaceContainer` pill at [CAPSULE_ALPHA] with a
- * low shadow, not an opaque full-width bar; the address field is a
+ * The capsule is a `surfaceContainer` pill at [capsuleFill]'s alpha with
+ * a low shadow, not an opaque full-width bar; the address field is a
  * second, darker pill inside it (`surfaceContainerHighest`) that grows
  * a primary-coloured outline while focused. Layout is fixed-height so
  * nothing shifts when focus, the trailing control or the protocol badge
  * come and go.
+ *
+ * Those two surfaces are a *resting* (and editing) look: as the bar
+ * compacts, the outer fill morphs into the pill's own, so the minimised
+ * capsule is a single opaque `surfaceContainerHighest` shape with no
+ * translucent rim around it (see [capsuleFill]).
  *
  * The capsule has exactly three heights and one model that produces
  * them (see [capsuleDrawnHeight]): 44 dp **compact**, 56 dp **resting**,
@@ -833,9 +879,10 @@ internal fun BottomToolbar(
                 .width(drawnWidth)
                 .height(drawnHeight),
             shape = CircleShape,
-            color = MaterialTheme.colorScheme.surfaceContainer.copy(
-                alpha = if (lightScheme) CAPSULE_ALPHA_LIGHT else CAPSULE_ALPHA_DARK,
-            ),
+            // Translucent `surfaceContainer` tray at rest, morphing into
+            // the address field's own opaque fill as the bar compacts —
+            // one colour, one shape, no rim (see [capsuleFill]).
+            color = capsuleFill(collapse, MaterialTheme.colorScheme),
             shadowElevation = if (lightScheme) CapsuleShadowLight else CapsuleShadowDark,
             content = {},
         )
