@@ -127,6 +127,60 @@ internal fun blocksVerticalPan(touchAction: String, overscrollBehaviorY: String)
 }
 
 /**
+ * The document on screen's answer to [rootBlocksVerticalPan], and the
+ * bookkeeping that keeps it the *current* document's answer.
+ *
+ * The probe is asynchronous — `evaluateJavascript` posts its result back
+ * some milliseconds later — while the document it describes can be
+ * replaced at any moment. A page whose load handler navigates
+ * (`location.href = …` from `onload`) does exactly that: the probe fired
+ * at its `onPageFinished` lands *after* the next document's
+ * `onPageStarted` has already reset the slot, and without a token the
+ * outgoing page's `touch-action` would describe the incoming one until
+ * its first paint re-probed.
+ *
+ * So each document gets a token: [startDocument] mints a new one and
+ * clears the answer, [beginProbe] stamps the probe in flight with the
+ * current one, and [accept] applies a result only while its token is
+ * still the one on screen. A late answer is dropped rather than
+ * misapplied, which leaves [blocksVerticalPan] at "nothing claimed" —
+ * the pre-probe default the new document would have had anyway.
+ *
+ * Single-threaded by construction: every caller is a `WebViewClient`
+ * callback or an `evaluateJavascript` result, all delivered on the UI
+ * thread.
+ */
+internal class RootPanProbeSlot {
+    private var generation = 0
+
+    /** The current document's last probe result; `false` until it answers. */
+    var blocksVerticalPan: Boolean = false
+        private set
+
+    /**
+     * A new document is starting: it claims nothing until it says so,
+     * and no probe of the document it replaces may speak for it.
+     */
+    fun startDocument() {
+        generation++
+        blocksVerticalPan = false
+    }
+
+    /** Stamp a probe about to be dispatched for the document on screen. */
+    fun beginProbe(): Int = generation
+
+    /**
+     * A probe answered: [blocks] is its verdict and [token] the value
+     * [beginProbe] handed it. Applied only if the document it asked
+     * about is still the one on screen.
+     */
+    fun accept(token: Int, blocks: Boolean) {
+        if (token != generation) return
+        blocksVerticalPan = blocks
+    }
+}
+
+/**
  * Should the `SwipeRefreshLayout` take the downward drag that is
  * starting now?
  *

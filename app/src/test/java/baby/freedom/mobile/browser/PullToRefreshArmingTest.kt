@@ -148,4 +148,58 @@ class PullToRefreshArmingTest {
         assertFalse(blocksVerticalPan(" AUTO ", " AUTO "))
         assertTrue(blocksVerticalPan("auto", " Contain "))
     }
+
+    // ---- whose probe the answer belongs to -------------------------
+
+    @Test
+    fun `a probe answers for the document that asked`() {
+        val slot = RootPanProbeSlot()
+        slot.startDocument()
+        val token = slot.beginProbe()
+        slot.accept(token, blocks = true)
+        assertTrue(slot.blocksVerticalPan)
+    }
+
+    @Test
+    fun `a probe that outlives its document does not answer for the next one`() {
+        // Page A sets `touch-action: none` and its load handler
+        // navigates to B: A's finish-time probe lands after B has
+        // started, and must not withhold pull-to-refresh on B.
+        val slot = RootPanProbeSlot()
+        slot.startDocument()
+        val staleToken = slot.beginProbe()
+        slot.startDocument()
+        slot.accept(staleToken, blocks = true)
+        assertFalse(slot.blocksVerticalPan)
+    }
+
+    @Test
+    fun `a new document drops the previous one's answer`() {
+        val slot = RootPanProbeSlot()
+        slot.startDocument()
+        slot.accept(slot.beginProbe(), blocks = true)
+        slot.startDocument()
+        assertFalse(slot.blocksVerticalPan)
+    }
+
+    @Test
+    fun `the same document's later probe replaces its earlier one`() {
+        // First paint says nothing claimed; the page's own stylesheet
+        // lands by load finished and the re-probe must be believed —
+        // and a same-document navigation (pushState, a hash link) gets
+        // no `onPageStarted`, so it keeps the document's token.
+        val slot = RootPanProbeSlot()
+        slot.startDocument()
+        slot.accept(slot.beginProbe(), blocks = false)
+        slot.accept(slot.beginProbe(), blocks = true)
+        assertTrue(slot.blocksVerticalPan)
+    }
+
+    @Test
+    fun `an unprobed document claims nothing`() {
+        val slot = RootPanProbeSlot()
+        assertFalse(slot.blocksVerticalPan)
+        slot.startDocument()
+        assertFalse(slot.blocksVerticalPan)
+    }
 }

@@ -632,18 +632,25 @@ private fun buildRefreshableWebView(
     // ACTION_DOWN and JS answers arrive too late to be asked then.
     // Reset on every navigation: unknown reads as "no claim", which is
     // the pre-#56 behaviour, and the scroll-range half of the decision
-    // is what carries a page that hasn't been probed yet.
-    var rootBlocksPan = false
+    // is what carries a page that hasn't been probed yet. The answer is
+    // tokened per document so a probe that outlives the page that asked
+    // for it cannot speak for the page that replaced it (see
+    // [RootPanProbeSlot]).
+    val rootPanProbe = RootPanProbeSlot()
 
     /**
      * Re-read the document's root pan styles. Cheap (two
      * `getComputedStyle` reads on an already-laid-out document) and run
      * at the two moments a document's root styles become knowable and
      * then final: first paint, and load finished.
+     *
+     * The result is stamped with the document it was asked about, and
+     * lands only if that document is still on screen when it arrives.
      */
     fun probeRootPanStyles(view: WebView?) {
+        val token = rootPanProbe.beginProbe()
         view?.evaluateJavascript(ROOT_PAN_STYLES_JS) { result ->
-            rootBlocksPan = rootBlocksVerticalPan(result)
+            rootPanProbe.accept(token, rootBlocksVerticalPan(result))
         }
     }
 
@@ -800,8 +807,9 @@ private fun buildRefreshableWebView(
                 state.capsuleCollapse.expand()
                 // …and with no claim on the user's vertical drags until
                 // it makes one: the previous document's `touch-action`
-                // is none of this one's business (#56).
-                rootBlocksPan = false
+                // is none of this one's business, not even by way of a
+                // probe of its that is still in flight (#56).
+                rootPanProbe.startDocument()
                 // …and with the progress latch open again: whatever the
                 // last Stop aborted, this document is a load of its own
                 // and its percentages are worth drawing (#41).
@@ -1231,7 +1239,7 @@ private fun buildRefreshableWebView(
         !pullToRefreshArmed(
             scrollY = webView.scrollY,
             documentScrollsDown = webView.canScrollVertically(1),
-            rootBlocksVerticalPan = rootBlocksPan,
+            rootBlocksVerticalPan = rootPanProbe.blocksVerticalPan,
         )
     }
     return refreshLayout to webView
