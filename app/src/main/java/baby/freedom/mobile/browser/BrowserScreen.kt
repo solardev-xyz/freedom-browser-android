@@ -78,6 +78,7 @@ import baby.freedom.swarm.IpfsStatus
 import baby.freedom.swarm.NodeInfo
 import baby.freedom.swarm.NodeStatus
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.job
 import kotlinx.coroutines.launch
 
@@ -629,6 +630,15 @@ fun BrowserScreen(
             val ensProbe = scope.launch {
                 try {
                     val result = ensResolver.resolveContenthash(name)
+                    // Everything below this line writes tab state —
+                    // `loadUrl` alone cancels whatever probe the tab is
+                    // waiting on now, which is how a cancelled probe
+                    // would walk straight past
+                    // [submitSupersedesPendingProbe] and navigate on
+                    // behalf of a submit the user already superseded
+                    // (#51). The resolver propagates cancellation
+                    // itself; this is the tab's own last word on it.
+                    ensureActive()
                     when (result) {
                         is EnsResult.Ok -> {
                             // Remember hash/cid → name for the whole session
