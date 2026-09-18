@@ -1062,6 +1062,16 @@ fun BrowserScreen(
                         if (isBookmarked) repo.unbookmark(url)
                         else repo.bookmark(url, state.title)
                     },
+                    // Step one of the two-step tap: a tap on the compact
+                    // capsule restores the resting bar and stops there.
+                    // It goes through [CapsuleCollapseState.expand], the
+                    // same door a navigation or a scroll back to the top
+                    // of the page uses, so the accumulated scroll travel
+                    // is cleared too — the bar the user just asked for
+                    // doesn't collapse again on the next few pixels of
+                    // drift, and it re-collapses only on a fresh
+                    // downward gesture.
+                    onExpandCapsule = { state.capsuleCollapse.expand() },
                     onOpenSettings = { showSettings = true },
                     onOpenNode = { showNode = true },
                     onOpenTabs = { showTabSwitcher = true },
