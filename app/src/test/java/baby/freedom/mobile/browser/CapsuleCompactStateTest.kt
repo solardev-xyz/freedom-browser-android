@@ -1,6 +1,7 @@
 package baby.freedom.mobile.browser
 
 import androidx.compose.material3.Typography
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import org.junit.Assert.assertEquals
@@ -518,5 +519,76 @@ class CapsuleCompactStateTest {
             "the capsule must still hold the label it was measured from",
             capsule >= compactLabel + CapsuleCompactSidePadding * 2,
         )
+    }
+
+    // ---- …and where the protocol badge sits ------------------------
+
+    /** The badge's drawn centre, for a label of [labelWidth] at rest. */
+    private fun badgeOffset(
+        collapse: Float,
+        canGoBack: Boolean = true,
+        label: Dp = labelWidth,
+    ): Dp = addressBadgeCenterOffset(
+        labelCenter = offset(collapse, canGoBack, hasBadge = true),
+        labelWidth = label * addressLabelScale(collapse),
+    )
+
+    @Test
+    fun `the badge sits against the domain, not against the field's edge`() {
+        // The one invariant the badge has: 8 dp of air between its own
+        // trailing edge and the label's first glyph — which is what makes
+        // it a mark *on* the domain rather than a third control at the
+        // leading edge of the pill (the bug the row layout had: the badge
+        // stayed at the field's edge while the label was centred, ~59 dp
+        // away on a 420 dpi phone).
+        val label = offset(0f, hasBadge = true)
+        val badge = badgeOffset(0f)
+        assertEquals(
+            AddressPillBadgeGap,
+            (label - labelWidth / 2f) - (badge + AddressPillBadgeSize / 2f),
+        )
+    }
+
+    @Test
+    fun `badge and domain are centred in the field as one group`() {
+        // Which is the other half of [addressLabelRestingCenter] giving
+        // the domain's centre away: the pair has to come out centred on
+        // the field's own content box, or the +12 dp shift is just a
+        // domain pushed off centre.
+        for (canGoBack in listOf(true, false)) {
+            val label = offset(0f, canGoBack, hasBadge = true)
+            val badge = badgeOffset(0f, canGoBack)
+            val leading = badge - AddressPillBadgeSize / 2f
+            val trailing = label + labelWidth / 2f
+            assertEquals(
+                "badge + domain off centre with canGoBack=$canGoBack",
+                addressFieldCenterOffset(canGoBack),
+                (leading + trailing) / 2f,
+            )
+        }
+    }
+
+    @Test
+    fun `the badge follows the domain through the collapse`() {
+        // It is placed from the label's drawn edge at every fraction, so
+        // the gap survives the label's travel *and* its type step — it
+        // cannot drift into the domain or off towards the pill's edge
+        // halfway through a collapse.
+        for (step in 0..20) {
+            val c = step / 20f
+            val label = offset(c, canGoBack = false, hasBadge = true)
+            val drawnLabel = labelWidth * addressLabelScale(c)
+            val badge = badgeOffset(c, canGoBack = false)
+            assertEquals(
+                "the badge left the domain at collapse=$c",
+                AddressPillBadgeGap.value,
+                ((label - drawnLabel / 2f) - (badge + AddressPillBadgeSize / 2f)).value,
+                0.001f,
+            )
+        }
+        // And it is gone with the rest of the pill's furniture before the
+        // compact capsule settles — the minimised bar is the domain and
+        // nothing else.
+        assertEquals(0f, capsulePillSlotScale(1f), 0f)
     }
 }

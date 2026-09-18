@@ -573,10 +573,10 @@ private val CapsuleFieldIconSize = 18.dp
 private val AddressPillControlInset = 8.dp
 
 /** The protocol badge's own mark. */
-private val AddressPillBadgeSize = 16.dp
+internal val AddressPillBadgeSize = 16.dp
 
 /** …and the air between it and the first glyph of the domain. */
-private val AddressPillBadgeGap = 8.dp
+internal val AddressPillBadgeGap = 8.dp
 
 /**
  * What the protocol badge costs the domain when the origin has earned
@@ -727,10 +727,37 @@ internal fun addressLabelMaxWidth(
  * whenever Back is there, and half a button-and-gap to the leading side
  * when it is not. The protocol badge is the one thing that moves it: it
  * sits in front of the domain inside the same box, so the domain gives
- * up half the badge's block to keep the pair of them centred.
+ * up half the badge's block to keep the pair of them centred — and the
+ * badge is then placed *from the domain* by
+ * [addressBadgeCenterOffset], so the two are one group however this
+ * moves.
  */
 internal fun addressLabelRestingCenter(canGoBack: Boolean, hasBadge: Boolean): Dp =
     addressFieldCenterOffset(canGoBack) + addressBadgeBlock(hasBadge) / 2f
+
+/**
+ * Where the protocol badge's own 16 dp box sits, relative to the same
+ * centre line the domain is placed against.
+ *
+ * The badge is a mark **on the domain**, so it is placed from the domain
+ * rather than from an edge of the field: [AddressPillBadgeGap] of air in
+ * front of the label's first glyph, wherever that glyph currently is.
+ * Laid out instead as the first child of the field's content row — which
+ * is where it used to be, back when the label was left-aligned in that
+ * row too — it stays pinned to the field's leading edge while the label
+ * it belongs to is centred in the pill, and the two end up half a bar
+ * apart: a badge that reads as a second menu icon, and a domain pushed
+ * off centre by [addressLabelRestingCenter] to pair with a mark that is
+ * nowhere near it.
+ *
+ * [labelCenter] and [labelWidth] are the label's *drawn* centre and
+ * drawn width ([addressLabelCenterOffset] and the measured layout at
+ * [addressLabelScale]), so the badge tracks the domain through the
+ * collapse instead of interpolating on a curve of its own — the same
+ * rule #55 put the label itself under.
+ */
+internal fun addressBadgeCenterOffset(labelCenter: Dp, labelWidth: Dp): Dp =
+    labelCenter - labelWidth / 2f - AddressPillBadgeGap - AddressPillBadgeSize / 2f
 
 /**
  * **The** domain label's horizontal geometry: how far the centre of the
@@ -775,15 +802,16 @@ internal fun addressLabelCenterOffset(collapse: Float, restingCenter: Dp): Dp =
  *
  * The order stated here is the split bar read left to right, which is
  * also the order the brief asks for: Back, the overflow menu, the
- * domain, the field it labels, Reload / Stop, tabs. The bar's slot is
- * the traversal group that carries it.
+ * protocol badge, the domain it marks, the field they sit on, Reload /
+ * Stop, tabs. The bar's slot is the traversal group that carries it.
  */
 private const val CapsuleOrderBack = 0f
 private const val CapsuleOrderOverflow = 1f
-private const val CapsuleOrderLabel = 2f
-private const val CapsuleOrderField = 3f
-private const val CapsuleOrderTrailing = 4f
-private const val CapsuleOrderTabs = 5f
+private const val CapsuleOrderBadge = 2f
+private const val CapsuleOrderLabel = 3f
+private const val CapsuleOrderField = 4f
+private const val CapsuleOrderTrailing = 5f
+private const val CapsuleOrderTabs = 6f
 
 /**
  * Narrowest the compact capsule ever gets. Safari's minimised bar keeps
@@ -1453,6 +1481,11 @@ internal fun BottomToolbar(
     // field's centre line rather than on the slot's. See
     // [capsuleControlTopShift].
     val controlTopShift = capsuleControlTopShift(collapse, edit, compactHeight)
+    // …and how much the things *inside* the field still have. The badge
+    // is drawn out here beside the label rather than in the field's row
+    // (see [addressBadgeCenterOffset]), so it takes this from the same
+    // function its neighbours in that row take it from.
+    val pillSlotScale = capsulePillSlotScale(collapse)
 
     // Derived, not read straight: `isCapsuleLoading` looks at
     // `state.progress`, and reading that here would put every single
@@ -1707,6 +1740,51 @@ internal fun BottomToolbar(
         // focus it gives way to the full URL in the editor.
         if (!addressFocused && restingLabel.isNotEmpty()) {
             val labelOffset = addressLabelCenterOffset(collapse, labelRestingCenter)
+            // The protocol badge, beside the domain it vouches for — a
+            // sibling of the label for exactly the reason the label is a
+            // sibling of the field (#55). Both are placed against the
+            // bar's own centre line, the badge from the label's drawn
+            // edge, so the mark and the name stay one group whatever the
+            // Back button, the two control slots or the collapse do; in
+            // the field's content row it would sit at the field's leading
+            // edge, half a bar from the domain it marks (see
+            // [addressBadgeCenterOffset]).
+            //
+            // Drawn, not laid out, like the label: no pointer input, so
+            // the tap still lands on the field beneath it. While the
+            // field has focus the badge goes back into the row, where the
+            // full URL it marks starts at the leading edge — see
+            // [AddressField].
+            if (badge != null && pillSlotScale > 0f) {
+                val labelDrawnWidth = labelWidth * addressLabelScale(collapse, labelCompactScale)
+                val badgeOffset = addressBadgeCenterOffset(
+                    labelCenter = labelOffset,
+                    labelWidth = labelDrawnWidth,
+                )
+                Image(
+                    painter = painterResource(badge.drawableRes),
+                    contentDescription = badge.contentDescription,
+                    modifier = Modifier
+                        .align(Alignment.Center)
+                        .size(AddressPillBadgeSize)
+                        .graphicsLayer {
+                            // It leaves with everything else the compact
+                            // pill drops ([capsulePillSlotScale]),
+                            // retreating into the first glyph of the
+                            // domain rather than shrinking away from it:
+                            // the pivot is the edge that faces the label,
+                            // so the 8 dp of air between them holds all
+                            // the way out.
+                            scaleX = pillSlotScale
+                            scaleY = pillSlotScale
+                            transformOrigin =
+                                TransformOrigin(if (direction > 0f) 1f else 0f, 0.5f)
+                            translationX = badgeOffset.toPx() * direction
+                            translationY = bottomAnchor.toPx()
+                        }
+                        .semantics { traversalIndex = CapsuleOrderBadge },
+                )
+            }
             Text(
                 text = restingLabel,
                 color = MaterialTheme.colorScheme.onSurface,
@@ -2034,10 +2112,13 @@ private fun capsuleHalves(size: Size, strokeWidth: Float): List<Path> {
  * the compact bar's one remaining control keeps a full-width 48 dp one.
  *
  * Inside it, left to right: the overflow menu ([menu], handed in as a
- * slot), the protocol badge where the origin has earned one, the domain
- * — drawn one level up, see [BottomToolbar] — and the Reload / Stop
- * control. The two control slots are the same size, so the domain
- * between them is centred in the field.
+ * slot), the domain — drawn one level up with the protocol badge beside
+ * it, see [BottomToolbar] — and the Reload / Stop control. The two
+ * control slots are the same size, so the domain between them is centred
+ * in the field. The badge is this row's only while the row's own text is
+ * the text on screen (the editor's full URL, or the home tab's
+ * placeholder); at rest it travels with the domain instead of with the
+ * leading edge (see [addressBadgeCenterOffset]).
  *
  * Collapsing takes the field down to the domain and nothing else: both
  * control slots and the badge retreat into the field's edges through the
@@ -2309,12 +2390,24 @@ private fun AddressField(
                                 .capsuleFieldSlot(slotScale, towardsStart = true),
                         )
                     }
-                    // The badge (and the gap after it) is one slot that
-                    // retreats into the pill's leading edge as the bar
-                    // collapses — the compact pill shows the domain
-                    // and nothing else. Zero-width means not composed,
-                    // so it can't take a tap meant for the label.
-                    if (badge != null && slotScale > 0f) {
+                    // The badge, on the runs where the text it marks is
+                    // this row's: the editor's full URL, which starts at
+                    // the leading edge, and the home tab's placeholder.
+                    // The resting domain is drawn one level up, centred
+                    // in the field, and the badge is drawn up there
+                    // beside it — a mark on the domain has to travel with
+                    // the domain (see [addressBadgeCenterOffset]). The
+                    // two conditions are complements, so the badge is on
+                    // screen exactly once in every state.
+                    //
+                    // Either way it is one slot with the gap after it,
+                    // retreating into the pill's leading edge as the bar
+                    // collapses — the compact pill shows the domain and
+                    // nothing else. Zero-width means not composed, so it
+                    // can't take a tap meant for the label.
+                    if (badge != null && (addressFocused || restingLabel.isEmpty()) &&
+                        slotScale > 0f
+                    ) {
                         Row(
                             modifier = Modifier
                                 .collapsingControl(slotScale, towardsStart = true),
