@@ -9,6 +9,8 @@ import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.IntrinsicSize
@@ -83,7 +85,9 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.layout
 import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.ImeAction
@@ -101,6 +105,7 @@ import androidx.compose.ui.unit.lerp
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupPositionProvider
 import androidx.compose.ui.window.PopupProperties
+import baby.freedom.mobile.ui.isLight
 import baby.freedom.swarm.NodeInfo
 import baby.freedom.swarm.NodeStatus
 import kotlin.math.max
@@ -305,12 +310,37 @@ internal fun isCapsuleLoading(state: BrowserState): Boolean =
     state.resolving || state.progress in 0..99
 
 /**
- * Capsule background opacity. Low enough that the page reads through as
- * a faint wash (so the chrome sits *over* the page rather than
- * replacing a strip of it), high enough that `onSurface` text stays
- * legible over both a white article and a dark hero image.
+ * Capsule background opacity on the **dark** scheme. Low enough that the
+ * page reads through as a faint wash (so the chrome sits *over* the page
+ * rather than replacing a strip of it), high enough that `onSurface`
+ * text stays legible over both a white article and a dark hero image.
  */
-private const val CAPSULE_ALPHA = 0.90f
+private const val CAPSULE_ALPHA_DARK = 0.90f
+
+/**
+ * Capsule background opacity on the **light** scheme.
+ *
+ * A dark capsule is unmistakable over any page; a near-white one is not,
+ * and the page it has the least to say against is a white one — the
+ * common case. Every point of transparency there lerps the fill
+ * *towards* the page it is sitting on, so the same 0.90 that reads as a
+ * faint wash on dark reads as the pill dissolving on light. 0.94 keeps
+ * the page visible through the chrome (that is still the brief's point)
+ * while leaving the capsule's own tone, and therefore its edge, legible
+ * against white.
+ */
+private const val CAPSULE_ALPHA_LIGHT = 0.94f
+
+/**
+ * Shadow under the capsule, per scheme. Just enough to lift it off the
+ * page without the "heavy shadow" the brief rules out — but on the light
+ * scheme the shadow is doing most of the lifting on its own (a pale
+ * capsule on a pale page has little tonal separation to offer), whereas
+ * on the dark one a black shadow over dark content is nearly invisible
+ * and the fill does the work.
+ */
+private val CapsuleShadowDark = 3.dp
+private val CapsuleShadowLight = 6.dp
 
 /**
  * The browser chrome: a floating, semi-transparent capsule layered over
@@ -417,6 +447,10 @@ internal fun BottomToolbar(
     // show; composing the infinite transition conditionally keeps an
     // idle capsule off the animation clock entirely.
     val sweep: State<Float>? = if (state.resolving) rememberCapsuleSweep() else null
+    // Which scheme is under us — read from the colours themselves rather
+    // than the system flag, so the capsule's alpha and shadow follow what
+    // it is actually painting with (see [ColorScheme.isLight]).
+    val lightScheme = MaterialTheme.colorScheme.isLight
     val progressColor = MaterialTheme.colorScheme.primary
     val progressStrokePx = with(LocalDensity.current) { CapsuleProgressStroke.toPx() }
 
@@ -440,10 +474,10 @@ internal fun BottomToolbar(
                 .fillMaxWidth()
                 .height(drawnHeight),
             shape = CircleShape,
-            color = MaterialTheme.colorScheme.surfaceContainer.copy(alpha = CAPSULE_ALPHA),
-            // Just enough shadow to lift the capsule off the page without
-            // the "heavy shadow" the brief rules out.
-            shadowElevation = 3.dp,
+            color = MaterialTheme.colorScheme.surfaceContainer.copy(
+                alpha = if (lightScheme) CAPSULE_ALPHA_LIGHT else CAPSULE_ALPHA_DARK,
+            ),
+            shadowElevation = if (lightScheme) CapsuleShadowLight else CapsuleShadowDark,
             content = {},
         )
 
@@ -755,6 +789,29 @@ private fun AddressField(
     modifier: Modifier = Modifier,
 ) {
     val focusRequester = remember { FocusRequester() }
+    val context = LocalContext.current
+    val keyboardController = LocalSoftwareKeyboardController.current
+
+    // Long-press URL actions (copy / share / paste-and-go). All three
+    // are answered from what the capsule already holds — the committed
+    // address, the page title, the clipboard — so the gesture needs no
+    // new plumbing out of this composable beyond the submit path
+    // paste-and-go shares with the keyboard's Go key.
+    var urlActionsOpen by remember(state.id) { mutableStateOf(false) }
+    // Sampled at long-press rather than composed from the clipboard:
+    // there is no "clipboard changed" signal worth subscribing to here,
+    // and the answer only has to be right for the menu about to open.
+    var urlActionsCanPaste by remember { mutableStateOf(false) }
+    // The pill's window bounds, so the menu can be anchored above the
+    // capsule the same hand-rolled way the overflow menu is (see
+    // [OverflowMenuButton] for why we don't let the popup work it out).
+    var pillBounds by remember { mutableStateOf<IntRect?>(null) }
+    val pillInteractionSource = remember { MutableInteractionSource() }
+    // What copy / share would act on: the tab's committed address, i.e.
+    // exactly what the label the user pressed is derived from. `null` on
+    // the home tab, where there is no address to offer.
+    val actionUrl = urlActionTarget(state.addressBarText, state.url)
+
     // Local [TextFieldValue]: the *edit buffer*. It holds whatever the
     // user is typing and lets us steer the selection (e.g. select all
     // on focus). Keystrokes stay here — they never write back into
@@ -849,6 +906,13 @@ private fun AddressField(
     Box(
         modifier = modifier
             .height(AddressFieldTouchHeight)
+            .onGloballyPositioned { coords ->
+                val r = coords.boundsInWindow()
+                pillBounds = IntRect(
+                    r.left.toInt(), r.top.toInt(),
+                    r.right.toInt(), r.bottom.toInt(),
+                )
+            }
             .drawBehind {
                 val h = pillHeight.toPx()
                 // Centred in the touch box, which is itself centred in
@@ -987,6 +1051,64 @@ private fun AddressField(
                                 overflow = TextOverflow.MiddleEllipsis,
                             )
                         }
+                        // Long-press surface over the resting label.
+                        //
+                        // A sibling laid over the (transparent) text
+                        // field rather than a modifier on the Box around
+                        // it: Compose hit-tests children before their
+                        // parent, so a modifier here would never see a
+                        // press the field itself takes first. On top, it
+                        // gets the gesture — and with it the chance to
+                        // keep the field's *own* long-press (selection
+                        // handles, magnifier) off a label that isn't
+                        // even editable text yet.
+                        //
+                        // Composed only while the field is unfocused, so
+                        // the moment the capsule becomes the editor it is
+                        // gone and every touch inside the pill is the
+                        // text field's again — cursor placement, drag
+                        // selection, the lot. That is also what keeps the
+                        // gesture off stage 2's scroll wiring: it lives
+                        // inside the capsule, never over the page, so the
+                        // WebView's own onTouchDown / onDragPastSlop
+                        // stream is untouched.
+                        //
+                        // `onClick` is the existing tap-to-edit, stated
+                        // explicitly now that the tap lands here instead:
+                        // request focus (which select-alls, see above)
+                        // and raise the keyboard.
+                        if (!addressFocused) {
+                            Box(
+                                modifier = Modifier
+                                    .matchParentSize()
+                                    .combinedClickable(
+                                        interactionSource = pillInteractionSource,
+                                        // No ripple: the pill is a
+                                        // painted bubble, and a
+                                        // rectangular ripple inside it
+                                        // would be the one square corner
+                                        // in the whole capsule.
+                                        indication = null,
+                                        onClickLabel = "Edit address",
+                                        onLongClickLabel = "URL actions",
+                                        onLongClick = {
+                                            urlActionsCanPaste = context.clipboardHasText()
+                                            // Nothing to copy and nothing
+                                            // to paste is an empty menu;
+                                            // a long-press that opens one
+                                            // is worse than one that does
+                                            // nothing.
+                                            if (actionUrl != null || urlActionsCanPaste) {
+                                                urlActionsOpen = true
+                                            }
+                                        },
+                                        onClick = {
+                                            focusRequester.requestFocus()
+                                            keyboardController?.show()
+                                        },
+                                    ),
+                            )
+                        }
                     }
                     // Trailing control slot — sized to the pill, never
                     // pushes it taller, and *always* reserved at the same
@@ -1049,6 +1171,33 @@ private fun AddressField(
                 }
             },
         )
+
+        // The long-press menu. Anchored on the pill's own bounds, above
+        // the capsule; dismissed by a tap outside or by the system back
+        // gesture (the popup is focusable, so back closes the menu
+        // instead of navigating the page under it).
+        //
+        // Guarded on focus as well as on the flag: if anything at all
+        // focuses the field while the menu is up, the capsule is the
+        // editor now and the menu has nothing left to describe.
+        val anchor = pillBounds
+        if (urlActionsOpen && anchor != null && !addressFocused) {
+            CapsuleUrlActionsMenu(
+                anchor = anchor,
+                canCopy = actionUrl != null,
+                canPaste = urlActionsCanPaste,
+                onCopy = { actionUrl?.let { copyUrlToClipboard(context, it) } },
+                onShare = { actionUrl?.let { shareUrl(context, it, state.title) } },
+                // Paste-and-go goes through the *same* submit path as the
+                // keyboard's Go key — so a pasted `bzz://` / ENS address
+                // takes the probe-gated route and a pasted phrase
+                // searches, with no second opinion about what a URL is.
+                onPasteAndGo = {
+                    pasteAndGoFromClipboard(context)?.let(onSubmit)
+                },
+                onDismiss = { urlActionsOpen = false },
+            )
+        }
     }
 }
 
@@ -1136,7 +1285,7 @@ private fun OverflowMenuButton(
         )
         if (menuExpanded && anchorBounds != null) {
             Popup(
-                popupPositionProvider = AnchoredAboveEndProvider(anchorBounds!!, popupGapPx),
+                popupPositionProvider = AnchoredAboveProvider(anchorBounds!!, popupGapPx),
                 onDismissRequest = { menuExpanded = false },
                 properties = PopupProperties(focusable = true),
             ) {
@@ -1271,7 +1420,7 @@ private fun OverflowMenuButton(
  * and keeps long labels like "Bookmark" from hugging the right edge.
  */
 @Composable
-private fun MenuItemLabel(text: String) {
+internal fun MenuItemLabel(text: String) {
     Text(
         text = text,
         modifier = Modifier.padding(end = 32.dp),
@@ -1280,17 +1429,20 @@ private fun MenuItemLabel(text: String) {
 
 /**
  * Places a [Popup] [gapPx] above an anchor's *top* edge (it opens
- * upwards, since the anchor lives in the bottom toolbar) and against its right
- * edge (LTR) / left edge (RTL), clamping to the window so the popup
- * never runs off-screen. The anchor bounds are captured by the caller
- * via [Modifier.onGloballyPositioned]; we deliberately ignore the
+ * upwards, since the anchor lives in the bottom toolbar), aligned to the
+ * anchor's trailing edge when [alignToEnd] (the overflow menu, hanging
+ * off its button) or its leading edge otherwise (the URL-actions menu,
+ * hanging off the label that was pressed), clamping to the window so the
+ * popup never runs off-screen. The anchor bounds are captured by the
+ * caller via [Modifier.onGloballyPositioned]; we deliberately ignore the
  * [anchorBounds] argument the framework hands in, since that's the
  * very value that mis-fires on the first open for Material3's default
  * [androidx.compose.material3.DropdownMenu].
  */
-private class AnchoredAboveEndProvider(
+internal class AnchoredAboveProvider(
     private val anchor: IntRect,
     private val gapPx: Int,
+    private val alignToEnd: Boolean = true,
 ) : PopupPositionProvider {
     override fun calculatePosition(
         anchorBounds: IntRect,
@@ -1298,9 +1450,10 @@ private class AnchoredAboveEndProvider(
         layoutDirection: LayoutDirection,
         popupContentSize: IntSize,
     ): IntOffset {
-        val x = when (layoutDirection) {
-            LayoutDirection.Ltr -> anchor.right - popupContentSize.width
-            LayoutDirection.Rtl -> anchor.left
+        val startEdge = layoutDirection == LayoutDirection.Ltr
+        val x = when (alignToEnd) {
+            true -> if (startEdge) anchor.right - popupContentSize.width else anchor.left
+            false -> if (startEdge) anchor.left else anchor.right - popupContentSize.width
         }.coerceIn(0, (windowSize.width - popupContentSize.width).coerceAtLeast(0))
         val y = (anchor.top - gapPx - popupContentSize.height)
             .coerceIn(0, (windowSize.height - popupContentSize.height).coerceAtLeast(0))

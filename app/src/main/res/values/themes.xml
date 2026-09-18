@@ -1,7 +1,20 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <style name="Theme.Freedom" parent="android:Theme.Material.NoActionBar">
+    <!--
+      Light variant (the `-night` qualifier below carries the dark one).
+      The Compose side follows the same system setting via
+      `isSystemInDarkTheme()` in FreedomTheme, so the window background
+      the platform paints before the first Compose frame — and the
+      status / navigation bar icon tint, which Compose does not own —
+      match the scheme that is about to be drawn over them.
+
+      `windowLightStatusBar` / `windowLightNavigationBar` are "dark icons
+      please": correct here, because the app surface under the (edge-to-
+      edge, transparent) system bars is near-white on this scheme.
+    -->
+    <style name="Theme.Freedom" parent="android:Theme.Material.Light.NoActionBar">
         <item name="android:statusBarColor">@android:color/transparent</item>
-        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:windowLightNavigationBar">true</item>
     </style>
 </resources>

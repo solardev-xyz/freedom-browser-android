@@ -1,21 +1,34 @@
 package baby.freedom.mobile.ui
 
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.ColorScheme
 import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
 import androidx.compose.material3.MaterialExpressiveTheme
 import androidx.compose.material3.darkColorScheme
+import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.luminance
 
 /**
- * The app theme: Material 3 Expressive on a fixed dark scheme.
+ * The app theme: Material 3 Expressive on one of two wordmark-keyed
+ * schemes, following the OS light/dark setting.
  *
- * Dark is forced regardless of the OS setting — the home surface and
- * the wordmark are designed for it, and [HomeScreen] keys its logo
- * choice off the theme's background luminance rather than the system
- * flag for exactly that reason. Dynamic colour is deliberately not
- * used: the brand accents come from the wordmark (its teal and amber
- * dots) and shouldn't drift with the wallpaper.
+ * Both schemes take their accents from the wordmark (its teal and amber
+ * dots) rather than from the wallpaper — dynamic colour is still
+ * deliberately not used, because the brand accents shouldn't drift with
+ * whatever the user's home screen happens to be. The light scheme is the
+ * same two hues brought down to Material's light tones (a tone-85 teal
+ * on white would fail every contrast bar there is); everything else on
+ * both sides keeps the Material baseline so the existing
+ * `surfaceVariant` cards and the WebView frame colour still sit
+ * together.
+ *
+ * Nothing downstream reads the *system* flag to decide what it is
+ * painting on: [baby.freedom.mobile.browser.HomeScreen] picks its
+ * wordmark by background luminance and the capsule keys its alpha and
+ * shadow off [isLight] below, so an explicit `darkTheme` override (a
+ * preview, a screenshot test) stays honest.
  *
  * `MaterialExpressiveTheme` brings the expressive motion scheme
  * (springier transitions on every component) and the expressive
@@ -24,9 +37,27 @@ import androidx.compose.ui.graphics.Color
  */
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
-fun FreedomTheme(content: @Composable () -> Unit) {
-    MaterialExpressiveTheme(colorScheme = FreedomDarkColors, content = content)
+fun FreedomTheme(
+    darkTheme: Boolean = isSystemInDarkTheme(),
+    content: @Composable () -> Unit,
+) {
+    MaterialExpressiveTheme(
+        colorScheme = if (darkTheme) FreedomDarkColors else FreedomLightColors,
+        content = content,
+    )
 }
+
+/**
+ * Is the active scheme a light one?
+ *
+ * Derived from the scheme itself rather than from `isSystemInDarkTheme`,
+ * so anything that paints differently on light and dark (the capsule's
+ * alpha and shadow) follows the colours it is actually drawing with —
+ * the same rule [baby.freedom.mobile.browser.HomeScreen] already uses to
+ * choose its wordmark.
+ */
+internal val ColorScheme.isLight: Boolean
+    get() = surface.luminance() > 0.5f
 
 /** Teal dot of the wordmark (`ic_freedom_wordmark_*`). */
 private val FreedomTeal = Color(0xFF00E9C4)
@@ -54,4 +85,34 @@ internal val FreedomDarkColors: ColorScheme = darkColorScheme(
     onTertiary = Color(0xFF003259),
     tertiaryContainer = Color(0xFF00497E),
     onTertiaryContainer = Color(0xFFD1E4FF),
+)
+
+/**
+ * Light scheme: the same two wordmark hues, at the tones a light
+ * surface can carry.
+ *
+ * The teal and the amber move to Material's tone-40 band and become the
+ * *ink* (primary / secondary), while the wordmark's own bright tones
+ * move to the containers — which is where the brand colour still reads
+ * as itself on white. This matters beyond decoration: `primary` is what
+ * the capsule's load trace and its Stop control are drawn in, so it has
+ * to clear a 3:1 non-text contrast bar against a near-white capsule.
+ * `inversePrimary` is the wordmark teal itself, so the pairing stays
+ * symmetric with the dark scheme (whose `inversePrimary` is this
+ * scheme's `primary`).
+ */
+internal val FreedomLightColors: ColorScheme = lightColorScheme(
+    primary = Color(0xFF00695B),
+    onPrimary = Color(0xFFFFFFFF),
+    primaryContainer = Color(0xFF70F7DE),
+    onPrimaryContainer = Color(0xFF002019),
+    inversePrimary = FreedomTeal,
+    secondary = Color(0xFF6F5300),
+    onSecondary = Color(0xFFFFFFFF),
+    secondaryContainer = FreedomAmber,
+    onSecondaryContainer = Color(0xFF241A00),
+    tertiary = Color(0xFF00629E),
+    onTertiary = Color(0xFFFFFFFF),
+    tertiaryContainer = Color(0xFFD1E4FF),
+    onTertiaryContainer = Color(0xFF001D33),
 )

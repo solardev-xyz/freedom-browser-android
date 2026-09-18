@@ -138,6 +138,26 @@ internal fun encodePngBytes(bitmap: Bitmap): ByteArray? {
     }
 }
 
+/**
+ * Does an `onPageFinished` for [finishedUrl] describe the document the
+ * WebView is actually showing ([currentUrl], i.e. `WebView.getUrl()`)?
+ *
+ * Chromium fires a synthetic `onPageFinished` for a navigation that was
+ * aborted before it committed — the user hit Stop, or a second
+ * navigation superseded the first — carrying the URL of the page that
+ * never loaded, while `getUrl()` goes on naming the page still on
+ * screen. Only a finish that passes this test may write the tab's
+ * committed address: adopting an aborted one renames the tab after a
+ * site it never visited, and the bold domain label is the capsule
+ * asserting "this is the site you are on" (#39).
+ *
+ * A `null` on either side means the WebView isn't telling us anything
+ * to the contrary, so the finish is taken at face value — the same
+ * behaviour as before this guard existed.
+ */
+internal fun finishedLoadIsCurrent(finishedUrl: String?, currentUrl: String?): Boolean =
+    finishedUrl == null || currentUrl == null || finishedUrl == currentUrl
+
 internal fun captureThumbnail(view: WebView, state: BrowserState) {
     val w = view.width
     val h = view.height
@@ -603,13 +623,28 @@ private fun buildRefreshableWebView(
                 // `lastLoadedDisplayUrl` so the error-page guards
                 // elsewhere still fire.
                 val uiDisplay = ErrorPage.displayUrlFor(url) ?: display
-                state.url = uiDisplay
-                lastLoadedDisplayUrl = display
-                state.title = sanitizeTitle(view?.title, url)
+                // …but only if this finish belongs to the document that
+                // is actually on screen. An aborted navigation — the
+                // user hitting Stop, or a second navigation superseding
+                // the first — still gets its own `onPageFinished`, with
+                // a URL that never committed and never painted a pixel
+                // (verified on the freedom AVD: no `onPageStarted`, no
+                // `onPageCommitVisible`, then `onPageFinished` for the
+                // abandoned URL while `getUrl()` still names the old
+                // page). Adopting it would rename the tab after a site
+                // it never loaded — the bold label, the reload target
+                // and the content on screen all disagreeing until the
+                // next navigation happened to fix them (#39).
+                val isCurrent = finishedLoadIsCurrent(url, view?.url)
+                if (isCurrent) {
+                    state.url = uiDisplay
+                    lastLoadedDisplayUrl = display
+                    state.title = sanitizeTitle(view?.title, url)
+                    state.addressBarText = uiDisplay
+                }
                 state.canGoBack = view?.canGoBack() == true
                 state.canGoForward = view?.canGoForward() == true
                 state.progress = -1
-                state.addressBarText = uiDisplay
                 // Record the *displayed* URL (bzz://, ens://, https://) — not
                 // the gateway-rewritten one — so history reflects what the
                 // user actually visited. The local home page is hidden from
@@ -617,9 +652,16 @@ private fun buildRefreshableWebView(
                 // clutter the history either. The error page is also
                 // deliberately kept out of history — it's a transient
                 // state, not a destination the user meant to visit.
+                //
+                // `currentLoadCommitted` is only reset by `onPageStarted`,
+                // which an aborted load never gets — so on its synthetic
+                // finish the flag is still the *previous* page's `true`,
+                // and without [finishedLoadIsCurrent] the abandoned URL
+                // went into history under the old page's title.
                 if (display.isNotBlank() &&
                     !ErrorPage.isErrorPage(url) &&
-                    currentLoadCommitted
+                    currentLoadCommitted &&
+                    isCurrent
                 ) {
                     repo.recordVisit(display, state.title)
                 }
