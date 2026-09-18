@@ -159,6 +159,33 @@ internal fun finishedLoadIsCurrent(finishedUrl: String?, currentUrl: String?): B
     finishedUrl == null || currentUrl == null || finishedUrl == currentUrl
 
 /**
+ * A finished load that is only waiting on first paint before it counts
+ * as a visit: the raw URL the finish was for, plus the history row it
+ * would write.
+ */
+internal data class PendingVisit(val rawUrl: String, val display: String, val title: String)
+
+/**
+ * The visit [pending] flushes when [committedUrl] paints, or `null` when
+ * that paint belongs to some other document.
+ *
+ * `onPageFinished` and `onPageCommitVisible` come in no guaranteed
+ * order. On a small, fast page — a local gateway page, a 2 kB document —
+ * the load event can beat the compositor's first frame by a millisecond,
+ * and the `currentLoadCommitted` gate that exists to keep *aborted*
+ * loads out of history then silently drops a page the user really did
+ * visit. So a finish that is history-worthy in every other respect is
+ * parked instead of discarded, and recorded here once the paint it was
+ * waiting for arrives. A load that never paints — the aborted case the
+ * gate is for — never flushes.
+ *
+ * The match is on the raw URL, so a paint belonging to the *next*
+ * navigation can't adopt the previous one's row.
+ */
+internal fun visitToFlush(pending: PendingVisit?, committedUrl: String?): PendingVisit? =
+    pending?.takeIf { it.rawUrl == committedUrl }
+
+/**
  * What [BrowserState.progress] should become for a chrome-client
  * `onProgressChanged([newProgress])`.
  *
@@ -435,6 +462,13 @@ private fun buildRefreshableWebView(
     // history entry with no real title.
     var currentLoadCommitted: Boolean = false
 
+    // A finish that arrived before its first paint, parked until
+    // `onPageCommitVisible` says the page really is on screen (see
+    // [visitToFlush]). Without it the fastest pages — the ones that
+    // finish loading in the millisecond before the compositor's first
+    // frame — were dropped from history by the gate above.
+    var pendingVisit: PendingVisit? = null
+
     // The dweb URL we already prompted a node recovery + retry for. A
     // main-frame load through the interceptor that dies mid-body
     // (Chromium's generic -1) is the signature of a node sitting on
@@ -618,6 +652,13 @@ private fun buildRefreshableWebView(
             override fun onPageCommitVisible(view: WebView?, url: String?) {
                 if (url == ABOUT_BLANK) return
                 currentLoadCommitted = true
+                // A finish that beat this paint left its visit parked;
+                // this is the moment it becomes real. Anything parked
+                // that *isn't* this document never painted, so it goes
+                // no further either way.
+                val flushed = visitToFlush(pendingVisit, url)
+                pendingVisit = null
+                if (flushed != null) repo.recordVisit(flushed.display, flushed.title)
             }
 
             override fun onPageFinished(view: WebView?, url: String?) {
@@ -689,12 +730,20 @@ private fun buildRefreshableWebView(
                 // finish the flag is still the *previous* page's `true`,
                 // and without [finishedLoadIsCurrent] the abandoned URL
                 // went into history under the old page's title.
+                //
+                // A load that finishes *before* its first paint is not
+                // aborted, it is merely quick: its visit is parked and
+                // recorded by `onPageCommitVisible` instead of being
+                // dropped here (see [visitToFlush]).
                 if (display.isNotBlank() &&
                     !ErrorPage.isErrorPage(url) &&
-                    currentLoadCommitted &&
                     isCurrent
                 ) {
-                    repo.recordVisit(display, state.title)
+                    if (currentLoadCommitted) {
+                        repo.recordVisit(display, state.title)
+                    } else if (url != null) {
+                        pendingVisit = PendingVisit(url, display, state.title)
+                    }
                 }
 
                 // Give the renderer a beat to paint, then capture a

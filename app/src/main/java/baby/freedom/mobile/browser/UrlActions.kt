@@ -102,14 +102,20 @@ internal fun Context.clipboardHasText(): Boolean {
  *
  * `text/plain` is the ordinary case; `text/html` counts because a link
  * copied out of a rendered page arrives as HTML with a plain-text
- * alternative, which is what `coerceToText` hands back. A clipboard
- * holding only an image or a file URI is not an address, so the item
- * stays off the menu rather than appearing and then doing nothing.
+ * alternative, which is what `coerceToText` hands back. `text/uri-list`
+ * counts too, and is the most address-like clip of the three: it is what
+ * `ClipData.newUri` advertises for a non-`content://` URI — a link
+ * handed over by a file manager, a share target or another browser —
+ * and `coerceToText` gives back the URI itself. A clipboard holding
+ * only an image or some other binary stays off the menu rather than
+ * offering an item that then does nothing.
  */
 internal fun clipHasPasteableText(hasPrimaryClip: Boolean, mimeTypes: List<String>): Boolean {
     if (!hasPrimaryClip) return false
     return mimeTypes.any {
-        it == ClipDescription.MIMETYPE_TEXT_PLAIN || it == ClipDescription.MIMETYPE_TEXT_HTML
+        it == ClipDescription.MIMETYPE_TEXT_PLAIN ||
+            it == ClipDescription.MIMETYPE_TEXT_HTML ||
+            it == ClipDescription.MIMETYPE_TEXT_URILIST
     }
 }
 

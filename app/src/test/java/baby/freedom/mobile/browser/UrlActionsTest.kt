@@ -74,6 +74,17 @@ class UrlActionsTest {
     }
 
     @Test
+    fun `a uri-list clip is pasteable`() {
+        // What `ClipData.newUri` advertises for a plain http(s) link —
+        // a file manager, a share target or another browser handing a
+        // URL over. `coerceToText` gives the URI straight back, so the
+        // item works; it just wasn't being offered.
+        assertTrue(
+            clipHasPasteableText(hasPrimaryClip = true, mimeTypes = listOf("text/uri-list")),
+        )
+    }
+
+    @Test
     fun `an empty clipboard offers no paste`() {
         assertFalse(clipHasPasteableText(hasPrimaryClip = false, mimeTypes = emptyList()))
         // Belt and braces: a stale description with no live clip behind
