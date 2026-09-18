@@ -923,6 +923,10 @@ fun BrowserScreen(
     val capsuleSideMargin =
         lerp(CapsuleSideMargin, CapsuleEditingSideMargin, editProgress)
 
+    // The page pixels the bar's three surfaces blur — `null` on Android
+    // 11, where they fall back to a plain translucent fill.
+    val backdrop = rememberCapsuleBackdrop()
+
     // Keyed on the *address bar's* focus, not on the keyboard: the IME
     // also comes up for a form field inside the page, and the capsule
     // stays at its resting height for that — reserving the editing
@@ -1000,6 +1004,13 @@ fun BrowserScreen(
                 .fillMaxSize()
                 .windowInsetsPadding(contentInsets)
                 .padding(bottom = contentBottomReserve)
+                // …and the pixels the bar's surfaces blur. The page is
+                // recorded into a layer here and drawn from it, so the
+                // chrome floating over it has something real to blur
+                // rather than a tint pretending to (see [CapsuleBackdrop]).
+                // Applied to the page area only — the chrome is a sibling
+                // below, so the layer can never end up recording itself.
+                .capsuleBackdropSource(backdrop)
                 .then(dismissKeyboardOnTap),
         ) {
             BrowserWebViewHost(
@@ -1173,6 +1184,7 @@ fun BrowserScreen(
                     modifier = Modifier
                         .widthIn(max = CHROME_MAX_WIDTH)
                         .fillMaxWidth(),
+                    backdrop = backdrop,
                 )
             }
         }
