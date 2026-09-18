@@ -3,7 +3,10 @@ package baby.freedom.mobile.ens
 import android.util.Log
 import java.net.URL
 import java.util.concurrent.ConcurrentHashMap
+import kotlin.coroutines.coroutineContext
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 
@@ -51,8 +54,26 @@ class EnsResolver internal constructor(
     /**
      * Resolve [rawName] (e.g. `swarm.eth`) to a content-addressed URI.
      * Thread-safe; cached for [CACHE_TTL_MS] per normalized name.
+     *
+     * Cancellation-honest: a caller whose coroutine was cancelled while
+     * we were resolving gets a `CancellationException`, never an
+     * [EnsResult]. Callers *act* on what comes back — navigate the tab,
+     * show an error page, cancel whatever probe the tab is now waiting
+     * on — and a probe the user has already superseded must do none of
+     * that (#51).
      */
     suspend fun resolveContenthash(rawName: String): EnsResult {
+        val result = resolve(rawName)
+        // Not every cancellation arrives as a `CancellationException`:
+        // tearing down the RPC in flight can surface as an ordinary
+        // `IOException`, which the retry loop maps to a PROVIDER_ERROR
+        // like any other transport failure. One check on the way out
+        // covers every return path above.
+        coroutineContext.ensureActive()
+        return result
+    }
+
+    private suspend fun resolve(rawName: String): EnsResult {
         val normalized = (rawName).trim().lowercase()
         if (normalized.isEmpty()) {
             return EnsResult.Error(name = "", reason = "INVALID_NAME", error = "empty name")
@@ -74,7 +95,7 @@ class EnsResolver internal constructor(
         for (attempt in 0 until total) {
             val idx = (preferredRpcIndex + attempt) % total
             val rpc = rpcEndpoints[idx]
-            val rpcResult = runCatching {
+            val rpcResult = runCatchingCancellable {
                 withContext(Dispatchers.IO) { ethCall(rpc, UNIVERSAL_RESOLVER, callData) }
             }
             if (rpcResult.isFailure) {
@@ -94,7 +115,7 @@ class EnsResolver internal constructor(
                 // Offchain resolver: run the CCIP-Read loop against the
                 // same RPC. Gateway failures are retryable transport
                 // errors, not "no such name", and aren't cached.
-                val followed = runCatching {
+                val followed = runCatchingCancellable {
                     withContext(Dispatchers.IO) {
                         followOffchainLookup(rpc, call.revertData!!)
                     }
@@ -535,6 +556,23 @@ class EnsResolver internal constructor(
         }
     }
 }
+
+/**
+ * [runCatching], minus the hole it leaves open around coroutines: a
+ * cancelled coroutine unwinds through a `CancellationException`, which
+ * `runCatching` catches like any other `Throwable` and hands back as a
+ * `Result.failure` — so the cancelled coroutine keeps running and
+ * reports a resolution *error* for a navigation that no longer exists.
+ * Cancellation isn't a failure to report; it goes to the caller.
+ */
+private inline fun <T> runCatchingCancellable(block: () -> T): Result<T> =
+    try {
+        Result.success(block())
+    } catch (e: CancellationException) {
+        throw e
+    } catch (t: Throwable) {
+        Result.failure(t)
+    }
 
 // ---- hex / byte utilities (file-level, internal) ----
 

@@ -78,6 +78,8 @@ import baby.freedom.swarm.IpfsStatus
 import baby.freedom.swarm.NodeInfo
 import baby.freedom.swarm.NodeStatus
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.job
 import kotlinx.coroutines.launch
 
 /**
@@ -152,6 +154,44 @@ internal fun pendingAddressBarText(
     SubmitSource.User -> submitted
     SubmitSource.Renderer -> current
 }
+
+/**
+ * Whether a submit from [source] also ends the address-bar edit — hides
+ * the keyboard, drops the field's focus (which re-seeds its buffer from
+ * the tab's committed address) and clears the "user has typed" latch.
+ *
+ * Only the user's own submit does. The teardown exists because the user
+ * just hit Go: the destination is settled and the editor has done its
+ * job. A *page* submitting through `shouldOverrideUrlLoading`
+ * ([SubmitSource.Renderer]) settles nothing about the editor — the user
+ * may be halfway through typing somewhere else entirely, and throwing
+ * their keyboard, focus and half-typed URL away on a `location.href`
+ * the page chose is the page editing the browser's chrome. Looped, it
+ * wipes every keystroke as it lands (#35).
+ */
+internal fun submitEndsAddressEditing(source: SubmitSource): Boolean =
+    source == SubmitSource.User
+
+/**
+ * Whether a submit from [incoming] may cancel the probe already in
+ * flight on the tab, which [pending] asked for (`null` when the tab has
+ * no probe running).
+ *
+ * A submit normally supersedes the probe before it — switching URL
+ * mid-probe must not let the stale probe decide the navigation. The
+ * exception is the page cancelling the *user*: an ENS resolve plus a
+ * cold-node gateway probe is a window of up to
+ * [NODE_READY_TIMEOUT_MS] plus the probe's own budget, and a page that
+ * loops `location.href='ens://…'` lands inside it on every tick. If
+ * each of those ticks cancelled the user's probe, the typed navigation
+ * away from the page would never complete and the user would be pinned
+ * there (#35). So a renderer submit waits its turn; a user submit
+ * always wins, including over their own earlier one.
+ */
+internal fun submitSupersedesPendingProbe(
+    pending: SubmitSource?,
+    incoming: SubmitSource,
+): Boolean = pending != SubmitSource.User || incoming == SubmitSource.User
 
 /**
  * A tab's committed address ([BrowserState.addressBarText]) after the
@@ -507,20 +547,31 @@ fun BrowserScreen(
         raw: String,
         source: SubmitSource = SubmitSource.User,
     ) {
-        keyboard?.hide()
-        // Drop focus synchronously so the IME's input connection is torn
-        // down before we overwrite the text below. Otherwise the IME
-        // still thinks the committed text is what the user typed ("be")
-        // and will clobber our newly-assigned URL on its next
-        // round-trip.
-        //
-        // For the keyboard-Go path this must be bounced via a
-        // coroutine delay (see the onGo handler) — clearing focus
-        // synchronously while the Enter key event is still in flight
-        // lets Compose route it to the next focusable (the Home button)
-        // and fire it as a synthetic click.
-        focusManager.clearFocus()
-        addressBarEdited = false
+        // A page submitting on top of a navigation the *user* asked for
+        // is ignored outright: it may neither cancel their probe nor
+        // start one of its own on the same tab (#35, see
+        // [submitSupersedesPendingProbe]). Checked before anything else
+        // so a looping `location.href` touches no tab state at all.
+        if (!submitSupersedesPendingProbe(target.pendingProbeSource, source)) return
+
+        // The editor is the user's, and only their own submit closes it
+        // (#35, see [submitEndsAddressEditing]).
+        if (submitEndsAddressEditing(source)) {
+            keyboard?.hide()
+            // Drop focus synchronously so the IME's input connection is
+            // torn down before we overwrite the text below. Otherwise
+            // the IME still thinks the committed text is what the user
+            // typed ("be") and will clobber our newly-assigned URL on
+            // its next round-trip.
+            //
+            // For the keyboard-Go path this must be bounced via a
+            // coroutine delay (see the onGo handler) — clearing focus
+            // synchronously while the Enter key event is still in flight
+            // lets Compose route it to the next focusable (the Home
+            // button) and fire it as a synthetic click.
+            focusManager.clearFocus()
+            addressBarEdited = false
+        }
 
         // Any new submit supersedes a probe that was still in flight on
         // this tab — otherwise switching URL mid-probe would let the
@@ -576,9 +627,18 @@ fun BrowserScreen(
                 )
             }
 
-            target.pendingProbeJob = scope.launch {
+            val ensProbe = scope.launch {
                 try {
                     val result = ensResolver.resolveContenthash(name)
+                    // Everything below this line writes tab state —
+                    // `loadUrl` alone cancels whatever probe the tab is
+                    // waiting on now, which is how a cancelled probe
+                    // would walk straight past
+                    // [submitSupersedesPendingProbe] and navigate on
+                    // behalf of a submit the user already superseded
+                    // (#51). The resolver propagates cancellation
+                    // itself; this is the tab's own last word on it.
+                    ensureActive()
                     when (result) {
                         is EnsResult.Ok -> {
                             // Remember hash/cid → name for the whole session
@@ -628,9 +688,10 @@ fun BrowserScreen(
                     }
                 } finally {
                     target.resolving = false
-                    target.pendingProbeJob = null
+                    target.finishPendingProbe(coroutineContext.job)
                 }
             }
+            target.beginPendingProbe(ensProbe, source)
             return
         }
 
@@ -656,7 +717,7 @@ fun BrowserScreen(
         val contentUri = contentUriForSubmit(url)
         if (contentUri != null) {
             target.resolving = true
-            target.pendingProbeJob = scope.launch {
+            val contentProbe = scope.launch {
                 try {
                     gateGatewayNavigation(
                         target = target,
@@ -666,9 +727,10 @@ fun BrowserScreen(
                     )
                 } finally {
                     target.resolving = false
-                    target.pendingProbeJob = null
+                    target.finishPendingProbe(coroutineContext.job)
                 }
             }
+            target.beginPendingProbe(contentProbe, source)
             return
         }
 
