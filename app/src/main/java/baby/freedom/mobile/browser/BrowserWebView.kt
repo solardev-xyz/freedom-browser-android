@@ -624,6 +624,36 @@ private fun buildRefreshableWebView(
     // [CommittedVisitGate]).
     val visitGate = CommittedVisitGate()
 
+    // "The document on screen has claimed vertical drags for itself"
+    // (`touch-action` / `overscroll-behavior-y` on `<html>` / `<body>`)
+    // — one of the two inputs to the pull-to-refresh arming decision
+    // below, see [pullToRefreshArmed]. Probed once per document
+    // because `SwipeRefreshLayout` asks its question synchronously on
+    // ACTION_DOWN and JS answers arrive too late to be asked then.
+    // Reset on every navigation: unknown reads as "no claim", which is
+    // the pre-#56 behaviour, and the scroll-range half of the decision
+    // is what carries a page that hasn't been probed yet. The answer is
+    // tokened per document so a probe that outlives the page that asked
+    // for it cannot speak for the page that replaced it (see
+    // [RootPanProbeSlot]).
+    val rootPanProbe = RootPanProbeSlot()
+
+    /**
+     * Re-read the document's root pan styles. Cheap (two
+     * `getComputedStyle` reads on an already-laid-out document) and run
+     * at the two moments a document's root styles become knowable and
+     * then final: first paint, and load finished.
+     *
+     * The result is stamped with the document it was asked about, and
+     * lands only if that document is still on screen when it arrives.
+     */
+    fun probeRootPanStyles(view: WebView?) {
+        val token = rootPanProbe.beginProbe()
+        view?.evaluateJavascript(ROOT_PAN_STYLES_JS) { result ->
+            rootPanProbe.accept(token, rootBlocksVerticalPan(result))
+        }
+    }
+
     // A finish that arrived before its first paint, parked until
     // `onPageCommitVisible` says the page really is on screen (see
     // [visitToFlush]). Without it the fastest pages — the ones that
@@ -775,6 +805,11 @@ private fun buildRefreshableWebView(
                 // A new document arrives with the chrome whole, however
                 // far the previous one was scrolled…
                 state.capsuleCollapse.expand()
+                // …and with no claim on the user's vertical drags until
+                // it makes one: the previous document's `touch-action`
+                // is none of this one's business, not even by way of a
+                // probe of its that is still in flight (#56).
+                rootPanProbe.startDocument()
                 // …and with the progress latch open again: whatever the
                 // last Stop aborted, this document is a load of its own
                 // and its percentages are worth drawing (#41).
@@ -855,6 +890,10 @@ private fun buildRefreshableWebView(
             }
 
             override fun onPageCommitVisible(view: WebView?, url: String?) {
+                // The document has laid out and painted, so its root
+                // styles are real: this is the earliest the #56 probe
+                // can answer, and pages are touchable from here on.
+                probeRootPanStyles(view)
                 if (url == ABOUT_BLANK) return
                 visitGate.commit()
                 // A finish that beat this paint left its visit parked;
@@ -874,6 +913,10 @@ private fun buildRefreshableWebView(
             }
 
             override fun onPageFinished(view: WebView?, url: String?) {
+                // Re-probe: a page's own stylesheet (or its first
+                // script) can be what sets `touch-action: none`, and
+                // that is not necessarily in place at first paint (#56).
+                probeRootPanStyles(view)
                 if (url != null && !ErrorPage.isErrorPage(url) && url != ABOUT_BLANK) {
                     autoRecoveredUrl = null
                 }
@@ -1176,11 +1219,29 @@ private fun buildRefreshableWebView(
         state.loadAborted = false
         webView.reload()
     }
-    // Only arm the pull-down gesture when the WebView is scrolled to the
-    // top. Without this override SwipeRefreshLayout can trigger in the
-    // middle of a page because WebView's canScrollUp reporting is flaky
-    // for nested scrollers.
-    refreshLayout.setOnChildScrollUpCallback { _, _ -> webView.scrollY > 0 }
+    // Who owns a downward drag — the refresh spinner or the page.
+    //
+    // `SwipeRefreshLayout` asks this on the gesture's ACTION_DOWN and
+    // lives with the answer for the whole gesture, so the decision is
+    // made from what is knowable synchronously: the WebView's own
+    // scroll range plus the last per-document probe of the root's
+    // `touch-action` / `overscroll-behavior-y` (see
+    // [pullToRefreshArmed]). A page that is exactly one viewport tall —
+    // a full-screen map, a canvas, a game — has no overscroll to pull
+    // on, so the drag stays with the page (#56).
+    //
+    // The callback reports "the child can scroll up", i.e. `true`
+    // vetoes the gesture; we override it rather than let
+    // `SwipeRefreshLayout` ask the WebView directly because WebView's
+    // own canScrollUp reporting is flaky for nested scrollers and would
+    // arm the spinner mid-page.
+    refreshLayout.setOnChildScrollUpCallback { _, _ ->
+        !pullToRefreshArmed(
+            scrollY = webView.scrollY,
+            documentScrollsDown = webView.canScrollVertically(1),
+            rootBlocksVerticalPan = rootPanProbe.blocksVerticalPan,
+        )
+    }
     return refreshLayout to webView
 }
 
