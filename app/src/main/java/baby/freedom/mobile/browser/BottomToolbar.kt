@@ -1,6 +1,5 @@
 package baby.freedom.mobile.browser
 
-import android.os.Build
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.RepeatMode
@@ -58,7 +57,6 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.Stable
 import androidx.compose.runtime.State
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
@@ -69,39 +67,29 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
-import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.drawWithCache
-import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.geometry.CornerRadius
-import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.Size
-import androidx.compose.ui.graphics.BlurEffect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.PathMeasure
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.StrokeCap
-import androidx.compose.ui.graphics.TileMode
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.graphics.drawscope.translate
 import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.graphics.layer.GraphicsLayer
-import androidx.compose.ui.graphics.layer.drawLayer
 import androidx.compose.ui.graphics.lerp
-import androidx.compose.ui.graphics.rememberGraphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.layout
 import androidx.compose.ui.layout.onGloballyPositioned
-import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalLayoutDirection
@@ -1122,42 +1110,28 @@ internal fun isCapsuleLoading(state: BrowserState): Boolean =
     state.resolving || state.progress in 0..99
 
 /**
- * Surface opacity on the **dark** scheme. The page reads through as a
- * faint wash — the chrome sits *over* the page rather than replacing a
- * strip of it — while `onSurface` text stays legible over both a white
- * article and a dark hero image.
+ * Surface opacity on the **dark** scheme — [CAPSULE_ALPHA_LIGHT]'s own
+ * number, stated separately because the two schemes take it against
+ * different tones (see [capsuleFill]) and might one day part company
+ * again.
  */
-private const val CAPSULE_ALPHA_DARK = 0.72f
+private const val CAPSULE_ALPHA_DARK = 0.90f
 
 /**
- * Surface opacity on the **light** scheme.
+ * Surface opacity on the **light** scheme, and — unchanged — on the dark
+ * one: one number for both schemes and every API level (#63).
  *
- * A dark surface is unmistakable over any page; a near-white one is not,
- * and the page it has the least to say against is a white one — the
- * common case. What makes 0.68 safe where the old single capsule needed
- * 0.94 is the blur behind it ([CapsuleBlurRadius]): a blurred backdrop
- * has no edges left to read as text through the fill, so the surface
- * stays a surface at an alpha that would otherwise have it dissolving
- * into the page.
+ * Nine tenths is the line between the two things the surfaces are asked
+ * for at once. A **faint tint** of the page through the chrome is wanted:
+ * it is what says the bar floats over the page rather than replacing a
+ * strip of it, and it is why this is an alpha at all rather than the
+ * scheme's flat `surface`. **Readable page text** through it is not: a
+ * bar the user has to look twice at to tell from the article behind it is
+ * not a surface. A tenth of the page is a wash of its colour and nothing
+ * legible — over a white article, over a dark hero image, and over the
+ * high-contrast body text of either.
  */
-private const val CAPSULE_ALPHA_LIGHT = 0.68f
-
-/**
- * Surface opacity on the **light** scheme where there is *no* blur to
- * stand on — Android 11, the `minSdk`, where
- * `RenderEffect.createBlurEffect` does not exist and
- * [rememberCapsuleBackdrop] hands back `null`.
- *
- * The 0.68 above is an alpha the blur pays for: take the blur away and
- * the page keeps its edges, so a busy light page reads straight through
- * the field — the one surface that must not be ambiguous about what it
- * is saying. So the no-blur path falls back to the 0.94 the single
- * capsule wore before #60, which is the same trade the old chrome made
- * on every device: a fill opaque enough to be a surface on its own.
- * Dark is unaffected — [CAPSULE_ALPHA_DARK] never leaned on the blur to
- * separate a dark surface from a page.
- */
-private const val CAPSULE_ALPHA_LIGHT_UNBLURRED = 0.94f
+private const val CAPSULE_ALPHA_LIGHT = 0.90f
 
 /**
  * Contrast of the hairline around each surface, per scheme: a 6 %
@@ -1167,14 +1141,6 @@ private const val CAPSULE_ALPHA_LIGHT_UNBLURRED = 0.94f
  */
 private const val CAPSULE_BORDER_ALPHA_LIGHT = 0.06f
 private const val CAPSULE_BORDER_ALPHA_DARK = 0.10f
-
-/**
- * Radius of the backdrop blur under the surfaces. The mockup's 20 px at
- * 3× is 6.7 dp; 8 dp is the same soft haze with a little more of it,
- * which is what keeps the light scheme's 0.68 fill legible over busy
- * pages.
- */
-private val CapsuleBlurRadius = 8.dp
 
 /**
  * Shadow under each surface, per scheme. Just enough to lift it off the
@@ -1193,24 +1159,21 @@ private val CapsuleShadowLight = 6.dp
  * One style, one colour: the split bar has no tray and no pill inside a
  * tray, so there is nothing left for a second tone to distinguish — the
  * round Back button, the field and the round tab counter are the same
- * translucent, blurred glass, and the compact pill is that same field
- * shrunk rather than a fourth thing. (Which is also why this no longer
- * takes a collapse fraction: #46's fill morph existed to dissolve the
- * outer tray into the pill as the bar compacted, and there is no outer
- * tray to dissolve.)
+ * translucent surface, and the compact pill is that same field shrunk
+ * rather than a fourth thing. (Which is also why this no longer takes a
+ * collapse fraction: #46's fill morph existed to dissolve the outer tray
+ * into the pill as the bar compacted, and there is no outer tray to
+ * dissolve.)
  *
  * `surface` on light is the scheme's white; `surfaceContainer` on dark is
- * the tone the capsule has always been. Both at [CAPSULE_ALPHA_LIGHT] /
- * [CAPSULE_ALPHA_DARK] — except that light's alpha is the blur's to
- * lend: [blurred] is false where the device has no [CapsuleBackdrop] to
- * give (Android 11), and the light fill goes back to the opaque
- * [CAPSULE_ALPHA_LIGHT_UNBLURRED] it can carry on its own.
+ * the tone the capsule has always been. Both at the same alpha
+ * ([CAPSULE_ALPHA_LIGHT] / [CAPSULE_ALPHA_DARK]) on every device — the
+ * fill is the whole surface now (#63), so there is nothing left for it to
+ * depend on but the scheme it is painting with.
  */
-internal fun capsuleFill(colors: ColorScheme, blurred: Boolean): Color =
+internal fun capsuleFill(colors: ColorScheme): Color =
     if (colors.isLight) {
-        colors.surface.copy(
-            alpha = if (blurred) CAPSULE_ALPHA_LIGHT else CAPSULE_ALPHA_LIGHT_UNBLURRED,
-        )
+        colors.surface.copy(alpha = CAPSULE_ALPHA_LIGHT)
     } else {
         colors.surfaceContainer.copy(alpha = CAPSULE_ALPHA_DARK)
     }
@@ -1221,147 +1184,34 @@ internal fun capsuleBorder(colors: ColorScheme): Color = colors.onSurface.copy(
 )
 
 /**
- * The page pixels the bar's surfaces blur — a real backdrop, not a
- * translucent fill pretending to be one.
- *
- * Compose has no "blur what is behind me" modifier, and the thing behind
- * this bar is a `WebView` inside an `AndroidView` rather than anything we
- * draw, so it takes two layers:
- *
- *  - [page] is the page itself, recorded once per frame by
- *    [Modifier.capsuleBackdropSource] and then drawn *from* that
- *    recording, so the page still costs exactly one rasterisation;
- *  - [blurred] is the strip of it the bar covers, replayed out of [page]
- *    with a blur `RenderEffect` on it by [Modifier.capsuleBackdropStrip].
- *
- * One blur per frame, over a slot-sized strip, shared by all three
- * surfaces — each of them simply draws [blurred] inside its own shape
- * clip. Blurring per surface instead would run the effect three times
- * over three copies of the whole page, which on the `freedom` AVD's
- * software renderer was the difference between a 200 ms and a 150 ms
- * median frame while scrolling.
- *
- * `null` below Android 12, where `RenderEffect.createBlurEffect` does not
- * exist: there the surfaces are drawn as a plain semi-transparent fill —
- * and on the light scheme at the opaquer
- * [CAPSULE_ALPHA_LIGHT_UNBLURRED], since the alpha the blurred surface
- * gets away with is the blur's doing (see [capsuleFill]).
- */
-@Stable
-internal class CapsuleBackdrop(
-    internal val page: GraphicsLayer,
-    internal val blurred: GraphicsLayer,
-) {
-    /**
-     * Where each recording's top-left sits in the window — the page's,
-     * and the strip's. Everything that draws one of them subtracts its
-     * own position from these to line the replayed pixels up with the
-     * page they were captured from.
-     *
-     * Read (and written) only inside draw lambdas and layout callbacks,
-     * so moving the page — an IME inset, a rotation — invalidates
-     * drawing rather than composition.
-     */
-    internal var pageOrigin by mutableStateOf(Offset.Zero)
-    internal var stripOrigin by mutableStateOf(Offset.Zero)
-}
-
-/** The backdrop this device can offer, or `null` on Android 11. */
-@Composable
-internal fun rememberCapsuleBackdrop(): CapsuleBackdrop? {
-    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return null
-    val page = rememberGraphicsLayer()
-    val blurred = rememberGraphicsLayer()
-    return remember(page, blurred) { CapsuleBackdrop(page, blurred) }
-}
-
-/**
- * Mark a composable as the content the bar blurs: its drawing is recorded
- * into [CapsuleBackdrop.page] and then drawn from that layer, so the page
- * is rasterised exactly once and the bar gets a copy it can blur.
- *
- * Applied to the page area only — never to anything containing the bar
- * itself, which would have the layer recording its own replay.
- */
-internal fun Modifier.capsuleBackdropSource(backdrop: CapsuleBackdrop?): Modifier =
-    if (backdrop == null) this else this
-        .onGloballyPositioned { coords -> backdrop.pageOrigin = coords.positionInRoot() }
-        .drawWithContent {
-            backdrop.page.record { this@drawWithContent.drawContent() }
-            drawLayer(backdrop.page)
-        }
-
-/**
- * Blur the strip of page this composable covers, once, into
- * [CapsuleBackdrop.blurred].
- *
- * Applied to the bar's slot, which draws before its children: by the time
- * the three surfaces come to draw, the strip they share is recorded and
- * each of them only has to replay it inside its own clip.
- *
- * `TileMode.Clamp` so that the clip can't feather a surface's edge into
- * transparency — the effect samples the strip's own edge pixels rather
- * than the nothing outside it.
- */
-@Composable
-private fun Modifier.capsuleBackdropStrip(backdrop: CapsuleBackdrop?): Modifier {
-    if (backdrop == null) return this
-    val radius = with(LocalDensity.current) { CapsuleBlurRadius.toPx() }
-    return this
-        .onGloballyPositioned { coords -> backdrop.stripOrigin = coords.positionInRoot() }
-        .drawBehind {
-            backdrop.blurred.renderEffect = BlurEffect(radius, radius, TileMode.Clamp)
-            backdrop.blurred.record(
-                size = IntSize(size.width.roundToInt(), size.height.roundToInt()),
-            ) {
-                val offset = backdrop.pageOrigin - backdrop.stripOrigin
-                translate(offset.x, offset.y) { drawLayer(backdrop.page) }
-            }
-        }
-}
-
-/**
- * One of the bar's three floating surfaces: translucent glass over the
- * blurred backdrop, a hairline of contrast around it, and the soft
+ * One of the bar's three floating surfaces: a translucent fill at
+ * [capsuleFill]'s alpha, a hairline of contrast around it, and the soft
  * elevation shadow the capsule has always carried.
  *
- * Background only — the control that lives on it is composed over it, so
- * nothing inside the surface is subject to the blur, and the shadow and
- * the hairline are drawn outside the clip so neither of them is blurred
- * either.
+ * The fill is the whole surface: a colour with an alpha, read from the
+ * scheme and from nothing else. It does not sample the page, record it or
+ * hold a layer of it, so a resting bar costs one fill per surface per draw
+ * and invalidates nothing between draws (#63).
+ *
+ * Background only — the control that lives on it is composed over it, and
+ * the shadow and the hairline are drawn outside the shape clip so the fill
+ * cannot cover either.
  */
 @Composable
 private fun CapsuleSurface(
     shape: Shape,
-    backdrop: CapsuleBackdrop?,
     modifier: Modifier = Modifier,
 ) {
     val colors = MaterialTheme.colorScheme
-    val fill = capsuleFill(colors, blurred = backdrop != null)
+    val fill = capsuleFill(colors)
     val border = capsuleBorder(colors)
     val elevation = if (colors.isLight) CapsuleShadowLight else CapsuleShadowDark
-    // The surface's own position, kept out of composition for the same
-    // reason [CapsuleBackdrop.pageOrigin] is: it changes on every frame
-    // of a morph, and only the draw lambda cares.
-    val origin = remember { mutableStateOf(Offset.Zero) }
 
     Box(
         modifier = modifier
-            .onGloballyPositioned { coords -> origin.value = coords.positionInRoot() }
             .border(Dp.Hairline, border, shape)
             .shadow(elevation, shape),
     ) {
-        if (backdrop != null) {
-            Box(
-                modifier = Modifier
-                    .matchParentSize()
-                    .clip(shape)
-                    .drawBehind {
-                        val offset = backdrop.stripOrigin - origin.value
-                        translate(offset.x, offset.y) { drawLayer(backdrop.blurred) }
-                    },
-            )
-        }
         Box(
             modifier = Modifier
                 .matchParentSize()
@@ -1384,11 +1234,13 @@ private fun CapsuleSurface(
  * **round tab counter**. Home lives in the overflow menu, as it has since
  * the chrome moved to the bottom.
  *
- * All three wear one style ([CapsuleSurface]): translucent glass at
- * [capsuleFill]'s alpha over a real backdrop blur ([CapsuleBackdrop]),
- * a hairline of [capsuleBorder] around it and the low shadow the capsule
- * has always had. There is no tray and no second, darker pill inside one
- * — the field *is* a surface, and the compact bar is that same field
+ * All three wear one style ([CapsuleSurface]): a translucent fill at
+ * [capsuleFill]'s alpha, a hairline of [capsuleBorder] around it and the
+ * low shadow the capsule has always had. The page tints faintly through
+ * the fill — a tenth of it, so the bar reads as floating over the page
+ * rather than replacing a strip of it — and nothing on the page is
+ * legible through it. There is no tray and no second, darker pill inside
+ * one — the field *is* a surface, and the compact bar is that same field
  * shrunk rather than a different shape with a different fill.
  *
  * The bar has exactly three heights and one model that produces them
@@ -1428,9 +1280,8 @@ private fun CapsuleSurface(
  * Stop control. Both are overlays on geometry that is already settled,
  * so a load starting or ending moves nothing.
  *
- * The caller owns the layout slot (insets, IME padding, max width) and
- * the [backdrop] the surfaces blur; this composable only fills whatever
- * width it is given.
+ * The caller owns the layout slot (insets, IME padding, max width); this
+ * composable only fills whatever width it is given.
  */
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
@@ -1461,7 +1312,6 @@ internal fun BottomToolbar(
     onNewTab: () -> Unit,
     onExpandCapsule: () -> Unit,
     modifier: Modifier = Modifier,
-    backdrop: CapsuleBackdrop? = null,
 ) {
     // Clamp rather than trust the caller: both fractions are driven by
     // springs, and the expressive spatial springs overshoot slightly at
@@ -1575,10 +1425,6 @@ internal fun BottomToolbar(
         modifier = modifier
             .fillMaxWidth()
             .height(slotHeight)
-            // The one blur the three surfaces share, taken here — before
-            // any of them draws — over exactly the strip of page this
-            // slot covers.
-            .capsuleBackdropStrip(backdrop)
             // One bar, read in the order it is drawn on screen rather
             // than in the order it happens to be composed — see
             // [CapsuleOrderLabel].
@@ -1662,7 +1508,7 @@ internal fun BottomToolbar(
                     )
                     .semantics { traversalIndex = CapsuleOrderBack },
             ) {
-                CapsuleRoundButton(backdrop = backdrop) {
+                CapsuleRoundButton {
                     // Expressive shape variants: the icon buttons morph
                     // from round to a squarer pressed shape on touch.
                     // Purely visual — the 48 dp hit target and click
@@ -1692,7 +1538,7 @@ internal fun BottomToolbar(
                     )
                     .semantics { traversalIndex = CapsuleOrderTabs },
             ) {
-                CapsuleRoundButton(backdrop = backdrop) {
+                CapsuleRoundButton {
                     TabsCountButton(count = tabCount, onClick = onOpenTabs)
                 }
             }
@@ -1707,7 +1553,6 @@ internal fun BottomToolbar(
             editProgress = edit,
             compactHeight = compactHeight,
             loading = loading,
-            backdrop = backdrop,
             onAddressFocusChanged = onAddressFocusChanged,
             onAddressEditedChanged = onAddressEditedChanged,
             onAddressQueryChanged = onAddressQueryChanged,
@@ -1932,7 +1777,6 @@ internal fun BottomToolbar(
  */
 @Composable
 private fun CapsuleRoundButton(
-    backdrop: CapsuleBackdrop?,
     modifier: Modifier = Modifier,
     content: @Composable () -> Unit,
 ) {
@@ -1942,7 +1786,6 @@ private fun CapsuleRoundButton(
     ) {
         CapsuleSurface(
             shape = CircleShape,
-            backdrop = backdrop,
             modifier = Modifier.size(CapsuleRestingHeight),
         )
         content()
@@ -2151,7 +1994,7 @@ private fun capsuleHalves(size: Size, strokeWidth: Float): List<Path> {
  * round buttons' own 44 dp so the whole bar sits on one centre line
  * ([addressPillTopShift] included) for every frame of either morph.
  *
- * Its glass is *drawn*, not laid out: the Box stays
+ * Its surface is *drawn*, not laid out: the Box stays
  * [addressFieldTouchHeight] tall throughout, so neither shrinking the
  * field nor inflating it ever changes the size of the tap target, and
  * the compact bar's one remaining control keeps a full-width 48 dp one.
@@ -2182,7 +2025,6 @@ private fun AddressField(
     editProgress: Float,
     compactHeight: Dp,
     loading: Boolean,
-    backdrop: CapsuleBackdrop?,
     onAddressFocusChanged: (Boolean) -> Unit,
     onAddressEditedChanged: (Boolean) -> Unit,
     onAddressQueryChanged: (String) -> Unit,
@@ -2293,8 +2135,9 @@ private fun AddressField(
     val colors = MaterialTheme.colorScheme
     val textStyle = LocalTextStyle.current.copy(color = colors.onSurface)
     // Focus is signalled by a primary-coloured ring rather than a
-    // container colour change: the field is glass over the page now, and
-    // a second fill on top of that would read as mud on either scheme.
+    // container colour change: the field is already a translucent
+    // surface over the page, and a second fill on top of that would read
+    // as mud on either scheme.
     // The colour animates with the theme's default effects spring so it
     // fades in rather than pops.
     val outline by animateColorAsState(
@@ -2305,7 +2148,7 @@ private fun AddressField(
     // Drawn (not laid out) pill geometry: the surface follows both morphs
     // while the Box that owns the touches keeps its height. Its width is
     // the box's — the caller sizes this composable to the field's drawn
-    // width ([addressFieldDrawnWidth]), so the glass, the touch band and
+    // width ([addressFieldDrawnWidth]), so the surface, the touch band and
     // the contents are one rectangle rather than three that have to be
     // kept in step.
     val pillHeight = capsuleDrawnHeight(collapse, editProgress, compactHeight)
@@ -2339,8 +2182,8 @@ private fun AddressField(
             .onGloballyPositioned { coords ->
                 val r = coords.boundsInWindow()
                 // The *drawn* pill's bounds, so the long-press menu keeps
-                // anchoring on the glass rather than on the touch box
-                // around it.
+                // anchoring on the pill's surface rather than on the touch
+                // box around it.
                 pillBounds = IntRect(
                     r.left.toInt(), r.top.toInt() + pillTopPx,
                     r.right.toInt(),
@@ -2349,12 +2192,11 @@ private fun AddressField(
             },
         contentAlignment = Alignment.CenterStart,
     ) {
-        // The field's own surface — the same glass the round buttons
-        // wear, at whatever height and shape the two morphs have made of
-        // it. Composed first, so everything below paints over it.
+        // The field's own surface — the same fill the round buttons wear,
+        // at whatever height and shape the two morphs have made of it.
+        // Composed first, so everything below paints over it.
         CapsuleSurface(
             shape = CircleShape,
-            backdrop = backdrop,
             modifier = Modifier
                 .align(Alignment.Center)
                 .fillMaxWidth()
@@ -2413,7 +2255,7 @@ private fun AddressField(
                 Row(
                     modifier = Modifier
                         .fillMaxSize()
-                        // Rides the same drawing shift as the glass it
+                        // Rides the same drawing shift as the surface it
                         // sits on, so the content stays on the compact
                         // pill's centre line rather than on the touch
                         // box's ([addressPillTopShift]).
@@ -2578,7 +2420,7 @@ private fun AddressField(
         // been the URL-actions long-press (#42). The box is the field's
         // drawn rectangle exactly, and the two controls inside it are
         // composed *over* this surface (see below), so they keep their
-        // own taps while every other pixel of the glass answers here.
+        // own taps while every other pixel of the pill answers here.
         //
         // Composed only while the field is unfocused, so the moment the
         // capsule becomes the editor it is gone and every touch inside
@@ -2635,7 +2477,7 @@ private fun AddressField(
         // The overflow menu, filling the leading slot the row reserved —
         // composed over the gesture surface for the same reason the
         // trailing control is, and for the same reason on the same edge:
-        // the hamburger has to keep its own taps while the glass around
+        // the hamburger has to keep its own taps while the pill around
         // it answers the two-step tap.
         //
         // Its box is [CapsuleControlSize] rather than the slot's 32 dp,
