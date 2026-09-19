@@ -1655,6 +1655,10 @@ internal fun BottomToolbar(
                         controlScale,
                         towardsStart = true,
                         topShift = controlTopShift,
+                        // The circle's shadow belongs on the page, not
+                        // squared off at the slot's edge — see
+                        // [Modifier.collapsingControl].
+                        clip = false,
                     )
                     .semantics { traversalIndex = CapsuleOrderBack },
             ) {
@@ -1684,6 +1688,7 @@ internal fun BottomToolbar(
                         controlScale,
                         towardsStart = false,
                         topShift = controlTopShift,
+                        clip = false,
                     )
                     .semantics { traversalIndex = CapsuleOrderTabs },
             ) {
@@ -1964,6 +1969,20 @@ private fun CapsuleRoundButton(
  * [capsuleControlTopShift]) — drawing only, so the control's touch box
  * stays where the slot put it.
  *
+ * [clip] is what keeps a control's *overflow* inside the narrowing slot:
+ * the field's own slots are 32 dp boxes holding 48 dp icon buttons (see
+ * [Modifier.capsuleFieldSlot]), so without it a ripple would paint over
+ * the domain beside it. The two round buttons have no overflow to
+ * contain — their ink is 44 dp inside a 48 dp box — but they do have an
+ * elevation shadow, and a clip here cuts it off square at the slot's
+ * edge: a straight line down the outboard side of the button and another
+ * under it, where the single capsule's shadow used to fall softly onto
+ * the page. They pass `false`, and the shadow leaves the box the way it
+ * always did — the [CapsuleBottomMargin] below the bar and the page
+ * beside it are the room it needs. Nothing else escapes: the scale below
+ * pivots on the edge the slot narrows towards, so the *control* still
+ * fills its slot exactly at every fraction of both morphs.
+ *
  * Order matters: the scale has to be applied *inside* the narrowing
  * slot, so `layout` (outer) wraps `graphicsLayer` (inner). Written the
  * other way round the layer would scale the already-narrowed slot a
@@ -1975,6 +1994,7 @@ private fun Modifier.collapsingControl(
     visible: Float,
     towardsStart: Boolean,
     topShift: Dp = 0.dp,
+    clip: Boolean = true,
 ): Modifier {
     if (visible >= 1f && topShift == 0.dp) return this
     return this
@@ -1997,7 +2017,7 @@ private fun Modifier.collapsingControl(
             // it has shrunk to.
             translationY = topShift.toPx()
             transformOrigin = TransformOrigin(if (towardsStart) 0f else 1f, 0.5f)
-            clip = true
+            this.clip = clip
         }
 }
 
