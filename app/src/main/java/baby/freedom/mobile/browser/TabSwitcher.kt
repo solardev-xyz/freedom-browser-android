@@ -37,6 +37,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -233,8 +234,23 @@ private fun firstLetterFor(tab: BrowserState): String {
 }
 
 /**
- * The tabs-count pill that lives in the bottom toolbar. Tapping it opens the
- * switcher. Renders as a bordered square with the tab count inside.
+ * The tabs-count badge that lives in the bottom toolbar's trailing round
+ * button. Tapping it opens the switcher. Renders as a bordered square
+ * with the tab count inside.
+ *
+ * Nineteen dp across with a 1.2 dp stroke, down from 22 and 1.5: the
+ * badge now sits inside a 44 dp circle of its own rather than loose on a
+ * bar, and the split-bar mockup draws it at 58 px square with a 3.5 px
+ * outline at 3× density (19.3 dp / 1.17 dp). Lighter and smaller, so the
+ * circle around it reads as the control and the badge as its content.
+ *
+ * The count is the one piece of type in the chrome that does *not* take
+ * the system font scale: it is an icon's fill, not text the user reads a
+ * sentence of, and the square it fills is a fixed 19 dp. Sized in `sp`
+ * it overflowed its own outline at `font_scale 2.0` (seen on the AVD);
+ * sized off the density it stays the same fraction of the badge at every
+ * accessibility setting, while the address label beside it scales as it
+ * always has.
  */
 @Composable
 fun TabsCountButton(
@@ -243,22 +259,25 @@ fun TabsCountButton(
     modifier: Modifier = Modifier,
 ) {
     val stroke = MaterialTheme.colorScheme.onSurface
+    val density = LocalDensity.current
     IconButton(onClick = onClick, shapes = IconButtonDefaults.shapes(), modifier = modifier) {
         Box(
             modifier = Modifier
-                .size(22.dp)
-                .clip(RoundedCornerShape(6.dp))
+                .size(19.dp)
+                .clip(RoundedCornerShape(5.dp))
                 .border(
-                    width = 1.5.dp,
+                    width = 1.2.dp,
                     color = stroke,
-                    shape = RoundedCornerShape(6.dp),
+                    shape = RoundedCornerShape(5.dp),
                 ),
             contentAlignment = Alignment.Center,
         ) {
             Text(
                 text = if (count > 99) "∞" else count.toString(),
                 color = stroke,
-                style = MaterialTheme.typography.labelMedium,
+                style = MaterialTheme.typography.labelSmall,
+                fontSize = with(density) { 11.dp.toSp() },
+                lineHeight = with(density) { 13.dp.toSp() },
                 fontWeight = FontWeight.SemiBold,
             )
         }

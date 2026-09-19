@@ -4,14 +4,16 @@ import androidx.compose.material3.ColorScheme
 import androidx.compose.ui.graphics.Color
 import baby.freedom.mobile.ui.FreedomDarkColors
 import baby.freedom.mobile.ui.FreedomLightColors
+import baby.freedom.mobile.ui.isLight
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * The compact capsule is one colour (#45): the address field's own fill,
- * opaque, with the resting state's translucent rim gone — and gone by
- * morphing into it, not by switching off at some fraction.
+ * The split bar's three surfaces share one style (#60): translucent glass
+ * over a blurred backdrop, with a hairline of contrast around it — no
+ * tray, no second pill inside a tray, and therefore no fill that morphs
+ * from one into the other as the bar compacts.
  */
 class CapsuleFillTest {
 
@@ -28,133 +30,129 @@ class CapsuleFillTest {
         assertEquals("$message (alpha)", expected.alpha, actual.alpha, 1f / 255f)
     }
 
-    /** Largest single-channel difference between two fills. */
-    private fun distance(a: Color, b: Color): Float = maxOf(
-        kotlin.math.abs(a.red - b.red),
-        kotlin.math.abs(a.green - b.green),
-        kotlin.math.abs(a.blue - b.blue),
-        kotlin.math.abs(a.alpha - b.alpha),
-    )
-
     @Test
-    fun `the compact capsule is the address field's colour, opaque`() {
-        for ((name, colors) in schemes) {
-            val fill = capsuleFill(collapse = 1f, colors = colors)
-            assertSameColor(
-                "compact capsule on the $name scheme is not the pill's fill",
-                colors.surfaceContainerHighest,
-                fill,
-            )
-            // Opaque: a translucent compact capsule would lerp towards
-            // whatever page is under it and stop being one colour.
-            assertEquals("compact capsule on $name is translucent", 1f, fill.alpha, 0.001f)
-        }
-    }
-
-    @Test
-    fun `the compact capsule has no second colour at its edge`() {
-        // What "no rim" means in one assertion: the outer surface and the
-        // pill drawn inside it are the same colour, so the inset between
-        // them cannot show.
+    fun `every surface on the bar is the same glass`() {
+        // Back's circle, the field and the tab counter's circle all call
+        // this one function with nothing but the scheme, so there is no
+        // argument by which they could come out different.
         for ((name, colors) in schemes) {
             assertSameColor(
-                "rim visible on the $name scheme",
-                capsuleFill(collapse = 1f, colors = colors),
-                colors.surfaceContainerHighest,
+                "the $name fill is not a pure function of the scheme",
+                capsuleFill(colors, blurred = true),
+                capsuleFill(colors, blurred = true),
             )
         }
     }
 
     @Test
-    fun `the resting capsule is untouched`() {
-        // The two-surface look at rest is the shipped one: translucent
-        // `surfaceContainer` at the scheme's own alpha.
-        assertSameColor(
-            "resting light capsule",
-            FreedomLightColors.surfaceContainer.copy(alpha = 0.94f),
-            capsuleFill(collapse = 0f, colors = FreedomLightColors),
-        )
-        assertSameColor(
-            "resting dark capsule",
-            FreedomDarkColors.surfaceContainer.copy(alpha = 0.90f),
-            capsuleFill(collapse = 0f, colors = FreedomDarkColors),
-        )
+    fun `the page reads through every surface, on both schemes`() {
         for ((name, colors) in schemes) {
+            val fill = capsuleFill(colors, blurred = true)
             assertTrue(
-                "the resting $name capsule should let the page through",
-                capsuleFill(0f, colors).alpha < 1f,
+                "the $name surface should let the page through",
+                fill.alpha < 1f,
             )
+            // …but not so far through that `onSurface` text stops being
+            // legible: two thirds of a surface is still a surface.
+            assertTrue("the $name surface has dissolved", fill.alpha >= 0.6f)
         }
     }
 
     @Test
-    fun `the rim dissolves rather than blinking out`() {
-        // Continuity is the whole ask: no threshold where the rim
-        // vanishes, no frame where a *different* colour flashes. Each
-        // step moves every channel by less than a tenth of the distance
-        // the whole morph covers.
-        for ((name, colors) in schemes) {
-            val resting = capsuleFill(0f, colors)
-            val compact = capsuleFill(1f, colors)
-            // What one of 20 even steps would cost if the morph were
-            // perfectly linear, with half a step of slack for the
-            // perceptual colour space the interpolation runs in and two
-            // 8-bit steps for the quantisation an sRGB [Color] does on
-            // the way back out.
-            val budget = 1.5f * distance(resting, compact) / 20f + 2f / 255f
-            var previous = resting
-            for (step in 1..20) {
-                val fill = capsuleFill(step / 20f, colors)
-                assertTrue(
-                    "the $name fill jumped at step $step",
-                    distance(previous, fill) <= budget,
-                )
-                previous = fill
-            }
-        }
+    fun `the light surface is white and the dark one the capsule's own tone`() {
+        assertSameColor(
+            "light surface",
+            FreedomLightColors.surface.copy(alpha = 0.68f),
+            capsuleFill(FreedomLightColors, blurred = true),
+        )
+        assertSameColor(
+            "dark surface",
+            FreedomDarkColors.surfaceContainer.copy(alpha = 0.72f),
+            capsuleFill(FreedomDarkColors, blurred = true),
+        )
     }
 
     @Test
-    fun `the capsule grows more opaque all the way down, never less`() {
-        for ((name, colors) in schemes) {
-            var previous = capsuleFill(0f, colors).alpha
-            for (step in 1..20) {
-                val alpha = capsuleFill(step / 20f, colors).alpha
-                assertTrue("the $name capsule thinned out at step $step", alpha >= previous - 1e-4f)
-                previous = alpha
-            }
-            assertEquals("$name never reaches opaque", 1f, previous, 0.001f)
-        }
-    }
-
-    @Test
-    fun `an overshooting spring cannot push the fill past either end`() {
-        // Both fractions come off expressive springs, which overshoot at
-        // both ends — the fill has to stay inside its band regardless.
+    fun `the compact pill is the field, not a fourth colour`() {
+        // #45/#46 had the outer capsule morph into the pill's fill as the
+        // bar compacted, because there were two surfaces to reconcile.
+        // The split bar has one: the compact pill *is* the field, so the
+        // fill it is drawn with is the same one it wore at rest.
         for ((name, colors) in schemes) {
             assertSameColor(
-                "$name fill past compact",
-                capsuleFill(1f, colors),
-                capsuleFill(1.08f, colors),
-            )
-            assertSameColor(
-                "$name fill past resting",
-                capsuleFill(0f, colors),
-                capsuleFill(-0.08f, colors),
+                "the compact $name pill changed colour",
+                capsuleFill(colors, blurred = true),
+                capsuleFill(colors, blurred = true),
             )
         }
     }
 
     @Test
-    fun `the fill reads the scheme it is painting with, not the system flag`() {
-        // The alphas differ per scheme (a pale capsule needs more of
-        // itself against a white page), and [ColorScheme.isLight] is what
-        // decides — so a scheme swap is all it takes.
+    fun `a device with no blur gets an opaquer light surface`() {
+        // Android 11 has no `RenderEffect.createBlurEffect`, so
+        // `rememberCapsuleBackdrop()` hands back null and the surfaces are
+        // a plain fill. 0.68 is an alpha the blur pays for: without it the
+        // page keeps its edges and reads through the field, so the light
+        // scheme falls back to the 0.94 the single capsule wore before
+        // #60.
+        val blurred = capsuleFill(FreedomLightColors, blurred = true)
+        val plain = capsuleFill(FreedomLightColors, blurred = false)
+        assertSameColor(
+            "the unblurred light surface",
+            FreedomLightColors.surface.copy(alpha = 0.94f),
+            plain,
+        )
+        assertTrue(
+            "an unblurred surface must not be the blurred one's alpha",
+            plain.alpha > blurred.alpha,
+        )
+        assertTrue("the unblurred surface stopped being glass", plain.alpha < 1f)
+    }
+
+    @Test
+    fun `the dark surface never leaned on the blur`() {
+        // Only light's alpha is the blur's to lend — a dark surface is
+        // unmistakable over any page, so taking the blur away changes
+        // nothing about it.
+        assertSameColor(
+            "the dark fill moved when the blur went away",
+            capsuleFill(FreedomDarkColors, blurred = true),
+            capsuleFill(FreedomDarkColors, blurred = false),
+        )
+    }
+
+    @Test
+    fun `the hairline is contrast, not a border`() {
+        for ((name, colors) in schemes) {
+            val border = capsuleBorder(colors)
+            assertSameColor(
+                "the $name hairline is not drawn in onSurface",
+                colors.onSurface.copy(alpha = border.alpha),
+                border,
+            )
+            assertTrue(
+                "the $name hairline would read as a border at ${border.alpha}",
+                border.alpha <= 0.12f,
+            )
+            assertTrue("the $name hairline is invisible", border.alpha >= 0.05f)
+        }
+    }
+
+    @Test
+    fun `the fill and the hairline read the scheme they are painting with`() {
+        // [ColorScheme.isLight] is what decides both, so a scheme swap is
+        // all it takes — no system flag anywhere in the path.
         val light: ColorScheme = FreedomLightColors
         val dark: ColorScheme = FreedomDarkColors
+        assertTrue("the light scheme should be the light one", light.isLight)
+        assertTrue("the dark scheme should not be light", !dark.isLight)
         assertTrue(
-            "the light capsule should be the more opaque of the two at rest",
-            capsuleFill(0f, light).alpha > capsuleFill(0f, dark).alpha,
+            "the dark surface should be the more opaque of the two",
+            capsuleFill(dark, blurred = true).alpha > capsuleFill(light, blurred = true).alpha,
+        )
+        assertTrue(
+            "a dark surface needs the stronger hairline",
+            capsuleBorder(dark).alpha > capsuleBorder(light).alpha,
         )
     }
 }

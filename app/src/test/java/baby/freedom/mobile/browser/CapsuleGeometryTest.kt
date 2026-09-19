@@ -9,30 +9,25 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * The one height model behind the floating capsule.
+ * The one height model behind the floating bar.
  *
  * Two morphs drive the same object — compact-on-scroll (#30) and the
  * editing morph (#31) — and the whole point of merging them was that
  * they resolve through a single rule rather than fighting over the same
- * pixels. These are the invariants that rule has to keep:
+ * pixels. The split bar (#60) adds a third consumer of that rule: the
+ * two round buttons are drawn at the resting height the field starts
+ * from. These are the invariants the rule has to keep:
  *
- * - three settled heights, 32 / 56 / 64 dp;
+ * - three settled heights, 32 / 44 / 64 dp of ink;
+ * - all of it drawn inside a 48 dp slot, so every control keeps
+ *   Material's touch target;
  * - the layout *slot* only ever moves for editing, so a scroll can't
- *   shift anything outside the capsule;
- * - the compact capsule shrinks *upwards* off a bottom edge that never
- *   moves (#47), while the 48 dp touch band follows it down;
- * - editing wins over compact;
- * - the address pill tracks the capsule with an even gutter in every
- *   state.
+ *   shift anything outside the bar;
+ * - the compact pill shrinks *upwards* off a bottom edge that never
+ *   moves (#47), while the 48 dp touch band stays over it;
+ * - editing wins over compact.
  */
 class CapsuleGeometryTest {
-
-    /** Gutter between the capsule's edge and the pill's, top and bottom. */
-    private fun gutter(collapse: Float, edit: Float, compact: Dp = CapsuleCompactHeight) =
-        (
-            capsuleDrawnHeight(collapse, edit, compact) -
-                addressPillHeight(collapse, edit, compact)
-            ) / 2f
 
     /**
      * The label's compact line box at a system font scale, read exactly
@@ -62,14 +57,18 @@ class CapsuleGeometryTest {
     private val fontScales = listOf(0.85f, 1f, 1.15f, 1.3f, 1.5f, 1.8f, 2f)
 
     @Test
-    fun `the capsule has exactly three settled heights`() {
-        assertEquals(CapsuleHeight, capsuleDrawnHeight(collapse = 0f, editProgress = 0f))
+    fun `the bar has exactly three settled heights`() {
+        assertEquals(CapsuleRestingHeight, capsuleDrawnHeight(collapse = 0f, editProgress = 0f))
         assertEquals(CapsuleCompactHeight, capsuleDrawnHeight(collapse = 1f, editProgress = 0f))
         assertEquals(CapsuleEditingHeight, capsuleDrawnHeight(collapse = 0f, editProgress = 1f))
 
         assertEquals(32.dp, CapsuleCompactHeight)
-        assertEquals(56.dp, CapsuleHeight)
+        assertEquals(44.dp, CapsuleRestingHeight)
         assertEquals(64.dp, CapsuleEditingHeight)
+        // …and a slot that gives every control its full touch target
+        // around whichever of them is drawn.
+        assertEquals(48.dp, CapsuleHeight)
+        assertEquals(AddressFieldTouchHeight, CapsuleHeight)
     }
 
     @Test
@@ -101,7 +100,7 @@ class CapsuleGeometryTest {
     fun `the slot grows only with the editing morph`() {
         assertEquals(CapsuleHeight, capsuleSlotHeight(0f))
         assertEquals(CapsuleEditingHeight, capsuleSlotHeight(1f))
-        assertEquals(60.dp, capsuleSlotHeight(0.5f))
+        assertEquals(56.dp, capsuleSlotHeight(0.5f))
     }
 
     @Test
@@ -126,14 +125,25 @@ class CapsuleGeometryTest {
     }
 
     @Test
-    fun `the pill keeps an even gutter at every settled height`() {
-        assertEquals(8.dp, gutter(collapse = 0f, edit = 0f))
-        assertEquals(8.dp, gutter(collapse = 0f, edit = 1f))
-        // None at all when compact: the capsule has shrunk onto the pill,
-        // so the two are one shape and the gutter that used to separate
-        // them is the 6 dp of rim #47 took away.
-        assertEquals(0.dp, gutter(collapse = 1f, edit = 0f))
-        assertEquals(CapsuleCompactHeight, addressPillHeight(collapse = 1f, editProgress = 0f))
+    fun `the bar's ink stands inside its slot, never outside it`() {
+        // The split bar draws 44 dp of surface in a 48 dp slot, so there
+        // are 2 dp of slack per side at rest — the slack that also turns
+        // the caller's 14 dp margin into the mockup's 16 dp of drawn one.
+        // Editing is the one state that fills the slot exactly.
+        assertEquals(2.dp, (CapsuleHeight - CapsuleRestingHeight) / 2f)
+        for (edit in listOf(0f, 0.5f, 1f)) {
+            for (step in 0..10) {
+                val collapse = step / 10f
+                assertTrue(
+                    "ink left the slot at collapse=$collapse edit=$edit",
+                    capsuleDrawnHeight(collapse, edit) <= capsuleSlotHeight(edit),
+                )
+            }
+        }
+        assertEquals(
+            capsuleSlotHeight(1f),
+            capsuleDrawnHeight(collapse = 0f, editProgress = 1f),
+        )
     }
 
     @Test
@@ -221,7 +231,7 @@ class CapsuleGeometryTest {
         for (scale in fontScales) {
             val compactHeight = compact(scale)
             assertEquals(
-                CapsuleHeight,
+                CapsuleRestingHeight,
                 capsuleDrawnHeight(collapse = 0f, editProgress = 0f, compactHeight = compactHeight),
             )
             assertEquals(
@@ -257,9 +267,9 @@ class CapsuleGeometryTest {
             )
         }
         // A taller capsule is a smaller anchor by exactly as much.
-        assertEquals(12.dp, capsuleBottomAnchor(1f, 0f, compact(1f)))
-        assertEquals(10.2f, capsuleBottomAnchor(1f, 0f, compact(1.3f)).value, 0.01f)
-        assertEquals(5.dp, capsuleBottomAnchor(1f, 0f, compact(2f)))
+        assertEquals(8.dp, capsuleBottomAnchor(1f, 0f, compact(1f)))
+        assertEquals(6.2f, capsuleBottomAnchor(1f, 0f, compact(1.3f)).value, 0.01f)
+        assertEquals(1.dp, capsuleBottomAnchor(1f, 0f, compact(2f)))
     }
 
     @Test
@@ -299,25 +309,23 @@ class CapsuleGeometryTest {
     }
 
     @Test
-    fun `the pill is still the compact capsule at every font scale`() {
+    fun `the field is the compact pill at every font scale`() {
         for (scale in fontScales) {
             val compactHeight = compact(scale)
             assertEquals(
-                "pill and capsule drifted apart at fontScale=$scale",
+                "field and compact pill drifted apart at fontScale=$scale",
                 compactHeight,
-                addressPillHeight(collapse = 1f, editProgress = 0f, compactHeight = compactHeight),
+                capsuleDrawnHeight(collapse = 1f, editProgress = 0f, compactHeight = compactHeight),
             )
-            assertEquals(0.dp, gutter(collapse = 1f, edit = 0f, compact = compactHeight))
-            // And it is never painted outside the box that owns the taps.
-            for (edit in listOf(0f, 0.5f, 1f)) {
-                for (collapse in listOf(0f, 0.5f, 1f)) {
-                    assertTrue(
-                        "pill overflows its touch box at fontScale=$scale " +
-                            "edit=$edit collapse=$collapse",
-                        addressPillHeight(collapse, edit, compactHeight) <=
-                            addressFieldTouchHeight(compactHeight),
-                    )
-                }
+            // And while it is not editing — the one state that grows the
+            // slot — it is never painted outside the box that owns the
+            // taps.
+            for (collapse in listOf(0f, 0.5f, 1f)) {
+                assertTrue(
+                    "field overflows its touch box at fontScale=$scale collapse=$collapse",
+                    capsuleDrawnHeight(collapse, 0f, compactHeight) <=
+                        addressFieldTouchHeight(compactHeight),
+                )
             }
         }
     }
@@ -400,17 +408,17 @@ class CapsuleGeometryTest {
                 0.001f,
             )
         }
-        assertEquals(12.dp, capsuleBottomAnchor(collapse = 1f, editProgress = 0f))
+        assertEquals(8.dp, capsuleBottomAnchor(collapse = 1f, editProgress = 0f))
     }
 
     @Test
-    fun `the states that fill the slot are not anchored at all`() {
-        // Resting and editing are both exactly the slot's height, so
-        // there is nothing to anchor and the capsule stays centred —
-        // which is to say #47 touches the compact state and only it.
-        assertEquals(0.dp, capsuleBottomAnchor(collapse = 0f, editProgress = 0f))
+    fun `the state that fills the slot is not anchored at all`() {
+        // The editor is exactly the slot's height, so there is nothing
+        // to anchor and it stays centred. Resting is 44 dp of ink in a
+        // 48 dp slot, so it carries the 2 dp that puts its bottom edge
+        // on the slot's — the same rule, not an exception to it.
         assertEquals(0.dp, capsuleBottomAnchor(collapse = 0f, editProgress = 1f))
-        assertEquals(0.dp, capsuleBottomAnchor(collapse = 0f, editProgress = 0.5f))
+        assertEquals(2.dp, capsuleBottomAnchor(collapse = 0f, editProgress = 0f))
     }
 
     @Test
@@ -423,8 +431,8 @@ class CapsuleGeometryTest {
             previous = anchor
         }
         // Overshooting springs may not push it past either end.
-        assertEquals(12.dp, capsuleBottomAnchor(collapse = 1.08f, editProgress = 0f))
-        assertEquals(0.dp, capsuleBottomAnchor(collapse = -0.08f, editProgress = 0f))
+        assertEquals(8.dp, capsuleBottomAnchor(collapse = 1.08f, editProgress = 0f))
+        assertEquals(2.dp, capsuleBottomAnchor(collapse = -0.08f, editProgress = 0f))
     }
 
     @Test
@@ -441,9 +449,10 @@ class CapsuleGeometryTest {
                     AddressFieldTouchHeight <= capsuleSlotHeight(0f),
             )
         }
-        // In the resting slot that is 4 dp of travel — exactly the slack
-        // a 48 dp box has under it in 56 dp.
-        assertEquals(4.dp, addressFieldTouchShift(collapse = 1f, editProgress = 0f))
+        // In the resting slot there is no travel at all — a 48 dp box in
+        // a 48 dp slot already spans it, so the band covers the compact
+        // pill without moving and the whole anchor is spent in drawing.
+        assertEquals(0.dp, addressFieldTouchShift(collapse = 1f, editProgress = 0f))
         assertEquals(0.dp, addressFieldTouchShift(collapse = 0f, editProgress = 0f))
     }
 
@@ -468,7 +477,7 @@ class CapsuleGeometryTest {
     }
 
     @Test
-    fun `the pill is drawn on the capsule's centre line, not the box's`() {
+    fun `the field is drawn on the bar's centre line, not the box's`() {
         // The anchor is split between a layout shift (the touch box,
         // capped by the slot) and a drawing shift (the bubble and the
         // label). The two must add back up to the capsule's own anchor,
@@ -487,7 +496,11 @@ class CapsuleGeometryTest {
             }
         }
         assertEquals(8.dp, addressPillTopShift(collapse = 1f, editProgress = 0f))
-        assertEquals(0.dp, addressPillTopShift(collapse = 0f, editProgress = 0f))
+        // At rest the whole anchor is the drawing shift: the touch band
+        // already spans the slot, so the 2 dp that put the ink on the
+        // slot's bottom edge are spent here and nowhere else.
+        assertEquals(2.dp, addressPillTopShift(collapse = 0f, editProgress = 0f))
+        assertEquals(0.dp, addressPillTopShift(collapse = 0f, editProgress = 1f))
     }
 
     @Test
@@ -509,46 +522,32 @@ class CapsuleGeometryTest {
                 )
             }
         }
-        // Nothing to follow in the two states that fill the slot.
-        assertEquals(0.dp, capsuleControlTopShift(collapse = 0f, editProgress = 0f))
+        // Nothing to follow in the editor, which fills the slot.
+        assertEquals(2.dp, capsuleControlTopShift(collapse = 0f, editProgress = 0f))
         assertEquals(0.dp, capsuleControlTopShift(collapse = 0f, editProgress = 1f))
-        assertEquals(12.dp, capsuleControlTopShift(collapse = 1f, editProgress = 0f))
+        assertEquals(8.dp, capsuleControlTopShift(collapse = 1f, editProgress = 0f))
     }
 
     @Test
     fun `a control still on screen is never drawn outside its touch box`() {
         // The control's shift is a drawing offset — its touch box does
         // not move — so it may only be spent on room the shrinking
-        // control has already given back. The controls leave faster than
-        // the capsule drops ([capsulePillSlotScale] against the anchor),
-        // so a control scaled about the centre of a 48 dp box stays
-        // inside that box for every fraction it is still visible.
-        val box = AddressFieldTouchHeight.value
+        // control has already given back. The round buttons leave faster
+        // than the field drops ([capsulePillSlotScale] against the
+        // anchor), so a 44 dp circle scaled about the centre of a 48 dp
+        // slot stays inside that slot for every fraction it is still
+        // visible.
+        val slot = CapsuleHeight.value
+        val ink = CapsuleRestingHeight.value
         for (step in 0..20) {
             val collapse = step / 20f
             val scale = capsulePillSlotScale(collapse)
             if (scale <= 0f) continue
             assertTrue(
-                "control drawn outside its touch box at collapse=$collapse",
-                capsuleControlTopShift(collapse, 0f).value + box * scale / 2f <=
-                    box / 2f + 0.001f,
+                "control drawn outside its slot at collapse=$collapse",
+                capsuleControlTopShift(collapse, 0f).value + ink * scale / 2f <=
+                    slot / 2f + 0.001f,
             )
-        }
-    }
-
-    @Test
-    fun `the pill never outgrows its touch target`() {
-        // The pill is drawn inside a box that stays
-        // [AddressFieldTouchHeight] tall in every state, so neither
-        // morph may paint a bubble taller than the box that owns the
-        // taps.
-        for (edit in listOf(0f, 0.5f, 1f)) {
-            for (collapse in listOf(0f, 0.5f, 1f)) {
-                assertTrue(
-                    "pill overflows its touch box at edit=$edit collapse=$collapse",
-                    addressPillHeight(collapse, edit) <= AddressFieldTouchHeight,
-                )
-            }
         }
     }
 
@@ -557,7 +556,7 @@ class CapsuleGeometryTest {
         // Both fractions come off expressive spatial springs, which
         // overshoot slightly at either end.
         assertEquals(CapsuleCompactHeight, capsuleDrawnHeight(collapse = 1.08f, editProgress = 0f))
-        assertEquals(CapsuleHeight, capsuleDrawnHeight(collapse = -0.08f, editProgress = 0f))
+        assertEquals(CapsuleRestingHeight, capsuleDrawnHeight(collapse = -0.08f, editProgress = 0f))
         assertEquals(
             CapsuleEditingHeight,
             capsuleDrawnHeight(collapse = 0f, editProgress = 1.08f),

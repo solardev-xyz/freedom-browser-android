@@ -870,8 +870,9 @@ fun BrowserScreen(
 
     // The capsule's geometry is driven by exactly two 0→1 fractions,
     // and they are one model rather than two (see [capsuleDrawnHeight]):
-    // the capsule has three heights — 32 dp compact, 56 dp resting,
-    // 64 dp editing — and these two numbers say which.
+    // the capsule has three drawn heights — 32 dp compact, 44 dp
+    // resting, 64 dp editing, all inside a 48 dp slot — and these two
+    // numbers say which.
     //
     // Both spring on the expressive motion scheme's spatial spec rather
     // than a hand-rolled curve: it's the one every other M3 Expressive
@@ -922,6 +923,10 @@ fun BrowserScreen(
     val capsuleSlot = capsuleSlotHeight(editProgress)
     val capsuleSideMargin =
         lerp(CapsuleSideMargin, CapsuleEditingSideMargin, editProgress)
+
+    // The page pixels the bar's three surfaces blur — `null` on Android
+    // 11, where they fall back to a plain translucent fill.
+    val backdrop = rememberCapsuleBackdrop()
 
     // Keyed on the *address bar's* focus, not on the keyboard: the IME
     // also comes up for a form field inside the page, and the capsule
@@ -1000,6 +1005,13 @@ fun BrowserScreen(
                 .fillMaxSize()
                 .windowInsetsPadding(contentInsets)
                 .padding(bottom = contentBottomReserve)
+                // …and the pixels the bar's surfaces blur. The page is
+                // recorded into a layer here and drawn from it, so the
+                // chrome floating over it has something real to blur
+                // rather than a tint pretending to (see [CapsuleBackdrop]).
+                // Applied to the page area only — the chrome is a sibling
+                // below, so the layer can never end up recording itself.
+                .capsuleBackdropSource(backdrop)
                 .then(dismissKeyboardOnTap),
         ) {
             BrowserWebViewHost(
@@ -1173,6 +1185,7 @@ fun BrowserScreen(
                     modifier = Modifier
                         .widthIn(max = CHROME_MAX_WIDTH)
                         .fillMaxWidth(),
+                    backdrop = backdrop,
                 )
             }
         }
