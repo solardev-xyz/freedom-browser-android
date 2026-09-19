@@ -171,7 +171,7 @@ class CapsuleCompactStateTest {
         // Reload / Stop / ×, and they keep them by being composed *over*
         // the surface rather than by the surface standing back from them
         // (#42). The field's own inset is not a strip the surface gives
-        // up — it is glass the user is aiming at.
+        // up — it is part of the surface the user is aiming at.
         assertEquals(1f, capsulePillSlotScale(0f), 0f)
         assertEquals(8.dp, capsuleLabelInset(0f))
     }

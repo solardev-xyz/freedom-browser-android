@@ -10,10 +10,14 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * The split bar's three surfaces share one style (#60): translucent glass
- * over a blurred backdrop, with a hairline of contrast around it — no
- * tray, no second pill inside a tray, and therefore no fill that morphs
- * from one into the other as the bar compacts.
+ * The split bar's three surfaces share one style (#60): a translucent
+ * fill, with a hairline of contrast around it — no tray, no second pill
+ * inside a tray, and therefore no fill that morphs from one into the
+ * other as the bar compacts.
+ *
+ * One alpha carries it on both schemes and at every API level (#63): the
+ * page tints faintly through the fill, and nothing on it is legible
+ * through the fill.
  */
 class CapsuleFillTest {
 
@@ -31,30 +35,37 @@ class CapsuleFillTest {
     }
 
     @Test
-    fun `every surface on the bar is the same glass`() {
+    fun `every surface on the bar is the same fill`() {
         // Back's circle, the field and the tab counter's circle all call
         // this one function with nothing but the scheme, so there is no
         // argument by which they could come out different.
         for ((name, colors) in schemes) {
             assertSameColor(
                 "the $name fill is not a pure function of the scheme",
-                capsuleFill(colors, blurred = true),
-                capsuleFill(colors, blurred = true),
+                capsuleFill(colors),
+                capsuleFill(colors),
             )
         }
     }
 
     @Test
-    fun `the page reads through every surface, on both schemes`() {
+    fun `the page tints through every surface, on both schemes`() {
         for ((name, colors) in schemes) {
-            val fill = capsuleFill(colors, blurred = true)
+            val fill = capsuleFill(colors)
+            // A faint wash of the page is the point — the bar floats over
+            // the page rather than replacing a strip of it.
             assertTrue(
-                "the $name surface should let the page through",
+                "the $name surface should let the page tint it",
                 fill.alpha < 1f,
             )
-            // …but not so far through that `onSurface` text stops being
-            // legible: two thirds of a surface is still a surface.
-            assertTrue("the $name surface has dissolved", fill.alpha >= 0.6f)
+            // …but only a tint. Page *text* reading through the chrome is
+            // what the alpha is set against (#63), so the fill stays a
+            // long way up from the two-thirds it used to sit at when a
+            // backdrop blur was taking the page's edges off for it.
+            assertTrue(
+                "the $name surface lets the page read through at ${fill.alpha}",
+                fill.alpha >= 0.85f,
+            )
         }
     }
 
@@ -62,13 +73,13 @@ class CapsuleFillTest {
     fun `the light surface is white and the dark one the capsule's own tone`() {
         assertSameColor(
             "light surface",
-            FreedomLightColors.surface.copy(alpha = 0.68f),
-            capsuleFill(FreedomLightColors, blurred = true),
+            FreedomLightColors.surface.copy(alpha = 0.90f),
+            capsuleFill(FreedomLightColors),
         )
         assertSameColor(
             "dark surface",
-            FreedomDarkColors.surfaceContainer.copy(alpha = 0.72f),
-            capsuleFill(FreedomDarkColors, blurred = true),
+            FreedomDarkColors.surfaceContainer.copy(alpha = 0.90f),
+            capsuleFill(FreedomDarkColors),
         )
     }
 
@@ -81,43 +92,24 @@ class CapsuleFillTest {
         for ((name, colors) in schemes) {
             assertSameColor(
                 "the compact $name pill changed colour",
-                capsuleFill(colors, blurred = true),
-                capsuleFill(colors, blurred = true),
+                capsuleFill(colors),
+                capsuleFill(colors),
             )
         }
     }
 
     @Test
-    fun `a device with no blur gets an opaquer light surface`() {
-        // Android 11 has no `RenderEffect.createBlurEffect`, so
-        // `rememberCapsuleBackdrop()` hands back null and the surfaces are
-        // a plain fill. 0.68 is an alpha the blur pays for: without it the
-        // page keeps its edges and reads through the field, so the light
-        // scheme falls back to the 0.94 the single capsule wore before
-        // #60.
-        val blurred = capsuleFill(FreedomLightColors, blurred = true)
-        val plain = capsuleFill(FreedomLightColors, blurred = false)
-        assertSameColor(
-            "the unblurred light surface",
-            FreedomLightColors.surface.copy(alpha = 0.94f),
-            plain,
-        )
-        assertTrue(
-            "an unblurred surface must not be the blurred one's alpha",
-            plain.alpha > blurred.alpha,
-        )
-        assertTrue("the unblurred surface stopped being glass", plain.alpha < 1f)
-    }
-
-    @Test
-    fun `the dark surface never leaned on the blur`() {
-        // Only light's alpha is the blur's to lend — a dark surface is
-        // unmistakable over any page, so taking the blur away changes
-        // nothing about it.
-        assertSameColor(
-            "the dark fill moved when the blur went away",
-            capsuleFill(FreedomDarkColors, blurred = true),
-            capsuleFill(FreedomDarkColors, blurred = false),
+    fun `both schemes carry the same opacity`() {
+        // The two used to differ (0.68 light against 0.72 dark) because
+        // the light one was being traded off against a backdrop blur that
+        // no longer exists. With the fill on its own, the question — how
+        // much page may read through a surface before it stops being one
+        // — has the same answer on both (#63).
+        assertEquals(
+            "the schemes disagree about how opaque a surface is",
+            capsuleFill(FreedomDarkColors).alpha,
+            capsuleFill(FreedomLightColors).alpha,
+            1f / 255f,
         )
     }
 
@@ -146,9 +138,15 @@ class CapsuleFillTest {
         val dark: ColorScheme = FreedomDarkColors
         assertTrue("the light scheme should be the light one", light.isLight)
         assertTrue("the dark scheme should not be light", !dark.isLight)
-        assertTrue(
-            "the dark surface should be the more opaque of the two",
-            capsuleFill(dark, blurred = true).alpha > capsuleFill(light, blurred = true).alpha,
+        assertSameColor(
+            "the light fill is not the light scheme's own surface",
+            FreedomLightColors.surface.copy(alpha = capsuleFill(light).alpha),
+            capsuleFill(light),
+        )
+        assertSameColor(
+            "the dark fill is not the dark scheme's own container tone",
+            FreedomDarkColors.surfaceContainer.copy(alpha = capsuleFill(dark).alpha),
+            capsuleFill(dark),
         )
         assertTrue(
             "a dark surface needs the stronger hairline",
