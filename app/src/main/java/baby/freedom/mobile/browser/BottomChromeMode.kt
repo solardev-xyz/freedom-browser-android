@@ -1,0 +1,442 @@
+package baby.freedom.mobile.browser
+
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.dp
+import org.json.JSONException
+import org.json.JSONObject
+import java.security.SecureRandom
+
+// Reserved mode (#66): stop covering a site's own bottom navigation.
+//
+// The floating capsule sits over the bottom ~58 dp of the page. On an
+// app-like page (a tab bar, a flex-column shell whose nav is its last
+// child, a bottom cookie banner) that band is the page's own primary
+// controls, and the capsule makes them untappable. Such a tab switches to
+// [BottomChromeMode.Reserved]: the page area stops above the bar, which
+// genuinely shrinks the WebView (Compose padding, the same mechanism the
+// keyboard reserve uses — `android.webkit.WebView` ignores its own View
+// padding, see [BrowserScreen]). The strip under the bar is filled with
+// the nav's own colour so the page reads as continuing under the chrome.
+//
+// Detection is a hit test injected per document ([bottomUiDetectorJs]),
+// the heuristic of Freedom iOS but event-driven: it runs once at commit,
+// then only when something could have changed the answer — load
+// finished, a same-document history change, a viewport resize, DOM
+// mutations (one debounced observer) and a size/visibility change of the
+// nav it found. An idle page runs nothing. Results come back through
+// `WebViewCompat.addWebMessageListener`, tagged with a per-document token,
+// and are validated and debounced here ([BottomChromeSlot]).
+
+/** How the bottom chrome sits against a tab's page. */
+enum class BottomChromeMode {
+    /** The floating capsule over a full-bleed page (the default). */
+    Overlay,
+
+    /** The page area's bottom edge stops above the capsule. */
+    Reserved,
+}
+
+/**
+ * The page area's bottom padding (on top of the IME inset it already
+ * gets from its window insets).
+ *
+ * - **Overlay, no keyboard:** nothing — the page runs under the bar.
+ * - **Overlay, keyboard up:** the capsule's footprint, as before #66 (so a
+ *   focused field at the end of a page can scroll clear of the capsule).
+ * - **Reserved:** the capsule's *resting* footprint plus the navigation
+ *   inset. Deliberately constant: compacting on scroll and the editing
+ *   morph happen inside this band, and never resize the WebView (#63).
+ * - **Reserved, keyboard up:** the keyboard reserve, but never less than
+ *   the reserved band. The IME inset is already part of the page area's
+ *   padding, so the navigation inset is only topped up while the rising
+ *   keyboard is still shorter than it — the page does not jump taller for
+ *   the first frames of the IME animation.
+ *
+ * @param capsuleFootprint the capsule's height plus its bottom margin as
+ *   [BrowserScreen] computes it (editing height while the address bar
+ *   has focus).
+ */
+internal fun contentBottomReserve(
+    mode: BottomChromeMode,
+    keyboardVisible: Boolean,
+    capsuleFootprint: Dp,
+    navInset: Dp,
+    imeInset: Dp,
+): Dp = when {
+    mode == BottomChromeMode.Reserved && keyboardVisible ->
+        capsuleFootprint + (navInset - imeInset).coerceAtLeast(0.dp)
+    mode == BottomChromeMode.Reserved -> reservedFootprint(navInset)
+    keyboardVisible -> capsuleFootprint
+    else -> 0.dp
+}
+
+/** The reserved band: the resting capsule, its margin and the navigation inset. */
+internal fun reservedFootprint(navInset: Dp): Dp =
+    CapsuleHeight + CapsuleBottomMargin + navInset.coerceAtLeast(0.dp)
+
+/**
+ * The mode a tab's chrome actually uses: the home surface is a native
+ * screen that pads itself, never reserved.
+ */
+internal fun effectiveBottomChromeMode(mode: BottomChromeMode, isHomeTab: Boolean): BottomChromeMode =
+    if (isHomeTab) BottomChromeMode.Overlay else mode
+
+/**
+ * The strip's colour under the bar in reserved mode, as ARGB. The page's
+ * report already carries the first of the detected nav's background, the
+ * page's `theme-color` and the page background that it found
+ * ([bottomUiDetectorJs]); [surfaceArgb] (the theme surface) when it found
+ * none or the value doesn't validate.
+ */
+internal fun bottomStripArgb(reportedRgb: String?, surfaceArgb: Int): Int =
+    parseRgb(reportedRgb) ?: surfaceArgb
+
+private val RGB = Regex("""rgb\((\d{1,3}), (\d{1,3}), (\d{1,3})\)""")
+
+/** `rgb(r, g, b)` (0..255 each, the one form the detector sends) → opaque ARGB, else null. */
+internal fun parseRgb(value: String?): Int? {
+    val m = RGB.matchEntire(value ?: return null) ?: return null
+    val (r, g, b) = m.destructured.toList().map { it.toInt() }
+    if (r > 255 || g > 255 || b > 255) return null
+    return (0xFF shl 24) or (r shl 16) or (g shl 8) or b
+}
+
+/** One validated detector report. */
+internal data class BottomUiReport(val hasBottomUI: Boolean, val color: String?)
+
+/**
+ * Validate a detector message for the document [expectedToken]. Accepts
+ * exactly `{"token": <expectedToken>, "hasBottomUI": <boolean>,
+ * "color": <rgb string> | null}` from the main frame; anything else —
+ * another frame, another document's token, extra or missing keys, a
+ * non-boolean flag, a colour that isn't `rgb(r, g, b)` — is dropped. A
+ * negative report carries no colour.
+ */
+internal fun parseBottomUiMessage(
+    data: String?,
+    isMainFrame: Boolean,
+    expectedToken: String?,
+): BottomUiReport? {
+    if (!isMainFrame || data == null || expectedToken == null || data.length > 512) return null
+    val o = try {
+        JSONObject(data)
+    } catch (_: JSONException) {
+        return null
+    }
+    if (o.length() != 3 || !o.has("token") || !o.has("hasBottomUI") || !o.has("color")) return null
+    if (o.opt("token") != expectedToken) return null
+    val has = o.opt("hasBottomUI") as? Boolean ?: return null
+    val rawColor = o.opt("color")
+    val color = when {
+        rawColor == null || rawColor == JSONObject.NULL -> null
+        rawColor is String && parseRgb(rawColor) != null -> rawColor
+        else -> return null
+    }
+    return BottomUiReport(has, if (has) color else null)
+}
+
+/** Two negative probes at least this far apart switch a reserved tab back to overlay. */
+internal const val RESERVED_EXIT_GAP_MS = 1_000L
+
+/**
+ * A reserved spell that ends within this long of starting counts as a
+ * quick exit; see [RESERVED_MAX_QUICK_EXITS].
+ */
+internal const val RESERVED_QUICK_EXIT_MS = 3_000L
+
+/**
+ * Quick exits per document after which the tab stays in overlay. A
+ * backstop against a page whose nav exists only at the full viewport
+ * height (a nav placed at an absolute pixel offset, say): reserving would
+ * hide it, overlay would show it again, and without this the tab would
+ * cycle about once a second. The detector itself is built not to do
+ * this for bottom-anchored navs (see [bottomUiDetectorJs]).
+ */
+internal const val RESERVED_MAX_QUICK_EXITS = 3
+
+/**
+ * A tab's bottom-chrome mode for the document on screen: the per-document
+ * token, validation and hysteresis. Single-threaded (the message listener
+ * and WebView callbacks run on the UI thread).
+ *
+ * - Every document starts in [BottomChromeMode.Overlay] with a fresh
+ *   token; reports tagged with an older one are dropped.
+ * - The first positive report switches to [BottomChromeMode.Reserved].
+ * - Back to overlay only after two negative reports at least
+ *   [RESERVED_EXIT_GAP_MS] apart. The first negative asks the caller to
+ *   re-probe after the gap ([Verdict.confirmInMs]); a positive in between
+ *   cancels the exit.
+ */
+internal class BottomChromeSlot(
+    private val newToken: () -> String = ::randomToken,
+) {
+    /** The answer to one report. */
+    data class Verdict(val changed: Boolean, val confirmInMs: Long? = null)
+
+    /** The current document's token; null before the first document. */
+    var token: String? = null
+        private set
+
+    var mode: BottomChromeMode = BottomChromeMode.Overlay
+        private set
+
+    /** The last validated strip colour while reserved; null in overlay. */
+    var color: String? = null
+        private set
+
+    /** Has the detector been installed in this document? */
+    var installed: Boolean = false
+        private set
+
+    private var firstNegativeAt = -1L
+    private var reservedAt = -1L
+    private var quickExits = 0
+
+    /** Is the tab pinned to overlay for this document? See [RESERVED_MAX_QUICK_EXITS]. */
+    val latched: Boolean get() = quickExits >= RESERVED_MAX_QUICK_EXITS
+
+    /** A new document: overlay, fresh token. Returns the token. */
+    fun startDocument(): String {
+        val t = newToken()
+        token = t
+        mode = BottomChromeMode.Overlay
+        color = null
+        installed = false
+        firstNegativeAt = -1L
+        reservedAt = -1L
+        quickExits = 0
+        return t
+    }
+
+    /** The detector is going in; returns the token to embed, or null if already installed. */
+    fun install(): String? {
+        val t = token ?: return null
+        if (installed) return null
+        installed = true
+        return t
+    }
+
+    /** A raw message from the page; see [parseBottomUiMessage]. */
+    fun accept(data: String?, isMainFrame: Boolean, nowMs: Long): Verdict {
+        val report = parseBottomUiMessage(data, isMainFrame, token) ?: return Verdict(false)
+        return accept(report, nowMs)
+    }
+
+    fun accept(report: BottomUiReport, nowMs: Long): Verdict {
+        if (report.hasBottomUI) {
+            firstNegativeAt = -1L
+            if (latched) return Verdict(false)
+            val changed = mode != BottomChromeMode.Reserved || color != report.color
+            if (mode != BottomChromeMode.Reserved) reservedAt = nowMs
+            mode = BottomChromeMode.Reserved
+            color = report.color
+            return Verdict(changed)
+        }
+        if (mode == BottomChromeMode.Overlay) return Verdict(false)
+        if (firstNegativeAt < 0) {
+            firstNegativeAt = nowMs
+            return Verdict(false, confirmInMs = RESERVED_EXIT_GAP_MS)
+        }
+        val waited = nowMs - firstNegativeAt
+        if (waited < RESERVED_EXIT_GAP_MS) {
+            return Verdict(false, confirmInMs = RESERVED_EXIT_GAP_MS - waited)
+        }
+        if (nowMs - reservedAt < RESERVED_QUICK_EXIT_MS) quickExits++
+        mode = BottomChromeMode.Overlay
+        color = null
+        firstNegativeAt = -1L
+        return Verdict(true)
+    }
+}
+
+private val tokenRandom = SecureRandom()
+
+private fun randomToken(): String {
+    val bytes = ByteArray(12).also(tokenRandom::nextBytes)
+    return bytes.joinToString("") { "%02x".format(it) }
+}
+
+/**
+ * Name of the object `addWebMessageListener` injects into pages. It is
+ * the one thing detection unavoidably exposes to a page, so it is
+ * deliberately generic: nothing names the browser.
+ */
+internal const val BOTTOM_UI_CHANNEL = "bottomUiChannel"
+
+/** What Kotlin sends back through the channel to ask for a fresh, reported probe. */
+internal fun bottomUiProbeRequest(token: String): String = "probe $token"
+
+/** Is [token] safe to splice into the detector's source? (Hex only.) */
+private val TOKEN_SAFE = Regex("[0-9a-f]{1,64}")
+
+/**
+ * The detector, installed once per document (see [BottomChromeSlot.install]).
+ *
+ * **The probe** is Freedom iOS's hit test, thresholds unchanged: take the
+ * element at `(vw/2, vh-30)` and walk up for an ancestor that is
+ *  - anchored to the bottom: `vh-60 ≤ rect.bottom ≤ vh+20`;
+ *  - nav-sized: `40 ≤ height ≤ vh*0.25`, `width ≥ vw*0.5`;
+ *  - interactive: contains `a, button, [role=button|tab|link]`.
+ * Deliberately not a `position: fixed` check: a flex-column shell whose
+ * nav is simply the last child of a viewport-tall container is the same
+ * thing to the user.
+ *
+ * One exclusion on top of iOS's rules: while the *document* scrolls, a
+ * candidate with no `fixed`/`sticky` element among itself and its
+ * ancestors scrolls with it — an ordinary footer that is at the viewport
+ * bottom only because the page is scrolled to its end (seen on the AVD
+ * with the article fixture and the keyboard up). Reserving for it would
+ * also stick: reserved mode removes the #65 spacer, which is what keeps
+ * such a footer off the probe band, and scrolling away is not an event
+ * the detector listens to. A flex shell's document doesn't scroll (its
+ * inner container does), so it is unaffected — "scrolls" discounts the
+ * #65 spacer's own height, which gives even a flex shell's document a
+ * few dozen px of scroll range.
+ *
+ * **Colour**, first found: a non-transparent background on the nav or an
+ * ancestor below `<body>`; the page's `theme-color` (a `media` query, if
+ * any, must match); `<body>`'s, then `<html>`'s background. `null` when
+ * there is none (the theme surface is used, [bottomStripArgb]).
+ *
+ * **Reserving cannot make the nav disappear.** Reserved mode shortens the
+ * viewport; the probe point and the anchoring band are measured from the
+ * *current* viewport's bottom, which a bottom-anchored nav (fixed,
+ * sticky, or the last child of a `100vh`/`100%` shell) follows. The one
+ * threshold that would otherwise move, `height ≤ vh*0.25`, is taken
+ * against the tallest viewport seen at the current width, so a nav that
+ * passed at full height still passes in the shortened one.
+ *
+ * **When it runs.** Once at install. Then only after an event, debounced
+ * to one probe per [debounceMs]: a `resize` of the window (the reserve
+ * itself, the keyboard, rotation), a DOM mutation (one `MutationObserver`
+ * on the document, whose callback only arms the debounce timer), and a
+ * `ResizeObserver`/`IntersectionObserver` on the nav it found — a nav
+ * that collapses, is removed or slides off-screen is noticed even if the
+ * change is outside the mutation filter. The Kotlin side adds load
+ * finished and same-document history changes (`pushState`,
+ * `replaceState`, `popstate`, `hashchange` all arrive as
+ * `doUpdateVisitedHistory`), and the hysteresis confirmation, as
+ * [bottomUiProbeRequest] messages. Nothing polls: with no events there
+ * is no work.
+ *
+ * **Reporting.** Only when the answer (flag, colour) changes, or when
+ * Kotlin asked. Nothing is written to the page: no DOM node, attribute,
+ * style or global of ours (the platform's channel object is the one
+ * thing a page can see), and history methods are not patched.
+ */
+internal fun bottomUiDetectorJs(token: String, debounceMs: Int = BOTTOM_UI_DEBOUNCE_MS): String {
+    require(TOKEN_SAFE.matches(token)) { "token must be hex" }
+    return """
+(function () {
+  var w = window, d = document, port = w.$BOTTOM_UI_CHANNEL;
+  if (!port || typeof port.postMessage !== 'function' || w.top !== w) return;
+  var T = '$token', SEL = 'a, button, [role="button"], [role="tab"], [role="link"]';
+  var gcs = w.getComputedStyle, setT = w.setTimeout, MO = w.MutationObserver,
+      RO = w.ResizeObserver, IO = w.IntersectionObserver, str = JSON.stringify;
+  var timer = 0, last = null, watched = null, ro = null, io = null, fullW = -1, fullH = 0, ctx = null;
+  var RGBA = /^rgba?\(\s*([\d.]+)[\s,]+([\d.]+)[\s,]+([\d.]+)\s*(?:[,\/]\s*([\d.]+)(%?)\s*)?\)$/;
+  function paint(c) {
+    var m = RGBA.exec(c || '');
+    if (!m) return null;
+    if (m[4] !== undefined && parseFloat(m[4]) === 0) return null;
+    return 'rgb(' + Math.round(+m[1]) + ', ' + Math.round(+m[2]) + ', ' + Math.round(+m[3]) + ')';
+  }
+  function norm(c) {
+    if (!c) return null;
+    var p = paint(c);
+    if (p) return p;
+    try {
+      if (!ctx) ctx = d.createElement('canvas').getContext('2d');
+      ctx.fillStyle = '#000'; ctx.fillStyle = c; var a = ctx.fillStyle;
+      ctx.fillStyle = '#fff'; ctx.fillStyle = c; if (ctx.fillStyle !== a) return null;
+      var h = /^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(a);
+      return h ? 'rgb(' + parseInt(h[1], 16) + ', ' + parseInt(h[2], 16) + ', ' + parseInt(h[3], 16) + ')' : paint(a);
+    } catch (e) { return null; }
+  }
+  function themeColor() {
+    var ms = d.querySelectorAll('meta[name="theme-color"]');
+    for (var i = 0; i < ms.length; i++) {
+      var q = ms[i].getAttribute('media');
+      if (q && !(w.matchMedia && w.matchMedia(q).matches)) continue;
+      var c = norm(ms[i].getAttribute('content'));
+      if (c) return c;
+    }
+    return null;
+  }
+  function spacerPx() {
+    var px = 0, l = d.adoptedStyleSheets || [];
+    for (var i = 0; i < l.length; i++) {
+      if (l[i] && l[i].$BOTTOM_SPACER_MARK === true) {
+        try { px += parseFloat(l[i].cssRules[0].style.height) || 0; } catch (e) {}
+      }
+    }
+    return px;
+  }
+  function pinned(n) {
+    for (; n && n !== d.documentElement; n = n.parentElement) {
+      var p = gcs(n).position;
+      if (p === 'fixed' || p === 'sticky') return true;
+    }
+    return false;
+  }
+  function probe() {
+    var de = d.documentElement, b = d.body;
+    if (!de || !b) return null;
+    var std = d.compatMode === 'CSS1Compat';
+    var vw = (std && de.clientWidth) || w.innerWidth, vh = (std && de.clientHeight) || w.innerHeight;
+    if (!vw || !vh) return null;
+    if (vw !== fullW) { fullW = vw; fullH = vh; } else if (vh > fullH) fullH = vh;
+    var nav = null, se = d.scrollingElement || de, scrolls = se.scrollHeight - spacerPx() > vh + 1;
+    for (var n = d.elementFromPoint(vw / 2, vh - 30); n && n !== b && n !== de; n = n.parentElement) {
+      var r = n.getBoundingClientRect();
+      if (r.bottom >= vh - 60 && r.bottom <= vh + 20 && r.height >= 40 && r.height <= fullH * 0.25 &&
+          r.width >= vw * 0.5 && n.querySelector(SEL) && !(scrolls && !pinned(n))) { nav = n; break; }
+    }
+    if (!nav) return { nav: null, color: null };
+    var c = null;
+    for (var m = nav; m && m !== b && m !== de && !c; m = m.parentElement) c = paint(gcs(m).backgroundColor);
+    return { nav: nav, color: c || themeColor() || paint(gcs(b).backgroundColor) || paint(gcs(de).backgroundColor) };
+  }
+  function watch(el) {
+    if (el === watched) return;
+    if (ro) ro.disconnect();
+    if (io) io.disconnect();
+    ro = io = null; watched = el;
+    if (!el) return;
+    if (RO) { ro = new RO(soon); ro.observe(el); }
+    if (IO) { io = new IO(soon); io.observe(el); }
+  }
+  function run(force) {
+    timer = 0;
+    var p = null;
+    try { p = probe(); } catch (e) {}
+    if (!p) return;
+    watch(p.nav);
+    var key = !!p.nav + ' ' + p.color;
+    if (!force && key === last) return;
+    last = key;
+    port.postMessage(str({ token: T, hasBottomUI: !!p.nav, color: p.color }));
+  }
+  function soon() { if (!timer) timer = setT(function () { run(false); }, $debounceMs); }
+  port.addEventListener('message', function (e) { if (e && e.data === 'probe ' + T) run(true); });
+  w.addEventListener('resize', soon);
+  if (MO && d.documentElement) new MO(soon).observe(d.documentElement, {
+    childList: true, subtree: true, attributes: true, attributeFilter: ['class', 'style', 'hidden', 'open']
+  });
+  run(true);
+})();
+"""
+}
+
+/** Debounce for event-triggered probes; the task floor is 250 ms. */
+internal const val BOTTOM_UI_DEBOUNCE_MS = 300
+
+/**
+ * Origins the channel is injected into. Any site may have a bottom nav,
+ * so this has to cover every web origin — and the rule grammar has no
+ * scheme-wide wildcard: WebView 133 rejects `https` plus a bare `*` host with
+ * `IllegalArgumentException` (a host wildcard must be `*.` plus a
+ * domain). `*` is the one rule that covers them all; the listener then
+ * accepts only `http`/`https` source origins, main frame only.
+ */
+internal val BOTTOM_UI_ORIGIN_RULES: Set<String> = setOf("*")

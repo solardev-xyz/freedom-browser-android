@@ -1,0 +1,16 @@
+<!doctype html><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Fixed tab bar</title>
+<link rel="stylesheet" href="base.css"><script src="common.js"></script>
+<style>
+  #root { padding-bottom:56px; }
+  nav.tabs { position:fixed; left:0; right:0; bottom:0; }
+  input { margin:8px 16px 24px; font-size:17px; padding:8px; width:calc(100% - 52px); }
+</style>
+<div id="root"><h1>Feed</h1><div id="rows"></div>
+<input placeholder="Comment (keyboard test)"></div>
+<nav class="tabs" role="tablist">
+  <button role="tab" data-name="Home">Home</button><button role="tab" data-name="Search">Search</button>
+  <button role="tab" data-name="Inbox">Inbox</button><button role="tab" data-name="Profile">Profile</button>
+</nav>
+<script>fixture.rows(document.getElementById('rows'), 30, 'Post');</script>

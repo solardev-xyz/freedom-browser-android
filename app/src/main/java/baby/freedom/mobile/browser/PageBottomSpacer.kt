@@ -144,6 +144,21 @@ internal val BOTTOM_SPACER_PRESENT_JS = """
 })();
 """
 
+/**
+ * Drop our sheet, if adopted. Run when the tab goes into reserved mode
+ * (#66): the page area then stops above the bar, so nothing runs under it
+ * and the spacer would only add blank scroll range.
+ */
+internal val BOTTOM_SPACER_REMOVE_JS = """
+(function () {
+  try {
+    var d = document, l = d.adoptedStyleSheets || [];
+    if (l.some(function (s) { return s && s.$BOTTOM_SPACER_MARK === true; }))
+      d.adoptedStyleSheets = l.filter(function (s) { return !(s && s.$BOTTOM_SPACER_MARK === true); });
+  } catch (e) {}
+})();
+"""
+
 /** [bottomSpacerDecisionJs]'s answer: `null` pending, else CSS px (0 = rejected). */
 internal fun parseBottomSpacerResult(jsResult: String?): Int? =
     jsResult?.trim()?.toIntOrNull()?.takeIf { it >= 0 }
@@ -230,6 +245,13 @@ internal class BottomSpacerSlot {
     /** Has this document painted (or finished)? Before that, see the class comment. */
     private var painted = false
 
+    /**
+     * The tab is in reserved mode (#66): the page no longer runs under the
+     * bar, so no pass runs and nothing is discounted. See [suspend].
+     */
+    var suspended = false
+        private set
+
     var state: SpacerState = SpacerState.Pending
         private set
 
@@ -252,7 +274,37 @@ internal class BottomSpacerSlot {
         keptAtContentHeightCss = -1
         keptRequest = -1
         painted = false
+        suspended = false
         state = SpacerState.Pending
+    }
+
+    /**
+     * The tab went into reserved mode. Forgets the decision and any pass in
+     * flight (its answer will be dropped as stale) so the pull-to-refresh
+     * discount is 0; the caller removes the sheet ([BOTTOM_SPACER_REMOVE_JS]).
+     * Returns false if already suspended.
+     */
+    fun suspend(): Boolean {
+        if (suspended) return false
+        suspended = true
+        inFlight = null
+        keptRequest = -1
+        keptAtContentHeightCss = -1
+        state = SpacerState.Pending
+        return true
+    }
+
+    /**
+     * Back to overlay: the page runs under the bar again, so it is decided
+     * afresh (with fresh touch budgets) — at once if it has painted, else
+     * at first paint through [decideOnLoad].
+     */
+    fun resume(): Token? {
+        if (!suspended) return null
+        suspended = false
+        touchAttempts = 0
+        lockedTouches = 0
+        return if (painted) begin() else null
     }
 
     /** Is a pass worth running for a document now [contentHeightCss] tall? */
@@ -265,6 +317,7 @@ internal class BottomSpacerSlot {
     /** First paint / load finished: decide if this document is still undecided. */
     fun decideOnLoad(contentHeightCss: Int): Token? {
         painted = true
+        if (suspended) return null
         return if (inFlight == null && undecided(contentHeightCss)) begin() else null
     }
 
@@ -274,7 +327,7 @@ internal class BottomSpacerSlot {
      * answers "locked" (see [accept]).
      */
     fun decideOnTouch(contentHeightCss: Int): Token? {
-        if (!painted || inFlight != null) return null
+        if (!painted || suspended || inFlight != null) return null
         if (touchAttempts >= SPACER_MAX_TOUCH_ATTEMPTS || lockedTouches >= SPACER_MAX_LOCKED_TOUCHES) return null
         if (!undecided(contentHeightCss)) return null
         touchAttempts++
@@ -288,7 +341,7 @@ internal class BottomSpacerSlot {
      */
     fun checkOnTouch(contentHeightCss: Int): Token? {
         val s = state
-        if (!painted || s !is SpacerState.Kept || s.stale || inFlight != null) return null
+        if (!painted || suspended || s !is SpacerState.Kept || s.stale || inFlight != null) return null
         if (contentHeightCss == keptAtContentHeightCss) return null
         return Token(document, request)
     }
@@ -301,7 +354,7 @@ internal class BottomSpacerSlot {
      * [decideOnLoad] measures it at the new width.
      */
     fun decideOnWidthChange(): Token? {
-        if (!painted) return null
+        if (!painted || suspended) return null
         state = when (val s = state) {
             is SpacerState.Kept -> s.copy(stale = true)
             else -> SpacerState.Pending
@@ -312,7 +365,7 @@ internal class BottomSpacerSlot {
 
     /** SPA history change: only a kept spacer is worth checking for. */
     fun checkOnHistoryChange(): Token? =
-        if (state is SpacerState.Kept && inFlight == null) Token(document, request) else null
+        if (!suspended && state is SpacerState.Kept && inFlight == null) Token(document, request) else null
 
     /**
      * A presence check's answer ([checkOnHistoryChange], [checkOnTouch]);
@@ -321,7 +374,7 @@ internal class BottomSpacerSlot {
      * reset `adoptedStyleSheets`), else null.
      */
     fun acceptPresence(token: Token, present: Boolean, contentHeightCss: Int): Token? {
-        if (token.document != document || state !is SpacerState.Kept || inFlight != null) return null
+        if (token.document != document || suspended || state !is SpacerState.Kept || inFlight != null) return null
         if (present) {
             keptAtContentHeightCss = contentHeightCss
             return null

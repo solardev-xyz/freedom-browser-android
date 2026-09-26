@@ -1,0 +1,31 @@
+<!doctype html><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>SPA routes</title>
+<link rel="stylesheet" href="base.css"><script src="common.js"></script>
+<style>
+  nav.tabs { position:fixed; left:0; right:0; bottom:0; }
+  .links { display:flex; gap:12px; margin:16px; }
+  .links a { padding:10px 14px; background:var(--card); border-radius:8px; color:inherit; text-decoration:none; }
+</style>
+<div class="links"><a href="?r=list" data-name="to list" data-r="list">Article view</a>
+  <a href="?r=app" data-name="to app" data-r="app">App view (bottom nav)</a></div>
+<div id="view"></div>
+<script>
+  // A client-side router: pushState + popstate, re-rendering the view.
+  var dark = /[?&]dark\b/.test(location.search) ? '&dark' : '';
+  function render(r) {
+    var v = document.getElementById('view');
+    v.innerHTML = '';
+    var h = document.createElement('h1'); h.textContent = r === 'app' ? 'App view' : 'Article view'; v.appendChild(h);
+    var rows = document.createElement('div'); v.appendChild(rows); fixture.rows(rows, 20, r === 'app' ? 'Item' : 'Paragraph');
+    if (r === 'app') v.insertAdjacentHTML('beforeend',
+      '<nav class="tabs"><button data-name="One">One</button><button data-name="Two">Two</button><button data-name="Three">Three</button></nav>' +
+      '<div style="height:56px"></div>');
+  }
+  document.querySelectorAll('.links a').forEach(function (a) {
+    a.href = '?r=' + a.dataset.r + dark;
+    a.addEventListener('click', function (e) { e.preventDefault(); history.pushState({}, '', a.href); render(a.dataset.r); });
+  });
+  addEventListener('popstate', function () { render(new URLSearchParams(location.search).get('r') || 'list'); });
+  render(new URLSearchParams(location.search).get('r') || 'list');
+</script>

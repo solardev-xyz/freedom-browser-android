@@ -1,7 +1,9 @@
 package baby.freedom.mobile.browser
 
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.Animatable
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
@@ -21,6 +23,9 @@ import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.WindowInsetsSides
 import androidx.compose.foundation.layout.displayCutout
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -106,6 +111,9 @@ private val CHROME_MAX_WIDTH = 640.dp
  * bee-lite gateway socket to bind after [NodeStatus.Running] flips on.
  */
 private const val NODE_READY_TIMEOUT_MS: Long = 90_000L
+
+/** Cross-fade of reserved mode's strip between two page colours (#66). */
+private const val STRIP_FADE_MS = 250
 
 /**
  * Outcome of a node-readiness wait: Running, a terminal "give up"
@@ -936,15 +944,55 @@ fun BrowserScreen(
     // would buy — and the keyboard is on its way over that strip anyway.
     val capsuleFootprint =
         (if (addressFocused) CapsuleEditingHeight else CapsuleHeight) + CapsuleBottomMargin
-    val contentBottomReserve = if (keyboardVisible) capsuleFootprint else 0.dp
+    // Reserved mode (#66): a page with its own bottom nav gets the band
+    // under the capsule to itself instead of running beneath it. The
+    // reserve is the capsule's *resting* footprint and changes only when
+    // the mode or the keyboard does — never with `collapseFraction` or
+    // `editProgress` — so the compact and editing morphs never resize the
+    // WebView (see [contentBottomReserve] and #63).
+    val chromeMode = effectiveBottomChromeMode(state.bottomChromeMode, isHomeTab)
+    val reserved = chromeMode == BottomChromeMode.Reserved
+    val navInsetDp = with(density) { navInsetPx.toDp() }
+    val imeInsetDp = with(density) { imeInsetPx.toDp() }
+    val contentBottomReserve = contentBottomReserve(
+        mode = chromeMode,
+        keyboardVisible = keyboardVisible,
+        capsuleFootprint = capsuleFootprint,
+        navInset = navInsetDp,
+        imeInset = imeInsetDp,
+    )
 
     // How much of the content area the capsule still covers once that
     // reserve is applied — zero while the keyboard is up, its own
     // footprint plus the navigation inset the content draws behind
     // otherwise. Native surfaces ([HomeScreen], [SuggestionsPanel]) pad
     // by it so their last row stays clear of the chrome.
-    val capsuleOverlap = if (keyboardVisible) 0.dp
-    else capsuleFootprint + with(density) { navInsetPx.toDp() }
+    val capsuleOverlap = if (keyboardVisible || reserved) 0.dp
+    else capsuleFootprint + navInsetDp
+
+    // The strip under the capsule in reserved mode: a solid fill in the
+    // page's own nav colour (else its theme-color, else its background,
+    // else the theme surface — see [bottomStripArgb]). Colour changes
+    // while reserved (an SPA route into a view with a differently
+    // coloured nav) cross-fade; entering reserved, or switching tabs,
+    // takes the colour in the same frame the page moves up, so a light
+    // nav never fades in from the dark app background. Only this strip
+    // animates — the WebView's size never does. The colour is read in
+    // the draw phase, so a fade redraws the strip and nothing else, and
+    // a settled strip draws nothing new.
+    val stripTarget = Color(
+        bottomStripArgb(state.bottomStripRgb, MaterialTheme.colorScheme.surface.toArgb()),
+    )
+    val stripColor = remember { Animatable(stripTarget) }
+    var stripShownFor by remember { mutableStateOf<Long?>(null) }
+    LaunchedEffect(stripTarget, reserved, state.id) {
+        if (reserved && stripShownFor == state.id) {
+            stripColor.animateTo(stripTarget, tween(STRIP_FADE_MS))
+        } else {
+            stripColor.snapTo(stripTarget)
+        }
+        stripShownFor = if (reserved) state.id else null
+    }
 
     // "Tap anywhere outside the floating toolbar to dismiss the
     // keyboard". We intercept presses on the Initial pass so we see
@@ -990,7 +1038,13 @@ fun BrowserScreen(
         // WebView itself whenever the keyboard is up (see
         // [contentBottomReserve]) — and page-footer reachability at
         // rest is left to the compact-on-scroll state from stage 2
-        // (#30), which is how Safari handles it too.
+        // (#30), which is how Safari handles it too. Re-checked for
+        // #66 on WebView 133: View padding, a fake 400 px system-bar /
+        // display-cutout inset dispatched to the WebView, and
+        // `setOverScrollMode` all leave `innerHeight`, `scrollHeight`
+        // and `env(safe-area-inset-bottom)` untouched. A page with its
+        // own bottom nav therefore gets the band shrunk out of the
+        // page area instead (reserved mode, [contentBottomReserve]).
         //
         // When the address bar is focused we overlay the suggestions
         // panel on top of it rather than unmounting the WebView — that
@@ -1038,6 +1092,18 @@ fun BrowserScreen(
                     modifier = Modifier.fillMaxSize(),
                 )
             }
+        }
+
+        // Reserved mode's strip (#66): everything below the page area —
+        // the reserve itself plus whatever the IME inset takes.
+        if (reserved) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .fillMaxWidth()
+                    .height(contentBottomReserve + imeInsetDp)
+                    .drawBehind { drawRect(stripColor.value) },
+            )
         }
 
         // The floating chrome overlay: just the capsule now. Page-load
