@@ -448,4 +448,76 @@ class PageBottomSpacerTest {
         // 40 CSS px of real overflow beyond the viewport, plus the spacer.
         assertTrue(documentScrollsPastSpacer(true, viewportCss + 40 + 82, 82, viewPx, scale))
     }
+
+    // ---- reserved mode (#66) -----------------------------------------
+
+    private fun keptSlot(): BottomSpacerSlot {
+        val slot = BottomSpacerSlot()
+        slot.startDocument()
+        val t = slot.decideOnLoad(3000)!!
+        slot.accept(t, 82, 3000)
+        return slot
+    }
+
+    @Test
+    fun `reserved mode drops a kept spacer and its pull-to-refresh discount`() {
+        val slot = keptSlot()
+        assertEquals(82, slot.discountCssPx)
+        assertTrue(slot.suspend())
+        assertEquals(0, slot.discountCssPx)
+        assertFalse(slot.suspend()) // already suspended: no second removal
+    }
+
+    @Test
+    fun `while reserved no pass runs, whatever happens`() {
+        val slot = keptSlot()
+        slot.suspend()
+        assertNull(slot.decideOnLoad(4000))
+        assertNull(slot.decideOnTouch(5000))
+        assertNull(slot.checkOnTouch(6000))
+        assertNull(slot.decideOnWidthChange())
+        assertNull(slot.checkOnHistoryChange())
+        assertEquals(0, slot.discountCssPx)
+    }
+
+    @Test
+    fun `a pass in flight when the tab goes reserved is dropped`() {
+        val slot = BottomSpacerSlot()
+        slot.startDocument()
+        val t = slot.decideOnLoad(3000)!!
+        slot.suspend()
+        slot.accept(t, 82, 3000)
+        assertEquals(0, slot.discountCssPx)
+        slot.settleKept(t, 3082)
+        assertEquals(SpacerState.Pending, slot.state)
+    }
+
+    @Test
+    fun `back to overlay decides afresh, with fresh budgets`() {
+        val slot = keptSlot()
+        slot.suspend()
+        val t = slot.resume()
+        assertNotNull(t)
+        slot.accept(t!!, 82, 3000)
+        assertEquals(82, slot.discountCssPx)
+        assertNull(slot.resume()) // not suspended
+    }
+
+    @Test
+    fun `a new document is never born suspended`() {
+        val slot = keptSlot()
+        slot.suspend()
+        slot.startDocument()
+        assertFalse(slot.suspended)
+        assertNotNull(slot.decideOnLoad(3000))
+    }
+
+    @Test
+    fun `resuming before first paint waits for it`() {
+        val slot = BottomSpacerSlot()
+        slot.startDocument()
+        slot.suspend()
+        assertNull(slot.resume())
+        assertNotNull(slot.decideOnLoad(3000))
+    }
 }

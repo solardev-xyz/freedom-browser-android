@@ -1,0 +1,23 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>step0 probe</title>
+<style>
+  body { margin:0; font:16px system-ui; }
+  .row { padding:14px 16px; border-bottom:1px solid #ddd; }
+  #probe { position:fixed; left:0; right:0; bottom:0; height:40px; background:#e33; color:#fff;
+           padding-bottom:env(safe-area-inset-bottom); }
+  #env { position:fixed; top:0; right:0; background:#ff0; font:12px monospace; padding:4px; }
+</style>
+<div id="env"></div>
+<div id="rows"></div>
+<div id="probe">fixed bottom:0 probe</div>
+<script>
+  for (let i = 1; i <= 60; i++) document.getElementById('rows').insertAdjacentHTML('beforeend', `<div class="row">row ${i}</div>`);
+  function report() {
+    const p = document.getElementById('probe');
+    document.getElementById('env').textContent =
+      `inset-bottom=${getComputedStyle(p).paddingBottom} innerH=${innerHeight} clientH=${document.documentElement.clientHeight} scrollH=${document.documentElement.scrollHeight}`;
+  }
+  report(); addEventListener('resize', report); setTimeout(report, 1000);
+</script>

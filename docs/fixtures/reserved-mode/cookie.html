@@ -1,0 +1,14 @@
+<!doctype html><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Cookie banner</title>
+<link rel="stylesheet" href="base.css"><script src="common.js"></script>
+<style>
+  #consent { position:fixed; left:0; right:0; bottom:0; padding:12px 16px; background:#263238; color:#fff;
+             display:flex; gap:12px; align-items:center; }
+  #consent span { flex:1; font-size:14px; }
+  #consent button { height:44px; padding:0 18px; border:0; border-radius:22px; background:#ffca28; font-weight:600; }
+</style>
+<h1>Article with a consent banner</h1><div id="rows"></div>
+<div id="consent"><span>We use cookies to make this fixture look realistic.</span>
+  <button data-name="Accept" onclick="document.getElementById('consent').remove()">Accept</button></div>
+<script>fixture.rows(document.getElementById('rows'), 25);</script>

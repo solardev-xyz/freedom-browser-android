@@ -1,0 +1,18 @@
+<!doctype html><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Flex app shell</title>
+<link rel="stylesheet" href="base.css"><script src="common.js"></script>
+<style>
+  html, body { height:100%; }
+  #app { height:100%; display:flex; flex-direction:column; }
+  main { flex:1; overflow:auto; }
+  header { padding:14px 16px; font:600 20px system-ui; background:var(--card); }
+</style>
+<div id="app">
+  <header>Flex shell (nav is the last child, not fixed)</header>
+  <main id="rows"></main>
+  <nav class="tabs">
+    <button data-name="Chats">Chats</button><button data-name="Calls">Calls</button><button data-name="Settings">Settings</button>
+  </nav>
+</div>
+<script>fixture.rows(document.getElementById('rows'), 30, 'Message');</script>

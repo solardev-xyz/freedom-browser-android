@@ -4,6 +4,7 @@ import android.annotation.SuppressLint
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Canvas
+import android.os.SystemClock
 import android.util.Log
 import android.view.MotionEvent
 import android.view.View
@@ -33,6 +34,10 @@ import androidx.core.graphics.createBitmap
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.swiperefreshlayout.widget.SwipeRefreshLayout
+import androidx.webkit.JavaScriptReplyProxy
+import androidx.webkit.WebMessageCompat
+import androidx.webkit.WebViewCompat
+import androidx.webkit.WebViewFeature
 import baby.freedom.mobile.data.BrowsingRepository
 import kotlinx.coroutines.flow.collectLatest
 import java.io.ByteArrayInputStream
@@ -708,6 +713,71 @@ private fun buildRefreshableWebView(
         }
     }
 
+    // Reserved mode (#66): does the document on screen have its own
+    // bottom navigation the capsule would cover? [BottomChromeSlot] holds
+    // the per-document token and the hysteresis; the page side is the
+    // detector from [bottomUiDetectorJs], installed once per document at
+    // first paint and otherwise woken only by events.
+    val bottomChrome = BottomChromeSlot()
+    val bottomUiSupported = WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER)
+
+    // The channel back into the current document's detector, from its
+    // last valid report. Null until it has reported; dropped on every
+    // new document.
+    var bottomUiReply: JavaScriptReplyProxy? = null
+
+    /** Install the detector in the document on screen, once. */
+    fun installBottomUiDetector(view: WebView) {
+        if (!bottomUiSupported) return
+        val token = bottomChrome.install() ?: return
+        view.evaluateJavascript(bottomUiDetectorJs(token), null)
+    }
+
+    /**
+     * Ask the current document's detector for a fresh, reported probe
+     * (load finished, a same-document history change, the hysteresis
+     * confirmation).
+     *
+     * Before first paint there is nothing to ask: the detector goes in
+     * at `onPageCommitVisible` ([installBottomUiDetector]), and
+     * [installIfUnpainted] lets load-finished install it for a document
+     * that never reports a first paint. A cross-document commit also
+     * fires `doUpdateVisitedHistory`, *before* first paint; that one
+     * must not install, or the detector would land in a document that
+     * may have no `<body>` yet.
+     *
+     * An installed detector that hasn't reported yet (no `<body>` at
+     * install) gives Kotlin no reply channel; it owes its report and
+     * sends it on its next probe (see [bottomUiDetectorJs]).
+     */
+    fun requestBottomUiProbe(view: WebView, installIfUnpainted: Boolean = false) {
+        if (!bottomUiSupported) return
+        if (!bottomChrome.installed) {
+            if (installIfUnpainted) installBottomUiDetector(view)
+            return
+        }
+        val token = bottomChrome.token ?: return
+        runCatching { bottomUiReply?.postMessage(bottomUiProbeRequest(token)) }
+    }
+
+    /**
+     * Publish [bottomChrome]'s mode to the tab, and move the #65 spacer
+     * out of the way while reserved: the page no longer runs under the
+     * bar, so it gets no end-of-document spacer and pull-to-refresh
+     * discounts none. Back in overlay the spacer is decided afresh.
+     */
+    fun applyBottomChrome(view: WebView) {
+        val reserved = bottomChrome.mode == BottomChromeMode.Reserved
+        val wasReserved = state.bottomChromeMode == BottomChromeMode.Reserved
+        if (reserved) state.bottomStripRgb = bottomChrome.color
+        state.bottomChromeMode = bottomChrome.mode
+        if (reserved && !wasReserved) {
+            if (bottomSpacer.suspend()) view.evaluateJavascript(BOTTOM_SPACER_REMOVE_JS, null)
+        } else if (!reserved && wasReserved) {
+            decideBottomSpacer(view, bottomSpacer.resume())
+        }
+    }
+
     // A finish that arrived before its first paint, parked until
     // `onPageCommitVisible` says the page really is on screen (see
     // [visitToFlush]). Without it the fastest pages — the ones that
@@ -777,6 +847,20 @@ private fun buildRefreshableWebView(
         // page — not the address bar — owns the focus.
         addOnLayoutChangeListener { v, left, top, right, bottom, oldLeft, oldTop, oldRight, oldBottom ->
             val shrank = (bottom - top) < (oldBottom - oldTop)
+            // A height change can reach the page one input late. When
+            // several land in quick succession — the keyboard sliding
+            // away while the page area's reserve changes (#66), or just
+            // the keyboard on its own — Chromium was seen on the freedom
+            // AVD (WebView 133) keeping the page at an intermediate
+            // height (`innerHeight` 805 in a 781 CSS px view) until the
+            // next touch: in reserved mode that hides the page's own nav
+            // behind the strip. `main` shows the same stale height after
+            // the address bar's keyboard closes (3 of 4 runs). One
+            // invalidate per size change makes WebView pick the final
+            // size up; it is not a loop — drawing doesn't change the size.
+            if ((bottom - top) != (oldBottom - oldTop)) {
+                v.postInvalidate()
+            }
             if (shrank && v.hasFocus()) {
                 (v as WebView).evaluateJavascript(SCROLL_FOCUSED_FIELD_JS, null)
             }
@@ -848,6 +932,34 @@ private fun buildRefreshableWebView(
             false
         }
 
+        // The detector's reports (#66). A message is taken only from an
+        // http(s) origin (see [BOTTOM_UI_ORIGIN_RULES] for why the rule
+        // itself can't say that), only from the main frame, only in the
+        // exact shape [parseBottomUiMessage] allows and only with the
+        // current document's token.
+        if (bottomUiSupported) {
+            val listener = WebViewCompat.WebMessageListener { view, message, sourceOrigin, isMainFrame, replyProxy ->
+                if (sourceOrigin.scheme != "https" && sourceOrigin.scheme != "http") return@WebMessageListener
+                if (message.type != WebMessageCompat.TYPE_STRING) return@WebMessageListener
+                val report = parseBottomUiMessage(message.data, isMainFrame, bottomChrome.token)
+                    ?: return@WebMessageListener
+                bottomUiReply = replyProxy
+                val verdict = bottomChrome.accept(report, SystemClock.uptimeMillis())
+                if (verdict.changed) applyBottomChrome(view)
+                val confirmIn = verdict.confirmInMs
+                if (confirmIn != null) {
+                    // One re-probe after the hysteresis gap — a single
+                    // delayed message, not a timer: it asks once, and a
+                    // new document in the meantime cancels it.
+                    val token = bottomChrome.token
+                    view.postDelayed({
+                        if (bottomChrome.token == token) requestBottomUiProbe(view)
+                    }, confirmIn)
+                }
+            }
+            WebViewCompat.addWebMessageListener(this, BOTTOM_UI_CHANNEL, BOTTOM_UI_ORIGIN_RULES, listener)
+        }
+
         // Force an initial paint so the WebView's compositor surface
         // is valid even before the user submits a URL.
         loadUrl(ABOUT_BLANK)
@@ -888,6 +1000,13 @@ private fun buildRefreshableWebView(
                 rootPanProbe.startDocument()
                 // …and without the outgoing document's spacer (#65).
                 bottomSpacer.startDocument()
+                // …and floating over the page until this document shows
+                // a bottom nav of its own (#66). A report still in flight
+                // from the outgoing document carries its old token and
+                // is dropped.
+                bottomChrome.startDocument()
+                bottomUiReply = null
+                state.bottomChromeMode = BottomChromeMode.Overlay
                 // …and with the progress latch open again: whatever the
                 // last Stop aborted, this document is a load of its own
                 // and its percentages are worth drawing (#41).
@@ -974,6 +1093,8 @@ private fun buildRefreshableWebView(
                 probeRootPanStyles(view)
                 if (view != null && bottomSpacerApplies(url)) {
                     decideBottomSpacer(view, bottomSpacer.decideOnLoad(view.contentHeight))
+                    // The bottom-nav detector goes in here, once (#66).
+                    installBottomUiDetector(view)
                 }
                 if (url == ABOUT_BLANK) return
                 visitGate.commit()
@@ -1003,6 +1124,11 @@ private fun buildRefreshableWebView(
                 // document has grown since.
                 if (view != null && bottomSpacerApplies(url)) {
                     decideBottomSpacer(view, bottomSpacer.decideOnLoad(view.contentHeight))
+                    // A late-mounting nav: probe again now the load is
+                    // done (or install, if first paint didn't) (#66).
+                    if (finishedLoadIsCurrent(url, view.url)) {
+                        requestBottomUiProbe(view, installIfUnpainted = true)
+                    }
                 }
                 if (url != null && !ErrorPage.isErrorPage(url) && url != ABOUT_BLANK) {
                     autoRecoveredUrl = null
@@ -1130,8 +1256,16 @@ private fun buildRefreshableWebView(
             // route can reset `adoptedStyleSheets`, spacer and all. A
             // kept spacer is looked for (read-only) and decided afresh
             // only if it has gone (#65).
+            //
+            // The same callback is how the bottom-nav detector hears
+            // about `pushState` / `replaceState` / `popstate` /
+            // `hashchange` without the page's history methods being
+            // patched (#66). It also fires for a cross-document commit,
+            // before first paint; the detector isn't installed yet then,
+            // and this doesn't install it (see [requestBottomUiProbe]).
             override fun doUpdateVisitedHistory(view: WebView?, url: String?, isReload: Boolean) {
                 if (view == null || !bottomSpacerApplies(url)) return
+                requestBottomUiProbe(view)
                 checkBottomSpacer(view, bottomSpacer.checkOnHistoryChange())
             }
 

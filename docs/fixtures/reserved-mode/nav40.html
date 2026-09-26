@@ -1,0 +1,12 @@
+<!doctype html><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Off-centre nav</title>
+<link rel="stylesheet" href="base.css"><script src="common.js"></script>
+<style>
+  nav.tabs { position:fixed; left:0; bottom:0; width:40%; border-top-right-radius:14px; }
+</style>
+<h1>A nav that leaves the horizontal centre free</h1>
+<p>The bottom nav covers only the left 40%. The probe at (vw/2, vh-30) hits the article, so this page is not detected and stays in overlay — a documented limit of the iOS heuristic.</p>
+<div id="rows"></div>
+<nav class="tabs"><button data-name="A">A</button><button data-name="B">B</button></nav>
+<script>fixture.rows(document.getElementById('rows'), 25);</script>

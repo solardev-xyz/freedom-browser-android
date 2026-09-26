@@ -110,6 +110,22 @@ class BrowserState(val id: Long) {
     internal val capsuleCollapse = CapsuleCollapseState()
 
     /**
+     * Whether the page area stops above the bottom chrome for the
+     * document on screen (#66). Set by the tab's WebView from its page's
+     * bottom-nav detector (see [BottomChromeSlot]); back to overlay on
+     * every new document.
+     */
+    var bottomChromeMode by mutableStateOf(BottomChromeMode.Overlay)
+        internal set
+
+    /**
+     * The strip colour the page reported with a reserved mode (an
+     * `rgb(r, g, b)` string, see [bottomStripArgb]); null for "none found".
+     */
+    var bottomStripRgb: String? by mutableStateOf<String?>(null)
+        internal set
+
+    /**
      * Most recent page-preview bitmap for this tab, shown in the tab
      * switcher grid. Captured from the live WebView after each successful
      * load and whenever the user opens the switcher (so the thumbnail

@@ -1,0 +1,11 @@
+:root { --bg:#ffffff; --fg:#1b1b1f; --nav:#6750a4; --navfg:#ffffff; --card:#f3f0f7; }
+:root.dark { --bg:#121417; --fg:#e6e1e5; --nav:#1f3b57; --navfg:#d6e8ff; --card:#1d2024; }
+html { background:var(--bg); color:var(--fg); }
+body { margin:0; font:17px/1.5 system-ui, sans-serif; }
+p { margin:0 16px 14px; }
+h1 { margin:16px; font-size:24px; }
+#badge { position:fixed; top:6px; right:6px; z-index:99; background:#ffeb3b; color:#000;
+         font:12px monospace; padding:3px 6px; border-radius:4px; }
+.tabs { display:flex; background:var(--nav); }
+.tabs button { flex:1; height:56px; border:0; background:transparent; color:var(--navfg);
+               font:600 14px system-ui; }
