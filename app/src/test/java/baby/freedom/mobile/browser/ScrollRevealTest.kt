@@ -187,20 +187,72 @@ class ScrollRevealTest {
     @Test
     fun `restores once the end is more than H away, not before`() {
         val s = revealed()
-        assertFalse(s.onScroll(distanceFromEndPx = 0, revealPx = 215))
-        assertFalse(s.onScroll(distanceFromEndPx = 215, revealPx = 215))
-        assertTrue(s.onScroll(distanceFromEndPx = 216, revealPx = 215))
+        assertFalse(s.onScroll(distanceFromEndPx = 0, scrollYPx = 3000, revealPx = 215))
+        assertFalse(s.onScroll(distanceFromEndPx = 215, scrollYPx = 2785, revealPx = 215))
+        assertTrue(s.onScroll(distanceFromEndPx = 216, scrollYPx = 2784, revealPx = 215))
         assertEquals(Phase.Idle, s.phase)
         // Reported once.
-        assertFalse(s.onScroll(distanceFromEndPx = 900, revealPx = 215))
+        assertFalse(s.onScroll(distanceFromEndPx = 900, scrollYPx = 2100, revealPx = 215))
+    }
+
+    @Test
+    fun `a page that gained H or less of range restores back at the top`() {
+        // short.html: 72 px of range after the reveal; the end can never
+        // be more than H away.
+        val s = revealed(unscrollable = true)
+        assertFalse(s.onScroll(distanceFromEndPx = 40, scrollYPx = 32, revealPx = 215))
+        assertTrue(s.revealed)
+        assertTrue(s.onScroll(distanceFromEndPx = 72, scrollYPx = 0, revealPx = 215))
+        assertEquals(Phase.Idle, s.phase)
+        assertFalse(s.revealedFromUnscrollable)
+    }
+
+    @Test
+    fun `restore rule`() {
+        assertFalse(revealShouldRestore(distanceFromEndPx = 215, scrollYPx = 1, revealPx = 215))
+        assertTrue(revealShouldRestore(distanceFromEndPx = 216, scrollYPx = 1, revealPx = 215))
+        assertTrue(revealShouldRestore(distanceFromEndPx = 0, scrollYPx = 0, revealPx = 215))
+    }
+
+    // --- handover ---------------------------------------------------------
+
+    @Test
+    fun `a handover timeout from an earlier reveal is stale`() {
+        val g = RevealGeneration()
+        val first = g.next()
+        assertTrue(g.isCurrent(first))
+        // Restored and pushed again before the first timeout fired.
+        val second = g.next()
+        assertFalse(g.isCurrent(first))
+        assertTrue(g.isCurrent(second))
+    }
+
+    @Test
+    fun `handover shortfall is zero when the page gained the whole shrink`() {
+        // Long article: range 2100 -> 2315, scrolled from its end.
+        assertEquals(0, revealShortfall(scrollFromPx = 2100, shrunkByPx = 215, newRangePx = 2315))
+        // Mid-page (end within reach, more range than needed).
+        assertEquals(0, revealShortfall(scrollFromPx = 100, shrunkByPx = 215, newRangePx = 2315))
+    }
+
+    @Test
+    fun `handover shortfall is what the clamp took off a page that gained less`() {
+        // short.html: range 0 -> 72 (review), 0 -> 189 (AVD run).
+        assertEquals(143, revealShortfall(scrollFromPx = 0, shrunkByPx = 215, newRangePx = 72))
+        assertEquals(26, revealShortfall(scrollFromPx = 0, shrunkByPx = 215, newRangePx = 189))
+        // vh-sized content whose range didn't grow at all.
+        assertEquals(215, revealShortfall(scrollFromPx = 500, shrunkByPx = 215, newRangePx = 500))
+        // Never more than the shrink, never negative.
+        assertEquals(215, revealShortfall(scrollFromPx = 500, shrunkByPx = 215, newRangePx = 0))
+        assertEquals(0, revealShortfall(scrollFromPx = 0, shrunkByPx = 0, newRangePx = 0))
     }
 
     @Test
     fun `after a restore, back at the end, nothing reveals without a fresh push`() {
         val s = revealed()
-        s.onScroll(1000, 215)
+        s.onScroll(1000, 1315, 215)
         // Scrolling back down to the end, same gesture: no down, no reveal.
-        assertFalse(s.onScroll(0, 215))
+        assertFalse(s.onScroll(0, 2315, 215))
         s.onBottomOverscroll()
         assertFalse(s.onMove(500f, 1000f, slop))
         assertFalse(s.revealed)

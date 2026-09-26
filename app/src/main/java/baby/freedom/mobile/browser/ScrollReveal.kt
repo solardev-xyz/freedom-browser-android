@@ -75,10 +75,41 @@ internal fun revealAllowed(
  * Should a revealed page go back to overlay? Once the user has scrolled
  * up so that the end is more than [revealPx] away: growing the WebView
  * back by H then only shows more page below the fold, the scroll offset
- * stays valid (no clamp) and nothing on screen moves.
+ * stays valid (no clamp) and nothing on screen moves. Or once they are
+ * back at the top ([scrollYPx] 0), where an offset of 0 stays valid
+ * too: a page that gained H or less of range from the reveal (a short
+ * page) can never get H from its end, and would otherwise stay revealed
+ * with its top scrolled away until the next document.
  */
-internal fun revealShouldRestore(distanceFromEndPx: Int, revealPx: Int): Boolean =
-    distanceFromEndPx > revealPx
+internal fun revealShouldRestore(distanceFromEndPx: Int, scrollYPx: Int, revealPx: Int): Boolean =
+    distanceFromEndPx > revealPx || scrollYPx <= 0
+
+/**
+ * How far short of the reveal's scroll ([scrollFromPx] + [shrunkByPx])
+ * Chromium's offset ends up once the page reports its new scroll range
+ * [newRangePx]: 0 when the page gained the whole shrink as range (a long
+ * page), up to the whole shrink for a page that gained none. The
+ * handover keeps this much of the held translation and settles it away
+ * instead of jumping.
+ */
+internal fun revealShortfall(scrollFromPx: Int, shrunkByPx: Int, newRangePx: Int): Int =
+    (scrollFromPx + shrunkByPx - newRangePx.coerceAtLeast(0)).coerceIn(0, shrunkByPx.coerceAtLeast(0))
+
+/**
+ * Numbers the reveals' handovers, so a delayed callback (the handover
+ * timeout) can tell whether the handover it was posted for is still
+ * the current one. A timeout left over from an earlier reveal (commit,
+ * scroll up to restore, push again, all within the timeout) must not
+ * end the next reveal's handover early. UI thread only.
+ */
+internal class RevealGeneration {
+    private var current = 0
+
+    /** A new handover starts; returns its tag. */
+    fun next(): Int = ++current
+
+    fun isCurrent(tag: Int): Boolean = tag == current
+}
 
 /**
  * The `documentScrollsDown` input to [pullToRefreshArmed] while a page
@@ -234,8 +265,8 @@ internal class ScrollRevealSlot {
      * A scroll while revealed: true if it should go back to overlay (see
      * [revealShouldRestore]). The next reveal needs a fresh push.
      */
-    fun onScroll(distanceFromEndPx: Int, revealPx: Int): Boolean {
-        if (phase != Phase.Revealed || !revealShouldRestore(distanceFromEndPx, revealPx)) return false
+    fun onScroll(distanceFromEndPx: Int, scrollYPx: Int, revealPx: Int): Boolean {
+        if (phase != Phase.Revealed || !revealShouldRestore(distanceFromEndPx, scrollYPx, revealPx)) return false
         reset()
         return true
     }

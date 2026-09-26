@@ -841,7 +841,11 @@ private fun buildRefreshableWebView(
         var revealTint: Int? = null
         var revealAnim: ValueAnimator? = null
         var revealBridge: Bitmap? = null
-        var revealExpectRange = 0
+        var revealScrollFrom = 0
+        var revealRangeFrom = 0
+        // Tags the handover timeout with the commit it belongs to, so a
+        // stale one can't end a later reveal's handover.
+        val revealTimeout = RevealGeneration()
 
         // H in whole px, as Compose's `padding` rounds it: a held
         // translation of 215.25 over a 215 px shrink left the page a
@@ -891,6 +895,31 @@ private fun buildRefreshableWebView(
             reveal.reset()
         }
 
+        /**
+         * Chromium draws at the new offset: drop the held translation.
+         * If the page gained less range than the shrink (a page that
+         * could barely scroll, vh-sized content), its offset was clamped
+         * [revealShortfall] px short of where the translation holds it;
+         * keep that much of the translation (no jump in this frame) and
+         * settle it away, over the page's own colour rather than the
+         * bridge (which shows the rows at the unclamped offset).
+         */
+        fun handOverReveal() {
+            onBeforeDraw = null
+            val shortBy = revealShortfall(revealScrollFrom, revealLandedPx, verticalRange)
+            if (shortBy <= 0) {
+                finishHandover()
+                return
+            }
+            // WebView still reports the requested offset; line it up
+            // with Chromium's clamped one (the handover's own scroll).
+            scrollBy(0, -shortBy)
+            translationY = -shortBy.toFloat()
+            revealBridge = null
+            refreshLayout.setBackgroundColor(0xFF000000.toInt() or (revealTint ?: 0xFFFFFF))
+            animateReveal(0f) { finishHandover() }
+        }
+
         fun onRevealTouchDown(event: MotionEvent) {
             val allowed = revealAllowed(
                 mode = state.bottomChromeMode,
@@ -935,7 +964,19 @@ private fun buildRefreshableWebView(
                 // there. Should the resize never come, the translation
                 // doesn't stay behind.
                 applyBottomChrome()
-                postDelayed({ if (revealHandover) finishHandover() }, REVEAL_HANDOVER_TIMEOUT_MS)
+                val generation = revealTimeout.next()
+                postDelayed({
+                    if (!revealTimeout.isCurrent(generation) || !revealHandover || revealAnim != null) return@postDelayed
+                    // The range never changed (or the resize never
+                    // landed): settle rather than snap.
+                    if (onBeforeDraw != null) {
+                        handOverReveal()
+                    } else {
+                        revealBridge = null
+                        refreshLayout.setBackgroundColor(0xFF000000.toInt() or (revealTint ?: 0xFFFFFF))
+                        animateReveal(0f) { finishHandover() }
+                    }
+                }, REVEAL_HANDOVER_TIMEOUT_MS)
             }
         }
 
@@ -969,10 +1010,15 @@ private fun buildRefreshableWebView(
             if (!revealHandover || onBeforeDraw != null) return
             revealLandedPx = shrunkBy
             revealBridge?.let { refreshLayout.background = BottomBandDrawable(it) }
-            revealExpectRange = verticalRange + shrunkBy
+            revealScrollFrom = scrollY
+            revealRangeFrom = verticalRange
             scrollBy(0, shrunkBy)
+            // Chromium's frame at the new offset is the first one that
+            // reports a changed range. Not "grown by the shrink": a page
+            // that gains less (a short page, vh-sized content) never
+            // gets there, and waited out the timeout (#70 review).
             onBeforeDraw = {
-                if (verticalRange >= revealExpectRange) finishHandover()
+                if (verticalRange != revealRangeFrom) handOverReveal()
             }
             postInvalidateOnAnimation()
         }
@@ -1047,10 +1093,10 @@ private fun buildRefreshableWebView(
             // The reveal's own scroll (the handover) is not the user's.
             if (revealHandover) return@setOnScrollChangeListener
             state.capsuleCollapse.onScroll(scrollY, oldScrollY, screenDensity)
-            // Scrolled back up past the reveal height: restore (#65).
-            // The WebView grows back by H below the fold; the offset is
-            // still in range, so nothing on screen moves.
-            if (reveal.onScroll(distanceFromEnd, revealLandedPx)) applyBottomChrome()
+            // Scrolled back up past the reveal height, or to the top:
+            // restore (#65). The WebView grows back by H below the fold;
+            // the offset is still in range, so nothing on screen moves.
+            if (reveal.onScroll(distanceFromEnd, scrollY, revealLandedPx)) applyBottomChrome()
         }
 
         // …and the touch stream that says whether a given scroll is the
