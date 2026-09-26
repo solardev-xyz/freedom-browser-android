@@ -1091,7 +1091,7 @@ private fun buildRefreshableWebView(
 
             // A same-document history change (`pushState`, hash) gets
             // no commit or finish callback, and an SPA re-rendering its
-            // route can take the spacer's `<style>` with it. Re-apply
+            // route can reset `adoptedStyleSheets`, spacer and all. Re-apply
             // — a no-op when it is still there (#65).
             override fun doUpdateVisitedHistory(view: WebView?, url: String?, isReload: Boolean) {
                 applyBottomSpacer(view)

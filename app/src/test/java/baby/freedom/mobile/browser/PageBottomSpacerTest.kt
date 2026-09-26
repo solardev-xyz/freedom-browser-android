@@ -55,10 +55,12 @@ class PageBottomSpacerTest {
     }
 
     @Test
-    fun `the script carries the height and the style id`() {
+    fun `the script carries the height and the marker`() {
         val js = bottomSpacerJs(82)
         assertTrue(js.contains("Math.ceil(82 * k)"))
-        assertTrue(js.contains("'$BOTTOM_SPACER_STYLE_ID'"))
+        assertTrue(js.contains("'$BOTTOM_SPACER_MARK'"))
+        assertTrue(js.contains("new CSSStyleSheet()"))
+        assertFalse(js.contains("createElement"))
         assertTrue(js.contains("html::after"))
     }
 

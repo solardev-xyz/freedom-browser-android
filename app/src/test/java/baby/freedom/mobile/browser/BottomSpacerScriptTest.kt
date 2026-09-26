@@ -16,36 +16,57 @@ import org.mozilla.javascript.Scriptable
  */
 class BottomSpacerScriptTest {
 
+    // `ours()` is the spacer's constructed sheet while the document has
+    // it adopted, else null. `cspBlocksSheets` makes every constructed
+    // rule fail to take, the way a blocked write would look.
     private val fakeDom = """
-        var styleEl = null;
         var htmlOverflowY = 'visible', bodyOverflowY = 'visible';
         var baseHeight = 2000;
+        var cspBlocksSheets = false, sheetsBuilt = 0, sheetWrites = 0;
         var screen = { width: 412 };
         var window = { scrollY: 0, innerHeight: 800 };
-        function spacerPx() { return styleEl ? (parseInt(styleEl.getAttribute('data-px'), 10) || 0) : 0; }
-        function mkStyle() {
-          var attrs = {};
-          return {
-            id: '', textContent: '',
-            setAttribute: function (k, v) { attrs[k] = v; },
-            getAttribute: function (k) { return k in attrs ? attrs[k] : null; },
-            remove: function () { if (styleEl === this) styleEl = null; }
+        function CSSStyleSheet() {
+          sheetsBuilt++;
+          var self = this, props = {};
+          this.textContent = '';
+          this.cssRules = [];
+          this.replaceSync = function (text) {
+            sheetWrites++;
+            self.textContent = text;
+            props = {};
+            var m = /(--[a-z-]+):(\d+)/.exec(text);
+            if (m) props[m[1]] = m[2];
+            self.cssRules = cspBlocksSheets ? [] : [{ style: {
+              getPropertyValue: function (k) { return k in props ? props[k] : ''; } } }];
           };
+        }
+        var otherSheet = { cssRules: [{ style: { getPropertyValue: function () { return ''; } } }] };
+        var document;
+        function ours() {
+          var l = document.adoptedStyleSheets;
+          for (var i = 0; i < l.length; i++) if (l[i] instanceof CSSStyleSheet) return l[i];
+          return null;
+        }
+        function spacerPx() {
+          var s = ours();
+          if (!s || !s.cssRules.length) return 0;
+          return parseInt(s.cssRules[0].style.getPropertyValue('$BOTTOM_SPACER_MARK'), 10) || 0;
         }
         var html = {
           clientWidth: 412,
           get scrollHeight() { return baseHeight + spacerPx(); },
           get clientHeight() { return window.innerHeight; },
-          get scrollTop() { return window.scrollY; },
-          appendChild: function (e) { styleEl = e; }
+          get scrollTop() { return window.scrollY; }
         };
         var body = {};
-        var document = {
-          documentElement: html, body: body, head: html, scrollingElement: html,
-          getElementById: function (id) { return styleEl && styleEl.id === id ? styleEl : null; },
-          createElement: function () { return mkStyle(); }
+        document = {
+          documentElement: html, body: body, scrollingElement: html,
+          adoptedStyleSheets: [otherSheet]
         };
-        function getComputedStyle(e) { return { overflowY: e === html ? htmlOverflowY : bodyOverflowY }; }
+        function getComputedStyle(e, pseudo) {
+          if (pseudo) return { content: spacerPx() > 0 ? '""' : 'none' };
+          return { overflowY: e === html ? htmlOverflowY : bodyOverflowY };
+        }
     """
 
     private inner class Doc {
@@ -60,7 +81,10 @@ class BottomSpacerScriptTest {
         fun num(js: String): Int = (Context.toNumber(eval(js))).toInt()
         fun run(dp: Int = 82): Int = num(bottomSpacerJs(dp))
         val spacer get() = num("spacerPx()")
-        val styleCount get() = num("styleEl ? 1 : 0")
+        val styleCount get() = num(
+            "var n = 0; for (var i = 0; i < document.adoptedStyleSheets.length; i++)" +
+                " if (document.adoptedStyleSheets[i] instanceof CSSStyleSheet) n++; n",
+        )
         fun close() = Context.exit()
     }
 
@@ -78,7 +102,7 @@ class BottomSpacerScriptTest {
         assertEquals(82, run())
         assertEquals(82, run())
         assertEquals(1, styleCount)
-        assertTrue(eval("styleEl.textContent").toString().contains("height:82px"))
+        assertTrue(eval("ours().textContent").toString().contains("height:82px"))
     }
 
     // R1-F1: a document scroll-locked at load (consent banner).
@@ -130,7 +154,7 @@ class BottomSpacerScriptTest {
         eval("html.clientWidth = 412; screen.width = 412")
         assertEquals(106, run(106))
         assertEquals(1, styleCount)
-        assertTrue(eval("styleEl.textContent").toString().contains("height:106px"))
+        assertTrue(eval("ours().textContent").toString().contains("height:106px"))
     }
 
     // R1-F2: a desktop-width page (980 px layout) rotated from landscape
@@ -147,15 +171,52 @@ class BottomSpacerScriptTest {
     @Test
     fun `an unchanged pass writes nothing`() = doc {
         assertEquals(82, run())
-        eval("styleEl.textContent = 'sentinel'")
+        eval("sheetWrites = 0")
         assertEquals(82, run())
-        assertEquals("sentinel", eval("styleEl.textContent").toString())
+        assertEquals(0, num("sheetWrites"))
     }
 
     @Test
     fun `no body yet is unknown`() = doc {
         eval("document.body = null")
         assertEquals(-1, run())
-        assertFalse(num("styleEl ? 1 : 0") == 1)
+        assertEquals(0, styleCount)
+    }
+
+    // R2-F1: a page whose CSP `style-src` lacks 'unsafe-inline'. The
+    // spacer goes in through CSSOM, which `style-src` does not govern —
+    // no `<style>` element, so nothing to block and nothing to report.
+    @Test
+    fun `the spacer is a constructed sheet, not a style element`() = doc {
+        assertEquals(82, run())
+        assertEquals(1, num("sheetsBuilt"))
+        assertEquals(2, num("document.adoptedStyleSheets.length"))
+        assertTrue(eval("document.adoptedStyleSheets[0] === otherSheet") as Boolean)
+    }
+
+    // R2-F1: whatever keeps the rule from taking, the script reports
+    // what is really on the page — never a height the page lacks.
+    @Test
+    fun `a rule that does not take is withdrawn and reported as none`() = doc {
+        eval("cspBlocksSheets = true")
+        assertEquals(0, run())
+        assertEquals(0, styleCount)
+        assertEquals(1, num("document.adoptedStyleSheets.length")) // the site's own stays
+    }
+
+    // An SPA that resets `adoptedStyleSheets` drops the spacer; the next
+    // pass puts it back and does not count the lost one.
+    @Test
+    fun `a sheet list reset by the page is re-adopted`() = doc {
+        assertEquals(82, run())
+        eval("document.adoptedStyleSheets = [otherSheet]")
+        assertEquals(82, run())
+        assertEquals(1, styleCount)
+    }
+
+    @Test
+    fun `no constructable stylesheets means no spacer`() = doc {
+        eval("CSSStyleSheet = undefined")
+        assertEquals(0, run())
     }
 }

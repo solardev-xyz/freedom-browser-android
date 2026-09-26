@@ -46,8 +46,13 @@ import kotlin.math.ceil
 // on `html`/`body` (skipped outright, see [bottomSpacerJs]), pages that
 // scroll an inner container, and `100vh` layouts.
 
-/** `id` of the injected `<style>`; one per document. */
-internal const val BOTTOM_SPACER_STYLE_ID = "freedom-bottom-spacer"
+/**
+ * Custom property that marks the spacer's rule and carries its height in
+ * CSS px; how a later pass finds its own sheet among the document's
+ * adopted ones. `all` does not reset custom properties, and nothing
+ * reads this one but [bottomSpacerJs].
+ */
+internal const val BOTTOM_SPACER_MARK = "--freedom-bottom-spacer"
 
 /**
  * How tall the spacer is, in dp: the capsule's resting slot, the margin
@@ -73,18 +78,24 @@ internal fun bottomSpacerApplies(url: String?): Boolean =
 
 /**
  * The script that (re)applies the spacer to the document on screen.
- * Idempotent: the `<style>` is looked up by [BOTTOM_SPACER_STYLE_ID]
- * and created only if it is missing, so running it at first paint, at
- * load finish, on every history update (SPA `pushState`), on a width
- * change and on every touch-down leaves exactly one. Nothing is left
- * running afterwards — no timer, no observer.
+ * Idempotent: the rule lives in one constructed stylesheet adopted by
+ * the document (`document.adoptedStyleSheets`), found again on each
+ * pass by [BOTTOM_SPACER_MARK], so running it at first paint, at load
+ * finish, on every history update (SPA `pushState`), on a width change
+ * and on every touch-down leaves exactly one. Nothing is left running
+ * afterwards — no timer, no observer.
  *
- * `spacerDp` is converted to CSS px here, in the page: at default zoom
- * one CSS px is one dp, but a page without a mobile viewport is laid
- * out at its desktop width (980 px) and shown zoomed out, so the same
- * dp takes proportionally more CSS px. The factor is the layout width
- * over the device width, never below 1, and not tracked through
- * pinch-zoom (zooming in only makes the spacer generously tall).
+ * A constructed sheet, not a `<style>` element: `evaluateJavascript`
+ * runs in the page's own world, so an inserted `<style>` is inline
+ * style under the page's CSP — a `style-src` without `'unsafe-inline'`
+ * blocks it (the footer stays under the bar while the script reported
+ * a spacer, skewing the pull-to-refresh gate) and every insert or
+ * rewrite sends the site a violation report, a fingerprint of this
+ * browser. CSSOM-built sheets are not subject to `style-src`, so the
+ * spacer applies on such pages too and reports nothing. The answer is
+ * still checked against the computed `::after` after every write, and
+ * a rule that did not take is withdrawn and reported as `0`, so the
+ * height handed back is always the one actually on the page.
  *
  * Recomputed on every run, not frozen at insertion: `configChanges`
  * keeps the document across a rotation, and both inputs move with it —
@@ -118,30 +129,40 @@ internal fun bottomSpacerJs(spacerDp: Int): String = """
     var h = document.documentElement;
     var b = document.body;
     if (!h || !b) return -1;
-    var el = document.getElementById('$BOTTOM_SPACER_STYLE_ID');
-    var cur = el ? (parseInt(el.getAttribute('data-px'), 10) || 0) : 0;
+    if (!('adoptedStyleSheets' in document) || typeof CSSStyleSheet !== 'function') return 0;
+    var sheet = null, cur = 0, list = document.adoptedStyleSheets, i;
+    for (i = 0; i < list.length; i++) {
+      var r = list[i].cssRules && list[i].cssRules[0];
+      var v = r && r.style ? parseInt(r.style.getPropertyValue('$BOTTOM_SPACER_MARK'), 10) : NaN;
+      if (v > 0) { sheet = list[i]; cur = v; break; }
+    }
+    var drop = function () {
+      var keep = [], all = document.adoptedStyleSheets, j;
+      for (j = 0; j < all.length; j++) if (all[j] !== sheet) keep.push(all[j]);
+      document.adoptedStyleSheets = keep;
+      return 0;
+    };
     var hidden = /hidden|clip/;
     if (hidden.test(getComputedStyle(h).overflowY) ||
         hidden.test(getComputedStyle(b).overflowY)) {
-      if (!el) return 0;
+      if (!sheet) return 0;
       var se = document.scrollingElement || h;
       var bottom = (window.scrollY || se.scrollTop || 0) +
         Math.max(window.innerHeight || 0, se.clientHeight || 0);
       if (bottom > se.scrollHeight - cur) return cur;
-      el.remove();
-      return 0;
+      return drop();
     }
     var k = Math.max(1, h.clientWidth / (screen.width || h.clientWidth));
     var px = Math.ceil($spacerDp * k);
-    if (el && cur === px) return px;
-    if (!el) {
-      el = document.createElement('style');
-      el.id = '$BOTTOM_SPACER_STYLE_ID';
-      (document.head || h).appendChild(el);
+    if (sheet && cur === px) return px;
+    if (!sheet) {
+      sheet = new CSSStyleSheet();
+      document.adoptedStyleSheets = list.concat([sheet]);
     }
-    el.setAttribute('data-px', String(px));
-    el.textContent = 'html::after{all:initial!important;content:""!important;' +
-      'display:block!important;clear:both!important;height:' + px + 'px!important}';
+    sheet.replaceSync('html::after{$BOTTOM_SPACER_MARK:' + px + ';all:initial!important;' +
+      'content:""!important;display:block!important;clear:both!important;' +
+      'height:' + px + 'px!important}');
+    if (getComputedStyle(h, '::after').content === 'none') return drop();
     return px;
   } catch (e) {
     return -1;
