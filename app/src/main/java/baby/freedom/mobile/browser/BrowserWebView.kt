@@ -677,7 +677,20 @@ private fun buildRefreshableWebView(
         // split-screen, and the zoom factor is against this one.
         val viewWidthDp = if (density > 0f) (view.width / density).roundToInt() else 0
         view.evaluateJavascript(bottomSpacerDecisionJs(spacerDp, viewWidthDp)) { result ->
-            bottomSpacer.accept(token, parseBottomSpacerResult(result), view.contentHeight)
+            val cssPx = parseBottomSpacerResult(result)
+            bottomSpacer.accept(token, cssPx, view.contentHeight)
+            if (cssPx != null && cssPx > 0) {
+                // `contentHeight` above is the last frame's, from before
+                // the rule; re-read it once the frame with it is ready.
+                view.postVisualStateCallback(
+                    token.request.toLong(),
+                    object : WebView.VisualStateCallback() {
+                        override fun onComplete(requestId: Long) {
+                            bottomSpacer.settleKept(token, view.contentHeight)
+                        }
+                    },
+                )
+            }
         }
     }
 

@@ -201,6 +201,12 @@ internal sealed interface SpacerState {
  * theme toggle) drops our sheet and with it `cssPx` of height, and the
  * pull-to-refresh discount must not outlive the sheet.
  *
+ * Nothing runs for a document before its first paint (commit visible or
+ * load finish, whichever [decideOnLoad] hears first). Between
+ * `onPageStarted` and then the WebView may still be showing — and a pass
+ * would measure — the *outgoing* document, and its answer would be taken
+ * for the new one's.
+ *
  * Pending and rejected documents are retried on load finish and on
  * touch-down — a rejected one only once the content height shows it has
  * grown. Touch-downs are capped per document: [SPACER_MAX_TOUCH_ATTEMPTS]
@@ -217,6 +223,12 @@ internal class BottomSpacerSlot {
 
     /** Content height when a kept sheet was last seen on the page; see [checkOnTouch]. */
     private var keptAtContentHeightCss = -1
+
+    /** The request whose "kept" answer [settleKept] may refine; see there. */
+    private var keptRequest = -1
+
+    /** Has this document painted (or finished)? Before that, see the class comment. */
+    private var painted = false
 
     var state: SpacerState = SpacerState.Pending
         private set
@@ -238,6 +250,8 @@ internal class BottomSpacerSlot {
         touchAttempts = 0
         lockedTouches = 0
         keptAtContentHeightCss = -1
+        keptRequest = -1
+        painted = false
         state = SpacerState.Pending
     }
 
@@ -249,8 +263,10 @@ internal class BottomSpacerSlot {
     }
 
     /** First paint / load finished: decide if this document is still undecided. */
-    fun decideOnLoad(contentHeightCss: Int): Token? =
-        if (inFlight == null && undecided(contentHeightCss)) begin() else null
+    fun decideOnLoad(contentHeightCss: Int): Token? {
+        painted = true
+        return if (inFlight == null && undecided(contentHeightCss)) begin() else null
+    }
 
     /**
      * Touch-down: retry an undecided document. Charged to
@@ -258,7 +274,7 @@ internal class BottomSpacerSlot {
      * answers "locked" (see [accept]).
      */
     fun decideOnTouch(contentHeightCss: Int): Token? {
-        if (inFlight != null) return null
+        if (!painted || inFlight != null) return null
         if (touchAttempts >= SPACER_MAX_TOUCH_ATTEMPTS || lockedTouches >= SPACER_MAX_LOCKED_TOUCHES) return null
         if (!undecided(contentHeightCss)) return null
         touchAttempts++
@@ -272,7 +288,7 @@ internal class BottomSpacerSlot {
      */
     fun checkOnTouch(contentHeightCss: Int): Token? {
         val s = state
-        if (s !is SpacerState.Kept || s.stale || inFlight != null) return null
+        if (!painted || s !is SpacerState.Kept || s.stale || inFlight != null) return null
         if (contentHeightCss == keptAtContentHeightCss) return null
         return Token(document, request)
     }
@@ -281,8 +297,11 @@ internal class BottomSpacerSlot {
      * Width change (rotation): always a fresh decision, superseding any in
      * flight. A kept spacer counts as kept until the pass answers — under
      * a scroll lock the pass leaves it in place, marked [SpacerState.Kept.stale].
+     * Before first paint nothing runs: the document is still pending, and
+     * [decideOnLoad] measures it at the new width.
      */
-    fun decideOnWidthChange(): Token {
+    fun decideOnWidthChange(): Token? {
+        if (!painted) return null
         state = when (val s = state) {
             is SpacerState.Kept -> s.copy(stale = true)
             else -> SpacerState.Pending
@@ -324,12 +343,32 @@ internal class BottomSpacerSlot {
             touchAttempts--
             lockedTouches++
         }
-        if (cssPx != null && cssPx > 0) keptAtContentHeightCss = contentHeightCss
+        if (cssPx != null && cssPx > 0) {
+            keptAtContentHeightCss = contentHeightCss
+            keptRequest = token.request
+        }
         state = when {
             cssPx == null -> state // pending: a stale kept sheet is still on the page
             cssPx > 0 -> SpacerState.Kept(cssPx)
             else -> SpacerState.Rejected(contentHeightCss)
         }
+    }
+
+    /**
+     * The frame after a kept answer ([token] is the pass that kept it):
+     * [contentHeightCss] now includes the spacer. The height [accept] got
+     * is `getContentHeight()` at callback time, which comes from the last
+     * compositor frame and usually predates the rule — recorded as is,
+     * the first touch-down would see the spacer's own height as a change
+     * and run a needless presence check. Ignored if anything has been
+     * decided since. (A rejected answer needs no such refinement: the
+     * rule was removed before any frame, so the page never changed.)
+     */
+    fun settleKept(token: Token, contentHeightCss: Int) {
+        val s = state
+        if (token.document != document || token.request != keptRequest) return
+        if (s !is SpacerState.Kept || s.stale || inFlight != null) return
+        keptAtContentHeightCss = contentHeightCss
     }
 
     private fun begin(touch: Boolean = false): Token =

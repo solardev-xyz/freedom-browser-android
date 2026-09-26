@@ -239,14 +239,14 @@ class PageBottomSpacerTest {
     fun `a width change decides afresh and supersedes a pass in flight`() {
         val slot = BottomSpacerSlot()
         slot.accept(slot.decideOnLoad(height)!!, 82, height)
-        val inFlight = slot.decideOnWidthChange()
-        val rotated = slot.decideOnWidthChange()
+        val inFlight = slot.decideOnWidthChange()!!
+        val rotated = slot.decideOnWidthChange()!!
         slot.accept(inFlight, 58, height)
         assertEquals(SpacerState.Kept(82, stale = true), slot.state) // superseded answer ignored
         slot.accept(rotated, 106, height)
         assertEquals(SpacerState.Kept(106), slot.state)
         // …and a rejected document gets a fresh chance too.
-        slot.accept(slot.decideOnWidthChange(), 0, height)
+        slot.accept(slot.decideOnWidthChange()!!, 0, height)
         assertEquals(SpacerState.Rejected(height), slot.state)
         assertNotNull(slot.decideOnWidthChange())
     }
@@ -257,7 +257,7 @@ class PageBottomSpacerTest {
         // pass leaves our sheet alone and answers pending.
         val slot = BottomSpacerSlot()
         slot.accept(slot.decideOnLoad(height)!!, 82, height)
-        slot.accept(slot.decideOnWidthChange(), null, height)
+        slot.accept(slot.decideOnWidthChange()!!, null, height)
         assertEquals(SpacerState.Kept(82, stale = true), slot.state)
         assertEquals(82, slot.discountCssPx) // still on the page
         slot.accept(slot.decideOnTouch(height)!!, null, height) // still locked
@@ -332,6 +332,59 @@ class PageBottomSpacerTest {
         val check = slot.checkOnHistoryChange()!!
         slot.startDocument()
         assertNull(slot.acceptPresence(check, present = false, height))
+    }
+
+    @Test
+    fun `nothing is measured between page start and the new document's first paint`() {
+        // Address-bar load: onPageStarted fires while the old page, rejected
+        // at 3000 px, is still on screen and still being scrolled.
+        val slot = BottomSpacerSlot()
+        slot.accept(slot.decideOnLoad(3000)!!, 0, 3000)
+        slot.startDocument()
+        assertNull(slot.decideOnTouch(3000)) // would measure the outgoing page
+        assertNull(slot.checkOnTouch(3000))
+        assertNull(slot.decideOnWidthChange())
+        assertEquals(SpacerState.Pending, slot.state)
+        assertEquals(0, slot.touchAttempts)
+        // First paint of a 2000 px article: decided on its own measure.
+        slot.accept(slot.decideOnLoad(2000)!!, 82, 2000)
+        assertEquals(SpacerState.Kept(82), slot.state)
+    }
+
+    @Test
+    fun `touch-downs retry again once the new document has painted`() {
+        val slot = BottomSpacerSlot()
+        slot.startDocument()
+        assertNull(slot.decideOnTouch(height))
+        slot.accept(slot.decideOnLoad(height)!!, null, height) // locked at first paint
+        assertNotNull(slot.decideOnTouch(height))
+    }
+
+    @Test
+    fun `a kept spacer's height is re-read after its frame, so the first touch runs nothing`() {
+        // accept() got getContentHeight() from the frame before the rule.
+        val slot = BottomSpacerSlot()
+        val t = slot.decideOnLoad(height)!!
+        slot.accept(t, 82, height)
+        slot.settleKept(t, height + 82)
+        assertNull(slot.checkOnTouch(height + 82))
+        assertNotNull(slot.checkOnTouch(height)) // the sheet's height went: look
+    }
+
+    @Test
+    fun `a late frame reading does not speak for a later decision or document`() {
+        val slot = BottomSpacerSlot()
+        val first = slot.decideOnLoad(height)!!
+        slot.accept(first, 82, height)
+        val rotated = slot.decideOnWidthChange()!!
+        slot.accept(rotated, 106, height + 82)
+        slot.settleKept(first, 9999) // superseded by the rotation's answer
+        assertNull(slot.checkOnTouch(height + 82))
+        slot.settleKept(rotated, height + 106)
+        assertNull(slot.checkOnTouch(height + 106))
+        slot.startDocument()
+        slot.settleKept(rotated, 1234)
+        assertEquals(SpacerState.Pending, slot.state)
     }
 
     // ---- pull-to-refresh discount ------------------------------------
