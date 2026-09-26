@@ -119,11 +119,29 @@ class BrowserState(val id: Long) {
         internal set
 
     /**
-     * The strip colour the page reported with a reserved mode (an
-     * `rgb(r, g, b)` string, see [bottomStripArgb]); null for "none found".
+     * The strip colour under the bar while the page area is shortened (an
+     * `rgb(r, g, b)` string, see [bottomStripArgb]): the one the page
+     * reported with a reserved mode, or the page's own bottom row sampled
+     * for a reveal (#65); null for "none found".
      */
     var bottomStripRgb: String? by mutableStateOf<String?>(null)
         internal set
+
+    /**
+     * The chrome is busy with the address bar or the keyboard, so a push
+     * at the end of the page doesn't reveal it (#65, [revealAllowed]).
+     * Written by [BrowserScreen] for the active tab; read by the tab's
+     * WebView on touch-down. Plain field: nothing recomposes on it.
+     */
+    internal var chromeEditing: Boolean = false
+
+    /**
+     * The theme surface as opaque ARGB, the colour a reveal (#65) falls
+     * back to when its sample of the page's bottom row failed: under the
+     * drag, and as the strip (a null [bottomStripRgb] resolves to it,
+     * see [bottomStripArgb]). Written by [BrowserScreen]; plain field.
+     */
+    internal var surfaceArgb: Int = 0xFF000000.toInt()
 
     /**
      * Most recent page-preview bitmap for this tab, shown in the tab

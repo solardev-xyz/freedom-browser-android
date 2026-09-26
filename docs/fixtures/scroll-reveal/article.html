@@ -1,0 +1,17 @@
+<!doctype html><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Long article</title>
+<link rel="stylesheet" href="../reserved-mode/base.css"><script src="../reserved-mode/common.js"></script>
+<style>
+  header { position:sticky; top:0; background:var(--card); padding:8px 16px; font-weight:600; }
+  footer { padding:16px; background:var(--nav); color:var(--navfg); }
+  footer button { font:600 16px system-ui; padding:10px 18px; }
+</style>
+<header>Sticky header</header>
+<h1>A long article</h1><div id="rows"></div>
+<footer>
+  <p>Footer · <a href="#top" data-name="footer link" style="color:inherit">a footer link</a></p>
+  <button data-name="footer button">Footer button</button>
+  <div>Last line of the footer</div>
+</footer>
+<script>fixture.rows(document.getElementById('rows'), 30);</script>

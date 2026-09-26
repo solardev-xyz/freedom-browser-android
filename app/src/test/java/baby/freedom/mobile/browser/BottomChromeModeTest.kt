@@ -3,6 +3,7 @@ package baby.freedom.mobile.browser
 import androidx.compose.ui.unit.dp
 import baby.freedom.mobile.browser.BottomChromeMode.Overlay
 import baby.freedom.mobile.browser.BottomChromeMode.Reserved
+import baby.freedom.mobile.browser.BottomChromeMode.Revealed
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -27,6 +28,23 @@ class BottomChromeModeTest {
     fun `reserved reserves the resting capsule plus the navigation inset`() {
         assertEquals(58.dp + nav, contentBottomReserve(Reserved, false, footprint, nav, 0.dp))
         assertEquals(58.dp + nav, reservedFootprint(nav))
+    }
+
+    @Test
+    fun `revealed uses exactly the reserved band, so revealed to reserved doesn't move the page`() {
+        for (kbd in listOf(false, true)) {
+            for (fp in listOf(footprint, editingFootprint)) {
+                val ime = if (kbd) 300.dp else 0.dp
+                assertEquals(
+                    contentBottomReserve(Reserved, kbd, fp, nav, ime),
+                    contentBottomReserve(Revealed, kbd, fp, nav, ime),
+                )
+                assertEquals(capsuleOverlap(Reserved, kbd, fp, nav), capsuleOverlap(Revealed, kbd, fp, nav))
+            }
+        }
+        assertTrue(Revealed.shortensPage)
+        assertTrue(Reserved.shortensPage)
+        assertFalse(Overlay.shortensPage)
     }
 
     @Test

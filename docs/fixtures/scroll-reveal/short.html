@@ -1,0 +1,25 @@
+<!doctype html><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Short page</title>
+<link rel="stylesheet" href="../reserved-mode/base.css"><script src="../reserved-mode/common.js"></script>
+<style> button { font:600 16px system-ui; padding:8px 18px; } </style>
+<h1>A short page</h1>
+<p>Shorter than the viewport, so it can't scroll. Its button sits under the bar.</p>
+<div id="gap"></div>
+<button data-name="button under the bar">Button under the bar</button>
+<script>
+  // Placed in px (not vh) against the tallest viewport seen, so the page
+  // stays shorter than its full-height viewport and the button ends ~8px
+  // above the screen bottom. Re-placed only when the viewport grows (the
+  // keyboard closing after the URL was typed), never when it shrinks (the
+  // reveal itself).
+  var g = document.getElementById('gap'), tallest = 0;
+  function place() {
+    if (innerHeight <= tallest) return;
+    tallest = innerHeight;
+    g.style.height = '0px';
+    g.style.height = (tallest - g.getBoundingClientRect().top - window.scrollY - 48) + 'px';
+  }
+  place(); addEventListener('resize', place); addEventListener('load', place);
+  setTimeout(place, 1000);
+</script>
