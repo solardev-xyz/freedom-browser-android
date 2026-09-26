@@ -61,7 +61,7 @@ class PageBottomSpacerTest {
         assertTrue(js.contains("'$BOTTOM_SPACER_MARK'"))
         assertTrue(js.contains("new CSSStyleSheet()"))
         assertFalse(js.contains("createElement"))
-        assertTrue(js.contains("html::after"))
+        assertTrue(js.contains("(onBody ? 'body' : 'html') + '::after{"))
     }
 
     // ---- result parsing ----------------------------------------------

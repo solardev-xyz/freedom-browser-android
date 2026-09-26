@@ -19,9 +19,18 @@ class BottomSpacerScriptTest {
     // `ours()` is the spacer's constructed sheet while the document has
     // it adopted, else null. `cspBlocksSheets` makes every constructed
     // rule fail to take, the way a blocked write would look.
+    //
+    // Layout, as Chromium does it: the body box is `bodyH` tall and its
+    // in-flow content `contentH` (both `baseHeight` unless set; content
+    // taller than the box is overflow). `html::after` sits under the body
+    // *box*; `body::after` after the body's content. `absBottom` is the
+    // end of an absolutely positioned element.
     private val fakeDom = """
         var htmlOverflowY = 'visible', bodyOverflowY = 'visible';
-        var baseHeight = 2000;
+        var baseHeight = 2000, bodyH = null, contentH = null, absBottom = 0;
+        var bodyDisplay = 'block';
+        function bH() { return bodyH === null ? baseHeight : bodyH; }
+        function cH() { return contentH === null ? baseHeight : contentH; }
         var cspBlocksSheets = false, sheetsBuilt = 0, sheetWrites = 0;
         var screen = { width: 412 };
         var window = { scrollY: 0, innerHeight: 800 };
@@ -36,7 +45,8 @@ class BottomSpacerScriptTest {
             props = {};
             var m = /(--[a-z-]+):(\d+)/.exec(text);
             if (m) props[m[1]] = m[2];
-            self.cssRules = cspBlocksSheets ? [] : [{ style: {
+            self.cssRules = cspBlocksSheets ? [] : [{
+              selectorText: /^[a-z]+::after/.exec(text)[0], style: {
               getPropertyValue: function (k) { return k in props ? props[k] : ''; } } }];
           };
         }
@@ -52,20 +62,36 @@ class BottomSpacerScriptTest {
           if (!s || !s.cssRules.length) return 0;
           return parseInt(s.cssRules[0].style.getPropertyValue('$BOTTOM_SPACER_MARK'), 10) || 0;
         }
+        function placedOn() {
+          var s = ours();
+          return s && s.cssRules.length ? s.cssRules[0].selectorText.split(':')[0] : '';
+        }
+        function onBody() { return placedOn() === 'body' ? spacerPx() : 0; }
+        function onHtml() { return placedOn() === 'html' ? spacerPx() : 0; }
         var html = {
           clientWidth: 412,
-          get scrollHeight() { return baseHeight + spacerPx(); },
+          get scrollHeight() {
+            return Math.max(window.innerHeight, bH() + onHtml(), cH() + onBody(), absBottom);
+          },
           get clientHeight() { return window.innerHeight; },
           get scrollTop() { return window.scrollY; }
         };
-        var body = {};
+        var body = {
+          get scrollHeight() { return Math.max(bH(), cH() + onBody()); },
+          get clientHeight() { return bH(); },
+          getBoundingClientRect: function () { return { bottom: bH() - window.scrollY }; }
+        };
         document = {
           documentElement: html, body: body, scrollingElement: html,
           adoptedStyleSheets: [otherSheet]
         };
         function getComputedStyle(e, pseudo) {
-          if (pseudo) return { content: spacerPx() > 0 ? '""' : 'none' };
-          return { overflowY: e === html ? htmlOverflowY : bodyOverflowY };
+          if (pseudo) return { content: spacerPx() > 0 && placedOn() === (e === html ? 'html' : 'body') ? '""' : 'none' };
+          return {
+            overflowY: e === html ? htmlOverflowY : bodyOverflowY,
+            display: e === html ? 'block' : bodyDisplay,
+            marginBottom: '0px', paddingBottom: '0px', borderBottomWidth: '0px'
+          };
         }
     """
 
@@ -212,6 +238,71 @@ class BottomSpacerScriptTest {
         eval("document.adoptedStyleSheets = [otherSheet]")
         assertEquals(82, run())
         assertEquals(1, styleCount)
+    }
+
+    // R3-F1: `html, body { height: 100% }` with content running past the
+    // body box. `html::after` would land under the box, inside the
+    // overflow, and add nothing; `body::after` follows the content.
+    @Test
+    fun `content overflowing a full-height body gets the spacer after it`() = doc {
+        eval("bodyH = 800; contentH = 1540")
+        assertEquals(82, run())
+        assertEquals("body", eval("placedOn()"))
+        assertEquals(1540 + 82, num("html.scrollHeight"))
+        assertEquals(82, run())
+        assertEquals(1, styleCount)
+    }
+
+    // R3-F1: the verifier's 60 px case — html::after would only have
+    // grown it 923 -> 945 while reporting 82, flipping the PTR gate.
+    @Test
+    fun `a small overflow past the body box still gets the whole spacer`() = doc {
+        eval("bodyH = 863; contentH = 923; window.innerHeight = 863")
+        assertEquals(82, run())
+        assertEquals(923 + 82, num("html.scrollHeight"))
+        assertTrue(documentScrollsPastSpacer(true, 923 + 82, 82, 863, 1f))
+    }
+
+    @Test
+    fun `the placement follows the page as it grows and shrinks`() = doc {
+        eval("bodyH = 800; contentH = 300")
+        assertEquals(82, run())
+        assertEquals("html", eval("placedOn()"))
+        eval("contentH = 1540") // infinite scroll loads more
+        assertEquals(82, run())
+        assertEquals("body", eval("placedOn()"))
+        eval("contentH = 780") // back inside the box; the spacer alone must not keep it on body
+        assertEquals(82, run())
+        assertEquals("html", eval("placedOn()"))
+        assertEquals(1, styleCount)
+    }
+
+    // A flex/grid body is never given `body::after` (it would be a
+    // flex/grid item); when its content overflows the box the spacer
+    // cannot end the document, and the script says so.
+    @Test
+    fun `a flex body overflowing its box reports no spacer`() = doc {
+        eval("bodyDisplay = 'flex'; bodyH = 800; contentH = 1540")
+        assertEquals(0, run())
+        assertEquals("html", eval("placedOn()"))
+        eval("sheetWrites = 0")
+        assertEquals(0, run()) // inert, and not rewritten on every pass
+        assertEquals(0, num("sheetWrites"))
+    }
+
+    @Test
+    fun `positioned content past the spacer reports no spacer`() = doc {
+        eval("bodyH = 800; contentH = 100; absBottom = 1500")
+        assertEquals(0, run())
+        eval("absBottom = 0") // the positioned element goes away
+        assertEquals(82, run())
+    }
+
+    @Test
+    fun `a short page reports the spacer it gets`() = doc {
+        eval("bodyH = 300; contentH = 300; window.innerHeight = 800")
+        assertEquals(82, run())
+        assertEquals("html", eval("placedOn()"))
     }
 
     @Test

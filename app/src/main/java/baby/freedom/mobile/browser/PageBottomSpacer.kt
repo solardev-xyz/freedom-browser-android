@@ -26,6 +26,16 @@ import kotlin.math.ceil
 //    where it adds no height at all. `<html>` is essentially never laid
 //    out that way, and `all: initial` below strips anything a site's own
 //    `html::after` rule might put on it.
+//  - Except when the body's own content overflows it. With
+//    `html, body { height: 100% }` (or a `100vh` body) the body box is
+//    one viewport tall and the page runs on past it as overflow;
+//    `html::after` then lands right under the body *box*, inside that
+//    overflow, and adds no scroll range. There — and only for a
+//    block-level body, where the pseudo-element is plain flow after the
+//    last child — the rule moves to `body::after`, which sits after the
+//    overflowing content. Each pass picks the placement afresh, so a
+//    page that grows past (or shrinks back inside) its body box moves
+//    the spacer with it.
 //
 // Never per frame. The height is the bar's *resting* footprint plus the
 // navigation inset — `capsuleOverlap` in [BrowserScreen] without the
@@ -44,7 +54,10 @@ import kotlin.math.ceil
 // Where it does nothing — #66's territory (reserved mode): elements that
 // are `position: fixed; bottom: 0`, app shells with `overflow: hidden`
 // on `html`/`body` (skipped outright, see [bottomSpacerJs]), pages that
-// scroll an inner container, and `100vh` layouts.
+// scroll an inner container, flex/grid bodies whose content overflows
+// the body box, and pages whose end is set by positioned content. The
+// script reports `0` for all of these (see "Does it end the document?"
+// in [bottomSpacerJs]).
 
 /**
  * Custom property that marks the spacer's rule and carries its height in
@@ -102,7 +115,20 @@ internal fun bottomSpacerApplies(url: String?): Boolean =
  * the navigation inset (3-button nav: 0 in landscape, 48 dp in
  * portrait) and a desktop-width page's zoom factor. A run whose height
  * differs from the one on the page rewrites the rule; one that matches
- * touches nothing, so the touch-down pass costs two style reads.
+ * touches nothing, so the touch-down pass is a handful of style and
+ * geometry reads — no write, and no layout of its own.
+ *
+ * Does it end the document? A spacer that is on the page but not at
+ * its end is worth nothing: the footer stays under the bar, and
+ * discounting its height from the pull-to-refresh gate would subtract
+ * range the page never got. So every pass checks that the document's
+ * scroll extent ends where the spacer does (the body's box, its bottom
+ * margin, the spacer or the body's overflow including it, `<html>`'s
+ * own bottom padding/border/margin; or the viewport, on a short page).
+ * When something else reaches further — a flex/grid body's overflow,
+ * an absolutely positioned element — it reports `0`. The rule is left
+ * in place (it is inert there, and dropping it only to put it back on
+ * the next pass would churn the page's styles on every touch-down).
  *
  * Scroll locks. While `<html>` or `<body>` hides vertical overflow the
  * document does not scroll — either an app shell, by design, or a page
@@ -119,7 +145,8 @@ internal fun bottomSpacerApplies(url: String?): Boolean =
  *    the modal and leave the page ~a bar higher when it closes, so it
  *    stays until a later pass finds the page unlocked again.
  *
- * Returns the spacer's height in CSS px, `0` when the document has none,
+ * Returns the spacer's height in CSS px, `0` when the document has none
+ * (or has one that does not end it),
  * or `-1` when it could not tell (no `<body>` yet — a later pass will
  * decide). Deliberately total, like [ROOT_PAN_STYLES_JS].
  */
@@ -142,27 +169,37 @@ internal fun bottomSpacerJs(spacerDp: Int): String = """
       document.adoptedStyleSheets = keep;
       return 0;
     };
+    var se = document.scrollingElement || h;
+    var hs = getComputedStyle(h), bs = getComputedStyle(b);
     var hidden = /hidden|clip/;
-    if (hidden.test(getComputedStyle(h).overflowY) ||
-        hidden.test(getComputedStyle(b).overflowY)) {
+    if (hidden.test(hs.overflowY) || hidden.test(bs.overflowY)) {
       if (!sheet) return 0;
-      var se = document.scrollingElement || h;
       var bottom = (window.scrollY || se.scrollTop || 0) +
         Math.max(window.innerHeight || 0, se.clientHeight || 0);
       if (bottom > se.scrollHeight - cur) return cur;
       return drop();
     }
+    var onBody = !!sheet && /^body/.test(sheet.cssRules[0].selectorText || '');
+    var toBody = se !== b && /^(block|flow-root|list-item)$/.test(bs.display) &&
+      b.scrollHeight - (onBody ? cur : 0) > b.clientHeight + 1;
     var k = Math.max(1, h.clientWidth / (screen.width || h.clientWidth));
     var px = Math.ceil($spacerDp * k);
-    if (sheet && cur === px) return px;
-    if (!sheet) {
-      sheet = new CSSStyleSheet();
-      document.adoptedStyleSheets = list.concat([sheet]);
+    if (!sheet || cur !== px || onBody !== toBody) {
+      if (!sheet) {
+        sheet = new CSSStyleSheet();
+        document.adoptedStyleSheets = list.concat([sheet]);
+      }
+      onBody = toBody;
+      sheet.replaceSync((onBody ? 'body' : 'html') + '::after{$BOTTOM_SPACER_MARK:' + px +
+        ';all:initial!important;content:""!important;display:block!important;' +
+        'clear:both!important;height:' + px + 'px!important}');
+      if (getComputedStyle(onBody ? b : h, '::after').content === 'none') return drop();
     }
-    sheet.replaceSync('html::after{$BOTTOM_SPACER_MARK:' + px + ';all:initial!important;' +
-      'content:""!important;display:block!important;clear:both!important;' +
-      'height:' + px + 'px!important}');
-    if (getComputedStyle(h, '::after').content === 'none') return drop();
+    var n = function (s, p) { return parseFloat(s[p]) || 0; };
+    var end = b.getBoundingClientRect().bottom + (window.scrollY || se.scrollTop || 0) +
+      n(bs, 'marginBottom') + (onBody ? Math.max(0, b.scrollHeight - b.clientHeight) : px) +
+      n(hs, 'paddingBottom') + n(hs, 'borderBottomWidth') + n(hs, 'marginBottom');
+    if (se !== b && se.scrollHeight > Math.max(end, se.clientHeight || 0) + 2) return 0;
     return px;
   } catch (e) {
     return -1;
