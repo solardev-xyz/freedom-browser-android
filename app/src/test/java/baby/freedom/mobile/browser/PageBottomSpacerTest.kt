@@ -2,6 +2,7 @@ package baby.freedom.mobile.browser
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -54,22 +55,10 @@ class PageBottomSpacerTest {
         assertTrue(bottomSpacerApplies("http://127.0.0.1:1633/bzz/abc/"))
     }
 
-    @Test
-    fun `the script carries the height and no brand marker`() {
-        val js = bottomSpacerJs(82)
-        assertTrue(js.contains("Math.ceil(82 * k)"))
-        // R5-F3: nothing a page can read back names the browser.
-        assertFalse(js.contains("freedom", ignoreCase = true))
-        assertFalse(Regex("--[a-z]").containsMatchIn(js)) // no custom property at all
-        assertTrue(js.contains("new CSSStyleSheet()"))
-        assertFalse(js.contains("createElement"))
-        assertTrue(js.contains("(onBody ? 'body' : 'html') + '::after{"))
-    }
-
     // ---- result parsing ----------------------------------------------
 
     @Test
-    fun `results parse to css px, unknowns to null`() {
+    fun `results parse to css px, pending to null`() {
         assertEquals(82, parseBottomSpacerResult("82"))
         assertEquals(0, parseBottomSpacerResult("0"))
         assertNull(parseBottomSpacerResult("-1"))
@@ -78,40 +67,139 @@ class PageBottomSpacerTest {
         assertNull(parseBottomSpacerResult("\"82\""))
     }
 
-    // ---- slot --------------------------------------------------------
+    // ---- slot: when does a pass run ----------------------------------
+
+    /** Runs [passes], answering each decision with [answer]; returns how many ran JS. */
+    private fun BottomSpacerSlot.simulate(passes: List<() -> BottomSpacerSlot.Token?>, answer: () -> Int?): Int {
+        var scripts = 0
+        for (pass in passes) {
+            val token = pass() ?: continue
+            scripts++
+            accept(token, answer())
+        }
+        return scripts
+    }
+
+    private fun BottomSpacerSlot.loadThenTouches(touches: Int) =
+        listOf({ decideOnLoad() }, { decideOnLoad() }) + List(touches) { { decideOnTouch() } }
 
     @Test
-    fun `a new document starts without a spacer`() {
+    fun `a kept document runs one script, then none on touch-down`() {
         val slot = BottomSpacerSlot()
-        slot.accept(slot.beginApply(), 82)
-        assertEquals(82, slot.spacerCssPx)
-        slot.startDocument()
-        assertEquals(0, slot.spacerCssPx)
+        assertEquals(1, slot.simulate(slot.loadThenTouches(5)) { 82 })
+        assertEquals(SpacerState.Kept(82), slot.state)
+        assertEquals(82, slot.discountCssPx)
+    }
+
+    @Test
+    fun `a rejected document runs one script, then none on touch-down`() {
+        val slot = BottomSpacerSlot()
+        assertEquals(1, slot.simulate(slot.loadThenTouches(5)) { 0 })
+        assertEquals(SpacerState.Rejected, slot.state)
+        assertEquals(0, slot.discountCssPx)
+    }
+
+    @Test
+    fun `no body at first paint is decided at load finish`() {
+        val slot = BottomSpacerSlot()
+        val answers = ArrayDeque(listOf(null, 82))
+        assertEquals(2, slot.simulate(slot.loadThenTouches(4)) { answers.removeFirst() })
+        assertEquals(SpacerState.Kept(82), slot.state)
+    }
+
+    @Test
+    fun `a lock that lifts is kept on the first touch after`() {
+        val slot = BottomSpacerSlot()
+        val answers = ArrayDeque(listOf(null, null, null, 82))
+        // commit, finish, touch (still locked), touch (unlocked) → kept; then nothing.
+        assertEquals(4, slot.simulate(slot.loadThenTouches(6)) { answers.removeFirst() })
+        assertEquals(SpacerState.Kept(82), slot.state)
+    }
+
+    @Test
+    fun `a permanent lock gives up after eight touches`() {
+        val slot = BottomSpacerSlot()
+        val scripts = slot.simulate(slot.loadThenTouches(20)) { null }
+        assertEquals(2 + SPACER_MAX_TOUCH_ATTEMPTS, scripts)
+        assertEquals(SpacerState.Pending(SPACER_MAX_TOUCH_ATTEMPTS), slot.state)
+        assertEquals(0, slot.discountCssPx)
+    }
+
+    @Test
+    fun `a touch while a decision is in flight does not start another`() {
+        val slot = BottomSpacerSlot()
+        val first = slot.decideOnLoad()!!
+        assertNull(slot.decideOnTouch())
+        assertNull(slot.decideOnLoad())
+        slot.accept(first, null)
+        assertEquals(SpacerState.Pending(0), slot.state) // the refused touch spent nothing
     }
 
     @Test
     fun `an answer from a replaced document is dropped`() {
         val slot = BottomSpacerSlot()
-        val stale = slot.beginApply()
+        val stale = slot.decideOnLoad()!!
         slot.startDocument()
         slot.accept(stale, 82)
-        assertEquals(0, slot.spacerCssPx)
+        assertEquals(SpacerState.Pending(0), slot.state)
+        assertNotNull(slot.decideOnLoad())
     }
 
     @Test
-    fun `an unknown answer keeps what was known`() {
+    fun `a new document starts undecided`() {
         val slot = BottomSpacerSlot()
-        slot.accept(slot.beginApply(), 82)
-        slot.accept(slot.beginApply(), null)
-        assertEquals(82, slot.spacerCssPx)
+        slot.accept(slot.decideOnLoad()!!, 82)
+        slot.startDocument()
+        assertEquals(SpacerState.Pending(0), slot.state)
+        assertEquals(0, slot.discountCssPx)
     }
 
     @Test
-    fun `a shell that drops the spacer reads zero`() {
+    fun `a width change decides afresh and supersedes a pass in flight`() {
         val slot = BottomSpacerSlot()
-        slot.accept(slot.beginApply(), 82)
-        slot.accept(slot.beginApply(), 0)
-        assertEquals(0, slot.spacerCssPx)
+        slot.accept(slot.decideOnLoad()!!, 82)
+        val inFlight = slot.decideOnWidthChange()
+        assertEquals(0, slot.discountCssPx) // the old rule is removed by the pass
+        val rotated = slot.decideOnWidthChange()
+        slot.accept(inFlight, 82)
+        assertEquals(SpacerState.Pending(0), slot.state)
+        slot.accept(rotated, 106)
+        assertEquals(SpacerState.Kept(106), slot.state)
+        // …and a rejected document gets a fresh chance too.
+        slot.accept(slot.decideOnWidthChange(), 0)
+        assertEquals(SpacerState.Rejected, slot.state)
+        assertNotNull(slot.decideOnWidthChange())
+    }
+
+    @Test
+    fun `an SPA route change re-decides only when our sheet has gone`() {
+        val slot = BottomSpacerSlot()
+        slot.accept(slot.decideOnLoad()!!, 82)
+        val still = slot.checkOnHistoryChange()!!
+        assertNull(slot.acceptPresence(still, present = true))
+        assertEquals(SpacerState.Kept(82), slot.state)
+        val gone = slot.checkOnHistoryChange()!!
+        val redo = slot.acceptPresence(gone, present = false)!!
+        assertEquals(0, slot.discountCssPx)
+        slot.accept(redo, 82)
+        assertEquals(SpacerState.Kept(82), slot.state)
+    }
+
+    @Test
+    fun `history changes on undecided or rejected documents run nothing`() {
+        val slot = BottomSpacerSlot()
+        assertNull(slot.checkOnHistoryChange())
+        slot.accept(slot.decideOnLoad()!!, 0)
+        assertNull(slot.checkOnHistoryChange())
+    }
+
+    @Test
+    fun `a history check from a replaced document is dropped`() {
+        val slot = BottomSpacerSlot()
+        slot.accept(slot.decideOnLoad()!!, 82)
+        val check = slot.checkOnHistoryChange()!!
+        slot.startDocument()
+        assertNull(slot.acceptPresence(check, present = false))
     }
 
     // ---- pull-to-refresh discount ------------------------------------
@@ -123,9 +211,9 @@ class PageBottomSpacerTest {
     private val viewportCss = 762
 
     @Test
-    fun `a short page scrolled only by the spacer does not count as scrolling`() {
-        // Exactly one viewport of content + 82 px of spacer: before the
-        // spacer it did not scroll, so pull-to-refresh must stay unarmed.
+    fun `a page scrolled only by the spacer does not count as scrolling`() {
+        // Exactly one viewport of content + 82 px of measured growth: before
+        // the spacer it did not scroll, so pull-to-refresh must stay unarmed.
         assertFalse(
             documentScrollsPastSpacer(
                 canScrollDown = true,

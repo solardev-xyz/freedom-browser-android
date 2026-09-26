@@ -658,32 +658,20 @@ private fun buildRefreshableWebView(
 
     // The end-of-document spacer that lets a page's last band scroll out
     // from under the floating bar (#65, interim — see
-    // [bottomSpacerJs]). Its height is remembered per document so the
-    // pull-to-refresh gate below can discount it.
+    // [bottomSpacerDecisionJs]). [BottomSpacerSlot] decides when a pass
+    // runs; once a document is decided, touch-downs run no script.
     val bottomSpacer = BottomSpacerSlot()
 
     /**
-     * (Re)apply the spacer to the document on screen. Idempotent, and
-     * run on the same hooks as [probeRootPanStyles] plus history
-     * updates (SPA route changes), width changes (rotation) and every
-     * touch-down. The height is read here, once per call, from the
-     * window's navigation inset — never per frame.
-     *
-     * The touch-down pass is what catches everything no navigation
-     * callback announces: a scroll lock (consent banner) lifting, the
-     * navigation inset changing, a rotation whose width change reached
-     * the renderer after the resize pass ran. It is a no-op on the
-     * page when nothing changed, and it lands before the drag gets
-     * past the touch slop, so the pull-to-refresh gate — re-asked on
-     * every intercepted move — already sees the height it reports.
+     * Run one spacer decision pass for [token]. The height is read here,
+     * once, from the window's navigation inset — never per frame.
      */
-    fun applyBottomSpacer(view: WebView?) {
-        if (view == null || !bottomSpacerApplies(view.url)) return
+    fun decideBottomSpacer(view: WebView, token: BottomSpacerSlot.Token?) {
+        if (token == null) return
         val navInsetPx = ViewCompat.getRootWindowInsets(view)
             ?.getInsets(WindowInsetsCompat.Type.systemBars())?.bottom ?: 0
         val spacerDp = bottomSpacerDp(navInsetPx, view.resources.displayMetrics.density)
-        val token = bottomSpacer.beginApply()
-        view.evaluateJavascript(bottomSpacerJs(spacerDp)) { result ->
+        view.evaluateJavascript(bottomSpacerDecisionJs(spacerDp)) { result ->
             bottomSpacer.accept(token, parseBottomSpacerResult(result))
         }
     }
@@ -762,10 +750,12 @@ private fun buildRefreshableWebView(
             }
             // A width change is a rotation (or a window resize): the
             // navigation inset and a desktop-width page's zoom factor
-            // both move with it, so re-size the #65 spacer. Height-only
-            // changes (the keyboard) deliberately leave it alone.
-            if (oldRight - oldLeft > 0 && (right - left) != (oldRight - oldLeft)) {
-                applyBottomSpacer(v as WebView)
+            // both move with it, so the #65 spacer is decided afresh.
+            // Height-only changes (the keyboard) leave it alone.
+            if (oldRight - oldLeft > 0 && (right - left) != (oldRight - oldLeft) &&
+                bottomSpacerApplies((v as WebView).url)
+            ) {
+                decideBottomSpacer(v, bottomSpacer.decideOnWidthChange())
             }
         }
 
@@ -803,9 +793,12 @@ private fun buildRefreshableWebView(
                 MotionEvent.ACTION_DOWN -> {
                     touchDownY = event.y
                     state.capsuleCollapse.onTouchDown()
-                    // Re-check the #65 spacer before this gesture can
-                    // scroll to the end (see [applyBottomSpacer]).
-                    applyBottomSpacer(this)
+                    // A scroll-locked document's #65 spacer is retried
+                    // here (a consent banner may have lifted); a decided
+                    // one runs nothing (see [BottomSpacerSlot]).
+                    if (bottomSpacerApplies(url)) {
+                        decideBottomSpacer(this, bottomSpacer.decideOnTouch())
+                    }
                 }
 
                 MotionEvent.ACTION_MOVE ->
@@ -940,7 +933,9 @@ private fun buildRefreshableWebView(
                 // styles are real: this is the earliest the #56 probe
                 // can answer, and pages are touchable from here on.
                 probeRootPanStyles(view)
-                applyBottomSpacer(view)
+                if (view != null && bottomSpacerApplies(url)) {
+                    decideBottomSpacer(view, bottomSpacer.decideOnLoad())
+                }
                 if (url == ABOUT_BLANK) return
                 visitGate.commit()
                 // A finish that beat this paint left its visit parked;
@@ -964,10 +959,11 @@ private fun buildRefreshableWebView(
                 // script) can be what sets `touch-action: none`, and
                 // that is not necessarily in place at first paint (#56).
                 probeRootPanStyles(view)
-                // Likewise the spacer: `<body>` may not have existed at
-                // first paint, and the page's own overflow rules may
-                // only be in place now.
-                applyBottomSpacer(view)
+                // Likewise the spacer, if first paint left it undecided
+                // (no `<body>` yet, or a scroll lock).
+                if (view != null && bottomSpacerApplies(url)) {
+                    decideBottomSpacer(view, bottomSpacer.decideOnLoad())
+                }
                 if (url != null && !ErrorPage.isErrorPage(url) && url != ABOUT_BLANK) {
                     autoRecoveredUrl = null
                 }
@@ -1091,10 +1087,15 @@ private fun buildRefreshableWebView(
 
             // A same-document history change (`pushState`, hash) gets
             // no commit or finish callback, and an SPA re-rendering its
-            // route can reset `adoptedStyleSheets`, spacer and all. Re-apply
-            // — a no-op when it is still there (#65).
+            // route can reset `adoptedStyleSheets`, spacer and all. A
+            // kept spacer is looked for (read-only) and decided afresh
+            // only if it has gone (#65).
             override fun doUpdateVisitedHistory(view: WebView?, url: String?, isReload: Boolean) {
-                applyBottomSpacer(view)
+                if (view == null || !bottomSpacerApplies(url)) return
+                val check = bottomSpacer.checkOnHistoryChange() ?: return
+                view.evaluateJavascript(BOTTOM_SPACER_PRESENT_JS) { result ->
+                    decideBottomSpacer(view, bottomSpacer.acceptPresence(check, result?.trim() != "0"))
+                }
             }
 
             override fun shouldOverrideUrlLoading(
@@ -1301,14 +1302,13 @@ private fun buildRefreshableWebView(
         val scale = webView.scale
         !pullToRefreshArmed(
             scrollY = webView.scrollY,
-            // Discounting the #65 spacer: it makes every short page
-            // scroll a little, and that must not arm the spinner on a
-            // page that did not scroll before (see
+            // Discounting the #65 spacer's measured growth: it must not
+            // arm the spinner on a page that did not scroll before (see
             // [documentScrollsPastSpacer]).
             documentScrollsDown = documentScrollsPastSpacer(
                 canScrollDown = webView.canScrollVertically(1),
                 contentHeightCss = webView.contentHeight,
-                spacerCss = bottomSpacer.spacerCssPx,
+                spacerCss = bottomSpacer.discountCssPx,
                 viewHeightPx = webView.height,
                 scale = scale,
             ),
