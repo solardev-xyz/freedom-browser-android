@@ -1,6 +1,7 @@
 package baby.freedom.mobile.browser
 
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
@@ -575,18 +576,61 @@ private fun addressBadgeBlock(hasBadge: Boolean): Dp =
     if (hasBadge) AddressPillBadgeSize + AddressPillBadgeGap else 0.dp
 
 /**
+ * What the leading navigation control looks like for a given history
+ * state (#62) — the one mapping from the tab's two history flags to the
+ * bar, stated apart from the composable so it can be tested on its own.
+ *
+ * Back is **always** on the bar: with nothing to pop it is drawn
+ * disabled rather than taken away, so history appearing or disappearing
+ * never moves the field. Forward has no slot of its own until there is
+ * somewhere to go — then the round Back button grows into a two-button
+ * pill holding both, Safari's shape, and Forward leaves the overflow
+ * menu (the pill is shown exactly when Forward is possible, so a menu
+ * entry could only ever be a disabled duplicate).
+ */
+internal data class NavControls(
+    /** Back is drawn active and takes taps; otherwise dimmed and inert. */
+    val backEnabled: Boolean,
+    /** The control is the Back + Forward pill rather than a round Back. */
+    val showsForward: Boolean,
+) {
+    /**
+     * Where [navPillProgress] is heading: 1 for the pill, 0 for the
+     * round button. Animated by the caller on the bar's own spring.
+     */
+    val pillTarget: Float get() = if (showsForward) 1f else 0f
+}
+
+internal fun navControlsFor(canGoBack: Boolean, canGoForward: Boolean): NavControls =
+    NavControls(backEnabled = canGoBack, showsForward = canGoForward)
+
+/**
+ * Width of the leading navigation control's *layout* slot, at a given
+ * fraction of the round → pill morph ([navPillProgress]: 0 the round
+ * Back button, 1 the Back + Forward pill).
+ *
+ * One [CapsuleControlSize] per button, so each half of the pill keeps
+ * Material's full 48 dp target, and the drawn pill stands the same 2 dp
+ * inside its slot the circle does — 44 dp tall, pill-ended. Linear in
+ * the fraction: the Forward half grows out of Back's trailing edge, and
+ * the field beside it gives up exactly what the pill takes.
+ */
+internal fun navControlWidth(navPillProgress: Float): Dp =
+    CapsuleControlSize * (1f + navPillProgress.coerceIn(0f, 1f))
+
+/**
  * Width of the address field at rest: the slot, less the round buttons
  * beside it and the gaps in front of them.
  *
- * Back is the one thing on the bar that comes and goes, and when it is
- * gone the field takes its slot rather than the bar keeping a hole on the
- * left: a tab with no history gets a wider field, not a gap where a
- * disabled button would be, and no substitute control is invented to fill
- * it (Home lives in the overflow menu, which is now inside the field).
+ * Back is always there (#62) — disabled rather than removed when there
+ * is no history — so the only thing on the bar that changes the field's
+ * width is Forward: [navPillProgress] grows the leading control from the
+ * round button into the Back + Forward pill ([navControlWidth]), and the
+ * field gives up the extra width as it does.
  */
-internal fun addressFieldRestingWidth(restingWidth: Dp, canGoBack: Boolean): Dp = (
+internal fun addressFieldRestingWidth(restingWidth: Dp, navPillProgress: Float = 0f): Dp = (
     restingWidth -
-        (if (canGoBack) CapsuleControlSize + CapsuleSplitGap else 0.dp) -
+        (navControlWidth(navPillProgress) + CapsuleSplitGap) -
         (CapsuleControlSize + CapsuleSplitGap)
     ).coerceAtLeast(0.dp)
 
@@ -594,15 +638,16 @@ internal fun addressFieldRestingWidth(restingWidth: Dp, canGoBack: Boolean): Dp 
  * …and where the centre of that field sits relative to the slot's own
  * centre line.
  *
- * Zero while both round buttons are there — the field is the middle of a
- * symmetric row — and half a button-and-gap towards the leading edge when
- * Back is not, which is what "the field takes the Back button's slot"
- * means in geometry. Everything the field draws is positioned from this
- * one number: its surface, its two controls and the domain label.
+ * Zero while the leading control is the round Back button — the field is
+ * the middle of a symmetric row — and half of Forward's extra slot
+ * towards the trailing edge once the pill has grown, which is what "the
+ * field gives up the width" means in geometry: its trailing edge stays
+ * put against the tab counter and its leading edge moves. Everything the
+ * field draws is positioned from this one number: its surface, its two
+ * controls and the domain label.
  */
-internal fun addressFieldCenterOffset(canGoBack: Boolean): Dp =
-    ((if (canGoBack) CapsuleControlSize + CapsuleSplitGap else 0.dp) -
-        (CapsuleControlSize + CapsuleSplitGap)) / 2f
+internal fun addressFieldCenterOffset(navPillProgress: Float = 0f): Dp =
+    (navControlWidth(navPillProgress) - CapsuleControlSize) / 2f
 
 /**
  * Width the address field's surface is actually drawn at, through both
@@ -619,12 +664,12 @@ internal fun addressFieldDrawnWidth(
     collapse: Float,
     editProgress: Float,
     restingWidth: Dp,
-    canGoBack: Boolean,
+    navPillProgress: Float,
     compactWidth: Dp,
 ): Dp = capsuleDrawnWidth(
     collapse = collapse,
     restingWidth = lerp(
-        addressFieldRestingWidth(restingWidth, canGoBack),
+        addressFieldRestingWidth(restingWidth, navPillProgress),
         restingWidth,
         editProgress.coerceIn(0f, 1f),
     ),
@@ -639,9 +684,9 @@ internal fun addressFieldDrawnWidth(
 internal fun addressFieldDrawnCenter(
     collapse: Float,
     editProgress: Float,
-    canGoBack: Boolean,
+    navPillProgress: Float,
 ): Dp = lerp(
-    lerp(addressFieldCenterOffset(canGoBack), 0.dp, editProgress.coerceIn(0f, 1f)),
+    lerp(addressFieldCenterOffset(navPillProgress), 0.dp, editProgress.coerceIn(0f, 1f)),
     0.dp,
     collapse.coerceIn(0f, 1f),
 )
@@ -681,26 +726,23 @@ internal fun capsuleLabelInset(
  * then sized to whatever that one layout came out as, so a label the
  * capsule was built to hold cannot elide inside it either.
  *
- * The Back button's slot is reserved here **whether or not there is
- * history to pop**, which is the one place this parts company with
- * [addressFieldRestingWidth]. `canGoBack` is the only thing in the
- * resting row that flips while the label itself stays put — an in-page
- * `pushState` gives a tab its first history entry without changing the
- * domain — and the compact capsule is sized from this one layout, so
- * letting the threshold follow it would re-ellipsise a long name and
- * step the compact capsule by the Back button's 48 dp in a single
- * frame, with no animation and no Back button on screen to explain it.
- * Reserved either way, what the label *says* depends only on the domain
- * and the window; only where it starts from still follows the button,
- * and there the button is on screen taking the room. The cost is a
- * domain between the two thresholds eliding on a tab with no history —
- * a settled ellipsis is worth more than the last 48 dp.
+ * Back no longer moves anything (#62): it is on the bar whether or not
+ * there is history, so a tab gaining its first entry cannot change this.
+ * Forward can — the pill takes 48 dp from the field — and it is decided
+ * off a Boolean, [reserveForward], never off the animated fraction, so
+ * the ellipsis still settles once per change rather than every frame of
+ * the morph. The caller holds it `true` for as long as *any* of the pill
+ * is on screen: the label steps down to the narrow field the moment
+ * Forward appears (the field is still wider than that, so it fits all
+ * the way through the grow), and only steps back up once the pill has
+ * fully shrunk away — never a label wider than the field it is in.
  */
 internal fun addressLabelMaxWidth(
     restingWidth: Dp,
     hasBadge: Boolean,
+    reserveForward: Boolean = false,
 ): Dp = (
-    addressFieldRestingWidth(restingWidth, canGoBack = true) -
+    addressFieldRestingWidth(restingWidth, if (reserveForward) 1f else 0f) -
         (AddressPillControlInset + CapsuleTrailingSlotSize) * 2 -
         addressBadgeBlock(hasBadge)
     ).coerceAtLeast(0.dp)
@@ -712,16 +754,16 @@ internal fun addressLabelMaxWidth(
  * The slots are the same size on both sides ([CapsuleTrailingSlotSize]
  * at [AddressPillControlInset]), so they cancel and the label's resting
  * centre is the *field's* centre — which is the slot's own centre line
- * whenever Back is there, and half a button-and-gap to the leading side
- * when it is not. The protocol badge is the one thing that moves it: it
+ * beside the round Back button, and follows the field towards the
+ * trailing side as the Back + Forward pill grows ([navPillProgress]). The protocol badge is the one thing that moves it: it
  * sits in front of the domain inside the same box, so the domain gives
  * up half the badge's block to keep the pair of them centred — and the
  * badge is then placed *from the domain* by
  * [addressBadgeCenterOffset], so the two are one group however this
  * moves.
  */
-internal fun addressLabelRestingCenter(canGoBack: Boolean, hasBadge: Boolean): Dp =
-    addressFieldCenterOffset(canGoBack) + addressBadgeBlock(hasBadge) / 2f
+internal fun addressLabelRestingCenter(navPillProgress: Float, hasBadge: Boolean): Dp =
+    addressFieldCenterOffset(navPillProgress) + addressBadgeBlock(hasBadge) / 2f
 
 /**
  * Where the protocol badge's own 16 dp box sits, relative to the same
@@ -789,11 +831,13 @@ internal fun addressLabelCenterOffset(collapse: Float, restingCenter: Dp): Dp =
  * node in the bar's `uiautomator` dump.)
  *
  * The order stated here is the split bar read left to right, which is
- * also the order the brief asks for: Back, the overflow menu, the
+ * also the order the brief asks for: Back, Forward (while the pill
+ * holds it), the overflow menu, the
  * protocol badge, the domain it marks, the field they sit on, Reload /
  * Stop, tabs. The bar's slot is the traversal group that carries it.
  */
 private const val CapsuleOrderBack = 0f
+private const val CapsuleOrderForward = 0.5f
 private const val CapsuleOrderOverflow = 1f
 private const val CapsuleOrderBadge = 2f
 private const val CapsuleOrderLabel = 3f
@@ -1226,9 +1270,10 @@ private fun CapsuleSurface(
  * three floating surfaces on one line over an edge-to-edge page, rather
  * than the single capsule that used to hold every control.
  *
- * Left to right: a **round Back button** (only while there is history to
- * pop — when there isn't, the field widens into its slot rather than the
- * bar keeping a hole or inventing a Home button to fill it), the
+ * Left to right: a **round Back button** (always there, drawn disabled
+ * when there is no history to pop, so the layout never shifts — and
+ * grown into a **Back + Forward pill** while there is somewhere to go
+ * forward, see [NavControls]), the
  * **address field** with the overflow menu on its leading edge, the
  * domain in the middle and Reload / Stop on its trailing edge, and a
  * **round tab counter**. Home lives in the overflow menu, as it has since
@@ -1397,12 +1442,31 @@ internal fun BottomToolbar(
         )
     }
     val textMeasurer = rememberTextMeasurer()
+    // The leading navigation control (#62): Back always, dimmed when
+    // there is nothing to pop, and grown into a Back + Forward pill
+    // while there is somewhere to go forward. The width change springs
+    // on the same expressive spatial spec the bar's other two morphs
+    // use, and every x on the bar — the field's edges, its centre, the
+    // domain label — is read off this one fraction, so the label stays
+    // centred in the field all the way through the grow.
+    val nav = navControlsFor(state.canGoBack, state.canGoForward)
+    val navPillAnimated by animateFloatAsState(
+        targetValue = nav.pillTarget,
+        animationSpec = MaterialTheme.motionScheme.defaultSpatialSpec(),
+        label = "navPill",
+    )
+    // Clamped like the other two fractions: the spring overshoots, and
+    // a pill narrower than the round button it grew from is not a shape.
+    val navPill = navPillAnimated.coerceIn(0f, 1f)
+    // The label's ellipsis is settled against the narrow field for as
+    // long as any of the pill is on screen — see [addressLabelMaxWidth].
+    val labelReservesForward = nav.showsForward || navPill > 0f
     // Where the domain settles at rest. Both of the things that move it
-    // are known here: the Back button (which decides where the field is)
+    // are known here: the navigation pill (which decides where the field is)
     // and the protocol badge (which shares the field's content box with
     // the label). See [addressLabelRestingCenter].
     val badge = protocolBadgeFor(state)
-    val labelRestingCenter = addressLabelRestingCenter(state.canGoBack, badge != null)
+    val labelRestingCenter = addressLabelRestingCenter(navPill, badge != null)
     // How far the settled compact label is scaled down from the settled
     // resting one, read off this density rather than assumed to be 14/16
     // (see [Density.addressLabelCompactScale]).
@@ -1443,6 +1507,7 @@ internal fun BottomToolbar(
         val labelMaxWidth = addressLabelMaxWidth(
             restingWidth = restingWidth,
             hasBadge = badge != null,
+            reserveForward = labelReservesForward,
         )
         val labelWidth = remember(restingLabel, restingLabelStyle, labelMaxWidth, density) {
             if (restingLabel.isEmpty()) 0.dp
@@ -1472,28 +1537,29 @@ internal fun BottomToolbar(
             collapse = collapse,
             editProgress = edit,
             restingWidth = restingWidth,
-            canGoBack = state.canGoBack,
+            navPillProgress = navPill,
             compactWidth = compactCapsuleWidth(
                 labelWidth = compactLabelWidth,
-                restingWidth = addressFieldRestingWidth(restingWidth, state.canGoBack),
+                restingWidth = addressFieldRestingWidth(restingWidth, navPill),
             ),
         )
-        val fieldCenter = addressFieldDrawnCenter(collapse, edit, state.canGoBack)
+        val fieldCenter = addressFieldDrawnCenter(collapse, edit, navPill)
         // Every x here is measured from the bar's leading edge, and
         // neither an offset nor a layer translation is mirrored for us the
         // way an alignment bias or a `start` padding would be.
         val direction =
             if (LocalLayoutDirection.current == LayoutDirection.Rtl) -1f else 1f
 
-        // Back — its own round surface on the leading edge, shown only
-        // while there is history to pop. When there isn't, nothing takes
-        // its place: the field simply widens into the slot (see
-        // [addressFieldRestingWidth]).
+        // Back — its own round surface on the leading edge, always there
+        // (#62): with no history to pop it is drawn disabled rather than
+        // taken away, so the field never shifts when history comes or
+        // goes. While Forward is possible the circle grows into a pill
+        // holding both buttons (see [NavPillButton]).
         //
         // Fully-collapsed controls are not composed at all, so a
         // zero-width Back button can never take a tap meant for the page
         // or the domain.
-        if (state.canGoBack && controlScale > 0f) {
+        if (controlScale > 0f) {
             Box(
                 modifier = Modifier
                     .align(Alignment.CenterStart)
@@ -1501,26 +1567,20 @@ internal fun BottomToolbar(
                         controlScale,
                         towardsStart = true,
                         topShift = controlTopShift,
-                        // The circle's shadow belongs on the page, not
+                        // The pill's shadow belongs on the page, not
                         // squared off at the slot's edge — see
                         // [Modifier.collapsingControl].
                         clip = false,
-                    )
-                    .semantics { traversalIndex = CapsuleOrderBack },
+                    ),
             ) {
-                CapsuleRoundButton {
-                    // Expressive shape variants: the icon buttons morph
-                    // from round to a squarer pressed shape on touch.
-                    // Purely visual — the 48 dp hit target and click
-                    // handlers are unchanged.
-                    IconButton(onClick = onBack, shapes = IconButtonDefaults.shapes()) {
-                        Icon(
-                            imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                            contentDescription = "Back",
-                            tint = contentColor,
-                        )
-                    }
-                }
+                NavPillButton(
+                    backEnabled = nav.backEnabled,
+                    forwardEnabled = nav.showsForward,
+                    pillProgress = navPill,
+                    contentColor = contentColor,
+                    onBack = onBack,
+                    onForward = onForward,
+                )
             }
         }
 
@@ -1569,7 +1629,6 @@ internal fun BottomToolbar(
                     state = state,
                     nodeInfo = nodeInfo,
                     isBookmarked = isBookmarked,
-                    onForward = onForward,
                     onHome = onHome,
                     onToggleBookmark = onToggleBookmark,
                     onOpenSettings = onOpenSettings,
@@ -1791,6 +1850,91 @@ private fun CapsuleRoundButton(
         content()
     }
 }
+
+/**
+ * The leading navigation control (#62): the round Back button, grown
+ * into a Back + Forward pill while there is forward history.
+ *
+ * One surface, not two circles: [CapsuleSurface] is drawn behind both
+ * buttons at the pill's current width, 2 dp inside the slot on every
+ * side like the circle — 44 dp tall, pill-ended — so at [pillProgress]
+ * 0 it *is* [CapsuleRoundButton] and at 1 it is Safari's pill. Each
+ * button keeps a full [CapsuleControlSize] target.
+ *
+ * Forward grows out of Back's trailing edge through the same
+ * [Modifier.collapsingControl] that takes the bar's controls away in the
+ * other two morphs — width and scale together, pivoting on the edge
+ * that faces Back — so the pill widens around a Forward arrow that is
+ * already the right size for the room it has. It is composed only while
+ * any of it is on screen, so a zero-width Forward cannot take a tap.
+ *
+ * A disabled button is a disabled [IconButton]: not clickable, no
+ * ripple, and reported disabled to accessibility services. Its glyph is
+ * dimmed by hand because the tint is stated rather than inherited (there
+ * is no [Surface] above it to provide a content colour).
+ */
+@OptIn(ExperimentalMaterial3ExpressiveApi::class)
+@Composable
+private fun NavPillButton(
+    backEnabled: Boolean,
+    forwardEnabled: Boolean,
+    pillProgress: Float,
+    contentColor: Color,
+    onBack: () -> Unit,
+    onForward: () -> Unit,
+) {
+    Box(contentAlignment = Alignment.CenterStart) {
+        CapsuleSurface(
+            shape = CircleShape,
+            modifier = Modifier
+                .matchParentSize()
+                .padding((CapsuleControlSize - CapsuleRestingHeight) / 2f),
+        )
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            IconButton(
+                onClick = onBack,
+                enabled = backEnabled,
+                shapes = IconButtonDefaults.shapes(),
+                modifier = Modifier.semantics { traversalIndex = CapsuleOrderBack },
+            ) {
+                Icon(
+                    imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                    contentDescription = "Back",
+                    tint = navGlyphTint(contentColor, backEnabled),
+                )
+            }
+            if (pillProgress > 0f) {
+                Box(
+                    modifier = Modifier
+                        .collapsingControl(pillProgress, towardsStart = true)
+                        .semantics { traversalIndex = CapsuleOrderForward },
+                ) {
+                    IconButton(
+                        onClick = onForward,
+                        enabled = forwardEnabled,
+                        shapes = IconButtonDefaults.shapes(),
+                    ) {
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Filled.ArrowForward,
+                            contentDescription = "Forward",
+                            tint = navGlyphTint(contentColor, forwardEnabled),
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Ink for a navigation glyph: the bar's own when the button can act,
+ * Material's 38 % disabled alpha of it when it cannot.
+ */
+private fun navGlyphTint(contentColor: Color, enabled: Boolean): Color =
+    if (enabled) contentColor else contentColor.copy(alpha = NavDisabledAlpha)
+
+/** Material's disabled-content alpha. */
+private const val NavDisabledAlpha = 0.38f
 
 /**
  * Take a flanking control away by interpolating its geometry: the slot
@@ -2657,7 +2801,6 @@ private fun OverflowMenuButton(
     state: BrowserState,
     nodeInfo: NodeInfo,
     isBookmarked: Boolean,
-    onForward: () -> Unit,
     onHome: () -> Unit,
     onToggleBookmark: () -> Unit,
     onOpenSettings: () -> Unit,
@@ -2755,20 +2898,6 @@ private fun OverflowMenuButton(
                             onClick = {
                                 menuExpanded = false
                                 onHome()
-                            },
-                        )
-                        DropdownMenuItem(
-                            text = { MenuItemLabel("Forward") },
-                            leadingIcon = {
-                                Icon(
-                                    Icons.AutoMirrored.Filled.ArrowForward,
-                                    contentDescription = null,
-                                )
-                            },
-                            enabled = state.canGoForward,
-                            onClick = {
-                                menuExpanded = false
-                                onForward()
                             },
                         )
                         DropdownMenuItem(

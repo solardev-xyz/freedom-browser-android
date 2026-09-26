@@ -95,71 +95,178 @@ class CapsuleCompactStateTest {
 
     @Test
     fun `the field is whatever the round buttons leave of the bar`() {
-        // A 48 dp button slot and a 7 dp gap on each side that has one.
+        // A 48 dp button slot and a 7 dp gap on each side.
         assertEquals(48.dp, CapsuleControlSize)
         assertEquals(7.dp, CapsuleSplitGap)
-        assertEquals(restingWidth - 110.dp, addressFieldRestingWidth(restingWidth, true))
-        assertEquals(restingWidth - 55.dp, addressFieldRestingWidth(restingWidth, false))
+        assertEquals(restingWidth - 110.dp, addressFieldRestingWidth(restingWidth, 0f))
+        // The Back + Forward pill is one more 48 dp button slot.
+        assertEquals(restingWidth - 158.dp, addressFieldRestingWidth(restingWidth, 1f))
         // Never negative, whatever window it is handed.
-        assertEquals(0.dp, addressFieldRestingWidth(40.dp, true))
+        assertEquals(0.dp, addressFieldRestingWidth(40.dp, 0f))
+    }
+
+    // ---- the leading navigation control (#62) ----------------------
+
+    @Test
+    fun `history maps onto a disabled Back and a Forward pill`() {
+        // No history either way: Back is still there, just disabled —
+        // the round button, not a gap.
+        assertEquals(
+            NavControls(backEnabled = false, showsForward = false),
+            navControlsFor(canGoBack = false, canGoForward = false),
+        )
+        assertEquals(
+            NavControls(backEnabled = true, showsForward = false),
+            navControlsFor(canGoBack = true, canGoForward = false),
+        )
+        assertEquals(
+            NavControls(backEnabled = true, showsForward = true),
+            navControlsFor(canGoBack = true, canGoForward = true),
+        )
+        // Safari's screenshot: forward only — the pill, Back dimmed.
+        assertEquals(
+            NavControls(backEnabled = false, showsForward = true),
+            navControlsFor(canGoBack = false, canGoForward = true),
+        )
+        assertEquals(0f, navControlsFor(true, false).pillTarget, 0f)
+        assertEquals(1f, navControlsFor(false, true).pillTarget, 0f)
     }
 
     @Test
-    fun `a tab with no history widens the field instead of leaving a hole`() {
-        // The brief's one explicit "don't": no gap where Back was, and no
-        // Home button substituted into its slot. The field takes it.
-        val withHistory = addressFieldRestingWidth(restingWidth, true)
-        val without = addressFieldRestingWidth(restingWidth, false)
-        assertEquals(CapsuleControlSize + CapsuleSplitGap, without - withHistory)
-        // …and it moves by exactly half of what it gained, which is what
-        // taking the slot rather than growing into the middle means.
-        assertEquals(0.dp, addressFieldCenterOffset(true))
+    fun `the pill is two full touch targets and the round button is one`() {
+        assertEquals(CapsuleControlSize, navControlWidth(0f))
+        assertEquals(CapsuleControlSize * 2, navControlWidth(1f))
+        assertEquals(72.dp, navControlWidth(0.5f))
+        // An overshooting spring can't make it narrower than the round
+        // button or wider than the pill.
+        assertEquals(navControlWidth(0f), navControlWidth(-0.08f))
+        assertEquals(navControlWidth(1f), navControlWidth(1.08f))
+    }
+
+    @Test
+    fun `back history no longer moves anything on the bar`() {
+        // #62: Back is always present, so the geometry takes no Back
+        // input at all — only the pill fraction. The field at rest with
+        // the round button is centred on the slot.
+        assertEquals(0.dp, addressFieldCenterOffset(0f))
+        assertEquals(0.dp, addressLabelRestingCenter(0f, hasBadge = false))
+    }
+
+    @Test
+    fun `the field gives the pill exactly the width it grows by`() {
+        // Every step of the morph: what the pill gains, the field loses,
+        // and the field's trailing edge (against the tab counter) stays
+        // put — so its centre moves by half of it, towards the trailing
+        // side.
+        val restingField = addressFieldRestingWidth(restingWidth, 0f)
+        for (step in 0..20) {
+            val p = step / 20f
+            val grown = navControlWidth(p) - navControlWidth(0f)
+            assertEquals(
+                "field width off at pill=$p",
+                (restingField - grown).value,
+                addressFieldRestingWidth(restingWidth, p).value,
+                0.001f,
+            )
+            assertEquals(
+                "field centre off at pill=$p",
+                (grown / 2f).value,
+                addressFieldCenterOffset(p).value,
+                0.001f,
+            )
+            val trailingEdge =
+                addressFieldCenterOffset(p) + addressFieldRestingWidth(restingWidth, p) / 2f
+            assertEquals(
+                "field's trailing edge moved at pill=$p",
+                (restingWidth / 2f - CapsuleControlSize - CapsuleSplitGap).value,
+                trailingEdge.value,
+                0.001f,
+            )
+        }
+        // …and the leading edge sits one split gap past the pill's slot.
+        val leadingEdge = addressFieldCenterOffset(1f) - addressFieldRestingWidth(restingWidth, 1f) / 2f
         assertEquals(
-            -(CapsuleControlSize + CapsuleSplitGap) / 2f,
-            addressFieldCenterOffset(false),
+            -restingWidth / 2f + navControlWidth(1f) + CapsuleSplitGap,
+            leadingEdge,
         )
+    }
+
+    @Test
+    fun `the domain stays centred in the field through the pill morph`() {
+        // The two control slots inside the field cancel, so the label
+        // follows the field's centre at every fraction of the grow.
+        for (step in 0..20) {
+            val p = step / 20f
+            assertEquals(
+                "label left the field's centre at pill=$p",
+                addressFieldCenterOffset(p).value,
+                addressLabelRestingCenter(p, hasBadge = false).value,
+                0.001f,
+            )
+        }
+    }
+
+    @Test
+    fun `the label's ellipsis follows the pill as a flag, not a fraction`() {
+        // With the pill on screen the label is settled against the
+        // narrower field — the 48 dp the Forward half takes.
+        val round = addressLabelMaxWidth(restingWidth, hasBadge = false, reserveForward = false)
+        val pill = addressLabelMaxWidth(restingWidth, hasBadge = false, reserveForward = true)
+        assertEquals(CapsuleControlSize, round - pill)
+        // The reserved width is never wider than any field the morph
+        // passes through, so the label always fits the field it is in.
+        for (step in 0..20) {
+            val p = step / 20f
+            assertTrue(
+                "label wider than the field at pill=$p",
+                pill <= addressFieldRestingWidth(restingWidth, p) - 80.dp,
+            )
+        }
     }
 
     @Test
     fun `the drawn field has three settled widths`() {
-        val restingField = addressFieldRestingWidth(restingWidth, canGoBack = true)
-        val compact = compactCapsuleWidth(142.dp, restingField)
-        assertEquals(
-            restingField,
-            addressFieldDrawnWidth(0f, 0f, restingWidth, true, compact),
-        )
-        // Editing hands the field the width the round buttons were using.
-        assertEquals(
-            restingWidth,
-            addressFieldDrawnWidth(0f, 1f, restingWidth, true, compact),
-        )
-        assertEquals(
-            compact,
-            addressFieldDrawnWidth(1f, 0f, restingWidth, true, compact),
-        )
+        for (pill in listOf(0f, 1f)) {
+            val restingField = addressFieldRestingWidth(restingWidth, pill)
+            val compact = compactCapsuleWidth(142.dp, restingField)
+            assertEquals(
+                restingField,
+                addressFieldDrawnWidth(0f, 0f, restingWidth, pill, compact),
+            )
+            // Editing hands the field the width the round buttons were using.
+            assertEquals(
+                restingWidth,
+                addressFieldDrawnWidth(0f, 1f, restingWidth, pill, compact),
+            )
+            assertEquals(
+                compact,
+                addressFieldDrawnWidth(1f, 0f, restingWidth, pill, compact),
+            )
+        }
     }
 
     @Test
     fun `both morphs pull the field back onto the slot's centre line`() {
-        // At rest with no Back button the field is off-centre by half a
-        // button; the editor and the compact pill are both centred, and
-        // the travel between is affine in the driving fraction.
-        assertEquals(addressFieldCenterOffset(false), addressFieldDrawnCenter(0f, 0f, false))
-        assertEquals(0.dp, addressFieldDrawnCenter(0f, 1f, false))
-        assertEquals(0.dp, addressFieldDrawnCenter(1f, 0f, false))
-        val resting = addressFieldCenterOffset(false).value
+        // At rest beside the Back + Forward pill the field is off-centre
+        // by half a button; the editor and the compact pill are both
+        // centred, and the travel between is affine in the driving
+        // fraction.
+        assertEquals(addressFieldCenterOffset(1f), addressFieldDrawnCenter(0f, 0f, 1f))
+        assertEquals(0.dp, addressFieldDrawnCenter(0f, 1f, 1f))
+        assertEquals(0.dp, addressFieldDrawnCenter(1f, 0f, 1f))
+        val resting = addressFieldCenterOffset(1f).value
         for (step in 0..20) {
             val t = step / 20f
             assertEquals(
                 "field centre wandered at edit=$t",
                 resting + (0f - resting) * t,
-                addressFieldDrawnCenter(0f, t, false).value,
+                addressFieldDrawnCenter(0f, t, 1f).value,
                 0.001f,
             )
         }
         // Overshooting springs can't push it past either end.
-        assertEquals(0.dp, addressFieldDrawnCenter(1.08f, 0f, false))
-        assertEquals(addressFieldCenterOffset(false), addressFieldDrawnCenter(-0.08f, 0f, false))
+        assertEquals(0.dp, addressFieldDrawnCenter(1.08f, 0f, 1f))
+        assertEquals(addressFieldCenterOffset(1f), addressFieldDrawnCenter(-0.08f, 0f, 1f))
     }
 
     // ---- tap surface -----------------------------------------------
@@ -385,29 +492,30 @@ class CapsuleCompactStateTest {
     /** A label that fits: `rfc-editor.org` at 16 sp on a 420 dpi phone. */
     private val labelWidth = 99.dp
 
-    private fun offset(collapse: Float, canGoBack: Boolean = true, hasBadge: Boolean = false) =
+    private fun offset(collapse: Float, pill: Float = 0f, hasBadge: Boolean = false) =
         addressLabelCenterOffset(
             collapse = collapse,
-            restingCenter = addressLabelRestingCenter(canGoBack, hasBadge),
+            restingCenter = addressLabelRestingCenter(pill, hasBadge),
         )
 
     @Test
     fun `the resting label is centred in the field it sits in`() {
         // The field's two control slots are the same size at the same
         // inset, so they cancel: the domain's resting centre is the
-        // field's centre, which is the bar's own whenever Back is there.
-        assertEquals(0.dp, addressLabelRestingCenter(canGoBack = true, hasBadge = false))
-        // Without Back the field has moved, and the label with it.
+        // field's centre, which is the bar's own beside the round Back.
+        assertEquals(0.dp, addressLabelRestingCenter(0f, hasBadge = false))
+        // Beside the Back + Forward pill the field has moved, and the
+        // label with it.
         assertEquals(
-            addressFieldCenterOffset(false),
-            addressLabelRestingCenter(canGoBack = false, hasBadge = false),
+            addressFieldCenterOffset(1f),
+            addressLabelRestingCenter(1f, hasBadge = false),
         )
         // The badge sits in front of the domain inside the same box, so
         // the domain gives up half of its 24 dp block to keep the pair
         // centred.
         assertEquals(
-            addressLabelRestingCenter(canGoBack = true, hasBadge = false) + 12.dp,
-            addressLabelRestingCenter(canGoBack = true, hasBadge = true),
+            addressLabelRestingCenter(0f, hasBadge = false) + 12.dp,
+            addressLabelRestingCenter(0f, hasBadge = true),
         )
     }
 
@@ -416,8 +524,12 @@ class CapsuleCompactStateTest {
         // Everything beside the label inside the field, added up: 8 dp of
         // inset and a 32 dp slot at each end.
         val max = addressLabelMaxWidth(restingWidth, hasBadge = false)
-        assertEquals(addressFieldRestingWidth(restingWidth, true) - 80.dp, max)
+        assertEquals(addressFieldRestingWidth(restingWidth, 0f) - 80.dp, max)
         assertTrue("a phone-width bar must leave room for a domain", max > 120.dp)
+        assertEquals(
+            addressFieldRestingWidth(restingWidth, 1f) - 80.dp,
+            addressLabelMaxWidth(restingWidth, hasBadge = false, reserveForward = true),
+        )
         // The badge takes its 24 dp — mark plus the air after it — out of
         // the same width.
         assertEquals(max - 24.dp, addressLabelMaxWidth(restingWidth, hasBadge = true))
@@ -427,79 +539,51 @@ class CapsuleCompactStateTest {
     }
 
     @Test
-    fun `history appearing under a compact bar cannot re-ellipsise the label`() {
-        // `canGoBack` is the one thing in the resting row that flips
-        // while the domain stays put — an in-page `pushState` gives the
-        // tab its first history entry without changing the host — and it
-        // flips while the Back button it belongs to is not even on
-        // screen. So the width the ellipsis is settled against reserves
-        // the button's slot either way: it is the *narrower* of the two
-        // fields, the one with a Back button beside it.
-        val inside = 80.dp
-        val withHistory = addressFieldRestingWidth(restingWidth, canGoBack = true) - inside
-        val withoutHistory = addressFieldRestingWidth(restingWidth, canGoBack = false) - inside
-        assertEquals(withHistory + CapsuleControlSize + CapsuleSplitGap, withoutHistory)
-        // A threshold that followed the history state would re-ellipsise
-        // a long name mid-session and step the compact pill — which is
-        // sized from that one layout — by the button's slot in a single
-        // unanimated frame. It takes the narrower field instead.
-        assertEquals(withHistory, addressLabelMaxWidth(restingWidth, hasBadge = false))
-        // Where the label *starts* does still follow the button — there
-        // the button is on screen, taking the room it moved the field out
-        // of.
-        assertTrue(
-            "the Back button still moves the resting label",
-            addressLabelRestingCenter(canGoBack = true, hasBadge = false) >
-                addressLabelRestingCenter(canGoBack = false, hasBadge = false),
-        )
-    }
-
-    @Test
     fun `the label's two settled positions are the field's and the slot's`() {
         // At rest: the centre of the field's content box.
-        assertEquals(addressLabelRestingCenter(canGoBack = true, hasBadge = false), offset(0f))
+        assertEquals(addressLabelRestingCenter(0f, hasBadge = false), offset(0f))
         assertEquals(
-            addressLabelRestingCenter(canGoBack = false, hasBadge = false),
-            offset(0f, canGoBack = false),
+            addressLabelRestingCenter(1f, hasBadge = false),
+            offset(0f, pill = 1f),
         )
         // Compact: dead centre, because `compactCapsuleWidth` sizes the
         // pill *from* this label.
         assertEquals(0.dp, offset(1f))
-        assertEquals(0.dp, offset(1f, canGoBack = false))
+        assertEquals(0.dp, offset(1f, pill = 1f))
     }
 
     @Test
     fun `the label's x is one function of the collapse`() {
         // The whole point of #55: affine in the fraction, so the label
         // cannot run ahead of the pill and fall back. Any three samples
-        // must be collinear. Taken on a tab with no history, where the
-        // label actually has somewhere to travel (with Back on screen the
-        // two ends coincide, which is the split bar's own doing).
-        val a = offset(0f, canGoBack = false).value
-        val b = offset(1f, canGoBack = false).value
+        // must be collinear. Taken beside the Back + Forward pill, where
+        // the label actually has somewhere to travel (beside the round
+        // Back the two ends coincide, which is the split bar's own doing).
+        val a = offset(0f, pill = 1f).value
+        val b = offset(1f, pill = 1f).value
         assertTrue("the label should have somewhere to travel", a != b)
         for (step in 0..20) {
             val c = step / 20f
             assertEquals(
                 "label left the straight line at collapse=$c",
                 a + (b - a) * c,
-                offset(c, canGoBack = false).value,
+                offset(c, pill = 1f).value,
                 0.001f,
             )
         }
         // Monotone with it, too — it never doubles back.
-        var previous = offset(0f, canGoBack = false)
+        var previous = offset(0f, pill = 1f)
         for (step in 1..20) {
-            val next = offset(step / 20f, canGoBack = false)
-            assertTrue("the label moved backwards at step $step", next >= previous)
+            val next = offset(step / 20f, pill = 1f)
+            assertTrue("the label moved forwards at step $step", next <= previous)
             previous = next
         }
     }
 
     @Test
     fun `an overshooting spring cannot push the label past either end`() {
-        assertEquals(offset(1f, canGoBack = false), offset(1.08f, canGoBack = false))
-        assertEquals(offset(0f, canGoBack = false), offset(-0.08f, canGoBack = false))
+        assertEquals(offset(1f, pill = 1f), offset(1.08f, pill = 1f))
+        assertEquals(offset(0f, pill = 1f), offset(-0.08f, pill = 1f))
     }
 
     @Test
@@ -526,10 +610,10 @@ class CapsuleCompactStateTest {
     /** The badge's drawn centre, for a label of [labelWidth] at rest. */
     private fun badgeOffset(
         collapse: Float,
-        canGoBack: Boolean = true,
+        pill: Float = 0f,
         label: Dp = labelWidth,
     ): Dp = addressBadgeCenterOffset(
-        labelCenter = offset(collapse, canGoBack, hasBadge = true),
+        labelCenter = offset(collapse, pill, hasBadge = true),
         labelWidth = label * addressLabelScale(collapse),
     )
 
@@ -555,14 +639,14 @@ class CapsuleCompactStateTest {
         // the domain's centre away: the pair has to come out centred on
         // the field's own content box, or the +12 dp shift is just a
         // domain pushed off centre.
-        for (canGoBack in listOf(true, false)) {
-            val label = offset(0f, canGoBack, hasBadge = true)
-            val badge = badgeOffset(0f, canGoBack)
+        for (pill in listOf(0f, 0.5f, 1f)) {
+            val label = offset(0f, pill, hasBadge = true)
+            val badge = badgeOffset(0f, pill)
             val leading = badge - AddressPillBadgeSize / 2f
             val trailing = label + labelWidth / 2f
             assertEquals(
-                "badge + domain off centre with canGoBack=$canGoBack",
-                addressFieldCenterOffset(canGoBack),
+                "badge + domain off centre with pill=$pill",
+                addressFieldCenterOffset(pill),
                 (leading + trailing) / 2f,
             )
         }
@@ -576,9 +660,9 @@ class CapsuleCompactStateTest {
         // halfway through a collapse.
         for (step in 0..20) {
             val c = step / 20f
-            val label = offset(c, canGoBack = false, hasBadge = true)
+            val label = offset(c, pill = 1f, hasBadge = true)
             val drawnLabel = labelWidth * addressLabelScale(c)
-            val badge = badgeOffset(c, canGoBack = false)
+            val badge = badgeOffset(c, pill = 1f)
             assertEquals(
                 "the badge left the domain at collapse=$c",
                 AddressPillBadgeGap.value,
