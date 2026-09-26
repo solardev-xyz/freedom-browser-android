@@ -182,6 +182,14 @@ internal fun revealSampleRowY(viewTopPx: Int, viewHeightPx: Int, windowHeightPx:
  * width, so over a wide (expanded) capsule that shade could outvote the
  * page (#70 review: a white page read (254, 254, 254)). The edges are
  * clear of it. The whole row for an [edgePx] that leaves no middle.
+ *
+ * Deliberate trade-off: only the outermost [edgePx] of the row votes,
+ * so the tint is the colour at the page's *sides*, not the row's
+ * dominant colour. A last band that is a centred card between body
+ * gutters (a white footer card on a grey body) tints the strip with the
+ * gutter grey rather than the card white. That matches what frames the
+ * lifted capsule at the screen edges, and is preferred over a
+ * whole-row vote the capsule's shadow can swing.
  */
 internal fun revealTintPixels(row: IntArray, edgePx: Int): IntArray {
     if (edgePx <= 0 || 2 * edgePx >= row.size) return row
