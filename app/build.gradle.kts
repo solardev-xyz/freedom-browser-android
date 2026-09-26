@@ -141,8 +141,8 @@ dependencies {
     // Real org.json for unit tests: the android.jar stub returns null from
     // every method, which breaks anything that builds JSON-RPC bodies.
     testImplementation("org.json:json:20240303")
-    // A JS engine for unit tests of injected page scripts (the #65
-    // spacer), run against a small fake DOM.
+    // A JS engine for unit tests of injected page scripts (the #66
+    // bottom-nav detector), run against a small fake DOM.
     testImplementation("org.mozilla:rhino:1.7.15")
 
     androidTestImplementation("androidx.test:runner:1.6.2")

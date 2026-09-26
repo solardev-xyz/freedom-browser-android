@@ -33,12 +33,9 @@ class BottomUiDetectorScriptTest {
         var html = el({ tag: 'html', clientWidth: 412, clientHeight: 863, rect: { top: 0, bottom: 863, height: 863, width: 412 } });
         var body = el({ tag: 'body', parent: html, rect: { top: 0, bottom: 863, height: 863, width: 412 } });
         var scrollHeight = 863;
-        var adopted = [];
         var document = {
           compatMode: 'CSS1Compat', documentElement: html, body: body,
           scrollingElement: { get scrollHeight() { return scrollHeight; } },
-          get adoptedStyleSheets() { return adopted; },
-          set adoptedStyleSheets(v) { domWrites++; adopted = v; },
           elementFromPoint: function (x, y) { this.lastProbe = [x, y]; return hit; },
           querySelectorAll: function (sel) { return sel === 'meta[name="theme-color"]' ? metas : []; },
           createElement: function (t) {
@@ -141,20 +138,6 @@ class BottomUiDetectorScriptTest {
     @Test
     fun `a flex shell's in-flow nav counts when the document doesn't scroll`() = page {
         eval("nav.pos = 'static'; hit = tab")
-        install()
-        assertTrue(last().has())
-    }
-
-    @Test
-    fun `the end-of-document spacer alone doesn't make a flex shell's document scroll`() = page {
-        eval(
-            """
-            nav.pos = 'static'; hit = tab; scrollHeight = 863 + 82;
-            var sheet = { cssRules: [{ style: { height: '82px' } }] };
-            sheet.$BOTTOM_SPACER_MARK = true;
-            adopted = [sheet];
-            """,
-        )
         install()
         assertTrue(last().has())
     }

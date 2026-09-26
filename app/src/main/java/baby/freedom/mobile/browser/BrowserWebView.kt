@@ -1,15 +1,26 @@
 package baby.freedom.mobile.browser
 
+import android.animation.Animator
+import android.animation.AnimatorListenerAdapter
+import android.animation.ValueAnimator
 import android.annotation.SuppressLint
+import android.app.Activity
 import android.content.Context
+import android.content.ContextWrapper
 import android.graphics.Bitmap
 import android.graphics.Canvas
+import android.graphics.ColorFilter
+import android.graphics.PixelFormat
+import android.graphics.Rect
+import android.graphics.drawable.Drawable
 import android.os.SystemClock
 import android.util.Log
+import android.view.PixelCopy
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewConfiguration
 import android.view.ViewGroup
+import android.view.animation.DecelerateInterpolator
 import android.webkit.CookieManager
 import android.webkit.MimeTypeMap
 import android.webkit.WebChromeClient
@@ -29,6 +40,7 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.graphics.createBitmap
 import androidx.core.view.ViewCompat
@@ -662,57 +674,6 @@ private fun buildRefreshableWebView(
         }
     }
 
-    // The end-of-document spacer that lets a page's last band scroll out
-    // from under the floating bar (#65, interim — see
-    // [bottomSpacerDecisionJs]). [BottomSpacerSlot] decides when a pass
-    // runs; once the spacer is kept, touch-downs run no script.
-    val bottomSpacer = BottomSpacerSlot()
-
-    /**
-     * Run one spacer decision pass for [token]. The height is read here,
-     * once, from the window's navigation inset — never per frame.
-     */
-    fun decideBottomSpacer(view: WebView, token: BottomSpacerSlot.Token?) {
-        if (token == null) return
-        val navInsetPx = ViewCompat.getRootWindowInsets(view)
-            ?.getInsets(WindowInsetsCompat.Type.systemBars())?.bottom ?: 0
-        val density = view.resources.displayMetrics.density
-        val spacerDp = bottomSpacerDp(navInsetPx, density)
-        // The WebView's own width, not the display's: they differ in
-        // split-screen, and the zoom factor is against this one.
-        val viewWidthDp = if (density > 0f) (view.width / density).roundToInt() else 0
-        view.evaluateJavascript(bottomSpacerDecisionJs(spacerDp, viewWidthDp)) { result ->
-            val cssPx = parseBottomSpacerResult(result)
-            bottomSpacer.accept(token, cssPx, view.contentHeight)
-            if (cssPx != null && cssPx > 0) {
-                // `contentHeight` above is the last frame's, from before
-                // the rule; re-read it once the frame with it is ready.
-                view.postVisualStateCallback(
-                    token.request.toLong(),
-                    object : WebView.VisualStateCallback() {
-                        override fun onComplete(requestId: Long) {
-                            bottomSpacer.settleKept(token, view.contentHeight)
-                        }
-                    },
-                )
-            }
-        }
-    }
-
-    /**
-     * Look (read-only) for a kept spacer's sheet for [check], and decide
-     * afresh if the page has dropped it.
-     */
-    fun checkBottomSpacer(view: WebView, check: BottomSpacerSlot.Token?) {
-        if (check == null) return
-        view.evaluateJavascript(BOTTOM_SPACER_PRESENT_JS) { result ->
-            decideBottomSpacer(
-                view,
-                bottomSpacer.acceptPresence(check, result?.trim() != "0", view.contentHeight),
-            )
-        }
-    }
-
     // Reserved mode (#66): does the document on screen have its own
     // bottom navigation the capsule would cover? [BottomChromeSlot] holds
     // the per-document token and the hysteresis; the page side is the
@@ -760,21 +721,37 @@ private fun buildRefreshableWebView(
         runCatching { bottomUiReply?.postMessage(bottomUiProbeRequest(token)) }
     }
 
+    // Scroll-to-reveal (#65): a push past the end of an overlay page
+    // shortens the page area by the bar's footprint, until the user
+    // scrolls back up. [ScrollRevealSlot] is the gesture's state; the
+    // WebView, its touch listener and the layout-change listener below
+    // drive it. Assigned once the WebView exists.
+    val reveal = ScrollRevealSlot()
+    var cancelReveal: () -> Unit = {}
+    // The reveal's resize is under way: the page is held at H by
+    // translation until it can be handed over to a real scroll offset.
+    var revealHandover = false
+    // What the page area actually shrank by for the reveal on screen.
+    var revealLandedPx = 0
+    var revealLanded: (Int) -> Unit = {}
+
     /**
-     * Publish [bottomChrome]'s mode to the tab, and move the #65 spacer
-     * out of the way while reserved: the page no longer runs under the
-     * bar, so it gets no end-of-document spacer and pull-to-refresh
-     * discounts none. Back in overlay the spacer is decided afresh.
+     * Publish the tab's bottom-chrome mode: reserved when the detector
+     * says so (#66), else revealed while a reveal holds (#65), else
+     * overlay. Reserved takes over from a reveal (same band, so the page
+     * doesn't move), and the reveal is forgotten: back in overlay it
+     * needs a fresh push.
      */
-    fun applyBottomChrome(view: WebView) {
+    fun applyBottomChrome() {
         val reserved = bottomChrome.mode == BottomChromeMode.Reserved
-        val wasReserved = state.bottomChromeMode == BottomChromeMode.Reserved
-        if (reserved) state.bottomStripRgb = bottomChrome.color
-        state.bottomChromeMode = bottomChrome.mode
-        if (reserved && !wasReserved) {
-            if (bottomSpacer.suspend()) view.evaluateJavascript(BOTTOM_SPACER_REMOVE_JS, null)
-        } else if (!reserved && wasReserved) {
-            decideBottomSpacer(view, bottomSpacer.resume())
+        if (reserved) {
+            if (reveal.phase != ScrollRevealSlot.Phase.Idle) cancelReveal()
+            state.bottomStripRgb = bottomChrome.color
+        }
+        state.bottomChromeMode = when {
+            reserved -> BottomChromeMode.Reserved
+            reveal.revealed -> BottomChromeMode.Revealed
+            else -> BottomChromeMode.Overlay
         }
     }
 
@@ -796,7 +773,7 @@ private fun buildRefreshableWebView(
     // recover again.
     var autoRecoveredUrl: String? = null
 
-    val webView = WebView(context).apply {
+    val webView = PageWebView(context).apply {
         layoutParams = ViewGroup.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.MATCH_PARENT,
@@ -826,6 +803,178 @@ private fun buildRefreshableWebView(
             // actually requires a tap is still gated by the browser's
             // own per-frame autoplay policy.
             mediaPlaybackRequiresUserGesture = false
+        }
+
+        // Scroll-to-reveal (#65), the View half; the decisions are in
+        // [ScrollRevealSlot].
+        //
+        // The drag and the settle move only this view's `translationY`
+        // (a RenderNode property: no layout, nothing for Chromium to
+        // redo). What the rising page uncovers is its container's
+        // background, set to the page's own bottom colour for the
+        // gesture.
+        //
+        // The commit is the one real resize, and handing over from the
+        // translation to it without a visible jump takes three things,
+        // each found frame by frame in screen recordings on the AVD:
+        //
+        //  1. Scroll by the shrink *when the new size lands*, and keep the
+        //     translation. Chromium draws its first frames at the new
+        //     size still at the old offset (it only accepts the new one
+        //     once the renderer has laid out at that size); dropping the
+        //     translation right away showed the page 215 px low for 2
+        //     frames.
+        //  2. Drop the translation in the draw pass in which the WebView
+        //     first reports the grown scroll range ([PageWebView]'s
+        //     `onBeforeDraw`): that is the frame Chromium draws at the new
+        //     offset. Waiting for a `VisualStateCallback` instead was 3
+        //     frames late.
+        //  3. Bridge the frames in between. At the new size and the old
+        //     offset Chromium renders nothing for the page's last band —
+        //     under the held translation that band is a hole (it showed
+        //     the container's background for 2 frames). Those rows are on
+        //     screen, unchanging, just before the resize, so they are
+        //     copied then ([captureRevealBand]) and drawn as the
+        //     container's background exactly where the hole opens, until
+        //     step 2.
+        var revealPx = 0f
+        var revealTint: Int? = null
+        var revealAnim: ValueAnimator? = null
+        var revealBridge: Bitmap? = null
+        var revealExpectRange = 0
+
+        // H in whole px, as Compose's `padding` rounds it: a held
+        // translation of 215.25 over a 215 px shrink left the page a
+        // quarter pixel off, i.e. a 1 px step at release.
+        fun revealHeightPx(): Float {
+            val density = resources.displayMetrics.density
+            val navInsetPx = ViewCompat.getRootWindowInsets(this)
+                ?.getInsets(WindowInsetsCompat.Type.systemBars())?.bottom ?: 0
+            return (reservedFootprint((navInsetPx / density).dp).value * density).roundToInt().toFloat()
+        }
+
+        fun stopRevealAnim() {
+            val a = revealAnim ?: return
+            revealAnim = null
+            a.cancel()
+        }
+
+        fun animateReveal(to: Float, then: () -> Unit) {
+            stopRevealAnim()
+            val anim = ValueAnimator.ofFloat(-translationY, to)
+            anim.duration = REVEAL_SETTLE_MS
+            anim.interpolator = DecelerateInterpolator()
+            anim.addUpdateListener { translationY = -(it.animatedValue as Float) }
+            anim.addListener(object : AnimatorListenerAdapter() {
+                override fun onAnimationEnd(animation: Animator) {
+                    if (revealAnim !== animation) return
+                    revealAnim = null
+                    then()
+                }
+            })
+            revealAnim = anim
+            anim.start()
+        }
+
+        /** The handover is over (or abandoned): the page stands on its own. */
+        fun finishHandover() {
+            onBeforeDraw = null
+            revealHandover = false
+            revealBridge = null
+            translationY = 0f
+            refreshLayout.background = null
+        }
+
+        cancelReveal = {
+            stopRevealAnim()
+            finishHandover()
+            reveal.reset()
+        }
+
+        fun onRevealTouchDown(event: MotionEvent) {
+            val allowed = revealAllowed(
+                mode = state.bottomChromeMode,
+                chromeEditing = state.chromeEditing,
+                keyboardVisible = ViewCompat.getRootWindowInsets(this)
+                    ?.isVisible(WindowInsetsCompat.Type.ime()) == true,
+                isHome = !bottomUiApplies(url),
+            )
+            if (reveal.onDown(event.rawX, event.rawY, atEnd = !canScrollVertically(1), allowed = allowed)) {
+                // The strip's colour, from the page's own bottom row
+                // while it is still there to be read.
+                revealTint = null
+                sampleBottomRow(this) { rgb -> revealTint = rgb }
+            }
+        }
+
+        fun onRevealDragStart(event: MotionEvent) {
+            stopRevealAnim()
+            revealPx = revealHeightPx()
+            // Chromium had the gesture until now; end it there (its
+            // overscroll effect relaxes, the page gets a touchcancel).
+            val cancel = MotionEvent.obtain(event)
+            cancel.action = MotionEvent.ACTION_CANCEL
+            onTouchEvent(cancel)
+            cancel.recycle()
+            parent?.requestDisallowInterceptTouchEvent(true)
+            refreshLayout.setBackgroundColor(0xFF000000.toInt() or (revealTint ?: 0xFFFFFF))
+        }
+
+        fun captureAndCommitReveal() {
+            if (reveal.phase != ScrollRevealSlot.Phase.Committing) return
+            captureRevealBand(this, revealPx.roundToInt()) { band ->
+                // A new document, reserved mode or a rotation may have
+                // called the reveal off while the copy was in flight.
+                if (reveal.phase != ScrollRevealSlot.Phase.Committing) return@captureRevealBand
+                revealBridge = band
+                reveal.onCommitted(unscrollable = scrollY <= 0)
+                revealTint?.let { state.bottomStripRgb = rgbString(it) }
+                revealHandover = true
+                // Compose shortens the page area on its next layout
+                // ([contentBottomReserve]); [revealLanded] takes it from
+                // there. Should the resize never come, the translation
+                // doesn't stay behind.
+                applyBottomChrome()
+                postDelayed({ if (revealHandover) finishHandover() }, REVEAL_HANDOVER_TIMEOUT_MS)
+            }
+        }
+
+        fun commitReveal() {
+            // `PixelCopy` reads the last frame *presented*: requested in
+            // the settle's final frame it caught the one before (the page
+            // 13 px short of H, seen as a 13 px step in the bridge). Two
+            // frames later the page has been standing still at H.
+            postOnAnimation { postOnAnimation { captureAndCommitReveal() } }
+        }
+
+        fun onRevealDragEvent(event: MotionEvent) {
+            when (event.actionMasked) {
+                MotionEvent.ACTION_MOVE ->
+                    translationY = -reveal.dragOffset(event.rawY, revealPx)
+
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    val cancelled = event.actionMasked == MotionEvent.ACTION_CANCEL
+                    when (reveal.onRelease(-translationY, revealPx, cancelled)) {
+                        ScrollRevealSlot.Phase.Committing -> animateReveal(revealPx) { commitReveal() }
+                        else -> animateReveal(0f) {
+                            reveal.onSprungBack()
+                            refreshLayout.background = null
+                        }
+                    }
+                }
+            }
+        }
+
+        revealLanded = fun(shrunkBy: Int) {
+            if (!revealHandover || onBeforeDraw != null) return
+            revealLandedPx = shrunkBy
+            revealBridge?.let { refreshLayout.background = BottomBandDrawable(it) }
+            revealExpectRange = verticalRange + shrunkBy
+            scrollBy(0, shrunkBy)
+            onBeforeDraw = {
+                if (verticalRange >= revealExpectRange) finishHandover()
+            }
+            postInvalidateOnAnimation()
         }
 
         // Keep a focused form field visible when the keyboard opens.
@@ -864,14 +1013,19 @@ private fun buildRefreshableWebView(
             if (shrank && v.hasFocus()) {
                 (v as WebView).evaluateJavascript(SCROLL_FOCUSED_FIELD_JS, null)
             }
+            // The reveal's resize has landed (#65): hand over from the
+            // drag's translation to the real, shortened page area.
+            if (shrank) revealLanded(oldBottom - oldTop - (bottom - top))
             // A width change is a rotation (or a window resize): the
-            // navigation inset and a desktop-width page's zoom factor
-            // both move with it, so the #65 spacer is decided afresh.
-            // Height-only changes (the keyboard) leave it alone.
+            // reveal height and the page's layout both move with it, so
+            // a reveal is dropped rather than carried over (#65) and the
+            // next one needs a fresh push. Height-only changes (the
+            // keyboard, the reveal itself) leave it alone.
             if (oldRight - oldLeft > 0 && (right - left) != (oldRight - oldLeft) &&
-                bottomSpacerApplies((v as WebView).url)
+                reveal.phase != ScrollRevealSlot.Phase.Idle
             ) {
-                decideBottomSpacer(v, bottomSpacer.decideOnWidthChange())
+                cancelReveal()
+                applyBottomChrome()
             }
         }
 
@@ -890,7 +1044,13 @@ private fun buildRefreshableWebView(
         // nothing else in the app listens to this view's scroll.
         val screenDensity = context.resources.displayMetrics.density
         setOnScrollChangeListener { _, _, scrollY, _, oldScrollY ->
+            // The reveal's own scroll (the handover) is not the user's.
+            if (revealHandover) return@setOnScrollChangeListener
             state.capsuleCollapse.onScroll(scrollY, oldScrollY, screenDensity)
+            // Scrolled back up past the reveal height: restore (#65).
+            // The WebView grows back by H below the fold; the offset is
+            // still in range, so nothing on screen moves.
+            if (reveal.onScroll(distanceFromEnd, revealLandedPx)) applyBottomChrome()
         }
 
         // …and the touch stream that says whether a given scroll is the
@@ -900,34 +1060,38 @@ private fun buildRefreshableWebView(
         // arrives as a run of small deltas that looks exactly like a
         // flick. A drag past the touch slop arms the state machine; the
         // next touch down disarms it, so a tap's after-effects can't
-        // move the chrome. The listener only observes — it always
-        // returns false, so the WebView handles the gesture as before.
+        // move the chrome. For that it only observes: the one gesture
+        // it takes from the WebView is a reveal push (#65), from the
+        // move that starts it to the finger lifting.
         val touchSlopPx = ViewConfiguration.get(context).scaledTouchSlop
         var touchDownY = 0f
+        onBottomOverscroll = { reveal.onBottomOverscroll() }
         setOnTouchListener { _, event ->
+            // The reveal owns this gesture (#65): the page follows the
+            // finger by translation only, and Chromium sees none of it.
+            if (reveal.phase == ScrollRevealSlot.Phase.Dragging) {
+                onRevealDragEvent(event)
+                return@setOnTouchListener true
+            }
             when (event.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
                     touchDownY = event.y
                     state.capsuleCollapse.onTouchDown()
-                    // A scroll-locked document's #65 spacer is retried
-                    // here (a consent banner may have lifted), as is a
-                    // rejected one that has grown since; a kept one runs
-                    // at most a read-only presence check, and only when
-                    // its height has changed (see [BottomSpacerSlot]).
-                    if (bottomSpacerApplies(url)) {
-                        val decision = bottomSpacer.decideOnTouch(contentHeight)
-                        if (decision != null) {
-                            decideBottomSpacer(this, decision)
-                        } else {
-                            checkBottomSpacer(this, bottomSpacer.checkOnTouch(contentHeight))
-                        }
-                    }
+                    onRevealTouchDown(event)
                 }
 
-                MotionEvent.ACTION_MOVE ->
+                MotionEvent.ACTION_MOVE -> {
                     if (abs(event.y - touchDownY) > touchSlopPx) {
                         state.capsuleCollapse.onDragPastSlop()
                     }
+                    if (reveal.onMove(event.rawX, event.rawY, touchSlopPx.toFloat())) {
+                        onRevealDragStart(event)
+                        return@setOnTouchListener true
+                    }
+                }
+
+                MotionEvent.ACTION_POINTER_DOWN, MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL ->
+                    reveal.onRelease(0f, 0f, cancelled = true)
             }
             false
         }
@@ -945,7 +1109,7 @@ private fun buildRefreshableWebView(
                     ?: return@WebMessageListener
                 bottomUiReply = replyProxy
                 val verdict = bottomChrome.accept(report, SystemClock.uptimeMillis())
-                if (verdict.changed) applyBottomChrome(view)
+                if (verdict.changed) applyBottomChrome()
                 val confirmIn = verdict.confirmInMs
                 if (confirmIn != null) {
                     // One re-probe after the hysteresis gap — a single
@@ -998,8 +1162,9 @@ private fun buildRefreshableWebView(
                 // is none of this one's business, not even by way of a
                 // probe of its that is still in flight (#56).
                 rootPanProbe.startDocument()
-                // …and without the outgoing document's spacer (#65).
-                bottomSpacer.startDocument()
+                // …and at full height again: a reveal belongs to the
+                // document it was pushed on (#65).
+                cancelReveal()
                 // …and floating over the page until this document shows
                 // a bottom nav of its own (#66). A report still in flight
                 // from the outgoing document carries its old token and
@@ -1091,8 +1256,7 @@ private fun buildRefreshableWebView(
                 // styles are real: this is the earliest the #56 probe
                 // can answer, and pages are touchable from here on.
                 probeRootPanStyles(view)
-                if (view != null && bottomSpacerApplies(url)) {
-                    decideBottomSpacer(view, bottomSpacer.decideOnLoad(view.contentHeight))
+                if (view != null && bottomUiApplies(url)) {
                     // The bottom-nav detector goes in here, once (#66).
                     installBottomUiDetector(view)
                 }
@@ -1119,11 +1283,7 @@ private fun buildRefreshableWebView(
                 // script) can be what sets `touch-action: none`, and
                 // that is not necessarily in place at first paint (#56).
                 probeRootPanStyles(view)
-                // Likewise the spacer, if first paint left it undecided
-                // (no `<body>` yet, a scroll lock) or rejected it and the
-                // document has grown since.
-                if (view != null && bottomSpacerApplies(url)) {
-                    decideBottomSpacer(view, bottomSpacer.decideOnLoad(view.contentHeight))
+                if (view != null && bottomUiApplies(url)) {
                     // A late-mounting nav: probe again now the load is
                     // done (or install, if first paint didn't) (#66).
                     if (finishedLoadIsCurrent(url, view.url)) {
@@ -1252,21 +1412,15 @@ private fun buildRefreshableWebView(
             }
 
             // A same-document history change (`pushState`, hash) gets
-            // no commit or finish callback, and an SPA re-rendering its
-            // route can reset `adoptedStyleSheets`, spacer and all. A
-            // kept spacer is looked for (read-only) and decided afresh
-            // only if it has gone (#65).
-            //
-            // The same callback is how the bottom-nav detector hears
-            // about `pushState` / `replaceState` / `popstate` /
+            // no commit or finish callback. This one is how the
+            // bottom-nav detector hears about `pushState` / `replaceState` / `popstate` /
             // `hashchange` without the page's history methods being
             // patched (#66). It also fires for a cross-document commit,
             // before first paint; the detector isn't installed yet then,
             // and this doesn't install it (see [requestBottomUiProbe]).
             override fun doUpdateVisitedHistory(view: WebView?, url: String?, isReload: Boolean) {
-                if (view == null || !bottomSpacerApplies(url)) return
+                if (view == null || !bottomUiApplies(url)) return
                 requestBottomUiProbe(view)
-                checkBottomSpacer(view, bottomSpacer.checkOnHistoryChange())
             }
 
             override fun shouldOverrideUrlLoading(
@@ -1469,19 +1623,13 @@ private fun buildRefreshableWebView(
     refreshLayout.setOnChildScrollUpCallback { _, _ ->
         // `getScale()` is deprecated only in favour of `onScaleChanged`
         // tracking; it still reports the live px-per-CSS-px we need.
-        @Suppress("DEPRECATION")
-        val scale = webView.scale
         !pullToRefreshArmed(
             scrollY = webView.scrollY,
-            // Discounting the #65 spacer's measured growth: it must not
-            // arm the spinner on a page that did not scroll before (see
-            // [documentScrollsPastSpacer]).
-            documentScrollsDown = documentScrollsPastSpacer(
+            // A page revealed from no scroll range at all (#65) doesn't
+            // gain pull-to-refresh from the range the reveal gave it.
+            documentScrollsDown = revealAdjustedScrollsDown(
                 canScrollDown = webView.canScrollVertically(1),
-                contentHeightCss = webView.contentHeight,
-                spacerCss = bottomSpacer.discountCssPx,
-                viewHeightPx = webView.height,
-                scale = scale,
+                revealedFromUnscrollable = reveal.revealed && reveal.revealedFromUnscrollable,
             ),
             rootBlocksVerticalPan = rootPanProbe.blocksVerticalPan,
         )
@@ -1501,6 +1649,121 @@ private fun buildRefreshableWebView(
 // failed page: ant_resume opens the bootnode sockets in parallel, so a
 // couple of seconds is enough for retrieval to have working routes.
 private const val AUTO_RECOVER_RETRY_DELAY_MS = 2_500L
+
+/** How long the reveal settles onto H, or springs back (#65). */
+private const val REVEAL_SETTLE_MS = 160L
+
+/** A reveal whose resize never lands lets go of its translation after this long. */
+private const val REVEAL_HANDOVER_TIMEOUT_MS = 1_000L
+
+/**
+ * The tab's WebView. A subclass only for what `WebView` keeps
+ * protected: Chromium's unconsumed overscroll, and the scroll range.
+ */
+internal class PageWebView(context: Context) : WebView(context) {
+    /** Chromium overscrolled past the bottom edge (the page didn't take the drag). */
+    var onBottomOverscroll: () -> Unit = {}
+
+    val verticalRange: Int get() = computeVerticalScrollRange() - computeVerticalScrollExtent()
+
+    /** px between the current scroll offset and the document's end. */
+    val distanceFromEnd: Int get() = (verticalRange - scrollY).coerceAtLeast(0)
+
+    /** Called at the start of each draw of this view, before Chromium's frame is recorded. */
+    var onBeforeDraw: (() -> Unit)? = null
+
+    override fun computeScroll() {
+        super.computeScroll()
+        onBeforeDraw?.invoke()
+    }
+
+    override fun onOverScrolled(scrollX: Int, scrollY: Int, clampedX: Boolean, clampedY: Boolean) {
+        super.onOverScrolled(scrollX, scrollY, clampedX, clampedY)
+        if (clampedY && !canScrollVertically(1)) onBottomOverscroll()
+    }
+}
+
+private fun Context.findActivity(): Activity? {
+    var c: Context? = this
+    while (c is ContextWrapper) {
+        if (c is Activity) return c
+        c = c.baseContext
+    }
+    return null
+}
+
+/**
+ * Read the window's pixels along [view]'s bottom edge and hand their
+ * [dominantRgb] to [onRgb] (#65). `PixelCopy` of a 1 px row: a small
+ * GPU read-back, answered within a frame or two, once per touch that
+ * arms a reveal.
+ */
+private fun sampleBottomRow(view: View, onRgb: (Int) -> Unit) {
+    val window = view.context.findActivity()?.window ?: return
+    if (view.width <= 0 || view.height <= 0) return
+    val loc = IntArray(2)
+    view.getLocationInWindow(loc)
+    val y = loc[1] + view.height - 1
+    val rect = Rect(loc[0], y, loc[0] + view.width, y + 1)
+    val bitmap = createBitmap(rect.width(), 1)
+    try {
+        PixelCopy.request(window, rect, bitmap, { result ->
+            if (result == PixelCopy.SUCCESS) {
+                val px = IntArray(bitmap.width)
+                bitmap.getPixels(px, 0, bitmap.width, 0, 0, bitmap.width, 1)
+                dominantRgb(px)?.let(onRgb)
+            }
+            bitmap.recycle()
+        }, view.handler ?: return)
+    } catch (e: IllegalArgumentException) {
+        bitmap.recycle()
+    }
+}
+
+/**
+ * Copy the window's pixels of the band a reveal's resize is about to
+ * leave Chromium-less (#65): [bandPx] tall, directly above the bottom
+ * [bandPx] of [view]'s (untranslated) bounds — the page's last band,
+ * lifted there by the settled translation. Answers null if the copy
+ * fails; the handover then runs without a bridge.
+ */
+private fun captureRevealBand(view: View, bandPx: Int, onBand: (Bitmap?) -> Unit) {
+    val window = view.context.findActivity()?.window
+    val handler = view.handler
+    if (window == null || handler == null || bandPx <= 0 || view.width <= 0 || view.height <= 2 * bandPx) {
+        onBand(null)
+        return
+    }
+    val loc = IntArray(2)
+    view.getLocationInWindow(loc)
+    val bottom = loc[1] - view.translationY.roundToInt() + view.height - bandPx
+    val rect = Rect(loc[0], bottom - bandPx, loc[0] + view.width, bottom)
+    val bitmap = createBitmap(rect.width(), rect.height())
+    try {
+        PixelCopy.request(window, rect, bitmap, { result ->
+            onBand(if (result == PixelCopy.SUCCESS) bitmap else null)
+        }, handler)
+    } catch (_: IllegalArgumentException) {
+        onBand(null)
+    }
+}
+
+/** Draws [band] across the bottom of its bounds; see [captureRevealBand]. */
+private class BottomBandDrawable(private val band: Bitmap) : Drawable() {
+    private val dst = Rect()
+
+    override fun draw(canvas: Canvas) {
+        val b = bounds
+        dst.set(b.left, b.bottom - band.height, b.right, b.bottom)
+        canvas.drawBitmap(band, null, dst, null)
+    }
+
+    override fun setAlpha(alpha: Int) = Unit
+    override fun setColorFilter(colorFilter: ColorFilter?) = Unit
+
+    @Deprecated("Deprecated in Java")
+    override fun getOpacity(): Int = PixelFormat.OPAQUE
+}
 
 // Scroll the page's focused form field back into view — see the
 // layout-change listener in [buildRefreshableWebView]. A no-op unless

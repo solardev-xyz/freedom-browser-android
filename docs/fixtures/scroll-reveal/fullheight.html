@@ -1,0 +1,12 @@
+<!doctype html><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Full-height body</title>
+<link rel="stylesheet" href="../reserved-mode/base.css"><script src="../reserved-mode/common.js"></script>
+<style>
+  html, body { height:100%; }
+  footer { padding:16px; background:var(--card); }
+  footer button { font:600 16px system-ui; padding:10px 18px; }
+</style>
+<h1>html, body { height: 100% }</h1><div id="rows"></div>
+<footer><button data-name="full-height button">Full-height footer button</button><div>Last line (full-height)</div></footer>
+<script>fixture.rows(document.getElementById('rows'), 25);</script>

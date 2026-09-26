@@ -34,7 +34,18 @@ enum class BottomChromeMode {
 
     /** The page area's bottom edge stops above the capsule. */
     Reserved,
+
+    /**
+     * An overlay page the user pushed past its end (#65, see
+     * [ScrollRevealSlot]): the same shortened page area and strip as
+     * [Reserved], until they scroll back up.
+     */
+    Revealed,
 }
+
+/** Does [this] mode stop the page area above the capsule (reserved band + strip)? */
+internal val BottomChromeMode.shortensPage: Boolean
+    get() = this != BottomChromeMode.Overlay
 
 /**
  * The page area's bottom padding (on top of the IME inset it already
@@ -46,6 +57,8 @@ enum class BottomChromeMode {
  * - **Reserved:** the capsule's *resting* footprint plus the navigation
  *   inset. Deliberately constant: compacting on scroll and the editing
  *   morph happen inside this band, and never resize the WebView (#63).
+ * - **Revealed** (#65): exactly as reserved — the same band, so a page
+ *   that goes from revealed to reserved doesn't move.
  * - **Reserved, keyboard up:** the keyboard reserve, but never less than
  *   the reserved band. The IME inset is already part of the page area's
  *   padding, so the navigation inset is only topped up while the rising
@@ -63,9 +76,9 @@ internal fun contentBottomReserve(
     navInset: Dp,
     imeInset: Dp,
 ): Dp = when {
-    mode == BottomChromeMode.Reserved && keyboardVisible ->
+    mode.shortensPage && keyboardVisible ->
         capsuleFootprint + (navInset - imeInset).coerceAtLeast(0.dp)
-    mode == BottomChromeMode.Reserved -> reservedFootprint(navInset)
+    mode.shortensPage -> reservedFootprint(navInset)
     keyboardVisible -> capsuleFootprint
     else -> 0.dp
 }
@@ -79,7 +92,7 @@ internal fun contentBottomReserve(
  * - **Keyboard up:** nothing — the reserve already clears the capsule.
  * - **Overlay:** the whole footprint plus the navigation inset the page
  *   area draws behind.
- * - **Reserved:** only what the capsule grows *past* the reserved band —
+ * - **Reserved / revealed:** only what the capsule grows *past* the reserved band —
  *   zero at rest, the editing morph's extra height while the address bar
  *   has focus without an IME (hardware keyboard, ChromeOS), which would
  *   otherwise cover the nearest suggestion row.
@@ -92,7 +105,7 @@ internal fun capsuleOverlap(
 ): Dp {
     if (keyboardVisible) return 0.dp
     val covered = capsuleFootprint + navInset.coerceAtLeast(0.dp)
-    return if (mode == BottomChromeMode.Reserved) {
+    return if (mode.shortensPage) {
         (covered - reservedFootprint(navInset)).coerceAtLeast(0.dp)
     } else {
         covered
@@ -102,6 +115,14 @@ internal fun capsuleOverlap(
 /** The reserved band: the resting capsule, its margin and the navigation inset. */
 internal fun reservedFootprint(navInset: Dp): Dp =
     CapsuleHeight + CapsuleBottomMargin + navInset.coerceAtLeast(0.dp)
+
+/**
+ * Does the bottom-nav detector run in this document? Everything the
+ * WebView shows except our own home sentinel: `about:blank` sits under
+ * the native Home overlay, which pads itself.
+ */
+internal fun bottomUiApplies(url: String?): Boolean =
+    !url.isNullOrEmpty() && url != ABOUT_BLANK
 
 /**
  * The mode a tab's chrome actually uses: the home surface is a native
@@ -315,12 +336,11 @@ private val TOKEN_SAFE = Regex("[0-9a-f]{1,64}")
  * ancestors scrolls with it — an ordinary footer that is at the viewport
  * bottom only because the page is scrolled to its end (seen on the AVD
  * with the article fixture and the keyboard up). Reserving for it would
- * also stick: reserved mode removes the #65 spacer, which is what keeps
- * such a footer off the probe band, and scrolling away is not an event
- * the detector listens to. A flex shell's document doesn't scroll (its
- * inner container does), so it is unaffected — "scrolls" discounts the
- * #65 spacer's own height, which gives even a flex shell's document a
- * few dozen px of scroll range.
+ * also stick: scrolling away is not an event the detector listens to.
+ * The same holds for a page scrolled to its end and revealed (#65): its
+ * footer sits right above the bar, but it scrolls. A flex shell's
+ * document doesn't scroll (its inner container does), so it is
+ * unaffected.
  *
  * **Colour**, first found: a non-transparent background on the nav or an
  * ancestor below `<body>`; the page's `theme-color` (a `media` query, if
@@ -400,15 +420,6 @@ internal fun bottomUiDetectorJs(token: String, debounceMs: Int = BOTTOM_UI_DEBOU
     }
     return null;
   }
-  function spacerPx() {
-    var px = 0, l = d.adoptedStyleSheets || [];
-    for (var i = 0; i < l.length; i++) {
-      if (l[i] && l[i].$BOTTOM_SPACER_MARK === true) {
-        try { px += parseFloat(l[i].cssRules[0].style.height) || 0; } catch (e) {}
-      }
-    }
-    return px;
-  }
   function pinned(n) {
     for (; n && n !== d.documentElement; n = n.parentElement) {
       var p = gcs(n).position;
@@ -423,7 +434,7 @@ internal fun bottomUiDetectorJs(token: String, debounceMs: Int = BOTTOM_UI_DEBOU
     var vw = (std && de.clientWidth) || w.innerWidth, vh = (std && de.clientHeight) || w.innerHeight;
     if (!vw || !vh) return null;
     if (vw !== fullW) { fullW = vw; fullH = vh; } else if (vh > fullH) fullH = vh;
-    var nav = null, se = d.scrollingElement || de, scrolls = se.scrollHeight - spacerPx() > vh + 1;
+    var nav = null, se = d.scrollingElement || de, scrolls = se.scrollHeight > vh + 1;
     for (var n = d.elementFromPoint(vw / 2, vh - 30); n && n !== b && n !== de; n = n.parentElement) {
       var r = n.getBoundingClientRect();
       if (r.bottom >= vh - 60 && r.bottom <= vh + 20 && r.height >= 40 && r.height <= fullH * 0.25 &&

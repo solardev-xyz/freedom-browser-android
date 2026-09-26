@@ -49,6 +49,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
@@ -951,7 +952,12 @@ fun BrowserScreen(
     // `editProgress` — so the compact and editing morphs never resize the
     // WebView (see [contentBottomReserve] and #63).
     val chromeMode = effectiveBottomChromeMode(state.bottomChromeMode, isHomeTab)
-    val reserved = chromeMode == BottomChromeMode.Reserved
+    // Reserved (#66) or revealed (#65): the page area stops above the
+    // capsule and the strip fills the band under it.
+    val reserved = chromeMode.shortensPage
+    // The tab's WebView reads this at touch-down: no reveal while the
+    // chrome is busy with the address bar or the keyboard (#65).
+    SideEffect { state.chromeEditing = addressFocused || keyboardVisible }
     val navInsetDp = with(density) { navInsetPx.toDp() }
     val imeInsetDp = with(density) { imeInsetPx.toDp() }
     val contentBottomReserve = contentBottomReserve(
@@ -1042,8 +1048,9 @@ fun BrowserScreen(
         // [HomeScreen] and [SuggestionsPanel] below, plus the
         // WebView itself whenever the keyboard is up (see
         // [contentBottomReserve]) — and page-footer reachability at
-        // rest is left to the compact-on-scroll state from stage 2
-        // (#30), which is how Safari handles it too. Re-checked for
+        // rest comes from a push past the end of the page, which
+        // shortens the page area the same way (scroll-to-reveal, #65,
+        // [ScrollRevealSlot]). Re-checked for
         // #66 on WebView 133: View padding, a fake 400 px system-bar /
         // display-cutout inset dispatched to the WebView, and
         // `setOverScrollMode` all leave `innerHeight`, `scrollHeight`
@@ -1099,15 +1106,23 @@ fun BrowserScreen(
             }
         }
 
-        // Reserved mode's strip (#66): everything below the page area —
-        // the reserve itself plus whatever the IME inset takes.
+        // The strip of reserved mode (#66) and of a reveal (#65):
+        // everything below the page area — the reserve itself plus
+        // whatever the IME inset takes.
         if (reserved) {
             Box(
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
                     .fillMaxWidth()
                     .height(contentBottomReserve + imeInsetDp)
-                    .drawBehind { drawRect(stripColor.value) },
+                    // Until the effect above has caught up with a strip
+                    // that just appeared, the target itself: the
+                    // Animatable is snapped a frame late, and that frame
+                    // showed the previous colour (seen frame by frame in a
+                    // screen recording of a reveal, #65).
+                    .drawBehind {
+                        drawRect(if (stripShownFor == state.id) stripColor.value else stripTarget)
+                    },
             )
         }
 

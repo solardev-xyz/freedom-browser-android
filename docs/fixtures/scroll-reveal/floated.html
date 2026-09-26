@@ -1,0 +1,18 @@
+<!doctype html><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Floated cards</title>
+<link rel="stylesheet" href="../reserved-mode/base.css"><script src="../reserved-mode/common.js"></script>
+<style>
+  .card { float:left; width:calc(50% - 24px); margin:8px 0 8px 16px; height:140px; background:var(--card); }
+  .last { float:left; width:calc(100% - 32px); margin:8px 16px; padding:12px 0; background:var(--nav); color:var(--navfg); text-align:center; }
+  .last button { font:600 16px system-ui; padding:10px 18px; }
+</style>
+<h1>Floated cards</h1>
+<div id="cards"></div>
+<div class="last"><button data-name="floated button">Floated last button</button><div>Last line (floated)</div></div>
+<script>
+  for (var i = 1; i <= 14; i++) {
+    var c = document.createElement('div'); c.className = 'card'; c.textContent = 'Card ' + i;
+    document.getElementById('cards').appendChild(c);
+  }
+</script>
