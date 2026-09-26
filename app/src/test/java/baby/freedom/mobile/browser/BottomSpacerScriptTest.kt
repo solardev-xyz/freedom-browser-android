@@ -28,39 +28,49 @@ class BottomSpacerScriptTest {
     // `body::after` after the body's content and floats. `bodyAuto`
     // makes the body box as tall as its in-flow content (plus the spacer
     // and the floats it clears, when on body). `absBottom` is the end of
-    // an absolutely positioned element.
+    // an absolutely positioned element. The in-flow content is one last
+    // child; `lastRel` pushes it down by `position: relative` (overflow
+    // only — the flow, and ::after, stay put). `quirks` is a document
+    // without a doctype: `<body>` is the scrolling element, reports the
+    // viewport's extent, and its box is stretched to the viewport.
     private val fakeDom = """
         var htmlOverflowY = 'visible', bodyOverflowY = 'visible';
         var baseHeight = 2000, bodyH = null, contentH = null, absBottom = 0;
         var bodyDisplay = 'block', bodyAuto = false, trail = 0, floatB = 0;
+        var lastRel = 0, quirks = false;
         function cH() { return contentH === null ? baseHeight : contentH; }
         function bH() {
-          if (bodyAuto) return onBody() ? Math.max(cH(), floatB) + onBody() : cH();
-          return bodyH === null ? baseHeight : bodyH;
+          var v;
+          if (bodyAuto) v = onBody() ? Math.max(cH(), floatB) + onBody() : cH();
+          else v = bodyH === null ? baseHeight : bodyH;
+          return quirks ? Math.max(v, window.innerHeight) : v;
         }
         function hH() { // <html>'s content box: auto height
           return onHtml() ? Math.max(bH() + trail, floatB) + onHtml() : Math.max(bH() + trail, floatB);
         }
         function bScroll() {
-          return Math.max(bH(), cH(), floatB, onBody() ? Math.max(cH(), floatB) + onBody() : 0);
+          return Math.max(bH(), cH() + lastRel, floatB, onBody() ? Math.max(cH(), floatB) + onBody() : 0);
         }
         var cspBlocksSheets = false, sheetsBuilt = 0, sheetWrites = 0;
         var screen = { width: 412 };
         var window = { scrollY: 0, innerHeight: 800 };
         function CSSStyleSheet() {
           sheetsBuilt++;
-          var self = this, props = {};
+          var self = this, props = {}, prio = {};
           this.textContent = '';
           this.cssRules = [];
           this.replaceSync = function (text) {
             sheetWrites++;
             self.textContent = text;
-            props = {};
-            var m = /(--[a-z-]+):(\d+)/.exec(text);
-            if (m) props[m[1]] = m[2];
+            props = {}; prio = {};
+            var re = /([a-z-]+):([^;!}]*)(!important)?/g, m;
+            while ((m = re.exec(text.replace(/^[^{]*\{/, '')))) {
+              props[m[1]] = m[2]; prio[m[1]] = m[3] ? 'important' : '';
+            }
             self.cssRules = cspBlocksSheets ? [] : [{
               selectorText: /^[a-z]+::after/.exec(text)[0], style: {
-              getPropertyValue: function (k) { return k in props ? props[k] : ''; } } }];
+              getPropertyValue: function (k) { return k in props ? props[k] : ''; },
+              getPropertyPriority: function (k) { return k in prio ? prio[k] : ''; } } }];
           };
         }
         var otherSheet = { cssRules: [{ style: { getPropertyValue: function () { return ''; } } }] };
@@ -73,7 +83,7 @@ class BottomSpacerScriptTest {
         function spacerPx() {
           var s = ours();
           if (!s || !s.cssRules.length) return 0;
-          return parseInt(s.cssRules[0].style.getPropertyValue('$BOTTOM_SPACER_MARK'), 10) || 0;
+          return parseInt(s.cssRules[0].style.getPropertyValue('height'), 10) || 0;
         }
         function placedOn() {
           var s = ours();
@@ -90,17 +100,31 @@ class BottomSpacerScriptTest {
           get scrollTop() { return window.scrollY; },
           getBoundingClientRect: function () { return { top: -window.scrollY, bottom: hH() - window.scrollY }; }
         };
+        var content = {
+          get offsetTop() { return lastRel; },
+          get offsetHeight() { return cH(); },
+          previousElementSibling: null,
+          getBoundingClientRect: function () {
+            return { top: lastRel - window.scrollY, bottom: cH() + lastRel - window.scrollY };
+          }
+        };
         var body = {
-          get scrollHeight() { return bScroll(); },
-          get clientHeight() { return bH(); },
+          get scrollHeight() { return quirks ? html.scrollHeight : bScroll(); },
+          get clientHeight() { return quirks ? window.innerHeight : bH(); },
+          lastElementChild: content,
           getBoundingClientRect: function () { return { top: -window.scrollY, bottom: bH() - window.scrollY }; }
         };
         document = {
-          documentElement: html, body: body, scrollingElement: html,
+          documentElement: html, body: body,
+          get scrollingElement() { return quirks ? body : html; },
           adoptedStyleSheets: [otherSheet]
         };
         function getComputedStyle(e, pseudo) {
           if (pseudo) return { content: spacerPx() > 0 && placedOn() === (e === html ? 'html' : 'body') ? '""' : 'none' };
+          if (e === content) return {
+            display: 'block', position: lastRel ? 'relative' : 'static', cssFloat: 'none',
+            top: lastRel + 'px', marginBottom: '0px'
+          };
           return {
             overflowY: e === html ? htmlOverflowY : bodyOverflowY,
             display: e === html ? 'block' : bodyDisplay,
@@ -359,11 +383,53 @@ class BottomSpacerScriptTest {
     fun `an auto-height body that only grew around the spacer settles on html`() = doc {
         eval("bodyAuto = true; contentH = 20; floatB = 1880")
         eval("document.adoptedStyleSheets = [otherSheet, new CSSStyleSheet()]")
-        eval("ours().replaceSync('body::after{$BOTTOM_SPACER_MARK:82;height:82px}')")
+        eval("ours().replaceSync('body::after{clear:both!important;height:82px!important}')")
         assertEquals(82, run())
         assertEquals("html", eval("placedOn()"))
         eval("sheetWrites = 0")
         repeat(3) { assertEquals(82, run()) }
         assertEquals(0, num("sheetWrites"))
+    }
+
+    // R5-F1: no doctype. `<body>` is the scrolling element and its
+    // scrollHeight/clientHeight are the viewport's; that is no body
+    // overflow, and html::after (under the viewport-tall body box) does
+    // end the document, so the spacer is reported and discounted.
+    @Test
+    fun `a quirks-mode short page reports the spacer it gets`() = doc {
+        eval("quirks = true; bodyAuto = true; contentH = 100; window.innerHeight = 863")
+        assertEquals(82, run())
+        assertEquals("html", eval("placedOn()"))
+        assertEquals(863 + 82, num("html.scrollHeight"))
+        assertFalse(documentScrollsPastSpacer(true, 863 + 82, 82, 863, 1f))
+        eval("sheetWrites = 0")
+        assertEquals(82, run())
+        assertEquals(0, num("sheetWrites"))
+    }
+
+    // R5-F2: a last child pushed down by `position: relative` (or a
+    // transform) overflows an auto-height body, but ::after follows the
+    // flow, not the offset box: neither placement gets past it. Report
+    // 0, stay on html, and write nothing on later passes.
+    @Test
+    fun `a relatively offset footer reports no spacer and does not flip placement`() = doc {
+        eval("bodyAuto = true; contentH = 1500; lastRel = 100; window.innerHeight = 863")
+        assertEquals(0, run())
+        assertEquals("html", eval("placedOn()"))
+        eval("sheetWrites = 0")
+        repeat(4) {
+            assertEquals(0, run())
+            assertEquals("html", eval("placedOn()"))
+        }
+        assertEquals(0, num("sheetWrites"))
+    }
+
+    // R5-F3: the sheet is found again by its shape, with no marker.
+    @Test
+    fun `the rule carries no custom property`() = doc {
+        assertEquals(82, run())
+        assertFalse(eval("ours().textContent").toString().contains("--"))
+        assertEquals(82, run())
+        assertEquals(1, styleCount)
     }
 }

@@ -55,10 +55,12 @@ class PageBottomSpacerTest {
     }
 
     @Test
-    fun `the script carries the height and the marker`() {
+    fun `the script carries the height and no brand marker`() {
         val js = bottomSpacerJs(82)
         assertTrue(js.contains("Math.ceil(82 * k)"))
-        assertTrue(js.contains("'$BOTTOM_SPACER_MARK'"))
+        // R5-F3: nothing a page can read back names the browser.
+        assertFalse(js.contains("freedom", ignoreCase = true))
+        assertFalse(Regex("--[a-z]").containsMatchIn(js)) // no custom property at all
         assertTrue(js.contains("new CSSStyleSheet()"))
         assertFalse(js.contains("createElement"))
         assertTrue(js.contains("(onBody ? 'body' : 'html') + '::after{"))

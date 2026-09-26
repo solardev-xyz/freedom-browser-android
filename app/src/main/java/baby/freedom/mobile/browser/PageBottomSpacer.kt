@@ -34,10 +34,13 @@ import kotlin.math.ceil
 //    block-level body, where the pseudo-element is plain flow after the
 //    last child — the rule moves to `body::after`, which sits after the
 //    overflowing content. Only overflow that runs into `html::after`'s
-//    band counts: uncleared floats also overflow an auto-height body,
-//    but `html::after`'s `clear` already puts it below them, and moving
-//    such a page to `body::after` (whose `clear` grows the body round
-//    the floats) would only flip it back on the next pass. A page that
+//    band counts, and only in-flow overflow — where the flow puts the
+//    body's last child, not `body.scrollHeight`: uncleared floats, and a
+//    last child pushed down by `position: relative` or a transform, also
+//    overflow an auto-height body, but `body::after` follows none of
+//    them (`html::after`'s `clear` already puts it below the floats),
+//    and moving such a page to `body::after` would only flip it back on
+//    the next pass. A page that
 //    grows past (or shrinks back inside) its body box moves the spacer
 //    with it; one that does neither is never rewritten.
 //
@@ -59,17 +62,25 @@ import kotlin.math.ceil
 // are `position: fixed; bottom: 0`, app shells with `overflow: hidden`
 // on `html`/`body` (skipped outright, see [bottomSpacerJs]), pages that
 // scroll an inner container, flex/grid bodies whose content overflows
-// the body box, and pages whose end is set by positioned content. The
-// script reports `0` for all of these (see "Does it end the document?"
-// in [bottomSpacerJs]).
-
-/**
- * Custom property that marks the spacer's rule and carries its height in
- * CSS px; how a later pass finds its own sheet among the document's
- * adopted ones. `all` does not reset custom properties, and nothing
- * reads this one but [bottomSpacerJs].
- */
-internal const val BOTTOM_SPACER_MARK = "--freedom-bottom-spacer"
+// the body box, and pages whose end is set by positioned, relatively
+// offset or transformed content. The script reports `0` for all of
+// these (see "Does it end the document?" in [bottomSpacerJs]).
+//
+// One inner scroller does get it, as a side effect of the full-height
+// case above: `html, body { height: 100%; overflow-x: hidden }` makes
+// `<body>` itself the scroll container (its `overflow-y` computes to
+// `auto`), its content overflows its box, and `body::after` lands at the
+// end of that overflow — i.e. at the end of the body's own scroll range,
+// which is where the footer is. The script reports the spacer there,
+// and the report is right whichever scroller the WebView takes as its
+// own: if the body is promoted to root scroller the discount removes
+// exactly the range the spacer added, and if not the document does not
+// scroll at all and pull-to-refresh is not armed anyway.
+//
+// Quirks mode (no doctype) is handled like standards mode: there
+// `<body>` is `document.scrollingElement` and reports the viewport's
+// scroll extent, which is compared the same way; it never gets
+// `body::after`.
 
 /**
  * How tall the spacer is, in dp: the capsule's resting slot, the margin
@@ -97,7 +108,11 @@ internal fun bottomSpacerApplies(url: String?): Boolean =
  * The script that (re)applies the spacer to the document on screen.
  * Idempotent: the rule lives in one constructed stylesheet adopted by
  * the document (`document.adoptedStyleSheets`), found again on each
- * pass by [BOTTOM_SPACER_MARK], so running it at first paint, at load
+ * pass by its shape — a one-rule sheet, `html::after` or `body::after`,
+ * `clear: both` and an `!important` height, which is also where the
+ * current height is read back from. No marker of our own: anything a
+ * page can read in `adoptedStyleSheets` that names this browser would
+ * be a fingerprint. So running it at first paint, at load
  * finish, on every history update (SPA `pushState`), on a width change
  * and on every touch-down leaves exactly one. Nothing is left running
  * afterwards — no timer, no observer.
@@ -166,8 +181,10 @@ internal fun bottomSpacerJs(spacerDp: Int): String = """
     if (!('adoptedStyleSheets' in document) || typeof CSSStyleSheet !== 'function') return 0;
     var sheet = null, cur = 0, list = document.adoptedStyleSheets, i;
     for (i = 0; i < list.length; i++) {
-      var r = list[i].cssRules && list[i].cssRules[0];
-      var v = r && r.style ? parseInt(r.style.getPropertyValue('$BOTTOM_SPACER_MARK'), 10) : NaN;
+      var rs = list[i].cssRules, r = rs && rs.length === 1 && rs[0], st = r && r.style;
+      var v = st && /^(html|body)::after$/.test(r.selectorText || '') &&
+        st.getPropertyValue('clear') === 'both' && st.getPropertyPriority('height') === 'important'
+        ? parseInt(st.getPropertyValue('height'), 10) : NaN;
       if (v > 0) { sheet = list[i]; cur = v; break; }
     }
     var drop = function () {
@@ -195,8 +212,8 @@ internal fun bottomSpacerJs(spacerDp: Int): String = """
         document.adoptedStyleSheets = document.adoptedStyleSheets.concat([sheet]);
       }
       onBody = toBody;
-      sheet.replaceSync((onBody ? 'body' : 'html') + '::after{$BOTTOM_SPACER_MARK:' + px +
-        ';all:initial!important;content:""!important;display:block!important;' +
+      sheet.replaceSync((onBody ? 'body' : 'html') + '::after{' +
+        'all:initial!important;content:""!important;display:block!important;' +
         'clear:both!important;height:' + px + 'px!important}');
       return getComputedStyle(onBody ? b : h, '::after').content !== 'none';
     };
@@ -219,10 +236,48 @@ internal fun bottomSpacerJs(spacerDp: Int): String = """
       }
       return pos + neg;
     };
+    // The body's last in-flow child, where the flow puts it: its
+    // border-box bottom in document coordinates before any relative
+    // offset or transform (offsetTop/offsetHeight ignore transforms; a
+    // relative offset is taken back off; a sticky one, whose offset
+    // moves with the scroll, is stacked on the sibling before it), and
+    // its bottom margin. These are what ::after follows.
+    // `body.scrollHeight` is not: it also counts relatively offset,
+    // transformed and floated content, which overflows even an
+    // auto-height body without moving ::after at all.
+    var last = function () {
+      var c, cs, sticky = [], edge, mb = 0, k;
+      for (c = b.lastElementChild; c; c = c.previousElementSibling) {
+        cs = getComputedStyle(c);
+        if (/^(none|contents)$/.test(cs.display) || (cs.cssFloat || cs['float'] || 'none') !== 'none' ||
+            /absolute|fixed/.test(cs.position)) continue;
+        if (cs.position !== 'sticky') break;
+        sticky.push([c, cs]);
+      }
+      if (c) {
+        edge = c.offsetTop + c.offsetHeight - (cs.position === 'relative' ? n(cs, 'top') : 0);
+        mb = n(cs, 'marginBottom');
+      } else if (sticky.length) {
+        edge = b.getBoundingClientRect().top + y() + n(bs, 'borderTopWidth') + n(bs, 'paddingTop');
+      } else return null;
+      for (k = sticky.length - 1; k >= 0; k--) {
+        edge += Math.max(mb, n(sticky[k][1], 'marginTop')) + sticky[k][0].offsetHeight;
+        mb = n(sticky[k][1], 'marginBottom');
+      }
+      return { edge: edge, mb: mb };
+    };
+    // How far the body's in-flow content runs past the body's content
+    // box: > 0 only for a body of fixed height (`html, body
+    // { height: 100% }`, `100vh`) — an auto-height body grows round it.
+    var over = function () {
+      var l = last();
+      return l ? l.edge + Math.min(0, l.mb) -
+        (b.getBoundingClientRect().bottom + y() - n(bs, 'paddingBottom') - n(bs, 'borderBottomWidth')) : 0;
+    };
     // Where the spacer ends, in document coordinates.
     var spacerEnd = function () {
-      var bb = b.getBoundingClientRect().bottom + y();
-      if (onBody) return bb + n(bs, 'marginBottom') + Math.max(0, b.scrollHeight - b.clientHeight);
+      var bb = b.getBoundingClientRect().bottom + y(), l;
+      if (onBody) return Math.max(bb + n(bs, 'marginBottom'), (l = last()) ? l.edge + Math.max(0, l.mb) + px : 0);
       // html::after is the last thing in <html>'s content box, so where
       // <html> is as tall as its content (nearly always) that box ends
       // exactly at the spacer: past a collapsed trailing margin, past
@@ -234,19 +289,23 @@ internal fun bottomSpacerJs(spacerDp: Int): String = """
     // band html::after occupies (`html, body { height: 100% }`)? Then
     // html::after adds less than its height, or nothing.
     var intrudes = function (end) {
-      return b.scrollHeight > b.clientHeight + 1 &&
-        b.getBoundingClientRect().top + y() + b.scrollHeight > end - px + 2;
+      var l = over() > 1 && last();
+      return !!l && l.edge > end - px + 2;
     };
+    // In quirks mode `<body>` is the scrolling element and its
+    // scrollHeight/clientHeight are the viewport's, so the same
+    // document-level comparison holds there too.
     var ends = function () {
       var end = spacerEnd();
       if (!onBody && intrudes(end)) return false;
-      return se === b || se.scrollHeight <= Math.max(end + tail(), se.clientHeight || 0) + 2;
+      return se.scrollHeight <= Math.max(end + tail(), se.clientHeight || 0) + 2;
     };
     var canBody = se !== b && /^(block|flow-root|list-item)$/.test(bs.display);
-    // On body::after, stay only while the content would still overflow
-    // the body box without it (a fixed-height body); an auto-height body
-    // that merely grew around it goes back to html::after.
-    var want = onBody && canBody && b.scrollHeight - cur > b.clientHeight + 1;
+    // On body::after, stay only while the in-flow content overflows the
+    // body box (a fixed-height body — the spacer, not being an element,
+    // does not count); an auto-height body that merely grew around it
+    // goes back to html::after.
+    var want = onBody && canBody && over() > 1;
     if (!sheet || cur !== px || onBody !== want) {
       if (!put(want)) return drop();
     }
