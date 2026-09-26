@@ -956,8 +956,13 @@ fun BrowserScreen(
     // capsule and the strip fills the band under it.
     val reserved = chromeMode.shortensPage
     // The tab's WebView reads this at touch-down: no reveal while the
-    // chrome is busy with the address bar or the keyboard (#65).
-    SideEffect { state.chromeEditing = addressFocused || keyboardVisible }
+    // chrome is busy with the address bar or the keyboard (#65), and
+    // the surface colour a reveal falls back to without a tint sample.
+    val surfaceArgb = MaterialTheme.colorScheme.surface.toArgb()
+    SideEffect {
+        state.chromeEditing = addressFocused || keyboardVisible
+        state.surfaceArgb = surfaceArgb
+    }
     val navInsetDp = with(density) { navInsetPx.toDp() }
     val imeInsetDp = with(density) { imeInsetPx.toDp() }
     val contentBottomReserve = contentBottomReserve(

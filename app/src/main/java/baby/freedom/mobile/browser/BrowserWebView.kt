@@ -839,6 +839,12 @@ private fun buildRefreshableWebView(
         //     step 2.
         var revealPx = 0f
         var revealTint: Int? = null
+        // The finger the drag follows (the one that pushed), and whether
+        // the rest of this gesture is the reveal's, down to the last
+        // finger lifting: a second finger doesn't take the drag over,
+        // and Chromium (cancelled at takeover) sees none of it.
+        var revealPointerId = MotionEvent.INVALID_POINTER_ID
+        var revealOwnsGesture = false
         var revealAnim: ValueAnimator? = null
         var revealBridge: Bitmap? = null
         var revealScrollFrom = 0
@@ -856,6 +862,12 @@ private fun buildRefreshableWebView(
                 ?.getInsets(WindowInsetsCompat.Type.systemBars())?.bottom ?: 0
             return (reservedFootprint((navInsetPx / density).dp).value * density).roundToInt().toFloat()
         }
+
+        // What the rising page uncovers: the page's own bottom colour,
+        // or the theme surface (what the strip falls back to as well)
+        // if the sample failed or hasn't answered yet.
+        fun revealBackgroundArgb(): Int =
+            revealTint?.let { 0xFF000000.toInt() or it } ?: state.surfaceArgb
 
         fun stopRevealAnim() {
             val a = revealAnim ?: return
@@ -916,7 +928,7 @@ private fun buildRefreshableWebView(
             scrollBy(0, -shortBy)
             translationY = -shortBy.toFloat()
             revealBridge = null
-            refreshLayout.setBackgroundColor(0xFF000000.toInt() or (revealTint ?: 0xFFFFFF))
+            refreshLayout.setBackgroundColor(revealBackgroundArgb())
             animateReveal(0f) { finishHandover() }
         }
 
@@ -938,6 +950,8 @@ private fun buildRefreshableWebView(
 
         fun onRevealDragStart(event: MotionEvent) {
             stopRevealAnim()
+            revealPointerId = event.getPointerId(0)
+            revealOwnsGesture = true
             revealPx = revealHeightPx()
             // Chromium had the gesture until now; end it there (its
             // overscroll effect relaxes, the page gets a touchcancel).
@@ -946,7 +960,7 @@ private fun buildRefreshableWebView(
             onTouchEvent(cancel)
             cancel.recycle()
             parent?.requestDisallowInterceptTouchEvent(true)
-            refreshLayout.setBackgroundColor(0xFF000000.toInt() or (revealTint ?: 0xFFFFFF))
+            refreshLayout.setBackgroundColor(revealBackgroundArgb())
         }
 
         fun captureAndCommitReveal() {
@@ -956,8 +970,14 @@ private fun buildRefreshableWebView(
                 // called the reveal off while the copy was in flight.
                 if (reveal.phase != ScrollRevealSlot.Phase.Committing) return@captureRevealBand
                 revealBridge = band
+                // What the page area is meant to shrink by, until
+                // [revealLanded] measures what it did: the restore rule
+                // has this reveal's H even if the resize never lands.
+                revealLandedPx = revealPx.roundToInt()
                 reveal.onCommitted(unscrollable = scrollY <= 0)
-                revealTint?.let { state.bottomStripRgb = rgbString(it) }
+                // No sample: null, i.e. the theme surface — never an
+                // earlier reserved or revealed page's colour.
+                state.bottomStripRgb = revealTint?.let(::rgbString)
                 revealHandover = true
                 // Compose shortens the page area on its next layout
                 // ([contentBottomReserve]); [revealLanded] takes it from
@@ -973,7 +993,7 @@ private fun buildRefreshableWebView(
                         handOverReveal()
                     } else {
                         revealBridge = null
-                        refreshLayout.setBackgroundColor(0xFF000000.toInt() or (revealTint ?: 0xFFFFFF))
+                        refreshLayout.setBackgroundColor(revealBackgroundArgb())
                         animateReveal(0f) { finishHandover() }
                     }
                 }, REVEAL_HANDOVER_TIMEOUT_MS)
@@ -989,12 +1009,19 @@ private fun buildRefreshableWebView(
         }
 
         fun onRevealDragEvent(event: MotionEvent) {
-            when (event.actionMasked) {
-                MotionEvent.ACTION_MOVE ->
-                    translationY = -reveal.dragOffset(event.rawY, revealPx)
+            val action = event.actionMasked
+            if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
+                revealOwnsGesture = false
+            }
+            if (reveal.phase != ScrollRevealSlot.Phase.Dragging) return
+            val index = event.findPointerIndex(revealPointerId)
+            val released = revealDragReleased(action, event.actionIndex, index)
+            when {
+                action == MotionEvent.ACTION_MOVE && index >= 0 ->
+                    translationY = -reveal.dragOffset(event.getRawY(index), revealPx)
 
-                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                    val cancelled = event.actionMasked == MotionEvent.ACTION_CANCEL
+                released -> {
+                    val cancelled = action == MotionEvent.ACTION_CANCEL
                     when (reveal.onRelease(-translationY, revealPx, cancelled)) {
                         ScrollRevealSlot.Phase.Committing -> animateReveal(revealPx) { commitReveal() }
                         else -> animateReveal(0f) {
@@ -1115,7 +1142,10 @@ private fun buildRefreshableWebView(
         setOnTouchListener { _, event ->
             // The reveal owns this gesture (#65): the page follows the
             // finger by translation only, and Chromium sees none of it.
-            if (reveal.phase == ScrollRevealSlot.Phase.Dragging) {
+            // A fresh gesture is nobody's yet, even if the last one's
+            // UP never reached us (the view was detached mid-drag).
+            if (event.actionMasked == MotionEvent.ACTION_DOWN) revealOwnsGesture = false
+            if (revealOwnsGesture) {
                 onRevealDragEvent(event)
                 return@setOnTouchListener true
             }
@@ -1739,7 +1769,8 @@ private fun Context.findActivity(): Activity? {
 }
 
 /**
- * Read the window's pixels along [view]'s bottom edge and hand their
+ * Read the window's pixels along [view]'s bottom edge, just above the
+ * navigation bar and its scrim ([revealSampleRowY]), and hand their
  * [dominantRgb] to [onRgb] (#65). `PixelCopy` of a 1 px row: a small
  * GPU read-back, answered within a frame or two, once per touch that
  * arms a reveal.
@@ -1749,7 +1780,9 @@ private fun sampleBottomRow(view: View, onRgb: (Int) -> Unit) {
     if (view.width <= 0 || view.height <= 0) return
     val loc = IntArray(2)
     view.getLocationInWindow(loc)
-    val y = loc[1] + view.height - 1
+    val navInsetPx = ViewCompat.getRootWindowInsets(view)
+        ?.getInsets(WindowInsetsCompat.Type.navigationBars())?.bottom ?: 0
+    val y = revealSampleRowY(loc[1], view.height, window.decorView.height, navInsetPx)
     val rect = Rect(loc[0], y, loc[0] + view.width, y + 1)
     val bitmap = createBitmap(rect.width(), 1)
     try {

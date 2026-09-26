@@ -8,6 +8,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import android.view.MotionEvent
 import org.junit.Test
 
 class ScrollRevealTest {
@@ -294,5 +295,33 @@ class ScrollRevealTest {
         assertEquals("rgb(103, 80, 164)", rgbString(0x6750A4))
         assertEquals(0xFF6750A4.toInt(), parseRgb(rgbString(dominantRgb(row)!!)))
         assertNull(dominantRgb(IntArray(0)))
+    }
+
+    @Test
+    fun `the tint is sampled above the navigation bar and its scrim`() {
+        // 3-button nav: 2400 px window, 126 px bar, WebView to the bottom.
+        assertEquals(2273, revealSampleRowY(viewTopPx = 0, viewHeightPx = 2400, windowHeightPx = 2400, navInsetPx = 126))
+        // Gesture nav: the handle's inset is still skipped.
+        assertEquals(2336, revealSampleRowY(viewTopPx = 0, viewHeightPx = 2400, windowHeightPx = 2400, navInsetPx = 63))
+        // No inset: the view's last row, as before.
+        assertEquals(2399, revealSampleRowY(viewTopPx = 0, viewHeightPx = 2400, windowHeightPx = 2400, navInsetPx = 0))
+        // A view that stops above the bar: its own last row.
+        assertEquals(2099, revealSampleRowY(viewTopPx = 100, viewHeightPx = 2000, windowHeightPx = 2400, navInsetPx = 126))
+        // Never outside the view.
+        assertEquals(100, revealSampleRowY(viewTopPx = 100, viewHeightPx = 10, windowHeightPx = 150, navInsetPx = 126))
+    }
+
+    // --- multi-touch ----------------------------------------------------------
+
+    @Test
+    fun `only the pushing finger lifting ends the drag`() {
+        assertTrue(revealDragReleased(MotionEvent.ACTION_UP, 0, 0))
+        assertTrue(revealDragReleased(MotionEvent.ACTION_CANCEL, 0, 0))
+        // The pushing finger (index 0) lifts, a second one stays down.
+        assertTrue(revealDragReleased(MotionEvent.ACTION_POINTER_UP, 0, 0))
+        // The second finger lifts: the drag goes on.
+        assertFalse(revealDragReleased(MotionEvent.ACTION_POINTER_UP, 1, 0))
+        assertFalse(revealDragReleased(MotionEvent.ACTION_POINTER_DOWN, 1, 0))
+        assertFalse(revealDragReleased(MotionEvent.ACTION_MOVE, 0, 0))
     }
 }

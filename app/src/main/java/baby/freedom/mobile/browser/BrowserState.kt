@@ -136,6 +136,14 @@ class BrowserState(val id: Long) {
     internal var chromeEditing: Boolean = false
 
     /**
+     * The theme surface as opaque ARGB, the colour a reveal (#65) falls
+     * back to when its sample of the page's bottom row failed: under the
+     * drag, and as the strip (a null [bottomStripRgb] resolves to it,
+     * see [bottomStripArgb]). Written by [BrowserScreen]; plain field.
+     */
+    internal var surfaceArgb: Int = 0xFF000000.toInt()
+
+    /**
      * Most recent page-preview bitmap for this tab, shown in the tab
      * switcher grid. Captured from the live WebView after each successful
      * load and whenever the user opens the switcher (so the thumbnail

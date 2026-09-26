@@ -1,5 +1,6 @@
 package baby.freedom.mobile.browser
 
+import android.view.MotionEvent
 import kotlin.math.abs
 import kotlin.math.exp
 
@@ -144,6 +145,33 @@ internal fun dominantRgb(pixels: IntArray): Int? {
         }
     }
     return best
+}
+
+/**
+ * Does this event end a reveal drag that follows the finger at pointer
+ * index [trackedIndex] (-1: not in this event)? The gesture ending, or
+ * the pushing finger lifting while another stays down: the commit is
+ * then decided on its offset, rather than the drag jumping to the other
+ * finger's position (#70 review). Another finger landing or lifting
+ * changes nothing.
+ */
+internal fun revealDragReleased(actionMasked: Int, actionIndex: Int, trackedIndex: Int): Boolean =
+    actionMasked == MotionEvent.ACTION_UP || actionMasked == MotionEvent.ACTION_CANCEL ||
+        (actionMasked == MotionEvent.ACTION_POINTER_UP && actionIndex == trackedIndex)
+
+/**
+ * The window row to sample a reveal's tint from: the page's last row
+ * that isn't under the navigation bar. The bar's own rows can carry the
+ * system's translucent contrast scrim (3-button navigation), which is
+ * drawn into the app's window, so a sample there reads page ⊕ scrim
+ * (#70 review: a blue footer came out grey). One row above the inset is
+ * inside the capsule's bottom margin, where only the page is. Clamped
+ * to the view, for a view that doesn't reach the navigation bar.
+ */
+internal fun revealSampleRowY(viewTopPx: Int, viewHeightPx: Int, windowHeightPx: Int, navInsetPx: Int): Int {
+    val viewBottom = viewTopPx + viewHeightPx
+    val clearBottom = minOf(viewBottom, windowHeightPx - navInsetPx.coerceAtLeast(0))
+    return (clearBottom - 1).coerceIn(viewTopPx, viewBottom - 1)
 }
 
 /** 0xRRGGBB → `rgb(r, g, b)`, the form [bottomStripArgb] reads. */
