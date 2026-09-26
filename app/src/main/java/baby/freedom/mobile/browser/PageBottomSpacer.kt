@@ -33,9 +33,13 @@ import kotlin.math.ceil
 //    overflow, and adds no scroll range. There — and only for a
 //    block-level body, where the pseudo-element is plain flow after the
 //    last child — the rule moves to `body::after`, which sits after the
-//    overflowing content. Each pass picks the placement afresh, so a
-//    page that grows past (or shrinks back inside) its body box moves
-//    the spacer with it.
+//    overflowing content. Only overflow that runs into `html::after`'s
+//    band counts: uncleared floats also overflow an auto-height body,
+//    but `html::after`'s `clear` already puts it below them, and moving
+//    such a page to `body::after` (whose `clear` grows the body round
+//    the floats) would only flip it back on the next pass. A page that
+//    grows past (or shrinks back inside) its body box moves the spacer
+//    with it; one that does neither is never rewritten.
 //
 // Never per frame. The height is the bar's *resting* footprint plus the
 // navigation inset — `capsuleOverlap` in [BrowserScreen] without the
@@ -122,9 +126,12 @@ internal fun bottomSpacerApplies(url: String?): Boolean =
  * its end is worth nothing: the footer stays under the bar, and
  * discounting its height from the pull-to-refresh gate would subtract
  * range the page never got. So every pass checks that the document's
- * scroll extent ends where the spacer does (the body's box, its bottom
- * margin, the spacer or the body's overflow including it, `<html>`'s
- * own bottom padding/border/margin; or the viewport, on a short page).
+ * scroll extent ends where the spacer does — for `html::after`, the
+ * bottom of `<html>`'s content box, which is the spacer's own bottom
+ * and so already past a trailing margin collapsed through `<body>` (a
+ * last `<p>`) and past cleared floats; for `body::after`, the body's
+ * overflow including it — plus `<html>`'s own bottom padding, border
+ * and margin; or the viewport, on a short page.
  * When something else reaches further — a flex/grid body's overflow,
  * an absolutely positioned element — it reports `0`. The rule is left
  * in place (it is inert there, and dropping it only to put it back on
@@ -180,27 +187,81 @@ internal fun bottomSpacerJs(spacerDp: Int): String = """
       return drop();
     }
     var onBody = !!sheet && /^body/.test(sheet.cssRules[0].selectorText || '');
-    var toBody = se !== b && /^(block|flow-root|list-item)$/.test(bs.display) &&
-      b.scrollHeight - (onBody ? cur : 0) > b.clientHeight + 1;
     var k = Math.max(1, h.clientWidth / (screen.width || h.clientWidth));
     var px = Math.ceil($spacerDp * k);
-    if (!sheet || cur !== px || onBody !== toBody) {
+    var put = function (toBody) {
       if (!sheet) {
         sheet = new CSSStyleSheet();
-        document.adoptedStyleSheets = list.concat([sheet]);
+        document.adoptedStyleSheets = document.adoptedStyleSheets.concat([sheet]);
       }
       onBody = toBody;
       sheet.replaceSync((onBody ? 'body' : 'html') + '::after{$BOTTOM_SPACER_MARK:' + px +
         ';all:initial!important;content:""!important;display:block!important;' +
         'clear:both!important;height:' + px + 'px!important}');
-      if (getComputedStyle(onBody ? b : h, '::after').content === 'none') return drop();
-    }
+      return getComputedStyle(onBody ? b : h, '::after').content !== 'none';
+    };
     var n = function (s, p) { return parseFloat(s[p]) || 0; };
-    var end = b.getBoundingClientRect().bottom + (window.scrollY || se.scrollTop || 0) +
-      n(bs, 'marginBottom') + (onBody ? Math.max(0, b.scrollHeight - b.clientHeight) : px) +
-      n(hs, 'paddingBottom') + n(hs, 'borderBottomWidth') + n(hs, 'marginBottom');
-    if (se !== b && se.scrollHeight > Math.max(end, se.clientHeight || 0) + 2) return 0;
-    return px;
+    var y = function () { return window.scrollY || se.scrollTop || 0; };
+    var tail = function () { return n(hs, 'paddingBottom') + n(hs, 'borderBottomWidth') + n(hs, 'marginBottom'); };
+    // Body's bottom margin as collapsed with its last in-flow descendants'
+    // (a trailing <p>'s 1em lands below the body box, not inside it).
+    var trail = function () {
+      var m = n(bs, 'marginBottom'), pos = Math.max(0, m), neg = Math.min(0, m), e = b, s = bs, c, cs;
+      while (!n(s, 'paddingBottom') && !n(s, 'borderBottomWidth') &&
+          /^(block|list-item)$/.test(s.display) && /^visible$/.test(s.overflowY || 'visible')) {
+        for (c = e.lastElementChild; c; c = c.previousElementSibling) {
+          cs = getComputedStyle(c);
+          if (cs.display !== 'none' && (cs.cssFloat || cs['float'] || 'none') === 'none' &&
+              !/absolute|fixed/.test(cs.position)) break;
+        }
+        if (!c || Math.abs(c.getBoundingClientRect().bottom - e.getBoundingClientRect().bottom) > 1) break;
+        m = n(cs, 'marginBottom'); pos = Math.max(pos, m); neg = Math.min(neg, m); e = c; s = cs;
+      }
+      return pos + neg;
+    };
+    // Where the spacer ends, in document coordinates.
+    var spacerEnd = function () {
+      var bb = b.getBoundingClientRect().bottom + y();
+      if (onBody) return bb + n(bs, 'marginBottom') + Math.max(0, b.scrollHeight - b.clientHeight);
+      // html::after is the last thing in <html>'s content box, so where
+      // <html> is as tall as its content (nearly always) that box ends
+      // exactly at the spacer: past a collapsed trailing margin, past
+      // the floats its clear:both clears. Else, estimate from the body.
+      var hEnd = h.getBoundingClientRect().bottom + y() - n(hs, 'paddingBottom') - n(hs, 'borderBottomWidth');
+      return Math.max(hEnd, bb + trail() + px);
+    };
+    // Does the body's content, overflowing its box, run on into the
+    // band html::after occupies (`html, body { height: 100% }`)? Then
+    // html::after adds less than its height, or nothing.
+    var intrudes = function (end) {
+      return b.scrollHeight > b.clientHeight + 1 &&
+        b.getBoundingClientRect().top + y() + b.scrollHeight > end - px + 2;
+    };
+    var ends = function () {
+      var end = spacerEnd();
+      if (!onBody && intrudes(end)) return false;
+      return se === b || se.scrollHeight <= Math.max(end + tail(), se.clientHeight || 0) + 2;
+    };
+    var canBody = se !== b && /^(block|flow-root|list-item)$/.test(bs.display);
+    // On body::after, stay only while the content would still overflow
+    // the body box without it (a fixed-height body); an auto-height body
+    // that merely grew around it goes back to html::after.
+    var want = onBody && canBody && b.scrollHeight - cur > b.clientHeight + 1;
+    if (!sheet || cur !== px || onBody !== want) {
+      if (!put(want)) return drop();
+    }
+    if (ends()) return px;
+    // html::after does not end the document. Move to body::after only if
+    // the body's own overflow is what runs into or past it — the one
+    // thing body::after follows. Uncleared floats never get here
+    // (html::after clears them, so they end above it), and neither does
+    // a page whose end is only a positioned element, so neither flips
+    // the placement back and forth between passes.
+    if (!onBody && canBody && intrudes(spacerEnd())) {
+      if (!put(true)) return drop();
+      if (ends()) return px;
+    }
+    return 0;
   } catch (e) {
     return -1;
   }

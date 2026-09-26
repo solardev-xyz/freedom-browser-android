@@ -23,14 +23,27 @@ class BottomSpacerScriptTest {
     // Layout, as Chromium does it: the body box is `bodyH` tall and its
     // in-flow content `contentH` (both `baseHeight` unless set; content
     // taller than the box is overflow). `html::after` sits under the body
-    // *box*; `body::after` after the body's content. `absBottom` is the
-    // end of an absolutely positioned element.
+    // *box* and a collapsed trailing margin `trail` (a last `<p>`'s),
+    // below `floatB`, the end of any uncleared floats (its `clear`);
+    // `body::after` after the body's content and floats. `bodyAuto`
+    // makes the body box as tall as its in-flow content (plus the spacer
+    // and the floats it clears, when on body). `absBottom` is the end of
+    // an absolutely positioned element.
     private val fakeDom = """
         var htmlOverflowY = 'visible', bodyOverflowY = 'visible';
         var baseHeight = 2000, bodyH = null, contentH = null, absBottom = 0;
-        var bodyDisplay = 'block';
-        function bH() { return bodyH === null ? baseHeight : bodyH; }
+        var bodyDisplay = 'block', bodyAuto = false, trail = 0, floatB = 0;
         function cH() { return contentH === null ? baseHeight : contentH; }
+        function bH() {
+          if (bodyAuto) return onBody() ? Math.max(cH(), floatB) + onBody() : cH();
+          return bodyH === null ? baseHeight : bodyH;
+        }
+        function hH() { // <html>'s content box: auto height
+          return onHtml() ? Math.max(bH() + trail, floatB) + onHtml() : Math.max(bH() + trail, floatB);
+        }
+        function bScroll() {
+          return Math.max(bH(), cH(), floatB, onBody() ? Math.max(cH(), floatB) + onBody() : 0);
+        }
         var cspBlocksSheets = false, sheetsBuilt = 0, sheetWrites = 0;
         var screen = { width: 412 };
         var window = { scrollY: 0, innerHeight: 800 };
@@ -71,15 +84,16 @@ class BottomSpacerScriptTest {
         var html = {
           clientWidth: 412,
           get scrollHeight() {
-            return Math.max(window.innerHeight, bH() + onHtml(), cH() + onBody(), absBottom);
+            return Math.max(window.innerHeight, hH(), bScroll(), absBottom);
           },
           get clientHeight() { return window.innerHeight; },
-          get scrollTop() { return window.scrollY; }
+          get scrollTop() { return window.scrollY; },
+          getBoundingClientRect: function () { return { top: -window.scrollY, bottom: hH() - window.scrollY }; }
         };
         var body = {
-          get scrollHeight() { return Math.max(bH(), cH() + onBody()); },
+          get scrollHeight() { return bScroll(); },
           get clientHeight() { return bH(); },
-          getBoundingClientRect: function () { return { bottom: bH() - window.scrollY }; }
+          getBoundingClientRect: function () { return { top: -window.scrollY, bottom: bH() - window.scrollY }; }
         };
         document = {
           documentElement: html, body: body, scrollingElement: html,
@@ -309,5 +323,47 @@ class BottomSpacerScriptTest {
     fun `no constructable stylesheets means no spacer`() = doc {
         eval("CSSStyleSheet = undefined")
         assertEquals(0, run())
+    }
+
+    // R4-F1: a last `<p>` whose bottom margin collapses through body
+    // lands below the body box; the spacer after it still ends the page.
+    @Test
+    fun `a trailing collapsed margin still reports the spacer`() = doc {
+        eval("bodyAuto = true; contentH = 790; trail = 16; window.innerHeight = 863")
+        assertEquals(82, run())
+        assertEquals("html", eval("placedOn()"))
+        assertEquals(790 + 16 + 82, num("html.scrollHeight"))
+        assertFalse(documentScrollsPastSpacer(true, 790 + 16 + 82, 82, 863, 1f))
+    }
+
+    // R4-F2: floats overflowing an auto-height body. html::after clears
+    // them, so it ends the page; body::after is never tried, and nothing
+    // flips between passes.
+    @Test
+    fun `uncleared floats keep the spacer on html, with no rewrite per pass`() = doc {
+        eval("bodyAuto = true; contentH = 20; floatB = 1880")
+        assertEquals(82, run())
+        assertEquals("html", eval("placedOn()"))
+        assertEquals(1880 + 82, num("html.scrollHeight"))
+        eval("sheetWrites = 0")
+        repeat(4) {
+            assertEquals(82, run())
+            assertEquals("html", eval("placedOn()"))
+        }
+        assertEquals(0, num("sheetWrites"))
+    }
+
+    // R4-F2: an auto-height body that is on body::after (from before its
+    // content moved into floats) goes back to html once and stays.
+    @Test
+    fun `an auto-height body that only grew around the spacer settles on html`() = doc {
+        eval("bodyAuto = true; contentH = 20; floatB = 1880")
+        eval("document.adoptedStyleSheets = [otherSheet, new CSSStyleSheet()]")
+        eval("ours().replaceSync('body::after{$BOTTOM_SPACER_MARK:82;height:82px}')")
+        assertEquals(82, run())
+        assertEquals("html", eval("placedOn()"))
+        eval("sheetWrites = 0")
+        repeat(3) { assertEquals(82, run()) }
+        assertEquals(0, num("sheetWrites"))
     }
 }
