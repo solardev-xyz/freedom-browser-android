@@ -1770,13 +1770,15 @@ private fun Context.findActivity(): Activity? {
 
 /**
  * Read the window's pixels along [view]'s bottom edge, just above the
- * navigation bar and its scrim ([revealSampleRowY]), and hand their
- * [dominantRgb] to [onRgb] (#65). `PixelCopy` of a 1 px row: a small
+ * navigation bar and its scrim ([revealSampleRowY]), and hand the
+ * [dominantRgb] of its edge columns ([revealTintPixels]: half the
+ * capsule's side margin, clear of its shadow) to [onRgb] (#65). `PixelCopy` of a 1 px row: a small
  * GPU read-back, answered within a frame or two, once per touch that
  * arms a reveal.
  */
 private fun sampleBottomRow(view: View, onRgb: (Int) -> Unit) {
     val window = view.context.findActivity()?.window ?: return
+    val handler = view.handler ?: return
     if (view.width <= 0 || view.height <= 0) return
     val loc = IntArray(2)
     view.getLocationInWindow(loc)
@@ -1790,10 +1792,11 @@ private fun sampleBottomRow(view: View, onRgb: (Int) -> Unit) {
             if (result == PixelCopy.SUCCESS) {
                 val px = IntArray(bitmap.width)
                 bitmap.getPixels(px, 0, bitmap.width, 0, 0, bitmap.width, 1)
-                dominantRgb(px)?.let(onRgb)
+                val edgePx = (CapsuleSideMargin.value * view.resources.displayMetrics.density / 2).roundToInt()
+                dominantRgb(revealTintPixels(px, edgePx))?.let(onRgb)
             }
             bitmap.recycle()
-        }, view.handler ?: return)
+        }, handler)
     } catch (e: IllegalArgumentException) {
         bitmap.recycle()
     }

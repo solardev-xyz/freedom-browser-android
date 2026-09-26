@@ -174,6 +174,20 @@ internal fun revealSampleRowY(viewTopPx: Int, viewHeightPx: Int, windowHeightPx:
     return (clearBottom - 1).coerceIn(viewTopPx, viewBottom - 1)
 }
 
+/**
+ * The pixels of a sampled row ([revealSampleRowY]) that vote on the
+ * tint: the [edgePx] columns at either end, inside the capsule's side
+ * margins. The row lies in the capsule's bottom margin, where the
+ * capsule's shadow falls off with one shade across the capsule's whole
+ * width, so over a wide (expanded) capsule that shade could outvote the
+ * page (#70 review: a white page read (254, 254, 254)). The edges are
+ * clear of it. The whole row for an [edgePx] that leaves no middle.
+ */
+internal fun revealTintPixels(row: IntArray, edgePx: Int): IntArray {
+    if (edgePx <= 0 || 2 * edgePx >= row.size) return row
+    return row.copyOfRange(0, edgePx) + row.copyOfRange(row.size - edgePx, row.size)
+}
+
 /** 0xRRGGBB → `rgb(r, g, b)`, the form [bottomStripArgb] reads. */
 internal fun rgbString(rgb: Int): String =
     "rgb(${(rgb shr 16) and 0xFF}, ${(rgb shr 8) and 0xFF}, ${rgb and 0xFF})"

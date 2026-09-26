@@ -298,6 +298,24 @@ class ScrollRevealTest {
     }
 
     @Test
+    fun `the capsule's shadow shade does not outvote the page`() {
+        // Expanded capsule over a white page: its shadow's falloff has
+        // one shade across most of the row, which a whole-row vote picks.
+        val white = 0xFFFFFFFF.toInt()
+        val shadow = 0xFFFEFEFE.toInt()
+        val row = IntArray(1080) { if (it in 60..1019) shadow else white }
+        assertEquals(0xFEFEFE, dominantRgb(row))
+        assertEquals(0xFFFFFF, dominantRgb(revealTintPixels(row, edgePx = 19)))
+        // Both ends vote: a scrollbar on one edge doesn't take it.
+        val scrolled = row.copyOf().also { for (i in 1070..1079) it[i] = 0xFF888888.toInt() }
+        assertEquals(0xFFFFFF, dominantRgb(revealTintPixels(scrolled, edgePx = 19)))
+        assertEquals(38, revealTintPixels(row, edgePx = 19).size)
+        // No room for a middle, or no edge: the whole row.
+        assertEquals(10, revealTintPixels(IntArray(10), edgePx = 5).size)
+        assertEquals(1080, revealTintPixels(row, edgePx = 0).size)
+    }
+
+    @Test
     fun `the tint is sampled above the navigation bar and its scrim`() {
         // 3-button nav: 2400 px window, 126 px bar, WebView to the bottom.
         assertEquals(2273, revealSampleRowY(viewTopPx = 0, viewHeightPx = 2400, windowHeightPx = 2400, navInsetPx = 126))
