@@ -18,7 +18,7 @@ import org.mozilla.javascript.Scriptable
 class BottomSpacerScriptTest {
 
     private val fakeDom = """
-        var htmlOverflowY = 'visible', bodyOverflowY = 'visible', pageHtmlAfter = 'none';
+        var htmlOverflowX = 'visible', htmlOverflowY = 'visible', bodyOverflowY = 'visible', pageHtmlAfter = 'none';
         var baseHeight = 2000, sheetWrites = 0, throwOnRead = false;
         var growth = function (px) { return px; };
         var screen = { width: 412 };
@@ -61,7 +61,8 @@ class BottomSpacerScriptTest {
             if (e !== html) throw new Error('only html::after is read');
             return { content: spacerPx() ? '""' : pageHtmlAfter };
           }
-          return { overflowY: e === html ? htmlOverflowY : bodyOverflowY };
+          return e === html ? { overflowX: htmlOverflowX, overflowY: htmlOverflowY }
+                            : { overflowX: bodyOverflowY, overflowY: bodyOverflowY };
         }
     """
 
@@ -75,7 +76,7 @@ class BottomSpacerScriptTest {
 
         fun eval(js: String): Any? = cx.evaluateString(scope, js, "t", 1, null)
         fun num(js: String): Int = (Context.toNumber(eval(js))).toInt()
-        fun decide(dp: Int = 82): Int = num(bottomSpacerDecisionJs(dp))
+        fun decide(dp: Int = 82, viewWidthDp: Int = 0): Int = num(bottomSpacerDecisionJs(dp, viewWidthDp))
         fun present(): Int = num(BOTTOM_SPACER_PRESENT_JS)
         val spacer get() = num("spacerPx()")
         val scrollHeight get() = num("html.scrollHeight")
@@ -144,6 +145,24 @@ class BottomSpacerScriptTest {
         assertEquals(1, sheets)
         eval("bodyOverflowY = 'visible'") // consent accepted
         assertEquals(82, decide())
+    }
+
+    @Test
+    fun `body overflow hidden under an html with its own overflow is not a lock`() = doc {
+        // html{overflow-y:scroll} body{overflow:hidden}: html's overflow is
+        // not visible, so body's does not propagate to the viewport — body
+        // clips only itself and the page scrolls as usual.
+        eval("htmlOverflowY = 'scroll'; bodyOverflowY = 'hidden'")
+        assertEquals(82, decide())
+        assertEquals(2082, scrollHeight)
+        // overflow-x alone set on html (overflow-y computes to auto) stops
+        // the propagation just the same.
+        eval("adopted = [otherSheet]; htmlOverflowX = 'auto'; htmlOverflowY = 'auto'")
+        assertEquals(82, decide())
+        // …while with html left visible, body's hidden is the viewport's: a lock.
+        eval("adopted = [otherSheet]; htmlOverflowX = 'visible'; htmlOverflowY = 'visible'; sheetWrites = 0")
+        assertEquals(-1, decide())
+        assertEquals(0, writes)
     }
 
     @Test
@@ -218,6 +237,19 @@ class BottomSpacerScriptTest {
     fun `a desktop-width page gets its zoom factor`() = doc {
         eval("html.clientWidth = 980")
         assertEquals(196, decide(82)) // ceil(82 * 980 / 412)
+    }
+
+    @Test
+    fun `the zoom factor is against the WebView's width, not the screen's`() = doc {
+        // Split-screen on a tablet: an ~800 dp display, a 400 dp WebView
+        // showing a 980 px layout — drawn at 400/980, so 82 dp needs
+        // ceil(82 * 980 / 400) CSS px, not 82 * 980 / 800.
+        eval("screen.width = 800; html.clientWidth = 980")
+        assertEquals(201, decide(82, viewWidthDp = 400))
+        assertEquals(201, spacer)
+        // A device-width page in the same window is not scaled.
+        eval("adopted = [otherSheet]; html.clientWidth = 400")
+        assertEquals(82, decide(82, viewWidthDp = 400))
     }
 
     @Test

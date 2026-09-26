@@ -163,13 +163,44 @@ class PageBottomSpacerTest {
     }
 
     @Test
-    fun `a permanent lock gives up after eight touches`() {
+    fun `a permanent lock gives up after its own allowance of touches`() {
         val slot = BottomSpacerSlot()
-        val scripts = slot.simulate(slot.loadThenTouches(20)) { null }
-        assertEquals(2 + SPACER_MAX_TOUCH_ATTEMPTS, scripts)
+        val scripts = slot.simulate(slot.loadThenTouches(200)) { null }
+        assertEquals(2 + SPACER_MAX_LOCKED_TOUCHES, scripts)
         assertEquals(SpacerState.Pending, slot.state)
-        assertEquals(SPACER_MAX_TOUCH_ATTEMPTS, slot.touchAttempts)
+        assertEquals(SPACER_MAX_LOCKED_TOUCHES, slot.lockedTouches)
+        assertEquals(0, slot.touchAttempts)
         assertEquals(0, slot.discountCssPx)
+    }
+
+    @Test
+    fun `a consent flow of many taps under its lock still gets the spacer after`() {
+        // "Manage options": tabs, a toggle per vendor, Save — 20 taps under
+        // overflow:hidden, each answered "locked". Then the lock lifts.
+        val slot = BottomSpacerSlot()
+        slot.simulate(listOf({ slot.decideOnLoad(height) }, { slot.decideOnLoad(height) })) { null }
+        assertEquals(20, slot.simulate(slot.touches(20)) { null })
+        assertEquals(0, slot.touchAttempts) // the measuring budget is untouched
+        assertEquals(20, slot.lockedTouches)
+        slot.accept(slot.decideOnTouch(height)!!, 82, height)
+        assertEquals(SpacerState.Kept(82), slot.state)
+    }
+
+    @Test
+    fun `locked taps and measuring taps are budgeted separately`() {
+        // A lock that comes and goes on a page that keeps rejecting.
+        val slot = BottomSpacerSlot()
+        slot.accept(slot.decideOnLoad(height)!!, 0, height)
+        var measured = 0
+        repeat(40) { i ->
+            height += 100
+            val t = slot.decideOnTouch(height) ?: return@repeat
+            val locked = i % 2 == 0
+            if (!locked) measured++
+            slot.accept(t, if (locked) null else 0, height)
+        }
+        assertEquals(SPACER_MAX_TOUCH_ATTEMPTS, measured)
+        assertEquals(SPACER_MAX_TOUCH_ATTEMPTS, slot.touchAttempts)
     }
 
     @Test
@@ -240,13 +271,50 @@ class PageBottomSpacerTest {
         val slot = BottomSpacerSlot()
         slot.accept(slot.decideOnLoad(height)!!, 82, height)
         val still = slot.checkOnHistoryChange()!!
-        assertNull(slot.acceptPresence(still, present = true))
+        assertNull(slot.acceptPresence(still, present = true, height))
         assertEquals(SpacerState.Kept(82), slot.state)
         val gone = slot.checkOnHistoryChange()!!
-        val redo = slot.acceptPresence(gone, present = false)!!
+        val redo = slot.acceptPresence(gone, present = false, height)!!
         assertEquals(0, slot.discountCssPx)
         slot.accept(redo, 82, height)
         assertEquals(SpacerState.Kept(82), slot.state)
+    }
+
+    @Test
+    fun `a kept document checks its sheet on touch-down only once its height changed`() {
+        val slot = BottomSpacerSlot()
+        slot.accept(slot.decideOnLoad(height)!!, 82, height)
+        assertNull(slot.checkOnTouch(height)) // unchanged: no script
+        // A theme toggle assigns `adoptedStyleSheets = [theme]`: our sheet
+        // and its 82 px go, with no history change to notice it.
+        height -= 82
+        val check = slot.checkOnTouch(height)!!
+        val redo = slot.acceptPresence(check, present = false, height)!!
+        assertEquals(0, slot.discountCssPx) // the discount does not outlive the sheet
+        height += 82
+        slot.accept(redo, 82, height)
+        assertEquals(SpacerState.Kept(82), slot.state)
+        assertNull(slot.checkOnTouch(height))
+    }
+
+    @Test
+    fun `a kept sheet found present is not checked again until the height moves`() {
+        val slot = BottomSpacerSlot()
+        slot.accept(slot.decideOnLoad(height)!!, 82, height)
+        height = 3000 // lazy images loaded
+        val check = slot.checkOnTouch(height)!!
+        assertNull(slot.acceptPresence(check, present = true, height))
+        assertEquals(SpacerState.Kept(82), slot.state)
+        assertNull(slot.checkOnTouch(height))
+        assertNull(slot.decideOnTouch(height))
+    }
+
+    @Test
+    fun `touch presence checks are for kept documents only`() {
+        val slot = BottomSpacerSlot()
+        assertNull(slot.checkOnTouch(height)) // pending
+        slot.accept(slot.decideOnLoad(height)!!, 0, height)
+        assertNull(slot.checkOnTouch(height + 500)) // rejected
     }
 
     @Test
@@ -263,7 +331,7 @@ class PageBottomSpacerTest {
         slot.accept(slot.decideOnLoad(height)!!, 82, height)
         val check = slot.checkOnHistoryChange()!!
         slot.startDocument()
-        assertNull(slot.acceptPresence(check, present = false))
+        assertNull(slot.acceptPresence(check, present = false, height))
     }
 
     // ---- pull-to-refresh discount ------------------------------------

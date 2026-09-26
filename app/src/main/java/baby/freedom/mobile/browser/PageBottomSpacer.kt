@@ -24,10 +24,12 @@ import kotlin.math.ceil
 // before (#66's territory).
 //
 // A kept spacer is left alone — the page is never restyled again for
-// it, so nothing jumps and touch-downs run no script (see
-// [BottomSpacerSlot]). It is re-made only on a width change (rotation:
-// the navigation inset and a desktop-width page's zoom both move), or
-// when an SPA route change has dropped our sheet. A rejected document
+// it, so nothing jumps, and touch-downs run at most a read-only check
+// that it is still there, only after the document's height has changed
+// (see [BottomSpacerSlot]). It is re-made only on a width change
+// (rotation: the navigation inset and a desktop-width page's zoom both
+// move), or when the page has dropped our sheet (an SPA route change, a
+// theme toggle resetting `adoptedStyleSheets`). A rejected document
 // is decided again if it grows (a client-rendered page whose first
 // paint was a one-screen shell).
 
@@ -63,9 +65,13 @@ internal const val BOTTOM_SPACER_MARK = "endSpacer"
 /**
  * One decision pass (see the file comment):
  *
- *  - `-1` — pending: `<html>`/`<body>` hides vertical overflow (a scroll
+ *  - `-1` — pending: the viewport hides vertical overflow (a scroll
  *    lock: consent banner, lightbox, app shell) or there is no `<body>`
- *    yet. Nothing is inserted *or removed*: a sheet of ours from an
+ *    yet. The viewport's overflow is `<html>`'s, or `<body>`'s when
+ *    `<html>` leaves both axes `visible` (CSS Overflow §3.3: only then
+ *    does `<body>`'s propagate). `html{overflow-y:scroll}
+ *    body{overflow:hidden}` is an ordinary scrolling page — `<body>`
+ *    clips only itself — not a lock. Nothing is inserted *or removed*: a sheet of ours from an
  *    earlier decision stays (a rotation under a modal keeps the spacer
  *    at its old height rather than dropping it; see [BottomSpacerSlot]).
  *
@@ -80,10 +86,14 @@ internal const val BOTTOM_SPACER_MARK = "endSpacer"
  *  - `n > 0` — kept: the rule stays, and `n` is the *measured* growth of
  *    `scrollingElement.scrollHeight`, in CSS px.
  *
- * The height is `spacerDp` scaled by a desktop-width page's zoom factor
- * (a 980 px layout on a 412 px screen needs proportionally more CSS px).
+ * The height is `spacerDp` scaled by a desktop-width page's zoom factor:
+ * a 980 px layout in a 412 dp WebView needs proportionally more CSS px.
+ * The factor is taken against [viewWidthDp] — the WebView's own width,
+ * not `screen.width`, which is the whole display's and about twice the
+ * WebView's in split-screen. `0` (not laid out yet) falls back to
+ * `screen.width`.
  */
-internal fun bottomSpacerDecisionJs(spacerDp: Int): String = """
+internal fun bottomSpacerDecisionJs(spacerDp: Int, viewWidthDp: Int = 0): String = """
 (function () {
   var d = document, sheet = null;
   var mine = function (s) { return !!s && s.$BOTTOM_SPACER_MARK === true; };
@@ -92,13 +102,15 @@ internal fun bottomSpacerDecisionJs(spacerDp: Int): String = """
     var h = d.documentElement, b = d.body;
     if (!h || !b) return -1;
     if (!('adoptedStyleSheets' in d) || typeof CSSStyleSheet !== 'function') return 0;
-    var hidden = /hidden|clip/;
-    if (hidden.test(getComputedStyle(h).overflowY) || hidden.test(getComputedStyle(b).overflowY)) return -1;
+    var hidden = /hidden|clip/, hs = getComputedStyle(h);
+    if (hidden.test(hs.overflowY)) return -1;
+    if (hs.overflowX === 'visible' && hs.overflowY === 'visible' &&
+        hidden.test(getComputedStyle(b).overflowY)) return -1;
     if (d.adoptedStyleSheets.some(mine)) drop(mine);
     var own = getComputedStyle(h, '::after').content;
     if (own && own !== 'none' && own !== 'normal') return 0;
     var se = d.scrollingElement || h;
-    var px = Math.ceil($spacerDp * Math.max(1, h.clientWidth / (screen.width || h.clientWidth)));
+    var px = Math.ceil($spacerDp * Math.max(1, h.clientWidth / (${viewWidthDp.coerceAtLeast(0)} || screen.width || h.clientWidth)));
     var before = se.scrollHeight;
     sheet = new CSSStyleSheet();
     sheet.replaceSync('html::after{all:initial!important;content:""!important;' +
@@ -136,8 +148,21 @@ internal val BOTTOM_SPACER_PRESENT_JS = """
 internal fun parseBottomSpacerResult(jsResult: String?): Int? =
     jsResult?.trim()?.toIntOrNull()?.takeIf { it >= 0 }
 
-/** Touch-downs per document that may run a decision pass (see [BottomSpacerSlot]). */
+/**
+ * Touch-downs per document that may run a decision pass that *measured*
+ * — inserted the rule and kept or rejected it (see [BottomSpacerSlot]).
+ */
 internal const val SPACER_MAX_TOUCH_ATTEMPTS = 8
+
+/**
+ * Touch-downs per document whose pass found a scroll lock still up. A
+ * separate, larger allowance: a consent dialog's "Manage options" flow
+ * (tabs, a toggle per vendor, Save) easily takes more than
+ * [SPACER_MAX_TOUCH_ATTEMPTS] taps under its lock, and must not leave
+ * the document without a spacer once it lifts. A locked pass is a
+ * read-only style lookup; the cap only bounds a lock that never lifts.
+ */
+internal const val SPACER_MAX_LOCKED_TOUCHES = 64
 
 /** Where a document stands with the spacer. */
 internal sealed interface SpacerState {
@@ -168,25 +193,40 @@ internal sealed interface SpacerState {
  * Single-threaded: WebView callbacks and `evaluateJavascript` results all
  * arrive on the UI thread.
  *
- * A kept spacer is final: touch-downs run no script for it. Pending and
- * rejected documents are retried on load finish and on touch-down — a
- * rejected one only once `WebView.getContentHeight()` (read natively, no
- * script) shows it has grown — with touch-downs capped at
- * [SPACER_MAX_TOUCH_ATTEMPTS] per document.
+ * A kept spacer is not re-decided on touch-down. Only if
+ * `WebView.getContentHeight()` (read natively, no script) has changed
+ * since it was last seen on the page does a touch-down run the read-only
+ * [BOTTOM_SPACER_PRESENT_JS] ([checkOnTouch]): a page that resets
+ * `adoptedStyleSheets` outside a history change (an async SPA render, a
+ * theme toggle) drops our sheet and with it `cssPx` of height, and the
+ * pull-to-refresh discount must not outlive the sheet.
+ *
+ * Pending and rejected documents are retried on load finish and on
+ * touch-down — a rejected one only once the content height shows it has
+ * grown. Touch-downs are capped per document: [SPACER_MAX_TOUCH_ATTEMPTS]
+ * passes that measured, and separately [SPACER_MAX_LOCKED_TOUCHES] that
+ * found a scroll lock still up.
  */
 internal class BottomSpacerSlot {
-    /** Identifies one decision request; see [accept]. */
-    data class Token(val document: Int, val request: Int)
+    /** Identifies one decision request; see [accept]. [touch]: begun by a touch-down. */
+    data class Token(val document: Int, val request: Int, val touch: Boolean = false)
 
     private var document = 0
     private var request = 0
     private var inFlight: Token? = null
 
+    /** Content height when a kept sheet was last seen on the page; see [checkOnTouch]. */
+    private var keptAtContentHeightCss = -1
+
     var state: SpacerState = SpacerState.Pending
         private set
 
-    /** Touch-downs this document has spent on decision passes. */
+    /** Touch-downs this document has spent on decision passes that measured. */
     var touchAttempts = 0
+        private set
+
+    /** Touch-downs this document has spent on passes that found a lock. */
+    var lockedTouches = 0
         private set
 
     /** What the pull-to-refresh gate discounts: the measured growth, or 0. */
@@ -196,6 +236,8 @@ internal class BottomSpacerSlot {
         document++
         inFlight = null
         touchAttempts = 0
+        lockedTouches = 0
+        keptAtContentHeightCss = -1
         state = SpacerState.Pending
     }
 
@@ -210,12 +252,29 @@ internal class BottomSpacerSlot {
     fun decideOnLoad(contentHeightCss: Int): Token? =
         if (inFlight == null && undecided(contentHeightCss)) begin() else null
 
-    /** Touch-down: retry an undecided document, at most [SPACER_MAX_TOUCH_ATTEMPTS] times. */
+    /**
+     * Touch-down: retry an undecided document. Charged to
+     * [touchAttempts] up front and moved to [lockedTouches] if the pass
+     * answers "locked" (see [accept]).
+     */
     fun decideOnTouch(contentHeightCss: Int): Token? {
-        if (inFlight != null || touchAttempts >= SPACER_MAX_TOUCH_ATTEMPTS) return null
+        if (inFlight != null) return null
+        if (touchAttempts >= SPACER_MAX_TOUCH_ATTEMPTS || lockedTouches >= SPACER_MAX_LOCKED_TOUCHES) return null
         if (!undecided(contentHeightCss)) return null
         touchAttempts++
-        return begin()
+        return begin(touch = true)
+    }
+
+    /**
+     * Touch-down on a kept document whose content height has changed
+     * since the sheet was last seen: a presence check, answered through
+     * [acceptPresence]. Null — no script — otherwise.
+     */
+    fun checkOnTouch(contentHeightCss: Int): Token? {
+        val s = state
+        if (s !is SpacerState.Kept || s.stale || inFlight != null) return null
+        if (contentHeightCss == keptAtContentHeightCss) return null
+        return Token(document, request)
     }
 
     /**
@@ -237,11 +296,17 @@ internal class BottomSpacerSlot {
         if (state is SpacerState.Kept && inFlight == null) Token(document, request) else null
 
     /**
-     * The history check's answer. Returns a new decision token when the
-     * sheet has gone (the SPA reset `adoptedStyleSheets`), else null.
+     * A presence check's answer ([checkOnHistoryChange], [checkOnTouch]);
+     * [contentHeightCss] is `WebView.getContentHeight()` when it arrived.
+     * Returns a new decision token when the sheet has gone (the page
+     * reset `adoptedStyleSheets`), else null.
      */
-    fun acceptPresence(token: Token, present: Boolean): Token? {
-        if (token.document != document || present || state !is SpacerState.Kept || inFlight != null) return null
+    fun acceptPresence(token: Token, present: Boolean, contentHeightCss: Int): Token? {
+        if (token.document != document || state !is SpacerState.Kept || inFlight != null) return null
+        if (present) {
+            keptAtContentHeightCss = contentHeightCss
+            return null
+        }
         state = SpacerState.Pending
         return begin()
     }
@@ -253,6 +318,13 @@ internal class BottomSpacerSlot {
     fun accept(token: Token, cssPx: Int?, contentHeightCss: Int) {
         if (token != inFlight) return
         inFlight = null
+        if (cssPx == null && token.touch) {
+            // Locked: the tap belonged to the lock (a consent flow), not
+            // to the measuring budget.
+            touchAttempts--
+            lockedTouches++
+        }
+        if (cssPx != null && cssPx > 0) keptAtContentHeightCss = contentHeightCss
         state = when {
             cssPx == null -> state // pending: a stale kept sheet is still on the page
             cssPx > 0 -> SpacerState.Kept(cssPx)
@@ -260,7 +332,8 @@ internal class BottomSpacerSlot {
         }
     }
 
-    private fun begin(): Token = Token(document, ++request).also { inFlight = it }
+    private fun begin(touch: Boolean = false): Token =
+        Token(document, ++request, touch).also { inFlight = it }
 }
 
 /**

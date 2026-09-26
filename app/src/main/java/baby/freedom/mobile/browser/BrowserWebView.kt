@@ -40,6 +40,7 @@ import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
 import kotlin.math.abs
+import kotlin.math.roundToInt
 
 internal const val ABOUT_BLANK = "about:blank"
 private const val LOG_TAG = "BrowserWebView"
@@ -670,9 +671,27 @@ private fun buildRefreshableWebView(
         if (token == null) return
         val navInsetPx = ViewCompat.getRootWindowInsets(view)
             ?.getInsets(WindowInsetsCompat.Type.systemBars())?.bottom ?: 0
-        val spacerDp = bottomSpacerDp(navInsetPx, view.resources.displayMetrics.density)
-        view.evaluateJavascript(bottomSpacerDecisionJs(spacerDp)) { result ->
+        val density = view.resources.displayMetrics.density
+        val spacerDp = bottomSpacerDp(navInsetPx, density)
+        // The WebView's own width, not the display's: they differ in
+        // split-screen, and the zoom factor is against this one.
+        val viewWidthDp = if (density > 0f) (view.width / density).roundToInt() else 0
+        view.evaluateJavascript(bottomSpacerDecisionJs(spacerDp, viewWidthDp)) { result ->
             bottomSpacer.accept(token, parseBottomSpacerResult(result), view.contentHeight)
+        }
+    }
+
+    /**
+     * Look (read-only) for a kept spacer's sheet for [check], and decide
+     * afresh if the page has dropped it.
+     */
+    fun checkBottomSpacer(view: WebView, check: BottomSpacerSlot.Token?) {
+        if (check == null) return
+        view.evaluateJavascript(BOTTOM_SPACER_PRESENT_JS) { result ->
+            decideBottomSpacer(
+                view,
+                bottomSpacer.acceptPresence(check, result?.trim() != "0", view.contentHeight),
+            )
         }
     }
 
@@ -796,9 +815,15 @@ private fun buildRefreshableWebView(
                     // A scroll-locked document's #65 spacer is retried
                     // here (a consent banner may have lifted), as is a
                     // rejected one that has grown since; a kept one runs
-                    // nothing (see [BottomSpacerSlot]).
+                    // at most a read-only presence check, and only when
+                    // its height has changed (see [BottomSpacerSlot]).
                     if (bottomSpacerApplies(url)) {
-                        decideBottomSpacer(this, bottomSpacer.decideOnTouch(contentHeight))
+                        val decision = bottomSpacer.decideOnTouch(contentHeight)
+                        if (decision != null) {
+                            decideBottomSpacer(this, decision)
+                        } else {
+                            checkBottomSpacer(this, bottomSpacer.checkOnTouch(contentHeight))
+                        }
                     }
                 }
 
@@ -1094,10 +1119,7 @@ private fun buildRefreshableWebView(
             // only if it has gone (#65).
             override fun doUpdateVisitedHistory(view: WebView?, url: String?, isReload: Boolean) {
                 if (view == null || !bottomSpacerApplies(url)) return
-                val check = bottomSpacer.checkOnHistoryChange() ?: return
-                view.evaluateJavascript(BOTTOM_SPACER_PRESENT_JS) { result ->
-                    decideBottomSpacer(view, bottomSpacer.acceptPresence(check, result?.trim() != "0"))
-                }
+                checkBottomSpacer(view, bottomSpacer.checkOnHistoryChange())
             }
 
             override fun shouldOverrideUrlLoading(
