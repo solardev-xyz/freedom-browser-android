@@ -70,6 +70,35 @@ internal fun contentBottomReserve(
     else -> 0.dp
 }
 
+/**
+ * How much of the page area the capsule still covers once
+ * [contentBottomReserve] is applied. Native surfaces ([HomeScreen],
+ * [SuggestionsPanel]) pad their content by it so the last row stays
+ * clear of the chrome.
+ *
+ * - **Keyboard up:** nothing — the reserve already clears the capsule.
+ * - **Overlay:** the whole footprint plus the navigation inset the page
+ *   area draws behind.
+ * - **Reserved:** only what the capsule grows *past* the reserved band —
+ *   zero at rest, the editing morph's extra height while the address bar
+ *   has focus without an IME (hardware keyboard, ChromeOS), which would
+ *   otherwise cover the nearest suggestion row.
+ */
+internal fun capsuleOverlap(
+    mode: BottomChromeMode,
+    keyboardVisible: Boolean,
+    capsuleFootprint: Dp,
+    navInset: Dp,
+): Dp {
+    if (keyboardVisible) return 0.dp
+    val covered = capsuleFootprint + navInset.coerceAtLeast(0.dp)
+    return if (mode == BottomChromeMode.Reserved) {
+        (covered - reservedFootprint(navInset)).coerceAtLeast(0.dp)
+    } else {
+        covered
+    }
+}
+
 /** The reserved band: the resting capsule, its margin and the navigation inset. */
 internal fun reservedFootprint(navInset: Dp): Dp =
     CapsuleHeight + CapsuleBottomMargin + navInset.coerceAtLeast(0.dp)
@@ -319,6 +348,14 @@ private val TOKEN_SAFE = Regex("[0-9a-f]{1,64}")
  * [bottomUiProbeRequest] messages. Nothing polls: with no events there
  * is no work.
  *
+ * **A report is owed until it is made.** A forced probe (install, or
+ * Kotlin asking) that finds no `<body>` yet can't answer; the next
+ * probe, whatever woke it, reports even if its answer matches the last
+ * one. Kotlin has no channel back into a detector that has never
+ * reported, so this is how its asks are honoured. If `<html>` itself
+ * wasn't there at install, the `MutationObserver` is attached on the
+ * document's next `readystatechange` (which also probes).
+ *
  * **Reporting.** Only when the answer (flag, colour) changes, or when
  * Kotlin asked. Nothing is written to the page: no DOM node, attribute,
  * style or global of ours (the platform's channel object is the one
@@ -333,7 +370,7 @@ internal fun bottomUiDetectorJs(token: String, debounceMs: Int = BOTTOM_UI_DEBOU
   var T = '$token', SEL = 'a, button, [role="button"], [role="tab"], [role="link"]';
   var gcs = w.getComputedStyle, setT = w.setTimeout, MO = w.MutationObserver,
       RO = w.ResizeObserver, IO = w.IntersectionObserver, str = JSON.stringify;
-  var timer = 0, last = null, watched = null, ro = null, io = null, fullW = -1, fullH = 0, ctx = null;
+  var timer = 0, last = null, owed = false, mo = null, watched = null, ro = null, io = null, fullW = -1, fullH = 0, ctx = null;
   var RGBA = /^rgba?\(\s*([\d.]+)[\s,]+([\d.]+)[\s,]+([\d.]+)\s*(?:[,\/]\s*([\d.]+)(%?)\s*)?\)$/;
   function paint(c) {
     var m = RGBA.exec(c || '');
@@ -410,19 +447,25 @@ internal fun bottomUiDetectorJs(token: String, debounceMs: Int = BOTTOM_UI_DEBOU
     timer = 0;
     var p = null;
     try { p = probe(); } catch (e) {}
-    if (!p) return;
+    if (!p) { if (force) owed = true; return; }
     watch(p.nav);
     var key = !!p.nav + ' ' + p.color;
-    if (!force && key === last) return;
-    last = key;
+    if (!force && !owed && key === last) return;
+    last = key; owed = false;
     port.postMessage(str({ token: T, hasBottomUI: !!p.nav, color: p.color }));
   }
   function soon() { if (!timer) timer = setT(function () { run(false); }, $debounceMs); }
   port.addEventListener('message', function (e) { if (e && e.data === 'probe ' + T) run(true); });
+  function attach() {
+    if (mo || !MO || !d.documentElement) return;
+    mo = new MO(soon);
+    mo.observe(d.documentElement, {
+      childList: true, subtree: true, attributes: true, attributeFilter: ['class', 'style', 'hidden', 'open']
+    });
+  }
   w.addEventListener('resize', soon);
-  if (MO && d.documentElement) new MO(soon).observe(d.documentElement, {
-    childList: true, subtree: true, attributes: true, attributeFilter: ['class', 'style', 'hidden', 'open']
-  });
+  if (d.addEventListener) d.addEventListener('readystatechange', function () { attach(); soon(); });
+  attach();
   run(true);
 })();
 """

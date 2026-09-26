@@ -56,8 +56,11 @@ class BottomUiDetectorScriptTest {
               };
             } };
           },
-          appendChild: function () { domWrites++; }, setAttribute: function () { domWrites++; }
+          appendChild: function () { domWrites++; }, setAttribute: function () { domWrites++; },
+          addEventListener: function (t, f) { docListeners.push({ t: t, f: f }); }
         };
+        var docListeners = [];
+        function readyStateChanges() { for (var i = 0; i < docListeners.length; i++) if (docListeners[i].t === 'readystatechange') docListeners[i].f(); }
         function getComputedStyle(e) {
           return { backgroundColor: e.bg || 'rgba(0, 0, 0, 0)', position: e.pos || 'static' };
         }
@@ -336,6 +339,58 @@ class BottomUiDetectorScriptTest {
         assertEquals(0, num("domWrites"))
         assertFalse(bottomUiDetectorJs(token).contains("freedom", ignoreCase = true))
         assertFalse(BOTTOM_UI_CHANNEL.contains("freedom", ignoreCase = true))
+    }
+
+    @Test
+    fun `a detector installed before body exists reports once body arrives`() = page {
+        // Installed early (no <body> yet): the forced first probe can't
+        // answer and posts nothing, so Kotlin has no reply channel yet.
+        eval("document.body = null; hit = tab")
+        install()
+        assertEquals(0, sent)
+        // <body> is parsed in: the MutationObserver wakes the detector and
+        // the owed report goes out without Kotlin having to ask.
+        eval("document.body = body")
+        mutate(); flush()
+        assertEquals(1, sent)
+        assertTrue(last().has())
+    }
+
+    @Test
+    fun `an owed report is sent even when it matches the last one`() = page {
+        eval("hit = app")
+        install()
+        assertEquals(1, sent)
+        assertFalse(last().has())
+        // Kotlin asks while <body> is momentarily gone (document.open()):
+        // no answer, so the report is owed…
+        eval("document.body = null")
+        kotlinProbe()
+        assertEquals(1, sent)
+        // …and the next event-driven probe sends it, unchanged answer and all.
+        eval("document.body = body")
+        mutate(); flush()
+        assertEquals(2, sent)
+        // Settled again: an unchanged answer is not re-sent.
+        mutate(); flush()
+        assertEquals(2, sent)
+    }
+
+    @Test
+    fun `with no documentElement at install, the observer attaches on readystatechange`() = page {
+        eval("document.documentElement = null; document.body = null; hit = tab")
+        install()
+        assertEquals(0, sent)
+        assertTrue(eval("mutationCb === null") as Boolean)
+        eval("document.documentElement = html; document.body = body; readyStateChanges()")
+        // Attached now, and the state change itself probes.
+        assertTrue(eval("mutationCb !== null") as Boolean)
+        assertEquals(1, flush())
+        assertEquals(1, sent)
+        assertTrue(last().has())
+        // A second state change doesn't attach a second observer.
+        eval("var firstCb = mutationCb; readyStateChanges()")
+        assertTrue(eval("mutationCb === firstCb") as Boolean)
     }
 
     @Test

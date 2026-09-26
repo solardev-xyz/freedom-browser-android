@@ -964,11 +964,16 @@ fun BrowserScreen(
 
     // How much of the content area the capsule still covers once that
     // reserve is applied — zero while the keyboard is up, its own
-    // footprint plus the navigation inset the content draws behind
-    // otherwise. Native surfaces ([HomeScreen], [SuggestionsPanel]) pad
-    // by it so their last row stays clear of the chrome.
-    val capsuleOverlap = if (keyboardVisible || reserved) 0.dp
-    else capsuleFootprint + navInsetDp
+    // footprint plus the navigation inset the content draws behind in
+    // overlay, and in reserved only the editing morph's growth past the
+    // reserved band. Native surfaces ([HomeScreen], [SuggestionsPanel])
+    // pad by it so their last row stays clear of the chrome.
+    val capsuleOverlap = capsuleOverlap(
+        mode = chromeMode,
+        keyboardVisible = keyboardVisible,
+        capsuleFootprint = capsuleFootprint,
+        navInset = navInsetDp,
+    )
 
     // The strip under the capsule in reserved mode: a solid fill in the
     // page's own nav colour (else its theme-color, else its background,

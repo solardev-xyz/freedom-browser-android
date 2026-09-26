@@ -48,6 +48,25 @@ class BottomChromeModeTest {
     }
 
     @Test
+    fun `overlay native surfaces clear the whole capsule and nav inset`() {
+        assertEquals(footprint + nav, capsuleOverlap(Overlay, false, footprint, nav))
+        assertEquals(editingFootprint + nav, capsuleOverlap(Overlay, false, editingFootprint, nav))
+        assertEquals(0.dp, capsuleOverlap(Overlay, true, editingFootprint, nav))
+    }
+
+    @Test
+    fun `reserved native surfaces clear only the editing capsule's growth`() {
+        // At rest the reserved band covers the capsule exactly.
+        assertEquals(0.dp, capsuleOverlap(Reserved, false, footprint, nav))
+        // Address bar focused with no IME (hardware keyboard): the editing
+        // capsule sticks 16 dp past the band, over the suggestions panel.
+        assertEquals(CapsuleEditingHeight - CapsuleHeight, capsuleOverlap(Reserved, false, editingFootprint, nav))
+        assertEquals(16.dp, capsuleOverlap(Reserved, false, editingFootprint, nav))
+        // Keyboard up: the keyboard reserve already clears it.
+        assertEquals(0.dp, capsuleOverlap(Reserved, true, editingFootprint, nav))
+    }
+
+    @Test
     fun `the home surface is never reserved`() {
         assertEquals(Overlay, effectiveBottomChromeMode(Reserved, isHomeTab = true))
         assertEquals(Reserved, effectiveBottomChromeMode(Reserved, isHomeTab = false))

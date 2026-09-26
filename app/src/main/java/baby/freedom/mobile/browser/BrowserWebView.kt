@@ -736,12 +736,24 @@ private fun buildRefreshableWebView(
     /**
      * Ask the current document's detector for a fresh, reported probe
      * (load finished, a same-document history change, the hysteresis
-     * confirmation). Installs it instead if first paint didn't.
+     * confirmation).
+     *
+     * Before first paint there is nothing to ask: the detector goes in
+     * at `onPageCommitVisible` ([installBottomUiDetector]), and
+     * [installIfUnpainted] lets load-finished install it for a document
+     * that never reports a first paint. A cross-document commit also
+     * fires `doUpdateVisitedHistory`, *before* first paint; that one
+     * must not install, or the detector would land in a document that
+     * may have no `<body>` yet.
+     *
+     * An installed detector that hasn't reported yet (no `<body>` at
+     * install) gives Kotlin no reply channel; it owes its report and
+     * sends it on its next probe (see [bottomUiDetectorJs]).
      */
-    fun requestBottomUiProbe(view: WebView) {
+    fun requestBottomUiProbe(view: WebView, installIfUnpainted: Boolean = false) {
         if (!bottomUiSupported) return
         if (!bottomChrome.installed) {
-            installBottomUiDetector(view)
+            if (installIfUnpainted) installBottomUiDetector(view)
             return
         }
         val token = bottomChrome.token ?: return
@@ -1114,7 +1126,9 @@ private fun buildRefreshableWebView(
                     decideBottomSpacer(view, bottomSpacer.decideOnLoad(view.contentHeight))
                     // A late-mounting nav: probe again now the load is
                     // done (or install, if first paint didn't) (#66).
-                    if (finishedLoadIsCurrent(url, view.url)) requestBottomUiProbe(view)
+                    if (finishedLoadIsCurrent(url, view.url)) {
+                        requestBottomUiProbe(view, installIfUnpainted = true)
+                    }
                 }
                 if (url != null && !ErrorPage.isErrorPage(url) && url != ABOUT_BLANK) {
                     autoRecoveredUrl = null
@@ -1246,7 +1260,9 @@ private fun buildRefreshableWebView(
             // The same callback is how the bottom-nav detector hears
             // about `pushState` / `replaceState` / `popstate` /
             // `hashchange` without the page's history methods being
-            // patched (#66).
+            // patched (#66). It also fires for a cross-document commit,
+            // before first paint; the detector isn't installed yet then,
+            // and this doesn't install it (see [requestBottomUiProbe]).
             override fun doUpdateVisitedHistory(view: WebView?, url: String?, isReload: Boolean) {
                 if (view == null || !bottomSpacerApplies(url)) return
                 requestBottomUiProbe(view)
