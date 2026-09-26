@@ -659,7 +659,7 @@ private fun buildRefreshableWebView(
     // The end-of-document spacer that lets a page's last band scroll out
     // from under the floating bar (#65, interim — see
     // [bottomSpacerDecisionJs]). [BottomSpacerSlot] decides when a pass
-    // runs; once a document is decided, touch-downs run no script.
+    // runs; once the spacer is kept, touch-downs run no script.
     val bottomSpacer = BottomSpacerSlot()
 
     /**
@@ -672,7 +672,7 @@ private fun buildRefreshableWebView(
             ?.getInsets(WindowInsetsCompat.Type.systemBars())?.bottom ?: 0
         val spacerDp = bottomSpacerDp(navInsetPx, view.resources.displayMetrics.density)
         view.evaluateJavascript(bottomSpacerDecisionJs(spacerDp)) { result ->
-            bottomSpacer.accept(token, parseBottomSpacerResult(result))
+            bottomSpacer.accept(token, parseBottomSpacerResult(result), view.contentHeight)
         }
     }
 
@@ -794,10 +794,11 @@ private fun buildRefreshableWebView(
                     touchDownY = event.y
                     state.capsuleCollapse.onTouchDown()
                     // A scroll-locked document's #65 spacer is retried
-                    // here (a consent banner may have lifted); a decided
-                    // one runs nothing (see [BottomSpacerSlot]).
+                    // here (a consent banner may have lifted), as is a
+                    // rejected one that has grown since; a kept one runs
+                    // nothing (see [BottomSpacerSlot]).
                     if (bottomSpacerApplies(url)) {
-                        decideBottomSpacer(this, bottomSpacer.decideOnTouch())
+                        decideBottomSpacer(this, bottomSpacer.decideOnTouch(contentHeight))
                     }
                 }
 
@@ -934,7 +935,7 @@ private fun buildRefreshableWebView(
                 // can answer, and pages are touchable from here on.
                 probeRootPanStyles(view)
                 if (view != null && bottomSpacerApplies(url)) {
-                    decideBottomSpacer(view, bottomSpacer.decideOnLoad())
+                    decideBottomSpacer(view, bottomSpacer.decideOnLoad(view.contentHeight))
                 }
                 if (url == ABOUT_BLANK) return
                 visitGate.commit()
@@ -960,9 +961,10 @@ private fun buildRefreshableWebView(
                 // that is not necessarily in place at first paint (#56).
                 probeRootPanStyles(view)
                 // Likewise the spacer, if first paint left it undecided
-                // (no `<body>` yet, or a scroll lock).
+                // (no `<body>` yet, a scroll lock) or rejected it and the
+                // document has grown since.
                 if (view != null && bottomSpacerApplies(url)) {
-                    decideBottomSpacer(view, bottomSpacer.decideOnLoad())
+                    decideBottomSpacer(view, bottomSpacer.decideOnLoad(view.contentHeight))
                 }
                 if (url != null && !ErrorPage.isErrorPage(url) && url != ABOUT_BLANK) {
                     autoRecoveredUrl = null

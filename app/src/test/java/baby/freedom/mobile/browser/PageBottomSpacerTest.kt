@@ -69,19 +69,24 @@ class PageBottomSpacerTest {
 
     // ---- slot: when does a pass run ----------------------------------
 
+    /** A document [height] CSS px tall, as `WebView.getContentHeight()` reads it. */
+    private var height = 800
+
     /** Runs [passes], answering each decision with [answer]; returns how many ran JS. */
     private fun BottomSpacerSlot.simulate(passes: List<() -> BottomSpacerSlot.Token?>, answer: () -> Int?): Int {
         var scripts = 0
         for (pass in passes) {
             val token = pass() ?: continue
             scripts++
-            accept(token, answer())
+            accept(token, answer(), height)
         }
         return scripts
     }
 
     private fun BottomSpacerSlot.loadThenTouches(touches: Int) =
-        listOf({ decideOnLoad() }, { decideOnLoad() }) + List(touches) { { decideOnTouch() } }
+        listOf({ decideOnLoad(height) }, { decideOnLoad(height) }) + List(touches) { { decideOnTouch(height) } }
+
+    private fun BottomSpacerSlot.touches(n: Int) = List(n) { { decideOnTouch(height) } }
 
     @Test
     fun `a kept document runs one script, then none on touch-down`() {
@@ -89,14 +94,55 @@ class PageBottomSpacerTest {
         assertEquals(1, slot.simulate(slot.loadThenTouches(5)) { 82 })
         assertEquals(SpacerState.Kept(82), slot.state)
         assertEquals(82, slot.discountCssPx)
+        height = 5000 // a kept spacer is final however the page grows
+        assertEquals(0, slot.simulate(slot.loadThenTouches(5)) { 82 })
     }
 
     @Test
-    fun `a rejected document runs one script, then none on touch-down`() {
+    fun `a rejected document that does not grow runs one script, then none`() {
         val slot = BottomSpacerSlot()
         assertEquals(1, slot.simulate(slot.loadThenTouches(5)) { 0 })
-        assertEquals(SpacerState.Rejected, slot.state)
+        assertEquals(SpacerState.Rejected(800), slot.state)
         assertEquals(0, slot.discountCssPx)
+    }
+
+    @Test
+    fun `a client-rendered page rejected at first paint is kept once it has grown`() {
+        // First paint is a one-screen "Loading…" shell: the spacer adds no
+        // scroll range. The app then renders the real content.
+        val slot = BottomSpacerSlot()
+        height = 863
+        slot.accept(slot.decideOnLoad(height)!!, 0, height)
+        assertEquals(SpacerState.Rejected(863), slot.state)
+        assertNull(slot.decideOnTouch(height)) // unchanged: nothing runs
+        height = 2082
+        val retry = slot.decideOnTouch(height)!!
+        slot.accept(retry, 82, height + 82)
+        assertEquals(SpacerState.Kept(82), slot.state)
+        assertEquals(1, slot.touchAttempts)
+    }
+
+    @Test
+    fun `load finish retries a rejected document that has grown`() {
+        val slot = BottomSpacerSlot()
+        slot.accept(slot.decideOnLoad(863)!!, 0, 863)
+        assertNull(slot.decideOnLoad(863))
+        assertNotNull(slot.decideOnLoad(2082))
+    }
+
+    @Test
+    fun `a page that keeps growing but never takes the spacer gives up after eight touches`() {
+        // e.g. a full-height flex body loading images: every retry rejects.
+        val slot = BottomSpacerSlot()
+        slot.accept(slot.decideOnLoad(height)!!, 0, height)
+        var scripts = 0
+        repeat(20) {
+            height += 100
+            val t = slot.decideOnTouch(height) ?: return@repeat
+            scripts++
+            slot.accept(t, 0, height)
+        }
+        assertEquals(SPACER_MAX_TOUCH_ATTEMPTS, scripts)
     }
 
     @Test
@@ -121,67 +167,85 @@ class PageBottomSpacerTest {
         val slot = BottomSpacerSlot()
         val scripts = slot.simulate(slot.loadThenTouches(20)) { null }
         assertEquals(2 + SPACER_MAX_TOUCH_ATTEMPTS, scripts)
-        assertEquals(SpacerState.Pending(SPACER_MAX_TOUCH_ATTEMPTS), slot.state)
+        assertEquals(SpacerState.Pending, slot.state)
+        assertEquals(SPACER_MAX_TOUCH_ATTEMPTS, slot.touchAttempts)
         assertEquals(0, slot.discountCssPx)
     }
 
     @Test
     fun `a touch while a decision is in flight does not start another`() {
         val slot = BottomSpacerSlot()
-        val first = slot.decideOnLoad()!!
-        assertNull(slot.decideOnTouch())
-        assertNull(slot.decideOnLoad())
-        slot.accept(first, null)
-        assertEquals(SpacerState.Pending(0), slot.state) // the refused touch spent nothing
+        val first = slot.decideOnLoad(height)!!
+        assertNull(slot.decideOnTouch(height))
+        assertNull(slot.decideOnLoad(height))
+        slot.accept(first, null, height)
+        assertEquals(SpacerState.Pending, slot.state)
+        assertEquals(0, slot.touchAttempts) // the refused touch spent nothing
     }
 
     @Test
     fun `an answer from a replaced document is dropped`() {
         val slot = BottomSpacerSlot()
-        val stale = slot.decideOnLoad()!!
+        val stale = slot.decideOnLoad(height)!!
         slot.startDocument()
-        slot.accept(stale, 82)
-        assertEquals(SpacerState.Pending(0), slot.state)
-        assertNotNull(slot.decideOnLoad())
+        slot.accept(stale, 82, height)
+        assertEquals(SpacerState.Pending, slot.state)
+        assertNotNull(slot.decideOnLoad(height))
     }
 
     @Test
     fun `a new document starts undecided`() {
         val slot = BottomSpacerSlot()
-        slot.accept(slot.decideOnLoad()!!, 82)
+        slot.accept(slot.decideOnLoad(height)!!, 82, height)
+        slot.simulate(slot.touches(3)) { null }
         slot.startDocument()
-        assertEquals(SpacerState.Pending(0), slot.state)
+        assertEquals(SpacerState.Pending, slot.state)
+        assertEquals(0, slot.touchAttempts)
         assertEquals(0, slot.discountCssPx)
     }
 
     @Test
     fun `a width change decides afresh and supersedes a pass in flight`() {
         val slot = BottomSpacerSlot()
-        slot.accept(slot.decideOnLoad()!!, 82)
+        slot.accept(slot.decideOnLoad(height)!!, 82, height)
         val inFlight = slot.decideOnWidthChange()
-        assertEquals(0, slot.discountCssPx) // the old rule is removed by the pass
         val rotated = slot.decideOnWidthChange()
-        slot.accept(inFlight, 82)
-        assertEquals(SpacerState.Pending(0), slot.state)
-        slot.accept(rotated, 106)
+        slot.accept(inFlight, 58, height)
+        assertEquals(SpacerState.Kept(82, stale = true), slot.state) // superseded answer ignored
+        slot.accept(rotated, 106, height)
         assertEquals(SpacerState.Kept(106), slot.state)
         // …and a rejected document gets a fresh chance too.
-        slot.accept(slot.decideOnWidthChange(), 0)
-        assertEquals(SpacerState.Rejected, slot.state)
+        slot.accept(slot.decideOnWidthChange(), 0, height)
+        assertEquals(SpacerState.Rejected(height), slot.state)
         assertNotNull(slot.decideOnWidthChange())
+    }
+
+    @Test
+    fun `a width change under a scroll lock keeps the spacer, redone once the lock lifts`() {
+        // Kept page, lightbox sets body{overflow:hidden}, user rotates: the
+        // pass leaves our sheet alone and answers pending.
+        val slot = BottomSpacerSlot()
+        slot.accept(slot.decideOnLoad(height)!!, 82, height)
+        slot.accept(slot.decideOnWidthChange(), null, height)
+        assertEquals(SpacerState.Kept(82, stale = true), slot.state)
+        assertEquals(82, slot.discountCssPx) // still on the page
+        slot.accept(slot.decideOnTouch(height)!!, null, height) // still locked
+        slot.accept(slot.decideOnTouch(height)!!, 58, height) // unlocked
+        assertEquals(SpacerState.Kept(58), slot.state)
+        assertNull(slot.decideOnTouch(height)) // final again
     }
 
     @Test
     fun `an SPA route change re-decides only when our sheet has gone`() {
         val slot = BottomSpacerSlot()
-        slot.accept(slot.decideOnLoad()!!, 82)
+        slot.accept(slot.decideOnLoad(height)!!, 82, height)
         val still = slot.checkOnHistoryChange()!!
         assertNull(slot.acceptPresence(still, present = true))
         assertEquals(SpacerState.Kept(82), slot.state)
         val gone = slot.checkOnHistoryChange()!!
         val redo = slot.acceptPresence(gone, present = false)!!
         assertEquals(0, slot.discountCssPx)
-        slot.accept(redo, 82)
+        slot.accept(redo, 82, height)
         assertEquals(SpacerState.Kept(82), slot.state)
     }
 
@@ -189,14 +253,14 @@ class PageBottomSpacerTest {
     fun `history changes on undecided or rejected documents run nothing`() {
         val slot = BottomSpacerSlot()
         assertNull(slot.checkOnHistoryChange())
-        slot.accept(slot.decideOnLoad()!!, 0)
+        slot.accept(slot.decideOnLoad(height)!!, 0, height)
         assertNull(slot.checkOnHistoryChange())
     }
 
     @Test
     fun `a history check from a replaced document is dropped`() {
         val slot = BottomSpacerSlot()
-        slot.accept(slot.decideOnLoad()!!, 82)
+        slot.accept(slot.decideOnLoad(height)!!, 82, height)
         val check = slot.checkOnHistoryChange()!!
         slot.startDocument()
         assertNull(slot.acceptPresence(check, present = false))

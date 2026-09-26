@@ -18,7 +18,7 @@ import org.mozilla.javascript.Scriptable
 class BottomSpacerScriptTest {
 
     private val fakeDom = """
-        var htmlOverflowY = 'visible', bodyOverflowY = 'visible';
+        var htmlOverflowY = 'visible', bodyOverflowY = 'visible', pageHtmlAfter = 'none';
         var baseHeight = 2000, sheetWrites = 0, throwOnRead = false;
         var growth = function (px) { return px; };
         var screen = { width: 412 };
@@ -56,7 +56,11 @@ class BottomSpacerScriptTest {
         document.documentElement = html;
         document.body = body;
         document.scrollingElement = html;
-        function getComputedStyle(e) {
+        function getComputedStyle(e, pseudo) {
+          if (pseudo === '::after') {
+            if (e !== html) throw new Error('only html::after is read');
+            return { content: spacerPx() ? '""' : pageHtmlAfter };
+          }
           return { overflowY: e === html ? htmlOverflowY : bodyOverflowY };
         }
     """
@@ -140,6 +144,38 @@ class BottomSpacerScriptTest {
         assertEquals(1, sheets)
         eval("bodyOverflowY = 'visible'") // consent accepted
         assertEquals(82, decide())
+    }
+
+    @Test
+    fun `a width change under a scroll lock leaves a kept spacer in place`() = doc {
+        // Kept, then a lightbox sets body{overflow:hidden} and the user rotates.
+        assertEquals(82, decide())
+        eval("bodyOverflowY = 'hidden'; sheetWrites = 0")
+        assertEquals(-1, decide(58))
+        assertEquals(0, writes)
+        assertEquals(82, spacer) // not dropped
+        assertEquals(2082, scrollHeight)
+        eval("bodyOverflowY = 'visible'") // lightbox closed: redone at the new height
+        assertEquals(58, decide(58))
+        assertEquals(2, sheets)
+    }
+
+    @Test
+    fun `a page that styles html__after itself is left alone`() = doc {
+        // html::after{content:'mobile';display:none}, read back from JS as a
+        // breakpoint channel: ours would override it.
+        eval("pageHtmlAfter = '\"mobile\"'")
+        assertEquals(0, decide())
+        assertEquals(0, writes)
+        assertEquals(1, sheets)
+        eval("pageHtmlAfter = 'normal'")
+        assertEquals(82, decide())
+    }
+
+    @Test
+    fun `our own kept rule is not mistaken for the page's`() = doc {
+        assertEquals(82, decide())
+        assertEquals(106, decide(106)) // re-decision drops ours before looking
     }
 
     @Test
