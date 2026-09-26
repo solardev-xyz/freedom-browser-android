@@ -27,11 +27,12 @@ import kotlin.math.ceil
 //    out that way, and `all: initial` below strips anything a site's own
 //    `html::after` rule might put on it.
 //
-// Static per document. The height is the bar's *resting* footprint plus
-// the navigation inset — `capsuleOverlap` in [BrowserScreen] without the
-// keyboard term — computed once when the style is (re)applied and never
-// tracked through the compact/edit morphs: restyling the page on every
-// frame of those is exactly the per-frame WebView work #63 forbids.
+// Never per frame. The height is the bar's *resting* footprint plus the
+// navigation inset — `capsuleOverlap` in [BrowserScreen] without the
+// keyboard term — recomputed on each (re)apply pass (load, history
+// update, width change, touch-down) but never tracked through the
+// compact/edit morphs: restyling the page on every frame of those is
+// exactly the per-frame WebView work #63 forbids.
 // While the keyboard is up the WebView is already shrunk clear of the
 // bar (`contentBottomReserve`), so the spacer is not needed then — but
 // it is left in place rather than removed: taking ~58 px off the end of
@@ -74,23 +75,38 @@ internal fun bottomSpacerApplies(url: String?): Boolean =
  * The script that (re)applies the spacer to the document on screen.
  * Idempotent: the `<style>` is looked up by [BOTTOM_SPACER_STYLE_ID]
  * and created only if it is missing, so running it at first paint, at
- * load finish and on every history update (SPA `pushState`) leaves
- * exactly one. Nothing is left running afterwards — no timer, no
- * observer.
+ * load finish, on every history update (SPA `pushState`), on a width
+ * change and on every touch-down leaves exactly one. Nothing is left
+ * running afterwards — no timer, no observer.
  *
  * `spacerDp` is converted to CSS px here, in the page: at default zoom
  * one CSS px is one dp, but a page without a mobile viewport is laid
  * out at its desktop width (980 px) and shown zoomed out, so the same
  * dp takes proportionally more CSS px. The factor is the layout width
- * over the device width, never below 1 — fixed when the style is
- * written, not tracked through pinch-zoom (zooming in only makes the
- * spacer generously tall).
+ * over the device width, never below 1, and not tracked through
+ * pinch-zoom (zooming in only makes the spacer generously tall).
  *
- * Skipped — and removed if an earlier pass added it — while `<html>` or
- * `<body>` hides vertical overflow. That is an app shell whose document
- * doesn't scroll by design; a spacer there would give it a hidden,
- * programmatic-only scroll range that a focus-scroll could push the
- * whole app up by.
+ * Recomputed on every run, not frozen at insertion: `configChanges`
+ * keeps the document across a rotation, and both inputs move with it —
+ * the navigation inset (3-button nav: 0 in landscape, 48 dp in
+ * portrait) and a desktop-width page's zoom factor. A run whose height
+ * differs from the one on the page rewrites the rule; one that matches
+ * touches nothing, so the touch-down pass costs two style reads.
+ *
+ * Scroll locks. While `<html>` or `<body>` hides vertical overflow the
+ * document does not scroll — either an app shell, by design, or a page
+ * scroll-locked for a moment (a consent banner at load, a lightbox):
+ *
+ *  - Not inserted while locked. A spacer on an app shell is a hidden,
+ *    programmatic-only scroll range that a focus-scroll could push the
+ *    whole app up by. A lock that lifts later (the consent banner is
+ *    accepted) is picked up by the next pass — at the latest the next
+ *    touch-down, i.e. before the user can scroll to the footer.
+ *  - Removed on a lock only when that cannot move the page: if the
+ *    viewport reaches into the spacer's band (the user is at the end
+ *    and opened a lightbox), dropping it would clamp `scrollY` behind
+ *    the modal and leave the page ~a bar higher when it closes, so it
+ *    stays until a later pass finds the page unlocked again.
  *
  * Returns the spacer's height in CSS px, `0` when the document has none,
  * or `-1` when it could not tell (no `<body>` yet — a later pass will
@@ -103,21 +119,29 @@ internal fun bottomSpacerJs(spacerDp: Int): String = """
     var b = document.body;
     if (!h || !b) return -1;
     var el = document.getElementById('$BOTTOM_SPACER_STYLE_ID');
+    var cur = el ? (parseInt(el.getAttribute('data-px'), 10) || 0) : 0;
     var hidden = /hidden|clip/;
     if (hidden.test(getComputedStyle(h).overflowY) ||
         hidden.test(getComputedStyle(b).overflowY)) {
-      if (el) el.remove();
+      if (!el) return 0;
+      var se = document.scrollingElement || h;
+      var bottom = (window.scrollY || se.scrollTop || 0) +
+        Math.max(window.innerHeight || 0, se.clientHeight || 0);
+      if (bottom > se.scrollHeight - cur) return cur;
+      el.remove();
       return 0;
     }
-    if (el) return parseInt(el.getAttribute('data-px'), 10) || 0;
     var k = Math.max(1, h.clientWidth / (screen.width || h.clientWidth));
     var px = Math.ceil($spacerDp * k);
-    el = document.createElement('style');
-    el.id = '$BOTTOM_SPACER_STYLE_ID';
+    if (el && cur === px) return px;
+    if (!el) {
+      el = document.createElement('style');
+      el.id = '$BOTTOM_SPACER_STYLE_ID';
+      (document.head || h).appendChild(el);
+    }
     el.setAttribute('data-px', String(px));
     el.textContent = 'html::after{all:initial!important;content:""!important;' +
       'display:block!important;clear:both!important;height:' + px + 'px!important}';
-    (document.head || h).appendChild(el);
     return px;
   } catch (e) {
     return -1;

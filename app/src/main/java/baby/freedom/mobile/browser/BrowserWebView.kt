@@ -665,8 +665,17 @@ private fun buildRefreshableWebView(
     /**
      * (Re)apply the spacer to the document on screen. Idempotent, and
      * run on the same hooks as [probeRootPanStyles] plus history
-     * updates (SPA route changes). The height is read here, once per
-     * call, from the window's navigation inset — never per frame.
+     * updates (SPA route changes), width changes (rotation) and every
+     * touch-down. The height is read here, once per call, from the
+     * window's navigation inset — never per frame.
+     *
+     * The touch-down pass is what catches everything no navigation
+     * callback announces: a scroll lock (consent banner) lifting, the
+     * navigation inset changing, a rotation whose width change reached
+     * the renderer after the resize pass ran. It is a no-op on the
+     * page when nothing changed, and it lands before the drag gets
+     * past the touch slop, so the pull-to-refresh gate — re-asked on
+     * every intercepted move — already sees the height it reports.
      */
     fun applyBottomSpacer(view: WebView?) {
         if (view == null || !bottomSpacerApplies(view.url)) return
@@ -746,10 +755,17 @@ private fun buildRefreshableWebView(
         // Only shrinks matter (the keyboard closing re-grows us, and
         // the page is free to stay where it is), and only while the
         // page — not the address bar — owns the focus.
-        addOnLayoutChangeListener { v, _, top, _, bottom, _, oldTop, _, oldBottom ->
+        addOnLayoutChangeListener { v, left, top, right, bottom, oldLeft, oldTop, oldRight, oldBottom ->
             val shrank = (bottom - top) < (oldBottom - oldTop)
             if (shrank && v.hasFocus()) {
                 (v as WebView).evaluateJavascript(SCROLL_FOCUSED_FIELD_JS, null)
+            }
+            // A width change is a rotation (or a window resize): the
+            // navigation inset and a desktop-width page's zoom factor
+            // both move with it, so re-size the #65 spacer. Height-only
+            // changes (the keyboard) deliberately leave it alone.
+            if (oldRight - oldLeft > 0 && (right - left) != (oldRight - oldLeft)) {
+                applyBottomSpacer(v as WebView)
             }
         }
 
@@ -787,6 +803,9 @@ private fun buildRefreshableWebView(
                 MotionEvent.ACTION_DOWN -> {
                     touchDownY = event.y
                     state.capsuleCollapse.onTouchDown()
+                    // Re-check the #65 spacer before this gesture can
+                    // scroll to the end (see [applyBottomSpacer]).
+                    applyBottomSpacer(this)
                 }
 
                 MotionEvent.ACTION_MOVE ->
