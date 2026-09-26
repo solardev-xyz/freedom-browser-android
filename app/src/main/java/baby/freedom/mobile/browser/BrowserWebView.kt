@@ -30,6 +30,8 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.graphics.createBitmap
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
 import androidx.swiperefreshlayout.widget.SwipeRefreshLayout
 import baby.freedom.mobile.data.BrowsingRepository
 import kotlinx.coroutines.flow.collectLatest
@@ -39,7 +41,7 @@ import java.net.HttpURLConnection
 import java.net.URL
 import kotlin.math.abs
 
-private const val ABOUT_BLANK = "about:blank"
+internal const val ABOUT_BLANK = "about:blank"
 private const val LOG_TAG = "BrowserWebView"
 
 // Response headers we strip when proxying — they're either managed by the
@@ -654,6 +656,29 @@ private fun buildRefreshableWebView(
         }
     }
 
+    // The end-of-document spacer that lets a page's last band scroll out
+    // from under the floating bar (#65, interim — see
+    // [bottomSpacerJs]). Its height is remembered per document so the
+    // pull-to-refresh gate below can discount it.
+    val bottomSpacer = BottomSpacerSlot()
+
+    /**
+     * (Re)apply the spacer to the document on screen. Idempotent, and
+     * run on the same hooks as [probeRootPanStyles] plus history
+     * updates (SPA route changes). The height is read here, once per
+     * call, from the window's navigation inset — never per frame.
+     */
+    fun applyBottomSpacer(view: WebView?) {
+        if (view == null || !bottomSpacerApplies(view.url)) return
+        val navInsetPx = ViewCompat.getRootWindowInsets(view)
+            ?.getInsets(WindowInsetsCompat.Type.systemBars())?.bottom ?: 0
+        val spacerDp = bottomSpacerDp(navInsetPx, view.resources.displayMetrics.density)
+        val token = bottomSpacer.beginApply()
+        view.evaluateJavascript(bottomSpacerJs(spacerDp)) { result ->
+            bottomSpacer.accept(token, parseBottomSpacerResult(result))
+        }
+    }
+
     // A finish that arrived before its first paint, parked until
     // `onPageCommitVisible` says the page really is on screen (see
     // [visitToFlush]). Without it the fastest pages — the ones that
@@ -810,6 +835,8 @@ private fun buildRefreshableWebView(
                 // is none of this one's business, not even by way of a
                 // probe of its that is still in flight (#56).
                 rootPanProbe.startDocument()
+                // …and without the outgoing document's spacer (#65).
+                bottomSpacer.startDocument()
                 // …and with the progress latch open again: whatever the
                 // last Stop aborted, this document is a load of its own
                 // and its percentages are worth drawing (#41).
@@ -894,6 +921,7 @@ private fun buildRefreshableWebView(
                 // styles are real: this is the earliest the #56 probe
                 // can answer, and pages are touchable from here on.
                 probeRootPanStyles(view)
+                applyBottomSpacer(view)
                 if (url == ABOUT_BLANK) return
                 visitGate.commit()
                 // A finish that beat this paint left its visit parked;
@@ -917,6 +945,10 @@ private fun buildRefreshableWebView(
                 // script) can be what sets `touch-action: none`, and
                 // that is not necessarily in place at first paint (#56).
                 probeRootPanStyles(view)
+                // Likewise the spacer: `<body>` may not have existed at
+                // first paint, and the page's own overflow rules may
+                // only be in place now.
+                applyBottomSpacer(view)
                 if (url != null && !ErrorPage.isErrorPage(url) && url != ABOUT_BLANK) {
                     autoRecoveredUrl = null
                 }
@@ -1036,6 +1068,14 @@ private fun buildRefreshableWebView(
                         captureThumbnail(view, state)
                     }
                 }, 400)
+            }
+
+            // A same-document history change (`pushState`, hash) gets
+            // no commit or finish callback, and an SPA re-rendering its
+            // route can take the spacer's `<style>` with it. Re-apply
+            // — a no-op when it is still there (#65).
+            override fun doUpdateVisitedHistory(view: WebView?, url: String?, isReload: Boolean) {
+                applyBottomSpacer(view)
             }
 
             override fun shouldOverrideUrlLoading(
@@ -1236,9 +1276,23 @@ private fun buildRefreshableWebView(
     // own canScrollUp reporting is flaky for nested scrollers and would
     // arm the spinner mid-page.
     refreshLayout.setOnChildScrollUpCallback { _, _ ->
+        // `getScale()` is deprecated only in favour of `onScaleChanged`
+        // tracking; it still reports the live px-per-CSS-px we need.
+        @Suppress("DEPRECATION")
+        val scale = webView.scale
         !pullToRefreshArmed(
             scrollY = webView.scrollY,
-            documentScrollsDown = webView.canScrollVertically(1),
+            // Discounting the #65 spacer: it makes every short page
+            // scroll a little, and that must not arm the spinner on a
+            // page that did not scroll before (see
+            // [documentScrollsPastSpacer]).
+            documentScrollsDown = documentScrollsPastSpacer(
+                canScrollDown = webView.canScrollVertically(1),
+                contentHeightCss = webView.contentHeight,
+                spacerCss = bottomSpacer.spacerCssPx,
+                viewHeightPx = webView.height,
+                scale = scale,
+            ),
             rootBlocksVerticalPan = rootPanProbe.blocksVerticalPan,
         )
     }
