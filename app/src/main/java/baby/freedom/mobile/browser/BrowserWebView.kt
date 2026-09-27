@@ -1138,7 +1138,15 @@ private fun buildRefreshableWebView(
         // move that starts it to the finger lifting.
         val touchSlopPx = ViewConfiguration.get(context).scaledTouchSlop
         var touchDownY = 0f
-        onBottomOverscroll = { reveal.onBottomOverscroll() }
+        onBottomOverscroll = {
+            // A drag that went down mid-page just reached the end with
+            // the finger still down (#138): armed, and the page's bottom
+            // row is on screen now to take the strip's colour from.
+            if (reveal.onBottomOverscroll()) {
+                revealTint = null
+                sampleBottomRow(this) { rgb -> revealTint = rgb }
+            }
+        }
         setOnTouchListener { _, event ->
             // The reveal owns this gesture (#65): the page follows the
             // finger by translation only, and Chromium sees none of it.

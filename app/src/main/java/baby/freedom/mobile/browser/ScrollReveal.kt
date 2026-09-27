@@ -13,14 +13,20 @@ import kotlin.math.exp
 //
 // The gesture, in the WebView's own touch stream:
 //
-//  1. A touch goes down while the document is already at its vertical
-//     end (a page that can't scroll at all counts). A fling that lands at
-//     the end is not a push: the finger that flung it went down
-//     mid-page, so nothing arms until the next touch.
-//  2. The finger moves up past the touch slop and Chromium reports the
-//     drag as unconsumed overscroll at the bottom edge — the page's own
-//     handlers (a map, a canvas, an inner scroller) didn't take it. Only
-//     then does the reveal take the gesture over (the WebView gets an
+//  1. The finger pushes on at the end: either
+//     - a touch goes down while the document is already at its vertical
+//       end (a page that can't scroll at all counts), the finger moves
+//       up past the touch slop and Chromium reports the drag as
+//       unconsumed overscroll at the bottom edge; or
+//     - a drag that went down mid-page carries the page to its end and
+//       keeps going (#138): Chromium's first unconsumed bottom
+//       overscroll while that finger is still down arms it, and the
+//       next move up takes over, anchored where the finger was then.
+//     Unconsumed: the page's own handlers (a map, a canvas, an inner
+//     scroller) didn't take the drag. A fling that lands at the end is
+//     not a push: its overscroll comes after the finger lifted, when
+//     nothing is watching, so nothing arms until the next touch.
+//  2. The reveal takes the gesture over (the WebView gets an
 //     ACTION_CANCEL).
 //  3. The page follows the finger with a draw-time `translationY`
 //     (rubber-band resistance, clamped to the reveal height H): no
@@ -124,9 +130,10 @@ internal fun revealAdjustedScrollsDown(canScrollDown: Boolean, revealedFromUnscr
 
 /**
  * The strip's colour for a reveal: the most common colour in a row of
- * the page's bottom edge, sampled at the touch that armed it — the page
- * as it runs out under the bar (its footer's background, or `<html>`'s
- * below a short page). Anything the sampling caught that isn't page (a
+ * the page's bottom edge, sampled when the reveal armed (the touch
+ * down at the end, or the drag reaching it) — the page as it runs out
+ * under the bar (its footer's background, or `<html>`'s below a short
+ * page). Anything the sampling caught that isn't page (a
  * shadow's faint falloff, a scrollbar) loses the vote. Alpha is dropped:
  * the window's pixels are opaque. Null for an empty row.
  */
@@ -209,7 +216,13 @@ internal class ScrollRevealSlot {
         /** Nothing going on. */
         Idle,
 
-        /** A touch went down at the end; watching for a push. */
+        /**
+         * A touch went down mid-page (a reveal allowed); watching for the
+         * drag to overscroll the end with the finger still down.
+         */
+        Tracking,
+
+        /** A touch went down at the end, or the drag reached it; watching for a push. */
         Armed,
 
         /** The reveal owns the gesture; the page follows the finger. */
@@ -236,46 +249,100 @@ internal class ScrollRevealSlot {
 
     private var downX = 0f
     private var downY = 0f
+    private var lastY = 0f
     private var startY = 0f
     private var overscrolled = false
 
+    // Armed by a drag that reached the end ([onBottomOverscroll] from
+    // [Phase.Tracking]) rather than by a touch that went down there.
+    private var armedMidDrag = false
+
     /**
      * A touch went down at ([x], [y]) (raw screen px). Arms only if the
-     * document is at its end and a reveal is [allowed].
+     * document is at its end and a reveal is [allowed]; mid-page (and
+     * allowed) it starts [Phase.Tracking] the drag instead, which arms
+     * if the drag reaches the end. Returns true when armed here (the
+     * moment to sample the page's bottom row).
      */
     fun onDown(x: Float, y: Float, atEnd: Boolean, allowed: Boolean): Boolean {
         overscrolled = false
-        if (phase == Phase.Armed) phase = Phase.Idle
-        if (phase != Phase.Idle || !atEnd || !allowed) return false
+        armedMidDrag = false
+        if (phase == Phase.Armed || phase == Phase.Tracking) phase = Phase.Idle
+        if (phase != Phase.Idle || !allowed) return false
         downX = x
         downY = y
-        phase = Phase.Armed
-        return true
+        lastY = y
+        phase = if (atEnd) Phase.Armed else Phase.Tracking
+        return atEnd
     }
 
-    /** Chromium reported unconsumed overscroll past the bottom edge during this touch. */
-    fun onBottomOverscroll() {
-        if (phase == Phase.Armed) overscrolled = true
+    /**
+     * Chromium reported unconsumed overscroll past the bottom edge. Only
+     * counts while a finger is down (Armed or Tracking): a fling's
+     * overscroll comes after the finger lifted, in Idle. Returns true if
+     * this arms a drag that went down mid-page (#138) — the page is at
+     * its end now, the moment to sample its bottom row.
+     */
+    fun onBottomOverscroll(): Boolean {
+        when (phase) {
+            Phase.Armed -> overscrolled = true
+            Phase.Tracking -> {
+                phase = Phase.Armed
+                armedMidDrag = true
+                overscrolled = true
+                // The rubber band starts from where the finger was when
+                // the page ran out, so the takeover doesn't jump.
+                startY = lastY
+                return true
+            }
+            else -> {}
+        }
+        return false
     }
 
     /**
      * The finger is at ([x], [y]). Returns true when the reveal takes the
-     * gesture over *on this event*: an upward, mostly vertical move past
+     * gesture over *on this event*.
+     *
+     * Armed at the touch down: an upward, mostly vertical move past
      * [slopPx], with the page having let the drag through (overscroll).
-     * A move that goes down or sideways first disarms.
+     * A move that goes down or sideways first disarms — back to
+     * [Phase.Tracking]: the same drag may still reach the end later.
+     *
+     * Armed mid-drag: the finger is long past the slop, so the next move
+     * up takes over; a move down (the page scrolling back up) goes back
+     * to tracking.
      */
     fun onMove(x: Float, y: Float, slopPx: Float): Boolean {
+        val prevY = lastY
+        lastY = y
         if (phase != Phase.Armed) return false
+        if (armedMidDrag) {
+            when {
+                y < prevY -> {
+                    phase = Phase.Dragging
+                    return true
+                }
+                y > prevY -> disarmToTracking()
+            }
+            return false
+        }
         val up = downY - y
         val side = abs(x - downX)
         if (up < -slopPx || (side > slopPx && side > abs(up))) {
-            phase = Phase.Idle
+            disarmToTracking()
             return false
         }
         if (up <= slopPx || !overscrolled) return false
         phase = Phase.Dragging
         startY = y
         return true
+    }
+
+    private fun disarmToTracking() {
+        phase = Phase.Tracking
+        armedMidDrag = false
+        overscrolled = false
     }
 
     /** The page's offset for the finger at [y] while [Phase.Dragging]; 0 otherwise. */
@@ -289,7 +356,7 @@ internal class ScrollRevealSlot {
      */
     fun onRelease(offsetPx: Float, revealPx: Float, cancelled: Boolean = false): Phase {
         phase = when {
-            phase != Phase.Dragging -> if (phase == Phase.Armed) Phase.Idle else phase
+            phase != Phase.Dragging -> if (phase == Phase.Armed || phase == Phase.Tracking) Phase.Idle else phase
             !cancelled && revealCommits(offsetPx, revealPx) -> Phase.Committing
             else -> Phase.SpringingBack
         }
@@ -329,5 +396,6 @@ internal class ScrollRevealSlot {
         phase = Phase.Idle
         revealedFromUnscrollable = false
         overscrolled = false
+        armedMidDrag = false
     }
 }
