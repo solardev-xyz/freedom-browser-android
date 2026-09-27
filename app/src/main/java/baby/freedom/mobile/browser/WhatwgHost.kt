@@ -1,6 +1,7 @@
 package baby.freedom.mobile.browser
 
 import java.net.IDN
+import java.text.Normalizer
 
 /**
  * Just enough of the WHATWG URL parser (what desktop's `new URL()` runs)
@@ -12,7 +13,7 @@ import java.net.IDN
  * templates desktop accepts would be refused. This follows the spec's
  * special-scheme path instead: tab/newline stripping, any mix of `/` and
  * `\` after `https:`, credentials up to the last `@`, a numeric port up to
- * 65535, percent-decoded + IDNA domains, WHATWG IPv4 (`127.1`, `0x7f.1`)
+ * 65535, percent-decoded + UTS-46 domains (see [label]), WHATWG IPv4 (`127.1`, `0x7f.1`)
  * and IPv6 (`[0::1]` → `[::1]`) serialisation. Only `http`/`https` are
  * parsed in full; any other scheme returns with no host, which the caller
  * refuses anyway.
@@ -66,18 +67,240 @@ internal object WhatwgHost {
             if (!raw.endsWith("]")) return null
             return ipv6(raw.substring(1, raw.length - 1))?.let { "[${serialiseIpv6(it)}]" }
         }
-        val decoded = percentDecode(raw)
-        val ascii = if (decoded.all { it.code < 0x80 }) {
-            decoded.lowercase()
-        } else {
-            runCatching { IDN.toASCII(decoded, IDN.ALLOW_UNASSIGNED) }.getOrNull()?.lowercase()
-                ?: return null
-        }
+        val ascii = percentDecode(raw).split('.', '\u3002', '\uFF0E', '\uFF61')
+            .map { label(it) ?: return null }
+            .joinToString(".")
         if (ascii.isEmpty() || ascii.any { it.code <= 0x20 || it.code == 0x7F || it in "#%/:<>?@[\\]^|" }) {
             return null
         }
         if (endsInNumber(ascii)) return ipv4(ascii)?.let(::serialiseIpv4)
         return ascii
+    }
+
+    /**
+     * One label of UTS-46 ToASCII as WHATWG runs it (non-transitional,
+     * CheckJoiners on, CheckHyphens off), or `null` where it fails.
+     *
+     * `java.net.IDN` is IDNA2003, which differs from that in two ways that
+     * matter here: it maps the "deviation" characters `ß`, `ς`, ZWJ and
+     * ZWNJ away (`local\u200Dhost` would become `localhost` — the
+     * loopback check must not see that host), and it never looks inside
+     * an all-ASCII `xn--` label. So IDN is only used to case-fold and
+     * NFKC-normalise the runs *between* deviation characters; those are
+     * kept, a joiner must sit in its RFC 5892 CONTEXTJ context, and the
+     * punycode is produced (and, for `xn--` input, checked) here.
+     */
+    private fun label(input: String): String? {
+        if (input.all { it.code < 0x80 }) {
+            val lower = input.asciiLowercase()
+            if (!lower.startsWith("xn--")) return lower
+            // `new URL` decodes it and requires a valid, canonical, non-ASCII label.
+            val decoded = Punycode.decode(lower.substring(4)) ?: return null
+            if (decoded.all { it.code < 0x80 } || !validUnicodeLabel(decoded)) return null
+            if (map(decoded) != decoded || Punycode.encode(decoded) != lower.substring(4)) return null
+            return lower
+        }
+        val mapped = map(input) ?: return null
+        if ('.' in mapped) return null
+        if (mapped.all { it.code < 0x80 }) return label(mapped)
+        if (mapped.startsWith("xn--") || !validUnicodeLabel(mapped)) return null
+        return "xn--" + (Punycode.encode(mapped) ?: return null)
+    }
+
+    private fun String.asciiLowercase() =
+        String(CharArray(length) { this[it].let { c -> if (c in 'A'..'Z') c + 32 else c } })
+
+    private const val ZWNJ = 0x200C
+    private const val ZWJ = 0x200D
+
+    /** UTS-46 deviation characters: valid as-is, where IDNA2003 maps them. */
+    private val DEVIATIONS = setOf(0xDF, 0x3C2, ZWNJ, ZWJ)
+
+    /** Case-fold + NFKC via IDNA2003's nameprep, leaving [DEVIATIONS] alone. */
+    private fun map(label: String): String? {
+        val out = StringBuilder()
+        val run = StringBuilder()
+        fun flush(): Boolean {
+            if (run.isEmpty()) return true
+            val ace = runCatching { IDN.toASCII(run.toString(), IDN.ALLOW_UNASSIGNED) }.getOrNull()
+                ?: return false
+            out.append(IDN.toUnicode(ace, IDN.ALLOW_UNASSIGNED).asciiLowercase())
+            run.clear()
+            return true
+        }
+        for (cp in label.codePoints()) {
+            // IDN's own unassigned table is Unicode 3.2; UTS-46 disallows what the current one leaves unassigned.
+            if (Character.getType(cp) == Character.UNASSIGNED.toInt()) return null
+            if (cp in DEVIATIONS) {
+                if (!flush()) return null
+                out.appendCodePoint(cp)
+            } else {
+                run.appendCodePoint(cp)
+            }
+        }
+        return if (flush()) out.toString() else null
+    }
+
+    /** UTS-46 validity checks IDNA2003 doesn't make: no leading mark, CONTEXTJ joiners. */
+    private fun validUnicodeLabel(label: String): Boolean {
+        val cps = label.codePoints().toArray()
+        if (cps.isEmpty() || cps[0].isMark()) return false
+        return cps.indices.all { i -> (cps[i] != ZWJ && cps[i] != ZWNJ) || joinerAllowed(cps, i) }
+    }
+
+    private fun Int.isMark() = Character.getType(this).let {
+        it == Character.NON_SPACING_MARK.toInt() || it == Character.COMBINING_SPACING_MARK.toInt() ||
+            it == Character.ENCLOSING_MARK.toInt()
+    }
+
+    /**
+     * RFC 5892 CONTEXTJ: either joiner right after a virama; ZWNJ also
+     * between two joining letters (`(L|D) T* ZWNJ T* (R|D)`). Java has no
+     * Joining_Type table, so "joining letter" is approximated as a letter
+     * of a cursive-joining script — a label that passes this way is never
+     * one of the loopback names, which is what the check guards.
+     */
+    private fun joinerAllowed(cps: IntArray, i: Int): Boolean {
+        if (i > 0 && isVirama(cps[i - 1])) return true
+        if (cps[i] == ZWJ) return false
+        fun transparent(cp: Int) = cp != ZWJ && cp != ZWNJ &&
+            Character.getType(cp).let {
+                it == Character.NON_SPACING_MARK.toInt() || it == Character.ENCLOSING_MARK.toInt() ||
+                    it == Character.FORMAT.toInt()
+            }
+        var before = i - 1
+        while (before >= 0 && transparent(cps[before])) before--
+        var after = i + 1
+        while (after < cps.size && transparent(cps[after])) after++
+        return before >= 0 && after < cps.size && joins(cps[before]) && joins(cps[after])
+    }
+
+    private val JOINING_SCRIPTS = setOf(
+        Character.UnicodeScript.ARABIC, Character.UnicodeScript.SYRIAC, Character.UnicodeScript.NKO,
+        Character.UnicodeScript.MONGOLIAN, Character.UnicodeScript.MANDAIC, Character.UnicodeScript.PHAGS_PA,
+    )
+
+    private fun joins(cp: Int) = Character.isLetter(cp) && Character.UnicodeScript.of(cp) in JOINING_SCRIPTS
+
+    /**
+     * Canonical_Combining_Class == 9 (Virama), read off the platform's own
+     * normaliser: canonical reordering swaps two adjacent marks when the
+     * first has the higher class, so [cp] must move behind U+3099 (ccc 8)
+     * and ahead of U+05B0 (ccc 10).
+     */
+    private fun isVirama(cp: Int): Boolean {
+        val m = String(Character.toChars(cp))
+        if (Normalizer.normalize(m, Normalizer.Form.NFD) != m) return false
+        return Normalizer.normalize("a$m\u3099", Normalizer.Form.NFD) == "a\u3099$m" &&
+            Normalizer.normalize("a\u05B0$m", Normalizer.Form.NFD) == "a$m\u05B0"
+    }
+
+    /** RFC 3492 Punycode for IDNA (`xn--` label bodies). `null` on invalid input or overflow. */
+    private object Punycode {
+        private const val BASE = 36
+        private const val TMIN = 1
+        private const val TMAX = 26
+
+        private fun adapt(delta: Long, points: Int, first: Boolean): Int {
+            var d = if (first) delta / 700 else delta / 2
+            d += d / points
+            var k = 0
+            while (d > ((BASE - TMIN) * TMAX) / 2) {
+                d /= BASE - TMIN
+                k += BASE
+            }
+            return (k + (BASE - TMIN + 1) * d / (d + 38)).toInt()
+        }
+
+        private fun threshold(k: Int, bias: Int) = when {
+            k <= bias -> TMIN
+            k >= bias + TMAX -> TMAX
+            else -> k - bias
+        }
+
+        private fun digit(d: Long) = if (d < 26) 'a' + d.toInt() else '0' + (d.toInt() - 26)
+
+        fun encode(input: String): String? {
+            val cps = input.codePoints().toArray()
+            val out = StringBuilder()
+            cps.filter { it < 0x80 }.forEach { out.append(it.toChar()) }
+            val basic = out.length
+            var handled = basic
+            if (basic > 0) out.append('-')
+            var n = 0x80
+            var delta = 0L
+            var bias = 72
+            while (handled < cps.size) {
+                val m = cps.filter { it >= n }.min()
+                delta += (m - n).toLong() * (handled + 1)
+                if (delta > Int.MAX_VALUE) return null
+                n = m
+                for (c in cps) {
+                    if (c < n) delta++
+                    if (c != n) continue
+                    var q = delta
+                    var k = BASE
+                    while (true) {
+                        val t = threshold(k, bias)
+                        if (q < t) break
+                        out.append(digit(t + (q - t) % (BASE - t)))
+                        q = (q - t) / (BASE - t)
+                        k += BASE
+                    }
+                    out.append(digit(q))
+                    bias = adapt(delta, handled + 1, handled == basic)
+                    delta = 0
+                    handled++
+                }
+                delta++
+                n++
+            }
+            return out.toString()
+        }
+
+        fun decode(input: String): String? {
+            val delimiter = input.lastIndexOf('-')
+            val out = ArrayList<Int>()
+            if (delimiter >= 0) {
+                for (c in input.substring(0, delimiter)) {
+                    if (c.code >= 0x80) return null
+                    out.add(c.code)
+                }
+            }
+            var pos = delimiter + 1
+            var n = 0x80L
+            var i = 0L
+            var bias = 72
+            while (pos < input.length) {
+                val oldI = i
+                var w = 1L
+                var k = BASE
+                while (true) {
+                    if (pos >= input.length) return null
+                    val c = input[pos++]
+                    val d = when (c) {
+                        in 'a'..'z' -> c - 'a'
+                        in 'A'..'Z' -> c - 'A'
+                        in '0'..'9' -> c - '0' + 26
+                        else -> return null
+                    }
+                    i += d * w
+                    if (i > Int.MAX_VALUE) return null
+                    val t = threshold(k, bias)
+                    if (d < t) break
+                    w *= BASE - t
+                    if (w > Int.MAX_VALUE) return null
+                    k += BASE
+                }
+                bias = adapt(i - oldI, out.size + 1, oldI == 0L)
+                n += i / (out.size + 1)
+                i %= (out.size + 1)
+                if (n > 0x10FFFF || n in 0xD800..0xDFFF) return null
+                out.add(i.toInt(), n.toInt())
+                i++
+            }
+            return StringBuilder().apply { out.forEach { appendCodePoint(it) } }.toString()
+        }
     }
 
     private fun percentDecode(s: String): String {

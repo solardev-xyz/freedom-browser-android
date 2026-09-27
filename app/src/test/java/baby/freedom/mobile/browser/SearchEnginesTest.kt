@@ -205,4 +205,66 @@ class SearchEnginesTest {
             assertEquals(input, desktop, SearchEngines.normalizeTemplate(input))
         }
     }
+
+    @Test
+    fun `IDNA follows desktop's UTS-46, not java-net-IDN's IDNA2003`() {
+        // Expected values from desktop's normalizeSearchUrlTemplate on Node's `URL`.
+        listOf(
+            // Joiners are kept and must be in CONTEXTJ context — never mapped away into `localhost`.
+            "http://local‍host/?q=%s" to null,
+            "http://local‌host/?q=%s" to null,
+            "http://local%E2%80%8Dhost/?q=%s" to null,
+            "https://a‌b.example/?q=%s" to null,
+            "https://क्‍ष.example/?q=%s" to "https://क्‍ष.example/?q={searchTerms}",
+            "https://क्‌ष.example/?q=%s" to "https://क्‌ष.example/?q={searchTerms}",
+            "https://ب‌ب.example/?q=%s" to "https://ب‌ب.example/?q={searchTerms}",
+            "https://́a.example/?q=%s" to null,
+            "http://ｌｏｃａｌｈｏｓｔ/?q=%s" to
+                "http://ｌｏｃａｌｈｏｓｔ/?q={searchTerms}",
+            "https://straße.example/?q=%s" to "https://straße.example/?q={searchTerms}",
+            // `xn--` labels are decoded and validated even in an all-ASCII host.
+            "https://xn--localhost/?q=%s" to null,
+            "https://xn--/?q=%s" to null,
+            "https://xn--a/?q=%s" to null,
+            "https://xn--abc-/?q=%s" to null,
+            "https://xn--bcher-kva-.de/?q=%s" to null,
+            "https://xn--1ug6928c/?q=%s" to null,
+            "https://bücher.xn--a/?q=%s" to null,
+            "https://XN--BCHER-KVA.de/?q=%s" to "https://XN--BCHER-KVA.de/?q={searchTerms}",
+            "https://xn--zca.example/?q=%s" to "https://xn--zca.example/?q={searchTerms}",
+            "https://xn--11b2ezcw70k.example/?q=%s" to "https://xn--11b2ezcw70k.example/?q={searchTerms}",
+            "https://xn--ls8h/?q=%s" to "https://xn--ls8h/?q={searchTerms}",
+            "https://xn--nxasmq6b/?q=%s" to "https://xn--nxasmq6b/?q={searchTerms}",
+            "https://-xn--a/?q=%s" to "https://-xn--a/?q={searchTerms}",
+        ).forEach { (input, desktop) ->
+            assertEquals(input, desktop, SearchEngines.normalizeTemplate(input))
+        }
+        // Serialised hostnames, as Node's `new URL(...).hostname` gives them.
+        listOf(
+            "क्‍ष" to "xn--11b2ezcw70k",
+            "क्‌ष" to "xn--11b2ezcs70k",
+            "ب‌ب" to "xn--ngba799q",
+            "straße.example" to "xn--strae-oqa.example",
+            "STRASSE.example" to "strasse.example",
+            "Bücher.de" to "xn--bcher-kva.de",
+            "ΟΣ" to "xn--0xai",
+            "ος" to "xn--0xag",
+            "例。テスト" to "xn--fsq.xn--zckzah",
+            "☃.example" to "xn--n3h.example",
+        ).forEach { (host, expected) ->
+            assertEquals(host, expected, WhatwgHost.parse("https://$host/")?.hostname)
+        }
+    }
+
+    @Test
+    fun `template is trimmed like JS String trim`() {
+        listOf(
+            "﻿https://s.example/?q=%s﻿" to "https://s.example/?q={searchTerms}",
+            " https://s.example/?q=%s　" to "https://s.example/?q={searchTerms}",
+            "\u001Fhttps://s.example/?q=%s" to "\u001Fhttps://s.example/?q={searchTerms}",
+            "\u0000https://s.example/?q=%s" to "\u0000https://s.example/?q={searchTerms}",
+        ).forEach { (input, desktop) ->
+            assertEquals(input, desktop, SearchEngines.normalizeTemplate(input))
+        }
+    }
 }

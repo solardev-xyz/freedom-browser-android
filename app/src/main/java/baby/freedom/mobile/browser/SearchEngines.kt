@@ -52,7 +52,7 @@ object SearchEngines {
      */
     fun validateTemplate(value: String): Validation {
         fun no(r: Rejection) = Validation(null, r)
-        val trimmed = value.trim()
+        val trimmed = value.trim(::isJsWhitespace)
         if (trimmed.isEmpty()) return no(Rejection.EMPTY)
         if (trimmed.length > MAX_TEMPLATE_LENGTH) return no(Rejection.TOO_LONG)
         val openSearch = trimmed.occurrences(PLACEHOLDER)
@@ -69,6 +69,15 @@ object SearchEngines {
         if (parsed.hasCredentials) return no(Rejection.USER_INFO)
         return Validation(normalized, null)
     }
+
+    /**
+     * What JS `String.prototype.trim` (desktop's) strips: WhiteSpace and
+     * LineTerminator. Kotlin's `trim()` differs — it keeps U+FEFF (a BOM
+     * pasted with a template) and strips U+001C–U+001F.
+     */
+    private fun isJsWhitespace(c: Char) =
+        c in "\t\u000B\u000C\uFEFF\n\r\u2028\u2029" ||
+            Character.getType(c) == Character.SPACE_SEPARATOR.toInt()
 
     /**
      * The engine id [id] actually resolves to — the one [templateFor]
