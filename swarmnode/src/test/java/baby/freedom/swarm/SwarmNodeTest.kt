@@ -18,6 +18,9 @@ class SwarmNodeTest {
         val releaseInit = CountDownLatch(1)
         val shutDown = CountDownLatch(1)
         @Volatile var nextHandle = 1L
+        /** [stopGateway] blocks until this opens; open by default. */
+        @Volatile var releaseStop = CountDownLatch(0)
+        val stopEntered = CountDownLatch(1)
 
         override fun seed(antDir: File) {
             calls += "seed"
@@ -36,7 +39,11 @@ class SwarmNodeTest {
         }
         override fun agentString(handle: Long) = "ant-test"
         override fun peerCount(handle: Long) = 0
-        override fun stopGateway(handle: Long) { calls += "stopGateway:$handle" }
+        override fun stopGateway(handle: Long) {
+            calls += "stopGateway:$handle"
+            stopEntered.countDown()
+            releaseStop.await(5, TimeUnit.SECONDS)
+        }
         override fun shutdown(handle: Long) {
             calls += "shutdown:$handle"
             shutDown.countDown()
@@ -102,6 +109,26 @@ class SwarmNodeTest {
         Thread.sleep(300)
         assertEquals(1, ops.calls.count { it.startsWith("init:") })
         assertTrue(ops.calls.none { it.startsWith("shutdown:") })
+        node.dispose()
+    }
+
+    @Test
+    fun restartAfterStopWaitsForTheOldNodeToShutDown() {
+        val ops = FakeOps().apply { releaseSeed.countDown(); releaseInit.countDown() }
+        val node = SwarmNode(config, ops)
+        node.start()
+        awaitStatus(node, NodeStatus.Running)
+        ops.releaseStop = CountDownLatch(1)
+        node.stop()
+        node.start()
+        assertTrue(ops.stopEntered.await(5, TimeUnit.SECONDS))
+        Thread.sleep(300)
+        // The old node still holds the gateway port: the new launch waits.
+        assertTrue(ops.calls.none { it == "init:2" })
+        ops.releaseStop.countDown()
+        awaitStatus(node, NodeStatus.Running)
+        val calls = ops.calls.toList()
+        assertTrue(calls.indexOf("shutdown:1") in 0 until calls.indexOf("init:2"))
         node.dispose()
     }
 }

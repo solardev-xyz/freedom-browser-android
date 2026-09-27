@@ -3,6 +3,7 @@ package baby.freedom.swarm
 import android.util.Log
 import java.io.File
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
@@ -86,25 +87,37 @@ class SwarmNode internal constructor(
 
     /** Bumped by every [start] and [stop]; a launch acts only while its own is current. */
     private var generation = 0L
+
+    /**
+     * Shutdown of the handle the latest [stop] took from a Running
+     * node; the next launch joins it before binding the gateway port.
+     * Guarded by [lock].
+     */
+    private var pendingShutdown: Job? = null
     private val startMutex = Mutex()
 
     private val _state = MutableStateFlow(NodeInfo())
     val state: StateFlow<NodeInfo> = _state.asStateFlow()
 
     fun start() {
-        val gen = synchronized(lock) {
+        val (gen, priorShutdown) = synchronized(lock) {
             if (_state.value.status == NodeStatus.Starting ||
                 _state.value.status == NodeStatus.Running
             ) return
             _state.update { it.copy(status = NodeStatus.Starting, errorMessage = null) }
-            ++generation
+            ++generation to pendingShutdown
         }
 
         scope.launch {
-            // One launch at a time: a launch that [stop] superseded
-            // mid-init finishes shutting its node down before the next
-            // one binds the same gateway port.
-            startMutex.withLock { bringUp(gen) }
+            // The previous node must be gone before this one binds the
+            // same gateway port. A launch that [stop] superseded
+            // mid-init shuts its node down inside [bringUp], so the
+            // mutex covers it; a Running node that [stop] took down is
+            // shut down in [pendingShutdown], which is joined here.
+            startMutex.withLock {
+                priorShutdown?.join()
+                bringUp(gen)
+            }
         }
     }
 
@@ -175,7 +188,7 @@ class SwarmNode internal constructor(
     private fun isCurrent(gen: Long) = synchronized(lock) { generation == gen }
 
     fun stop() {
-        val h = synchronized(lock) {
+        val shutdown = synchronized(lock) {
             // Supersede any launch still in flight.
             generation++
             peerPoller?.cancel()
@@ -183,17 +196,19 @@ class SwarmNode internal constructor(
             _state.update {
                 it.copy(status = NodeStatus.Stopped, connectedPeers = 0, clientVersion = "")
             }
-            handle.also { handle = 0L }
-        }
-
-        if (h != 0L) {
-            scope.launch {
+            val h = handle
+            handle = 0L
+            if (h == 0L) return
+            // Created LAZY and published under [lock], so a [start]
+            // that follows this [stop] always sees it and waits for it.
+            scope.launch(start = CoroutineStart.LAZY) {
                 runCatching {
                     ops.stopGateway(h)
                     ops.shutdown(h)
                 }.onFailure { Log.w(TAG, "shutdown threw", it) }
-            }
+            }.also { pendingShutdown = it }
         }
+        shutdown.start()
     }
 
     /**
