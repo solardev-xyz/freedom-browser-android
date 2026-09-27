@@ -204,7 +204,44 @@ class BrowserState(val id: Long) {
             val kept = documentGeneration
             if (generation <= kept) return
             documentGeneration = generation
-            if (!replacesDocument) gatewayWork.retag(from = kept, to = generation)
+            if (replacesDocument) {
+                replacedDocument = kept
+            } else {
+                replacedDocument = null
+                gatewayWork.retag(from = kept, to = generation)
+            }
+        }
+    }
+
+    /**
+     * The [documentGeneration] a main-frame answer took over from while
+     * that answer's document has yet to commit: the page still on
+     * screen. Null once it commits or the answer kept the page anyway.
+     */
+    private var replacedDocument: Int? = null
+
+    /**
+     * The last main-frame answer committed a new document (UI thread,
+     * `onPageStarted`): the page it took over from is gone.
+     */
+    internal fun documentCommitted() {
+        synchronized(documentLock) { replacedDocument = null }
+    }
+
+    /**
+     * The last main-frame answer, taken for a new document, went to the
+     * download listener instead (UI thread). Chromium downloads every
+     * type it can't render, not only what [mainFrameAnswerReplacesDocument]
+     * can tell from the headers (an inline `application/zip`, say), so
+     * the page on screen stayed after all: adopt its open requests the
+     * way [mainFrameAnswered] does for a known non-replacing answer
+     * (R2-F1).
+     */
+    internal fun mainFrameBecameDownload() {
+        synchronized(documentLock) {
+            val kept = replacedDocument ?: return
+            replacedDocument = null
+            gatewayWork.retag(from = kept, to = documentGeneration)
         }
     }
 

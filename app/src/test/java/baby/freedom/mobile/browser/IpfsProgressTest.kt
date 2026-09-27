@@ -477,6 +477,39 @@ class IpfsProgressTest {
     }
 
     @Test
+    fun `an answer taken for a document that became a download adopts the page (R2-F1)`() {
+        val tab = BrowserState(id = 1)
+        tab.beginLoad(inWebView = true)
+        tab.mainFrameAnswered(tab.mainFrameRequested(), replacesDocument = true)
+        tab.documentCommitted()
+        val image = tab.gatewayWork.start(tab.documentGeneration)
+        // A link to an inline application/zip: counted as a new document…
+        tab.beginLoad(inWebView = true)
+        tab.mainFrameAnswered(tab.mainFrameRequested(), replacesDocument = true)
+        assertTrue(tab.gatewayWork.activeBefore(tab.loadGeneration))
+        // …until the download listener gets it and the page stays.
+        tab.mainFrameBecameDownload()
+        assertFalse(tab.gatewayWork.activeBefore(tab.loadGeneration))
+        tab.gatewayWork.finish(image)
+    }
+
+    @Test
+    fun `a committed document's page is not adopted by a later download (R2-F1)`() {
+        val tab = BrowserState(id = 1)
+        tab.beginLoad(inWebView = true)
+        tab.mainFrameAnswered(tab.mainFrameRequested(), replacesDocument = true)
+        tab.documentCommitted()
+        tab.beginLoad(inWebView = true)
+        tab.mainFrameAnswered(tab.mainFrameRequested(), replacesDocument = true)
+        // Committed before the old page's image was cancelled.
+        tab.documentCommitted()
+        val stale = tab.gatewayWork.start(1)
+        tab.mainFrameBecameDownload()
+        assertTrue(tab.gatewayWork.activeBefore(tab.loadGeneration))
+        tab.gatewayWork.finish(stale)
+    }
+
+    @Test
     fun `a cross-document commit's history update adopts nothing (R3-F2)`() {
         val tab = BrowserState(id = 1)
         tab.beginLoad(inWebView = true)

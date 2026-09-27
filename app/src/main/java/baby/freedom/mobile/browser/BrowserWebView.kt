@@ -1565,7 +1565,12 @@ private fun buildRefreshableWebView(
             // turned into a download leaves the tab committed, so
             // nothing else would clear them).
             val wasPending = pendingNavigationUrls.remove(url)
-            if (wasPending) pendingNavigationUrls.clear()
+            if (wasPending) {
+                pendingNavigationUrls.clear()
+                // The page on screen stays: its open requests are this
+                // load's, whatever the answer's headers suggested.
+                state.mainFrameBecameDownload()
+            }
             // A main-frame navigation that turned out to be a file never
             // commits: no onPageStarted, no final progress callback. Left
             // alone, the capsule keeps the typed address, the progress
@@ -1639,6 +1644,7 @@ private fun buildRefreshableWebView(
             override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
                 // The pending navigation committed; it's no download.
                 pendingNavigationUrls.clear()
+                state.documentCommitted()
                 // The main-frame document committed: its ENS pins are now
                 // the page on screen's, and subresources held waiting on
                 // the commit go ahead (#99, [EnsDocumentPins]).
@@ -3418,6 +3424,11 @@ internal fun mainFrameNoteApplies(requestGeneration: Int, currentGeneration: Int
  * download listener (#79), which saves it through DownloadManager
  * rather than rendering it. `null` — Chromium fetches it itself — is
  * assumed to (#94, R3-F2).
+ *
+ * A best guess from the headers only: Chromium also downloads any other
+ * type it can't render (an inline `application/zip`, say), which this
+ * counts as replacing. The download listener corrects that once the
+ * answer reaches it ([BrowserState.mainFrameBecameDownload]).
  */
 internal fun mainFrameAnswerReplacesDocument(response: WebResourceResponse?): Boolean =
     response == null || mainFrameAnswerReplacesDocument(
