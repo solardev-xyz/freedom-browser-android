@@ -15,8 +15,7 @@ import kotlin.coroutines.CoroutineContext
  * warm-up is parsed on [background] once the tables are decoded; an
  * ASCII link is parseable at once. Parsing each as soon as possible
  * would let an ASCII link that arrived *after* a Unicode one be
- * published first and then be overwritten in the single-slot deep-link
- * flow by the older link. So a link is published synchronously only
+ * published — and get its tab — first. So a link is published synchronously only
  * when it is fast *and* nothing is still queued ahead of it; otherwise
  * it is chained behind the previous link's job.
  *

@@ -20,6 +20,7 @@ import androidx.compose.ui.platform.LocalView
 import androidx.core.view.WindowCompat
 import androidx.lifecycle.lifecycleScope
 import baby.freedom.mobile.browser.BrowserScreen
+import baby.freedom.mobile.browser.DeepLinkQueue
 import baby.freedom.mobile.browser.Gateways
 import baby.freedom.mobile.browser.HOME_URL
 import baby.freedom.mobile.browser.PublicSuffixList
@@ -58,15 +59,15 @@ class MainActivity : ComponentActivity() {
     private lateinit var settings: NodeSettings
 
     /**
-     * An App Link that arrived after the UI was already composed (see
-     * [onNewIntent]), waiting to be opened in a tab. Cold-start links
+     * App Links that arrived after the UI was already composed (see
+     * [onNewIntent]), waiting to be opened in tabs, oldest first. Cold-start links
      * don't use this — they're passed straight in as the initial URL.
      */
-    private val deepLinkFlow = MutableStateFlow<String?>(null)
+    private val deepLinkQueue = DeepLinkQueue()
 
-    /** Publishes [onNewIntent] links into [deepLinkFlow] in arrival order. */
+    /** Publishes [onNewIntent] links into [deepLinkQueue] in arrival order. */
     private val deepLinks = OrderedDeepLinks(lifecycleScope, Dispatchers.Default) {
-        deepLinkFlow.value = it
+        deepLinkQueue.offer(it)
     }
 
     @Volatile
@@ -168,7 +169,7 @@ class MainActivity : ComponentActivity() {
                     val ipfsInfo by ipfsInfoFlow.collectAsState()
                     val runNodeEnabled by settings.runNodeEnabled
                         .collectAsState(initial = true)
-                    val deepLink by deepLinkFlow.collectAsState()
+                    val pendingLinks by deepLinkQueue.pending.collectAsState()
                     BrowserScreen(
                         nodeInfo = info,
                         ipfsInfo = ipfsInfo,
@@ -177,8 +178,8 @@ class MainActivity : ComponentActivity() {
                         onEnsureIpfsStarted = ::onEnsureIpfsStarted,
                         onIpfsToggle = ::onIpfsToggle,
                         initialUrl = startUrl,
-                        deepLinkUrl = deepLink,
-                        onDeepLinkHandled = { deepLinkFlow.compareAndSet(it, null) },
+                        deepLink = pendingLinks.firstOrNull(),
+                        onDeepLinkHandled = deepLinkQueue::handled,
                         onRecoverNodes = ::onRecoverNodes,
                         ipfsProgressSnapshot = ::ipfsProgressSnapshot,
                         ipfsCounters = ::ipfsCounters,

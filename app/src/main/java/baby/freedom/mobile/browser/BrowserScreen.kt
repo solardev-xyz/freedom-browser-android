@@ -415,8 +415,8 @@ fun BrowserScreen(
     onEnsureIpfsStarted: () -> Unit,
     onIpfsToggle: (Boolean) -> Unit,
     initialUrl: String = HOME_URL,
-    deepLinkUrl: String? = null,
-    onDeepLinkHandled: (String) -> Unit = {},
+    deepLink: DeepLink? = null,
+    onDeepLinkHandled: (DeepLink) -> Unit = {},
     onRecoverNodes: () -> Unit = {},
     ipfsProgressSnapshot: () -> String? = { null },
     ipfsCounters: () -> LongArray? = { null },
@@ -1030,12 +1030,11 @@ fun BrowserScreen(
     // MainActivity.onNewIntent). Cold start doesn't come through here —
     // it's the [initialUrl] above — so a link tapped now is a second
     // destination and gets its own tab rather than replacing whatever
-    // the user was reading. [onDeepLinkHandled] clears the pending URL
-    // so a config change doesn't re-open it — but only if it is still
-    // [url]: a newer link published while this one was being opened
-    // must survive to get its own tab.
-    LaunchedEffect(deepLinkUrl) {
-        val url = deepLinkUrl ?: return@LaunchedEffect
+    // the user was reading. [deepLink] is the head of a queue (several
+    // links can arrive in one frame); [onDeepLinkHandled] pops it so a
+    // config change doesn't re-open it and the next link gets its turn.
+    LaunchedEffect(deepLink) {
+        val link = deepLink ?: return@LaunchedEffect
         // Whatever full-screen overlay was up would otherwise hide the
         // tab we just opened.
         showSettings = false
@@ -1044,8 +1043,8 @@ fun BrowserScreen(
         showHistory = false
         showBookmarks = false
         showDownloads = false
-        submit(tabs.newTab(), url)
-        onDeepLinkHandled(url)
+        submit(tabs.newTab(), link.url)
+        onDeepLinkHandled(link)
     }
 
     // The chrome is a floating capsule layered *over* an edge-to-edge
