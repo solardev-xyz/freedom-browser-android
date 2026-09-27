@@ -334,57 +334,62 @@ internal fun FindBar(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             val textStyle = LocalTextStyle.current.copy(color = colors.onSurface)
-            BasicTextField(
-                value = fieldValue,
-                onValueChange = { newValue ->
-                    val changed = newValue.text != fieldValue.text
-                    fieldValue = newValue
-                    if (changed) onQueryChange(newValue.text)
-                },
-                singleLine = true,
-                textStyle = textStyle,
-                cursorBrush = SolidColor(colors.primary),
-                keyboardOptions = KeyboardOptions(
-                    capitalization = KeyboardCapitalization.None,
-                    autoCorrectEnabled = false,
-                    imeAction = ImeAction.Search,
-                ),
-                keyboardActions = KeyboardActions(
-                    onSearch = { submit(forward = true) },
-                ),
-                modifier = Modifier
-                    .weight(1f)
-                    .focusRequester(focusRequester)
-                    .onPreviewKeyEvent { event ->
-                        // Hardware keyboard: Enter / Shift+Enter walk the
-                        // matches and Escape closes, as in every desktop
-                        // browser. Both halves of the key are consumed so
-                        // the down doesn't reach the IME or the WebView.
-                        when (event.key) {
-                            Key.Enter, Key.NumPadEnter -> {
-                                if (event.type == KeyEventType.KeyUp) submit(!event.isShiftPressed)
-                                true
+            // Text keyboard, but no auto-correct: Gboard ignores
+            // `autoCorrectEnabled = false` on a Text field and turns
+            // "teh" into "the" unless suggestions are off too (#172).
+            NoSuggestionsTextInput {
+                BasicTextField(
+                    value = fieldValue,
+                    onValueChange = { newValue ->
+                        val changed = newValue.text != fieldValue.text
+                        fieldValue = newValue
+                        if (changed) onQueryChange(newValue.text)
+                    },
+                    singleLine = true,
+                    textStyle = textStyle,
+                    cursorBrush = SolidColor(colors.primary),
+                    keyboardOptions = KeyboardOptions(
+                        capitalization = KeyboardCapitalization.None,
+                        autoCorrectEnabled = false,
+                        imeAction = ImeAction.Search,
+                    ),
+                    keyboardActions = KeyboardActions(
+                        onSearch = { submit(forward = true) },
+                    ),
+                    modifier = Modifier
+                        .weight(1f)
+                        .focusRequester(focusRequester)
+                        .onPreviewKeyEvent { event ->
+                            // Hardware keyboard: Enter / Shift+Enter walk the
+                            // matches and Escape closes, as in every desktop
+                            // browser. Both halves of the key are consumed so
+                            // the down doesn't reach the IME or the WebView.
+                            when (event.key) {
+                                Key.Enter, Key.NumPadEnter -> {
+                                    if (event.type == KeyEventType.KeyUp) submit(!event.isShiftPressed)
+                                    true
+                                }
+                                Key.Escape -> {
+                                    if (event.type == KeyEventType.KeyUp) onClose()
+                                    true
+                                }
+                                else -> false
                             }
-                            Key.Escape -> {
-                                if (event.type == KeyEventType.KeyUp) onClose()
-                                true
+                        },
+                    decorationBox = { inner ->
+                        Box(contentAlignment = Alignment.CenterStart) {
+                            if (fieldValue.text.isEmpty()) {
+                                Text(
+                                    "Find in page",
+                                    style = textStyle,
+                                    color = colors.onSurfaceVariant,
+                                )
                             }
-                            else -> false
+                            inner()
                         }
                     },
-                decorationBox = { inner ->
-                    Box(contentAlignment = Alignment.CenterStart) {
-                        if (fieldValue.text.isEmpty()) {
-                            Text(
-                                "Find in page",
-                                style = textStyle,
-                                color = colors.onSurfaceVariant,
-                            )
-                        }
-                        inner()
-                    }
-                },
-            )
+                )
+            }
             val spoken = findCountSpoken(result)
             // Announce only the new search's own report, not the count
             // held over from the previous keystroke.
