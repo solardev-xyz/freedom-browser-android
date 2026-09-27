@@ -44,9 +44,11 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -771,6 +773,8 @@ fun BrowserWebViewHost(
             // Camera captures handed to pages live in our own cache/uploads
             // (served by our FileProvider), outside Chromium's cache dir.
             runCatching { fileChooser.clearCaptures() }
+            // Remembered zoom levels are keyed by the sites visited (#88).
+            pageZoom.clearAll()
         }
         onDispose {
             tabs.captureActiveThumbnail = null
@@ -785,12 +789,20 @@ fun BrowserWebViewHost(
     // everything after that — a press in the menu, the same site changed
     // from another tab, the remembered levels landing from disk after
     // the first page of a cold start already committed.
+    // Scaled by the system font scale (a config change we handle
+    // ourselves, so it arrives here live), which is WebView's default.
+    val fontScale = rememberUpdatedState(LocalConfiguration.current.fontScale)
     LaunchedEffect(tabs) {
-        snapshotFlow { tabs.tabs.map { it.id to pageZoom.levelFor(it.zoomSite) } }
-            .collect { levels ->
-                for ((id, level) in levels) {
+        snapshotFlow {
+            val scale = fontScale.value
+            tabs.tabs.map {
+                it.id to PageZoomLevels.textZoom(pageZoom.levelFor(it.zoomSite), scale)
+            }
+        }
+            .collect { zooms ->
+                for ((id, zoom) in zooms) {
                     val settings = webViews[id]?.settings ?: continue
-                    if (settings.textZoom != level) settings.textZoom = level
+                    if (settings.textZoom != zoom) settings.textZoom = zoom
                 }
             }
     }
@@ -1687,7 +1699,14 @@ private fun buildRefreshableWebView(
                 // Home and error pages aren't sites: they get the default.
                 val zoomSite = zoomSiteKey(url)
                 state.zoomSite = zoomSite
-                view?.settings?.textZoom = pageZoom.levelFor(zoomSite)
+                // Relative to the system font scale, which is what
+                // WebView's own default text zoom is.
+                view?.let {
+                    it.settings.textZoom = PageZoomLevels.textZoom(
+                        pageZoom.levelFor(zoomSite),
+                        it.resources.configuration.fontScale,
+                    )
+                }
                 // …and above the home branch below, because the blank
                 // entry ends a page's probe exactly like any other
                 // document does (see [cancelProbeSupersededBy]).

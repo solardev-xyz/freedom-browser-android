@@ -53,10 +53,12 @@ class PageZoomTest {
     private class Harness(stored: Map<String, Int> = emptyMap(), deferLoad: Boolean = false) {
         val loaded = CompletableDeferred<Map<String, Int>>()
         val writes = mutableListOf<Pair<String, Int?>>()
+        var clears = 0
         val zoom = PageZoom(
             scope = CoroutineScope(Dispatchers.Unconfined),
             load = { loaded.await() },
             save = { site, percent -> writes += site to percent },
+            clear = { clears++ },
         )
 
         init {
@@ -115,5 +117,40 @@ class PageZoomTest {
         val h = Harness(mapOf("a.com" to 5, "b.com" to 9000))
         assertEquals(25, h.zoom.levelFor("a.com"))
         assertEquals(500, h.zoom.levelFor("b.com"))
+    }
+
+    @Test
+    fun `text zoom is relative to the system font scale`() {
+        // At the default level a page renders exactly as WebView's own
+        // default does: font scale x 100.
+        assertEquals(100, PageZoomLevels.textZoom(100, 1.0f))
+        assertEquals(150, PageZoomLevels.textZoom(100, 1.5f))
+        assertEquals(85, PageZoomLevels.textZoom(100, 0.85f))
+        assertEquals(195, PageZoomLevels.textZoom(130, 1.5f))
+        assertEquals(130, PageZoomLevels.textZoom(130, 1.0f))
+        assertEquals(750, PageZoomLevels.textZoom(500, 1.5f))
+    }
+
+    @Test
+    fun `clearing forgets every level and the file`() {
+        val h = Harness(mapOf("a.com" to 150))
+        h.zoom.apply("b.com", ZoomAction.In)
+        h.zoom.clearAll()
+        assertEquals(100, h.zoom.levelFor("a.com"))
+        assertEquals(100, h.zoom.levelFor("b.com"))
+        assertEquals(1, h.clears)
+    }
+
+    @Test
+    fun `a clear before the startup read lands drops that read`() {
+        val h = Harness(deferLoad = true)
+        h.zoom.clearAll()
+        h.loaded.complete(mapOf("a.com" to 150))
+        assertEquals(100, h.zoom.levelFor("a.com"))
+        assertEquals(1, h.clears)
+        // Levels set after the clear still work and are written.
+        h.zoom.apply("a.com", ZoomAction.In)
+        assertEquals(110, h.zoom.levelFor("a.com"))
+        assertEquals(listOf("a.com" to 110), h.writes)
     }
 }

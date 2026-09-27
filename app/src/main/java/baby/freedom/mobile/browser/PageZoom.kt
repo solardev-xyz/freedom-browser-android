@@ -8,6 +8,7 @@ import kotlinx.coroutines.MainScope
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlin.math.roundToInt
 
 /**
  * Page zoom (#88): per-site zoom steps, reset, remembered per site.
@@ -32,6 +33,20 @@ object PageZoomLevels {
     /** One step in or out from [current], clamped to [MIN]..[MAX]. */
     fun step(current: Int, zoomIn: Boolean): Int =
         (current + if (zoomIn) STEP else -STEP).coerceIn(MIN, MAX)
+
+    /**
+     * The WebView text zoom that shows a page at [level] percent.
+     *
+     * A WebView's own default text zoom isn't 100: it is the system font
+     * scale (Settings → Display → Font size) times 100, so pages honour
+     * the user's font-size / accessibility setting. The page level is
+     * relative to that, the way desktop page zoom stacks on the default
+     * font size — at [DEFAULT] a page renders exactly as it did before
+     * page zoom existed, and every other level is off from that by the
+     * level alone, not by the font scale as well.
+     */
+    fun textZoom(level: Int, fontScale: Float): Int =
+        (level * fontScale).roundToInt().coerceAtLeast(1)
 }
 
 /**
@@ -77,16 +92,21 @@ class PageZoom internal constructor(
     private val scope: CoroutineScope,
     private val load: suspend () -> Map<String, Int>,
     private val save: suspend (site: String, percent: Int?) -> Unit,
+    private val clear: suspend () -> Unit,
 ) {
     private val levels = mutableStateMapOf<String, Int>()
 
     /** Sites changed this session, which the startup read must not override. */
     private val touched = HashSet<String>()
+
+    /** Set by [clearAll]: the startup read, if still pending, is stale. */
+    private var cleared = false
     private val writes = Mutex()
 
     init {
         scope.launch {
             val stored = load()
+            if (cleared) return@launch
             for ((site, level) in stored) {
                 if (site !in touched) levels[site] = level.coerceIn(PageZoomLevels.MIN, PageZoomLevels.MAX)
             }
@@ -114,6 +134,18 @@ class PageZoom internal constructor(
         scope.launch { writes.withLock { save(site, stored) } }
     }
 
+    /**
+     * Forget every remembered level (part of "Clear cookies & site
+     * data"): the file lists sites the user visited, so it goes with the
+     * rest of the browsing trail. Open tabs drop back to the default.
+     */
+    fun clearAll() {
+        cleared = true
+        touched.clear()
+        levels.clear()
+        scope.launch { writes.withLock { clear() } }
+    }
+
     companion object {
         @Volatile
         private var instance: PageZoom? = null
@@ -121,7 +153,7 @@ class PageZoom internal constructor(
         fun get(context: Context): PageZoom =
             instance ?: synchronized(this) {
                 instance ?: SiteZoomStore.get(context).let { store ->
-                    PageZoom(MainScope(), store::load, store::set)
+                    PageZoom(MainScope(), store::load, store::set, store::clear)
                 }.also { instance = it }
             }
     }

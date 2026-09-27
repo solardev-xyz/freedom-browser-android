@@ -217,7 +217,7 @@ fun SettingsScreen(
     if (confirmClearSiteData) {
         ConfirmDialog(
             title = "Clear cookies and site data?",
-            message = "Signs you out of most sites and wipes cached page data, cookies, and form autofill from every open tab.",
+            message = "Signs you out of most sites and wipes cached page data, cookies, form autofill and remembered page zoom levels from every open tab.",
             confirmLabel = "Clear site data",
             onConfirm = {
                 onClearWebViewData()
@@ -390,7 +390,7 @@ private fun BrowsingDataSection(
         ActionRow(
             icon = Icons.Filled.Cookie,
             title = "Clear cookies & site data",
-            subtitle = "Cookies, DOM storage, cache, and form data",
+            subtitle = "Cookies, DOM storage, cache, form data, and zoom levels",
             enabled = true,
             onClick = onClearSiteDataRequested,
         )

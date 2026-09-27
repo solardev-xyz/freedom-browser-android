@@ -56,6 +56,15 @@ class SiteZoomStore internal constructor(
         }
     }
 
+    /** Forget every remembered level. */
+    suspend fun clear() {
+        try {
+            store.edit { it.clear() }
+        } catch (e: IOException) {
+            Log.w(TAG, "clearing site zoom failed", e)
+        }
+    }
+
     companion object {
         private const val PREFIX = "zoom:"
         private const val TAG = "SiteZoomStore"
