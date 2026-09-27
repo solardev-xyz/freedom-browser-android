@@ -122,6 +122,26 @@ object Gateways {
     private val lookupsInFlight = ConcurrentHashMap<LookupKey, Deferred<EnsResult>>()
     private val lookupFailedAt = ConcurrentHashMap<LookupKey, Long>()
 
+    /**
+     * Open the failure window for [key]. Also drops entries that can no
+     * longer matter — those under other resolver settings (superseded by
+     * a settings change; a lookup is only ever keyed by the current ones)
+     * and those whose window has closed — so the map holds at most the
+     * recent failures under the current settings rather than growing
+     * with every settings change for the life of the process.
+     */
+    private fun recordLookupFailure(key: LookupKey) {
+        val now = System.currentTimeMillis()
+        val window = reverifyFailureWindowMs
+        lookupFailedAt.entries.removeIf { (k, at) ->
+            k.settings != key.settings || now - at >= window
+        }
+        lookupFailedAt[key] = now
+    }
+
+    /** Number of recorded lookup failures (tests). */
+    internal fun ensLookupFailureCount(): Int = lookupFailedAt.size
+
     private fun lookupKey(name: String): LookupKey {
         val settings = try {
             runBlocking { ensRpcConfig().resolverSettings }
@@ -169,7 +189,7 @@ object Gateways {
                 // not a flaky network: it must not let later documents
                 // skip the wait and fall back on an earlier answer.
                 if (outcome is EnsResult.Error && outcome.reason != "CCIP_DISABLED") {
-                    lookupFailedAt[key] = System.currentTimeMillis()
+                    recordLookupFailure(key)
                 } else {
                     lookupFailedAt.remove(key)
                 }
@@ -186,7 +206,7 @@ object Gateways {
         // document skipped the wait, it didn't find the network any slower,
         // and the running lookup records its own outcome when it finishes.
         if (result == null && deadlineMs != null && deadlineMs > 0 && !job.isCompleted) {
-            lookupFailedAt[key] = System.currentTimeMillis()
+            recordLookupFailure(key)
         }
         return result
     }

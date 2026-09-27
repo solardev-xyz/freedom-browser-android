@@ -358,6 +358,48 @@ class GatewaysTest {
     }
 
     @Test
+    fun `failures recorded under superseded settings or past their window are dropped`() {
+        val realConfig = Gateways.ensRpcConfig
+        var config = EnsRpcConfig(customEndpoints = listOf("https://a.example"))
+        Gateways.ensRpcConfig = { config }
+        val window = Gateways.reverifyFailureWindowMs
+        try {
+            withLookup({ EnsResult.Error(it, "PROVIDER_ERROR", "down", retryable = true) }) {
+                fun fail(name: String) {
+                    KnownEnsNames.record("bzz://$ref64", name)
+                    assertNull(Gateways.reverifyEnsDocument(name, EnsDocumentPins()))
+                    // The failure is recorded when the lookup completes.
+                    val until = System.currentTimeMillis() + 2_000
+                    while (Gateways.ensLookupFailureCount() == 0 &&
+                        System.currentTimeMillis() < until
+                    ) Thread.sleep(5)
+                }
+                fail("a.eth")
+                fail("b.eth")
+                assertEquals(2, Gateways.ensLookupFailureCount())
+
+                // Each settings change leaves nothing behind from the old ones.
+                repeat(5) { i ->
+                    config = EnsRpcConfig(customEndpoints = listOf("https://e$i.example"))
+                    fail("a.eth")
+                    assertEquals(1, Gateways.ensLookupFailureCount())
+                }
+
+                // Under the same settings, failures whose window has closed go too.
+                fail("b.eth")
+                assertEquals(2, Gateways.ensLookupFailureCount())
+                Gateways.reverifyFailureWindowMs = 1
+                Thread.sleep(5)
+                fail("c.eth")
+                assertEquals(1, Gateways.ensLookupFailureCount())
+            }
+        } finally {
+            Gateways.reverifyFailureWindowMs = window
+            Gateways.ensRpcConfig = realConfig
+        }
+    }
+
+    @Test
     fun `reverifyEnsDocument refuses a name whose content is no longer loadable`() {
         KnownEnsNames.record("bzz://$ref64", "swarm.eth")
         withLookup({ EnsResult.Unsupported(it, "0xe5", "") }) {
