@@ -443,6 +443,8 @@ fun BrowserScreen(
     // text lives here until it is submitted.
     var addressQuery by remember { mutableStateOf("") }
     val snackbarHostState = remember { SnackbarHostState() }
+    val sitePermissions = remember(context) { SitePermissionBroker.get(context) }
+    SitePermissionAndroidBridge(sitePermissions, snackbarHostState)
     // Any full-screen panel over the browser (they're all opaque).
     val overlayShown = showSettings || showNode || showTabSwitcher ||
         showHistory || showBookmarks || showDownloads
@@ -1561,7 +1563,21 @@ fun BrowserScreen(
     val droppedOffers by downloads.droppedOffers.collectAsState()
     val activeTabId = tabs.active.id
     val tabOffers = downloadOffers.filter { it.tabId == activeTabId }
-    tabOffers.firstOrNull()?.let { offer ->
+    // It takes turns with the site-permission prompt (#81) on the same
+    // tab — they never stack; see [modalPromptTurn] for the order.
+    // A permission prompt waits while a full-screen panel covers the
+    // page (the Downloads list included, via [overlayShown]).
+    val pageUncovered = !overlayShown
+    val androidDialogUp by sitePermissions.androidDialogUp.collectAsState()
+    var offerHasTurn by remember(activeTabId) { mutableStateOf(false) }
+    val promptTurn = modalPromptTurn(
+        permissionWaiting = pageUncovered && state.permissionPrompt != null,
+        offerWaiting = tabOffers.isNotEmpty(),
+        offerHasTurn = offerHasTurn,
+        androidDialogUp = androidDialogUp,
+    )
+    SideEffect { offerHasTurn = promptTurn == PromptTurn.DownloadOffer }
+    tabOffers.firstOrNull()?.takeIf { promptTurn == PromptTurn.DownloadOffer }?.let { offer ->
         DownloadOfferDialog(
             offer = offer,
             othersWaiting = tabOffers.size - 1,
@@ -1625,6 +1641,35 @@ fun BrowserScreen(
                     .padding(bottom = 8.dp),
             ) { data -> Snackbar(snackbarData = data) }
         }
+    }
+
+    // Site-permission prompt (#81) — only ever the active tab's, and
+    // only while its page is what's on screen: a background tab's
+    // request waits until the user switches to it, any request waits
+    // while a full-screen panel ([overlayShown]: Settings, Node, tabs,
+    // History, Bookmarks, Downloads) covers the page, so the user
+    // always sees the page that is asking, and it waits its turn with
+    // the tab's download offer ([modalPromptTurn]).
+    val pageOnScreen = pageUncovered && promptTurn != PromptTurn.DownloadOffer
+    state.permissionPrompt?.takeIf { promptTurn == PromptTurn.SitePermission }?.let { prompt ->
+        androidx.compose.runtime.key(prompt) { SitePermissionPrompt(prompt) }
+    }
+    // The same gate for Android's own runtime-permission dialog, which
+    // the broker raises only over the tab named here — plus the app
+    // itself being in the foreground: WebViews aren't paused in the
+    // background, so page JS can still ask, and launching the system
+    // dialog from a stopped Activity would either pop it over another
+    // app or be blocked with no result ever delivered (stranding the
+    // broker's dialog lock). RESUMED, not STARTED, so the paused sliver
+    // on the way to the background doesn't count either.
+    val lifecycleState by androidx.lifecycle.compose.LocalLifecycleOwner.current.lifecycle
+        .currentStateFlow.collectAsState()
+    val onScreenTabId = state.id.takeIf {
+        pageOnScreen && lifecycleState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED)
+    }
+    androidx.compose.runtime.SideEffect { sitePermissions.onScreenTab.value = onScreenTabId }
+    DisposableEffect(sitePermissions) {
+        onDispose { sitePermissions.onScreenTab.value = null }
     }
 
     // HTML5 fullscreen. Last, so it paints over every overlay above.

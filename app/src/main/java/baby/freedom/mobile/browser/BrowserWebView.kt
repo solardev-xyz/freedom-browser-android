@@ -28,6 +28,8 @@ import android.view.ViewGroup
 import android.view.animation.DecelerateInterpolator
 import android.webkit.CookieManager
 import android.webkit.MimeTypeMap
+import android.webkit.GeolocationPermissions
+import android.webkit.PermissionRequest
 import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceError
@@ -557,6 +559,7 @@ fun BrowserWebViewHost(
 ) {
     val context = LocalContext.current
     val repo = remember(context) { BrowsingRepository.get(context) }
+    val sitePermissions = remember(context) { SitePermissionBroker.get(context) }
     val fileChooser = rememberFileChooser()
 
     // Enable Chrome DevTools inspection for debug builds so we can
@@ -622,6 +625,7 @@ fun BrowserWebViewHost(
             context = context,
             state = tab,
             repo = repo,
+            sitePermissions = sitePermissions,
             onSubmitUrl = { target, url ->
                 tabs.requestSubmit?.invoke(target, url)
             },
@@ -663,6 +667,9 @@ fun BrowserWebViewHost(
             val wv = webViews.remove(id) ?: continue
             val layout = refreshLayouts.remove(id)
             if (layout != null) frame.removeView(layout)
+            // Take down any permission prompt the tab still had up;
+            // its request is denied along with the page.
+            sitePermissions.onTabClosed(id)
             wv.stopLoading()
             wv.destroy()
         }
@@ -788,6 +795,7 @@ private fun buildRefreshableWebView(
     context: Context,
     state: BrowserState,
     repo: BrowsingRepository,
+    sitePermissions: SitePermissionBroker,
     onSubmitUrl: (BrowserState, String) -> Unit,
     onEnterFullscreen: (View, WebChromeClient.CustomViewCallback?) -> Unit,
     onExitFullscreen: () -> Unit,
@@ -1023,6 +1031,11 @@ private fun buildRefreshableWebView(
             // actually requires a tap is still gated by the browser's
             // own per-frame autoplay policy.
             mediaPlaybackRequiresUserGesture = false
+            // The Geolocation API reaches onGeolocationPermissionsShowPrompt
+            // (and so the site-permission prompt, #81) only while this is
+            // on. It is WebView's default; spelled out because the prompt
+            // depends on it.
+            setGeolocationEnabled(true)
             // The selection toolbar's search is ours ("Search", added in
             // [PageWebView.startActionMode]): it uses the engine chosen
             // in Settings, in a new tab. Chromium's "Web search" would hand the
@@ -1643,6 +1656,10 @@ private fun buildRefreshableWebView(
                 bottomChrome.startDocument()
                 bottomUiChannels.startDocument()
                 state.bottomChromeMode = BottomChromeMode.Overlay
+                // …and with no permission prompt from the outgoing
+                // document left standing: its requests are denied and
+                // a late answer can't land on this one (#81).
+                sitePermissions.onDocumentStarted(state)
                 // …and with the progress latch open again: whatever the
                 // last Stop aborted, this document is a load of its own
                 // and its percentages are worth drawing (#41).
@@ -2081,6 +2098,33 @@ private fun buildRefreshableWebView(
 
             override fun onHideCustomView() {
                 onExitFullscreen()
+            }
+
+            // Site permissions (#81): camera / microphone through
+            // `onPermissionRequest`, location through the geolocation
+            // prompt. Both go to [SitePermissionBroker], which asks the
+            // user per site and only then asks Android for the app's
+            // runtime permission. Without these overrides WebView
+            // denies every request outright.
+            override fun onPermissionRequest(request: PermissionRequest?) {
+                request ?: return
+                sitePermissions.onMediaRequest(state, request)
+            }
+
+            override fun onPermissionRequestCanceled(request: PermissionRequest?) {
+                request ?: return
+                sitePermissions.onMediaRequestCanceled(state, request)
+            }
+
+            override fun onGeolocationPermissionsShowPrompt(
+                origin: String?,
+                callback: GeolocationPermissions.Callback?,
+            ) {
+                sitePermissions.onGeolocationRequest(state, origin, callback)
+            }
+
+            override fun onGeolocationPermissionsHidePrompt() {
+                sitePermissions.onGeolocationHidden(state)
             }
 
             // `<input type=file>` (#80) — see [FileChooser].
