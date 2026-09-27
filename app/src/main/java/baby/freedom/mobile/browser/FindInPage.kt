@@ -50,8 +50,9 @@ import androidx.compose.ui.unit.dp
 
 /**
  * What the WebView last reported for a tab's find session:
- * [active] is the 1-based ordinal of the highlighted match (0 when there
- * are none), [matches] the total. [final] is Chromium's "done counting";
+ * [active] is the 1-based ordinal of the highlighted match (0 when none
+ * is highlighted — no matches, or an interim report sent before one was
+ * picked), [matches] the total. [final] is Chromium's "done counting";
  * interim results stream in while a long page is still being scanned and
  * are shown as they come, so the count visibly converges.
  */
@@ -61,7 +62,9 @@ data class FindResult(val active: Int, val matches: Int, val final: Boolean)
  * Build a [FindResult] from `WebView.FindListener.onFindResultReceived`'s
  * arguments. The listener's ordinal is **0-based** and is meaningless
  * when there are no matches, so it is normalised here once rather than at
- * every reader.
+ * every reader. An interim report can also arrive before any match is
+ * marked current (ordinal -1 with matches > 0); that reads "0/N", as in
+ * Chrome, rather than claiming match 1 is the highlighted one.
  */
 internal fun findResultFrom(
     activeMatchOrdinal: Int,
@@ -69,7 +72,7 @@ internal fun findResultFrom(
     isDoneCounting: Boolean,
 ): FindResult {
     val matches = numberOfMatches.coerceAtLeast(0)
-    val active = if (matches == 0) 0 else (activeMatchOrdinal + 1).coerceIn(1, matches)
+    val active = if (activeMatchOrdinal in 0 until matches) activeMatchOrdinal + 1 else 0
     return FindResult(active = active, matches = matches, final = isDoneCounting)
 }
 

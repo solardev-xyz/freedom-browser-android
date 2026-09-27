@@ -32,9 +32,16 @@ class FindInPageTest {
     }
 
     @Test
-    fun `out-of-range ordinals are clamped into the match range`() {
-        assertEquals(1, findResultFrom(-1, 5, false).active)
-        assertEquals(5, findResultFrom(9, 5, false).active)
+    fun `interim report with no current match reads 0 of N, not 1 of N`() {
+        val r = findResultFrom(activeMatchOrdinal = -1, numberOfMatches = 5, isDoneCounting = false)
+        assertEquals(0, r.active)
+        assertEquals("0/5", findCountLabel(r))
+        // There are matches to walk to, so stepping stays available.
+        assertTrue(findNavigationEnabled(r))
+        // An ordinal past the end marks no known match either.
+        assertEquals(0, findResultFrom(9, 5, false).active)
+        // Boundary: the last valid 0-based ordinal is the last match.
+        assertEquals(5, findResultFrom(4, 5, true).active)
     }
 
     @Test
