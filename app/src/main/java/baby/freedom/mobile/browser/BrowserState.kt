@@ -399,6 +399,16 @@ class BrowserState(val id: Long) {
         internal set
 
     /**
+     * The document on screen's `<meta name="theme-color">` as opaque
+     * ARGB, or null for none (#92): the band behind the status bar takes
+     * it. Set by the tab's WebView from [THEME_COLOR_JS] after first
+     * paint, load finished and same-document history changes (see
+     * [ThemeColorSlot]); cleared on the way home.
+     */
+    var themeColorArgb: Int? by mutableStateOf<Int?>(null)
+        internal set
+
+    /**
      * The chrome is busy with the address bar or the keyboard, so a push
      * at the end of the page doesn't reveal it (#65, [revealAllowed]).
      * Written by [BrowserScreen] for the active tab; read by the tab's

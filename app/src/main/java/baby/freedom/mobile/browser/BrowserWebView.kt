@@ -968,6 +968,22 @@ private fun buildRefreshableWebView(
         }
     }
 
+    // The page's theme colour behind the status bar (#92). Read at first
+    // paint, when the load finishes (a tag a script adds late) and on a
+    // same-document history change (an SPA route with its own colour);
+    // each read is stamped with its document and gated on that document
+    // having painted, so the outgoing page can't answer for the incoming
+    // one (see [ThemeColorSlot]).
+    val themeColor = ThemeColorSlot()
+
+    fun readThemeColor(view: WebView?, onScreen: Boolean = false) {
+        view ?: return
+        val token = themeColor.beginRead(onScreen) ?: return
+        view.evaluateJavascript(THEME_COLOR_JS) { result ->
+            if (themeColor.accept(token)) state.themeColorArgb = themeColorArgb(result)
+        }
+    }
+
     // Reserved mode (#66): does the document on screen have its own
     // bottom navigation the capsule would cover? [BottomChromeSlot] holds
     // the per-document token and the hysteresis; the page side is the
@@ -1539,6 +1555,16 @@ private fun buildRefreshableWebView(
         // scroll range, or one already at the top) isn't going to reach
         // the end: the gesture is the page's, as before #138.
         onTopOverscroll = { reveal.onTopOverscroll() }
+        // A live light/dark switch re-renders the page under its other
+        // `prefers-color-scheme`, and its theme colour may be one of a
+        // light/dark pair (#92). Read it again once a frame drawn after
+        // the switch is on screen: asked any earlier, `matchMedia` can
+        // still answer for the old scheme.
+        onNightModeChanged = {
+            postVisualStateCallback(0, object : WebView.VisualStateCallback() {
+                override fun onComplete(requestId: Long) = readThemeColor(this@apply)
+            })
+        }
         setOnTouchListener { _, event ->
             // The reveal owns this gesture (#65): the page follows the
             // finger by translation only, and Chromium sees none of it.
@@ -1751,6 +1777,10 @@ private fun buildRefreshableWebView(
                 // is none of this one's business, not even by way of a
                 // probe of its that is still in flight (#56).
                 rootPanProbe.startDocument()
+                // …and with its own theme colour once it has painted; the
+                // outgoing page keeps its tint until then, as it keeps
+                // the screen (#92).
+                themeColor.startDocument()
                 // …and at full height again: a reveal belongs to the
                 // document it was pushed on (#65).
                 cancelReveal()
@@ -1811,6 +1841,7 @@ private fun buildRefreshableWebView(
                     }
                     state.title = ""
                     state.progress = -1
+                    state.themeColorArgb = null
                     lastLoadedDisplayUrl = null
                     visitGate.startNavigation()
                     // Home is a navigation like any other: a page that
@@ -1883,6 +1914,9 @@ private fun buildRefreshableWebView(
                     installBottomUiDetector()
                 }
                 if (url == ABOUT_BLANK) return
+                // …and its `<head>` is in: the theme colour is readable (#92).
+                themeColor.painted()
+                readThemeColor(view)
                 visitGate.commit()
                 // A finish that beat this paint left its visit parked;
                 // this is the moment it becomes real. Anything parked
@@ -1938,6 +1972,8 @@ private fun buildRefreshableWebView(
                     state.progress = -1
                     // …and no site to zoom as (#88), for the same reason.
                     state.zoomSite = null
+                    // …and no page colour behind the status bar (#92).
+                    state.themeColorArgb = null
                     // …and drop the park for the same reason as the
                     // `onPageStarted` branch: home has the screen now, so
                     // a page that finished but had not painted by the
@@ -2002,6 +2038,10 @@ private fun buildRefreshableWebView(
                     lastLoadedDisplayUrl = display
                     state.title = sanitizeTitle(view?.title, url)
                     state.addressBarText = uiDisplay
+                    // A theme colour a script set after first paint (#92).
+                    // A current finish is the document on screen even if
+                    // it never reported a paint.
+                    readThemeColor(view, onScreen = true)
                 }
                 state.canGoBack = view?.canGoBack() == true
                 state.canGoForward = view?.canGoForward() == true
@@ -2072,6 +2112,10 @@ private fun buildRefreshableWebView(
                 // load's document for the IPFS phase line (#94, R3-F2).
                 state.historyUpdated(isHome = url == ABOUT_BLANK)
                 if (view == null || !bottomUiApplies(url)) return
+                // An SPA route can bring its own theme colour (#92). Only
+                // once the document has painted: before that, this is the
+                // cross-document commit, and first paint reads it anyway.
+                readThemeColor(view)
                 requestBottomUiProbe()
             }
 
@@ -2459,6 +2503,23 @@ internal class PageWebView(context: Context) : WebView(context) {
 
     /** Chromium overscrolled past the top edge (see [overscrollPastTop]). */
     var onTopOverscroll: () -> Unit = {}
+
+    /**
+     * The system flipped between light and dark while this WebView was
+     * attached. The manifest keeps `uiMode` in `configChanges`, so this
+     * is the only word of it the page's owner gets.
+     */
+    var onNightModeChanged: () -> Unit = {}
+    private var nightMode = context.resources.configuration.uiMode and
+        android.content.res.Configuration.UI_MODE_NIGHT_MASK
+
+    override fun onConfigurationChanged(newConfig: android.content.res.Configuration?) {
+        super.onConfigurationChanged(newConfig)
+        val night = (newConfig ?: return).uiMode and android.content.res.Configuration.UI_MODE_NIGHT_MASK
+        if (night == nightMode) return
+        nightMode = night
+        onNightModeChanged()
+    }
 
     // The vertical delta of the overScrollBy call in progress (0 outside
     // one): onOverScrolled only says a clamp happened, not which edge.

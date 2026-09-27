@@ -46,6 +46,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.systemBars
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.layout.windowInsetsTopHeight
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.filled.History
@@ -420,6 +421,7 @@ fun BrowserScreen(
     onRecoverNodes: () -> Unit = {},
     ipfsProgressSnapshot: () -> String? = { null },
     ipfsCounters: () -> LongArray? = { null },
+    onStatusBarTint: (Int?) -> Unit = {},
 ) {
     val tabs = remember { TabsState(homepage = initialUrl) }
     // Shared with the request interceptor (which resolves
@@ -1252,6 +1254,29 @@ fun BrowserScreen(
         stripShownFor = if (reserved) state.id else null
     }
 
+    // The band behind the status bar (#92): the page's theme colour, or
+    // the app background (the colour this screen has always shown there)
+    // when it has none or the tab is home. Same fade rules as the strip:
+    // a colour change on the tab on screen cross-fades, a tab switch
+    // takes the new tab's colour in the same frame as its page. Read in
+    // the draw phase, so a fade redraws the band and nothing else.
+    val tint = statusBarTint(state.themeColorArgb, isHomeTab)
+    val bandTarget = tint?.let(::Color) ?: MaterialTheme.colorScheme.background
+    val bandColor = remember { Animatable(bandTarget) }
+    var bandShownFor by remember { mutableStateOf<Long?>(null) }
+    LaunchedEffect(bandTarget, state.id) {
+        if (bandShownFor == state.id) {
+            bandColor.animateTo(bandTarget, tween(STRIP_FADE_MS))
+        } else {
+            bandColor.snapTo(bandTarget)
+        }
+        bandShownFor = state.id
+    }
+    // The status-bar icons follow the band — but only while it is what's
+    // under them: a full-screen panel paints the app background there.
+    val iconTint = tint.takeIf { !overlayShown }
+    LaunchedEffect(iconTint) { onStatusBarTint(iconTint) }
+
     // "Tap anywhere outside the floating toolbar to dismiss the
     // keyboard". We intercept presses on the Initial pass so we see
     // them before the WebView/HomeScreen children, but we never
@@ -1278,6 +1303,14 @@ fun BrowserScreen(
             .fillMaxSize()
             .background(MaterialTheme.colorScheme.background),
     ) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .windowInsetsTopHeight(contentInsets)
+                .drawBehind {
+                    drawRect(if (bandShownFor == state.id) bandColor.value else bandTarget)
+                },
+        )
         // The page fills the whole content area and keeps drawing
         // underneath the capsule, so the site is visible around and
         // faintly beneath it.

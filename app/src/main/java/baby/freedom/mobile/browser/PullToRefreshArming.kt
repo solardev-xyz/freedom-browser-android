@@ -205,7 +205,7 @@ internal fun pullToRefreshArmed(
  * Unwrap the JSON value `evaluateJavascript` hands back: `"…"` for a
  * string, the literal `null` for a frame that produced nothing.
  */
-private fun unquoteJsString(raw: String?): String? {
+internal fun unquoteJsString(raw: String?): String? {
     val value = raw?.trim() ?: return null
     if (value.isEmpty() || value == "null") return null
     if (value.length < 2 || !value.startsWith('"') || !value.endsWith('"')) return null
