@@ -708,6 +708,15 @@ private fun buildRefreshableWebView(
     // new document.
     var bottomUiReply: JavaScriptReplyProxy? = null
 
+    // Page context menu (#84): the long-press waiting on the page's
+    // `contextmenu` verdict, which arrives on the same web-message
+    // channel as the bottom-UI reports. Without both features the page's
+    // say can't be heard, so there is no menu and every long-press stays
+    // Chromium's.
+    val contextMenuSupported = bottomUiSupported &&
+        WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)
+    var contextMenuPress: PageContextMenuPress? = null
+
     /** Install the detector in the document on screen, once. */
     fun installBottomUiDetector(view: WebView) {
         if (!bottomUiSupported) return
@@ -834,41 +843,53 @@ private fun buildRefreshableWebView(
         this.onSearchSelection = onSearchSelection
 
         // Long-press on a link or an image raises the page context menu
-        // (#84). Anything else returns `false` and stays Chromium's: a
+        // (#84) — but only once the page has had its DOM `contextmenu`
+        // event and let it through ([PageContextMenuPress]). The press
+        // itself is never taken: Chromium calls this listener *before*
+        // it hands the long-press to the page, so returning `true` here
+        // would keep the event from the page altogether (no
+        // preventDefault, no site long-press UI).
+        // Anything that isn't a link or image stays wholly Chromium's: a
         // long-press on text starts a selection, whose toolbar carries
         // the selection actions.
         //
-        // The hit test is answered synchronously, which is what decides
-        // whether we take the long-press at all; the link's own address
+        // The hit test is answered synchronously; the link's own address
         // and text (for an image inside a link, the hit test only
         // reports the image) come from `requestFocusNodeHref`, which
-        // answers through a Message — the menu opens when it lands.
+        // answers through a Message, and the page's verdict comes
+        // through the web-message channel ([contextMenuVerdictJs]). The
+        // menu opens when both have landed.
+        if (contextMenuSupported) {
+            WebViewCompat.addDocumentStartJavaScript(
+                this,
+                contextMenuVerdictJs(BOTTOM_UI_CHANNEL),
+                BOTTOM_UI_ORIGIN_RULES,
+            )
+        }
         setOnLongClickListener {
+            if (!contextMenuSupported) return@setOnLongClickListener false
             val hit = hitTestResult
             val type = hit.type
             val extra = hit.extra
-            // Taken only when a menu is certain to open once the href
-            // lands — returning `true` has already suppressed Chromium's
-            // own long-press. An image inside a link is certain when the
-            // image itself is fetchable; a `blob:` image inside a link
-            // hangs on the link, which may yet resolve to nothing
-            // (`javascript:`), so that case stays Chromium's.
+            // Only a press certain to have a target once the href lands.
+            // An image inside a link is certain when the image itself is
+            // fetchable; a `blob:` image inside a link hangs on the link,
+            // which may yet resolve to nothing (`javascript:`), so that
+            // case gets no menu.
             if (!pageContextMenuIsCertain(type, extra)) return@setOnLongClickListener false
             // Which document this press is on is read now, not when the
-            // href lands: a navigation committing in between must leave
-            // the menu stale, not re-pin it to the new page.
+            // answers land: a navigation committing in between must
+            // leave the menu stale, not re-pin it to the new page.
             val pin = onContextMenuPress() ?: return@setOnLongClickListener false
+            val press = PageContextMenuPress(pin, type, extra, SystemClock.uptimeMillis())
+            contextMenuPress = press
             val reply = android.os.Handler(android.os.Looper.getMainLooper()) { msg ->
-                pageContextTargetFor(
-                    type = type,
-                    extra = extra,
-                    focusHref = msg.data.getString("url"),
-                    focusTitle = msg.data.getString("title"),
-                )?.let { onContextMenu(pin, it) }
+                press.onHref(msg.data.getString("url"), msg.data.getString("title"))
+                    ?.let { onContextMenu(press.pin, it) }
                 true
             }
             requestFocusNodeHref(reply.obtainMessage())
-            true
+            false
         }
 
         // Scroll-to-reveal (#65), the View half; the decisions are in
@@ -1247,6 +1268,14 @@ private fun buildRefreshableWebView(
             val listener = WebViewCompat.WebMessageListener { view, message, sourceOrigin, isMainFrame, replyProxy ->
                 if (sourceOrigin.scheme != "https" && sourceOrigin.scheme != "http") return@WebMessageListener
                 if (message.type != WebMessageCompat.TYPE_STRING) return@WebMessageListener
+                // The page's say on a long-press (#84): any frame, since
+                // the press may land in an iframe. It can only ever open
+                // a menu for a press the user actually made.
+                parseContextMenuVerdict(message.data)?.let { allowed ->
+                    contextMenuPress?.onPageVerdict(allowed, SystemClock.uptimeMillis())
+                        ?.let { target -> contextMenuPress?.let { onContextMenu(it.pin, target) } }
+                    return@WebMessageListener
+                }
                 val report = parseBottomUiMessage(message.data, isMainFrame, bottomChrome.token)
                     ?: return@WebMessageListener
                 bottomUiReply = replyProxy
