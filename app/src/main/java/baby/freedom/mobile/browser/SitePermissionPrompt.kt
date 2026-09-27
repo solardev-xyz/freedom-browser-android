@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.LocationOn
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Videocam
@@ -78,6 +79,7 @@ fun SitePermissionPrompt(prompt: PermissionPrompt) {
         armed = true
     }
     val icon = when {
+        prompt.permissions.any { it is ExternalScheme } -> Icons.AutoMirrored.Filled.OpenInNew
         SitePermission.CAMERA in prompt.permissions -> Icons.Filled.Videocam
         SitePermission.MICROPHONE in prompt.permissions -> Icons.Filled.Mic
         else -> Icons.Filled.LocationOn
@@ -195,7 +197,13 @@ fun SitePermissionAndroidBridge(
                 }
             }
         }
+        broker.onNoAppForLink = { scheme ->
+            scope.launch {
+                snackbarHostState.showSnackbar("No app on this device can open ${scheme.label}.")
+            }
+        }
         onDispose {
+            broker.onNoAppForLink = null
             broker.requestAndroidPermissions = null
             broker.onAndroidPermissionMissing = null
             // A dialog result that will never arrive must not strand

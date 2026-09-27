@@ -21,6 +21,7 @@ import android.view.ActionMode
 import android.view.Menu
 import android.view.MenuItem
 import android.view.PixelCopy
+import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewConfiguration
@@ -639,6 +640,12 @@ fun BrowserWebViewHost(
             // Handed to Chromium by `onCreateWindow`, which needs it
             // never to have navigated.
             isPopup = tab.openerId != null,
+            popupOpener = {
+                val openerId = tab.openerId
+                val opener = tabs.tabs.firstOrNull { it.id == openerId }
+                val view = openerId?.let { webViews[it] }
+                if (opener != null && view != null) opener to view else null
+            },
             fileChooser = fileChooser,
             // Only the tab on screen raises a menu, and only over a
             // real page (the home overlay covers `about:blank`).
@@ -804,6 +811,7 @@ private fun buildRefreshableWebView(
     onCreateWindow: () -> WebView,
     onCloseWindow: () -> Unit,
     isPopup: Boolean = false,
+    popupOpener: () -> Pair<BrowserState, WebView>? = { null },
     onContextMenuPress: () -> PageContextMenuPin? = { null },
     onContextMenu: (PageContextMenuPin, PageContextTarget) -> Unit = { _, _ -> },
     onSearchSelection: (String) -> Unit = {},
@@ -1545,6 +1553,43 @@ private fun buildRefreshableWebView(
         // shouldOverrideUrlLoading, emptied by onPageStarted.
         val pendingNavigationUrls = java.util.Collections.synchronizedSet(LinkedHashSet<String>())
 
+        // Whether the main-frame navigation in flight started with a user
+        // gesture. WebView reports `hasGesture()` false on every redirect
+        // hop, so a tapped link whose server redirects to another app's
+        // link (a meeting invite's tracking URL → `zoomus:`) would be
+        // refused without it (#85). Reset when a document starts.
+        var navigationHadGesture = false
+
+        // Whether this WebView has started a document yet. A popup
+        // (`target=_blank`, `window.open()`) whose very first navigation
+        // is a link to another app was opened for that link alone: the
+        // link is its opener's (origin, tap, prompt), and the empty tab
+        // closes again, as in Chrome (#85).
+        var documentStartedOnce = false
+
+        // A link to another app (#85) that passed the scheme and gesture
+        // checks: the site-permission broker asks (or applies a
+        // remembered answer) for the page that asked, then the app is
+        // started. An `intent:` no app can take goes to its http(s)
+        // fallback instead, as a page navigation would.
+        fun offerExternalLink(view: WebView, tab: BrowserState, url: String) {
+            val origin = permissionOriginKey(view.url)
+            val launch = externalAppLaunch(url, view.context.packageName)
+            if (origin == null || launch == null) {
+                Log.i(LOG_TAG, "external link refused: ${externalUrlForLog(url)}")
+                return
+            }
+            sitePermissions.onExternalLink(tab, origin, launch.scheme) {
+                if (startExternalApp(view.context, launch)) return@onExternalLink
+                val fallback = launch.fallbackUrl
+                if (fallback != null) {
+                    onSubmitUrl(tab, fallback)
+                } else {
+                    sitePermissions.onNoAppForLink?.invoke(launch.scheme)
+                }
+            }
+        }
+
         setDownloadListener { url, userAgent, contentDisposition, mimeType, contentLength ->
             // A download that is the response of a main-frame navigation
             // since the last commit (the typed URL or a redirect hop).
@@ -1628,6 +1673,8 @@ private fun buildRefreshableWebView(
             override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
                 // The pending navigation committed; it's no download.
                 pendingNavigationUrls.clear()
+                navigationHadGesture = false
+                documentStartedOnce = true
                 // The main-frame document committed: its ENS pins are now
                 // the page on screen's, and subresources held waiting on
                 // the commit go ahead (#99, [EnsDocumentPins]).
@@ -1936,6 +1983,35 @@ private fun buildRefreshableWebView(
                 request: WebResourceRequest?,
             ): Boolean {
                 val target = request?.url?.toString() ?: return false
+                // A link to another app (#85): never a page load. Main
+                // frame + user gesture only, then per-site consent.
+                if (request.isForMainFrame && !request.isRedirect) {
+                    navigationHadGesture = request.hasGesture()
+                }
+                val opener = if (isPopup && !documentStartedOnce && request.isForMainFrame) {
+                    popupOpener()
+                } else {
+                    null
+                }
+                val askingView = opener?.second ?: view
+                val verdict = externalLinkVerdict(
+                    url = target,
+                    isForMainFrame = request.isForMainFrame,
+                    hasGesture = request.hasGesture() ||
+                        (request.isRedirect && request.isForMainFrame && navigationHadGesture),
+                    consumeGesture = { (askingView as? PageWebView)?.userGestures?.consume() == true },
+                )
+                if (verdict != ExternalLinkVerdict.NotExternal) {
+                    if (verdict == ExternalLinkVerdict.Ask && askingView != null) {
+                        offerExternalLink(askingView, opener?.first ?: state, target)
+                    } else {
+                        Log.i(LOG_TAG, "external link refused: ${externalUrlForLog(target)}")
+                    }
+                    // Posted: the tab (and this WebView) mustn't be torn
+                    // down from inside its own callback.
+                    if (opener != null) view?.post { onCloseWindow() }
+                    return true
+                }
                 // Redirect hops of a main-frame navigation come through
                 // here — the download a navigation turns into has the
                 // final hop's URL.
@@ -2257,6 +2333,24 @@ private const val REVEAL_HANDOVER_TIMEOUT_MS = 1_000L
  * protected: Chromium's unconsumed overscroll, and the scroll range.
  */
 internal class PageWebView(context: Context) : WebView(context) {
+    /**
+     * The user's taps and key presses on this page, each good for one
+     * link to another app (#85, see [UserGestureLatch]). Recorded before
+     * Chromium sees the event, so the click it turns into — and the
+     * navigation that starts — find it already there.
+     */
+    val userGestures = UserGestureLatch(SystemClock::uptimeMillis)
+
+    override fun dispatchTouchEvent(event: MotionEvent): Boolean {
+        if (event.actionMasked == MotionEvent.ACTION_UP) userGestures.onInput()
+        return super.dispatchTouchEvent(event)
+    }
+
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        if (event.action == KeyEvent.ACTION_DOWN) userGestures.onInput()
+        return super.dispatchKeyEvent(event)
+    }
+
     /** "Search" on the text-selection toolbar, with the selected text (#84). */
     var onSearchSelection: ((String) -> Unit)? = null
 

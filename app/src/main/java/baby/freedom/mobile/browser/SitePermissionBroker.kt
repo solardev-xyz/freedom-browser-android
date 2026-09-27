@@ -26,7 +26,7 @@ import kotlinx.coroutines.sync.withLock
  */
 class PermissionPrompt internal constructor(
     val origin: String,
-    val permissions: List<SitePermission>,
+    val permissions: List<SiteCapability>,
 ) {
     internal val answer = CompletableDeferred<PromptAnswer>()
 
@@ -40,7 +40,8 @@ class PermissionPrompt internal constructor(
  * runtime permissions, and the stores (#81). One per process.
  *
  * Flow of a request (camera/mic via `onPermissionRequest`, location via
- * `onGeolocationPermissionsShowPrompt`):
+ * `onGeolocationPermissionsShowPrompt`, a link to another app via
+ * [onExternalLink]):
  *
  *  1. Key it by the requesting origin ([permissionOriginKey]); a
  *     non-http(s) origin or a capability we don't prompt for is denied.
@@ -85,6 +86,14 @@ class SitePermissionBroker private constructor(
      */
     @Volatile
     var onAndroidPermissionMissing: ((List<SitePermission>) -> Unit)? = null
+
+    /**
+     * Installed by [BrowserScreen]: the user allowed a link to another
+     * app (#85), but no app on the device can open it — say so rather
+     * than doing nothing.
+     */
+    @Volatile
+    var onNoAppForLink: ((ExternalScheme) -> Unit)? = null
 
     /**
      * Set by [BrowserScreen]: the tab whose page is what's on screen —
@@ -173,6 +182,24 @@ class SitePermissionBroker private constructor(
         )
     }
 
+    /**
+     * A page in [tab] asked to hand a link to another app (#85), already
+     * vetted by [externalLinkVerdict] (blocked schemes, main frame, user
+     * gesture). [origin] is the page's permission key; [launch] starts
+     * the app, and only runs if the site is allowed [scheme] and the
+     * page that asked is still the tab's document.
+     */
+    fun onExternalLink(tab: BrowserState, origin: String, scheme: ExternalScheme, launch: () -> Unit) {
+        handle(
+            tab = tab,
+            origin = origin,
+            permissions = listOf(scheme),
+            token = Any(),
+            grant = launch,
+            deny = {},
+        )
+    }
+
     /** `WebChromeClient.onGeolocationPermissionsHidePrompt`. */
     fun onGeolocationHidden(tab: BrowserState) =
         withdraw(tab.id) { it.token is GeolocationPermissions.Callback }
@@ -205,14 +232,14 @@ class SitePermissionBroker private constructor(
     val entries: Flow<List<SitePermissionEntry>> =
         combine(store.all, session.version) { records, _ ->
             val stored = records.mapNotNull { r ->
-                val p = SitePermission.forKey(r.permission) ?: return@mapNotNull null
+                val p = SiteCapability.forKey(r.permission) ?: return@mapNotNull null
                 val d = PermissionDecision.fromStored(r.decision) ?: return@mapNotNull null
                 SitePermissionEntry(r.origin, p, d, remembered = true)
             }
             val storedKeys = stored.map { it.origin to it.permission }.toSet()
             stored + session.entries()
                 .filter { (it.origin to it.permission) !in storedKeys }
-                .sortedWith(compareBy({ it.origin }, { it.permission.ordinal }))
+                .sortedWith(compareBy({ it.origin }, { capabilityOrder(it.permission) }, { it.permission.key }))
         }
 
     /** Forget [entry] everywhere, so the site has to ask again. */
@@ -228,7 +255,7 @@ class SitePermissionBroker private constructor(
     private fun handle(
         tab: BrowserState,
         origin: String,
-        permissions: List<SitePermission>,
+        permissions: List<SiteCapability>,
         token: Any,
         grant: () -> Unit,
         deny: () -> Unit,
@@ -265,7 +292,7 @@ class SitePermissionBroker private constructor(
         tab: BrowserState,
         entry: Pending,
         origin: String,
-        permissions: List<SitePermission>,
+        permissions: List<SiteCapability>,
         live: () -> Boolean,
         finish: (Boolean) -> Unit,
     ) {
@@ -292,9 +319,9 @@ class SitePermissionBroker private constructor(
         finish(ensureAndroidPermissions(entry, permissions, live))
     }
 
-    private suspend fun storedDecisions(origin: String): Map<SitePermission, PermissionDecision> =
+    private suspend fun storedDecisions(origin: String): Map<SiteCapability, PermissionDecision> =
         store.decisionsFor(origin).mapNotNull { (k, v) ->
-            val p = SitePermission.forKey(k) ?: return@mapNotNull null
+            val p = SiteCapability.forKey(k) ?: return@mapNotNull null
             val d = PermissionDecision.fromStored(v) ?: return@mapNotNull null
             p to d
         }.toMap()
@@ -314,7 +341,7 @@ class SitePermissionBroker private constructor(
         tab: BrowserState,
         entry: Pending,
         origin: String,
-        undecided: List<SitePermission>,
+        undecided: List<SiteCapability>,
     ): Boolean? {
         val prompt = PermissionPrompt(origin, undecided)
         entry.prompt = prompt
@@ -355,7 +382,7 @@ class SitePermissionBroker private constructor(
 
     private suspend fun record(
         origin: String,
-        permissions: List<SitePermission>,
+        permissions: List<SiteCapability>,
         decision: PermissionDecision,
         remember: Boolean,
     ) {
@@ -394,9 +421,12 @@ class SitePermissionBroker private constructor(
      */
     private suspend fun ensureAndroidPermissions(
         entry: Pending,
-        permissions: List<SitePermission>,
+        requested: List<SiteCapability>,
         live: () -> Boolean,
     ): Boolean {
+        // Only device capabilities need anything from Android; a link to
+        // another app needs nothing.
+        val permissions = requested.filterIsInstance<SitePermission>()
         fun held(p: SitePermission) = p.androidPermissions.any {
             ContextCompat.checkSelfPermission(appContext, it) == PackageManager.PERMISSION_GRANTED
         }
@@ -433,6 +463,10 @@ class SitePermissionBroker private constructor(
             p.prompt?.respond(PromptAnswer.Withdrawn)
         }
     }
+
+    /** Device capabilities in their declared order, then app links. */
+    private fun capabilityOrder(c: SiteCapability): Int =
+        (c as? SitePermission)?.ordinal ?: SitePermission.entries.size
 
     companion object {
         private const val TAG = "SitePermissions"

@@ -24,6 +24,7 @@ import androidx.compose.material3.RadioButton
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.LocationOn
@@ -77,7 +78,8 @@ import kotlinx.coroutines.launch
  *     site storage / per-tab caches. Each action is guarded by a
  *     confirmation dialog.
  *  2. **Site permissions** — every camera / microphone / location
- *     decision (remembered, or this run's), each revocable (#81).
+ *     decision (remembered, or this run's), each revocable (#81), and
+ *     every "open <scheme>: links in another app" one (#85).
  *  3. **About** — app name, version, package, and a short blurb.
  *  4. **Other** — a single "Show advanced options" row. Tapping it
  *     flips [NodeSettings.showIpfsUi] on, which reveals an "IPFS node
@@ -398,7 +400,8 @@ private fun BrowsingDataSection(
 }
 
 /**
- * Site permissions (#81): one row per decision — the site, in full and
+ * Site permissions (#81), links to other apps included (#85): one row
+ * per decision — the site, in full and
  * wrapping (never ellipsised: the end of a host is the part that
  * matters), the permission and its state, and a Remove button that
  * makes the site ask again next time. Session-only decisions are listed
@@ -413,7 +416,7 @@ private fun SitePermissionsSection(
     SectionCard(title = "Site permissions") {
         if (entries.isEmpty()) {
             Text(
-                "Sites you allow or block from using your camera, microphone or location appear here.",
+                "Sites you allow or block from using your camera, microphone or location, or from opening links in other apps, appear here.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
@@ -431,6 +434,7 @@ private fun SitePermissionsSection(
                         SitePermission.CAMERA -> Icons.Filled.Videocam
                         SitePermission.MICROPHONE -> Icons.Filled.Mic
                         SitePermission.LOCATION -> Icons.Filled.LocationOn
+                        is ExternalScheme -> Icons.AutoMirrored.Filled.OpenInNew
                     },
                     contentDescription = null,
                     tint = MaterialTheme.colorScheme.onSurface,
