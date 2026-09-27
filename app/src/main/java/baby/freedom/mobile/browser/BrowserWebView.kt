@@ -1011,6 +1011,10 @@ private fun buildRefreshableWebView(
     // Audio indicator (#91): the frames whose media is audible, as their
     // detectors report it on the same channel (see [TabAudioFrames]).
     val audioFrames = TabAudioFrames<JavaScriptReplyProxy>()
+    fun forgetTabAudio() {
+        audioFrames.clear()
+        state.playingAudio = false
+    }
 
     // Page context menu (#84): the long-press waiting on the page's
     // `contextmenu` verdict, which the detector's document-start script
@@ -1635,6 +1639,13 @@ private fun buildRefreshableWebView(
                     // document's own late ready (see [BottomUiChannels]);
                     // otherwise it waits for its document's first paint.
                     if (!isMainFrame) return@WebMessageListener
+                    // A new main-frame document has replaced the last one,
+                    // and every frame of that one is gone (#91): nothing
+                    // they said about audio holds any more, whether or not
+                    // their `pagehide` silence made it here. Their reports
+                    // all came before this ready; the new document's
+                    // subframes only report after it.
+                    forgetTabAudio()
                     postBottomUiProbe(bottomUiChannels.onReady(replyProxy, bottomChrome.installed))
                     return@WebMessageListener
                 }
@@ -1848,6 +1859,12 @@ private fun buildRefreshableWebView(
                 // is dropped.
                 bottomChrome.startDocument()
                 bottomUiChannels.startDocument()
+                // A main-frame document no detector runs in (not
+                // http(s)) sends no ready to reset the tab's audio frames
+                // on (#91), so they are forgotten here. An http(s) one's
+                // ready does it instead: its subframes can report before
+                // this callback arrives.
+                if (!isHttpUrl(url)) forgetTabAudio()
                 state.bottomChromeMode = BottomChromeMode.Overlay
                 // …and with no permission prompt from the outgoing
                 // document left standing: its requests are denied and

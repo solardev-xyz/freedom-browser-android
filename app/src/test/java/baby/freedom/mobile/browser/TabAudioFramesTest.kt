@@ -24,4 +24,14 @@ class TabAudioFramesTest {
         frames.clear()
         assertFalse(frames.any)
     }
+
+    @Test
+    fun `only http(s) documents run the detector`() {
+        assertTrue(isHttpUrl("https://example.com/"))
+        assertTrue(isHttpUrl("HTTP://example.com/"))
+        assertFalse(isHttpUrl("about:blank"))
+        assertFalse(isHttpUrl("data:text/html,x"))
+        assertFalse(isHttpUrl("file:///android_asset/error/error.html"))
+        assertFalse(isHttpUrl(null))
+    }
 }

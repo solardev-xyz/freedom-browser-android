@@ -440,6 +440,15 @@ internal const val AUDIO_AUDIBLE = "audio 1"
 /** A frame's report that nothing in its document is audible any more (#91). */
 internal const val AUDIO_SILENT = "audio 0"
 
+/**
+ * How often an audible frame's detector looks at its elements again,
+ * whatever events it heard (#91): the safety net for a silence no event
+ * announces — `document.open()` erases every listener of the document and
+ * its window, the detector's included, and pauses the elements it removes.
+ * Only while the frame is audible; a silent frame runs nothing.
+ */
+internal const val AUDIO_RECHECK_MS = 2000
+
 /** Is [data] a frame's audio report ([AUDIO_AUDIBLE] → true, [AUDIO_SILENT] → false)? `null` if not one. */
 internal fun parseAudioReport(data: String?): Boolean? = when (data) {
     AUDIO_AUDIBLE -> true
@@ -478,13 +487,21 @@ internal fun bottomUiProbeRequest(token: String): String = "probe $token"
  * **Audible media** (#91), in every frame: a capture listener for
  * trusted `playing` on `window` picks up each `<audio>`/`<video>` of the
  * document as it starts, and from then on listens on the element itself
- * (`pause`, `ended`, `emptied`, `volumechange`, through
+ * (`pause`, `ended`, `emptied`, `volumechange`, `waiting`, `stalled`,
+ * `playing`, through
  * `EventTarget.prototype.addEventListener` saved at document start) — so
  * an element the page detaches mid-play, whose `pause` no longer reaches
  * `window`, is still heard. The frame posts [AUDIO_AUDIBLE] when one of
- * its elements becomes audible (playing, not `muted`, `volume` above 0)
- * and [AUDIO_SILENT] when none is any more, or when the document goes
- * (`pagehide`: navigated away, or its iframe removed). What it can't
+ * its elements becomes audible (playing, not `muted`, `volume` above 0,
+ * and not starved of data: `readyState` past `HAVE_CURRENT_DATA`, so a
+ * stream stuck `waiting`/`stalled` with `paused` still false doesn't
+ * count until its next `playing`) and [AUDIO_SILENT] when none is any
+ * more, or when the document goes (`pagehide`: navigated away, or its
+ * iframe removed). While audible it also looks again every
+ * [AUDIO_RECHECK_MS], so a silence no event reports (`document.open()`
+ * erases the detector's listeners) still reaches Kotlin; Kotlin in turn
+ * forgets every frame when a new main-frame document starts
+ * ([TabAudioFrames.clear]). What it can't
  * see: Web Audio (an `AudioContext` fires nothing on `window`), an
  * element that never joined the document (`new Audio(src).play()`), and
  * one inside a shadow root (`playing` isn't composed). WebView itself has
@@ -583,7 +600,7 @@ internal fun bottomUiDetectorJs(channel: String, debounceMs: Int = BOTTOM_UI_DEB
     require(CHANNEL_SAFE.matches(channel)) { "channel must be lower-case letters" }
     return """
 (function () {
-  var w = window, d = document, N = '$channel', port = w[N], AUDIO_EVENTS = ['pause', 'ended', 'emptied', 'volumechange'];
+  var w = window, d = document, N = '$channel', port = w[N], AUDIO_EVENTS = ['pause', 'ended', 'emptied', 'volumechange', 'waiting', 'stalled', 'playing'];
   if (port === undefined) return;
   try { delete w[N]; } catch (e) {}
   if (!port || typeof port.postMessage !== 'function') return;
@@ -592,15 +609,16 @@ internal fun bottomUiDetectorJs(channel: String, debounceMs: Int = BOTTOM_UI_DEB
     if (!e.isTrusted) return;
     setT(function () { port.postMessage(e.defaultPrevented ? '$CONTEXT_MENU_KEPT' : '$CONTEXT_MENU_ALLOWED'); }, 0);
   }, true);
-  var ET = w.EventTarget, onEl = ET && ET.prototype && ET.prototype.addEventListener, media = [], loud = false;
+  var ET = w.EventTarget, onEl = ET && ET.prototype && ET.prototype.addEventListener, media = [], loud = false, recheck = 0;
   function hear() {
     var now = false;
     for (var i = media.length - 1; i >= 0; i--) {
       var m = media[i];
       if (m.paused || m.ended) media.splice(i, 1);
-      else if (!m.muted && m.volume > 0) now = true;
+      else if (!m.muted && m.volume > 0 && m.readyState > 2) now = true;
     }
     if (now !== loud) { loud = now; port.postMessage(now ? '$AUDIO_AUDIBLE' : '$AUDIO_SILENT'); }
+    if (loud && !recheck) recheck = setT(function () { recheck = 0; hear(); }, $AUDIO_RECHECK_MS);
   }
   if (onEl) {
     w.addEventListener('playing', function (e) {

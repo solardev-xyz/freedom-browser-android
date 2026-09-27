@@ -23,6 +23,12 @@ package baby.freedom.mobile.browser
  * document to the listener (its `JavaScriptReplyProxy`); only [AUDIO_AUDIBLE]
  * frames are held, and a frame's own [AUDIO_SILENT] (sent when its media
  * stops, and on `pagehide`) drops it again.
+ *
+ * A silence can fail to arrive (`document.open()` erases the detector's
+ * listeners, `pagehide` included), so the WebView also [clear]s the set
+ * whenever a new main-frame document replaces the last one: on the new
+ * document's ready, or at `onPageStarted` for a document no detector runs
+ * in ([isHttpUrl]).
  */
 internal class TabAudioFrames<K> {
     private val audible = HashSet<K>()
@@ -36,6 +42,12 @@ internal class TabAudioFrames<K> {
         return any
     }
 
-    /** Forget every frame (the WebView's pages are gone). */
+    /** Forget every frame: a new main-frame document replaced them all. */
     fun clear() = audible.clear()
+}
+
+/** Is [url] http(s), a document the detector runs in and reports from? */
+internal fun isHttpUrl(url: String?): Boolean {
+    val u = url ?: return false
+    return u.startsWith("http://", ignoreCase = true) || u.startsWith("https://", ignoreCase = true)
 }

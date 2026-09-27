@@ -93,7 +93,7 @@ class BottomUiDetectorScriptTest {
           for (var i = 0; i < this.ls.length; i++) if (this.ls[i].t === t && this.ls[i].f === f) return;
           this.ls.push({ t: t, f: f });
         };
-        function media() { var m = new EventTarget(); m.paused = true; m.ended = false; m.muted = false; m.volume = 1; m.connected = true; return m; }
+        function media() { var m = new EventTarget(); m.paused = true; m.ended = false; m.muted = false; m.volume = 1; m.connected = true; m.readyState = 4; return m; }
         function fire(m, t) {
           var e = { type: t, target: m, isTrusted: true };
           if (m.connected) for (var i = 0; i < mediaListeners.length; i++) if (mediaListeners[i].t === t) mediaListeners[i].f(e);
@@ -497,6 +497,39 @@ class BottomUiDetectorScriptTest {
         // Back from the back/forward cache, still playing.
         eval("win('pageshow', { persisted: true })")
         assertEquals("$AUDIO_AUDIBLE|$AUDIO_SILENT|$AUDIO_AUDIBLE", audio())
+    }
+
+    @Test
+    fun `a stream starved of data isn't audible until it plays again`() = page {
+        documentStart()
+        eval("var v = media(); play(v); v.readyState = 2; fire(v, 'waiting')")
+        assertEquals("$AUDIO_AUDIBLE|$AUDIO_SILENT", audio())
+        // A stall with data still buffered keeps playing, and stays audible.
+        eval("v.readyState = 4; fire(v, 'playing'); fire(v, 'stalled')")
+        assertEquals("$AUDIO_AUDIBLE|$AUDIO_SILENT|$AUDIO_AUDIBLE", audio())
+        // Detached while starved: its own `playing` still brings it back.
+        eval("v.readyState = 1; fire(v, 'waiting'); v.connected = false; v.readyState = 4; fire(v, 'playing')")
+        assertEquals("$AUDIO_AUDIBLE|$AUDIO_SILENT|$AUDIO_AUDIBLE|$AUDIO_SILENT|$AUDIO_AUDIBLE", audio())
+    }
+
+    @Test
+    fun `an audible frame looks again on a timer, so a silence no event reports is still sent`() = page {
+        documentStart()
+        eval("var v = media(); play(v)")
+        assertEquals(1, timers)
+        assertEquals(AUDIO_AUDIBLE, audio())
+        assertEquals(AUDIO_RECHECK_MS, num("timers[0].ms"))
+        // Still playing: the check re-arms itself, and says nothing new.
+        assertEquals(1, flush())
+        assertEquals(1, timers)
+        assertEquals(AUDIO_AUDIBLE, audio())
+        // `document.open()`: every listener is erased and the element,
+        // removed from the document, pauses without anyone hearing it.
+        eval("mediaListeners = []; v.ls = []; v.paused = true")
+        flush()
+        assertEquals("$AUDIO_AUDIBLE|$AUDIO_SILENT", audio())
+        // Silent now: nothing runs any more.
+        assertEquals(0, timers)
     }
 
     @Test
