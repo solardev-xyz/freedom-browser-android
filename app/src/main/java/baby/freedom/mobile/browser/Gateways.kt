@@ -111,13 +111,24 @@ object Gateways {
      * `null` when the backing node isn't available (no IPFS gateway
      * yet) or an ENS name doesn't resolve; the interceptor turns that
      * into a clean synthesized error instead of a hanging load.
+     *
+     * An ENS root is served from the requesting tab's [pins] first — the
+     * root its document was just checked against — then the session
+     * registry.
      */
-    fun gatewayUrlFor(root: ContentRoot, pathAndQuery: String): String? = when (root) {
+    fun gatewayUrlFor(
+        root: ContentRoot,
+        pathAndQuery: String,
+        pins: EnsDocumentPins? = null,
+    ): String? = when (root) {
         is ContentRoot.Bzz -> "$SWARM_BASE/bzz/${root.ref}$pathAndQuery"
         is ContentRoot.Ipfs -> ipfsBase.ifEmpty { null }?.let { "$it/ipfs/${root.cid}$pathAndQuery" }
         is ContentRoot.IpnsKey -> ipfsBase.ifEmpty { null }?.let { "$it/ipns/${root.key}$pathAndQuery" }
         is ContentRoot.IpnsName -> ipfsBase.ifEmpty { null }?.let { "$it/ipns/${root.name}$pathAndQuery" }
-        is ContentRoot.Ens -> resolveEnsRoot(root.name)?.let { gatewayUrlFor(it, pathAndQuery) }
+        is ContentRoot.Ens ->
+            (pins?.uriFor(root.name)?.let { VirtualOrigin.parseContentUrl(it)?.first }
+                ?: resolveEnsRoot(root.name))
+                ?.let { gatewayUrlFor(it, pathAndQuery) }
     }
 
     /**
@@ -144,39 +155,78 @@ object Gateways {
     }
 
     /**
-     * Resolve [name] again for a main-frame document on its
-     * `<name>.ens.…` host, and make the session registry follow the
-     * answer (#99).
+     * Resolve [name] again for a document on its `<name>.ens.…` host
+     * (the top-level page or an iframe), and make this tab's [pins] —
+     * and the session registry — follow the answer (#99).
      *
-     * The registry is what [gatewayUrlFor] serves a name from, and only
-     * the submit flow ever wrote it — so Back / Forward (the bar, the
-     * system gesture, a page's own `history.back()`), which restore a
-     * history entry without going through submit, used to serve the
+     * The registry used to be the only thing a name was served from,
+     * and only the submit flow ever wrote it — so Back / Forward (the
+     * bar, the system gesture, a page's own `history.back()`), which
+     * restore a history entry without going through submit, served the
      * page from whatever the name resolved to when it was first
      * visited, however long ago. Every document load now takes the same
      * lookup a typed navigation does: the resolver's answer, subject to
-     * the resolver's own freshness rules and nothing older. Subresources
-     * keep the registry hot path; they belong to a document that was
-     * just checked.
+     * the resolver's own freshness rules.
      *
-     * Returns `null` when the name resolved to loadable content (the
-     * registry now holds it), or the [ErrorPage] code for the page the
-     * user should see instead. A failure leaves the registry untouched:
-     * other tabs on the name keep their subresources, and the failed
-     * history entry is what Reload retries.
+     * The answer is pinned in the tab's own [pins], which is what that
+     * tab's subresources are served from ([gatewayUrlFor]): a re-check
+     * in one tab must not move another tab's already-loaded document
+     * onto a different root halfway through its lazy chunks. The
+     * process-global registry is still updated — it names the hash in
+     * the address bar and serves requests that belong to no tab
+     * (service workers).
+     *
+     * Only an *answer* refuses the document: `NotFound` / `Unsupported`
+     * say the name no longer points at loadable content. A lookup that
+     * merely failed (RPC unreachable) serves the last answer this tab
+     * or this session had for the name, as it did before the re-check
+     * existed — the network being down is no reason to stop Back from
+     * working. With no earlier answer at all it's `ens_lookup_failed`.
+     *
+     * Returns `null` when the document may be served (its root is now
+     * pinned), or the [ErrorPage] code for the refusal. A refusal
+     * leaves the registry and the pins untouched.
      */
-    fun reverifyEnsDocument(name: String): String? =
+    fun reverifyEnsDocument(name: String, pins: EnsDocumentPins? = null): String? =
         when (val result = ensLookup(name)) {
             is EnsResult.Ok -> {
                 if (VirtualOrigin.parseContentUrl(result.uri) == null) {
                     "ens_unsupported_codec"
                 } else {
                     KnownEnsNames.record(result.uri, name)
+                    pins?.pin(name, result.uri)
                     null
                 }
             }
             is EnsResult.NotFound -> "ens_not_found"
             is EnsResult.Unsupported -> "ens_unsupported_codec"
-            is EnsResult.Error -> "ens_lookup_failed"
+            is EnsResult.Error -> {
+                val last = (pins?.uriFor(name) ?: KnownEnsNames.uriFor(name))
+                    ?.takeIf { VirtualOrigin.parseContentUrl(it) != null }
+                if (last == null) {
+                    "ens_lookup_failed"
+                } else {
+                    pins?.pin(name, last)
+                    null
+                }
+            }
         }
+}
+
+/**
+ * One tab's `name → content URI` answers: the root each ENS document in
+ * that tab was served from, so the document's subresources come from the
+ * same root even if another tab re-checks the name in the meantime and
+ * gets a newer answer (#99). Written by [Gateways.reverifyEnsDocument],
+ * read by [Gateways.gatewayUrlFor]. Owned by the tab's WebView client;
+ * the interceptor runs on WebView's IO threads, hence the concurrent map.
+ */
+class EnsDocumentPins {
+    private val nameToUri = java.util.concurrent.ConcurrentHashMap<String, String>()
+
+    fun pin(name: String, uri: String) {
+        nameToUri[name.lowercase()] = uri
+    }
+
+    fun uriFor(name: String): String? = nameToUri[name.lowercase()]
 }

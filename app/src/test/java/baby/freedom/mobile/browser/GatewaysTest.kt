@@ -161,13 +161,64 @@ class GatewaysTest {
     }
 
     @Test
-    fun `reverifyEnsDocument does not fall back to the old answer when the lookup fails`() {
+    fun `reverifyEnsDocument refuses a name whose content is no longer loadable`() {
         KnownEnsNames.record("bzz://$ref64", "swarm.eth")
-        withLookup({ EnsResult.Error(it, "PROVIDER_ERROR", "down", retryable = true) }) {
-            assertEquals("ens_lookup_failed", Gateways.reverifyEnsDocument("swarm.eth"))
-        }
         withLookup({ EnsResult.Unsupported(it, "0xe5", "") }) {
             assertEquals("ens_unsupported_codec", Gateways.reverifyEnsDocument("swarm.eth"))
+        }
+    }
+
+    @Test
+    fun `a failed lookup serves the last answer instead of refusing`() {
+        // RPC unreachable: Back keeps working off what this tab (or, for
+        // a fresh tab, the session) last had for the name.
+        KnownEnsNames.record("bzz://$ref64", "swarm.eth")
+        val pins = EnsDocumentPins()
+        withLookup({ EnsResult.Error(it, "PROVIDER_ERROR", "down", retryable = true) }) {
+            assertNull(Gateways.reverifyEnsDocument("swarm.eth", pins))
+            assertEquals("bzz://$ref64", pins.uriFor("swarm.eth"))
+            pins.pin("swarm.eth", "bzz://$otherRef")
+            assertNull(Gateways.reverifyEnsDocument("swarm.eth", pins))
+            // The tab's own answer beats the session's.
+            assertEquals("bzz://$otherRef", pins.uriFor("swarm.eth"))
+        }
+    }
+
+    @Test
+    fun `a failed lookup with no earlier answer is refused`() {
+        withLookup({ EnsResult.Error(it, "PROVIDER_ERROR", "down", retryable = true) }) {
+            assertEquals("ens_lookup_failed", Gateways.reverifyEnsDocument("swarm.eth"))
+            assertEquals(
+                "ens_lookup_failed",
+                Gateways.reverifyEnsDocument("swarm.eth", EnsDocumentPins()),
+            )
+        }
+    }
+
+    @Test
+    fun `one tab's re-check does not move another tab's subresources`() {
+        val tab1 = EnsDocumentPins()
+        val tab2 = EnsDocumentPins()
+        var current = ref64
+        withLookup({ EnsResult.Ok(it, "bzz", "bzz://$current", current) }) {
+            assertNull(Gateways.reverifyEnsDocument("swarm.eth", tab1))
+            // The name moves; tab 2 loads it (or goes Back onto it).
+            current = otherRef
+            assertNull(Gateways.reverifyEnsDocument("swarm.eth", tab2))
+            val root = ContentRoot.Ens("swarm.eth")
+            assertEquals(
+                "http://127.0.0.1:1633/bzz/$ref64/chunk.js",
+                Gateways.gatewayUrlFor(root, "/chunk.js", tab1),
+            )
+            assertEquals(
+                "http://127.0.0.1:1633/bzz/$otherRef/chunk.js",
+                Gateways.gatewayUrlFor(root, "/chunk.js", tab2),
+            )
+            // No tab (a service worker): the session's latest answer.
+            assertEquals(
+                "http://127.0.0.1:1633/bzz/$otherRef/chunk.js",
+                Gateways.gatewayUrlFor(root, "/chunk.js"),
+            )
         }
     }
 

@@ -40,6 +40,10 @@ class VirtualOriginContractTest {
      */
     @Volatile
     private var testdappContent: String? = null
+
+    /** RPC unreachable: every lookup fails (not "no contenthash"). */
+    @Volatile
+    private var rpcDown = false
     private val ensLookups = java.util.concurrent.atomic.AtomicInteger(0)
 
     @Before
@@ -50,7 +54,9 @@ class VirtualOriginContractTest {
         Gateways.ensLookup = { name ->
             ensLookups.incrementAndGet()
             val ref = testdappContent
-            if (name == "testdapp.eth" && ref != null) {
+            if (rpcDown) {
+                EnsResult.Error(name, "PROVIDER_ERROR", "RPC unreachable", retryable = true)
+            } else if (name == "testdapp.eth" && ref != null) {
                 EnsResult.Ok(name, "bzz", "bzz://$ref", ref)
             } else {
                 EnsResult.NotFound(name, "NO_CONTENTHASH")
@@ -165,11 +171,82 @@ class VirtualOriginContractTest {
         testdappContent = null
         harness.goForward()
         assertEquals(404, harness.lastHttpError.get())
-        assertEquals(
-            "ens_not_found",
-            errorCodeForMainFrameHttpError(404, harness.lastHttpErrorHeaders.get()),
+        assertEquals("ens_not_found", nameResolutionErrorIn(harness.lastHttpErrorHeaders.get()))
+        val text = harness.js("document.body.innerText")
+        assertFalse(text.contains("VERSION_B"))
+        // The refusal is the error page itself, in the entry's place.
+        assertTrue(text, text.contains("No content for this ENS name"))
+    }
+
+    @Test
+    fun aRefusedBackKeepsTheForwardEntry() {
+        val ensUrl = VirtualOrigin.toVirtualUrl("ens://testdapp.eth")!!
+        testdappContent = FixtureGateway.REF_A
+        harness.load(ensUrl)
+        harness.awaitJsTrue("window.results && window.results.loaded === true")
+        harness.load(originB)
+        harness.awaitJsTrue("window.results && window.results.loaded === true")
+
+        // The name loses its contenthash; Back is refused in place — the
+        // production client leaves a refusal carrying the header alone
+        // rather than loading ErrorPage on top (which would truncate the
+        // forward entry the user just came from).
+        testdappContent = null
+        harness.goBack()
+        assertEquals(404, harness.lastHttpError.get())
+        assertEquals("ens_not_found", nameResolutionErrorIn(harness.lastHttpErrorHeaders.get()))
+        assertEquals(ensUrl, harness.js("location.href").trim('"'))
+        var canGoForward = false
+        InstrumentationRegistry.getInstrumentation().runOnMainSync {
+            canGoForward = harness.webView.canGoForward()
+        }
+        assertTrue("the page Back came from is still in history", canGoForward)
+        harness.goForward()
+        harness.awaitJsTrue("window.results && window.results.loaded === true")
+        assertEquals("\"VERSION_B\"", harness.js("document.getElementById('version').textContent"))
+    }
+
+    @Test
+    fun backWithTheRpcDownServesTheLastAnswer() {
+        val ensUrl = VirtualOrigin.toVirtualUrl("ens://testdapp.eth")!!
+        testdappContent = FixtureGateway.REF_A
+        harness.load(ensUrl)
+        harness.awaitJsTrue("window.results && window.results.loaded === true")
+        harness.load(originB)
+        harness.awaitJsTrue("window.results && window.results.loaded === true")
+
+        // A failed lookup isn't an answer: Back serves what the name last
+        // resolved to instead of refusing the page.
+        rpcDown = true
+        harness.goBack()
+        assertEquals(0, harness.lastHttpError.get())
+        harness.awaitJsTrue("window.results && window.results.loaded === true")
+        assertEquals("\"VERSION_A\"", harness.js("document.getElementById('version').textContent"))
+    }
+
+    @Test
+    fun anEnsIframeReChecksTheName() {
+        val ensUrl = VirtualOrigin.toVirtualUrl("ens://testdapp.eth")!!
+        testdappContent = FixtureGateway.REF_A
+        harness.load(ensUrl)
+        harness.awaitJsTrue("window.results && window.results.loaded === true")
+        harness.load(originB)
+        harness.awaitJsTrue("window.results && window.results.loaded === true")
+
+        // The name moves; a page embeds it. The iframe's document is a
+        // document too, and is served from the current answer.
+        testdappContent = FixtureGateway.REF_B
+        KnownEnsNames.record("bzz://${FixtureGateway.REF_A}", "testdapp.eth")
+        harness.ensPins.pin("testdapp.eth", "bzz://${FixtureGateway.REF_A}")
+        val before = ensLookups.get()
+        harness.js(
+            "(function(){var f=document.createElement('iframe');" +
+                "f.onload=function(){window.__framed=true};" +
+                "f.src='$ensUrl';document.body.appendChild(f)})()",
         )
-        assertFalse(harness.js("document.body.innerText").contains("VERSION_B"))
+        harness.awaitJsTrue("window.__framed === true")
+        assertTrue("the iframe looked the name up", ensLookups.get() > before)
+        assertEquals("bzz://${FixtureGateway.REF_B}", harness.ensPins.uriFor("testdapp.eth"))
     }
 
     // ------------------------------------------------------------------

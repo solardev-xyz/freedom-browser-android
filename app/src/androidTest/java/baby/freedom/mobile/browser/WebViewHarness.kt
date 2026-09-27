@@ -32,6 +32,9 @@ class WebViewHarness {
     /** Response headers of that main-frame HTTP error. */
     val lastHttpErrorHeaders = AtomicReference<Map<String, String>>(emptyMap())
 
+    /** This "tab"'s ENS pins, as `buildRefreshableWebView` keeps one per tab. */
+    val ensPins = EnsDocumentPins()
+
     fun setUp() {
         instrumentation.runOnMainSync {
             webView = WebView(instrumentation.targetContext).apply {
@@ -41,7 +44,7 @@ class WebViewHarness {
                     override fun shouldInterceptRequest(
                         view: WebView?,
                         request: WebResourceRequest?,
-                    ): WebResourceResponse? = interceptVirtualRequest(request)
+                    ): WebResourceResponse? = interceptVirtualRequest(request, ensPins)
 
                     override fun onPageFinished(view: WebView?, url: String?) {
                         pageFinished.countDown()

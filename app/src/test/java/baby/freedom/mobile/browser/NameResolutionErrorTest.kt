@@ -1,26 +1,22 @@
 package baby.freedom.mobile.browser
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * How a main-frame HTTP error on a dweb page picks its [ErrorPage] code:
- * the interceptor's own refusal of an ENS document (#99) names its code
- * in [NAME_RESOLUTION_ERROR_HEADER]; everything else keeps the
- * status-based reading.
+ * The interceptor's refusal of an ENS document (#99): how
+ * `onReceivedHttpError` recognises it, and which requests count as the
+ * documents the name re-check runs for.
  */
 class NameResolutionErrorTest {
 
     @Test
-    fun `the interceptor's header names the error page`() {
+    fun `the interceptor's header names the refusal`() {
         for (code in listOf("ens_not_found", "ens_unsupported_codec", "ens_lookup_failed")) {
-            assertEquals(
-                code,
-                errorCodeForMainFrameHttpError(
-                    statusForNameResolutionError(code),
-                    mapOf(NAME_RESOLUTION_ERROR_HEADER to code),
-                ),
-            )
+            assertEquals(code, nameResolutionErrorIn(mapOf(NAME_RESOLUTION_ERROR_HEADER to code)))
         }
     }
 
@@ -28,15 +24,15 @@ class NameResolutionErrorTest {
     fun `the header is matched case-insensitively`() {
         assertEquals(
             "ens_not_found",
-            errorCodeForMainFrameHttpError(404, mapOf("x-name-resolution-error" to "ens_not_found")),
+            nameResolutionErrorIn(mapOf("x-name-resolution-error" to "ens_not_found")),
         )
     }
 
     @Test
-    fun `without the header the status decides as before`() {
-        assertEquals("ERR_CONNECTION_REFUSED", errorCodeForMainFrameHttpError(502, emptyMap()))
-        assertEquals("swarm_content_not_found", errorCodeForMainFrameHttpError(404, null))
-        assertEquals("swarm_content_not_found", errorCodeForMainFrameHttpError(500, emptyMap()))
+    fun `without the header it is an ordinary HTTP error`() {
+        assertNull(nameResolutionErrorIn(emptyMap()))
+        assertNull(nameResolutionErrorIn(null))
+        assertNull(nameResolutionErrorIn(mapOf("Content-Type" to "text/html")))
     }
 
     @Test
@@ -44,5 +40,33 @@ class NameResolutionErrorTest {
         assertEquals(502, statusForNameResolutionError("ens_lookup_failed"))
         assertEquals(404, statusForNameResolutionError("ens_not_found"))
         assertEquals(404, statusForNameResolutionError("ens_unsupported_codec"))
+    }
+
+    private val navAccept =
+        "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
+
+    @Test
+    fun `the main frame is always a document`() {
+        assertTrue(isDocumentRequest(true, null))
+        assertTrue(isDocumentRequest(true, mapOf("Accept" to "*/*")))
+    }
+
+    @Test
+    fun `an iframe or a service-worker-forwarded navigation is a document`() {
+        assertTrue(isDocumentRequest(false, mapOf("Sec-Fetch-Dest" to "iframe")))
+        assertTrue(isDocumentRequest(false, mapOf("sec-fetch-dest" to "document")))
+        assertTrue(isDocumentRequest(false, mapOf("Accept" to navAccept)))
+    }
+
+    @Test
+    fun `subresources are not documents`() {
+        assertFalse(isDocumentRequest(false, null))
+        assertFalse(isDocumentRequest(false, mapOf("Accept" to "*/*")))
+        assertFalse(isDocumentRequest(false, mapOf("Accept" to "text/css,*/*;q=0.1")))
+        assertFalse(isDocumentRequest(false, mapOf("Accept" to "image/avif,image/webp,*/*")))
+        // Sec-Fetch-Dest, when present, wins over an HTML-ish Accept.
+        assertFalse(
+            isDocumentRequest(false, mapOf("Sec-Fetch-Dest" to "empty", "Accept" to navAccept)),
+        )
     }
 }

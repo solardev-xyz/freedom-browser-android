@@ -74,39 +74,104 @@ private const val LOG_TAG = "BrowserWebView"
 private val HEADERS_TO_STRIP = setOf(
     "transfer-encoding", "content-encoding", "connection", "keep-alive",
     "set-cookie", "set-cookie2",
-    // Ours alone to set: a gateway response carrying it would pick the
-    // error page the user sees (see [errorCodeForMainFrameHttpError]).
+    // Ours alone to set: a gateway response carrying it would pass for
+    // our own in-place refusal and keep the real error page away (see
+    // [nameResolutionErrorIn]).
     NAME_RESOLUTION_ERROR_HEADER.lowercase(),
 )
 
 /**
- * Header on the interceptor's synthetic answer to a main-frame
- * `<name>.ens.…` document whose name no longer resolves to loadable
- * content (#99). Carries the [ErrorPage] code, so `onReceivedHttpError`
- * can say what went wrong instead of guessing from the status. Only
- * ever on a response that is replaced by the error page before the
- * page could read it.
+ * Header on the interceptor's refusal of a `<name>.ens.…` document whose
+ * name no longer resolves to loadable content (#99). Carries the
+ * [ErrorPage] code, and tells `onReceivedHttpError` that the response
+ * already *is* the error page (see [nameResolutionRefusal]).
  */
 internal const val NAME_RESOLUTION_ERROR_HEADER = "X-Name-Resolution-Error"
 
 /**
- * [ErrorPage] code for a main-frame HTTP error on a dweb page: the code
- * the interceptor named in [NAME_RESOLUTION_ERROR_HEADER] if it refused
- * the document itself, otherwise the status's usual reading — a
- * synthesized 502 is the gateway socket being gone, anything else is
- * content the gateway couldn't find.
+ * The [ErrorPage] code in a main-frame HTTP error's headers if the
+ * interceptor refused the document itself, else `null`.
  */
-internal fun errorCodeForMainFrameHttpError(status: Int, headers: Map<String, String>?): String {
+internal fun nameResolutionErrorIn(headers: Map<String, String>?): String? =
     headers?.entries
         ?.firstOrNull { it.key.equals(NAME_RESOLUTION_ERROR_HEADER, ignoreCase = true) }
         ?.value
-        ?.let { return it }
-    return if (status == 502) "ERR_CONNECTION_REFUSED" else "swarm_content_not_found"
-}
 
 /** Status for the interceptor's refusal of an ENS document. */
 internal fun statusForNameResolutionError(code: String): Int =
     if (code == "ens_lookup_failed") 502 else 404
+
+/**
+ * Is [req] a document load — the top-level page, or an iframe — as
+ * opposed to a subresource of one? The name re-check (#99) keys on this.
+ * `isForMainFrame` alone misses iframes, and requests a service worker
+ * forwards on (which WebView hands over as not-main-frame). Chromium
+ * marks a navigation's own request with `Sec-Fetch-Dest` and an
+ * `Accept` that leads with `text/html`; subresources (`fetch`, XHR,
+ * scripts, styles, images) never lead with it by default.
+ */
+internal fun isDocumentRequest(
+    isForMainFrame: Boolean,
+    headers: Map<String, String>?,
+): Boolean {
+    if (isForMainFrame) return true
+    fun header(name: String) =
+        headers?.entries?.firstOrNull { it.key.equals(name, ignoreCase = true) }?.value
+    header("Sec-Fetch-Dest")?.trim()?.lowercase()?.let {
+        return it == "document" || it == "iframe" || it == "frame"
+    }
+    return header("Accept")?.trim()?.lowercase()?.startsWith("text/html") == true
+}
+
+/**
+ * The interceptor's answer to an ENS document it refuses: the error
+ * page itself, served *as* the history entry's document rather than
+ * via a `loadUrl(ErrorPage.url(…))` afterwards (#99). That navigation
+ * would push a new entry and so truncate forward history — a refused
+ * Back would delete the page the user just came from, and Back from
+ * the error page would only land on the refused entry again. Served in
+ * place, Back and Forward move past it as usual and Reload re-checks
+ * the name. No script: the document is on the name's origin.
+ */
+internal fun nameResolutionRefusal(name: String, code: String): WebResourceResponse {
+    val (title, description) = when (code) {
+        "ens_not_found" -> "No content for this ENS name" to
+            "This ENS name doesn't point at any content any more. The owner may " +
+            "have removed its <code>contenthash</code> record, or the name has no resolver."
+        "ens_unsupported_codec" -> "Unsupported content format" to
+            "This ENS name now resolves to a content format Freedom Browser " +
+            "cannot load yet on mobile."
+        else -> "ENS lookup failed" to
+            "Couldn't reach an Ethereum RPC endpoint to resolve this name. " +
+            "Check your connection and try again."
+    }
+    val safeName = name.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    val html = """<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'">
+<title>$title</title><style>
+html,body{margin:0;min-height:100%}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
+background:#141414;color:#f5f5f5;padding:32px 20px;box-sizing:border-box;text-align:center}
+.c{max-width:560px;margin:0 auto}
+h1{font-size:22px;margin:24px 0 12px;color:#ff5e5e}
+p{line-height:1.55;margin:0 0 20px;color:#ccc;font-size:15px}
+.d{background:#1a1a1a;padding:14px 16px;border-radius:8px;font-family:ui-monospace,Menlo,monospace;
+font-size:13px;color:#ff8a8a;margin:0 0 24px;word-break:break-all;white-space:pre-wrap;text-align:left}
+a{display:inline-block;padding:12px 22px;background:#2c2c2c;color:#fff;border:1px solid #444;
+border-radius:8px;font-size:15px;text-decoration:none}
+@media (prefers-color-scheme:light){body{background:#fff;color:#24292f}h1{color:#cf222e}
+p{color:#57606a}.d{background:#f6f8fa;color:#cf222e}a{background:#f6f8fa;border-color:#d0d7de;color:#24292f}}
+</style></head><body><div class="c"><h1>$title</h1><p>$description</p>
+<div class="d">ens://$safeName
+
+$code</div><a href="">Try again</a></div></body></html>"""
+    return WebResourceResponse(
+        "text/html", "utf-8", statusForNameResolutionError(code), "Name Resolution Failed",
+        mapOf(NAME_RESOLUTION_ERROR_HEADER to code, "Cache-Control" to "no-store"),
+        ByteArrayInputStream(html.toByteArray(Charsets.UTF_8)),
+    )
+}
 
 // Request headers we never forward upstream — either managed by
 // `HttpURLConnection` itself or carrying state tied to the WebView's
@@ -663,6 +728,10 @@ private fun buildRefreshableWebView(
     // we still want to attribute the icon to the page it actually
     // belongs to.
     var lastLoadedDisplayUrl: String? = null
+
+    // The ENS roots this tab's documents were served from, so their
+    // subresources don't follow another tab's newer answer (#99).
+    val ensPins = EnsDocumentPins()
 
     // "The document on screen has painted, and has not been written to
     // history yet." Commits in `onPageCommitVisible`, resets in
@@ -1563,7 +1632,7 @@ private fun buildRefreshableWebView(
             override fun shouldInterceptRequest(
                 view: WebView?,
                 request: WebResourceRequest?,
-            ): WebResourceResponse? = interceptVirtualRequest(request)
+            ): WebResourceResponse? = interceptVirtualRequest(request, ensPins)
 
             override fun onReceivedError(
                 view: WebView?,
@@ -1615,8 +1684,16 @@ private fun buildRefreshableWebView(
                 // synthesized 502 is the interceptor telling us the
                 // gateway socket itself is gone (node not running).
                 val display = displayFor(failed, state).ifBlank { failed }
+                // The interceptor's refusal of an ENS document (#99) is
+                // already the error page, served in place — loading
+                // ErrorPage on top would truncate forward history.
+                if (nameResolutionErrorIn(errorResponse?.responseHeaders) != null) {
+                    Log.i(LOG_TAG, "main-frame HTTP $status for $failed → name refused in place")
+                    return
+                }
                 val errorCode =
-                    errorCodeForMainFrameHttpError(status, errorResponse?.responseHeaders)
+                    if (status == 502) "ERR_CONNECTION_REFUSED"
+                    else "swarm_content_not_found"
                 val page = ErrorPage.url(
                     errorCode = errorCode,
                     displayUrl = display,
@@ -2035,9 +2112,13 @@ private fun syntheticResponse(
  * into [ErrorPage] instead of hanging; non-GET/HEAD methods get a 405
  * (WebView interception can't carry request bodies — writes go to the
  * node API origin directly).
+ *
+ * [ensPins] is the requesting tab's (null for service-worker fetches,
+ * which belong to no tab): the ENS roots its documents were served from.
  */
 internal fun interceptVirtualRequest(
     request: WebResourceRequest?,
+    ensPins: EnsDocumentPins? = null,
 ): WebResourceResponse? {
     val req = request ?: return null
     val uri = req.url ?: return null
@@ -2089,17 +2170,13 @@ internal fun interceptVirtualRequest(
     // A document on a name-derived origin re-checks the name first —
     // Back / Forward included, which restore the history entry without
     // going through submit (#99, see [Gateways.reverifyEnsDocument]).
-    if (root is ContentRoot.Ens && req.isForMainFrame) {
-        Gateways.reverifyEnsDocument(root.name)?.let { code ->
-            return syntheticResponse(
-                statusForNameResolutionError(code), "Name Resolution Failed",
-                "${root.name} did not resolve to loadable content ($code).",
-                extraHeaders = mapOf(NAME_RESOLUTION_ERROR_HEADER to code),
-            )
+    if (root is ContentRoot.Ens && isDocumentRequest(req.isForMainFrame, req.requestHeaders)) {
+        Gateways.reverifyEnsDocument(root.name, ensPins)?.let { code ->
+            return nameResolutionRefusal(root.name, code)
         }
     }
 
-    val target = Gateways.gatewayUrlFor(root, pathAndQuery)
+    val target = Gateways.gatewayUrlFor(root, pathAndQuery, ensPins)
         ?: return syntheticResponse(
             502, "Bad Gateway",
             "No local gateway can serve this content root " +
