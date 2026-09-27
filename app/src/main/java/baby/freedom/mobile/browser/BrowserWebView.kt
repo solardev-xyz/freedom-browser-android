@@ -186,6 +186,22 @@ internal fun nameResolutionRefusal(name: String, code: String): WebResourceRespo
         "ens_unsupported_codec" -> "Unsupported content format" to
             "This ENS name now resolves to a content format Freedom Browser " +
             "cannot load yet on mobile."
+        // [Gateways.reverifyEnsDocument] lands here for one server's
+        // record that isn't what this tab or session had — including when
+        // they had nothing yet (an iframe of a name never resolved) — and
+        // for one server's "no content" for a name with an earlier answer.
+        // A typed navigation shows the record with Continue and "no
+        // content" as "No content" with a trust note, so the copy neither
+        // promises an answer to review nor claims an earlier one.
+        "ens_unverified" -> "Not cross-checked" to
+            "Only one Ethereum RPC server answered for this name, so Freedom " +
+            "couldn't check its answer against another server. An answer only " +
+            "one server gave is loaded here only if it matches one already " +
+            "loaded in this session, so nothing was loaded. Try again, or " +
+            "enter the name in the address bar to see what that server answered."
+        "ens_conflict" -> "RPC servers disagreed" to
+            "The Ethereum RPC servers Freedom asked gave different answers for " +
+            "this name. At least one of them is wrong, so nothing was loaded."
         else -> "ENS lookup failed" to
             "Couldn't reach an Ethereum RPC endpoint to resolve this name. " +
             "Check your connection and try again."
@@ -2475,6 +2491,18 @@ private fun buildRefreshableWebView(
                 request: WebResourceRequest?,
             ): Boolean {
                 val target = request?.url?.toString() ?: return false
+                // "Continue once" on the not-cross-checked ENS warning
+                // (#96): never a load, only a message for the submit
+                // flow, which checks it is this tab's ([EnsGate]).
+                if (EnsGate.continueToken(target) != null) {
+                    if (request.isForMainFrame) {
+                        // A stale warning (Back, tab restore) re-runs its
+                        // navigation rather than doing nothing.
+                        EnsGate.continueDestination(target, state.ensGate, view?.url)
+                            ?.let { onSubmitUrl(state, it) }
+                    }
+                    return true
+                }
                 // A link to another app (#85): never a page load. Main
                 // frame + user gesture only, then per-site consent.
                 if (request.isForMainFrame && !request.isRedirect) {

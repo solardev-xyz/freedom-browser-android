@@ -31,6 +31,17 @@ class ErrorPageTest {
         assertTrue(u.contains("error=ERR_FAILED"))
         assertFalse("protocol must not leak when null", u.contains("protocol="))
         assertFalse("retry must not leak when null", u.contains("retry="))
+        assertFalse("continue must not leak when null", u.contains("continue="))
+    }
+
+    @Test
+    fun `url carries the not-cross-checked warning's continue URL`() {
+        val u = ErrorPage.url(
+            errorCode = "ens_unverified",
+            displayUrl = "swarm.eth",
+            continueUrl = "freedom-ens-continue:0123abcd",
+        )
+        assertTrue(u.contains("continue=freedom-ens-continue%3A0123abcd"))
     }
 
     @Test

@@ -4,6 +4,7 @@ import android.webkit.CookieManager
 import android.webkit.WebStorage
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import baby.freedom.mobile.ens.EnsResult
+import baby.freedom.mobile.ens.EnsTrust
 import androidx.test.platform.app.InstrumentationRegistry
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -58,9 +59,9 @@ class VirtualOriginContractTest {
             if (rpcDown) {
                 EnsResult.Error(name, "PROVIDER_ERROR", "RPC unreachable", retryable = true)
             } else if (name == "testdapp.eth" && ref != null) {
-                EnsResult.Ok(name, "bzz", "bzz://$ref", ref)
+                EnsResult.Ok(name, "bzz", "bzz://$ref", ref, EnsTrust.ASSUMED)
             } else {
-                EnsResult.NotFound(name, "NO_CONTENTHASH")
+                EnsResult.NotFound(name, "NO_CONTENTHASH", EnsTrust.ASSUMED)
             }
         }
         clearWebStorage()
