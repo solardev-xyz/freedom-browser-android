@@ -76,6 +76,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.lerp
 import baby.freedom.mobile.data.BrowsingRepository
+import baby.freedom.mobile.data.NodeSettings
 import baby.freedom.mobile.data.UrlSuggestion
 import baby.freedom.mobile.ens.EnsInput
 import baby.freedom.mobile.ens.EnsResult
@@ -395,6 +396,11 @@ fun BrowserScreen(
     val gatewayProbe = remember { GatewayProbe() }
     val context = LocalContext.current
     val repo = remember(context) { BrowsingRepository.get(context) }
+    // The search engine chosen in Settings (#87). Read at submit time
+    // through the State, so a change in Settings applies to the next
+    // search without re-creating [submit].
+    val searchTemplate by remember(context) { NodeSettings.get(context).searchTemplate }
+        .collectAsState(initial = SearchEngines.DEFAULT.template)
     val scope = rememberCoroutineScope()
     // Keep a stable reference to the latest nodeInfo for probe-gating
     // closures launched from submit(). Without rememberUpdatedState, a
@@ -715,7 +721,7 @@ fun BrowserScreen(
             return
         }
 
-        val url = UrlParser.toUrl(canonical)
+        val url = UrlParser.toUrl(canonical, searchTemplate)
         // Home is a special non-URL destination — clear the tab, blank
         // the WebView, and let the Compose [HomeScreen] overlay take
         // over. Fall-through into the gateway-probe / plain-load paths
