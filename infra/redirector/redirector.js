@@ -56,6 +56,12 @@ function configFromEnv(env = process.env) {
 const DEFAULT_CONFIG = configFromEnv();
 
 const NAMESPACES = ['bzz', 'ipfs', 'ipns', 'ens'];
+// Name systems the app resolves under the `ens` namespace that no
+// public gateway serves: WNS `.wei` and GNS `.gwei` names live in their
+// own NameNFT registries, which eth.limo doesn't read, so
+// `<name>.wei.limo` would just fail to resolve. Those hosts still decode
+// (the app opens them fine via App Links); they just have no redirect.
+const UNGATEWAYED_NAME_SUFFIXES = ['.wei', '.gwei'];
 const BZZ_REF_CHUNK_HEX = 64;
 const B36 = '0123456789abcdefghijklmnopqrstuvwxyz';
 const LOWER_MULTIBASE = /^[a-z0-9]+$/;
@@ -290,10 +296,17 @@ function gatewayUrlFor(root, pathAndQuery, cfg = DEFAULT_CONFIG) {
     case 'ipnsName':
       return `https://${escapeName(root.name)}.ipns.${cfg.ipnsGatewayHost}${tail}`;
     case 'ens':
+      if (!hasPublicGateway(root)) return null;
       return `https://${root.name}.${cfg.ensGatewaySuffix}${tail}`;
     default:
       return null;
   }
+}
+
+/** Whether a public gateway serves [root] (false for `.wei`/`.gwei` names). */
+function hasPublicGateway(root) {
+  if (root.kind !== 'ens') return true;
+  return !UNGATEWAYED_NAME_SUFFIXES.some((suffix) => root.name.endsWith(suffix));
 }
 
 /** Virtual host + path → the gateway URL to 301 to, or `null`. */
@@ -344,7 +357,17 @@ function handle(req, res, cfg = DEFAULT_CONFIG) {
     return;
   }
   const host = hostOfRequest(req);
-  const target = redirectFor(host, req.url || '/', cfg);
+  const root = parseHost(host, cfg);
+  if (root && !hasPublicGateway(root)) {
+    res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
+    res.end(
+      `${displayUrlFor(host, req.url || '/', cfg)}\n\n` +
+        'No public gateway serves this name yet. Open the link in the Freedom\n' +
+        'browser, which resolves it on-chain.\n',
+    );
+    return;
+  }
+  const target = root && gatewayUrlFor(root, req.url || '/', cfg);
   if (!target) {
     res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
     res.end(
@@ -389,6 +412,7 @@ module.exports = {
   unescapeName,
   splitHost,
   parseHost,
+  hasPublicGateway,
   gatewayUrlFor,
   redirectFor,
   displayUrlFor,

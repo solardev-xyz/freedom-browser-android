@@ -179,9 +179,14 @@
 
         if (error === 'ens_not_found') {
           titleEl.textContent = 'No content for this ' + nameLabel + ' name';
+          // ENS goes through a per-name resolver; WNS/GNS store records
+          // straight on their registry, so there the other cause is the
+          // name not being registered.
+          const otherCause =
+            nameLabel === 'ENS' ? 'the name has no resolver' : "the name isn't registered";
           descriptionEl.innerHTML =
             "This " + nameLabel + " name doesn't point at any content yet. The owner may not have set a " +
-            '<code>contenthash</code> record, or the name has no resolver.';
+            '<code>contenthash</code> record, or ' + otherCause + '.';
         } else if (error === 'ens_wrong_protocol') {
           titleEl.textContent = 'Name lives on a different network';
           descriptionEl.innerHTML =
