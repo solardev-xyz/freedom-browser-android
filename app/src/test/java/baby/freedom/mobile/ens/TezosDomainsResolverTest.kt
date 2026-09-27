@@ -246,7 +246,7 @@ class TezosDomainsResolverTest {
         assertTrue(a.verified)
         assertEquals(2, a.agreed)
         assertEquals(
-            EnsResult.Ok("docs.tez", "ipns", "ipns://docs.example/site", "docs.example"),
+            EnsResult.Ok("docs.tez", "ipns", "ipns://docs.example/site", "docs.example", EnsTrust(verified = true, agreed = listOf("rpc-one.test", "rpc-two.test"), block = 992)),
             resolver.resolve("docs.tez"),
         )
     }
@@ -254,9 +254,9 @@ class TezosDomainsResolverTest {
     @Test
     fun `a name with no website record, or not registered, is not found`() = runBlocking {
         val none = TezosDomainsResolver(threeEndpoints, rpc(record("openid:name" to "Bob")))
-        assertEquals(EnsResult.NotFound("bob.tez", "NO_WEBSITE_RECORD"), none.resolve("bob.tez"))
+        assertEquals(EnsResult.NotFound("bob.tez", "NO_WEBSITE_RECORD", EnsTrust(verified = true, agreed = listOf("rpc-one.test", "rpc-two.test", "rpc-three.test"), block = 992)), none.resolve("bob.tez"))
         val unregistered = TezosDomainsResolver(threeEndpoints, rpc(null))
-        assertEquals(EnsResult.NotFound("nobody.tez", "NOT_REGISTERED"), unregistered.resolve("nobody.tez"))
+        assertEquals(EnsResult.NotFound("nobody.tez", "NOT_REGISTERED", EnsTrust(verified = true, agreed = listOf("rpc-one.test", "rpc-two.test", "rpc-three.test"), block = 992)), unregistered.resolve("nobody.tez"))
     }
 
     @Test
@@ -274,9 +274,19 @@ class TezosDomainsResolverTest {
         assertEquals("Tezos RPC providers returned conflicting results", outcome.reason)
         assertTrue(outcome.detail, outcome.detail.contains("ipfs://bafybeigdyrzt/site: rpc-one.test"))
         assertTrue(outcome.detail, outcome.detail.contains("ipfs://bafyother/site: rpc-two.test"))
-        val ens = TezosDomainsResolver.toEnsResult("contested.tez", outcome) as EnsResult.Error
-        assertEquals("PROVIDER_CONFLICT", ens.reason)
-        assertFalse(ens.retryable)
+        // The same verdict as ENS's quorum, so the same warning page.
+        assertEquals(
+            EnsResult.Conflict(
+                "contested.tez",
+                EnsResult.Conflict.Subject.RECORD,
+                listOf(
+                    EnsResult.Conflict.Group("ipfs://bafybeigdyrzt/site", listOf("rpc-one.test")),
+                    EnsResult.Conflict.Group("ipfs://bafyother/site", listOf("rpc-two.test")),
+                ),
+                992,
+            ),
+            TezosDomainsResolver.toEnsResult("contested.tez", outcome),
+        )
     }
 
     @Test
@@ -286,7 +296,7 @@ class TezosDomainsResolverTest {
             expiry = """{"string":"2001-01-01T00:00:00Z"}""",
         )
         assertEquals(
-            EnsResult.NotFound("stale.tez", "EXPIRED"),
+            EnsResult.NotFound("stale.tez", "EXPIRED", EnsTrust(verified = true, agreed = listOf("rpc-one.test", "rpc-two.test", "rpc-three.test"), block = 992)),
             TezosDomainsResolver(threeEndpoints, http).resolve("stale.tez"),
         )
     }
@@ -638,7 +648,7 @@ class TezosDomainsResolverTest {
         }
         val resolver = EnsResolver(listOf("https://eth.test"), eth, TezosDomainsResolver(threeEndpoints, tezHttp))
         assertEquals(
-            EnsResult.Ok("alice.tez", "ipfs", "ipfs://bafybeigdyrzt", "bafybeigdyrzt"),
+            EnsResult.Ok("alice.tez", "ipfs", "ipfs://bafybeigdyrzt", "bafybeigdyrzt", EnsTrust(verified = true, agreed = listOf("rpc-one.test", "rpc-two.test", "rpc-three.test"), block = 992)),
             resolver.resolveContenthash("Alice.tez"),
         )
         assertTrue(ethCalls.isEmpty())

@@ -37,6 +37,8 @@ import android.webkit.MimeTypeMap
 import android.webkit.GeolocationPermissions
 import android.webkit.PermissionRequest
 import android.webkit.ValueCallback
+import android.webkit.JsPromptResult
+import android.webkit.JsResult
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
@@ -121,7 +123,7 @@ internal fun nameResolutionErrorIn(headers: Map<String, String>?): String? =
 
 /** Status for the interceptor's refusal of an ENS document. */
 internal fun statusForNameResolutionError(code: String): Int =
-    if (code == "ens_lookup_failed" || code == Gateways.ENS_PROVIDER_CONFLICT) 502 else 404
+    if (code == "ens_lookup_failed") 502 else 404
 
 /**
  * "The main-frame document the interceptor last served for this tab was
@@ -179,18 +181,19 @@ internal fun isDocumentRequest(
  * place, Back and Forward move past it as usual and Reload re-checks
  * the name. No script: the document is on the name's origin.
  */
-internal fun nameResolutionRefusal(name: String, code: String, detail: String? = null): WebResourceResponse =
+internal fun nameResolutionRefusal(name: String, code: String): WebResourceResponse =
     WebResourceResponse(
         "text/html", "utf-8", statusForNameResolutionError(code), "Name Resolution Failed",
         mapOf(NAME_RESOLUTION_ERROR_HEADER to code, "Cache-Control" to "no-store"),
-        ByteArrayInputStream(nameResolutionRefusalHtml(name, code, detail).toByteArray(Charsets.UTF_8)),
+        ByteArrayInputStream(nameResolutionRefusalHtml(name, code).toByteArray(Charsets.UTF_8)),
     )
 
-/** [nameResolutionRefusal]'s page; [detail] is what the resolver said, if worth showing. */
-internal fun nameResolutionRefusalHtml(name: String, code: String, detail: String? = null): String {
+/** [nameResolutionRefusal]'s page. */
+internal fun nameResolutionRefusalHtml(name: String, code: String): String {
     val system = NameSystem.forName(name)
     val label = system.label
     val tezos = system == NameSystem.TEZOS
+    val chain = if (tezos) "Tezos" else "Ethereum"
     val (title, description) = when (code) {
         "ens_not_found" -> "No content for this $label name" to
             if (tezos) {
@@ -203,18 +206,27 @@ internal fun nameResolutionRefusalHtml(name: String, code: String, detail: Strin
         "ens_unsupported_codec" -> "Unsupported content format" to
             "This $label name now resolves to a content format Freedom Browser " +
             "cannot load yet on mobile."
-        Gateways.ENS_PROVIDER_CONFLICT -> "$label lookup refused" to
-            "The ${if (tezos) "Tezos" else "Ethereum"} RPC providers Freedom asks gave conflicting " +
-            "answers for this name, so it can't be resolved safely right now."
+        // [Gateways.reverifyEnsDocument] lands here for one server's
+        // record that isn't what this tab or session had — including when
+        // they had nothing yet (an iframe of a name never resolved) — and
+        // for one server's "no content" for a name with an earlier answer.
+        // A typed navigation shows the record with Continue and "no
+        // content" as "No content" with a trust note, so the copy neither
+        // promises an answer to review nor claims an earlier one.
+        "ens_unverified" -> "Not cross-checked" to
+            "Only one $chain RPC server answered for this name, so Freedom " +
+            "couldn't check its answer against another server. An answer only " +
+            "one server gave is loaded here only if it matches one already " +
+            "loaded in this session, so nothing was loaded. Try again, or " +
+            "enter the name in the address bar to see what that server answered."
+        "ens_conflict" -> "RPC servers disagreed" to
+            "The $chain RPC servers Freedom asked gave different answers for " +
+            "this name. At least one of them is wrong, so nothing was loaded."
         else -> "$label lookup failed" to
             "Couldn't reach ${if (tezos) "a Tezos" else "an Ethereum"} RPC endpoint to resolve this name. " +
             "Check your connection and try again."
     }
-    fun escape(text: String) = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-    val safeName = escape(name)
-    // What the resolver said — for a provider conflict, which providers
-    // disagreed about what, as the typed flow's error page shows.
-    val safeDetail = detail?.takeIf { it.isNotBlank() }?.let { "\n\n" + escape(it) }.orEmpty()
+    val safeName = name.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
     return """<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'">
@@ -234,7 +246,7 @@ p{color:#57606a}.d{background:#f6f8fa;color:#cf222e}a{background:#f6f8fa;border-
 </style></head><body><div class="c"><h1>$title</h1><p>$description</p>
 <div class="d">ens://$safeName
 
-$code$safeDetail</div><a href="">Try again</a></div></body></html>"""
+$code</div><a href="">Try again</a></div></body></html>"""
 }
 
 /** Where [nameWebRecordNavigation] sends a request for [pathAndQuery] on the name's origin. */
@@ -643,6 +655,9 @@ fun BrowserWebViewHost(
         // interceptor as everything else (feature-gated no-op where the
         // WebView doesn't support SW interception).
         ServiceWorkerInterception.install()
+        // A private session a dead process left behind (#86) goes
+        // before any page — private or not — can load.
+        PrivateProfile.discardLeftovers()
         Unit
     }
 
@@ -673,6 +688,23 @@ fun BrowserWebViewHost(
     // is what actually lives under [frame]; the WebView is its only child.
     val webViews = remember { mutableMapOf<Long, WebView>() }
     val refreshLayouts = remember { mutableMapOf<Long, SwipeRefreshLayout>() }
+    // The ids in [webViews] of private tabs (#86).
+    val privateIds = remember { mutableSetOf<Long>() }
+
+    /**
+     * No private tab is left (#86): wipe the private profile's cookies
+     * and site storage (its HTTP cache was cleared through the last
+     * private WebView) and retire it for deletion, and drop
+     * what the app itself kept for the session in memory: its
+     * site-permission answers, zoom levels, and downloads list (a
+     * private download still running is cancelled, as in Chrome).
+     */
+    fun endPrivateSession() {
+        PrivateProfile.discard()
+        sitePermissions.onPrivateSessionEnded()
+        pageZoom.clearPrivate()
+        DownloadManager.get(context).endPrivateSession()
+    }
 
     // Per-tab navigation observers (coroutine jobs, tracked so we can cancel
     // them if the tab is closed).
@@ -735,10 +767,10 @@ fun BrowserWebViewHost(
                 }
             },
             onContextMenu = { pin, target -> tabs.pageContextMenu = pin.request(target) },
-            onSearchSelection = { query -> tabs.requestSearchInNewTab?.invoke(query) },
-            onUnverifiedName = { name -> tabs.requestUnverifiedNameNotice?.invoke(name) },
+            onSearchSelection = { query -> tabs.requestSearchInNewTab?.invoke(query, tab.private) },
         )
         webViews[tab.id] = wv
+        if (tab.private) privateIds += tab.id
         refreshLayouts[tab.id] = layout
         frame.addView(layout)
         return wv
@@ -784,8 +816,16 @@ fun BrowserWebViewHost(
             )
         }
         val toRemove = webViews.keys.filter { it !in idsNow }
+        var closedPrivate = false
         for (id in toRemove) {
             val wv = webViews.remove(id) ?: continue
+            if (privateIds.remove(id)) {
+                closedPrivate = true
+                // The last private WebView is the only handle on the
+                // private profile's HTTP cache (#86): clear it through
+                // this one before it goes.
+                if (privateIds.isEmpty()) runCatching { wv.clearCache(true) }
+            }
             val layout = refreshLayouts.remove(id)
             if (layout != null) frame.removeView(layout)
             // Take down any permission prompt the tab still had up;
@@ -796,6 +836,9 @@ fun BrowserWebViewHost(
             wv.stopLoading()
             wv.destroy()
         }
+        // The last private tab is gone (its WebView destroyed above):
+        // the private session ends, and everything it kept goes with it.
+        if (closedPrivate && privateIds.isEmpty()) endPrivateSession()
     }
 
     // Visibility: only the active tab draws. Toggle the SwipeRefreshLayout
@@ -828,7 +871,14 @@ fun BrowserWebViewHost(
                             // From here the WebView is on this load, not
                             // the one it was showing (#94).
                             tab.handLoadToWebView()
-                            wv.loadUrl(pending)
+                            // The user's submit scheduled this very load?
+                            // Then its redirects may end in an app link
+                            // (#173) — this load's, no other's.
+                            if (tab.takeUserNamedLoad(pending) && wv is PageWebView) {
+                                wv.loadUrlNamedByUser(pending)
+                            } else {
+                                wv.loadUrl(pending)
+                            }
                         }
                     }
             }
@@ -923,6 +973,9 @@ fun BrowserWebViewHost(
             runCatching { CookieManager.getInstance().removeAllCookies(null) }
             runCatching { CookieManager.getInstance().flush() }
             runCatching { WebStorage.getInstance().deleteAllData() }
+            // …and a private session's own (#86), which lives in its
+            // profile's stores.
+            PrivateProfile.clearData()
             // Per-instance state: HTTP cache, autofill form data, and the
             // back/forward stack live on each WebView, so clear them on
             // every live tab.
@@ -961,7 +1014,7 @@ fun BrowserWebViewHost(
         snapshotFlow {
             val scale = fontScale.value
             tabs.tabs.map {
-                it.id to PageZoomLevels.textZoom(pageZoom.levelFor(it.zoomSite), scale)
+                it.id to PageZoomLevels.textZoom(pageZoom.levelFor(it.zoomSite, it.private), scale)
             }
         }
             .collect { zooms ->
@@ -974,6 +1027,9 @@ fun BrowserWebViewHost(
 
     DisposableEffect(Unit) {
         onDispose {
+            // As when the last private tab closes (#86): the private
+            // cache goes through a private WebView, before they all do.
+            privateIds.firstNotNullOfOrNull { webViews[it] }?.let { runCatching { it.clearCache(true) } }
             for (wv in webViews.values) {
                 UnverifiedOrigins.release(wv)
                 (wv as? PageWebView)?.sweptReload?.committed()
@@ -982,6 +1038,13 @@ fun BrowserWebViewHost(
             }
             webViews.clear()
             refreshLayouts.clear()
+            // The tabs don't outlive this host (a recreated screen
+            // starts from a fresh blank tab), so neither does a private
+            // session.
+            if (privateIds.isNotEmpty()) {
+                privateIds.clear()
+                endPrivateSession()
+            }
         }
     }
 }
@@ -1006,7 +1069,6 @@ private fun buildRefreshableWebView(
     onContextMenuPress: () -> PageContextMenuPin? = { null },
     onContextMenu: (PageContextMenuPin, PageContextTarget) -> Unit = { _, _ -> },
     onSearchSelection: (String) -> Unit = {},
-    onUnverifiedName: (String) -> Unit = {},
 ): Pair<SwipeRefreshLayout, WebView> {
     val refreshLayout = SwipeRefreshLayout(context).apply {
         layoutParams = ViewGroup.LayoutParams(
@@ -1026,9 +1088,6 @@ private fun buildRefreshableWebView(
     // The ENS roots this tab's documents were served from, so their
     // subresources don't follow another tab's newer answer (#99).
     val ensPins = EnsDocumentPins()
-    // Reported from the interceptor's IO thread; the notice is UI.
-    val mainThread = android.os.Handler(android.os.Looper.getMainLooper())
-    ensPins.onUnverified = { name -> mainThread.post { onUnverifiedName(name) } }
 
     // Is the document on screen the interceptor's in-place refusal of an
     // ENS name? Kept out of history like any other error page (#99).
@@ -1304,7 +1363,16 @@ private fun buildRefreshableWebView(
     // recover again.
     var autoRecoveredUrl: String? = null
 
-    val webView = PageWebView(context).apply {
+    // A private tab's pickers and `<select>` lists open in windows of
+    // their own, built on this context: [PrivateWindowContext] makes
+    // them FLAG_SECURE like the Activity window (#86).
+    val webView = PageWebView(
+        if (state.private) PrivateWindowContext.of(context) else context,
+    ).apply {
+        // A private tab's WebView goes on the private session's profile
+        // (#86) before anything else touches it: Chromium only takes a
+        // profile change on a WebView that has never been used.
+        if (state.private) PrivateProfile.attach(this)
         layoutParams = ViewGroup.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.MATCH_PARENT,
@@ -1932,11 +2000,35 @@ private fun buildRefreshableWebView(
         // detoured to the submit flow, or turned into a download), and
         // when the browser starts a load of its own over it.
         var navigationHadGesture = false
+        // The redirect chain of the main-frame navigation in flight when
+        // it is a load the user named ([BrowserState.takeUserNamedLoad]):
+        // it may end in an app link with no tap on a page, asked for the
+        // hop that redirected there (#173 — a Meet link redirects to the
+        // Meet app's `intent:`). Ended wherever [navigationHadGesture] is
+        // dropped, on Stop, when loading stops without a commit (a 204,
+        // R2-F1), and by a main-frame request of the page's own
+        // ([UserNamedChain]).
+        val userNamedChain = UserNamedChain()
+        // The URL of the document on screen, as last committed (or moved
+        // by history.pushState): tells the page's own `load` event from
+        // the end of a navigation that never commits
+        // ([UserNamedChain.loadFinished]).
+        var committedPageUrl: String? = null
         // A load the browser starts itself (typed URL, reload, back /
         // forward) replaces whatever navigation was in flight without a
         // first hop through shouldOverrideUrlLoading: the replaced
         // navigation's gesture mustn't carry over to its redirects (#85).
-        this.onBrowserInitiatedLoad = { navigationHadGesture = false }
+        this.onBrowserInitiatedLoad = { url, userNamed ->
+            navigationHadGesture = false
+            if (url != null && userNamed) userNamedChain.started(url) else userNamedChain.ended()
+        }
+        // Stop (or a new load's stop first) ends the navigation in flight
+        // without a commit: neither its gesture nor the user's naming of
+        // it carries over to a navigation the page starts next (R1-F1).
+        this.onStopLoading = {
+            navigationHadGesture = false
+            userNamedChain.ended()
+        }
 
         // Whether this WebView has started a document yet. A popup
         // (`target=_blank`, `window.open()`) whose very first navigation
@@ -1981,6 +2073,7 @@ private fun buildRefreshableWebView(
                 pendingNavigationUrls.clear()
                 // Nor does its gesture carry over to the next load.
                 navigationHadGesture = false
+                userNamedChain.ended()
                 // The page on screen stays: its open requests are this
                 // load's, whatever the answer's headers suggested.
                 state.mainFrameKeptPage()
@@ -2011,6 +2104,7 @@ private fun buildRefreshableWebView(
             )
             DownloadManager.get(context).start(
                 tabId = state.id,
+                private = state.private,
                 url = url,
                 userAgent = userAgent,
                 contentDisposition = contentDisposition,
@@ -2073,7 +2167,9 @@ private fun buildRefreshableWebView(
                 // The pending navigation committed; it's no download.
                 pendingNavigationUrls.clear()
                 navigationHadGesture = false
+                userNamedChain.ended()
                 documentStartedOnce = true
+                committedPageUrl = url
                 // The previous document, and its frames, are gone: what a
                 // sweep held for them is cleared once more, now that they
                 // can't write to it again, and the tab no longer counts
@@ -2145,7 +2241,7 @@ private fun buildRefreshableWebView(
                 // WebView's own default text zoom is.
                 view?.let {
                     it.settings.textZoom = PageZoomLevels.textZoom(
-                        pageZoom.levelFor(zoomSite),
+                        pageZoom.levelFor(zoomSite, state.private),
                         it.resources.configuration.fontScale,
                     )
                 }
@@ -2271,12 +2367,16 @@ private fun buildRefreshableWebView(
                 // case in #53) would find the slot untouched and record
                 // the same visit again.
                 val flushed = pendingVisit.flush(url)
-                if (flushed != null && visitGate.recordOnce(flushed.display)) {
+                // A private tab (#86) claims the slot and writes nothing.
+                if (flushed != null && visitGate.recordOnce(flushed.display) && !state.private) {
                     repo.recordVisit(flushed.display, flushed.title)
                 }
             }
 
             override fun onPageFinished(view: WebView?, url: String?) {
+                // Loading stopped: the user's named load, if this is its
+                // end (a 204, a cancelled hop), has no more hops (R2-F1).
+                userNamedChain.loadFinished(url, committedPageUrl)
                 // Re-probe: a page's own stylesheet (or its first
                 // script) can be what sets `touch-action: none`, and
                 // that is not necessarily in place at first paint (#56).
@@ -2433,7 +2533,9 @@ private fun buildRefreshableWebView(
                     isCurrent
                 ) {
                     if (visitGate.isCommitted) {
-                        if (visitGate.recordOnce(display)) repo.recordVisit(display, state.title)
+                        if (visitGate.recordOnce(display) && !state.private) {
+                            repo.recordVisit(display, state.title)
+                        }
                     } else if (url != null) {
                         pendingVisit.park(PendingVisit(url, display, state.title))
                     }
@@ -2458,6 +2560,7 @@ private fun buildRefreshableWebView(
             // before first paint; the detector isn't installed yet then,
             // and this doesn't install it (see [requestBottomUiProbe]).
             override fun doUpdateVisitedHistory(view: WebView?, url: String?, isReload: Boolean) {
+                committedPageUrl = url
                 // A same-document step keeps the page on screen as the
                 // load's document for the IPFS phase line (#94, R3-F2).
                 state.historyUpdated(isHome = url == ABOUT_BLANK)
@@ -2476,10 +2579,24 @@ private fun buildRefreshableWebView(
                 request: WebResourceRequest?,
             ): Boolean {
                 val target = request?.url?.toString() ?: return false
+                // "Continue once" on the not-cross-checked ENS warning
+                // (#96): never a load, only a message for the submit
+                // flow, which checks it is this tab's ([EnsGate]).
+                if (EnsGate.continueToken(target) != null) {
+                    if (request.isForMainFrame) {
+                        // A stale warning (Back, tab restore) re-runs its
+                        // navigation rather than doing nothing.
+                        EnsGate.continueDestination(target, state.ensGate, view?.url)
+                            ?.let { onSubmitUrl(state, it) }
+                    }
+                    return true
+                }
                 // A link to another app (#85): never a page load. Main
                 // frame + user gesture only, then per-site consent.
                 if (request.isForMainFrame && !request.isRedirect) {
                     navigationHadGesture = request.hasGesture()
+                    // The page's own navigation, not the user's load.
+                    userNamedChain.ended()
                 }
                 // A popup's very first navigation: an app link there is
                 // its opener's, and the popup was opened for it alone.
@@ -2487,11 +2604,19 @@ private fun buildRefreshableWebView(
                 val opener = if (popupFirstNavigation) popupOpener() else null
                 val askingView = opener?.second as? PageWebView ?: view as? PageWebView
                 var gesture: Int? = null
+                // The hop whose answer this redirect is, when it is one of
+                // a load the user named (#173).
+                val userNamedAsker = if (request.isRedirect && request.isForMainFrame) {
+                    userNamedChain.asker()
+                } else {
+                    null
+                }
                 val verdict = externalLinkVerdict(
                     url = target,
                     isForMainFrame = request.isForMainFrame,
                     hasGesture = request.hasGesture() ||
                         (request.isRedirect && request.isForMainFrame && navigationHadGesture),
+                    userNamedRedirect = userNamedAsker != null,
                     consumeGesture = {
                         gesture = askingView?.userGestures?.consume()
                         gesture != null
@@ -2500,7 +2625,10 @@ private fun buildRefreshableWebView(
                 if (verdict != ExternalLinkVerdict.NotExternal) {
                     // Cancelled here, so it never reaches onPageStarted:
                     // its gesture mustn't carry over to the next load.
-                    if (request.isForMainFrame) navigationHadGesture = false
+                    if (request.isForMainFrame) {
+                        navigationHadGesture = false
+                        userNamedChain.ended()
+                    }
                     // A redirect hop cancelled here ends a navigation whose
                     // first hop was already answered as a new document
                     // (#94): none commits, so the page on screen stays and
@@ -2524,7 +2652,23 @@ private fun buildRefreshableWebView(
                     val offer = askingView?.let { page -> { offerExternalLink(page, pageUrl, offerTab, target) } }
                     val waiting = verdict == ExternalLinkVerdict.Ask && input != null && latch != null &&
                         offer != null && latch.whenInTopDocument(input, offer)
-                    if (waiting) {
+                    if (verdict == ExternalLinkVerdict.AskUserNamed && askingView != null) {
+                        // The load ends here, in another app or nowhere:
+                        // the tab goes back to what it shows — the page
+                        // before, or Home when there was none — instead
+                        // of a blank page under the named address (#173).
+                        // Not by loading Home: a new document would
+                        // withdraw the prompt below.
+                        state.stopProgress()
+                        state.addressBarText = state.url
+                        state.canGoBack = askingView.canGoBack()
+                        // The user's own submit was the gesture. The site
+                        // asking is the hop that answered with the app
+                        // link — not the page on screen, which didn't ask,
+                        // nor the address typed, which may have been an
+                        // open redirect to it (#173, R1-F2).
+                        offerExternalLink(askingView, userNamedAsker, state, target)
+                    } else if (waiting) {
                         askingView.postDelayed({
                             if (latch.giveUp(input, offer)) {
                                 Log.i(LOG_TAG, "external link refused: ${externalUrlForLog(target)}")
@@ -2567,6 +2711,7 @@ private fun buildRefreshableWebView(
                 }
                 if (detoured) {
                     navigationHadGesture = false
+                    userNamedChain.ended()
                     onSubmitUrl(state, target)
                     return true
                 }
@@ -2576,6 +2721,9 @@ private fun buildRefreshableWebView(
                 if (request.isForMainFrame && view is PageWebView) {
                     view.documents.navigationStarted(target)
                 }
+                // A hop of the user's named load the WebView now follows:
+                // its answer is the next one that may be an app link.
+                if (request.isForMainFrame && request.isRedirect) userNamedChain.redirected(target)
                 return false
             }
 
@@ -2585,7 +2733,12 @@ private fun buildRefreshableWebView(
             ): WebResourceResponse? {
                 val mainFrame = request?.isForMainFrame == true
                 if (mainFrame) {
-                    request!!.url?.toString()?.let(pendingNavigationUrls::add)
+                    request!!.url?.toString()?.let {
+                        pendingNavigationUrls.add(it)
+                        // Not a hop of the user's named load: the page's
+                        // own navigation (R1-F1).
+                        userNamedChain.mainFrameRequested(it)
+                    }
                 }
                 // Tagged with the load it belongs to, and open until
                 // Chromium closes the body, so the IPFS phase line can
@@ -2731,6 +2884,31 @@ private fun buildRefreshableWebView(
                 state.title = sanitizeTitle(title, view?.url)
             }
 
+            // JavaScript dialogs from a private tab (#86) go in a secure
+            // window of our own ([showPrivateJsDialog]); a normal tab's
+            // keep WebView's default dialog (false).
+            override fun onJsAlert(view: WebView?, url: String?, message: String?, result: JsResult?): Boolean =
+                state.private && result != null &&
+                    showPrivateJsDialog(context, JsDialogKind.ALERT, url, message, null, result)
+
+            override fun onJsConfirm(view: WebView?, url: String?, message: String?, result: JsResult?): Boolean =
+                state.private && result != null &&
+                    showPrivateJsDialog(context, JsDialogKind.CONFIRM, url, message, null, result)
+
+            override fun onJsPrompt(
+                view: WebView?,
+                url: String?,
+                message: String?,
+                defaultValue: String?,
+                result: JsPromptResult?,
+            ): Boolean =
+                state.private && result != null &&
+                    showPrivateJsDialog(context, JsDialogKind.PROMPT, url, message, defaultValue, result)
+
+            override fun onJsBeforeUnload(view: WebView?, url: String?, message: String?, result: JsResult?): Boolean =
+                state.private && result != null &&
+                    showPrivateJsDialog(context, JsDialogKind.BEFORE_UNLOAD, url, message, null, result)
+
             // HTML5 fullscreen (`element.requestFullscreen()`, and the
             // native `<video>` fullscreen button). Without these two
             // overrides the WebView rejects every request and the
@@ -2840,6 +3018,9 @@ private fun buildRefreshableWebView(
                 // a "page load failed" icon persisted against the
                 // origin the user was actually trying to visit.
                 if (ErrorPage.isErrorPage(display)) return
+                // Nor anything from a private tab (#86): the favicon
+                // cache is a list of sites visited.
+                if (state.private) return
                 val bytes = encodePngBytes(icon) ?: return
                 repo.storeFavicon(display, bytes)
             }
@@ -3037,14 +3218,44 @@ internal class PageWebView(context: Context) : WebView(context) {
      * A load this app starts on the WebView (not the page): a typed URL,
      * a reload, back / forward, a retry. Its first hop never reaches
      * `shouldOverrideUrlLoading`, so the client hears of it here (#85).
+     * `url`: the URL loaded (`loadUrl`, `postUrl`), or `null` for a
+     * reload, a history step or inline data. `userNamed`: the load is
+     * the one a user's submit scheduled ([loadUrlNamedByUser], #173).
      */
-    var onBrowserInitiatedLoad: () -> Unit = {}
+    var onBrowserInitiatedLoad: (url: String?, userNamed: Boolean) -> Unit = { _, _ -> }
 
-    private fun browserInitiatedLoad() {
+    /** `stopLoading()`: the navigation in flight ends without a commit. */
+    // Nullable: read by an override WebView could call before this
+    // class's initializers have run.
+    var onStopLoading: (() -> Unit)? = null
+
+    // Set only for the duration of [loadUrlNamedByUser]'s own load.
+    private var loadingNamedByUser = false
+
+    private fun browserInitiatedLoad(url: String? = null) {
         // Any load but a sweep's own step supersedes its reload: a later
         // resubmission prompt is that load's, not the sweep's (R1-F1).
         sweptReload.navigationStarted()
-        onBrowserInitiatedLoad()
+        onBrowserInitiatedLoad(url, url != null && loadingNamedByUser)
+    }
+
+    /**
+     * Loads [url] as the address the user named (#173): the one load a
+     * user's submit scheduled, never any other `loadUrl` (a blank first
+     * paint, a retry, an error page) that happens to come first.
+     */
+    fun loadUrlNamedByUser(url: String) {
+        loadingNamedByUser = true
+        try {
+            loadUrl(url)
+        } finally {
+            loadingNamedByUser = false
+        }
+    }
+
+    override fun stopLoading() {
+        onStopLoading?.invoke()
+        super.stopLoading()
     }
 
     // Navigations the app starts, noted before Chromium has them (see
@@ -3052,19 +3263,19 @@ internal class PageWebView(context: Context) : WebView(context) {
     // `shouldOverrideUrlLoading`.
     override fun loadUrl(url: String) {
         documents.navigationStarted(url)
-        browserInitiatedLoad()
+        browserInitiatedLoad(url)
         super.loadUrl(url)
     }
 
     override fun loadUrl(url: String, additionalHttpHeaders: MutableMap<String, String>) {
         documents.navigationStarted(url)
-        browserInitiatedLoad()
+        browserInitiatedLoad(url)
         super.loadUrl(url, additionalHttpHeaders)
     }
 
     override fun postUrl(url: String, postData: ByteArray) {
         documents.navigationStarted(url)
-        browserInitiatedLoad()
+        browserInitiatedLoad(url)
         super.postUrl(url, postData)
     }
 
@@ -3805,15 +4016,9 @@ private fun interceptVirtualRequestFor(
         (req.isForMainFrame || page?.uriFor(root.name) == null)
     ) {
         var web: EnsResult.Ok? = null
-        var conflict: EnsResult.Error? = null
-        Gateways.reverifyEnsDocument(
-            root.name, ensPins, page,
-            onWebRecord = { web = it },
-            onConflict = { conflict = it },
-            onUnverified = { ensPins?.onUnverified?.invoke(it.name) },
-        )?.let { code ->
+        Gateways.reverifyEnsDocument(root.name, ensPins, page, onWebRecord = { web = it })?.let { code ->
             web?.let { return nameWebRecordNavigation(it, pathAndQuery) }
-            return nameResolutionRefusal(root.name, code, conflict?.let { "${it.reason}: ${it.error}" })
+            return nameResolutionRefusal(root.name, code)
         }
     }
 

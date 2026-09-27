@@ -2,6 +2,7 @@ package baby.freedom.mobile.browser
 
 import baby.freedom.mobile.ens.EnsResolver
 import baby.freedom.mobile.ens.EnsResult
+import baby.freedom.mobile.ens.EnsTrust
 import baby.freedom.swarm.SwarmNode
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
@@ -215,10 +216,7 @@ object Gateways {
                 // a failure opens the failure window, an answer closes it.
                 @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
                 val outcome = own.getCompleted()
-                // A provider conflict is a refusal, not a failure: it
-                // mustn't let the next documents skip the wait and fall
-                // back on the last answer.
-                if (outcome is EnsResult.Error && !isProviderConflict(outcome)) {
+                if (outcome is EnsResult.Error) {
                     lookupFailedAt[key] = System.currentTimeMillis()
                 } else {
                     lookupFailedAt.remove(key)
@@ -368,27 +366,18 @@ object Gateways {
             VirtualOrigin.parseContentUrl(uri)?.let { return it }
         }
         val result = ensLookup(name)
-        if (result is EnsResult.Ok) {
+        // One server's word isn't served unasked (#96); the submit flow
+        // records what the user let through.
+        if (result is EnsResult.Ok && result.trust.verified) {
             val content = VirtualOrigin.parseContentUrl(result.uri) ?: return null
-            // One provider's word is served, not remembered for the session.
-            if (result.verified) KnownEnsNames.record(result.uri, name)
+            KnownEnsNames.record(result.uri, name)
             return content
         }
         return null
     }
 
-    /** [reverifyEnsDocument]'s refusal when the name's providers contradict each other. */
-    const val ENS_PROVIDER_CONFLICT = "ens_provider_conflict"
-
     /** [reverifyEnsDocument]'s answer for a `.tez` name whose website is now on the web. */
     const val ENS_WEB_RECORD = "ens_web_record"
-
-    /**
-     * Tezos Domains providers that disagree: a non-retryable refusal, not
-     * a transport failure (see `TezosDomainsResolver.toEnsResult`).
-     */
-    internal fun isProviderConflict(result: EnsResult.Error): Boolean =
-        !result.retryable && result.reason == "PROVIDER_CONFLICT"
 
     /**
      * Resolve [name] again for a document on its `<name>.ens.…` host
@@ -425,6 +414,15 @@ object Gateways {
      * With no earlier answer the document waits for the resolver, as a
      * typed navigation does.
      *
+     * Two more refusals since the RPC cross-check (#96): servers that
+     * disagree (`ens_conflict`), and an answer only one server gave that
+     * isn't what this tab or the session already had
+     * (`ens_unverified`) — the same answer again is served, since it was
+     * cross-checked before or the user let it through. Neither forgets
+     * the name's earlier answer. That includes one server alone saying
+     * the name has no (loadable) content: with an earlier answer it's
+     * `ens_unverified`, not `ens_not_found`, and the answer is kept.
+     *
      * A main-frame document passes its incoming [page]
      * ([EnsDocumentPins.beginNavigation]); the answer is pinned there, and
      * reaches the page on screen only once that document commits. An
@@ -439,35 +437,18 @@ object Gateways {
      * mapping nor a later failed lookup describes content the name no
      * longer points at. Pages already on screen keep their own pins.
      *
-     * A lookup that failed *non-retryably* — Tezos Domains providers
-     * that contradict each other (`PROVIDER_CONFLICT`) — is a refusal
-     * ([ENS_PROVIDER_CONFLICT]), never a fall-back to the last answer:
-     * the resolver declined to pick a side, and serving the old root
-     * would pick one for it. It isn't an answer about the name either,
-     * so the last answers are kept for when the providers agree again.
-     *
      * A `.tez` name whose website record is now on the ordinary web
      * (`http(s)`) returns [ENS_WEB_RECORD] after handing the answer to
      * [onWebRecord]: the document can't be served on the name's origin,
-     * so the caller sends the frame there instead.
-     *
-     * A provider conflict hands the resolver's error to [onConflict]
-     * first, so the refusal page can say which providers disagreed.
-     *
-     * An *unverified* answer (one Tezos RPC provider, see
-     * `EnsResult.Ok.verified`) is served — pinned for [page] — but is
-     * neither the tab's last answer nor recorded in [KnownEnsNames]: a
-     * later failed lookup must not fall back on a destination only one
-     * operator vouched for. [onUnverified] is told, so the tab can say so
-     * as the typed flow does.
+     * so the caller sends the frame there instead. An unverified one is
+     * refused like any other (`ens_unverified`) unless the typed flow
+     * already let it through.
      */
     fun reverifyEnsDocument(
         name: String,
         pins: EnsDocumentPins? = null,
         page: EnsDocumentPins.Page? = null,
         onWebRecord: (EnsResult.Ok) -> Unit = {},
-        onConflict: (EnsResult.Error) -> Unit = {},
-        onUnverified: (EnsResult.Ok) -> Unit = {},
     ): String? {
         val key = name.lowercase()
         val last = (pins?.lastAnswerFor(name) ?: KnownEnsNames.uriFor(name))
@@ -488,32 +469,43 @@ object Gateways {
             pins?.forgetLastAnswer(name)
             return code
         }
+        // "Nothing loadable here" on one server's word only (#96) — the
+        // others failed or never answered. With an earlier answer to
+        // lose, that's a claim to question, not to act on: one server
+        // mustn't turn a real record into "no resolver". Refused, the
+        // name's earlier answer kept.
+        fun noContent(code: String, trust: EnsTrust): String =
+            if (!trust.verified && last != null) "ens_unverified" else gone(code)
         return when (result) {
             is EnsResult.Ok -> {
-                if (result.protocol == "http" || result.protocol == "https") {
-                    // Not content this origin serves: drop the old root,
-                    // as for any answer that no longer loads here.
+                val web = result.protocol == "http" || result.protocol == "https"
+                if (!web && VirtualOrigin.parseContentUrl(result.uri) == null) {
+                    noContent("ens_unsupported_codec", result.trust)
+                } else if (!result.trust.verified &&
+                    result.uri != pins?.lastAnswerFor(name) &&
+                    result.uri != KnownEnsNames.uriFor(name)
+                ) {
+                    // Only one RPC server's word, and not for what this
+                    // tab or the session already had — cross-checked
+                    // then, or let through by the user (#96).
+                    "ens_unverified"
+                } else if (web) {
+                    // A `.tez` website on the ordinary web: not content
+                    // this origin serves, so drop the old root, as for any
+                    // answer that no longer loads here.
                     onWebRecord(result)
                     gone(ENS_WEB_RECORD)
-                } else if (VirtualOrigin.parseContentUrl(result.uri) == null) {
-                    gone("ens_unsupported_codec")
-                } else if (!result.verified) {
-                    pins?.pin(name, result.uri, page, remember = false)
-                    onUnverified(result)
-                    null
                 } else {
                     KnownEnsNames.record(result.uri, name)
                     pins?.pin(name, result.uri, page)
                     null
                 }
             }
-            is EnsResult.NotFound -> gone("ens_not_found")
-            is EnsResult.Unsupported -> gone("ens_unsupported_codec")
-            // Providers contradicting each other: a refusal, not an outage.
-            is EnsResult.Error if isProviderConflict(result) -> {
-                onConflict(result)
-                ENS_PROVIDER_CONFLICT
-            }
+            is EnsResult.NotFound -> noContent("ens_not_found", result.trust)
+            is EnsResult.Unsupported -> noContent("ens_unsupported_codec", result.trust)
+            // Servers disagree about the name right now (#96). Not the
+            // name's answer to forget, but nothing to serve on either.
+            is EnsResult.Conflict -> "ens_conflict"
             // Failed, or still running at the deadline: not an answer.
             is EnsResult.Error, null -> {
                 if (last == null) {
@@ -581,20 +573,12 @@ class EnsDocumentPins {
     private val last = ConcurrentHashMap<String, String>()
 
     /**
-     * Told (on the interceptor's thread) when a document re-check served
-     * an answer only one provider gave — [Gateways.reverifyEnsDocument].
-     */
-    @Volatile
-    var onUnverified: ((name: String) -> Unit)? = null
-
-    /**
      * Pin [name] to [uri] for [page] (the incoming page from
-     * [beginNavigation]), or for the page on screen when `null`. With
-     * [remember], it also becomes the tab's last answer for the name.
+     * [beginNavigation]), or for the page on screen when `null`.
      */
-    fun pin(name: String, uri: String, page: Page? = null, remember: Boolean = true) {
+    fun pin(name: String, uri: String, page: Page? = null) {
         (page ?: current).pins[name.lowercase()] = uri
-        if (remember) last[name.lowercase()] = uri
+        last[name.lowercase()] = uri
     }
 
     /** The root the current page's documents on [name] were served from. */

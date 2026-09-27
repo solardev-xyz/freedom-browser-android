@@ -233,8 +233,13 @@ data class SitePermissionEntry(
  * session tier. [entries] is Compose-observable through [version] so
  * Settings can list and revoke session decisions too (an embargo the
  * user can't see or lift would be a dead end).
+ *
+ * With [embargoes] false, dismissals count for nothing: each one is a
+ * deny-once and the site may ask again. That's the private tabs' tier
+ * (#86), which Settings doesn't list — an embargo there could be
+ * neither seen nor lifted.
  */
-class PermissionSession {
+class PermissionSession(private val embargoes: Boolean = true) {
     private data class Key(val origin: String, val permission: SiteCapability)
 
     private val decisions = LinkedHashMap<Key, PermissionDecision>()
@@ -264,6 +269,7 @@ class PermissionSession {
      */
     @Synchronized
     fun dismiss(origin: String, permission: SiteCapability): Boolean {
+        if (!embargoes) return false
         val k = Key(origin, permission)
         val n = (dismissals[k] ?: 0) + 1
         dismissals[k] = n

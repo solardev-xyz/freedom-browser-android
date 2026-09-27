@@ -48,7 +48,15 @@ object CookieHygiene {
     }
 
     internal fun sweepBlocking(navigatedUrl: String? = null) {
-        val cm = runCatching { CookieManager.getInstance() }.getOrNull() ?: return
+        // Private tabs (#86) keep their cookies in their own profile's jar.
+        val jars = listOfNotNull(
+            runCatching { CookieManager.getInstance() }.getOrNull(),
+            PrivateProfile.cookieManager(),
+        )
+        for (cm in jars) runCatching { sweepJar(cm, navigatedUrl) }
+    }
+
+    private fun sweepJar(cm: CookieManager, navigatedUrl: String?) {
         var expired = 0
         for (suffix in VirtualOrigin.SUFFIXES) {
             expired += expireAllFor(cm, "https://$suffix/", domain = ".$suffix")

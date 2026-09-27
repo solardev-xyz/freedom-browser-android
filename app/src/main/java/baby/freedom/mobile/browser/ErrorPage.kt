@@ -34,6 +34,9 @@ import java.net.URLEncoder
  *  - `detail`  — optional free-form text appended to the details
  *                block (e.g. the resolver reason `NO_RESOLVER` or a
  *                contenthash codec tag).
+ *  - `continue` — optional URL a "Continue once" button navigates to:
+ *                the not-cross-checked ENS warning's way on (#96,
+ *                [EnsGate.continueUrl]).
  */
 object ErrorPage {
     const val URL: String = "file:///android_asset/error/error.html"
@@ -44,6 +47,7 @@ object ErrorPage {
         protocol: String? = null,
         retryUrl: String? = null,
         detail: String? = null,
+        continueUrl: String? = null,
     ): String {
         val params = buildList {
             add("error=${encode(errorCode)}")
@@ -51,6 +55,7 @@ object ErrorPage {
             if (protocol != null) add("protocol=${encode(protocol)}")
             if (retryUrl != null) add("retry=${encode(retryUrl)}")
             if (detail != null) add("detail=${encode(detail)}")
+            if (continueUrl != null) add("continue=${encode(continueUrl)}")
         }
         return "$URL?${params.joinToString("&")}"
     }
@@ -67,14 +72,17 @@ object ErrorPage {
      * page — otherwise the raw asset path would leak into the address
      * bar and the user would lose the ability to edit-and-resubmit.
      */
-    fun displayUrlFor(url: String?): String? {
+    fun displayUrlFor(url: String?): String? = paramFor(url, "url")
+
+    /** The [name] query param of an error-page URL; `null` if absent or not one. */
+    fun paramFor(url: String?, name: String): String? {
         if (!isErrorPage(url)) return null
         val query = url!!.substringAfter('?', "")
         if (query.isEmpty()) return null
         for (part in query.split('&')) {
             val eq = part.indexOf('=')
             if (eq < 0) continue
-            if (part.substring(0, eq) != "url") continue
+            if (part.substring(0, eq) != name) continue
             return runCatching {
                 // The `Charset` overloads of [URLDecoder] / [URLEncoder]
                 // are API 33; `minSdk` is 30 and the library isn't

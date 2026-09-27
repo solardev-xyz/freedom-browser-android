@@ -100,7 +100,10 @@ class NameSystemTest {
         // (alice.wei at the time of writing): an empty `bytes`.
         val http = ScriptedRpc { result(abiBytes("")) }
         val r = runBlocking { EnsResolver(listOf(rpc), http).resolveContenthash("alice.wei") }
-        assertEquals(EnsResult.NotFound("alice.wei", "EMPTY_CONTENTHASH"), r)
+        require(r is EnsResult.NotFound) { "got $r" }
+        assertEquals("EMPTY_CONTENTHASH", r.reason)
+        // One endpoint: its word only (#96).
+        assertTrue(!r.trust.verified)
     }
 
     @Test

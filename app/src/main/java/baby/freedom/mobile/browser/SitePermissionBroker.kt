@@ -27,6 +27,11 @@ import kotlinx.coroutines.sync.withLock
 class PermissionPrompt internal constructor(
     val origin: String,
     val permissions: List<SiteCapability>,
+    /**
+     * Asked from a private tab (#86): the answer lasts for the private
+     * session only, so the prompt offers no "remember".
+     */
+    val private: Boolean = false,
 ) {
     internal val answer = CompletableDeferred<PromptAnswer>()
 
@@ -69,6 +74,21 @@ class SitePermissionBroker private constructor(
     private val store: SitePermissionStore,
 ) {
     val session = PermissionSession()
+
+    /**
+     * Private tabs' decisions (#86): their own session tier, kept apart
+     * from [session] both ways — a private tab starts from nothing
+     * remembered or answered in normal tabs, and what it's told applies
+     * to private tabs only, is never written to the store, and isn't
+     * listed in Settings. Replaced when the private session ends
+     * ([onPrivateSessionEnded]). Since Settings can't show it, it never
+     * embargoes: a dismissed prompt is a deny-once, nothing more.
+     */
+    private var privateSession = PermissionSession(embargoes = false)
+
+    private fun sessionFor(tab: BrowserState): PermissionSession =
+        if (tab.private) privateSession else session
+
     private val scope = MainScope()
 
     /**
@@ -221,6 +241,11 @@ class SitePermissionBroker private constructor(
         tabLocks.remove(tabId)
     }
 
+    /** The last private tab has closed (#86): forget its answers. */
+    fun onPrivateSessionEnded() {
+        privateSession = PermissionSession(embargoes = false)
+    }
+
     // ---------------------------------------------------------------
     // Settings
     // ---------------------------------------------------------------
@@ -304,9 +329,9 @@ class SitePermissionBroker private constructor(
             var allowed: Boolean? = null
             while (allowed == null) {
                 if (!live()) return@withLock false
-                val stored = storedDecisions(origin)
+                val stored = storedDecisionsFor(tab, origin)
                 if (!live()) return@withLock false
-                allowed = when (val plan = planFor(origin, permissions, stored, session)) {
+                allowed = when (val plan = planFor(origin, permissions, stored, sessionFor(tab))) {
                     PermissionPlan.Deny -> false
                     PermissionPlan.Grant -> true
                     // null: settled by another tab's answer meanwhile — re-plan.
@@ -318,6 +343,10 @@ class SitePermissionBroker private constructor(
         if (!siteAllowed || !live()) return finish(false)
         finish(ensureAndroidPermissions(entry, permissions, live))
     }
+
+    /** What's remembered for [origin], as [tab] sees it: nothing, in a private tab. */
+    private suspend fun storedDecisionsFor(tab: BrowserState, origin: String): Map<SiteCapability, PermissionDecision> =
+        if (tab.private) emptyMap() else storedDecisions(origin)
 
     private suspend fun storedDecisions(origin: String): Map<SiteCapability, PermissionDecision> =
         store.decisionsFor(origin).mapNotNull { (k, v) ->
@@ -343,13 +372,14 @@ class SitePermissionBroker private constructor(
         origin: String,
         undecided: List<SiteCapability>,
     ): Boolean? {
-        val prompt = PermissionPrompt(origin, undecided)
+        val prompt = PermissionPrompt(origin, undecided, private = tab.private)
+        val tier = sessionFor(tab)
         entry.prompt = prompt
         tab.permissionPrompt = prompt
         val answer = try {
             coroutineScope {
                 val watcher = launch {
-                    awaitPromptSuperseded(origin, undecided, session) { storedDecisions(origin) }
+                    awaitPromptSuperseded(origin, undecided, tier) { storedDecisionsFor(tab, origin) }
                     prompt.respond(PromptAnswer.Superseded)
                 }
                 try {
@@ -364,15 +394,15 @@ class SitePermissionBroker private constructor(
         }
         return when (answer) {
             is PromptAnswer.Allow -> {
-                record(origin, undecided, PermissionDecision.ALLOW, answer.remember)
+                record(tier, origin, undecided, PermissionDecision.ALLOW, answer.remember && !tab.private)
                 true
             }
             is PromptAnswer.Block -> {
-                record(origin, undecided, PermissionDecision.DENY, answer.remember)
+                record(tier, origin, undecided, PermissionDecision.DENY, answer.remember && !tab.private)
                 false
             }
             PromptAnswer.Dismiss -> {
-                for (p in undecided) session.dismiss(origin, p)
+                for (p in undecided) tier.dismiss(origin, p)
                 false
             }
             PromptAnswer.Withdrawn -> false
@@ -381,6 +411,7 @@ class SitePermissionBroker private constructor(
     }
 
     private suspend fun record(
+        tier: PermissionSession,
         origin: String,
         permissions: List<SiteCapability>,
         decision: PermissionDecision,
@@ -391,7 +422,7 @@ class SitePermissionBroker private constructor(
         // one) sees it while the store write is still in flight; a
         // remembered decision only leaves the session tier once the
         // store holds it.
-        for (p in permissions) session.record(origin, p, decision, remembered = false)
+        for (p in permissions) tier.record(origin, p, decision, remembered = false)
         if (!remember) return
         // A failed write (the store logs it) leaves the decision as a
         // session one: it still applies this run and Settings shows it
@@ -399,8 +430,8 @@ class SitePermissionBroker private constructor(
         val written = permissions.filter { store.set(origin, it.key, decision.stored) }
         for (p in written) {
             // Unless the user revoked or re-decided it meanwhile.
-            if (session.decisionFor(origin, p) == decision) {
-                session.record(origin, p, decision, remembered = true)
+            if (tier.decisionFor(origin, p) == decision) {
+                tier.record(origin, p, decision, remembered = true)
             }
         }
     }

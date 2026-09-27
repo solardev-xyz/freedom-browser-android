@@ -16,8 +16,15 @@ import kotlinx.coroutines.Job
  * [id] is a process-unique, stable identifier so the multi-tab host can
  * map a tab to its physical [android.webkit.WebView] instance across
  * recompositions. It should never be reused within a session.
+ *
+ * [private] marks a private tab (#86), fixed for the tab's life: its
+ * WebView runs on the throwaway [PrivateProfile] (its own cookies,
+ * storage and cache, deleted once the last private tab closes), and
+ * nothing it browses is written to history, the favicon cache,
+ * remembered zoom levels, remembered site permissions or the download
+ * list on disk. It never goes on the reopen-closed-tab stack.
  */
-class BrowserState(val id: Long) {
+class BrowserState(val id: Long, val private: Boolean = false) {
     /**
      * The tab whose page opened this one as a new window (`target=_blank`,
      * `window.open()`; see [TabsState.adoptPopup]), or null for a tab the
@@ -96,6 +103,13 @@ class BrowserState(val id: Long) {
      */
     var resolving by mutableStateOf(false)
         internal set
+
+    /**
+     * The "Continue once" the tab's *not cross-checked* warning offers,
+     * if that's what it is showing (#96, see [EnsGate]). Replaced by the
+     * next such warning; used up by the Continue it was made for.
+     */
+    internal var ensGate: EnsGate? = null
 
     /**
      * This tab's current (or pending) load is content the embedded IPFS
@@ -281,6 +295,22 @@ class BrowserState(val id: Long) {
      */
     var loadAborted by mutableStateOf(false)
         internal set
+
+    /**
+     * The WebView URL of the navigation the user named, scheduled as
+     * [pendingUrl] by their submit's own [loadUrl] (`namedByUser`),
+     * until the WebView takes it ([takeUserNamedLoad]).
+     */
+    private var userNamedPendingUrl: String? = null
+
+    /**
+     * Whether the load of [url] the tab's WebView is starting from
+     * [pendingUrl] is the one the user named: its server redirects may
+     * then end in a link to another app without a tap on any page
+     * (#173, see [externalLinkVerdict]). One load's worth: taken here.
+     */
+    internal fun takeUserNamedLoad(url: String): Boolean =
+        (userNamedPendingUrl == url).also { userNamedPendingUrl = null }
 
     /**
      * The site-permission prompt this tab is waiting on (#81), or null.
@@ -551,8 +581,12 @@ class BrowserState(val id: Long) {
      * scheme-constrained ENS load. Passing `null` (the default) leaves
      * any existing override untouched — reload, back, and forward all
      * reuse the current override. Call [clearEnsOverride] to reset.
+     *
+     * [namedByUser]: this is the load a user's own submit scheduled
+     * (#173, [takeUserNamedLoad]). Only [BrowserScreen]'s submit passes
+     * it, at the load that submit makes.
      */
-    fun loadUrl(url: String, displayPrefix: String? = null) {
+    fun loadUrl(url: String, displayPrefix: String? = null, namedByUser: Boolean = false) {
         cancelPendingProbe()
         // A new load supersedes whatever the last Stop aborted, so the
         // progress latch opens again.
@@ -560,6 +594,10 @@ class BrowserState(val id: Long) {
         ipfsLoad = ipfsLoadFor(url, ipfsLoad)
         val loadable = Gateways.toLoadable(url)
         pendingUrl = loadable
+        // Named by the user only when their submit's own load says so
+        // (#173): never an error page, a restore, or a Back step that
+        // happens to come after it (R2-F2).
+        userNamedPendingUrl = loadable.takeIf { namedByUser }
         if (displayPrefix != null) {
             // The override base is the virtual origin the content is
             // served from — in-manifest navigation stays under it, so

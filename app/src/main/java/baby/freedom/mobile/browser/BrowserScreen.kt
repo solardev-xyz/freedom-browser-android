@@ -17,13 +17,7 @@ import androidx.compose.animation.Animatable
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.awaitEachGesture
-import androidx.compose.foundation.gestures.awaitFirstDown
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.union
@@ -48,12 +42,9 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.layout.windowInsetsTopHeight
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Bookmark
-import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Snackbar
 import androidx.compose.material3.SnackbarHost
@@ -77,25 +68,17 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.input.pointer.PointerEventPass
-import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
-import androidx.compose.ui.text.AnnotatedString
-import androidx.compose.ui.text.SpanStyle
-import androidx.compose.ui.text.buildAnnotatedString
-import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.lerp
 import baby.freedom.mobile.data.BrowsingRepository
+import baby.freedom.mobile.ui.PrivateTheme
 import baby.freedom.mobile.data.NodeSettings
-import baby.freedom.mobile.data.UrlSuggestion
 import baby.freedom.mobile.ens.EnsInput
 import baby.freedom.mobile.ens.EnsResult
 import baby.freedom.mobile.ens.TezosDomainsResolver
@@ -475,25 +458,6 @@ fun BrowserScreen(
     var addressQuery by remember { mutableStateOf("") }
     val snackbarHostState = remember { SnackbarHostState() }
 
-    // A `.tez` answer only one Tezos RPC provider gave (the others down
-    // or stuck) still loads — as on desktop — but not silently: one
-    // operator chose this destination. Said by the typed flow and by a
-    // tab's document re-check (Back, Forward, reload); once per name
-    // while that answer is cached, since the typed flow's load is
-    // re-checked right after and every iframe on the name is too.
-    val unverifiedNotices = remember { mutableMapOf<String, Long>() }
-    fun noteUnverifiedName(name: String) {
-        val key = name.lowercase()
-        val now = System.currentTimeMillis()
-        if (unverifiedNotices[key]?.let { now - it < TezosDomainsResolver.UNVERIFIED_TTL_MS } == true) return
-        unverifiedNotices[key] = now
-        scope.launch {
-            snackbarHostState.showSnackbar(
-                "$key: only one Tezos RPC provider answered, so this destination isn't cross-checked",
-                duration = SnackbarDuration.Long,
-            )
-        }
-    }
     val sitePermissions = remember(context) { SitePermissionBroker.get(context) }
     SitePermissionAndroidBridge(sitePermissions, snackbarHostState)
     // Any full-screen panel over the browser (they're all opaque).
@@ -510,9 +474,23 @@ fun BrowserScreen(
     // open, and a Long snackbar would sit over the bottom row's Retry
     // and × for ten seconds.
     val downloadNotices = remember { DownloadNotices() }
+    // Is anything from a private session (#86) on screen? A private
+    // download's notice (negative id) names its file, so it's only shown
+    // while that's the case, and withdrawn when the screen goes back to
+    // normal content — before [PrivateScreenGuard] drops FLAG_SECURE.
+    val privateOnScreen = privateContentOnScreen(
+        activePrivate = tabs.active.private,
+        anyPrivate = tabs.tabs.any { it.private },
+        switcherShown = showTabSwitcher,
+        downloadsShown = showDownloads,
+    )
+    val privateOnScreenNow by rememberUpdatedState(privateOnScreen)
+    LaunchedEffect(privateOnScreen) {
+        if (!privateOnScreen) downloadNotices.cancelPrivate()
+    }
     LaunchedEffect(downloads) {
         downloads.events.collect { event ->
-            if (showDownloads) {
+            if (showDownloads || (event.id < 0 && !privateOnScreenNow)) {
                 downloadNotices.supersedeStart(event.id)
                 return@collect
             }
@@ -562,6 +540,10 @@ fun BrowserScreen(
     }
 
     val state = tabs.active
+    // Private pages stay out of the Recents snapshot and screenshots
+    // (#86) — and so does a private download's notice (it names the
+    // file) until it has left the screen.
+    PrivateScreenGuard(privateOnScreen || downloadNotices.privateShowing)
     val isBookmarked by repo.isBookmarked(state.url).collectAsState(initial = false)
 
     // IPFS load progress (#94): while the active tab is busy on content
@@ -698,6 +680,7 @@ fun BrowserScreen(
         displayPrefix: String?,
         displayUrl: String,
         loadUri: String = contentUri,
+        namedByUser: Boolean = false,
     ) {
         val generation = target.loadGeneration
         val isIpfs = contentUri.startsWith("ipfs://") || contentUri.startsWith("ipns://")
@@ -779,7 +762,8 @@ fun BrowserScreen(
             target.gatewayWork.finish(probeWork)
         }
         when (outcome) {
-            GatewayProbe.Outcome.Ok -> target.loadUrl(loadUri, displayPrefix = displayPrefix)
+            GatewayProbe.Outcome.Ok ->
+                target.loadUrl(loadUri, displayPrefix = displayPrefix, namedByUser = namedByUser)
             GatewayProbe.Outcome.Aborted -> { /* superseded by a later submit */ }
             is GatewayProbe.Outcome.Unreachable -> showError("ERR_CONNECTION_REFUSED")
             GatewayProbe.Outcome.NotFound, is GatewayProbe.Outcome.Other -> {
@@ -795,7 +779,21 @@ fun BrowserScreen(
         target: BrowserState,
         raw: String,
         source: SubmitSource = SubmitSource.User,
+        // An unverified ENS answer the user chose to load (#96): let
+        // through if the resolver still gives exactly this one.
+        approvedUri: String? = null,
     ) {
+        // "Continue once" on the tab's not-cross-checked warning (#96):
+        // the one navigation it was shown for, again, with its answer
+        // let through. Its token is the tab's own, so a page can't
+        // fake one ([EnsGate]); anything else is dropped here.
+        EnsGate.continueToken(raw)?.let { token ->
+            val gate = target.ensGate?.takeIf { it.token == token } ?: return
+            target.ensGate = null
+            submit(target, gate.retryUrl, SubmitSource.User, approvedUri = gate.uri)
+            return
+        }
+
         // A page submitting on top of a navigation the *user* asked for
         // is ignored outright: it may neither cancel their probe nor
         // start one of its own on the same tab (#35, see
@@ -826,6 +824,11 @@ fun BrowserScreen(
         // lifts a download block a declined offer left on it
         // ([DownloadOffers]); a page's own navigation doesn't.
         if (source == SubmitSource.User) downloads.allowOffers(target.id)
+        // And the load it schedules is theirs: its redirects may end in
+        // an app link without a tap on a page (#173). Handed to that
+        // load's own `loadUrl` below, never left for whichever load
+        // comes next (R2-F2).
+        val namedByUser = source == SubmitSource.User
 
         // Any new submit supersedes a probe that was still in flight on
         // this tab — otherwise switching URL mid-probe would let the
@@ -872,7 +875,12 @@ fun BrowserScreen(
             // [gateGatewayNavigation]) — the resolve itself is ENS's.
             target.ipfsLoad = false
 
-            fun ensError(errorCode: String, detail: String, retryUrl: String = retryDisplay) {
+            fun ensError(
+                errorCode: String,
+                detail: String,
+                retryUrl: String = retryDisplay,
+                continueUrl: String? = null,
+            ) {
                 target.clearEnsOverride()
                 target.loadUrl(
                     ErrorPage.url(
@@ -881,6 +889,7 @@ fun BrowserScreen(
                         protocol = "ens",
                         retryUrl = retryUrl,
                         detail = detail,
+                        continueUrl = continueUrl,
                     ),
                 )
             }
@@ -898,6 +907,18 @@ fun BrowserScreen(
                     // itself; this is the tab's own last word on it.
                     ensureActive()
                     when (result) {
+                        // Only one RPC server's word for it (#96): ask
+                        // first. The user's "Continue once" comes back
+                        // here with this very answer approved.
+                        is EnsResult.Ok if !result.trust.verified && result.uri != approvedUri -> {
+                            val gate = EnsGate.create(name, result.uri, retryDisplay)
+                            target.ensGate = gate
+                            ensError(
+                                errorCode = "ens_unverified",
+                                detail = EnsGate.unverifiedDetail(result),
+                                continueUrl = EnsGate.continueUrl(gate),
+                            )
+                        }
                         is EnsResult.Ok -> {
                             val webRecord = result.protocol == "http" || result.protocol == "https"
                             // Remember hash/cid → name for the whole session
@@ -906,12 +927,7 @@ fun BrowserScreen(
                             // trip through [Gateways] + [DisplayUrl] now. A
                             // `.tez` name's http(s) website is not content
                             // the name's origin serves, so it isn't recorded.
-                            // Nor is an unverified one: a later failed
-                            // re-check would fall back on it.
-                            if (!webRecord && result.verified) KnownEnsNames.record(result.uri, name)
-                            fun noteUnverified() {
-                                if (!result.verified) noteUnverifiedName(name)
-                            }
+                            if (!webRecord) KnownEnsNames.record(result.uri, name)
                             if (requiredProtocol != null && result.protocol != requiredProtocol) {
                                 // Retry with the generic ens:// form: the
                                 // same constrained URL would fail forever,
@@ -937,7 +953,6 @@ fun BrowserScreen(
                                 target.addressBarText =
                                     pendingAddressBarText(target.addressBarText, web, source)
                                 target.loadUrl(web)
-                                noteUnverified()
                             } else if (result.protocol == "bzz" ||
                                 result.protocol == "ipfs" ||
                                 result.protocol == "ipns"
@@ -953,8 +968,8 @@ fun BrowserScreen(
                                     // above), and per-site storage sticks
                                     // to the name across content updates.
                                     loadUri = "ens://$name$suffix",
+                                    namedByUser = namedByUser,
                                 )
-                                noteUnverified()
                             } else {
                                 ensError(
                                     errorCode = "ens_unsupported_codec",
@@ -962,25 +977,32 @@ fun BrowserScreen(
                                 )
                             }
                         }
+                        // Nothing to load either way, but say when it's
+                        // only one server's word for it (#96).
                         is EnsResult.NotFound ->
-                            ensError("ens_not_found", detail = result.reason)
+                            ensError(
+                                "ens_not_found",
+                                detail = EnsGate.withTrustNote(result.reason, result.trust),
+                            )
                         is EnsResult.Unsupported ->
                             ensError(
                                 "ens_unsupported_codec",
                                 // A `.tez` record's "codec" is the reason
                                 // its website URI was refused.
-                                detail = if (name.endsWith(".tez")) result.codec else "codec ${result.codec}",
+                                detail = EnsGate.withTrustNote(
+                                    if (name.endsWith(".tez")) result.codec else "codec ${result.codec}",
+                                    result.trust,
+                                ),
                             )
                         is EnsResult.Error ->
                             ensError(
                                 "ens_lookup_failed",
-                                // `.tez` says which providers disagreed / failed.
-                                detail = if (name.endsWith(".tez")) {
-                                    "${result.reason}: ${result.error}"
-                                } else {
-                                    result.reason
-                                },
+                                // `.tez` says what failed.
+                                detail = if (name.endsWith(".tez")) "${result.reason}: ${result.error}" else result.reason,
                             )
+                        // RPC servers disagreed (#96): nothing to load.
+                        is EnsResult.Conflict ->
+                            ensError("ens_conflict", detail = EnsGate.conflictDetail(result))
                     }
                 } finally {
                     target.resolving = false
@@ -1023,6 +1045,7 @@ fun BrowserScreen(
                         contentUri = contentUri,
                         displayPrefix = null,
                         displayUrl = contentUri,
+                        namedByUser = namedByUser,
                     )
                 } finally {
                     target.resolving = false
@@ -1033,7 +1056,20 @@ fun BrowserScreen(
             return
         }
 
-        target.loadUrl(url)
+        target.loadUrl(url, namedByUser = namedByUser)
+    }
+
+    // "New private tab" (#86), from the menu and the tab switcher —
+    // null, so neither offers it, where the WebView can't run private
+    // tabs (no multi-profile support).
+    val privateTabsSupported = remember { PrivateProfile.isSupported() }
+    val newPrivateTab: (() -> Unit)? = if (privateTabsSupported) {
+        {
+            val fresh = tabs.newTab(private = true)
+            submit(fresh, tabs.homepageUrl)
+        }
+    } else {
+        null
     }
 
     // Wire the WebView layer's "route this URL through submit" hook up
@@ -1055,13 +1091,13 @@ fun BrowserScreen(
         // they submit as [SubmitSource.User]. A background tab says so
         // in a snackbar that can bring it forward — otherwise nothing
         // on screen would change.
-        tabs.requestOpenInNewTab = { url, background ->
-            val fresh = tabs.newTab(activate = !background)
+        tabs.requestOpenInNewTab = { url, background, private ->
+            val fresh = tabs.newTab(activate = !background, private = private)
             submit(fresh, url)
             if (background) {
                 scope.launch {
                     val result = snackbarHostState.showSnackbar(
-                        message = "Opened in new tab",
+                        message = if (private) "Opened in new private tab" else "Opened in new tab",
                         actionLabel = "Switch",
                         duration = SnackbarDuration.Short,
                     )
@@ -1074,16 +1110,14 @@ fun BrowserScreen(
         }
         // Read [searchTemplate] when the search runs, so a change of
         // engine in Settings applies to the next one.
-        tabs.requestSearchInNewTab = { query ->
-            tabs.requestOpenInNewTab?.invoke(UrlParser.searchUrl(query, searchTemplate), false)
+        tabs.requestSearchInNewTab = { query, private ->
+            tabs.requestOpenInNewTab?.invoke(UrlParser.searchUrl(query, searchTemplate), false, private)
         }
-        tabs.requestUnverifiedNameNotice = { name -> noteUnverifiedName(name) }
         onDispose {
             tabs.requestSubmit = null
             tabs.requestNodeRecovery = null
             tabs.requestOpenInNewTab = null
             tabs.requestSearchInNewTab = null
-            tabs.requestUnverifiedNameNotice = null
         }
     }
 
@@ -1362,16 +1396,7 @@ fun BrowserScreen(
     // Applied to every band of the screen that isn't the pill itself:
     // the page area, the progress strip, and the chrome background
     // around the pill (side gutters + the padding under it).
-    val dismissKeyboardOnTap = Modifier.pointerInput(Unit) {
-        awaitEachGesture {
-            awaitFirstDown(
-                requireUnconsumed = false,
-                pass = PointerEventPass.Initial,
-            )
-            focusManager.clearFocus()
-            keyboard?.hide()
-        }
-    }
+    val dismissKeyboardOnTap = Modifier.endEditOnPress(focusManager, keyboard)
 
     Box(
         modifier = Modifier
@@ -1416,13 +1441,29 @@ fun BrowserScreen(
         // When the address bar is focused we overlay the suggestions
         // panel on top of it rather than unmounting the WebView — that
         // keeps the underlying page alive (scroll position, JS timers,
-        // media) across focus changes.
-        Box(
+        // media) across focus changes. The suggestions are the page layer's sibling, outside
+        // [dismissKeyboardOnTap] — inside it, a press on a row cleared
+        // focus and unmounted the panel before the click landed (#170,
+        // see [PageWithSuggestions]).
+        val suggestionsShown = addressFocused && addressBarEdited && addressQuery.isNotEmpty()
+        PageWithSuggestions(
+            dismissKeyboardOnTap = dismissKeyboardOnTap,
             modifier = Modifier
                 .fillMaxSize()
                 .windowInsetsPadding(contentInsets)
-                .padding(bottom = contentBottomReserve)
-                .then(dismissKeyboardOnTap),
+                .padding(bottom = contentBottomReserve),
+            suggestions = if (!suggestionsShown) null else {
+                {
+                    SuggestionsPanel(
+                        repo = repo,
+                        query = addressQuery,
+                        searchTemplate = searchTemplate,
+                        onPick = { submit(state, it) },
+                        bottomContentPadding = capsuleOverlap,
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                }
+            },
         ) {
             BrowserWebViewHost(
                 tabs = tabs,
@@ -1442,19 +1483,17 @@ fun BrowserScreen(
             // moment the user hits Go on a typed URL, before the
             // WebView has a chance to fire onPageStarted and
             // populate `state.url`.
-            if (isHomeTab) {
+            if (isHomeTab && state.private) {
+                PrivateTheme(private = true) {
+                    PrivateHomeScreen(
+                        bottomContentPadding = capsuleOverlap,
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                }
+            } else if (isHomeTab) {
                 HomeScreen(
                     repo = repo,
                     onOpen = { submit(state, it) },
-                    bottomContentPadding = capsuleOverlap,
-                    modifier = Modifier.fillMaxSize(),
-                )
-            }
-            if (addressFocused && addressBarEdited && addressQuery.isNotEmpty()) {
-                SuggestionsPanel(
-                    repo = repo,
-                    query = addressQuery,
-                    onPick = { submit(state, it) },
                     bottomContentPadding = capsuleOverlap,
                     modifier = Modifier.fillMaxSize(),
                 )
@@ -1522,6 +1561,11 @@ fun BrowserScreen(
                     ),
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
+                // A private tab's chrome wears the private scheme (#86).
+                PrivateTheme(state.private) {
+                // …and its text fields (address bar, find bar) keep the
+                // keyboard from learning what is typed in them.
+                TabTextInput(state.private) {
                 if (findOpen) {
                     // Keyed on the tab: each tab's bar is its own field,
                     // seeded from that tab's query.
@@ -1630,19 +1674,22 @@ fun BrowserScreen(
                         val fresh = tabs.newTab()
                         submit(fresh, tabs.homepageUrl)
                     },
+                    onNewPrivateTab = newPrivateTab,
                     onFindInPage = { state.find.show() },
                     // Same rule as Find in page: nothing to zoom on the
                     // home surface — nor on a document that isn't a
                     // site (an error page), which has no zoomSite.
                     zoomLevel = state.zoomSite
                         ?.takeIf { state.url.isNotBlank() }
-                        ?.let(pageZoom::levelFor),
-                    onZoom = { action -> state.zoomSite?.let { pageZoom.apply(it, action) } },
+                        ?.let { pageZoom.levelFor(it, state.private) },
+                    onZoom = { action -> state.zoomSite?.let { pageZoom.apply(it, action, state.private) } },
                     onPrint = { tabs.printPage?.invoke(state) },
                     modifier = Modifier
                         .widthIn(max = CHROME_MAX_WIDTH)
                         .fillMaxWidth(),
                 )
+                }
+                }
             }
         }
 
@@ -1735,6 +1782,7 @@ fun BrowserScreen(
                 val fresh = tabs.newTab()
                 submit(fresh, tabs.homepageUrl)
             },
+            onNewPrivateTab = newPrivateTab,
         )
     }
 
@@ -1781,7 +1829,7 @@ fun BrowserScreen(
                         Toast.makeText(context, "Loading image\u2026", Toast.LENGTH_SHORT).show()
                     }
                     val image = try {
-                        fetchImage(url, request.pageUrl, WebSettings.getDefaultUserAgent(context))
+                        fetchImage(url, request.pageUrl, WebSettings.getDefaultUserAgent(context), owner.private)
                     } finally {
                         progress.cancel()
                     }
@@ -1793,10 +1841,10 @@ fun BrowserScreen(
                 PageContextMenuSheet(
                     target = request.target,
                     displayUrl = { displayFor(it, owner) },
-                    onOpenInNewTab = { tabs.requestOpenInNewTab?.invoke(displayFor(it, owner), true) },
+                    onOpenInNewTab = { tabs.requestOpenInNewTab?.invoke(displayFor(it, owner), true, owner.private) },
                     onCopyLink = { copyUrlToClipboard(context, it) },
                     onShareLink = { url, title -> shareUrl(context, url, title) },
-                    onOpenImage = { tabs.requestOpenInNewTab?.invoke(displayFor(it, owner), true) },
+                    onOpenImage = { tabs.requestOpenInNewTab?.invoke(displayFor(it, owner), true, owner.private) },
                     onCopyImage = { url ->
                         withImage(url, { copyImageToClipboard(context, it, url) }, "Couldn't copy image")
                     },
@@ -1946,150 +1994,6 @@ fun BrowserScreen(
             session = session,
             onExit = { tabs.exitFullscreen() },
         )
-    }
-}
-
-/**
- * Opaque panel that overlays the WebView while the address bar is
- * focused, showing bookmarks + recent history that match what the user
- * has typed so far. The list is reversed so the best match sits right
- * above the (bottom) address bar and the thumb, with weaker matches
- * stacking upwards. Picking a row dispatches the canonical URL back to
- * the browser's `submit` path, which hides the keyboard and clears
- * focus (and therefore dismisses this panel).
- */
-@Composable
-private fun SuggestionsPanel(
-    repo: BrowsingRepository,
-    query: String,
-    onPick: (String) -> Unit,
-    bottomContentPadding: Dp,
-    modifier: Modifier = Modifier,
-) {
-    // Re-subscribe when the query changes; Room's Flow keeps emitting
-    // fresh results if the underlying tables change too.
-    val suggestionsFlow = remember(repo, query) { repo.suggestions(query) }
-    val suggestions by suggestionsFlow.collectAsState(initial = emptyList())
-
-    Box(
-        modifier = modifier.background(MaterialTheme.colorScheme.background),
-    ) {
-        if (suggestions.isEmpty()) {
-            Text(
-                text = if (query.isBlank()) "No history or bookmarks yet"
-                else "No matches for \"$query\"",
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                style = MaterialTheme.typography.bodyMedium,
-                modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .padding(
-                        bottom = 32.dp + bottomContentPadding,
-                        start = 16.dp,
-                        end = 16.dp,
-                    ),
-            )
-        } else {
-            LazyColumn(
-                modifier = Modifier.fillMaxSize(),
-                reverseLayout = true,
-                // The capsule floats over this panel — keep the
-                // best-match row (which sits at the bottom, nearest the
-                // thumb) clear of it.
-                contentPadding = PaddingValues(
-                    top = 8.dp,
-                    bottom = 8.dp + bottomContentPadding,
-                ),
-            ) {
-                items(
-                    items = suggestions,
-                    key = { s -> s.source.name + "|" + s.url },
-                ) { s ->
-                    SuggestionRow(
-                        suggestion = s,
-                        highlight = query.trim(),
-                        onClick = { onPick(s.url) },
-                    )
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun SuggestionRow(
-    suggestion: UrlSuggestion,
-    highlight: String,
-    onClick: () -> Unit,
-) {
-    val icon = when (suggestion.source) {
-        UrlSuggestion.Source.BOOKMARK -> Icons.Filled.Bookmark
-        UrlSuggestion.Source.HISTORY -> Icons.Filled.History
-    }
-    val displayTitle = suggestion.title.ifBlank { suggestion.url }
-
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 8.dp)
-            .clip(MaterialTheme.shapes.medium)
-            .clickable(onClick = onClick)
-            .padding(horizontal = 16.dp, vertical = 10.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Icon(
-            imageVector = icon,
-            contentDescription = when (suggestion.source) {
-                UrlSuggestion.Source.BOOKMARK -> "Bookmark"
-                UrlSuggestion.Source.HISTORY -> "History"
-            },
-            tint = when (suggestion.source) {
-                UrlSuggestion.Source.BOOKMARK -> MaterialTheme.colorScheme.primary
-                UrlSuggestion.Source.HISTORY -> MaterialTheme.colorScheme.onSurfaceVariant
-            },
-            modifier = Modifier.size(18.dp),
-        )
-        Spacer(Modifier.width(12.dp))
-        Column(modifier = Modifier.weight(1f)) {
-            Text(
-                text = highlightedText(displayTitle, highlight),
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                fontWeight = FontWeight.Medium,
-                color = MaterialTheme.colorScheme.onSurface,
-            )
-            Text(
-                text = highlightedText(suggestion.url, highlight),
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
-    }
-}
-
-/**
- * Bold every case-insensitive occurrence of [needle] inside [text].
- * Returns a plain [androidx.compose.ui.text.AnnotatedString] we can
- * drop straight into a [Text] composable.
- */
-private fun highlightedText(text: String, needle: String): AnnotatedString {
-    if (needle.isEmpty()) return AnnotatedString(text)
-    return buildAnnotatedString {
-        append(text)
-        val haystack = text.lowercase()
-        val q = needle.lowercase()
-        var i = 0
-        while (i <= haystack.length - q.length) {
-            val found = haystack.indexOf(q, i)
-            if (found < 0) break
-            addStyle(
-                SpanStyle(fontWeight = FontWeight.Bold),
-                found,
-                found + q.length,
-            )
-            i = found + q.length
-        }
     }
 }
 

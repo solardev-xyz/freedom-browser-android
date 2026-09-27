@@ -176,11 +176,12 @@ class TabsState(
      * Hook installed by [BrowserScreen]: open a URL in a new tab through
      * the screen's submit flow — in the background (with a snackbar to
      * switch to it) or in front. Used by the page context menu and the
-     * text-selection "Search" (#84). `null` before the screen has
-     * composed.
+     * text-selection "Search" (#84). With `private` (asked from a
+     * private tab) the new tab is private too (#86). `null` before the
+     * screen has composed.
      */
     @Volatile
-    var requestOpenInNewTab: ((url: String, background: Boolean) -> Unit)? = null
+    var requestOpenInNewTab: ((url: String, background: Boolean, private: Boolean) -> Unit)? = null
 
     /**
      * Hook installed by [BrowserScreen]: search [query] with the engine
@@ -190,16 +191,7 @@ class TabsState(
      * screen has composed.
      */
     @Volatile
-    var requestSearchInNewTab: ((query: String) -> Unit)? = null
-
-    /**
-     * Hook installed by [BrowserScreen]: a tab's document re-check (Back,
-     * Forward, reload, an iframe) served a `.tez` answer only one Tezos
-     * RPC provider gave. The screen says so, as the typed flow does.
-     * Main thread. `null` before the screen has composed.
-     */
-    @Volatile
-    var requestUnverifiedNameNotice: ((name: String) -> Unit)? = null
+    var requestSearchInNewTab: ((query: String, private: Boolean) -> Unit)? = null
 
     /**
      * The link / image menu currently raised over a page, set by
@@ -273,10 +265,11 @@ class TabsState(
      * blank and the caller is expected to load the homepage once the node
      * is running; otherwise [url] is submitted immediately (typical
      * "open link in new tab" flow). With [activate] false the tab opens
-     * behind the current one, which stays on screen.
+     * behind the current one, which stays on screen. With [private] it
+     * is a private tab (#86, see [BrowserState.private]).
      */
-    fun newTab(url: String? = null, activate: Boolean = true): BrowserState {
-        val tab = newBlankTab()
+    fun newTab(url: String? = null, activate: Boolean = true, private: Boolean = false): BrowserState {
+        val tab = newBlankTab(private)
         tabs.add(tab)
         if (activate) activeIndex = tabs.lastIndex
         if (url != null) tab.loadUrl(url)
@@ -291,9 +284,13 @@ class TabsState(
      * popup's URL into it itself: nothing is scheduled here, and the
      * `window.opener` link to the page that asked stays intact (OAuth-
      * style popups post their result back through it).
+     *
+     * A private tab's popup is private too: Chromium hands the popup
+     * the opener's session, and its WebView has to be on the same
+     * profile for that.
      */
     fun adoptPopup(opener: BrowserState): BrowserState {
-        val tab = newBlankTab()
+        val tab = newBlankTab(opener.private)
         tab.openerId = opener.id
         // Its blank document is the page's until something commits: not
         // the home overlay (see [BrowserState.blankIsPage]).
@@ -349,7 +346,8 @@ class TabsState(
     /**
      * Close the tab at [index]. With [remember] (the user closing it)
      * the tab goes onto the reopen stack ([reopenClosedTab]); a window
-     * the page closed itself ([closePopup]) doesn't.
+     * the page closed itself ([closePopup]) doesn't, and neither does a
+     * private tab: closing it is the end of it (#86).
      */
     fun closeTab(index: Int, remember: Boolean = true) {
         if (index !in tabs.indices) return
@@ -358,7 +356,7 @@ class TabsState(
         if (fullscreen?.tabId == tabs[index].id) exitFullscreen()
         // The list is never empty: the last tab is replaced by a blank one.
         val placeholder = if (tabs.size == 1) newBlankTab() else null
-        if (remember) rememberClosed(index, placeholder?.id)
+        if (remember && !tabs[index].private) rememberClosed(index, placeholder?.id)
         tabs.removeAt(index)
         if (placeholder != null) {
             tabs.add(placeholder)
@@ -480,7 +478,12 @@ class TabsState(
     val homepageUrl: String
         get() = homepage
 
-    private fun newBlankTab(): BrowserState = BrowserState(id = idSeq.incrementAndGet())
+    /** Any private tab (#86) is open. */
+    val hasPrivateTabs: Boolean
+        get() = tabs.any { it.private }
+
+    private fun newBlankTab(private: Boolean = false): BrowserState =
+        BrowserState(id = idSeq.incrementAndGet(), private = private)
 
     companion object {
         /** How many closed tabs [reopenClosedTab] can walk back through. */

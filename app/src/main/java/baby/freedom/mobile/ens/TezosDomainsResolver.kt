@@ -46,14 +46,15 @@ import org.json.JSONTokener
  *     expired name is not found). `web:redirect_url` wins over
  *     `web:content_url`; `td:ttl` bounds the cache.
  *  4. **Quorum.** An answer two providers agree on is *verified*; a
- *     lone provider's is *unverified* and only short-cached. Providers
+ *     lone provider's is *unverified* — short-cached, and the browser
+ *     asks before loading it, as for ENS (`EnsTrust`). Providers
  *     that disagree without a strict majority (about the head, the
  *     anchor hash, or the record) are a [Outcome.Conflict] — refused,
  *     never settled by picking a side. A stuck provider never counts
  *     towards verification: it can only attest to the chain as it was
  *     when it stalled, and a live provider serving a record rolled back
- *     to that point would read the same — so a live provider answering
- *     next to a stuck one is still a lone, unverified answer.
+ *     to that point would read the same — so it sits out, and its
+ *     agreement is never counted.
  *
  * Website records may be `ipfs://` / `ipns://` (served natively, the
  * `.tez` name stays the origin; a published base path is kept) or
@@ -84,8 +85,27 @@ class TezosDomainsResolver internal constructor(
     }
 
     internal sealed class Outcome {
-        data class Answer(val leg: Leg, val verified: Boolean, val agreed: Int, val asked: Int) : Outcome()
-        data class Conflict(val reason: String, val detail: String) : Outcome()
+        data class Answer(
+            val leg: Leg,
+            val verified: Boolean,
+            val agreed: Int,
+            val asked: Int,
+            /** Hosts that gave [leg], and hosts outvoted by them. */
+            val agreedHosts: List<String> = emptyList(),
+            val dissentedHosts: List<String> = emptyList(),
+            /** The anchor block the record was read at. */
+            val block: Long? = null,
+        ) : Outcome()
+
+        /** [groups]: each distinct answer about [subject], largest first. */
+        data class Conflict(
+            val reason: String,
+            val subject: EnsResult.Conflict.Subject,
+            val groups: List<EnsResult.Conflict.Group>,
+            val block: Long? = null,
+        ) : Outcome() {
+            val detail: String get() = groups.joinToString("; ") { "${it.answer}: ${it.hosts.joinToString(", ")}" }
+        }
         data class Failed(val reason: String) : Outcome()
     }
 
@@ -117,7 +137,8 @@ class TezosDomainsResolver internal constructor(
     suspend fun resolve(rawName: String): EnsResult {
         val name = rawName.trim().lowercase()
         if (!isTezosDomainName(name)) {
-            return EnsResult.NotFound(name, "INVALID_NAME")
+            // Decided here, no server asked: nothing to cross-check.
+            return EnsResult.NotFound(name, "INVALID_NAME", EnsTrust(verified = true))
         }
         val outcome = resolveOutcome(name)
         return toEnsResult(name, outcome).also { Log.i(TAG, "[$name] → $it") }
@@ -198,10 +219,14 @@ class TezosDomainsResolver internal constructor(
         // providers that disagree leave no majority — the median of two is
         // just the lower one — so neither side can be trusted.
         if (heads.size * 2 <= allHeads.size) {
-            val groups = allHeads.groupBy { it.level }.entries.joinToString("; ") { (level, hs) ->
-                "chain head #$level: ${hs.joinToString(", ") { hostOf(it.endpoint) }}"
+            val groups = allHeads.groupBy { it.level }.entries.sortedByDescending { it.value.size }.map { (level, hs) ->
+                EnsResult.Conflict.Group("chain head #$level", hs.map { hostOf(it.endpoint) })
             }
-            return Outcome.Conflict("Tezos RPC providers disagree about the chain head", groups)
+            return Outcome.Conflict(
+                "Tezos RPC providers disagree about the chain head",
+                EnsResult.Conflict.Subject.HEAD,
+                groups,
+            )
         }
 
         val anchorLevel = heads.minOf { it.level } - ANCHOR_DEPTH
@@ -212,10 +237,15 @@ class TezosDomainsResolver internal constructor(
         // The hash at a settled depth isn't negotiable: without a strict
         // majority on it, a tie would be broken by iteration order.
         if (best.size * 2 <= anchors.size) {
-            val groups = anchorGroups.joinToString("; ") { g ->
-                "block #${g[0].level} ${g[0].hash.take(10)}…: ${g.joinToString(", ") { hostOf(it.endpoint) }}"
+            val groups = anchorGroups.map { g ->
+                EnsResult.Conflict.Group(g[0].hash, g.map { hostOf(it.endpoint) })
             }
-            return Outcome.Conflict("Tezos RPC providers returned conflicting anchor blocks", groups)
+            return Outcome.Conflict(
+                "Tezos RPC providers returned conflicting anchor blocks",
+                EnsResult.Conflict.Subject.BLOCK,
+                groups,
+                anchorLevel,
+            )
         }
 
         val legs = settle(best) { anchor -> anchor.endpoint to resolveAtBlock(anchor.endpoint, anchor.hash, name) }
@@ -224,12 +254,18 @@ class TezosDomainsResolver internal constructor(
         val groups = legs.groupBy { it.second }.values.sortedByDescending { it.size }
         val winner = groups.first()
         if (groups.size > 1 && winner.size * 2 <= legs.size) {
-            val detail = groups.joinToString("; ") { g ->
+            val detail = groups.map { g ->
                 val leg = g[0].second
-                val value = if (leg.type == Leg.Type.OK) leg.uri.orEmpty().take(300) else leg.reason
-                "$value: ${g.joinToString(", ") { hostOf(it.first) }}"
+                // Whole: the user is looking at who said what.
+                val value = if (leg.type == Leg.Type.OK) leg.uri.orEmpty() else leg.reason.orEmpty()
+                EnsResult.Conflict.Group(value, g.map { hostOf(it.first) })
             }
-            return Outcome.Conflict("Tezos RPC providers returned conflicting results", detail)
+            return Outcome.Conflict(
+                "Tezos RPC providers returned conflicting results",
+                EnsResult.Conflict.Subject.RECORD,
+                detail,
+                anchorLevel,
+            )
         }
         if (winner.size < legs.size) {
             val dissenting = legs.filter { it !in winner }.joinToString(", ") { it.first }
@@ -241,6 +277,9 @@ class TezosDomainsResolver internal constructor(
             verified = agreed >= 2,
             agreed = agreed,
             asked = legs.size + stale.size,
+            agreedHosts = winner.map { hostOf(it.first) },
+            dissentedHosts = legs.filter { it !in winner }.map { hostOf(it.first) },
+            block = anchorLevel,
         )
         synchronized(resultCache) {
             resultCache[name] = Timed(answer, now() + cacheDuration(answer))
@@ -568,17 +607,21 @@ class TezosDomainsResolver internal constructor(
          */
         internal fun toEnsResult(name: String, outcome: Outcome): EnsResult = when (outcome) {
             is Outcome.Failed -> EnsResult.Error(name, "PROVIDER_ERROR", outcome.reason, retryable = true)
-            is Outcome.Conflict -> EnsResult.Error(
-                name,
-                "PROVIDER_CONFLICT",
-                "${outcome.reason} (${outcome.detail})",
-                retryable = false,
-            )
+            // The same verdict ENS's quorum gives (#96): nothing loads,
+            // and the warning lists who said what.
+            is Outcome.Conflict -> EnsResult.Conflict(name, outcome.subject, outcome.groups, outcome.block)
             is Outcome.Answer -> {
                 val leg = outcome.leg
+                val trust = EnsTrust(
+                    verified = outcome.verified,
+                    agreed = outcome.agreedHosts,
+                    dissented = outcome.dissentedHosts,
+                    block = outcome.block,
+                )
                 when (leg.type) {
-                    Leg.Type.NOT_FOUND -> EnsResult.NotFound(name, leg.reason ?: "NOT_FOUND")
-                    Leg.Type.UNSUPPORTED -> EnsResult.Unsupported(name, codec = leg.reason.orEmpty(), rawContentHash = "")
+                    Leg.Type.NOT_FOUND -> EnsResult.NotFound(name, leg.reason ?: "NOT_FOUND", trust)
+                    Leg.Type.UNSUPPORTED ->
+                        EnsResult.Unsupported(name, codec = leg.reason.orEmpty(), rawContentHash = "", trust = trust)
                     Leg.Type.OK -> EnsResult.Ok(
                         name = name,
                         protocol = leg.protocol!!,
@@ -588,8 +631,8 @@ class TezosDomainsResolver internal constructor(
                         } else {
                             leg.uri
                         },
+                        trust = trust,
                         redirect = leg.redirect,
-                        verified = outcome.verified,
                     )
                 }
             }
