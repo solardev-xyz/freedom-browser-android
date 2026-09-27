@@ -1,6 +1,5 @@
 package baby.freedom.mobile.browser
 
-import android.os.SystemClock
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
@@ -138,13 +137,6 @@ private const val STRIP_FADE_MS = 250
  * the line at once.
  */
 private const val IPFS_STATUS_LINGER_MS: Long = 250L
-
-/**
- * A new IPFS load counts as superseding the tab's previous one — which
- * then keeps running in the node, see [IpfsProgress.carriedOver] — when
- * that one was polled this recently: a few poll intervals.
- */
-private const val IPFS_SUPERSEDE_WINDOW_MS: Long = 1_500L
 
 /** Air between the IPFS phase line and the capsule under it. */
 private val IpfsStatusGap = 8.dp
@@ -487,62 +479,41 @@ fun BrowserScreen(
     // reason — it is the load's, not the poll loop's: it is keyed on the
     // tab and its [BrowserState.loadGeneration], so a new navigation that
     // supersedes one still loading (and so never lets the tab go idle)
-    // starts from a fresh baseline instead of inheriting the old load's
-    // counter growth.
+    // starts a fresh [IpfsProgress.LoadMeter], which sets aside the
+    // counter growth of every poll during which the superseded load
+    // still had gateway requests open ([BrowserState.gatewayWork]).
     val pollIpfsProgress = state.ipfsLoad &&
         isCapsuleLoading(state) &&
         ipfsInfo.status == IpfsStatus.Running
     val ipfsLoadKey = state.id to state.loadGeneration
     var ipfsStatus by remember { mutableStateOf<String?>(null) }
     var ipfsStatusTab by remember { mutableStateOf<Long?>(null) }
-    var ipfsBaseline by remember { mutableStateOf<IpfsProgress.Counters?>(null) }
-    var ipfsBaselineKey by remember { mutableStateOf<Pair<Long, Int>?>(null) }
-    // When the load being polled last read the counters; the baseline
-    // of the first load in a run of loads that superseded one another
-    // without the tab going idle (null when this load didn't supersede
-    // one); and so the counters those superseded loads moved (see
-    // [IpfsProgress.carriedOver]).
-    var ipfsLastPollAt by remember { mutableStateOf(0L) }
-    var ipfsChainStart by remember { mutableStateOf<IpfsProgress.Counters?>(null) }
-    var ipfsCarried by remember { mutableStateOf<IpfsProgress.Counters?>(null) }
+    var ipfsMeter by remember { mutableStateOf<IpfsProgress.LoadMeter?>(null) }
+    var ipfsMeterKey by remember { mutableStateOf<Pair<Long, Int>?>(null) }
     LaunchedEffect(ipfsLoadKey, pollIpfsProgress) {
         if (!pollIpfsProgress) {
             delay(IPFS_STATUS_LINGER_MS)
             ipfsStatus = null
-            ipfsBaseline = null
-            ipfsCarried = null
-            ipfsChainStart = null
-            ipfsLastPollAt = 0L
+            ipfsMeter = null
             return@LaunchedEffect
         }
-        // A new load on a tab whose previous load was still being polled
-        // a moment ago — superseded mid-flight, so the tab never went
-        // idle: keep the old load's baseline (or, if it superseded one
-        // too, the first one's) to tell which counters are theirs.
-        if (ipfsBaselineKey != ipfsLoadKey) {
-            ipfsChainStart = if (ipfsBaselineKey?.first == state.id &&
-                SystemClock.uptimeMillis() - ipfsLastPollAt <= IPFS_SUPERSEDE_WINDOW_MS
-            ) {
-                ipfsChainStart ?: ipfsBaseline
-            } else {
-                null
+        val meter = ipfsMeter?.takeIf { ipfsMeterKey == ipfsLoadKey }
+            ?: IpfsProgress.LoadMeter().also {
+                ipfsMeter = it
+                ipfsMeterKey = ipfsLoadKey
             }
-            ipfsBaseline = null
-            ipfsCarried = null
-            ipfsBaselineKey = ipfsLoadKey
-        }
+        val generation = state.loadGeneration
         while (true) {
             val (snapshot, counters) = withContext(Dispatchers.IO) {
                 runCatching { ipfsProgressSnapshot() }.getOrNull() to
                     IpfsProgress.Counters.of(runCatching { ipfsCounters() }.getOrNull())
             }
-            val baseline = ipfsBaseline ?: counters.also {
-                ipfsBaseline = it
-                ipfsCarried = IpfsProgress.carriedOver(ipfsChainStart, it)
-            }
-            ipfsStatus = IpfsProgress.line(snapshot, baseline, counters, ipfsCarried)
+            ipfsStatus = meter.poll(
+                snapshot,
+                counters,
+                supersededActive = state.gatewayWork.activeBefore(generation),
+            )
             ipfsStatusTab = state.id
-            ipfsLastPollAt = SystemClock.uptimeMillis()
             delay(IpfsProgress.POLL_INTERVAL_MS)
         }
     }
@@ -568,7 +539,11 @@ fun BrowserScreen(
     val isHomeTab = state.isHome
     val goBack: () -> Unit = {
         when (backActionFor(state.canGoBack, state.isHome)) {
-            BackAction.History -> state.loadUrl("javascript:history.back();void(0);")
+            BackAction.History -> {
+                // A navigation of its own (#94, see [BrowserState.loadGeneration]).
+                state.beginLoad()
+                state.loadUrl("javascript:history.back();void(0);")
+            }
             BackAction.Home -> {
                 state.cancelPendingProbe()
                 state.navigateHome()
@@ -602,6 +577,7 @@ fun BrowserScreen(
         displayUrl: String,
         loadUri: String = contentUri,
     ) {
+        val generation = target.loadGeneration
         val isIpfs = contentUri.startsWith("ipfs://") || contentUri.startsWith("ipns://")
         // The one place that knows where an ENS name leads: the
         // chrome's IPFS progress line follows this load from here (#94).
@@ -661,7 +637,17 @@ fun BrowserScreen(
         val resolved = Gateways.toGatewayUrl(contentUri)
         val headUrl = GatewayUrls.extractBase(resolved)?.prefix ?: resolved
 
-        when (val outcome = gatewayProbe.probe(headUrl)) {
+        // Open gateway work of this load while the probe's HEADs run —
+        // a later submit's IPFS phase line reads it to tell this load is
+        // still busy in the node (#94, see [GatewayWork]). The HEAD
+        // itself is blocking, so the probe returns only once it has.
+        val probeWork = target.gatewayWork.start(generation)
+        val outcome = try {
+            gatewayProbe.probe(headUrl)
+        } finally {
+            target.gatewayWork.finish(probeWork)
+        }
+        when (outcome) {
             GatewayProbe.Outcome.Ok -> target.loadUrl(loadUri, displayPrefix = displayPrefix)
             GatewayProbe.Outcome.Aborted -> { /* superseded by a later submit */ }
             is GatewayProbe.Outcome.Unreachable -> showError("ERR_CONNECTION_REFUSED")
@@ -1336,7 +1322,10 @@ fun BrowserScreen(
                         }
                     },
                     onBack = goBack,
-                    onForward = { state.loadUrl("javascript:history.forward();void(0);") },
+                    onForward = {
+                        state.beginLoad()
+                        state.loadUrl("javascript:history.forward();void(0);")
+                    },
                     onHome = {
                         submit(state, tabs.homepageUrl)
                     },

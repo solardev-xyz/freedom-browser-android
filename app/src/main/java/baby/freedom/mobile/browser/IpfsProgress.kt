@@ -109,8 +109,8 @@ object IpfsProgress {
     /**
      * The line to show: the snapshot's phase when it has one, else the
      * phase [fromCounters] reads off the counters' growth since
-     * [baseline] (the reading taken when this load started), leaving out
-     * whatever [carried] marks as a superseded load's.
+     * [baseline] (the reading taken when this load started), less
+     * whatever [carried] attributes to superseded loads (see [LoadMeter]).
      */
     fun line(
         snapshotJson: String?,
@@ -120,25 +120,6 @@ object IpfsProgress {
     ): String? =
         message(snapshotJson)
             ?: if (baseline != null && now != null) fromCounters(baseline, now, carried) else null
-
-    /**
-     * The counters superseded loads moved: their growth from [earlier]
-     * (the baseline of the first load in an unbroken run of superseded
-     * ones) to [atStart] (the new load's). Null when there is no earlier
-     * reading — nothing was in flight.
-     *
-     * The node doesn't stop a gateway fetch because the WebView went
-     * elsewhere, so an old load keeps ticking the node-wide counters
-     * well into the next one, and in bursts (a page's cache hits land
-     * hundreds at a time, seconds apart) — so every counter it moved at
-     * all is treated as still its, not only the ones that moved in the
-     * last poll or two. Without this, a new load of an unprovided
-     * CID that supersedes a busy page reads the old page's arriving
-     * blocks as its own ("Fetching from verified provider…") for its
-     * whole DHT search.
-     */
-    fun carriedOver(earlier: Counters?, atStart: Counters?): Counters? =
-        if (earlier == null || atStart == null) null else atStart - earlier
 
     /**
      * The phase a load is in, from how the node's cumulative counters
@@ -153,13 +134,13 @@ object IpfsProgress {
      * same time blends in — the price of a signal that works today; the
      * snapshot [message] reads is per-request. The one blend we can see
      * coming — this load superseding one on the same tab that is still
-     * running in the node — is handled by [carried] (see [carriedOver]):
-     * every counter the old load was moving is left out for this load,
-     * so the line may under-report a phase but never shows the old
-     * load's.
+     * running in the node — is handled by [carried] (see [LoadMeter]):
+     * the growth that happened while the old load still had gateway
+     * requests open is subtracted, so the line may under-report a phase
+     * for that stretch but never shows the old load's.
      */
     fun fromCounters(baseline: Counters, now: Counters, carried: Counters? = null): String {
-        val d = (now - baseline).without(carried)
+        val d = (now - baseline).minusClamped(carried)
         return when {
             d.bitswapBlocks > 0 && d.bitswapBlocks >= d.httpProviderBlocks ->
                 PHASE_MESSAGES.getValue("fetching_bitswap")
@@ -186,14 +167,23 @@ object IpfsProgress {
         /** Providers found, delegated routing and DHT together. */
         val providerResults: Long = 0,
     ) {
-        /** This, with every field [mask] has grown (> 0) zeroed. */
-        fun without(mask: Counters?): Counters = if (mask == null) this else Counters(
-            cacheHits = if (mask.cacheHits > 0) 0 else cacheHits,
-            httpProviderBlocks = if (mask.httpProviderBlocks > 0) 0 else httpProviderBlocks,
-            bitswapBlocks = if (mask.bitswapBlocks > 0) 0 else bitswapBlocks,
-            delegatedLookups = if (mask.delegatedLookups > 0) 0 else delegatedLookups,
-            dhtLookups = if (mask.dhtLookups > 0) 0 else dhtLookups,
-            providerResults = if (mask.providerResults > 0) 0 else providerResults,
+        /** This less [other] field by field, never below zero. */
+        fun minusClamped(other: Counters?): Counters = if (other == null) this else Counters(
+            cacheHits = (cacheHits - other.cacheHits).coerceAtLeast(0),
+            httpProviderBlocks = (httpProviderBlocks - other.httpProviderBlocks).coerceAtLeast(0),
+            bitswapBlocks = (bitswapBlocks - other.bitswapBlocks).coerceAtLeast(0),
+            delegatedLookups = (delegatedLookups - other.delegatedLookups).coerceAtLeast(0),
+            dhtLookups = (dhtLookups - other.dhtLookups).coerceAtLeast(0),
+            providerResults = (providerResults - other.providerResults).coerceAtLeast(0),
+        )
+
+        operator fun plus(other: Counters) = Counters(
+            cacheHits = cacheHits + other.cacheHits,
+            httpProviderBlocks = httpProviderBlocks + other.httpProviderBlocks,
+            bitswapBlocks = bitswapBlocks + other.bitswapBlocks,
+            delegatedLookups = delegatedLookups + other.delegatedLookups,
+            dhtLookups = dhtLookups + other.dhtLookups,
+            providerResults = providerResults + other.providerResults,
         )
 
         operator fun minus(other: Counters) = Counters(
@@ -218,6 +208,49 @@ object IpfsProgress {
                     dhtLookups = raw[8],
                 )
             }
+        }
+    }
+
+    /**
+     * One load's reading of the node-wide counters, poll by poll.
+     *
+     * The first reading is the load's baseline. After that, each poll's
+     * growth is the load's own — unless a load it superseded on the same
+     * tab still had gateway requests open at either end of that poll
+     * interval ([GatewayWork.activeBefore]). The node doesn't stop a
+     * fetch because the WebView went elsewhere, so while such a request
+     * is open the old load can move *any* counter, at any time, in
+     * bursts; there is no telling its growth from this load's. That
+     * interval's growth is set aside as carried, whole, and subtracted
+     * from this load's (see [fromCounters]). Once the superseded
+     * requests have all closed, growth counts again — so a link tapped
+     * while the page is still loading advances as soon as the old page's
+     * requests are gone, instead of being masked for the whole load.
+     */
+    class LoadMeter {
+        private var baseline: Counters? = null
+        private var last: Counters? = null
+        private var carried = Counters()
+        private var overlapping = false
+
+        /**
+         * Record a poll ([now] null when the node didn't answer) and
+         * return the line to show. [supersededActive]: a superseded load
+         * of this tab has a gateway request open right now.
+         */
+        fun poll(snapshotJson: String?, now: Counters?, supersededActive: Boolean): String? {
+            overlapping = overlapping || supersededActive
+            if (now != null) {
+                val prev = last
+                if (prev == null) {
+                    baseline = now
+                } else if (overlapping) {
+                    carried += (now - prev).minusClamped(Counters())
+                }
+                last = now
+                overlapping = supersededActive
+            }
+            return line(snapshotJson, baseline, now, carried)
         }
     }
 
@@ -275,6 +308,55 @@ object IpfsProgress {
     private fun token(item: JSONObject, key: String): String {
         val raw = item.opt(key) as? String ?: return ""
         return raw.trim().lowercase().replace(Regex("[-\\s]+"), "_")
+    }
+}
+
+/**
+ * The gateway requests one tab has open — its submit probe's HEADs and
+ * every request its WebView routes through [interceptVirtualRequest] —
+ * each tagged with the [BrowserState.loadGeneration] it belongs to.
+ * Thread-safe: the interceptor starts and finishes work on its own
+ * threads, the chrome's poll reads it from the main thread.
+ *
+ * This is how the IPFS phase line (#94) knows a superseded load is still
+ * running in the node ([activeBefore]) and for how long, instead of
+ * guessing from which counters it had moved by some earlier poll.
+ *
+ * A request counts as open until its response body is closed (Chromium
+ * closes it on EOF and on cancel) or its probe attempt returns. Entries
+ * older than [STALE_MS] are ignored, so a body some path forgets to
+ * close can't hold every later load's line back for good.
+ */
+internal class GatewayWork(
+    private val clockMs: () -> Long = { System.nanoTime() / 1_000_000 },
+) {
+    private class Entry(val generation: Int, val startedAt: Long)
+
+    private val lock = Any()
+    private var nextToken = 0L
+    private val open = HashMap<Long, Entry>()
+
+    /** Record a request of load [generation]; pass the result to [finish]. */
+    fun start(generation: Int): Long = synchronized(lock) {
+        val token = ++nextToken
+        open[token] = Entry(generation, clockMs())
+        token
+    }
+
+    /** The request [token] is done. Idempotent. */
+    fun finish(token: Long) {
+        synchronized(lock) { open.remove(token) }
+    }
+
+    /** Some load older than [generation] still has a request open. */
+    fun activeBefore(generation: Int): Boolean = synchronized(lock) {
+        val now = clockMs()
+        open.values.removeAll { now - it.startedAt >= STALE_MS }
+        open.values.any { it.generation < generation }
+    }
+
+    companion object {
+        const val STALE_MS: Long = 60_000L
     }
 }
 

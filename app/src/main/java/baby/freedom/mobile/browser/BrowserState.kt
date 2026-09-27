@@ -82,18 +82,57 @@ class BrowserState(val id: Long) {
 
     /**
      * Bumped each time a new navigation starts on this tab — a submit
-     * (typed, bookmark, detoured link) or a main-frame link the WebView
-     * follows itself. Not by the probe → WebView hand-off inside one
-     * submit, which is the same load. The IPFS phase line (#94) keys its
-     * counter baseline on it, so a load that supersedes one still in
-     * flight is measured from its own start, not the previous load's.
+     * (typed, bookmark, reload button, detoured link), a main-frame link
+     * the WebView follows itself, Back / Forward, and pull-to-refresh.
+     * Not by the probe → WebView hand-off inside one submit, which is
+     * the same load. The IPFS phase line (#94) keys its counter reading
+     * on it, so a load that supersedes one still in flight is measured
+     * from its own start, not the previous load's.
      */
     var loadGeneration by mutableIntStateOf(0)
         private set
 
-    /** Mark the start of a new navigation (see [loadGeneration]). */
-    internal fun beginLoad() {
+    /**
+     * The [loadGeneration] of the navigation the WebView itself was last
+     * handed. It trails [loadGeneration] while a submit is still in its
+     * probe phase — the WebView is still on (or still fetching) the
+     * previous load then. Read on the request-interceptor thread, so a
+     * late main-frame request of the outgoing navigation is attributed
+     * to that navigation and not to the submit that is still probing.
+     */
+    @Volatile
+    internal var webViewGeneration: Int = 0
+        private set
+
+    /**
+     * The [loadGeneration] of the document the WebView last committed —
+     * the one whose subresource requests the interceptor is seeing.
+     */
+    @Volatile
+    internal var documentGeneration: Int = 0
+        private set
+
+    /** This tab's open gateway requests, by load (see [GatewayWork]). */
+    internal val gatewayWork = GatewayWork()
+
+    /**
+     * Mark the start of a new navigation (see [loadGeneration]).
+     * [inWebView]: the WebView is already navigating (a link it follows,
+     * a reload) rather than waiting for a probe to hand it the URL.
+     */
+    internal fun beginLoad(inWebView: Boolean = false) {
         loadGeneration++
+        if (inWebView) webViewGeneration = loadGeneration
+    }
+
+    /** The WebView is being handed this tab's current navigation. */
+    internal fun handLoadToWebView() {
+        webViewGeneration = loadGeneration
+    }
+
+    /** The WebView committed the navigation it was last handed. */
+    internal fun commitLoad() {
+        documentGeneration = webViewGeneration
     }
 
     /**

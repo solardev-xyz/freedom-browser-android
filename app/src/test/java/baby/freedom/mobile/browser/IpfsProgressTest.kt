@@ -234,38 +234,114 @@ class IpfsProgressTest {
     }
 
     @Test
-    fun `a superseded load still running in the node doesn't lend the new load its phase`() {
-        // The old page (baseline `earlier`) had pulled blocks off an
-        // HTTP provider (one delegated lookup + providers per block)
-        // and a burst of cache hits by the time the new load started…
-        val earlier = counters(0, 0, 0, 10, 0, 10, 20, 0, 0, 0, 0)
-        val atStart = counters(0, 0, 100, 12, 0, 12, 26, 0, 0, 0, 0)
-        val carried = IpfsProgress.carriedOver(earlier, atStart)
-        // …and keeps doing so, while the new, unprovided CID falls back
-        // to the DHT.
-        val later = counters(0, 0, 700, 20, 0, 20, 50, 0, 2, 0, 0)
+    fun `a superseded load that starts moving new counters late doesn't lend them (R2-F1)`() {
+        // The old ipns site was still in its delegated lookup when the
+        // new, unprovided CID was submitted: at the new load's first
+        // poll only lookups had moved…
+        val meter = IpfsProgress.LoadMeter()
+        val atStart = counters(0, 0, 0, 0, 0, 3, 2, 0, 0, 0, 0)
+        assertEquals("IPFS: Looking up content…", meter.poll(null, atStart, supersededActive = true))
+        // …then the old site's HTTP-provider and Bitswap blocks land,
+        // while its request is still open.
+        val blocks = counters(0, 0, 40, 30, 12, 4, 6, 0, 1, 0, 0)
+        assertEquals("IPFS: Looking up content…", meter.poll(null, blocks, supersededActive = true))
+        // The old request closes; the tail of its interval is still set
+        // aside, the new load's DHT fallback afterwards is its own.
+        val tail = counters(0, 0, 45, 31, 12, 4, 6, 0, 1, 0, 0)
+        assertEquals("IPFS: Looking up content…", meter.poll(null, tail, supersededActive = false))
+        val dht = counters(0, 0, 45, 31, 12, 4, 6, 0, 3, 0, 0)
+        assertEquals("IPFS: Searching the DHT…", meter.poll(null, dht, supersededActive = false))
+    }
+
+    @Test
+    fun `a superseded load masks nothing it could not have moved, and only while open (R2-F3)`() {
+        // A same-site link tapped while the page is still loading: both
+        // move HTTP-provider blocks and cache hits.
+        val meter = IpfsProgress.LoadMeter()
+        meter.poll(null, zero, supersededActive = true)
+        val overlap = counters(0, 0, 10, 5, 0, 0, 0, 0, 0, 0, 0)
+        assertEquals("IPFS: Looking up content…", meter.poll(null, overlap, supersededActive = true))
+        // Once the old page's requests are closed (and one interval has
+        // passed), the new page's blocks read as its own.
+        meter.poll(null, overlap, supersededActive = false)
+        val own = counters(0, 0, 10, 8, 0, 0, 0, 0, 0, 0, 0)
+        assertEquals("IPFS: Fetching from verified provider…", meter.poll(null, own, supersededActive = false))
+    }
+
+    @Test
+    fun `a load that superseded nothing reads its growth straight away`() {
+        val meter = IpfsProgress.LoadMeter()
+        val before = counters(0, 0, 50, 20, 30, 10, 12, 0, 4, 2, 0)
+        assertEquals("IPFS: Looking up content…", meter.poll(null, before, supersededActive = false))
         assertEquals(
-            "IPFS: Fetching from verified provider…",
-            IpfsProgress.fromCounters(atStart, later),
+            "IPFS: Finding providers…",
+            meter.poll(null, counters(0, 0, 50, 20, 30, 11, 12, 0, 4, 2, 0), supersededActive = false),
         )
+        // A missed poll keeps the interval open: its overlap still counts.
+        assertNull(meter.poll(null, null, supersededActive = true))
         assertEquals(
-            "IPFS: Searching the DHT…",
-            IpfsProgress.fromCounters(atStart, later, carried),
+            "IPFS: Finding providers…",
+            meter.poll(null, counters(0, 0, 90, 20, 30, 11, 12, 0, 4, 2, 0), supersededActive = false),
         )
-        assertEquals(
-            "IPFS: Searching the DHT…",
-            IpfsProgress.line(null, atStart, later, carried),
-        )
-        // Counters the old load wasn't moving still count: blocks from
-        // Bitswap for the new load show.
-        val fetching = counters(0, 0, 700, 20, 3, 20, 50, 0, 2, 0, 0)
-        assertEquals(
-            "IPFS: Fetching from peers…",
-            IpfsProgress.fromCounters(atStart, fetching, carried),
-        )
-        // Nothing in flight before: nothing carried.
-        assertNull(IpfsProgress.carriedOver(null, atStart))
-        assertEquals(later - atStart, (later - atStart).without(null))
+        // The snapshot still wins when it has a phase.
+        val snapshot = """{"active":[{"kind":"gateway_request","phase":"retrying","status":"active"}]}"""
+        assertEquals("IPFS: Retrying slow provider…", meter.poll(snapshot, before, supersededActive = false))
+    }
+
+    @Test
+    fun `gateway work reports only older loads' open requests`() {
+        var clock = 0L
+        val work = GatewayWork { clock }
+        assertFalse(work.activeBefore(1))
+        val old = work.start(1)
+        val current = work.start(2)
+        assertTrue(work.activeBefore(2))
+        assertFalse(work.activeBefore(1))
+        work.finish(old)
+        work.finish(old)
+        assertFalse(work.activeBefore(2))
+        work.finish(current)
+        // A body nobody closed stops counting after the stale limit.
+        work.start(1)
+        assertTrue(work.activeBefore(2))
+        clock += GatewayWork.STALE_MS
+        assertFalse(work.activeBefore(2))
+    }
+
+    @Test
+    fun `a tracked body reports its close once`() {
+        var closes = 0
+        val stream = CloseNotifyingInputStream("abc".byteInputStream()) { closes++ }
+        assertEquals('a'.code, stream.read())
+        assertEquals(0, closes)
+        stream.close()
+        stream.close()
+        assertEquals(1, closes)
+    }
+
+    @Test
+    fun `a main-frame request only sets the flag of its own load (R2-F4)`() {
+        // The WebView is still on load 3 while a submit probes load 4.
+        assertFalse(mainFrameNoteApplies(requestGeneration = 3, currentGeneration = 4))
+        assertTrue(mainFrameNoteApplies(requestGeneration = 4, currentGeneration = 4))
+    }
+
+    @Test
+    fun `the WebView's generation trails a submit until the hand-off (R2-F2, R2-F4)`() {
+        val tab = BrowserState(id = 1)
+        tab.beginLoad(inWebView = true) // a link, back/forward, a pull-to-refresh
+        tab.commitLoad()
+        assertEquals(1, tab.webViewGeneration)
+        assertEquals(1, tab.documentGeneration)
+        tab.beginLoad() // a submit, still probing
+        assertEquals(2, tab.loadGeneration)
+        assertEquals(1, tab.webViewGeneration)
+        assertFalse(mainFrameNoteApplies(tab.webViewGeneration, tab.loadGeneration))
+        tab.handLoadToWebView()
+        assertTrue(mainFrameNoteApplies(tab.webViewGeneration, tab.loadGeneration))
+        assertEquals(1, tab.documentGeneration)
+        tab.commitLoad()
+        assertEquals(2, tab.documentGeneration)
     }
 
     @Test

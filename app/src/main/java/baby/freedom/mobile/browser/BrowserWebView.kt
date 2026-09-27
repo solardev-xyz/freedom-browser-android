@@ -53,9 +53,12 @@ import androidx.webkit.WebViewFeature
 import baby.freedom.mobile.data.BrowsingRepository
 import kotlinx.coroutines.flow.collectLatest
 import java.io.ByteArrayInputStream
+import java.io.FilterInputStream
+import java.io.InputStream
 import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.abs
 import kotlin.math.roundToInt
 
@@ -541,6 +544,9 @@ fun BrowserWebViewHost(
                             // on after navigateHome() has already cleared
                             // it to -1.
                             wv.stopLoading()
+                            // From here the WebView is on this load, not
+                            // the one it was showing (#94).
+                            tab.handLoadToWebView()
                             wv.loadUrl(pending)
                         }
                     }
@@ -1256,6 +1262,9 @@ private fun buildRefreshableWebView(
                 // entry ends a page's probe exactly like any other
                 // document does (see [cancelProbeSupersededBy]).
                 cancelProbeSupersededBy(url)
+                // …and belonging to the navigation it was last handed,
+                // for the gateway requests it makes from now on (#94).
+                state.commitLoad()
                 // …and IPFS or not by what actually committed — a link,
                 // back/forward, or a redirect can land somewhere the
                 // submit that started this load didn't name (#94).
@@ -1526,7 +1535,7 @@ private fun buildRefreshableWebView(
                     state.loadAborted = false
                     // A link the WebView follows itself is a new load
                     // (a detoured one gets this from the submit, #94).
-                    state.beginLoad()
+                    state.beginLoad(inWebView = true)
                 }
                 if (detoured) {
                     onSubmitUrl(state, target)
@@ -1539,10 +1548,26 @@ private fun buildRefreshableWebView(
                 view: WebView?,
                 request: WebResourceRequest?,
             ): WebResourceResponse? {
-                if (request?.isForMainFrame == true) {
-                    noteMainFrameContentLoad(view, state, request.url.toString())
+                val mainFrame = request?.isForMainFrame == true
+                if (mainFrame) {
+                    noteMainFrameContentLoad(view, state, request!!.url.toString())
                 }
-                return interceptVirtualRequest(request)
+                // Tagged with the load it belongs to, and open until
+                // Chromium closes the body, so the IPFS phase line can
+                // tell while a superseded load is still fetching (#94,
+                // see [GatewayWork]). A main-frame request is the
+                // navigation the WebView was handed; a subresource is
+                // the committed document's.
+                val work = state.gatewayWork.start(
+                    if (mainFrame) state.webViewGeneration else state.documentGeneration,
+                )
+                val response = try {
+                    interceptVirtualRequest(request)
+                } catch (t: Throwable) {
+                    state.gatewayWork.finish(work)
+                    throw t
+                }
+                return trackedUntilClosed(response) { state.gatewayWork.finish(work) }
             }
 
             override fun onReceivedError(
@@ -1690,6 +1715,8 @@ private fun buildRefreshableWebView(
         // going through [BrowserState.loadUrl], so it has to open the
         // Stop latch itself (#41).
         state.loadAborted = false
+        // …and is a new load of its own for the IPFS phase line (#94).
+        state.beginLoad(inWebView = true)
         webView.reload()
     }
     // Who owns a downward drag — the refresh spinner or the page.
@@ -2508,16 +2535,62 @@ internal fun sanitizeTitle(rawTitle: String?, actualUrl: String?): String {
  * yet whether they lead to IPFS. Resolve the name here (the same lookup
  * [interceptVirtualRequest] is about to do, which then hits the registry)
  * so the phase line shows for the fetch itself, not only after commit.
- * The write is posted to the main thread and dropped if another
- * navigation started meanwhile.
+ *
+ * The request belongs to the navigation the WebView was last handed
+ * ([BrowserState.webViewGeneration]), which is not necessarily the tab's
+ * current one: a submit still in its probe phase has already started a
+ * new load while the WebView is still fetching the old. The write is
+ * posted to the main thread and applied only if that navigation is still
+ * the tab's current load (see [mainFrameNoteApplies]).
  */
 private fun noteMainFrameContentLoad(view: WebView?, state: BrowserState, url: String) {
     val root = VirtualOrigin.parseHostOfUrl(url) ?: return
     if (root is ContentRoot.Ens) Gateways.resolveEnsRoot(root.name)
-    val generation = state.loadGeneration
+    val generation = state.webViewGeneration
     view?.post {
-        if (state.loadGeneration == generation) {
+        if (mainFrameNoteApplies(generation, state.loadGeneration)) {
             state.ipfsLoad = ipfsLoadFor(url, state.ipfsLoad)
+        }
+    }
+}
+
+/**
+ * Whether a main-frame request made for the WebView's navigation
+ * [requestGeneration] may set the flag of the tab's load
+ * [currentGeneration]: only when they are the same load.
+ */
+internal fun mainFrameNoteApplies(requestGeneration: Int, currentGeneration: Int): Boolean =
+    requestGeneration == currentGeneration
+
+/**
+ * [response], with [onDone] run once its body is closed — or at once
+ * when there is no body to wait for.
+ */
+internal fun trackedUntilClosed(
+    response: WebResourceResponse?,
+    onDone: () -> Unit,
+): WebResourceResponse? {
+    val body = response?.data
+    if (body == null) {
+        onDone()
+        return response
+    }
+    response.data = CloseNotifyingInputStream(body, onDone)
+    return response
+}
+
+/** Runs [onClose] once, the first time the stream is closed. */
+internal class CloseNotifyingInputStream(
+    inner: InputStream,
+    private val onClose: () -> Unit,
+) : FilterInputStream(inner) {
+    private val closed = AtomicBoolean(false)
+
+    override fun close() {
+        try {
+            super.close()
+        } finally {
+            if (closed.compareAndSet(false, true)) onClose()
         }
     }
 }
