@@ -64,7 +64,15 @@ class IpfsNode(
     )
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    @Volatile
     private var handle: Long = 0L
+
+    /**
+     * Held across [releaseHandle] and [progressSnapshotJson] so a
+     * snapshot polled from a binder thread can never read a handle that
+     * is being freed underneath it.
+     */
+    private val handleLock = Any()
     private var statsPoller: Job? = null
 
     private val _state = MutableStateFlow(IpfsInfo())
@@ -155,7 +163,38 @@ class IpfsNode(
         }
     }
 
-    private fun releaseHandle() {
+    /**
+     * The node's live retrieval-progress snapshot (JSON, see
+     * [FreedomIpfsNative.progressSnapshotJson]), or null while the node
+     * isn't running. Blocking but cheap — a mutex-guarded copy of an
+     * in-memory ring — so the browser can poll it a few times a second
+     * while an `ipfs://` / `ipns://` page loads.
+     */
+    fun progressSnapshotJson(): String? = synchronized(handleLock) {
+        val node = handle
+        if (node == 0L || _state.value.status != IpfsStatus.Running) return null
+        runCatching { FreedomIpfsNative.progressSnapshotJson(node) }
+            .onFailure { Log.w(TAG, "progressSnapshotJson threw", it) }
+            .getOrNull()
+            ?.toString(Charsets.UTF_8)
+    }
+
+    /**
+     * The node's cumulative retrieval / routing counters
+     * ([FreedomIpfsNative.diagnostics], `long[11]`), or null while the
+     * node isn't running. Unlike [progressSnapshotJson] these are plain
+     * atomics inside the node, so they tick regardless of which tracing
+     * subscriber the process ended up with.
+     */
+    fun diagnostics(): LongArray? = synchronized(handleLock) {
+        val node = handle
+        if (node == 0L || _state.value.status != IpfsStatus.Running) return null
+        runCatching { FreedomIpfsNative.diagnostics(node) }
+            .onFailure { Log.w(TAG, "diagnostics threw", it) }
+            .getOrNull()
+    }
+
+    private fun releaseHandle() = synchronized(handleLock) {
         val node = handle
         handle = 0L
         if (node != 0L) {

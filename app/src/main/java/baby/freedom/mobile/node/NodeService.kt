@@ -63,6 +63,12 @@ class NodeService : Service() {
 
         override fun getIpfsState(): IpfsInfo = ipfsNode?.state?.value ?: IpfsInfo()
 
+        // Binder thread, not [scope]: a cheap in-memory copy, answered
+        // synchronously so the UI's poll gets this tick's snapshot.
+        override fun getIpfsProgress(): String? = ipfsNode?.progressSnapshotJson()
+
+        override fun getIpfsCounters(): LongArray? = ipfsNode?.diagnostics()
+
         override fun registerCallback(cb: INodeCallback?) {
             cb ?: return
             callbacks.register(cb)

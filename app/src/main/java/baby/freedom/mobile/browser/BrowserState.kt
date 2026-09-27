@@ -69,6 +69,18 @@ class BrowserState(val id: Long) {
         internal set
 
     /**
+     * This tab's current (or pending) load is content the embedded IPFS
+     * node serves — an `ipfs://` / `ipns://` page, or an ENS name whose
+     * contenthash points there. While it is and the tab is busy, the
+     * chrome polls the node's retrieval progress and shows which phase
+     * the fetch is in (#94). Kept by [loadUrl] and navigation commit via
+     * [ipfsLoadFor], and set outright by the probe-gated submit path,
+     * which is the one place that knows where an ENS name leads.
+     */
+    var ipfsLoad by mutableStateOf(false)
+        internal set
+
+    /**
      * True between a Stop tap and the tab's next navigation.
      *
      * Chromium answers `stopLoading()` on an *uncommitted* navigation
@@ -267,6 +279,7 @@ class BrowserState(val id: Long) {
         // A new load supersedes whatever the last Stop aborted, so the
         // progress latch opens again.
         loadAborted = false
+        ipfsLoad = ipfsLoadFor(url, ipfsLoad)
         val loadable = Gateways.toLoadable(url)
         pendingUrl = loadable
         if (displayPrefix != null) {
@@ -328,6 +341,7 @@ class BrowserState(val id: Long) {
         addressBarText = ""
         progress = -1
         resolving = false
+        ipfsLoad = false
         loadUrl(HOME_URL)
     }
 
@@ -371,6 +385,7 @@ class BrowserState(val id: Long) {
         progress = -1
         resolving = false
         loadAborted = false
+        ipfsLoad = false
         canGoBack = false
         canGoForward = false
         override = null

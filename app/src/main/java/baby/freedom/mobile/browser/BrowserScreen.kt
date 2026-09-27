@@ -1,6 +1,16 @@
 package baby.freedom.mobile.browser
 
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.Surface
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.animation.Animatable
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
@@ -83,10 +93,12 @@ import baby.freedom.swarm.IpfsInfo
 import baby.freedom.swarm.IpfsStatus
 import baby.freedom.swarm.NodeInfo
 import baby.freedom.swarm.NodeStatus
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.job
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * Sentinel URL for the home tab. We load `about:blank` into the
@@ -115,6 +127,17 @@ private const val NODE_READY_TIMEOUT_MS: Long = 90_000L
 
 /** Cross-fade of reserved mode's strip between two page colours (#66). */
 private const val STRIP_FADE_MS = 250
+
+/**
+ * How long the IPFS phase line (#94) outlives the load going idle — long
+ * enough to bridge the probe → WebView hand-off, where the tab can read
+ * "not busy" for a frame or two, short enough that a finished page loses
+ * the line at once.
+ */
+private const val IPFS_STATUS_LINGER_MS: Long = 250L
+
+/** Air between the IPFS phase line and the capsule under it. */
+private val IpfsStatusGap = 8.dp
 
 /**
  * Outcome of a node-readiness wait: Running, a terminal "give up"
@@ -387,6 +410,8 @@ fun BrowserScreen(
     deepLinkUrl: String? = null,
     onDeepLinkHandled: () -> Unit = {},
     onRecoverNodes: () -> Unit = {},
+    ipfsProgressSnapshot: () -> String? = { null },
+    ipfsCounters: () -> LongArray? = { null },
 ) {
     val tabs = remember { TabsState(homepage = initialUrl) }
     // Shared with the request interceptor (which resolves
@@ -434,6 +459,47 @@ fun BrowserScreen(
 
     val state = tabs.active
     val isBookmarked by repo.isBookmarked(state.url).collectAsState(initial = false)
+
+    // IPFS load progress (#94): while the active tab is busy on content
+    // the IPFS node serves, poll the node's retrieval-progress snapshot
+    // and show which phase the fetch is in above the capsule — the
+    // phone's version of the desktop status line. The capsule's own
+    // trace says *that* it is loading; on a slow CID this says *why* it
+    // is taking so long (finding providers, searching the DHT, …).
+    //
+    // [ipfsStatusTab] pins a message to the tab it was polled for, so a
+    // tab switch never shows one tab's phase over another. Going idle
+    // clears it after [IPFS_STATUS_LINGER_MS] rather than at once: the
+    // hand-off from the probe (`resolving`) to the WebView's first
+    // progress callback can read "not busy" for a frame, and the line
+    // shouldn't blink out and back in across it. The counter baseline
+    // (see [IpfsProgress.fromCounters]) survives that blink for the same
+    // reason — it is the load's, not the poll loop's.
+    val pollIpfsProgress = state.ipfsLoad &&
+        isCapsuleLoading(state) &&
+        ipfsInfo.status == IpfsStatus.Running
+    var ipfsStatus by remember { mutableStateOf<String?>(null) }
+    var ipfsStatusTab by remember { mutableStateOf<Long?>(null) }
+    var ipfsBaseline by remember { mutableStateOf<IpfsProgress.Counters?>(null) }
+    LaunchedEffect(state.id, pollIpfsProgress) {
+        if (!pollIpfsProgress) {
+            delay(IPFS_STATUS_LINGER_MS)
+            ipfsStatus = null
+            ipfsBaseline = null
+            return@LaunchedEffect
+        }
+        if (ipfsStatusTab != state.id) ipfsBaseline = null
+        while (true) {
+            val (snapshot, counters) = withContext(Dispatchers.IO) {
+                runCatching { ipfsProgressSnapshot() }.getOrNull() to
+                    IpfsProgress.Counters.of(runCatching { ipfsCounters() }.getOrNull())
+            }
+            val baseline = ipfsBaseline ?: counters.also { ipfsBaseline = it }
+            ipfsStatus = IpfsProgress.line(snapshot, baseline, counters)
+            ipfsStatusTab = state.id
+            delay(IpfsProgress.POLL_INTERVAL_MS)
+        }
+    }
 
     // Gate the hardware back button on [backHandledFor]: enabled
     // whenever Back has somewhere to go — off the home overlay, or on it
@@ -491,6 +557,9 @@ fun BrowserScreen(
         loadUri: String = contentUri,
     ) {
         val isIpfs = contentUri.startsWith("ipfs://") || contentUri.startsWith("ipns://")
+        // The one place that knows where an ENS name leads: the
+        // chrome's IPFS progress line follows this load from here (#94).
+        target.ipfsLoad = isIpfs
         val protocolHint = when {
             contentUri.startsWith("bzz://") -> "swarm"
             contentUri.startsWith("ipns://") -> "ipns"
@@ -630,6 +699,9 @@ fun BrowserScreen(
             target.addressBarText =
                 pendingAddressBarText(target.addressBarText, ensDisplay, source)
             target.resolving = true
+            // Not IPFS until the contenthash says so (see
+            // [gateGatewayNavigation]) — the resolve itself is ENS's.
+            target.ipfsLoad = false
 
             fun ensError(errorCode: String, detail: String, retryUrl: String = retryDisplay) {
                 target.clearEnsOverride()
@@ -1277,6 +1349,29 @@ fun BrowserScreen(
             }
         }
 
+        // The IPFS phase line (#94) sits where a snackbar would: above
+        // the capsule's slot, clear of the page's own bottom edge. Not
+        // while the address bar is open — the editor owns that band.
+        val ipfsLine = ipfsStatus?.takeIf { ipfsStatusTab == state.id && !addressFocused }
+        AnimatedVisibility(
+            visible = ipfsLine != null,
+            enter = fadeIn(),
+            exit = fadeOut(),
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .windowInsetsPadding(chromeInsets)
+                .padding(
+                    start = CapsuleSideMargin,
+                    end = CapsuleSideMargin,
+                    bottom = capsuleSlot + CapsuleBottomMargin + IpfsStatusGap,
+                ),
+        ) {
+            // Keep drawing the last line while it fades out.
+            var shown by remember { mutableStateOf("") }
+            if (ipfsLine != null) shown = ipfsLine
+            IpfsStatusLine(text = shown)
+        }
+
         // Snackbars pop up above the capsule rather than under it —
         // tracking the capsule's *slot* rather than its drawn height, so
         // they follow the editing morph as the bar inflates but sit
@@ -1494,6 +1589,38 @@ private fun highlightedText(text: String, needle: String): AnnotatedString {
                 found + q.length,
             )
             i = found + q.length
+        }
+    }
+}
+
+/**
+ * The IPFS phase line (#94): the IPFS mark and the node's current
+ * retrieval phase ("IPFS: Finding providers…") in a small pill above the
+ * capsule. Wraps rather than ellipsises — the phase is the whole point,
+ * and a narrow screen or a large font scale must still show all of it.
+ */
+@Composable
+private fun IpfsStatusLine(text: String) {
+    Surface(
+        shape = RoundedCornerShape(50),
+        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+        contentColor = MaterialTheme.colorScheme.onSurface,
+        shadowElevation = 2.dp,
+        modifier = Modifier
+            .widthIn(max = CHROME_MAX_WIDTH)
+            .semantics { liveRegion = LiveRegionMode.Polite },
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Image(
+                painter = painterResource(baby.freedom.mobile.R.drawable.ic_ipfs),
+                contentDescription = null,
+                modifier = Modifier.size(16.dp),
+            )
+            Spacer(Modifier.width(8.dp))
+            Text(text = text, style = MaterialTheme.typography.labelLarge)
         }
     }
 }

@@ -1256,6 +1256,10 @@ private fun buildRefreshableWebView(
                 // entry ends a page's probe exactly like any other
                 // document does (see [cancelProbeSupersededBy]).
                 cancelProbeSupersededBy(url)
+                // …and IPFS or not by what actually committed — a link,
+                // back/forward, or a redirect can land somewhere the
+                // submit that started this load didn't name (#94).
+                if (url != null) state.ipfsLoad = ipfsLoadFor(url, state.ipfsLoad)
                 if (url == ABOUT_BLANK) {
                     // `about:blank` is our home sentinel — either the
                     // WebView's forced initial paint, a user-initiated
