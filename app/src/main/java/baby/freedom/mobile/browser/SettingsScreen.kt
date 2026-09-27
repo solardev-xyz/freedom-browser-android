@@ -218,15 +218,12 @@ private fun SearchSection(
     onClick: () -> Unit,
 ) {
     // A `custom` id without a usable template searches with the default
-    // ([SearchEngines.templateFor]) — say so rather than claim "Custom".
-    val customValid = SearchEngines.normalizeTemplate(customTemplate) != null
-    val isCustom = engineId == SearchEngines.CUSTOM_ID && customValid
+    // ([SearchEngines.effectiveId]) — say so rather than claim "Custom".
+    val isCustom = SearchEngines.effectiveId(engineId, customTemplate) == SearchEngines.CUSTOM_ID
     SectionCard(title = "Search") {
         PageRow(
             title = "Search engine",
-            subtitle = if (isCustom) "Custom" else SearchEngines.labelFor(
-                engineId.takeUnless { it == SearchEngines.CUSTOM_ID },
-            ),
+            subtitle = SearchEngines.labelFor(engineId, customTemplate),
             style = PageRowStyle.Inset,
             leadingIcon = Icons.Filled.Search,
             // The whole template, wrapped — never cut, so it's readable
@@ -251,14 +248,16 @@ private fun SearchEngineDialog(
     onSaveCustom: (String) -> Unit,
     onDismiss: () -> Unit,
 ) {
+    // Check the radio of the engine search actually uses — the same
+    // resolver as the Settings row, so a stale `custom` shows DuckDuckGo
+    // here too rather than a checked "Custom" the row doesn't name.
+    val effectiveId = SearchEngines.effectiveId(selectedId, savedCustomTemplate)
     var customSelected by remember {
-        mutableStateOf(selectedId == SearchEngines.CUSTOM_ID)
+        mutableStateOf(effectiveId == SearchEngines.CUSTOM_ID)
     }
     var draft by remember { mutableStateOf(savedCustomTemplate) }
-    val normalized = SearchEngines.normalizeTemplate(draft)
-    val effectiveId = SearchEngines.BUILT_IN.firstOrNull { it.id == selectedId }?.id
-        ?: if (selectedId == SearchEngines.CUSTOM_ID) SearchEngines.CUSTOM_ID
-        else SearchEngines.DEFAULT_ID
+    val validation = SearchEngines.validateTemplate(draft)
+    val normalized = validation.template
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -286,11 +285,10 @@ private fun SearchEngineDialog(
                         isError = draft.isNotBlank() && normalized == null,
                         supportingText = {
                             Text(
-                                if (draft.isNotBlank() && normalized == null) {
-                                    "Needs an https:// URL with {searchTerms} (or %s) exactly once"
-                                } else {
-                                    "Your search replaces {searchTerms} (or %s)"
-                                },
+                                validation.rejection
+                                    ?.takeIf { draft.isNotBlank() }
+                                    ?.let(::templateHint)
+                                    ?: "Your search replaces {searchTerms} (or %s)",
                             )
                         },
                         keyboardOptions = KeyboardOptions(
@@ -314,6 +312,18 @@ private fun SearchEngineDialog(
             TextButton(onClick = onDismiss) { Text("Cancel") }
         },
     )
+}
+
+/** What to fix, for each reason [SearchEngines.validateTemplate] refuses a template. */
+private fun templateHint(rejection: SearchEngines.Rejection): String = when (rejection) {
+    SearchEngines.Rejection.EMPTY,
+    SearchEngines.Rejection.NO_PLACEHOLDER -> "Put {searchTerms} (or %s) where your search goes"
+    SearchEngines.Rejection.MULTIPLE_PLACEHOLDERS -> "Use {searchTerms} (or %s) only once"
+    SearchEngines.Rejection.TOO_LONG -> "Too long: at most 2048 characters"
+    SearchEngines.Rejection.NOT_A_URL -> "Not a full URL: start with https:// and a host name"
+    SearchEngines.Rejection.SCHEME ->
+        "Needs https:// (http:// only to localhost, 127.0.0.1 or [::1])"
+    SearchEngines.Rejection.USER_INFO -> "Remove the user name or password before the host"
 }
 
 @Composable
