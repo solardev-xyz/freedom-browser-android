@@ -105,9 +105,18 @@ internal fun findCountSpoken(result: FindResult?): String = when {
  */
 internal fun findCountLiveRegion(result: FindResult?): Boolean = result?.final == true
 
-/** Previous / next are only worth pressing when there is somewhere to go. */
-internal fun findNavigationEnabled(result: FindResult?): Boolean =
-    result != null && result.matches > 0
+/**
+ * Whether stepping does anything: the one rule behind both the previous /
+ * next arrows and Search / Enter ([findSubmitAction]), so the two never
+ * disagree. [shown] is the count on the bar ([FindInPageState.displayed]),
+ * held across keystrokes — while a new search's first report is pending
+ * both follow the held count, and both settle together when it lands.
+ * With nothing shown yet (the session's first search, still pending) a
+ * step is queued behind the search and does step, so it's allowed; a
+ * count of 0 has nowhere to go.
+ */
+internal fun findStepEnabled(searching: Boolean, shown: FindResult?): Boolean =
+    searching && (shown == null || shown.matches > 0)
 
 /** What the keyboard's Search key / Enter does in the find field. */
 internal enum class FindSubmit {
@@ -128,12 +137,13 @@ internal enum class FindSubmit {
  * report, and re-running `findAllAsync` there would restart at match 1
  * instead of advancing. `findNext` issued while that first report is
  * still pending is queued behind the search, so it steps as intended.
+ * Whether it steps is [findStepEnabled], shared with the arrows.
  */
-internal fun findSubmitAction(searching: Boolean, fieldText: String, result: FindResult?): FindSubmit =
+internal fun findSubmitAction(searching: Boolean, fieldText: String, shown: FindResult?): FindSubmit =
     when {
         fieldText.isEmpty() -> FindSubmit.None
         !searching -> FindSubmit.Search
-        result == null || result.matches > 0 -> FindSubmit.Step
+        findStepEnabled(searching, shown) -> FindSubmit.Step
         else -> FindSubmit.None
     }
 
@@ -171,8 +181,9 @@ class FindInPageState {
      * character, and blanking the count (and greying the arrows) until
      * each one's first report made them flicker while typing — so the
      * previous count stays up until the new one lands. Null only once the
-     * session has ended or the query is empty. Decisions about the *new*
-     * search (Search vs Step, announcing) still read [result].
+     * session has ended or the query is empty. Whether a step does
+     * anything (arrows and Enter alike, [findStepEnabled]) follows this
+     * held count too; only announcing reads the new search's own [result].
      */
     var displayed: FindResult? by mutableStateOf(null)
         private set
@@ -287,7 +298,7 @@ internal fun FindBar(
     // Search / Enter: step to the next match, or — for a prefilled query
     // that hasn't been searched in this session yet — run it.
     fun submit(forward: Boolean) {
-        when (findSubmitAction(find.searching, fieldValue.text, find.result)) {
+        when (findSubmitAction(find.searching, fieldValue.text, find.displayed)) {
             FindSubmit.Search -> onQueryChange(fieldValue.text)
             FindSubmit.Step -> onStep(forward)
             FindSubmit.None -> Unit
@@ -392,7 +403,7 @@ internal fun FindBar(
                         if (live) liveRegion = LiveRegionMode.Polite
                     },
             )
-            val canStep = findNavigationEnabled(result)
+            val canStep = findStepEnabled(find.searching, result)
             FindBarButton(Icons.Filled.KeyboardArrowUp, "Previous match", canStep) { onStep(false) }
             FindBarButton(Icons.Filled.KeyboardArrowDown, "Next match", canStep) { onStep(true) }
             FindBarButton(Icons.Filled.Close, "Close find", true, onClose)

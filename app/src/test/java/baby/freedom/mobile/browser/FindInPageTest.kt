@@ -14,7 +14,7 @@ class FindInPageTest {
         val r = findResultFrom(activeMatchOrdinal = 2, numberOfMatches = 12, isDoneCounting = true)
         assertEquals(FindResult(active = 3, matches = 12, final = true), r)
         assertEquals("3/12", findCountLabel(r))
-        assertTrue(findNavigationEnabled(r))
+        assertTrue(findStepEnabled(true, r))
     }
 
     @Test
@@ -22,13 +22,14 @@ class FindInPageTest {
         // The listener reports a garbage ordinal (-1 or 0) with no matches.
         val r = findResultFrom(activeMatchOrdinal = -1, numberOfMatches = 0, isDoneCounting = true)
         assertEquals("0/0", findCountLabel(r))
-        assertFalse(findNavigationEnabled(r))
+        assertFalse(findStepEnabled(true, r))
     }
 
     @Test
     fun `no result shows no count`() {
         assertEquals("", findCountLabel(null))
-        assertFalse(findNavigationEnabled(null))
+        // Not searching: nothing to step through.
+        assertFalse(findStepEnabled(false, null))
     }
 
     @Test
@@ -37,7 +38,7 @@ class FindInPageTest {
         assertEquals(0, r.active)
         assertEquals("0/5", findCountLabel(r))
         // There are matches to walk to, so stepping stays available.
-        assertTrue(findNavigationEnabled(r))
+        assertTrue(findStepEnabled(true, r))
         // An ordinal past the end marks no known match either.
         assertEquals(0, findResultFrom(9, 5, false).active)
         // Boundary: the last valid 0-based ordinal is the last match.
@@ -75,7 +76,7 @@ class FindInPageTest {
         assertNull(find.result)
         assertEquals(old, find.displayed)
         assertEquals("2/7", findCountLabel(find.displayed))
-        assertTrue(findNavigationEnabled(find.displayed))
+        assertTrue(findStepEnabled(find.searching, find.displayed))
         assertFalse(findCountLiveRegion(find.result))
         val new = FindResult(1, 3, false)
         find.onResult(new)
@@ -140,24 +141,24 @@ class FindInPageTest {
         find.show()
         find.query = "needle" // prefilled from last session
         assertFalse(find.searching)
-        assertEquals(FindSubmit.Search, findSubmitAction(find.searching, "needle", find.result))
+        assertEquals(FindSubmit.Search, findSubmitAction(find.searching, "needle", find.displayed))
 
         find.startSearch("needle")
-        // Sent, Chromium hasn't reported: result is null but the search is
-        // live, so Enter must step rather than restart at match 1 (R2-F1).
+        // Sent, Chromium hasn't reported: nothing is shown but the search
+        // is live, so Enter must step rather than restart at match 1 (R2-F1).
         assertTrue(find.searching)
-        assertNull(find.result)
-        assertEquals(FindSubmit.Step, findSubmitAction(find.searching, "needle", find.result))
+        assertNull(find.displayed)
+        assertEquals(FindSubmit.Step, findSubmitAction(find.searching, "needle", find.displayed))
 
         find.onResult(FindResult(1, 4, true))
-        assertEquals(FindSubmit.Step, findSubmitAction(find.searching, "needle", find.result))
+        assertEquals(FindSubmit.Step, findSubmitAction(find.searching, "needle", find.displayed))
         // A finished search with nothing found has nowhere to go.
         assertEquals(FindSubmit.None, findSubmitAction(true, "needle", FindResult(0, 0, true)))
         assertEquals(FindSubmit.None, findSubmitAction(false, "", null))
 
         find.close()
         assertFalse(find.searching)
-        assertEquals(FindSubmit.Search, findSubmitAction(find.searching, "needle", find.result))
+        assertEquals(FindSubmit.Search, findSubmitAction(find.searching, "needle", find.displayed))
     }
 
     @Test
@@ -179,5 +180,49 @@ class FindInPageTest {
         assertFalse(findCountLiveRegion(null))
         assertFalse("interim reports stay quiet", findCountLiveRegion(FindResult(0, 40, false)))
         assertTrue(findCountLiveRegion(FindResult(3, 120, true)))
+    }
+
+    /**
+     * R4-F1: the arrows and Enter read the same state through the same
+     * rule, so they agree while a new search is pending on a held count.
+     * Each side is computed the way its call site in [FindBar] computes it.
+     */
+    private fun arrowsEnabled(find: FindInPageState) = findStepEnabled(find.searching, find.displayed)
+    private fun enterSteps(find: FindInPageState) =
+        findSubmitAction(find.searching, find.query, find.displayed) == FindSubmit.Step
+
+    @Test
+    fun `arrows and Enter agree while a new search is pending`() {
+        val find = FindInPageState()
+        find.show()
+
+        // First search of the session, no report yet: both step.
+        find.startSearch("n")
+        assertTrue(arrowsEnabled(find))
+        assertTrue(enterSteps(find))
+
+        // Held 3/10, next keystroke pending (it may find nothing): both
+        // follow the held count until the report lands.
+        find.onResult(FindResult(3, 10, true))
+        find.startSearch("nx")
+        assertTrue(arrowsEnabled(find))
+        assertTrue(enterSteps(find))
+        find.onResult(FindResult(0, 0, true))
+        assertFalse(arrowsEnabled(find))
+        assertFalse(enterSteps(find))
+
+        // Held 0/0, backspace pending (it may match again): both stay off
+        // until the report lands, then come on together.
+        find.startSearch("n")
+        assertFalse(arrowsEnabled(find))
+        assertFalse(enterSteps(find))
+        find.onResult(FindResult(1, 10, false))
+        assertTrue(arrowsEnabled(find))
+        assertTrue(enterSteps(find))
+
+        // Closed: neither steps.
+        find.close()
+        assertFalse(arrowsEnabled(find))
+        assertFalse(enterSteps(find))
     }
 }
