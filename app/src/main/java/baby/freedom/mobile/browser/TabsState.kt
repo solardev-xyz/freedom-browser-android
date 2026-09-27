@@ -92,7 +92,13 @@ class TabsState(
      * the first frame, rather than flashing the home overlay until the
      * restored navigation reports in — and [override] because the
      * restored virtual-origin URLs only display as `name.eth/…` under
-     * it.
+     * it. [loadStopped] is the tab's Stop latch
+     * ([BrowserState.loadAborted]): a first navigation the user stopped
+     * isn't fetched again on reopen.
+     *
+     * [placeholderId] is the blank tab [closeTab] put in this one's
+     * place because it was the last tab, so undoing *this* close (and
+     * no other) can drop that tab again if it was never used.
      */
     class ClosedTab(
         val index: Int,
@@ -102,13 +108,9 @@ class TabsState(
         val override: BrowserState.Override?,
         val thumbnail: ImageBitmap?,
         val webViewState: Bundle?,
+        val loadStopped: Boolean = false,
+        val placeholderId: Long? = null,
     )
-
-    /**
-     * The blank tab [closeTab] created because the last tab was closed,
-     * so [reopenClosedTab] can drop it again if it was never used.
-     */
-    private var lastTabReplacementId: Long? = null
 
     /** Most recently closed last. Capped at [MAX_CLOSED_TABS]. */
     private val closedTabs = mutableStateListOf<ClosedTab>()
@@ -226,10 +228,12 @@ class TabsState(
         // Let the WebView wind its fullscreen session down before the
         // host destroys it (see [BrowserWebViewHost]).
         if (fullscreen?.tabId == tabs[index].id) exitFullscreen()
-        rememberClosed(index)
+        // The list is never empty: the last tab is replaced by a blank one.
+        val placeholder = if (tabs.size == 1) newBlankTab() else null
+        rememberClosed(index, placeholder?.id)
         tabs.removeAt(index)
-        if (tabs.isEmpty()) {
-            tabs.add(newBlankTab().also { lastTabReplacementId = it.id })
+        if (placeholder != null) {
+            tabs.add(placeholder)
             activeIndex = 0
             return
         }
@@ -246,7 +250,7 @@ class TabsState(
      * loading that address; a tab sent Home after browsing is kept for
      * its history.
      */
-    private fun rememberClosed(index: Int) {
+    private fun rememberClosed(index: Int, placeholderId: Long?) {
         val tab = tabs[index]
         if (tab.isHome && !tab.canGoBack && !tab.canGoForward) return
         closedTabs.add(
@@ -258,6 +262,8 @@ class TabsState(
                 override = tab.override,
                 thumbnail = tab.thumbnail,
                 webViewState = saveWebViewState?.invoke(tab),
+                loadStopped = tab.loadAborted,
+                placeholderId = placeholderId,
             ),
         )
         while (closedTabs.size > MAX_CLOSED_TABS) closedTabs.removeAt(0)
@@ -283,18 +289,22 @@ class TabsState(
                 webViewState = closed.webViewState,
                 fallbackUrl = closed.addressBarText.ifBlank { closed.url },
                 // Closed before its page committed: the saved state
-                // ends on the blank entry, so submit the address again.
+                // ends on the blank entry, so put the address back —
+                // and submit it again, unless the user had stopped
+                // that load (the bar then showed it with Reload).
                 resubmitUrl = closed.addressBarText.takeIf { closed.url.isBlank() }.orEmpty(),
+                submit = !(closed.url.isBlank() && closed.loadStopped),
             )
         }
         // Undoing the close of the last tab: the blank tab [closeTab]
         // put in its place was only there so the list isn't empty. If
         // it's still untouched, the reopened tab takes its place.
-        val placeholder = tabs.indexOfFirst {
-            it.id == lastTabReplacementId && it.isUntouched()
-        }
+        // Tied to this entry, so reopening some later-closed tab
+        // leaves it alone.
+        val placeholder = closed.placeholderId?.let { id ->
+            tabs.indexOfFirst { it.id == id && it.isUntouched() }
+        } ?: -1
         if (placeholder >= 0) tabs.removeAt(placeholder)
-        lastTabReplacementId = null
         val at = closed.index.coerceIn(0, tabs.size)
         if (tabs.isNotEmpty()) captureActiveThumbnail?.invoke()
         tabs.add(at, tab)

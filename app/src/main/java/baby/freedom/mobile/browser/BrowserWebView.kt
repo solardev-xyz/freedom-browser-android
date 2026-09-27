@@ -522,11 +522,22 @@ fun BrowserWebViewHost(
                     // Closed before its page committed, the restored
                     // list ends on the blank entry; without a restore
                     // the WebView is on it too. Either way the address
-                    // is submitted once that entry has finished — any
-                    // earlier and the blank entry's `onPageFinished`
-                    // wipes the tab's address after the submit, and
-                    // the tab loads behind the home overlay.
-                    tab.submitAfterBlank = if (restored) restore.resubmitUrl else restore.fallbackUrl
+                    // goes back (and is submitted, unless the user had
+                    // stopped that load) once that entry has finished —
+                    // any earlier and the blank entry's `onPageFinished`
+                    // wipes the tab's address after the submit, and the
+                    // tab loads behind the home overlay. Only armed if
+                    // the WebView really is on the blank entry: a
+                    // restored list that ends on a real page never
+                    // finishes a blank load to consume it.
+                    tab.afterBlank = restore.afterBlank(
+                        restored = restored,
+                        currentEntryUrl = if (restored) {
+                            wv.copyBackForwardList().currentItem?.url
+                        } else {
+                            ABOUT_BLANK
+                        },
+                    )
                 }
             }
         }
@@ -1438,18 +1449,24 @@ private fun buildRefreshableWebView(
                     // [cancelProbeSupersededBy]).
                     cancelProbeSupersededBy(url)
                     // A reopened tab waiting on this blank entry to
-                    // submit its address (see [BrowserState.submitAfterBlank]).
+                    // put its address back (see [BrowserState.afterBlank]).
                     // The hook submits as the renderer, which leaves the
                     // address bar as it is until the page commits — so
                     // put the address the user had there back first, or
-                    // the tab loads behind the home overlay.
-                    state.submitAfterBlank.takeIf { it.isNotBlank() }?.let {
-                        state.submitAfterBlank = ""
-                        state.addressBarText = it
-                        onSubmitUrl(state, it)
+                    // the tab loads behind the home overlay. A load the
+                    // user had stopped only gets its address back, and
+                    // the Stop latch so the bar offers Reload.
+                    state.afterBlank?.let {
+                        state.afterBlank = null
+                        state.addressBarText = it.address
+                        if (it.submit) onSubmitUrl(state, it.address) else state.stopProgress()
                     }
                     return
                 }
+                // The first page to finish after a restore consumes the
+                // pending blank-entry address too, even though it isn't
+                // the blank entry: it can't apply to a later Home.
+                state.afterBlank = null
                 // Dismiss the pull-to-refresh spinner once the page has
                 // finished loading (or errored out). Happens regardless
                 // of whether the load was user-initiated reload or not.

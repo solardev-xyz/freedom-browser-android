@@ -144,6 +144,62 @@ class TabsStateTest {
     }
 
     @Test
+    fun `a first load the user stopped comes back without refetching`() {
+        val tabs = threeTabs()
+        val stopped = tabs.newTab()
+        stopped.addressBarText = "https://d.example/" // submitted…
+        stopped.stopProgress() // …then stopped before it committed
+        tabs.closeTab(3)
+        val restore = tabs.reopenClosedTab()!!.pendingRestore!!
+        assertEquals("https://d.example/", restore.resubmitUrl)
+        assertFalse(restore.submit)
+        val after = restore.afterBlank(restored = true, currentEntryUrl = ABOUT_BLANK)!!
+        assertEquals("https://d.example/", after.address)
+        assertFalse(after.submit)
+
+        // A stopped load on top of a committed page still restores the
+        // page (and refetches it if the saved state can't be restored).
+        tabs.switchTo(1)
+        tabs.active.stopProgress()
+        tabs.closeTab(1)
+        val committed = tabs.reopenClosedTab()!!.pendingRestore!!
+        assertTrue(committed.submit)
+        assertNull(committed.afterBlank(restored = true, currentEntryUrl = "https://b.example/"))
+        assertTrue(committed.afterBlank(restored = false, currentEntryUrl = ABOUT_BLANK)!!.submit)
+    }
+
+    @Test
+    fun `a pending address is only armed while the WebView is on the blank entry`() {
+        val restore = BrowserState.PendingRestore(
+            webViewState = null,
+            fallbackUrl = "https://d.example/",
+            resubmitUrl = "https://d.example/",
+        )
+        assertTrue(restore.afterBlank(restored = true, currentEntryUrl = ABOUT_BLANK)!!.submit)
+        assertNotNull(restore.afterBlank(restored = true, currentEntryUrl = null))
+        // Restored onto a real page (or an error page): nothing left
+        // armed to fire on a later trip Home.
+        assertNull(restore.afterBlank(restored = true, currentEntryUrl = "https://d.example/"))
+        assertNull(
+            BrowserState.PendingRestore(null, fallbackUrl = "https://d.example/")
+                .afterBlank(restored = true, currentEntryUrl = ABOUT_BLANK),
+        )
+    }
+
+    @Test
+    fun `reopening an unrelated tab keeps the last-tab placeholder`() {
+        val tabs = TabsState(homepage = HOME_URL)
+        tabs.tabs[0].visit("a")
+        tabs.closeTab(0) // [P]
+        tabs.newTab().visit("n")
+        tabs.closeTab(1) // close N, P untouched
+        tabs.reopenClosedTab() // undoes N, not A
+        assertEquals(listOf("", "n"), tabs.titles)
+        tabs.reopenClosedTab() // undoes A: P goes now
+        assertEquals(listOf("a", "n"), tabs.titles)
+    }
+
+    @Test
     fun `a tab sent home after browsing is remembered for its history`() {
         val tabs = threeTabs()
         tabs.switchTo(1)
