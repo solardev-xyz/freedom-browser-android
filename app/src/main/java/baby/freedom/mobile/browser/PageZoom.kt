@@ -47,6 +47,20 @@ object PageZoomLevels {
      */
     fun textZoom(level: Int, fontScale: Float): Int =
         (level * fontScale).roundToInt().coerceAtLeast(1)
+
+    /** How a level is written in the UI, e.g. "90%". */
+    fun label(level: Int): String = "$level%"
+
+    /**
+     * Strings at least as wide as any [label] in [MIN]..[MAX], whatever
+     * the font: every digit repeated to [MAX]'s digit count. Sizing the
+     * menu's level slot to the widest of these keeps it one width at every
+     * level and font scale, so − / + never shift under the user's finger
+     * (a proportional font's digits needn't all be the same width, hence
+     * all ten rather than a guess at the widest).
+     */
+    val widthProbes: List<String> =
+        ('0'..'9').map { d -> d.toString().repeat(MAX.toString().length) + "%" }
 }
 
 /**

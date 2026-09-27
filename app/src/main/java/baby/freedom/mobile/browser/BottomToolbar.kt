@@ -74,6 +74,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.drawWithCache
@@ -104,6 +105,7 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.isTraversalGroup
 import androidx.compose.ui.semantics.semantics
@@ -3074,9 +3076,10 @@ private fun OverflowMenuButton(
  * (home, an error page — nothing to zoom) disables the whole row.
  *
  * The level is always in the row's text, never only in a tooltip or a
- * content description, and sits in a slot with a minimum width so stepping
- * from 90% to 100% doesn't nudge the buttons under the user's finger; the
- * slot grows past that floor at large font scales rather than clip.
+ * content description, and sits in a slot sized to the widest label any
+ * level could show at the current font scale, so stepping from 90% to
+ * 100% doesn't nudge the buttons under the user's finger and large font
+ * scales grow the slot rather than clip the '%'.
  */
 @Composable
 private fun ZoomMenuRow(level: Int?, onZoom: (ZoomAction) -> Unit) {
@@ -3123,9 +3126,9 @@ private fun ZoomMenuRow(level: Int?, onZoom: (ZoomAction) -> Unit) {
                     .let { if (enabled) it else it.copy(alpha = disabledAlpha) },
             ),
             contentPadding = PaddingValues(horizontal = 4.dp),
-            // A floor, not a fixed width: 64dp fits "100%" at default font
-            // size so stepping 90% -> 100% doesn't move the buttons, but at
-            // large font scales the slot must grow or the '%' is clipped.
+            // 64dp is the touch-target floor; past that the slot is as wide
+            // as the widest label any level could show (see the probes
+            // below), so it is one width at every level and font scale.
             modifier = Modifier
                 .widthIn(min = 64.dp)
                 .semantics {
@@ -3133,12 +3136,25 @@ private fun ZoomMenuRow(level: Int?, onZoom: (ZoomAction) -> Unit) {
                         if (enabled && shown != PageZoomLevels.DEFAULT) ", tap to reset to 100%" else ""
                 },
         ) {
-            Text(
-                text = "$shown%",
-                maxLines = 1,
-                softWrap = false,
-                textAlign = TextAlign.Center,
-            )
+            Box(contentAlignment = Alignment.Center) {
+                // Invisible, silent width probes: they size the slot to the
+                // widest possible level at the current font scale, so going
+                // 90% -> 100% never nudges − / + (and the '%' never clips).
+                for (probe in PageZoomLevels.widthProbes) {
+                    Text(
+                        text = probe,
+                        maxLines = 1,
+                        softWrap = false,
+                        modifier = Modifier.alpha(0f).clearAndSetSemantics {},
+                    )
+                }
+                Text(
+                    text = PageZoomLevels.label(shown),
+                    maxLines = 1,
+                    softWrap = false,
+                    textAlign = TextAlign.Center,
+                )
+            }
         }
         IconButton(
             onClick = { onZoom(ZoomAction.In) },

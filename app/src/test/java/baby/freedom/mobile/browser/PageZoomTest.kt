@@ -5,6 +5,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class PageZoomTest {
@@ -19,6 +20,22 @@ class PageZoomTest {
         assertEquals(35, PageZoomLevels.step(25, zoomIn = true))
         assertEquals(500, PageZoomLevels.step(500, zoomIn = true))
         assertEquals(500, PageZoomLevels.step(495, zoomIn = true))
+    }
+
+    @Test
+    fun `width probes cover every level's label, one per digit`() {
+        val probes = PageZoomLevels.widthProbes
+        assertEquals(10, probes.size)
+        assertEquals("000%", probes.first())
+        assertEquals("999%", probes.last())
+        // Every reachable label has no more characters than the probes and
+        // each of its digits appears in a probe of that full length, so the
+        // widest probe bounds its width in any font.
+        for (level in PageZoomLevels.MIN..PageZoomLevels.MAX) {
+            val label = PageZoomLevels.label(level)
+            assertTrue(label.length <= probes.first().length)
+            for (c in label) assertTrue(probes.any { it.count { p -> p == c } >= label.count { it == c } })
+        }
     }
 
     @Test
