@@ -3,7 +3,15 @@ package baby.freedom.mobile.browser
 import baby.freedom.mobile.ens.EnsResolver
 import baby.freedom.mobile.ens.EnsResult
 import baby.freedom.swarm.SwarmNode
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Deferred
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeoutOrNull
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * Process-wide holder + router for the local content gateways.
@@ -54,6 +62,68 @@ object Gateways {
     @Volatile
     internal var ensLookup: (String) -> EnsResult =
         { name -> runBlocking { ensResolver.resolveContenthash(name) } }
+
+    /**
+     * How long a document re-check ([reverifyEnsDocument]) waits for the
+     * resolver when there *is* an earlier answer to fall back on. The
+     * resolver can take a minute to give up on a stalled network (five
+     * endpoints, 15 s each); before #99 Back served the page instantly,
+     * so the re-check may cost a moment, not that. A lookup still
+     * running at the deadline carries on in the background (and warms
+     * the resolver's cache for the next load); the document is served
+     * from the last answer meanwhile. `internal var` for tests.
+     */
+    @Volatile
+    internal var reverifyDeadlineMs: Long = 3_000
+
+    /**
+     * After a re-check that failed or ran out of time, later documents
+     * for the same name within this window don't wait for the resolver
+     * again: an `Error` isn't cached by the resolver, so each iframe and
+     * each Back would otherwise pay [reverifyDeadlineMs] anew on a dead
+     * network. They join the lookup still in flight, if any, without
+     * waiting on it. `internal var` for tests.
+     */
+    @Volatile
+    internal var reverifyFailureWindowMs: Long = 30_000
+
+    private val lookupScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val lookupsInFlight = ConcurrentHashMap<String, Deferred<EnsResult>>()
+    private val lookupFailedAt = ConcurrentHashMap<String, Long>()
+
+    /** Forget recent lookup failures (tests swapping [ensLookup]). */
+    internal fun resetEnsLookupState() {
+        lookupFailedAt.clear()
+    }
+
+    /**
+     * [ensLookup] for [name], shared with any lookup for it already in
+     * flight, waiting at most [deadlineMs] (`null` = until it answers).
+     * `null` when the deadline passed first; the lookup keeps running.
+     */
+    private fun lookupWithin(name: String, deadlineMs: Long?): EnsResult? {
+        val key = name.lowercase()
+        var started: Deferred<EnsResult>? = null
+        val job = lookupsInFlight.computeIfAbsent(key) {
+            lookupScope.async(start = CoroutineStart.LAZY) {
+                try {
+                    ensLookup(name)
+                } catch (e: Exception) {
+                    if (e is kotlinx.coroutines.CancellationException) throw e
+                    EnsResult.Error(name, "PROVIDER_ERROR", e.message.orEmpty(), retryable = true)
+                }
+            }.also { started = it }
+        }
+        started?.let { own ->
+            own.invokeOnCompletion { lookupsInFlight.remove(key, own) }
+            own.start()
+        }
+        return runBlocking {
+            if (deadlineMs == null) job.await()
+            else if (deadlineMs <= 0) (if (job.isCompleted) job.await() else null)
+            else withTimeoutOrNull(deadlineMs) { job.await() }
+        }
+    }
 
     /**
      * Rewrite a user-facing URL (`bzz://` / `ipfs://` / `ipns://` /
@@ -182,13 +252,37 @@ object Gateways {
      * or this session had for the name, as it did before the re-check
      * existed — the network being down is no reason to stop Back from
      * working. With no earlier answer at all it's `ens_lookup_failed`.
+     * The same goes for a lookup that hasn't answered within
+     * [reverifyDeadlineMs] when there is an earlier answer: a stalled
+     * network costs Back a few seconds at most, and nothing on the
+     * next loads of the name while [reverifyFailureWindowMs] runs.
+     * With no earlier answer the document waits for the resolver, as a
+     * typed navigation does.
      *
      * Returns `null` when the document may be served (its root is now
      * pinned), or the [ErrorPage] code for the refusal. A refusal
      * leaves the registry and the pins untouched.
      */
-    fun reverifyEnsDocument(name: String, pins: EnsDocumentPins? = null): String? =
-        when (val result = ensLookup(name)) {
+    fun reverifyEnsDocument(name: String, pins: EnsDocumentPins? = null): String? {
+        val key = name.lowercase()
+        val last = (pins?.lastAnswerFor(name) ?: KnownEnsNames.uriFor(name))
+            ?.takeIf { VirtualOrigin.parseContentUrl(it) != null }
+        // With something to fall back on, don't hold the document for
+        // the resolver's worst case (see [reverifyDeadlineMs]).
+        val deadline = when {
+            last == null -> null
+            lookupFailedAt[key]?.let {
+                System.currentTimeMillis() - it < reverifyFailureWindowMs
+            } == true -> 0L
+            else -> reverifyDeadlineMs
+        }
+        val result = lookupWithin(name, deadline)
+        if (result == null || result is EnsResult.Error) {
+            lookupFailedAt[key] = System.currentTimeMillis()
+        } else {
+            lookupFailedAt.remove(key)
+        }
+        return when (result) {
             is EnsResult.Ok -> {
                 if (VirtualOrigin.parseContentUrl(result.uri) == null) {
                     "ens_unsupported_codec"
@@ -200,9 +294,8 @@ object Gateways {
             }
             is EnsResult.NotFound -> "ens_not_found"
             is EnsResult.Unsupported -> "ens_unsupported_codec"
-            is EnsResult.Error -> {
-                val last = (pins?.uriFor(name) ?: KnownEnsNames.uriFor(name))
-                    ?.takeIf { VirtualOrigin.parseContentUrl(it) != null }
+            // Failed, or still running at the deadline: not an answer.
+            is EnsResult.Error, null -> {
                 if (last == null) {
                     "ens_lookup_failed"
                 } else {
@@ -211,22 +304,41 @@ object Gateways {
                 }
             }
         }
+    }
 }
 
 /**
- * One tab's `name → content URI` answers: the root each ENS document in
- * that tab was served from, so the document's subresources come from the
- * same root even if another tab re-checks the name in the meantime and
- * gets a newer answer (#99). Written by [Gateways.reverifyEnsDocument],
- * read by [Gateways.gatewayUrlFor]. Owned by the tab's WebView client;
- * the interceptor runs on WebView's IO threads, hence the concurrent map.
+ * One tab's `name → content URI` answers (#99), in two parts:
+ *
+ * - **the current page's**: the root each ENS document of the page on
+ *   screen (its main frame and its iframes) was served from. Its
+ *   subresources come from the same root even if another tab — or a
+ *   later Back in this one — re-checks the name and gets a newer
+ *   answer, so an already-loaded page never gets its lazy chunks from
+ *   a different version. Cleared by [newPage] when the tab's main frame
+ *   requests a new document; read by [Gateways.gatewayUrlFor].
+ * - **the tab's last answer** per name, kept across pages: what a
+ *   re-check whose lookup failed falls back on.
+ *
+ * Written by [Gateways.reverifyEnsDocument]. Owned by the tab's WebView
+ * client; the interceptor runs on WebView's IO threads, hence the
+ * concurrent maps.
  */
 class EnsDocumentPins {
-    private val nameToUri = java.util.concurrent.ConcurrentHashMap<String, String>()
+    private val page = ConcurrentHashMap<String, String>()
+    private val last = ConcurrentHashMap<String, String>()
 
     fun pin(name: String, uri: String) {
-        nameToUri[name.lowercase()] = uri
+        page[name.lowercase()] = uri
+        last[name.lowercase()] = uri
     }
 
-    fun uriFor(name: String): String? = nameToUri[name.lowercase()]
+    /** The root the current page's documents on [name] were served from. */
+    fun uriFor(name: String): String? = page[name.lowercase()]
+
+    /** The last answer this tab had for [name], on any page. */
+    fun lastAnswerFor(name: String): String? = last[name.lowercase()]
+
+    /** The main frame is loading a new document: the page's pins go. */
+    fun newPage() = page.clear()
 }

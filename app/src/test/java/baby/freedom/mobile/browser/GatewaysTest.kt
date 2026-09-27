@@ -121,11 +121,90 @@ class GatewaysTest {
     private fun withLookup(answer: (String) -> EnsResult, block: () -> Unit) {
         val real = Gateways.ensLookup
         Gateways.ensLookup = answer
+        Gateways.resetEnsLookupState()
         try {
             block()
         } finally {
             Gateways.ensLookup = real
+            Gateways.resetEnsLookupState()
             KnownEnsNames.clear()
+        }
+    }
+
+    @Test
+    fun `a stalled lookup serves the last answer after the deadline, and only waits once`() {
+        KnownEnsNames.record("bzz://$ref64", "stalled.eth")
+        val release = java.util.concurrent.CountDownLatch(1)
+        val lookups = java.util.concurrent.atomic.AtomicInteger(0)
+        val deadline = Gateways.reverifyDeadlineMs
+        Gateways.reverifyDeadlineMs = 200
+        try {
+            withLookup({ name ->
+                lookups.incrementAndGet()
+                release.await() // the RPC black-holes until released
+                EnsResult.Ok(name, "bzz", "bzz://$otherRef", otherRef)
+            }) {
+                val pins = EnsDocumentPins()
+                var t = System.nanoTime()
+                assertNull(Gateways.reverifyEnsDocument("stalled.eth", pins))
+                val firstMs = (System.nanoTime() - t) / 1_000_000
+                assertTrue("waited ${firstMs}ms", firstMs in 150..2_000)
+                assertEquals("bzz://$ref64", pins.uriFor("stalled.eth"))
+
+                // The next document (an iframe, another Back) doesn't wait
+                // again, and doesn't start a second lookup either.
+                t = System.nanoTime()
+                assertNull(Gateways.reverifyEnsDocument("stalled.eth", pins))
+                assertTrue((System.nanoTime() - t) / 1_000_000 < 150)
+                assertEquals(1, lookups.get())
+
+                // Once the lookup answers, the next load takes the answer.
+                release.countDown()
+                val until = System.currentTimeMillis() + 2_000
+                while (System.currentTimeMillis() < until &&
+                    pins.uriFor("stalled.eth") != "bzz://$otherRef"
+                ) {
+                    assertNull(Gateways.reverifyEnsDocument("stalled.eth", pins))
+                    Thread.sleep(20)
+                }
+                assertEquals("bzz://$otherRef", pins.uriFor("stalled.eth"))
+            }
+        } finally {
+            release.countDown()
+            Gateways.reverifyDeadlineMs = deadline
+        }
+    }
+
+    @Test
+    fun `with no earlier answer a slow lookup is waited for`() {
+        val deadline = Gateways.reverifyDeadlineMs
+        Gateways.reverifyDeadlineMs = 50
+        try {
+            withLookup({ name ->
+                Thread.sleep(300)
+                EnsResult.Ok(name, "bzz", "bzz://$otherRef", otherRef)
+            }) {
+                val pins = EnsDocumentPins()
+                assertNull(Gateways.reverifyEnsDocument("slow.eth", pins))
+                assertEquals("bzz://$otherRef", pins.uriFor("slow.eth"))
+            }
+        } finally {
+            Gateways.reverifyDeadlineMs = deadline
+        }
+    }
+
+    @Test
+    fun `a new page drops the page's pins but keeps the tab's last answer`() {
+        val pins = EnsDocumentPins()
+        pins.pin("swarm.eth", "bzz://$otherRef")
+        pins.newPage()
+        assertNull(pins.uriFor("swarm.eth"))
+        assertEquals("bzz://$otherRef", pins.lastAnswerFor("swarm.eth"))
+        // …which a failed lookup on the next page still falls back on.
+        KnownEnsNames.record("bzz://$ref64", "swarm.eth")
+        withLookup({ EnsResult.Error(it, "PROVIDER_ERROR", "down", retryable = true) }) {
+            assertNull(Gateways.reverifyEnsDocument("swarm.eth", pins))
+            assertEquals("bzz://$otherRef", pins.uriFor("swarm.eth"))
         }
     }
 

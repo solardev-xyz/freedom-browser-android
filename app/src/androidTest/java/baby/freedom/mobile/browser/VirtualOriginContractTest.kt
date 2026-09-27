@@ -51,6 +51,7 @@ class VirtualOriginContractTest {
         gateway.start()
         harness.setUp()
         KnownEnsNames.clear()
+        Gateways.resetEnsLookupState()
         Gateways.ensLookup = { name ->
             ensLookups.incrementAndGet()
             val ref = testdappContent
@@ -71,6 +72,7 @@ class VirtualOriginContractTest {
         gateway.shutdown()
         KnownEnsNames.clear()
         Gateways.ensLookup = realEnsLookup
+        Gateways.resetEnsLookupState()
     }
 
     private fun clearWebStorage() {
@@ -233,11 +235,13 @@ class VirtualOriginContractTest {
         harness.load(originB)
         harness.awaitJsTrue("window.results && window.results.loaded === true")
 
-        // The name moves; a page embeds it. The iframe's document is a
-        // document too, and is served from the current answer.
+        // The name moves; another page embeds it. The iframe's document
+        // is a document too, and is served from the current answer —
+        // not the session's first one. (Leaving the name's page dropped
+        // this tab's pin for it.)
         testdappContent = FixtureGateway.REF_B
         KnownEnsNames.record("bzz://${FixtureGateway.REF_A}", "testdapp.eth")
-        harness.ensPins.pin("testdapp.eth", "bzz://${FixtureGateway.REF_A}")
+        assertEquals(null, harness.ensPins.uriFor("testdapp.eth"))
         val before = ensLookups.get()
         harness.js(
             "(function(){var f=document.createElement('iframe');" +
@@ -247,6 +251,66 @@ class VirtualOriginContractTest {
         harness.awaitJsTrue("window.__framed === true")
         assertTrue("the iframe looked the name up", ensLookups.get() > before)
         assertEquals("bzz://${FixtureGateway.REF_B}", harness.ensPins.uriFor("testdapp.eth"))
+    }
+
+    @Test
+    fun aSameNameIframeKeepsThePagesRoot() {
+        val ensUrl = VirtualOrigin.toVirtualUrl("ens://testdapp.eth")!!
+        testdappContent = FixtureGateway.REF_A
+        harness.load(ensUrl)
+        harness.awaitJsTrue("window.results && window.results.loaded === true")
+
+        // The name moves while its page is on screen, and the page embeds
+        // itself: the iframe is part of the page already served from A, so
+        // it must not re-pin the name and move the page's later
+        // subresources to B under A's HTML.
+        testdappContent = FixtureGateway.REF_B
+        val before = ensLookups.get()
+        harness.js(
+            "(function(){var f=document.createElement('iframe');" +
+                "f.onload=function(){window.__framed=true};" +
+                "f.src='$ensUrl';document.body.appendChild(f)})()",
+        )
+        harness.awaitJsTrue("window.__framed === true")
+        assertEquals("no re-check for the page's own name", before, ensLookups.get())
+        assertEquals("bzz://${FixtureGateway.REF_A}", harness.ensPins.uriFor("testdapp.eth"))
+        assertEquals(
+            "\"VERSION_A\"",
+            harness.js(
+                "document.querySelector('iframe').contentDocument" +
+                    ".getElementById('version').textContent",
+            ),
+        )
+    }
+
+    @Test
+    fun backWithTheRpcStalledServesTheLastAnswerWithinTheDeadline() {
+        val ensUrl = VirtualOrigin.toVirtualUrl("ens://testdapp.eth")!!
+        testdappContent = FixtureGateway.REF_A
+        harness.load(ensUrl)
+        harness.awaitJsTrue("window.results && window.results.loaded === true")
+        harness.load(originB)
+        harness.awaitJsTrue("window.results && window.results.loaded === true")
+
+        // Every RPC black-holes. Back must not wait out the resolver's
+        // minute of timeouts before serving the last answer.
+        val release = java.util.concurrent.CountDownLatch(1)
+        val real = Gateways.ensLookup
+        Gateways.ensLookup = { name -> release.await(); real(name) }
+        try {
+            val t = System.currentTimeMillis()
+            harness.goBack(timeoutSeconds = 20)
+            harness.awaitJsTrue("window.results && window.results.loaded === true")
+            val took = System.currentTimeMillis() - t
+            assertTrue("Back took ${took}ms", took < Gateways.reverifyDeadlineMs + 5_000)
+            assertEquals(0, harness.lastHttpError.get())
+            assertEquals(
+                "\"VERSION_A\"",
+                harness.js("document.getElementById('version').textContent"),
+            )
+        } finally {
+            release.countDown()
+        }
     }
 
     // ------------------------------------------------------------------

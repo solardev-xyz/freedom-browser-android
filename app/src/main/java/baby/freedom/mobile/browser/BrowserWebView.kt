@@ -102,6 +102,28 @@ internal fun statusForNameResolutionError(code: String): Int =
     if (code == "ens_lookup_failed") 502 else 404
 
 /**
+ * "The main-frame document the interceptor last served for this tab was
+ * a name refusal" (#99), keyed by its URL. The refusal is served on the
+ * name's real URL, not on an [ErrorPage] URL, so the
+ * `ErrorPage.isErrorPage` guards that keep error pages out of history
+ * can't see it; the tab's client asks this instead. Written from
+ * `shouldInterceptRequest` (IO thread) for every main-frame request —
+ * which WebView makes before the document commits — and read on the
+ * main thread from `onPageFinished`.
+ */
+internal class NameRefusalSlot {
+    @Volatile
+    private var refusedUrl: String? = null
+
+    fun onMainFrameResponse(url: String, refusalCode: String?) {
+        refusedUrl = if (refusalCode != null) url.substringBefore('#') else null
+    }
+
+    fun isRefused(url: String?): Boolean =
+        url != null && url.substringBefore('#') == refusedUrl
+}
+
+/**
  * Is [req] a document load — the top-level page, or an iframe — as
  * opposed to a subresource of one? The name re-check (#99) keys on this.
  * `isForMainFrame` alone misses iframes, and requests a service worker
@@ -732,6 +754,10 @@ private fun buildRefreshableWebView(
     // The ENS roots this tab's documents were served from, so their
     // subresources don't follow another tab's newer answer (#99).
     val ensPins = EnsDocumentPins()
+
+    // Is the document on screen the interceptor's in-place refusal of an
+    // ENS name? Kept out of history like any other error page (#99).
+    val nameRefusal = NameRefusalSlot()
 
     // "The document on screen has painted, and has not been written to
     // history yet." Commits in `onPageCommitVisible`, resets in
@@ -1543,7 +1569,9 @@ private fun buildRefreshableWebView(
                 // the address bar (displayFor returns "") and shouldn't
                 // clutter the history either. The error page is also
                 // deliberately kept out of history — it's a transient
-                // state, not a destination the user meant to visit.
+                // state, not a destination the user meant to visit —
+                // and so is the in-place refusal of an ENS name, which
+                // sits on the name's own URL (#99, [NameRefusalSlot]).
                 //
                 // The gate's commit half is only reset by `onPageStarted`,
                 // which an aborted load never gets — so on its synthetic
@@ -1568,6 +1596,7 @@ private fun buildRefreshableWebView(
                 // [CommittedVisitGate]).
                 if (display.isNotBlank() &&
                     !ErrorPage.isErrorPage(url) &&
+                    !nameRefusal.isRefused(url) &&
                     isCurrent
                 ) {
                     if (visitGate.isCommitted) {
@@ -1632,7 +1661,16 @@ private fun buildRefreshableWebView(
             override fun shouldInterceptRequest(
                 view: WebView?,
                 request: WebResourceRequest?,
-            ): WebResourceResponse? = interceptVirtualRequest(request, ensPins)
+            ): WebResourceResponse? {
+                val response = interceptVirtualRequest(request, ensPins)
+                if (request?.isForMainFrame == true) {
+                    nameRefusal.onMainFrameResponse(
+                        request.url.toString(),
+                        response?.let { nameResolutionErrorIn(it.responseHeaders) },
+                    )
+                }
+                return response
+            }
 
             override fun onReceivedError(
                 view: WebView?,
@@ -2124,6 +2162,10 @@ internal fun interceptVirtualRequest(
     val uri = req.url ?: return null
     val url = uri.toString()
 
+    // A new main-frame document — any URL, not only a virtual one — is
+    // a new page: the previous page's ENS pins stop applying (#99).
+    if (req.isForMainFrame) ensPins?.newPage()
+
     // Sanctioned write path: pages on virtual origins POST/upload to
     // the node API origin (`http://127.0.0.1:…`) directly. Those
     // requests pass through to Chromium's network stack (bodies never
@@ -2170,7 +2212,15 @@ internal fun interceptVirtualRequest(
     // A document on a name-derived origin re-checks the name first —
     // Back / Forward included, which restore the history entry without
     // going through submit (#99, see [Gateways.reverifyEnsDocument]).
-    if (root is ContentRoot.Ens && isDocumentRequest(req.isForMainFrame, req.requestHeaders)) {
+    // Except a non-main-frame document on a name the page on screen is
+    // already pinned to — a same-name iframe, a pjax `fetch` asking for
+    // `text/html`: that is part of the page, and re-pinning the name
+    // would move the rest of the page's subresources to a newer root
+    // under its old HTML.
+    if (root is ContentRoot.Ens &&
+        isDocumentRequest(req.isForMainFrame, req.requestHeaders) &&
+        (req.isForMainFrame || ensPins?.uriFor(root.name) == null)
+    ) {
         Gateways.reverifyEnsDocument(root.name, ensPins)?.let { code ->
             return nameResolutionRefusal(root.name, code)
         }

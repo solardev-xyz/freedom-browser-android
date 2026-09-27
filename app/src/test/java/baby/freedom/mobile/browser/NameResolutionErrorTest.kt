@@ -69,4 +69,19 @@ class NameResolutionErrorTest {
             isDocumentRequest(false, mapOf("Sec-Fetch-Dest" to "empty", "Accept" to navAccept)),
         )
     }
+
+    @Test
+    fun `a refused main-frame document is recognised until the next one`() {
+        val slot = NameRefusalSlot()
+        val url = "https://name-eth.ens.freedom.baby/"
+        assertFalse(slot.isRefused(url))
+        slot.onMainFrameResponse(url, "ens_not_found")
+        assertTrue(slot.isRefused(url))
+        assertTrue(slot.isRefused("$url#section"))
+        assertFalse(slot.isRefused("https://other-eth.ens.freedom.baby/"))
+        assertFalse(slot.isRefused(null))
+        // The next main-frame document was served: no longer refused.
+        slot.onMainFrameResponse(url, null)
+        assertFalse(slot.isRefused(url))
+    }
 }
