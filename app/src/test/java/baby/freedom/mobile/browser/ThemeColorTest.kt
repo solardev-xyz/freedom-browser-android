@@ -24,6 +24,9 @@ class ThemeColorTest {
         function meta(content, media) {
           return { getAttribute: function (a) { return a === 'content' ? content : a === 'media' ? (media === undefined ? null : media) : null; } };
         }
+        // What the canvas paints for colours outside sRGB's syntax: the engine's sRGB for them.
+        var painted = { 'oklch(60% 0.2 30)': [211, 74, 64, 255], 'color(display-p3 1 0 0)': [255, 0, 0, 255],
+                        'oklch(60% 0.2 30 / 0)': [0, 0, 0, 0] };
         var named = { red: '#ff0000', white: '#ffffff', navy: '#000080', rebeccapurple: '#663399' };
         function serialise(c) {
           var s = String(c).trim().toLowerCase(), m;
@@ -32,6 +35,8 @@ class ThemeColorTest {
           if (s === 'currentcolor') return '#000000';
           if ((m = /^#([0-9a-f])([0-9a-f])([0-9a-f])${'$'}/.exec(s))) return '#' + m[1] + m[1] + m[2] + m[2] + m[3] + m[3];
           if (/^#[0-9a-f]{6}${'$'}/.test(s)) return s;
+          // Chromium keeps a non-sRGB CSS Color 4 value in its own syntax.
+          if (/^(oklch|oklab|lab|lch|color)\(/.test(s)) return s;
           if ((m = /^rgba?\((\d+),\s*(\d+),\s*(\d+)(?:,\s*([\d.]+))?\)${'$'}/.exec(s))) {
             if (m[4] !== undefined && +m[4] < 1) return 'rgba(' + m[1] + ', ' + m[2] + ', ' + m[3] + ', ' + m[4] + ')';
             var h = function (n) { return ('0' + (+n).toString(16)).slice(-2); };
@@ -43,10 +48,13 @@ class ThemeColorTest {
           querySelectorAll: function (sel) { selectors.push(sel); return metas; },
           createElement: function (t) {
             return { getContext: function () {
-              var v = '#000000';
+              var v = '#000000', px = [0, 0, 0, 0];
               return {
                 get fillStyle() { return v; },
-                set fillStyle(c) { var s = serialise(c); if (s) v = s; }
+                set fillStyle(c) { var s = serialise(c); if (s) v = s; },
+                clearRect: function () { px = [0, 0, 0, 0]; },
+                fillRect: function () { px = painted[v] || [0, 0, 0, 0]; },
+                getImageData: function () { return { data: px }; }
               };
             } };
           },
@@ -118,6 +126,18 @@ class ThemeColorTest {
         // …in favour of the next one that does parse.
         eval("metas.push(meta('navy'))")
         assertEquals(0xFF000080.toInt(), read())
+    }
+
+    @Test
+    fun `colours outside sRGB's syntax are read from a painted pixel`() {
+        eval("metas = [meta('oklch(60% 0.2 30)')]")
+        assertEquals(0xFFD34A40.toInt(), read())
+        eval("metas = [meta('color(display-p3 1 0 0)')]")
+        assertEquals(0xFFFF0000.toInt(), read())
+        // Fully transparent still doesn't count, however it's written.
+        eval("metas = [meta('oklch(60% 0.2 30 / 0)'), meta('navy')]")
+        assertEquals(0xFF000080.toInt(), read())
+        assertEquals(0, Context.toNumber(eval("writes")).toInt())
     }
 
     @Test

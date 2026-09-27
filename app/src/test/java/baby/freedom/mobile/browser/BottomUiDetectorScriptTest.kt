@@ -78,7 +78,9 @@ class BottomUiDetectorScriptTest {
           if (pageCancels) e.defaultPrevented = true;
           flushTimers();
         }
-        function MutationObserver(cb) { mutationCb = cb; this.observe = function (n, o) { this.target = n; this.opts = o; }; }
+        var mutationObs = null;
+        function mutationCbOpts() { return mutationObs.opts; }
+        function MutationObserver(cb) { mutationCb = cb; mutationObs = this; this.observe = function (n, o) { this.target = n; this.opts = o; }; }
         function ResizeObserver(cb) { this.cb = cb; var self = this;
           this.observe = function (e) { observed.push({ kind: 'resize', el: e, cb: cb, obs: self }); };
           this.disconnect = function () { observed = observed.filter(function (o) { return o.obs !== self; }); }; }
@@ -279,6 +281,42 @@ class BottomUiDetectorScriptTest {
         mutate(); flush()
         assertEquals(2, sent)
         assertEquals("rgb(0, 0, 0)", last().color())
+    }
+
+    @Test
+    fun `a meta change pings Kotlin to re-read the theme colour, debounced, and nothing else does`() = page {
+        eval("hit = tab")
+        install()
+        val sentStr = { Context.toString(eval("sent.join('|')")) }
+        // It watches the attributes a theme-color change comes through.
+        assertEquals(
+            "class,style,hidden,open,content,media,name",
+            Context.toString(eval("mutationCbOpts().attributeFilter.join(',')")),
+        )
+        // A mutation elsewhere: no ping.
+        eval("mutationCb([{ type: 'attributes', target: { nodeName: 'DIV' } }, { type: 'childList', addedNodes: [{ nodeName: 'P' }], removedNodes: [] }])")
+        flush()
+        assertEquals(1, sent)
+        // A route setting its colour after a fetch: `content` changes, twice in one debounce.
+        eval("mutationCb([{ type: 'attributes', target: { nodeName: 'META' } }])")
+        eval("mutationCb([{ type: 'attributes', target: { nodeName: 'META' } }])")
+        assertEquals(1, timers)
+        flush()
+        assertEquals(2, sent)
+        val ping = Context.toString(eval("sent[1]"))
+        assertEquals(THEME_COLOR_PING_PREFIX + token, ping)
+        assertTrue(isThemeColorPing(ping, isMainFrame = true, expectedToken = token))
+        assertFalse(isThemeColorPing(ping, isMainFrame = false, expectedToken = token))
+        assertFalse(isThemeColorPing(ping, isMainFrame = true, expectedToken = "ffff"))
+        assertFalse(isThemeColorPing(ping, isMainFrame = true, expectedToken = null))
+        // A tag added, a tag removed, a `<head>` swapped: one ping each.
+        eval("mutationCb([{ type: 'childList', addedNodes: [{ nodeName: 'META' }], removedNodes: [] }])"); flush()
+        eval("mutationCb([{ type: 'childList', addedNodes: [], removedNodes: [{ nodeName: 'META' }] }])"); flush()
+        eval("mutationCb([{ type: 'childList', addedNodes: [{ nodeName: 'HEAD' }], removedNodes: [] }])"); flush()
+        assertEquals(5, sent)
+        // …and it's no probe report: the bottom-UI answer is unchanged, so none was sent.
+        assertNull(parseBottomUiMessage(ping, true, token))
+        assertTrue(sentStr().split('|').drop(1).all { it == ping })
     }
 
     @Test

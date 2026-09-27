@@ -24,14 +24,19 @@ import kotlin.math.pow
  * page is rendered in). The name matches case-insensitively, like
  * Chromium's own lookup.
  *
- * Any CSS colour is accepted (hex, `rgb()`, `hsl()`, named…): it is
- * normalised by a detached 2D canvas, the same way the bottom-nav
- * detector reads the page's `theme-color` for its strip
- * ([bottomUiDetectorJs]). A value the canvas rejects keeps its
- * `fillStyle` unchanged, so it is set over two different defaults and
- * accepted only if both agree. `currentcolor` (meaningless without an
- * element) and a fully transparent colour don't count; any other alpha
- * is dropped, a status bar can't be see-through.
+ * Any CSS colour the page's engine parses is accepted: it is normalised
+ * by a detached 2D canvas, the same way the bottom-nav detector reads
+ * the page's `theme-color` for its strip ([bottomUiDetectorJs]). A value
+ * the canvas rejects keeps its `fillStyle` unchanged, so it is set over
+ * two different defaults and accepted only if both agree. sRGB colours
+ * (hex, `rgb()`, `hsl()`, `hwb()`, named…) serialise as `#rrggbb` or
+ * `rgba(…)` and are read from that string. CSS Color 4 colours in other
+ * spaces (`lab()`, `oklch()`, `color(display-p3 …)`) keep their own
+ * syntax in `fillStyle`, so those are painted into one pixel of the
+ * (never attached) canvas and read back with `getImageData`: the
+ * canvas's sRGB, gamut-mapped by the engine. `currentcolor` (meaningless
+ * without an element) and a fully transparent colour don't count; any
+ * other alpha is dropped, a status bar can't be see-through.
  *
  * Nothing is written to the page: no node is inserted, the canvas is
  * never attached, and there is no global or listener of ours left
@@ -51,7 +56,12 @@ internal const val THEME_COLOR_JS = """
       var h = HEX.exec(a);
       if (h) return 'rgb(' + parseInt(h[1], 16) + ', ' + parseInt(h[2], 16) + ', ' + parseInt(h[3], 16) + ')';
       var m = RGBA.exec(a);
-      if (!m || (m[4] !== undefined && parseFloat(m[4]) === 0)) return null;
+      if (!m) {
+        ctx.clearRect(0, 0, 1, 1); ctx.fillRect(0, 0, 1, 1);
+        var p = ctx.getImageData(0, 0, 1, 1).data;
+        return p[3] ? 'rgb(' + p[0] + ', ' + p[1] + ', ' + p[2] + ')' : null;
+      }
+      if (m[4] !== undefined && parseFloat(m[4]) === 0) return null;
       return 'rgb(' + Math.round(+m[1]) + ', ' + Math.round(+m[2]) + ', ' + Math.round(+m[3]) + ')';
     }
     var ms = d.querySelectorAll('meta[name="theme-color" i]');

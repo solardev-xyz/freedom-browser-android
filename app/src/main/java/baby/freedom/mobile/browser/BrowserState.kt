@@ -402,7 +402,8 @@ class BrowserState(val id: Long) {
      * The document on screen's `<meta name="theme-color">` as opaque
      * ARGB, or null for none (#92): the band behind the status bar takes
      * it. Set by the tab's WebView from [THEME_COLOR_JS] after first
-     * paint, load finished and same-document history changes (see
+     * paint, load finished, same-document history changes and any
+     * `<meta>` change the bottom-UI detector sees (see
      * [ThemeColorSlot]); cleared on the way home.
      */
     var themeColorArgb: Int? by mutableStateOf<Int?>(null)

@@ -970,7 +970,9 @@ private fun buildRefreshableWebView(
 
     // The page's theme colour behind the status bar (#92). Read at first
     // paint, when the load finishes (a tag a script adds late) and on a
-    // same-document history change (an SPA route with its own colour);
+    // same-document history change (an SPA route with its own colour),
+    // and whenever the detector sees a `<meta>` change (a route that sets
+    // its colour only after its data arrives, [THEME_COLOR_PING_PREFIX]);
     // each read is stamped with its document and gated on that document
     // having painted, so the outgoing page can't answer for the incoming
     // one (see [ThemeColorSlot]).
@@ -1559,7 +1561,9 @@ private fun buildRefreshableWebView(
         // `prefers-color-scheme`, and its theme colour may be one of a
         // light/dark pair (#92). Read it again once a frame drawn after
         // the switch is on screen: asked any earlier, `matchMedia` can
-        // still answer for the old scheme.
+        // still answer for the old scheme. Every tab's WebView stays
+        // attached to the one frame (a background tab is only hidden),
+        // so a background tab hears the switch and re-reads too.
         onNightModeChanged = {
             postVisualStateCallback(0, object : WebView.VisualStateCallback() {
                 override fun onComplete(requestId: Long) = readThemeColor(this@apply)
@@ -1623,6 +1627,14 @@ private fun buildRefreshableWebView(
                     // otherwise it waits for its document's first paint.
                     if (!isMainFrame) return@WebMessageListener
                     postBottomUiProbe(bottomUiChannels.onReady(replyProxy, bottomChrome.installed))
+                    return@WebMessageListener
+                }
+                // A `<meta>` changed in the current document (#92): an
+                // SPA route that sets its theme colour only after its
+                // data arrives, well after `doUpdateVisitedHistory`'s
+                // read. [readThemeColor] still gates on that document.
+                if (isThemeColorPing(message.data, isMainFrame, bottomChrome.token)) {
+                    readThemeColor(view)
                     return@WebMessageListener
                 }
                 val report = parseBottomUiMessage(message.data, isMainFrame, bottomChrome.token)
@@ -2115,6 +2127,8 @@ private fun buildRefreshableWebView(
                 // An SPA route can bring its own theme colour (#92). Only
                 // once the document has painted: before that, this is the
                 // cross-document commit, and first paint reads it anyway.
+                // A colour the route sets later (after a fetch) comes in
+                // through the detector's `<meta>` ping.
                 readThemeColor(view)
                 requestBottomUiProbe()
             }

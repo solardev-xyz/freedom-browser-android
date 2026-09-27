@@ -403,6 +403,23 @@ internal const val CONTEXT_MENU_ALLOWED = "contextmenu 1"
 /** The detector's report that the page kept a long-press (`preventDefault()` on its `contextmenu`). */
 internal const val CONTEXT_MENU_KEPT = "contextmenu 0"
 
+/**
+ * What the detector posts, followed by the current document's token,
+ * when a mutation touched a `<meta>` (added, removed, or its `content` /
+ * `media` / `name` changed) or swapped a `<head>`: the page's theme
+ * colour may have changed, so Kotlin reads it again (#92). A ping only —
+ * the colour itself is read by [THEME_COLOR_JS].
+ */
+internal const val THEME_COLOR_PING_PREFIX = "theme "
+
+/**
+ * Is [data] the current document's [THEME_COLOR_PING_PREFIX] ping? Main
+ * frame only, and only with [expectedToken] (another document's ping, or
+ * one sent before Kotlin's first probe request, is dropped).
+ */
+internal fun isThemeColorPing(data: String?, isMainFrame: Boolean, expectedToken: String?): Boolean =
+    isMainFrame && expectedToken != null && data == THEME_COLOR_PING_PREFIX + expectedToken
+
 /** What Kotlin sends back through the channel to ask for a fresh, reported probe. */
 internal fun bottomUiProbeRequest(token: String): String = "probe $token"
 
@@ -493,6 +510,13 @@ internal fun bottomUiProbeRequest(token: String): String = "probe $token"
  * wasn't there at install, the `MutationObserver` is attached on the
  * document's next `readystatechange` (which also probes).
  *
+ * **Theme colour** (#92). The same `MutationObserver` also watches
+ * `content`, `media` and `name`; a batch that touched a `<meta>` (or a
+ * `<head>`) marks the theme colour dirty, and the next debounced run
+ * posts a [THEME_COLOR_PING_PREFIX] ping with the token, so a route that
+ * sets its `theme-color` after a data fetch (react-helmet, Next.js, Vue's
+ * `useHead`) is still read. The ping carries no colour; Kotlin reads it.
+ *
  * **Reporting.** Only when the answer (flag, colour) changes, or when
  * Kotlin asked. Nothing is written to the page: no DOM node, attribute,
  * style or global of ours — the platform's channel object included,
@@ -524,7 +548,8 @@ internal fun bottomUiDetectorJs(channel: String, debounceMs: Int = BOTTOM_UI_DEB
   var T = null, started = false, ASK = /^probe ([0-9a-f]{1,64})$/, SEL = 'a, button, [role="button"], [role="tab"], [role="link"]';
   var gcs = w.getComputedStyle, MO = w.MutationObserver,
       RO = w.ResizeObserver, IO = w.IntersectionObserver, str = JSON.stringify;
-  var timer = 0, last = null, owed = false, mo = null, watched = null, ro = null, io = null, fullW = -1, fullH = 0, ctx = null;
+  var timer = 0, last = null, owed = false, mo = null, watched = null, ro = null, io = null, fullW = -1, fullH = 0, ctx = null,
+      metaDirty = false;
   var RGBA = /^rgba?\(\s*([\d.]+)[\s,]+([\d.]+)[\s,]+([\d.]+)\s*(?:[,\/]\s*([\d.]+)(%?)\s*)?\)$/;
   function paint(c) {
     var m = RGBA.exec(c || '');
@@ -590,6 +615,7 @@ internal fun bottomUiDetectorJs(channel: String, debounceMs: Int = BOTTOM_UI_DEB
   }
   function run(force) {
     timer = 0;
+    if (metaDirty) { metaDirty = false; port.postMessage('$THEME_COLOR_PING_PREFIX' + T); }
     var p = null;
     try { p = probe(); } catch (e) {}
     if (!p) { if (force) owed = true; return; }
@@ -600,11 +626,22 @@ internal fun bottomUiDetectorJs(channel: String, debounceMs: Int = BOTTOM_UI_DEB
     port.postMessage(str({ token: T, hasBottomUI: !!p.nav, color: p.color }));
   }
   function soon() { if (!timer) timer = setT(function () { run(false); }, $debounceMs); }
+  function isMeta(n) { return !!n && (n.nodeName === 'META' || n.nodeName === 'HEAD'); }
+  function metaTouched(recs) {
+    for (var i = 0; recs && i < recs.length; i++) {
+      var r = recs[i];
+      if (r.type === 'attributes') { if (isMeta(r.target)) return true; continue; }
+      var lists = [r.addedNodes, r.removedNodes];
+      for (var j = 0; j < 2; j++) for (var k = 0; lists[j] && k < lists[j].length; k++) if (isMeta(lists[j][k])) return true;
+    }
+    return false;
+  }
   function attach() {
     if (mo || !MO || !d.documentElement) return;
-    mo = new MO(soon);
+    mo = new MO(function (recs) { if (metaTouched(recs)) metaDirty = true; soon(); });
     mo.observe(d.documentElement, {
-      childList: true, subtree: true, attributes: true, attributeFilter: ['class', 'style', 'hidden', 'open']
+      childList: true, subtree: true, attributes: true,
+      attributeFilter: ['class', 'style', 'hidden', 'open', 'content', 'media', 'name']
     });
   }
   function start() {
