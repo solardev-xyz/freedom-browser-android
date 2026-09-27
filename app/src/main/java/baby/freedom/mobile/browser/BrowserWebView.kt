@@ -1500,8 +1500,8 @@ private fun buildRefreshableWebView(
                 // Input the top document itself received (#85): only the
                 // main frame's word counts — an iframe's would let it
                 // vouch for a tap on itself ([UserGestureLatch]).
-                if (message.data == TOP_DOCUMENT_INPUT) {
-                    if (isMainFrame) userGestures.onTopDocumentInput()
+                parseTopDocumentInput(message.data)?.let { ageMs ->
+                    if (isMainFrame) userGestures.onTopDocumentInput(ageMs)
                     return@WebMessageListener
                 }
                 // The page's say on a long-press (#84): any frame, since
@@ -2429,12 +2429,15 @@ internal class PageWebView(context: Context) : WebView(context) {
     override fun dispatchTouchEvent(event: MotionEvent): Boolean {
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
-                userGestures.onInputStart()
+                userGestures.onInputStart(event.eventTime)
                 taps.onDown(event.x, event.y)
             }
             MotionEvent.ACTION_MOVE -> taps.onMove(event.x, event.y)
             MotionEvent.ACTION_POINTER_DOWN, MotionEvent.ACTION_CANCEL -> taps.onCancel()
-            MotionEvent.ACTION_UP -> if (taps.onUp(event.x, event.y)) userGestures.onInput()
+            MotionEvent.ACTION_UP -> {
+                userGestures.onInputContinues(event.eventTime)
+                if (taps.onUp(event.x, event.y)) userGestures.onInput()
+            }
         }
         return super.dispatchTouchEvent(event)
     }
@@ -2447,7 +2450,8 @@ internal class PageWebView(context: Context) : WebView(context) {
                 isModifier = KeyEvent.isModifierKey(event.keyCode),
             )
         ) {
-            userGestures.onInputStart()
+            userGestures.onInputStart(event.eventTime)
+            userGestures.onInputContinues(SystemClock.uptimeMillis())
             userGestures.onInput()
         }
         return super.dispatchKeyEvent(event)

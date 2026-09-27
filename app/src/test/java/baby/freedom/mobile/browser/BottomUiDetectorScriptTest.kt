@@ -68,9 +68,15 @@ class BottomUiDetectorScriptTest {
         function matchMedia(q) { return { matches: !!mediaMatches[q] }; }
         function setTimeout(f, ms) { timers.push({ f: f, ms: ms }); return ++timerSeq; }
         var contextMenuListeners = [], inputListeners = [];
+        // The page's clock, and Event's native timeStamp getter (which the page may later shadow).
+        var perfNow = 1000;
+        var performance = { now: function () { return perfNow; } };
+        function Event() {}
+        Object.defineProperty(Event.prototype, 'timeStamp', { configurable: true, get: function () { return this._ts; } });
         // A trusted (or synthetic) input event of type [t] reaching this document.
         function input(t, trusted) {
-          for (var i = 0; i < inputListeners.length; i++) if (inputListeners[i].t === t) inputListeners[i].f({ isTrusted: trusted });
+          var e = new Event(); e.isTrusted = trusted; e._ts = perfNow - 7;
+          for (var i = 0; i < inputListeners.length; i++) if (inputListeners[i].t === t) inputListeners[i].f(e);
         }
         function addEventListener(t, f, c) {
           if (t === 'contextmenu') { contextMenuListeners.push({ f: f, capture: c === true }); return; }
@@ -416,7 +422,7 @@ class BottomUiDetectorScriptTest {
 
     // ---- input in the top document (#85) ------------------------------
 
-    private fun Page.inputs(): Int = num("sent.filter(function (s) { return s === '$TOP_DOCUMENT_INPUT'; }).length")
+    private fun Page.inputs(): Int = num("sent.filter(function (s) { return s.indexOf('$TOP_DOCUMENT_INPUT') === 0; }).length")
 
     @Test
     fun `trusted input in the top document is reported at once, from document start`() = page {
@@ -429,6 +435,18 @@ class BottomUiDetectorScriptTest {
         assertEquals(0, timers)
         eval("input('keydown', true); input('click', true)")
         assertEquals(3, inputs())
+        // Each says how long ago its event happened, on the page's clock.
+        assertTrue(eval("sent.every(function (s) { return s === '$TOP_DOCUMENT_INPUT 7'; })") as Boolean)
+    }
+
+    @Test
+    fun `the page can't skew the input's age after document start`() = page {
+        documentStart()
+        eval("performance.now = function () { return 1e9; }")
+        eval("Object.defineProperty(Event.prototype, 'timeStamp', { get: function () { return 0; } })")
+        eval("input('pointerdown', true)")
+        assertEquals(1, inputs())
+        assertEquals(7L, parseTopDocumentInput(eval("sent[sent.length - 1]").toString()))
     }
 
     @Test

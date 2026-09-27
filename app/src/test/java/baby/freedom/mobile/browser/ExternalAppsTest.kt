@@ -127,75 +127,177 @@ class ExternalAppsTest {
         onInput()
     }
 
+    /** A clock the tests move by hand, and a latch on it. */
+    private class Clock(var now: Long = 10_000L) {
+        val latch = UserGestureLatch { now }
+
+        /** A tap: down now, up [holdMs] later. Returns the down time. */
+        fun tap(holdMs: Long = 80): Long {
+            val down = now
+            latch.onInputStart(down)
+            now += holdMs
+            latch.onInputContinues(now)
+            latch.onInput()
+            return down
+        }
+
+        /** The top document's word about an event at [eventTime], arriving [transitMs] after the page read it. */
+        fun topDocumentSaw(eventTime: Long, transitMs: Long = 3) {
+            latch.onTopDocumentInput(now - transitMs - eventTime)
+        }
+    }
+
     @Test
     fun `a tap the top document confirmed before the navigation is offered at once`() {
-        val latch = UserGestureLatch { 10_000L }
-        latch.onInputStart()
-        latch.onTopDocumentInput() // its pointerdown, before the finger lifts
-        latch.onInput()
+        val c = Clock()
+        c.latch.onInputStart(c.now)
+        c.now += 10
+        c.topDocumentSaw(c.now - 10) // its pointerdown, before the finger lifts
+        c.latch.onInput()
         var offered = 0
-        assertTrue(latch.whenInTopDocument(latch.consume()!!) { offered++ })
+        assertTrue(c.latch.whenInTopDocument(c.latch.consume()!!) { offered++ })
         assertEquals(1, offered)
     }
 
     @Test
     fun `a tap the top document confirms after the navigation is offered then`() {
-        val latch = UserGestureLatch { 10_000L }
-        latch.tap()
-        val id = latch.consume()!!
+        val c = Clock()
+        val down = c.tap()
+        val id = c.latch.consume()!!
         var offered = 0
-        assertTrue(latch.whenInTopDocument(id) { offered++ })
+        assertTrue(c.latch.whenInTopDocument(id) { offered++ })
         assertEquals(0, offered)
-        latch.onTopDocumentInput() // ~20 ms later on the AVD
+        c.now += 20 // ~20 ms later on the AVD
+        c.topDocumentSaw(down)
         assertEquals(1, offered)
-        assertFalse(latch.giveUp(id))
-        latch.onTopDocumentInput()
+        assertFalse(c.latch.giveUp(id))
+        c.topDocumentSaw(down)
         assertEquals(1, offered)
     }
 
     @Test
     fun `a tap on an iframe is never offered, even one that navigates the top frame`() {
-        val latch = UserGestureLatch { 10_000L }
-        latch.tap() // the iframe got the pointerdown; the top document heard nothing
-        val id = latch.consume()!!
+        val c = Clock()
+        c.tap() // the iframe got the pointerdown; the top document heard nothing
+        val id = c.latch.consume()!!
         var offered = 0
-        assertTrue(latch.whenInTopDocument(id) { offered++ })
-        assertTrue(latch.giveUp(id)) // CONFIRM_MS later: refused
-        latch.onTopDocumentInput()
+        assertTrue(c.latch.whenInTopDocument(id) { offered++ })
+        assertTrue(c.latch.giveUp(id)) // CONFIRM_MS later: refused
         assertEquals(0, offered)
     }
 
     @Test
     fun `a top-document tap can't vouch for a later tap on an iframe`() {
-        val latch = UserGestureLatch { 10_000L }
-        latch.onInputStart() // a tap on the top page, unused
-        latch.onTopDocumentInput()
-        latch.onInput()
-        latch.tap() // then a tap on the iframe
+        val c = Clock()
+        val first = c.tap() // a tap on the top page, unused
+        c.topDocumentSaw(first)
+        c.latch.consume()
+        c.now += 150
+        c.tap() // then a tap on the iframe
         var offered = 0
-        assertTrue(latch.whenInTopDocument(latch.consume()!!) { offered++ })
+        assertTrue(c.latch.whenInTopDocument(c.latch.consume()!!) { offered++ })
         assertEquals(0, offered)
     }
 
     @Test
-    fun `nor can a later top-document tap vouch for an earlier iframe tap`() {
-        val latch = UserGestureLatch { 10_000L }
-        latch.tap() // on the iframe
-        val id = latch.consume()!!
+    fun `a top-document tap's word that arrives late, during a later iframe tap, vouches only for itself`() {
+        // R4-F1: an iframe keeps the shared renderer thread busy, so the
+        // top page's pointerdown for tap 1 is heard only after tap 2 (on
+        // the iframe's target=_top link) and its navigation.
+        val c = Clock()
+        val first = c.tap()
+        c.now += 150
+        c.tap() // on the iframe
+        val id = c.latch.consume()!!
         var offered = 0
-        assertTrue(latch.whenInTopDocument(id) { offered++ })
-        latch.onInputStart() // the next tap, on the top page
-        latch.onTopDocumentInput()
+        assertTrue(c.latch.whenInTopDocument(id) { offered++ })
+        c.now += 1_200 // the busy loop ends
+        c.topDocumentSaw(first)
         assertEquals(0, offered)
-        assertFalse(latch.whenInTopDocument(id) { offered++ })
+        assertTrue(c.latch.giveUp(id))
+    }
+
+    @Test
+    fun `nor can a later top-document tap vouch for an earlier iframe tap`() {
+        val c = Clock()
+        c.tap() // on the iframe
+        val id = c.latch.consume()!!
+        var offered = 0
+        assertTrue(c.latch.whenInTopDocument(id) { offered++ })
+        c.now += 150
+        val next = c.tap() // the next tap, on the top page
+        c.topDocumentSaw(next)
+        assertEquals(0, offered)
+        assertTrue(c.latch.giveUp(id))
+    }
+
+    @Test
+    fun `later input doesn't drop an offer waiting on a slow redirect chain`() {
+        // R4-F2: a tapped link redirects to an app scheme a second later;
+        // meanwhile the user touches the page again (a scroll's start).
+        val c = Clock()
+        val down = c.tap()
+        c.topDocumentSaw(down)
+        c.now += 500
+        c.latch.onInputStart(c.now) // a touch that becomes a scroll: no tap
+        c.topDocumentSaw(c.now)
+        c.now += 700
+        var offered = 0
+        assertTrue(c.latch.whenInTopDocument(c.latch.consume()!!) { offered++ })
+        assertEquals(1, offered)
+    }
+
+    @Test
+    fun `an offer already waiting is still run by its own input's late word`() {
+        val c = Clock()
+        val down = c.tap()
+        val id = c.latch.consume()!!
+        var offered = 0
+        assertTrue(c.latch.whenInTopDocument(id) { offered++ })
+        c.now += 200
+        c.latch.onInputStart(c.now) // another touch begins before the word arrives
+        c.topDocumentSaw(down)
+        assertEquals(1, offered)
+    }
+
+    @Test
+    fun `a word that fits two inputs confirms neither`() {
+        val c = Clock()
+        val first = c.tap(holdMs = 40)
+        c.now += 20
+        c.tap() // not human, but: 20 ms after the first lifted
+        val id = c.latch.consume()!!
+        var offered = 0
+        c.topDocumentSaw(first + 50, transitMs = 0) // after tap 1's end, in tap 2
+        assertTrue(c.latch.whenInTopDocument(id) { offered++ })
+        assertEquals(0, offered)
+    }
+
+    @Test
+    fun `a word that fits no input confirms nothing`() {
+        val c = Clock()
+        val down = c.tap()
+        c.topDocumentSaw(down - 500)
+        c.topDocumentSaw(c.now + 500) // a negative age can't come from the detector, but still
+        var offered = 0
+        assertTrue(c.latch.whenInTopDocument(c.latch.consume()!!) { offered++ })
         assertEquals(0, offered)
     }
 
     @Test
     fun `the top document's word alone, with no tap, buys nothing`() {
-        val latch = UserGestureLatch { 10_000L }
-        latch.onTopDocumentInput()
-        assertNull(latch.consume())
+        val c = Clock()
+        c.latch.onTopDocumentInput(0)
+        assertNull(c.latch.consume())
+    }
+
+    @Test
+    fun `the top document's input message carries the event's age`() {
+        assertEquals(12L, parseTopDocumentInput("input 12"))
+        assertEquals(0L, parseTopDocumentInput("input 0"))
+        for (bad in listOf("input", "input ", "input -3", "input 1.5", "input 12 ", "xinput 1", "input 12345678", null)) {
+            assertNull(bad, parseTopDocumentInput(bad))
+        }
     }
 
     @Test

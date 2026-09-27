@@ -410,6 +410,16 @@ internal const val CONTEXT_MENU_KEPT = "contextmenu 0"
  */
 internal const val TOP_DOCUMENT_INPUT = "input"
 
+private val TOP_DOCUMENT_INPUT_RE = Regex("^$TOP_DOCUMENT_INPUT (\\d{1,7})$")
+
+/**
+ * The age in ms of the input a [TOP_DOCUMENT_INPUT] message reports
+ * (`input <ms>`: how long before the message the DOM event happened), or
+ * `null` when [data] isn't one.
+ */
+internal fun parseTopDocumentInput(data: String?): Long? =
+    TOP_DOCUMENT_INPUT_RE.matchEntire(data ?: return null)?.groupValues?.get(1)?.toLong()
+
 /** What Kotlin sends back through the channel to ask for a fresh, reported probe. */
 internal fun bottomUiProbeRequest(token: String): String = "probe $token"
 
@@ -440,7 +450,10 @@ internal fun bottomUiProbeRequest(token: String): String = "probe $token"
  * **Input in the top document** (#85): in the main frame, capture
  * listeners for trusted `pointerdown`, `keydown` and `click` post
  * [TOP_DOCUMENT_INPUT] at once (not a task later: it has to reach Kotlin
- * before the navigation the input starts). A tap or key press aimed at
+ * before the navigation the input starts), with the event's age — `now`
+ * minus its `timeStamp`, both read through `performance.now` and the
+ * `Event.prototype` getter saved at document start, so page script can't
+ * skew them — which lets Kotlin tell which input it was. A tap or key press aimed at
  * an iframe is dispatched in the iframe's document only, so this is how
  * Kotlin tells a tap on the top page from one on an embedded frame that
  * navigates the top frame ([UserGestureLatch]).
@@ -536,7 +549,13 @@ internal fun bottomUiDetectorJs(channel: String, debounceMs: Int = BOTTOM_UI_DEB
     setT(function () { port.postMessage(e.defaultPrevented ? '$CONTEXT_MENU_KEPT' : '$CONTEXT_MENU_ALLOWED'); }, 0);
   }, true);
   if (w.top !== w) return;
-  var said = function (e) { if (e.isTrusted) port.postMessage('$TOP_DOCUMENT_INPUT'); };
+  var P = w.performance, pnow = P && P.now && P.now.bind(P), EP = w.Event && w.Event.prototype,
+      tsd = EP && Object.getOwnPropertyDescriptor(EP, 'timeStamp'), tsOf = tsd && tsd.get;
+  var said = function (e) {
+    if (!e.isTrusted || !pnow || !tsOf) return;
+    var age = Math.round(pnow() - tsOf.call(e));
+    port.postMessage('$TOP_DOCUMENT_INPUT ' + (age > 0 ? age : 0));
+  };
   w.addEventListener('pointerdown', said, true);
   w.addEventListener('keydown', said, true);
   w.addEventListener('click', said, true);

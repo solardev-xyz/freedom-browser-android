@@ -185,13 +185,18 @@ internal fun externalLinkVerdict(
  * iframe is dispatched inside the iframe's document alone), and Kotlin
  * takes it only when WebView reports the message as the main frame's.
  * That message is not ordered with the navigation: on the API 36 AVD it
- * lands ~20 ms *after* `shouldOverrideUrlLoading` for the tap's link. So
- * each input gets an id ([onInputStart]), the navigation — cancelled
+ * lands ~20 ms *after* `shouldOverrideUrlLoading` for the tap's link,
+ * and far later when a script (an iframe's, even: it shares the
+ * renderer thread) keeps the page busy. So each input gets an id and
+ * its start…end time ([onInputStart], [onInputContinues]); the message
+ * carries the DOM event's age, which puts it on the same timeline, and
+ * confirms only the one input it falls inside — a late word about a
+ * tap on the top page can't vouch for a later tap in an iframe, nor the
+ * other way round ([onTopDocumentInput]). The navigation — cancelled
  * anyway — takes the id with the tap ([consume]), and the offer waits
  * for the top document to confirm that same input
- * ([whenInTopDocument]), for at most [CONFIRM_MS] ([giveUp]). A new
- * input drops the wait: a tap in the top document can't vouch for a
- * later one in an iframe, nor the other way round. Without the detector
+ * ([whenInTopDocument]), for at most [CONFIRM_MS] ([giveUp]); later
+ * input (a scroll during a slow redirect chain) doesn't drop it. Without the detector
  * (a WebView lacking the document-start script) no input is ever
  * confirmed, and app links are refused: fail closed.
  *
@@ -199,32 +204,51 @@ internal fun externalLinkVerdict(
  * Main thread only.
  */
 internal class UserGestureLatch(private val clock: () -> Long) {
+    /** One input: when it began and (so far) ended, on [clock]'s timeline. */
+    private class Input(val id: Int, val start: Long, var end: Long) {
+        var inTopDocument = false
+    }
+
     private var inputId = 0
+    private val recent = ArrayDeque<Input>()
     private var armedId: Int? = null
     private var armedAt = 0L
-    private var topDocumentId: Int? = null
-    private var waiting: Pair<Int, () -> Unit>? = null
+    private val waiting = HashMap<Int, () -> Unit>()
 
     /**
      * A touch, key press or accessibility click begins — before the page
-     * sees it. A new input id; an offer still waiting for the previous
-     * one's confirmation is refused.
+     * sees it — at [at] (the event's own time, e.g. `MotionEvent.eventTime`).
+     * A new input id. An offer still waiting on an earlier input keeps
+     * waiting: its confirmation names its own input, not "the latest".
      */
-    fun onInputStart() {
+    fun onInputStart(at: Long = clock()) {
         inputId++
-        waiting = null
+        recent.addLast(Input(inputId, at, at))
+        val stale = clock() - WINDOW_MS - CONFIRM_MS
+        while (recent.isNotEmpty() && (recent.size > MAX_RECENT || recent.first().end < stale)) recent.removeFirst()
+    }
+
+    /** The current input goes on until [at] (a touch's `ACTION_UP`). */
+    fun onInputContinues(at: Long) {
+        val input = recent.lastOrNull()?.takeIf { it.id == inputId } ?: return
+        if (at > input.end) input.end = at
     }
 
     /**
-     * The top document received trusted input ([TOP_DOCUMENT_INPUT]):
-     * the current input is its own. Runs an offer waiting on it.
+     * The top document received trusted input ([TOP_DOCUMENT_INPUT]) that
+     * happened [ageMs] before now, by the page's own clock (the DOM
+     * event's `timeStamp`, which Chromium takes from the platform event).
+     * Credited to the one recent input it falls inside — never simply to
+     * the current one: a renderer busy with an iframe's script can deliver
+     * an earlier tap's word after a later tap has begun. Nothing, when it
+     * matches no input or more than one. Runs an offer waiting on it.
      */
-    fun onTopDocumentInput() {
-        topDocumentId = inputId
-        val (id, offer) = waiting ?: return
-        if (id != inputId) return
-        waiting = null
-        offer()
+    fun onTopDocumentInput(ageMs: Long) {
+        // Event time plus the message's own (small, positive) transit.
+        val at = clock() - ageMs
+        val input = recent.singleOrNull { at >= it.start - EARLY_MS && at <= it.end + LATE_MS } ?: return
+        input.inTopDocument = true
+        waiting.remove(input.id)?.invoke()
     }
 
     /** The user tapped or pressed a key on the page: one launch's worth. */
@@ -246,17 +270,18 @@ internal class UserGestureLatch(private val clock: () -> Long) {
 
     /**
      * Runs [offer] once the top document confirms input [id] was its own:
-     * now, if it already has, or when its message arrives. False when it
-     * never can (a newer input has begun), so the link is refused now.
-     * A caller that gets true calls [giveUp] after [CONFIRM_MS].
+     * now, if it already has, or when its message arrives, even after
+     * later input. False when it never can (the input is no longer on
+     * record), so the link is refused now. A caller that gets true calls
+     * [giveUp] after [CONFIRM_MS].
      */
     fun whenInTopDocument(id: Int, offer: () -> Unit): Boolean {
-        if (topDocumentId == id) {
+        val input = recent.firstOrNull { it.id == id } ?: return false
+        if (input.inTopDocument) {
             offer()
             return true
         }
-        if (id != inputId) return false
-        waiting = id to offer
+        waiting[id] = offer
         return true
     }
 
@@ -264,17 +289,23 @@ internal class UserGestureLatch(private val clock: () -> Long) {
      * The top document never confirmed input [id]: the offer waiting on
      * it is refused. True when there was one still waiting.
      */
-    fun giveUp(id: Int): Boolean {
-        if (waiting?.first != id) return false
-        waiting = null
-        return true
-    }
+    fun giveUp(id: Int): Boolean = waiting.remove(id) != null
 
     companion object {
         const val WINDOW_MS = 5_000L
 
         /** How long an offer waits for the top document's [TOP_DOCUMENT_INPUT]. */
         const val CONFIRM_MS = 1_000L
+
+        /**
+         * How far a confirmation's time may fall outside its input's
+         * start…end: before it, clock rounding only; after it, the
+         * message's trip from the renderer to the main thread.
+         */
+        const val EARLY_MS = 5L
+        const val LATE_MS = 50L
+
+        private const val MAX_RECENT = 32
     }
 }
 
