@@ -136,6 +136,19 @@
         return url;
       }
 
+      // Which name system a name failure belongs to, from the display
+      // URL's host (`alice.wei/p`, `bzz://name.gwei`). Mirrors desktop's
+      // `nameSystemLabelForName`.
+      function nameSystemLabel(url) {
+        const host = (url || '')
+          .replace(/^[a-z][a-z0-9+.-]*:\/\//i, '')
+          .split(/[\/?#]/)[0]
+          .toLowerCase();
+        if (host.endsWith('.wei')) return 'WNS';
+        if (host.endsWith('.gwei')) return 'GNS';
+        return 'ENS';
+      }
+
       const params = new URLSearchParams(window.location.search);
       const error = params.get('error');
       const url = params.get('url');
@@ -148,6 +161,7 @@
       const detailsEl = document.getElementById('details');
       const descriptionEl = document.getElementById('description');
       const titleEl = document.getElementById('title');
+      const nameLabel = nameSystemLabel(url);
 
       async function checkSwarmStatus() {
         try {
@@ -164,22 +178,22 @@
         else if (url) parts.push(url);
 
         if (error === 'ens_not_found') {
-          titleEl.textContent = 'No content for this ENS name';
+          titleEl.textContent = 'No content for this ' + nameLabel + ' name';
           descriptionEl.innerHTML =
-            "This ENS name doesn't point at any content yet. The owner may not have set a " +
+            "This " + nameLabel + " name doesn't point at any content yet. The owner may not have set a " +
             '<code>contenthash</code> record, or the name has no resolver.';
         } else if (error === 'ens_wrong_protocol') {
           titleEl.textContent = 'Name lives on a different network';
           descriptionEl.innerHTML =
-            'This ENS name resolves to content on a different network than the ' +
+            'This ' + nameLabel + ' name resolves to content on a different network than the ' +
             'scheme you typed asks for. Try the name on its own &mdash; the browser ' +
             'will follow wherever its <code>contenthash</code> points.';
         } else if (error === 'ens_unsupported_codec') {
           titleEl.textContent = 'Unsupported content format';
           descriptionEl.innerHTML =
-            'This ENS name resolves to a content format Freedom Browser cannot load yet on mobile.';
+            'This ' + nameLabel + ' name resolves to a content format Freedom Browser cannot load yet on mobile.';
         } else if (error === 'ens_lookup_failed') {
-          titleEl.textContent = 'ENS lookup failed';
+          titleEl.textContent = nameLabel + ' lookup failed';
           descriptionEl.innerHTML =
             "Couldn't reach an Ethereum RPC endpoint to resolve this name. Check your " +
             'connection and try again.';

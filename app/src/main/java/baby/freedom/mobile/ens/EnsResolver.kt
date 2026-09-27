@@ -32,6 +32,12 @@ import org.json.JSONObject
  * because the URLs come from the contract, not from us; see
  * [ccipFetch].
  *
+ * WNS (`.wei`) and GNS (`.gwei`) names take the same path with a
+ * different call target: `contenthash(namehash)` straight on the
+ * system's NameNFT registry contract instead of `resolve()` on the
+ * Universal Resolver (see [NameSystem]). Same namehash, same record
+ * decoding, same cache and RPC rotation; no CCIP-Read.
+ *
  * Known limitations vs. the desktop resolver:
  *   - ENSIP-15 normalization is lowercased-ASCII only. Pure-ASCII names
  *     round-trip correctly; emoji / non-ASCII labels may normalize
@@ -85,7 +91,14 @@ class EnsResolver internal constructor(
             }
         }
 
-        val callData = buildResolveCallData(normalized)
+        val system = NameSystem.forName(normalized)
+        val contract = system.contractAddress
+        val target = contract ?: UNIVERSAL_RESOLVER
+        val callData = if (contract != null) {
+            CONTENTHASH_SELECTOR + namehash(normalized)
+        } else {
+            buildResolveCallData(normalized)
+        }
 
         var lastError: EnsResult.Error? = null
         val total = rpcEndpoints.size
@@ -96,7 +109,7 @@ class EnsResolver internal constructor(
             val idx = (preferredRpcIndex + attempt) % total
             val rpc = rpcEndpoints[idx]
             val rpcResult = runCatchingCancellable {
-                withContext(Dispatchers.IO) { ethCall(rpc, UNIVERSAL_RESOLVER, callData) }
+                withContext(Dispatchers.IO) { ethCall(rpc, target, callData) }
             }
             if (rpcResult.isFailure) {
                 val err = rpcResult.exceptionOrNull()!!
@@ -111,7 +124,9 @@ class EnsResolver internal constructor(
             }
 
             var call = rpcResult.getOrThrow()
-            if (call.revertData != null && isOffchainLookup(call.revertData)) {
+            // CCIP-Read is a Universal Resolver affair; a NameNFT
+            // registry is called directly and never defers offchain.
+            if (contract == null && call.revertData != null && isOffchainLookup(call.revertData)) {
                 // Offchain resolver: run the CCIP-Read loop against the
                 // same RPC. Gateway failures are retryable transport
                 // errors, not "no such name", and aren't cached.
@@ -133,7 +148,7 @@ class EnsResolver internal constructor(
                 call = followed.getOrThrow()
             }
             if (call.revertData != null) {
-                val mapped = mapRevert(normalized, call.revertData)
+                val mapped = if (contract == null) mapRevert(normalized, call.revertData) else null
                 if (mapped != null) {
                     preferredRpcIndex = idx
                     return cacheAndReturn(normalized, mapped)
@@ -157,7 +172,13 @@ class EnsResolver internal constructor(
             }
 
             preferredRpcIndex = idx
-            val decoded = decodeContenthashResponse(normalized, raw)
+            val decoded = if (contract != null) {
+                // The registry's own `contenthash(bytes32)` return: the
+                // ABI `bytes` the UR would have wrapped in its tuple.
+                decodeContenthashBytes(normalized, raw)
+            } else {
+                decodeContenthashResponse(normalized, raw)
+            }
             return cacheAndReturn(normalized, decoded)
         }
 
@@ -306,8 +327,16 @@ class EnsResolver internal constructor(
         // Inner: the bytes returned by contenthash(bytes32) — themselves
         // an ABI-encoded dynamic bytes wrapper around the raw EIP-1577
         // contenthash.
-        val innerHex = outer.toHex()
-        val inner = decodeDynamicBytesAt("0x$innerHex", pointerSlot = 0)
+        return decodeContenthashBytes(name, "0x" + outer.toHex())
+    }
+
+    /**
+     * Decode the return of `contenthash(bytes32)` — ABI `bytes` wrapping
+     * the raw EIP-1577 contenthash. Reached through the Universal
+     * Resolver's tuple for ENS, and directly for NameNFT registries.
+     */
+    private fun decodeContenthashBytes(name: String, abiHex: String): EnsResult {
+        val inner = decodeDynamicBytesAt(abiHex, pointerSlot = 0)
             ?: return EnsResult.Error(
                 name, "UNSUPPORTED_CONTENTHASH_FORMAT", "inner decode failed"
             )

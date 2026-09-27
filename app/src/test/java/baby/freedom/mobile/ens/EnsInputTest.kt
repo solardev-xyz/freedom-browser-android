@@ -59,4 +59,22 @@ class EnsInputTest {
         assertNull(EnsInput.parseConstrained("ens://vitalik.eth"))
         assertNull(EnsInput.parseConstrained("vitalik.eth"))
     }
+
+    @Test
+    fun `wns and gns names parse like ens names`() {
+        assertEquals(EnsInput.Parsed("alice.wei", ""), EnsInput.parse("alice.wei"))
+        assertEquals(EnsInput.Parsed("alice.wei", "/p?q=1"), EnsInput.parse("ens://ALICE.wei/p?q=1"))
+        assertEquals(EnsInput.Parsed("apoorv.gwei", "#x"), EnsInput.parse("apoorv.gwei#x"))
+        assertEquals(
+            EnsInput.Constrained("meinhard.wei", "/", "bzz"),
+            EnsInput.parseConstrained("bzz://meinhard.wei/"),
+        )
+    }
+
+    @Test
+    fun `lookalike suffixes are not names`() {
+        assertNull(EnsInput.parse("example.weird"))
+        assertNull(EnsInput.parse("alicewei"))
+        assertNull(EnsInput.parse("https://alice.wei.example"))
+    }
 }
