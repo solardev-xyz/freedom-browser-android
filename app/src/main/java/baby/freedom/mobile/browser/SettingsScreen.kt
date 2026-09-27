@@ -15,6 +15,10 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.LocationOn
+import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material.icons.filled.Cookie
 import androidx.compose.material.icons.filled.DeleteForever
 import androidx.compose.material.icons.filled.ErrorOutline
@@ -27,6 +31,7 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -59,8 +64,10 @@ import kotlinx.coroutines.launch
  *  1. **Browsing data** — wipe history, bookmarks, and WebView cookies /
  *     site storage / per-tab caches. Each action is guarded by a
  *     confirmation dialog.
- *  2. **About** — app name, version, package, and a short blurb.
- *  3. **Other** — a single "Show advanced options" row. Tapping it
+ *  2. **Site permissions** — every camera / microphone / location
+ *     decision (remembered, or this run's), each revocable (#81).
+ *  3. **About** — app name, version, package, and a short blurb.
+ *  4. **Other** — a single "Show advanced options" row. Tapping it
  *     flips [NodeSettings.showIpfsUi] on, which reveals an "IPFS node
  *     (experimental)" card below (status, peers, gateway URL, and
  *     routing preferences). This gate exists so IPFS support stays a
@@ -92,6 +99,10 @@ fun SettingsScreen(
     var confirmClearBookmarks by remember { mutableStateOf(false) }
     var confirmClearSiteData by remember { mutableStateOf(false) }
 
+    val sitePermissions = remember(context) { SitePermissionBroker.get(context) }
+    val permissionEntries by remember(sitePermissions) { sitePermissions.entries }
+        .collectAsState(initial = emptyList())
+
     val scope = rememberCoroutineScope()
 
     FullScreenScaffold(
@@ -110,6 +121,12 @@ fun SettingsScreen(
                     onClearHistoryRequested = { confirmClearHistory = true },
                     onClearBookmarksRequested = { confirmClearBookmarks = true },
                     onClearSiteDataRequested = { confirmClearSiteData = true },
+                )
+            }
+            item("permissions") {
+                SitePermissionsSection(
+                    entries = permissionEntries,
+                    onRevoke = sitePermissions::revoke,
                 )
             }
             item("about") {
@@ -205,6 +222,79 @@ private fun BrowsingDataSection(
             enabled = true,
             onClick = onClearSiteDataRequested,
         )
+    }
+}
+
+/**
+ * Site permissions (#81): one row per decision — the site, in full and
+ * wrapping (never ellipsised: the end of a host is the part that
+ * matters), the permission and its state, and a Remove button that
+ * makes the site ask again next time. Session-only decisions are listed
+ * too, so a Block or a dismissal embargo made this run can be lifted
+ * without restarting the app.
+ */
+@Composable
+private fun SitePermissionsSection(
+    entries: List<SitePermissionEntry>,
+    onRevoke: (SitePermissionEntry) -> Unit,
+) {
+    SectionCard(title = "Site permissions") {
+        if (entries.isEmpty()) {
+            Text(
+                "Sites you allow or block from using your camera, microphone or location appear here.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+            )
+        }
+        for (entry in entries) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(start = 12.dp, top = 6.dp, bottom = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(
+                    when (entry.permission) {
+                        SitePermission.CAMERA -> Icons.Filled.Videocam
+                        SitePermission.MICROPHONE -> Icons.Filled.Mic
+                        SitePermission.LOCATION -> Icons.Filled.LocationOn
+                    },
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onSurface,
+                )
+                Spacer(Modifier.width(12.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        permissionOriginDisplay(entry.origin),
+                        fontWeight = FontWeight.Medium,
+                    )
+                    Text(
+                        "${entry.permission.label} · ${sitePermissionStateLabel(entry)}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                IconButton(onClick = { onRevoke(entry) }) {
+                    Icon(
+                        Icons.Filled.Close,
+                        contentDescription = "Remove ${entry.permission.label} permission for ${permissionOriginDisplay(entry.origin)}",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+        }
+    }
+}
+
+/** "Allowed", "Blocked (this session)", "Blocked after 3 dismissals (this session)". */
+internal fun sitePermissionStateLabel(entry: SitePermissionEntry): String {
+    val scope = if (entry.remembered) "" else " (this session)"
+    return when {
+        entry.embargoed ->
+            "Blocked after ${PermissionSession.DISMISS_EMBARGO_THRESHOLD} dismissals$scope"
+        entry.decision == PermissionDecision.ALLOW -> "Allowed$scope"
+        else -> "Blocked$scope"
     }
 }
 

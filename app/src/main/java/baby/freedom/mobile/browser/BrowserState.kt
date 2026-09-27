@@ -88,6 +88,15 @@ class BrowserState(val id: Long) {
     var loadAborted by mutableStateOf(false)
         internal set
 
+    /**
+     * The site-permission prompt this tab is waiting on (#81), or null.
+     * Owned by [SitePermissionBroker]; [BrowserScreen] shows it while
+     * this tab is the active one, so a background tab can never put a
+     * prompt over the page the user is looking at.
+     */
+    var permissionPrompt: PermissionPrompt? by mutableStateOf<PermissionPrompt?>(null)
+        internal set
+
     var canGoBack by mutableStateOf(false)
         internal set
     var canGoForward by mutableStateOf(false)

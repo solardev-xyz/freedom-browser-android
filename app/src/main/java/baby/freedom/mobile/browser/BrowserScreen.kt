@@ -431,6 +431,8 @@ fun BrowserScreen(
     // text lives here until it is submitted.
     var addressQuery by remember { mutableStateOf("") }
     val snackbarHostState = remember { SnackbarHostState() }
+    val sitePermissions = remember(context) { SitePermissionBroker.get(context) }
+    SitePermissionAndroidBridge(sitePermissions, snackbarHostState)
 
     val state = tabs.active
     val isBookmarked by repo.isBookmarked(state.url).collectAsState(initial = false)
@@ -1343,6 +1345,12 @@ fun BrowserScreen(
                 submit(state, url)
             },
         )
+    }
+
+    // Site-permission prompt (#81) — only ever the active tab's; a
+    // background tab's request waits until the user switches to it.
+    state.permissionPrompt?.let { prompt ->
+        androidx.compose.runtime.key(prompt) { SitePermissionPrompt(prompt) }
     }
 
     // HTML5 fullscreen. Last, so it paints over every overlay above.
