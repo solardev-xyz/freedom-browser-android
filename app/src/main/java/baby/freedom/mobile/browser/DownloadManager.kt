@@ -263,7 +263,13 @@ class DownloadManager private constructor(context: Context) {
                     ?.use { it.count > 0 } ?: false
             }.getOrDefault(false)
         }
-        if (!exists) return "The file was deleted"
+        if (!exists) {
+            // Deleted outside the app: the row is no longer "completed" —
+            // mark it failed so it stops offering an open that can't work
+            // and offers Retry instead.
+            markFileDeleted(entry.id)
+            return "The file was deleted"
+        }
         val intent = Intent(Intent.ACTION_VIEW)
             .setDataAndType(uri, entry.mimeType.ifBlank { "*/*" })
             .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
@@ -273,6 +279,18 @@ class DownloadManager private constructor(context: Context) {
         } catch (_: ActivityNotFoundException) {
             "No app can open this file"
         }
+    }
+
+    private suspend fun markFileDeleted(id: Long) = withContext(Dispatchers.IO) {
+        // Re-read: the caller's copy may be stale (removed, or retried).
+        val current = dao.get(id)?.takeIf { it.status == DownloadStatus.COMPLETED } ?: return@withContext
+        dao.update(
+            current.copy(
+                status = DownloadStatus.FAILED,
+                contentUri = null,
+                error = "File deleted",
+            ),
+        )
     }
 
     // ---------------------------------------------------------------
@@ -501,8 +519,10 @@ class DownloadManager private constructor(context: Context) {
             if (status in 300..399) {
                 val location = conn.getHeaderField("Location")
                 conn.disconnect()
-                if (location.isNullOrBlank()) throw DownloadFailure("Redirect without a location")
-                current = URL(URL(current), location).toString()
+                current = when (val hop = downloadRedirect(current, location)) {
+                    is DownloadRedirect.Follow -> hop.url
+                    is DownloadRedirect.Refuse -> throw DownloadFailure(hop.reason)
+                }
                 return@repeat
             }
             if (status !in 200..299) {

@@ -262,4 +262,57 @@ class DownloadRequestTest {
         assertNull(downloadReferer(downloadRefererOrigin(null), "https://files.other.net/tool.zip"))
         assertNull(downloadReferer(null, "https://mail.example.com/x"))
     }
+
+    // ------------------------------------------------------------------
+    // downloadRedirect
+    // ------------------------------------------------------------------
+
+    @Test
+    fun `redirects resolve against the answering url and may switch http and https`() {
+        assertEquals(
+            DownloadRedirect.Follow("https://example.com/files/b.zip"),
+            downloadRedirect("https://example.com/files/a.zip", "b.zip"),
+        )
+        assertEquals(
+            DownloadRedirect.Follow("https://cdn.example.net/x.zip"),
+            downloadRedirect("http://example.com/a", "https://cdn.example.net/x.zip"),
+        )
+        assertEquals(
+            DownloadRedirect.Follow("http://example.com/x"),
+            downloadRedirect("https://example.com/a", "HTTP://example.com/x"),
+        )
+    }
+
+    @Test
+    fun `redirects to other schemes are refused with the scheme named`() {
+        for ((location, scheme) in listOf(
+            "ftp://host/file.zip" to "ftp",
+            "intent://scan/#Intent;scheme=zxing;end" to "intent",
+            "data:text/plain,hi" to "data",
+            "file:///etc/hosts" to "file",
+            "Market://details?id=x" to "market",
+        )) {
+            assertEquals(
+                location,
+                DownloadRedirect.Refuse("Redirected to an unsupported $scheme: link"),
+                downloadRedirect("https://example.com/a", location),
+            )
+        }
+    }
+
+    @Test
+    fun `missing or unusable locations are refused`() {
+        assertEquals(
+            DownloadRedirect.Refuse("Redirect without a location"),
+            downloadRedirect("https://example.com/a", null),
+        )
+        assertEquals(
+            DownloadRedirect.Refuse("Redirect without a location"),
+            downloadRedirect("https://example.com/a", "  "),
+        )
+        assertEquals(
+            DownloadRedirect.Refuse("Malformed redirect"),
+            downloadRedirect("https://example.com/a", "http://"),
+        )
+    }
 }

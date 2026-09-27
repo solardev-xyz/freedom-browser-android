@@ -316,3 +316,29 @@ private fun originOf(url: String): String? {
     val port = uri.port.takeIf { it != -1 && it != defaultPort }
     return "$scheme://$host" + (port?.let { ":$it" } ?: "")
 }
+
+/** Where a web download's redirect hop leads, or why it can't be followed. */
+internal sealed class DownloadRedirect {
+    data class Follow(val url: String) : DownloadRedirect()
+    data class Refuse(val reason: String) : DownloadRedirect()
+}
+
+/**
+ * Resolve a redirect's `Location` against the URL that answered it.
+ * Only http(s) hops are followed: the native fetch can't speak any
+ * other scheme (`ftp:`, `intent:`, `data:` …), so those end the
+ * download with a reason that names the scheme instead of failing
+ * somewhere deeper with a generic error.
+ */
+internal fun downloadRedirect(current: String, location: String?): DownloadRedirect {
+    if (location.isNullOrBlank()) return DownloadRedirect.Refuse("Redirect without a location")
+    val resolved = runCatching { java.net.URL(java.net.URL(current), location.trim()) }.getOrNull()
+    val scheme = resolved?.protocol?.lowercase()
+        ?: Regex("^([A-Za-z][A-Za-z0-9+.-]*):").find(location.trim())?.groupValues?.get(1)?.lowercase()
+    return when {
+        scheme != null && scheme != "http" && scheme != "https" ->
+            DownloadRedirect.Refuse("Redirected to an unsupported $scheme: link")
+        resolved == null || resolved.host.isNullOrEmpty() -> DownloadRedirect.Refuse("Malformed redirect")
+        else -> DownloadRedirect.Follow(resolved.toString())
+    }
+}
