@@ -85,7 +85,6 @@ import baby.freedom.swarm.IpfsInfo
 import baby.freedom.swarm.IpfsStatus
 import baby.freedom.swarm.NodeInfo
 import baby.freedom.swarm.NodeStatus
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.job
@@ -448,31 +447,23 @@ fun BrowserScreen(
     // the same start and end live, "Details" would open what's already
     // open, and a Long snackbar would sit over the bottom row's Retry
     // and × for ten seconds.
+    val downloadNotices = remember { DownloadNotices() }
     LaunchedEffect(downloads) {
-        // Each download's own "Downloading…" notice, so its end can
-        // supersede exactly that one — cancelling a pending
-        // `showSnackbar` dismisses it if showing, or drops it from the
-        // queue — and never another download's "Downloaded · Open".
-        val startNotices = mutableMapOf<Long, Job>()
         downloads.events.collect { event ->
             if (showDownloads) {
-                startNotices.remove(event.id)?.cancel()
+                downloadNotices.supersedeStart(event.id)
                 return@collect
             }
             when (event) {
-                is DownloadEvent.Started -> {
-                    val notice = launch {
-                        snackbarHostState.showSnackbar(
-                            "Downloading ${event.fileName}",
-                            duration = SnackbarDuration.Short,
-                        )
-                    }
-                    startNotices[event.id] = notice
-                    notice.invokeOnCompletion { startNotices.remove(event.id, notice) }
+                is DownloadEvent.Started -> downloadNotices.show(this, event.id, start = true) {
+                    snackbarHostState.showSnackbar(
+                        "Downloading ${event.fileName}",
+                        duration = SnackbarDuration.Short,
+                    )
                 }
                 is DownloadEvent.Completed -> {
-                    startNotices.remove(event.id)?.cancel()
-                    launch {
+                    downloadNotices.supersedeStart(event.id)
+                    downloadNotices.show(this, event.id) {
                         val result = snackbarHostState.showSnackbar(
                             "Downloaded ${event.fileName}",
                             actionLabel = "Open",
@@ -486,8 +477,8 @@ fun BrowserScreen(
                     }
                 }
                 is DownloadEvent.Failed -> {
-                    startNotices.remove(event.id)?.cancel()
-                    launch {
+                    downloadNotices.supersedeStart(event.id)
+                    downloadNotices.show(this, event.id) {
                         val result = snackbarHostState.showSnackbar(
                             "Download failed: ${event.reason}",
                             actionLabel = "Details",
@@ -500,10 +491,12 @@ fun BrowserScreen(
         }
     }
 
-    // …and a download notice already up when the list opens goes: the
-    // list has the same news, and the notice would cover its bottom row.
+    // …and when the list opens, every download notice goes — the one
+    // on screen and those queued behind it: the list has the same news,
+    // they'd cover its bottom row, and they'd hold up the list's own
+    // messages. Other snackbars aren't download news and stay.
     LaunchedEffect(showDownloads) {
-        if (showDownloads) snackbarHostState.currentSnackbarData?.dismiss()
+        if (showDownloads) downloadNotices.cancelAll()
     }
 
     val state = tabs.active
