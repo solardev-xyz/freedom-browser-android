@@ -4,7 +4,6 @@ import android.webkit.WebView.HitTestResult
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
-import org.mozilla.javascript.Context as JsContext
 
 /**
  * The page's say on a long-press (#84): the menu opens only for a press
@@ -63,64 +62,10 @@ class PageContextMenuPressTest {
     fun `only the exact verdict messages parse`() {
         assertEquals(true, parseContextMenuVerdict("contextmenu 1"))
         assertEquals(false, parseContextMenuVerdict("contextmenu 0"))
+        assertEquals(true, parseContextMenuVerdict(CONTEXT_MENU_ALLOWED))
+        assertEquals(false, parseContextMenuVerdict(CONTEXT_MENU_KEPT))
         assertNull(parseContextMenuVerdict("contextmenu"))
         assertNull(parseContextMenuVerdict("""{"token":"ab","hasBottomUI":true}"""))
         assertNull(parseContextMenuVerdict(null))
-    }
-
-    // ---- the page side ------------------------------------------------
-
-    /** Runs the verdict script against a fake window, dispatches [event], returns what it posted. */
-    private fun dispatch(event: String): List<String> {
-        val cx = JsContext.enter()
-        try {
-            cx.optimizationLevel = -1
-            val scope = cx.initStandardObjects()
-            cx.evaluateString(
-                scope,
-                """
-                var posted = [], listeners = [], timers = [];
-                var globalThis = this;
-                this.chan = { postMessage: function(m){ posted.push(String(m)); } };
-                var window = { addEventListener: function(t, f, c){ if (t === 'contextmenu' && c) listeners.push(f); } };
-                function setTimeout(f){ timers.push(f); }
-                """.trimIndent(),
-                "setup", 1, null,
-            )
-            cx.evaluateString(scope, contextMenuVerdictJs("chan"), "script", 1, null)
-            cx.evaluateString(
-                scope,
-                """
-                var e = $event;
-                listeners.forEach(function(f){ f(e); });
-                // A page handler after ours, still within the dispatch.
-                if (e.pageCancels) e.defaultPrevented = true;
-                timers.forEach(function(f){ f(); });
-                """.trimIndent(),
-                "dispatch", 1, null,
-            )
-            val posted = scope.get("posted", scope) as org.mozilla.javascript.NativeArray
-            return posted.map { it.toString() }
-        } finally {
-            JsContext.exit()
-        }
-    }
-
-    @Test
-    fun `the script reports a let-through press`() {
-        assertEquals(listOf("contextmenu 1"), dispatch("{ isTrusted: true, defaultPrevented: false }"))
-    }
-
-    @Test
-    fun `the script reads the outcome after every page handler`() {
-        assertEquals(
-            listOf("contextmenu 0"),
-            dispatch("{ isTrusted: true, defaultPrevented: false, pageCancels: true }"),
-        )
-    }
-
-    @Test
-    fun `the script ignores a synthetic event`() {
-        assertEquals(emptyList<String>(), dispatch("{ isTrusted: false, defaultPrevented: false }"))
     }
 }

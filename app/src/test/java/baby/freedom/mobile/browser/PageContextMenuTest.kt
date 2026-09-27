@@ -204,10 +204,13 @@ class PageContextMenuTest {
     }
 
     @Test
-    fun `search uses the same engine as the address bar`() {
-        val typed = UrlParser.toUrl("freedom browser")
-        assertTrue(typed.startsWith("https://search.brave.com/search?q="))
-        assertEquals(typed.substringBefore("?q="), UrlParser.searchUrl("x").substringBefore("?q="))
+    fun `search uses the engine chosen in Settings, like the address bar`() {
+        for (engine in SearchEngines.BUILT_IN) {
+            val typed = UrlParser.toUrl("freedom browser", engine.template)
+            assertEquals(typed, UrlParser.searchUrl("freedom browser", engine.template))
+        }
+        val custom = SearchEngines.templateFor("custom", "https://s.example/find/%s")
+        assertEquals("https://s.example/find/a%20b", UrlParser.searchUrl("  a b ", custom))
     }
 
     // ---- the selection script, against a stub DOM ---------------------

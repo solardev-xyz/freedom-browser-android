@@ -64,6 +64,23 @@
         </activity>
 
         <!--
+          Serves camera captures for <input type=file capture> — the
+          camera app writes the photo into it, the page reads it back
+          (see FileChooser.kt) — and the page context menu's Copy image /
+          Share image files (see ImageActions.kt). Scoped to
+          cache/uploads/ and cache/shared/ only (res/xml/file_paths.xml).
+        -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.files"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
+
+        <!--
           NodeService lives in its own `:node` process so we can exit
           that process (and everything native inside it — ant's tokio
           runtime, the freedom-ipfs store) when the user toggles the node
@@ -74,21 +91,6 @@
             android:exported="false"
             android:foregroundServiceType="dataSync"
             android:process=":node" />
-
-        <!--
-          Hands images out of the page context menu (Copy image / Share
-          image) as content:// URIs; scoped to cache/shared/ by
-          res/xml/shared_files.xml.
-        -->
-        <provider
-            android:name="androidx.core.content.FileProvider"
-            android:authorities="${applicationId}.fileprovider"
-            android:exported="false"
-            android:grantUriPermissions="true">
-            <meta-data
-                android:name="android.support.FILE_PROVIDER_PATHS"
-                android:resource="@xml/shared_files" />
-        </provider>
 
     </application>
 </manifest>

@@ -1,9 +1,0 @@
-<?xml version="1.0" encoding="utf-8"?>
-<!--
-  What the FileProvider may hand out: only the cache subdirectory that
-  the page context menu's Copy image / Share image write into (see
-  ImageActions.kt). Nothing else in the app's storage is reachable.
--->
-<paths>
-    <cache-path name="shared" path="shared/" />
-</paths>

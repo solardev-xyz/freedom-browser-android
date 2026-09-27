@@ -423,10 +423,11 @@ private suspend fun shareableUri(context: Context, image: FetchedImage, url: Str
             val dir = File(root, System.nanoTime().toString()).apply { mkdirs() }
             val file = File(dir, imageFileName(url, image.mime, ::extensionFor))
             file.writeBytes(image.bytes)
-            FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
+            FileProvider.getUriForFile(context, FileChooser.authority(context), file)
         }.getOrNull()
     }
 
+/** Subdirectory of `cacheDir`; must match `res/xml/file_paths.xml`. */
 private const val SHARED_DIR = "shared"
 
 /** Put [image] on the clipboard as a `content://` image clip. */

@@ -39,8 +39,8 @@ import kotlinx.coroutines.launch
  * through ([PageContextMenuPress]); a long-press anywhere else is left
  * to Chromium, which starts a text selection. The selection toolbar keeps
  * Chromium's own Copy / Share / Select all and gains a "Search" item
- * that searches with the browser's engine ([UrlParser.searchUrl]) in a
- * new tab, in place of Chromium's "Web search", which hands the text to
+ * that searches with the engine chosen in Settings ([UrlParser.searchUrl])
+ * in a new tab, in place of Chromium's "Web search", which hands the text to
  * whatever app answers `ACTION_WEB_SEARCH` instead.
  */
 
@@ -169,8 +169,8 @@ internal class PageContextMenuPin(
  * View's `performLongClick` *before* it hands the gesture to the page,
  * and taking the press there (returning `true`) is what stops the page
  * from ever seeing its `contextmenu`. So the press is never taken; the
- * page's event runs as usual, and [contextMenuVerdictJs] reports its
- * outcome. A verdict later than [PAGE_CONTEXT_MENU_VERDICT_WINDOW_MS]
+ * page's event runs as usual, and the detector's document-start script
+ * ([bottomUiDetectorJs]) reports its outcome over the hidden channel. A verdict later than [PAGE_CONTEXT_MENU_VERDICT_WINDOW_MS]
  * after the press isn't this press's, and no verdict at all (the script
  * couldn't run) means no menu: the page's own behaviour wins.
  */
@@ -214,36 +214,10 @@ internal const val PAGE_CONTEXT_MENU_VERDICT_WINDOW_MS = 1_500L
  * not one (`null`).
  */
 internal fun parseContextMenuVerdict(data: String?): Boolean? = when (data) {
-    "contextmenu 1" -> true
-    "contextmenu 0" -> false
+    CONTEXT_MENU_ALLOWED -> true
+    CONTEXT_MENU_KEPT -> false
     else -> null
 }
-
-/**
- * Reports each trusted `contextmenu` event's outcome back through
- * [channel] (the `addWebMessageListener` object; no new global is made).
- * Installed with `addDocumentStartJavaScript`, so it runs before any of
- * the page's own scripts: its capture listener on `window` is the first
- * one there, and the channel is held in a closure the page can't swap.
- *
- * The outcome is read after dispatch (a task later), when every page
- * handler — including a bubbling one registered on `window` after ours —
- * has had its say. A press counts as let through when nothing called
- * `preventDefault()`. (`-webkit-touch-callout` needs no check: Android's
- * Blink doesn't parse it — `CSS.supports` is false on the API 36 AVD —
- * so it suppresses nothing there, with or without this menu.)
- */
-internal fun contextMenuVerdictJs(channel: String): String = """
-(function(){
-  var c = globalThis[${org.json.JSONObject.quote(channel)}];
-  if (!c || typeof c.postMessage !== 'function') return;
-  var post = c.postMessage.bind(c);
-  window.addEventListener('contextmenu', function(e){
-    if (!e.isTrusted) return;
-    setTimeout(function(){ post('contextmenu ' + (e.defaultPrevented ? 0 : 1)); }, 0);
-  }, true);
-})();
-""".trimIndent()
 
 /**
  * Whether [request] no longer describes what is on screen: its tab is
