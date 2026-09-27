@@ -137,6 +137,17 @@ class TabsState(
     var printPage: ((BrowserState) -> Unit)? = null
 
     /**
+     * Hook installed by the [BrowserWebViewHost]: mute or unmute the
+     * given tab's WebView (#91, `WebViewCompat.setAudioMuted`) — only the
+     * host knows which WebView backs a tab. `null` before the host has
+     * composed, after it disposes, and when the device's WebView doesn't
+     * support muting (then the tab switcher shows the audio indicator
+     * without a mute toggle). Snapshot state, so the switcher picks up
+     * the hook's arrival.
+     */
+    var setAudioMuted: ((BrowserState, Boolean) -> Unit)? by mutableStateOf(null)
+
+    /**
      * Hook installed by [BrowserScreen] so the WebView layer can bounce
      * `bzz://` / `ens://` navigations (in-page link clicks, error-page
      * "Try Again" button) back through the screen's probe-gated submit

@@ -817,6 +817,16 @@ fun BrowserWebViewHost(
                 }
             }
         }
+        // Per-tab mute (#91). Only where the WebView can: without the
+        // hook the switcher shows the indicator but no toggle.
+        if (WebViewFeature.isFeatureSupported(WebViewFeature.MUTE_AUDIO)) {
+            tabs.setAudioMuted = { tab, muted ->
+                webViews[tab.id]?.let { wv ->
+                    WebViewCompat.setAudioMuted(wv, muted)
+                    tab.audioMuted = WebViewCompat.isAudioMuted(wv)
+                }
+            }
+        }
         tabs.printPage = { tab ->
             webViews[tab.id]?.let { wv ->
                 printWebView(wv, printJobName(tab.title, tab.addressBarText, tab.url))
@@ -854,6 +864,7 @@ fun BrowserWebViewHost(
             tabs.saveWebViewState = null
             tabs.find = null
             tabs.printPage = null
+            tabs.setAudioMuted = null
         }
     }
 
@@ -996,6 +1007,10 @@ private fun buildRefreshableWebView(
     // which document sent it, so it only counts once a report does
     // ([BottomUiChannels]).
     val bottomUiChannels = BottomUiChannels<JavaScriptReplyProxy>()
+
+    // Audio indicator (#91): the frames whose media is audible, as their
+    // detectors report it on the same channel (see [TabAudioFrames]).
+    val audioFrames = TabAudioFrames<JavaScriptReplyProxy>()
 
     // Page context menu (#84): the long-press waiting on the page's
     // `contextmenu` verdict, which the detector's document-start script
@@ -1591,6 +1606,13 @@ private fun buildRefreshableWebView(
             val listener = WebViewCompat.WebMessageListener { view, message, sourceOrigin, isMainFrame, replyProxy ->
                 if (sourceOrigin.scheme != "https" && sourceOrigin.scheme != "http") return@WebMessageListener
                 if (message.type != WebMessageCompat.TYPE_STRING) return@WebMessageListener
+                // A frame's media became audible or fell silent (#91):
+                // any frame, keyed by its reply proxy, folded into the
+                // tab's indicator.
+                parseAudioReport(message.data)?.let { audible ->
+                    state.playingAudio = audioFrames.onReport(replyProxy, audible)
+                    return@WebMessageListener
+                }
                 // Input the top document itself received (#85): only the
                 // main frame's word counts — an iframe's would let it
                 // vouch for a tap on itself ([UserGestureLatch]).

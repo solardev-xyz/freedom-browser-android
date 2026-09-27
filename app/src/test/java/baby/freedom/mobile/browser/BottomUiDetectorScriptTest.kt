@@ -81,8 +81,28 @@ class BottomUiDetectorScriptTest {
         function addEventListener(t, f, c) {
           if (t === 'contextmenu') { contextMenuListeners.push({ f: f, capture: c === true }); return; }
           if (t === 'pointerdown' || t === 'keydown' || t === 'click') { inputListeners.push({ t: t, f: f, capture: c === true }); return; }
+          if (t === 'playing' || t === 'pagehide' || t === 'pageshow') { mediaListeners.push({ t: t, f: f, capture: c === true }); return; }
           windowListeners++; if (t === 'resize') resizeListeners.push(f);
         }
+        // Media (#91): elements that dispatch to their own listeners, and a
+        // `playing` that reaches window only while [connected].
+        var mediaListeners = [];
+        function EventTarget() {}
+        EventTarget.prototype.addEventListener = function (t, f) {
+          this.ls = this.ls || [];
+          for (var i = 0; i < this.ls.length; i++) if (this.ls[i].t === t && this.ls[i].f === f) return;
+          this.ls.push({ t: t, f: f });
+        };
+        function media() { var m = new EventTarget(); m.paused = true; m.ended = false; m.muted = false; m.volume = 1; m.connected = true; return m; }
+        function fire(m, t) {
+          var e = { type: t, target: m, isTrusted: true };
+          if (m.connected) for (var i = 0; i < mediaListeners.length; i++) if (mediaListeners[i].t === t) mediaListeners[i].f(e);
+          var ls = m.ls || [];
+          for (var j = 0; j < ls.length; j++) if (ls[j].t === t) ls[j].f(e);
+        }
+        function play(m) { m.paused = false; fire(m, 'playing'); }
+        function pause(m) { m.paused = true; fire(m, 'pause'); }
+        function win(t, e) { for (var i = 0; i < mediaListeners.length; i++) if (mediaListeners[i].t === t) mediaListeners[i].f(e || {}); }
         // A trusted long-press's `contextmenu`: our listener, then the page's handlers, then tasks.
         function pressAndHold(e, pageCancels) {
           for (var i = 0; i < contextMenuListeners.length; i++) contextMenuListeners[i].f(e);
@@ -418,6 +438,73 @@ class BottomUiDetectorScriptTest {
         eval("pressAndHold({ isTrusted: true, defaultPrevented: false }, false)")
         assertEquals(CONTEXT_MENU_ALLOWED, verdicts())
         assertEquals(1, sent)
+    }
+
+    // ---- audible media (#91) -------------------------------------------
+
+    private fun Page.audio(): String = Context.toString(eval("sent.filter(function (s) { return /^audio /.test(s); }).join('|')"))
+
+    @Test
+    fun `media becoming audible and falling silent is reported once each, from document start`() = page {
+        documentStart()
+        assertTrue(eval("mediaListeners.every(function (l) { return l.capture; })") as Boolean)
+        eval("var v = media(); play(v)")
+        assertEquals(AUDIO_AUDIBLE, audio())
+        assertEquals(true, parseAudioReport(audio()))
+        // A second `playing` (after buffering) says nothing new.
+        eval("fire(v, 'playing')")
+        assertEquals(AUDIO_AUDIBLE, audio())
+        eval("pause(v)")
+        assertEquals("$AUDIO_AUDIBLE|$AUDIO_SILENT", audio())
+        assertEquals(false, parseAudioReport(AUDIO_SILENT))
+    }
+
+    @Test
+    fun `muted or zero-volume media isn't audible until the page turns it up`() = page {
+        documentStart()
+        eval("var v = media(); v.muted = true; play(v)")
+        assertEquals("", audio())
+        eval("v.muted = false; fire(v, 'volumechange')")
+        assertEquals(AUDIO_AUDIBLE, audio())
+        eval("v.volume = 0; fire(v, 'volumechange')")
+        assertEquals("$AUDIO_AUDIBLE|$AUDIO_SILENT", audio())
+    }
+
+    @Test
+    fun `the frame stays audible while any of its elements is`() = page {
+        documentStart()
+        eval("var a = media(), b = media(); play(a); play(b); pause(a)")
+        assertEquals(AUDIO_AUDIBLE, audio())
+        eval("b.ended = true; b.paused = true; fire(b, 'ended')")
+        assertEquals("$AUDIO_AUDIBLE|$AUDIO_SILENT", audio())
+    }
+
+    @Test
+    fun `an element detached mid-play is still heard when it pauses`() = page {
+        documentStart()
+        eval("var v = media(); play(v); v.connected = false; pause(v)")
+        assertEquals("$AUDIO_AUDIBLE|$AUDIO_SILENT", audio())
+    }
+
+    @Test
+    fun `leaving the document reports silence, and a synthetic playing is ignored`() = page {
+        documentStart()
+        eval("var v = media(); v.paused = false; fire({ connected: true, ls: [] }, 'playing')")
+        eval("mediaListeners.forEach(function (l) { if (l.t === 'playing') l.f({ target: v, isTrusted: false }); })")
+        assertEquals("", audio())
+        eval("play(v); win('pagehide')")
+        assertEquals("$AUDIO_AUDIBLE|$AUDIO_SILENT", audio())
+        // Back from the back/forward cache, still playing.
+        eval("win('pageshow', { persisted: true })")
+        assertEquals("$AUDIO_AUDIBLE|$AUDIO_SILENT|$AUDIO_AUDIBLE", audio())
+    }
+
+    @Test
+    fun `a subframe reports its audio too`() = page {
+        eval("top = {}")
+        documentStart()
+        eval("var v = media(); play(v)")
+        assertEquals(AUDIO_AUDIBLE, audio())
     }
 
     // ---- input in the top document (#85) ------------------------------

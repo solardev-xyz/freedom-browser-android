@@ -33,6 +33,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Restore
+import androidx.compose.material.icons.automirrored.filled.VolumeOff
+import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.IconButtonDefaults
@@ -79,7 +81,8 @@ import kotlinx.coroutines.launch
  *
  * A top bar with "+ New tab" and an × to dismiss, followed by a 2-column
  * grid of tab cards. Each card shows its page title, a close (×) button,
- * and a preview thumbnail of the page (or a letter placeholder when no
+ * a speaker to mute / unmute a tab that is playing audio (#91), and a
+ * preview thumbnail of the page (or a letter placeholder when no
  * snapshot has been captured yet).
  *
  * Long-press a card and drag it to move the tab ([TabsState.moveTab]);
@@ -187,6 +190,7 @@ fun TabSwitcherScreen(
                         onDismiss()
                     },
                     onClose = { tabs.closeTab(index) },
+                    onToggleMute = tabs.setAudioMuted?.let { set -> { set(tab, !tab.audioMuted) } },
                     // The drag has no TalkBack equivalent, so the same
                     // moves are offered as accessibility actions.
                     moveActions = tabMoveTargets(index, tabs.tabs.size).map { (label, to) ->
@@ -409,6 +413,7 @@ private fun TabCard(
     isActive: Boolean,
     onClick: () -> Unit,
     onClose: () -> Unit,
+    onToggleMute: (() -> Unit)?,
     modifier: Modifier = Modifier,
     moveActions: List<CustomAccessibilityAction> = emptyList(),
 ) {
@@ -453,6 +458,9 @@ private fun TabCard(
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.weight(1f),
             )
+            if (tab.playingAudio || tab.audioMuted) {
+                TabAudioButton(tab.audioMuted, onToggleMute)
+            }
             IconButton(
                 onClick = onClose,
                 shapes = IconButtonDefaults.shapes(),
@@ -485,6 +493,46 @@ private fun TabCard(
                 ThumbnailPlaceholder(tab)
             }
         }
+    }
+}
+
+/**
+ * The card's audio indicator (#91): a speaker while the tab's page is
+ * audible, a struck-out one while the tab is muted (shown whether or not
+ * the page is playing right now, so a muted tab can always be unmuted).
+ * A tap toggles the mute; without [onToggleMute] (a WebView that can't
+ * mute) it is only an indicator.
+ */
+@Composable
+private fun TabAudioButton(muted: Boolean, onToggleMute: (() -> Unit)?) {
+    val icon = if (muted) Icons.AutoMirrored.Filled.VolumeOff else Icons.AutoMirrored.Filled.VolumeUp
+    val tint = if (muted) {
+        MaterialTheme.colorScheme.onSurfaceVariant
+    } else {
+        MaterialTheme.colorScheme.primary
+    }
+    if (onToggleMute == null) {
+        Box(Modifier.size(36.dp), contentAlignment = Alignment.Center) {
+            Icon(
+                icon,
+                contentDescription = if (muted) "Tab muted" else "Tab playing audio",
+                tint = tint,
+                modifier = Modifier.size(16.dp),
+            )
+        }
+        return
+    }
+    IconButton(
+        onClick = onToggleMute,
+        shapes = IconButtonDefaults.shapes(),
+        modifier = Modifier.size(36.dp),
+    ) {
+        Icon(
+            icon,
+            contentDescription = if (muted) "Unmute tab" else "Mute tab",
+            tint = tint,
+            modifier = Modifier.size(16.dp),
+        )
     }
 }
 

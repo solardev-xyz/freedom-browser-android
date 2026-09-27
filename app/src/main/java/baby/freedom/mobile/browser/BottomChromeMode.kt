@@ -430,6 +430,23 @@ internal fun parseTopDocumentInput(data: String?): TopDocumentInput? {
     return TopDocumentInput(m.groupValues[2].toLong(), isClick = m.groupValues[1] == "click")
 }
 
+/**
+ * A frame's report that media in its document is now audible (#91):
+ * playing, not muted by the page, volume above zero. Sent on a change
+ * only; [AUDIO_SILENT] when that stops. See [TabAudioFrames].
+ */
+internal const val AUDIO_AUDIBLE = "audio 1"
+
+/** A frame's report that nothing in its document is audible any more (#91). */
+internal const val AUDIO_SILENT = "audio 0"
+
+/** Is [data] a frame's audio report ([AUDIO_AUDIBLE] → true, [AUDIO_SILENT] → false)? `null` if not one. */
+internal fun parseAudioReport(data: String?): Boolean? = when (data) {
+    AUDIO_AUDIBLE -> true
+    AUDIO_SILENT -> false
+    else -> null
+}
+
 /** What Kotlin sends back through the channel to ask for a fresh, reported probe. */
 internal fun bottomUiProbeRequest(token: String): String = "probe $token"
 
@@ -455,7 +472,23 @@ internal fun bottomUiProbeRequest(token: String): String = "probe $token"
  * browser's link / image menu opens only for a press the page didn't
  * `preventDefault()` ([PageContextMenuPress]). (`-webkit-touch-callout`
  * needs no check: Android's Blink doesn't parse it — `CSS.supports` is
- * false on the API 36 AVD.) In a subframe that is all it does.
+ * false on the API 36 AVD.) In a subframe that and the audio reports
+ * below are all it does.
+ *
+ * **Audible media** (#91), in every frame: a capture listener for
+ * trusted `playing` on `window` picks up each `<audio>`/`<video>` of the
+ * document as it starts, and from then on listens on the element itself
+ * (`pause`, `ended`, `emptied`, `volumechange`, through
+ * `EventTarget.prototype.addEventListener` saved at document start) — so
+ * an element the page detaches mid-play, whose `pause` no longer reaches
+ * `window`, is still heard. The frame posts [AUDIO_AUDIBLE] when one of
+ * its elements becomes audible (playing, not `muted`, `volume` above 0)
+ * and [AUDIO_SILENT] when none is any more, or when the document goes
+ * (`pagehide`: navigated away, or its iframe removed). What it can't
+ * see: Web Audio (an `AudioContext` fires nothing on `window`), an
+ * element that never joined the document (`new Audio(src).play()`), and
+ * one inside a shadow root (`playing` isn't composed). WebView itself has
+ * no "this page is audible" signal (see [TabAudioFrames]).
  *
  * **Input in the top document** (#85): in the main frame, capture
  * listeners for trusted `pointerdown`, `keydown` and `click` post
@@ -550,7 +583,7 @@ internal fun bottomUiDetectorJs(channel: String, debounceMs: Int = BOTTOM_UI_DEB
     require(CHANNEL_SAFE.matches(channel)) { "channel must be lower-case letters" }
     return """
 (function () {
-  var w = window, d = document, N = '$channel', port = w[N];
+  var w = window, d = document, N = '$channel', port = w[N], AUDIO_EVENTS = ['pause', 'ended', 'emptied', 'volumechange'];
   if (port === undefined) return;
   try { delete w[N]; } catch (e) {}
   if (!port || typeof port.postMessage !== 'function') return;
@@ -559,6 +592,29 @@ internal fun bottomUiDetectorJs(channel: String, debounceMs: Int = BOTTOM_UI_DEB
     if (!e.isTrusted) return;
     setT(function () { port.postMessage(e.defaultPrevented ? '$CONTEXT_MENU_KEPT' : '$CONTEXT_MENU_ALLOWED'); }, 0);
   }, true);
+  var ET = w.EventTarget, onEl = ET && ET.prototype && ET.prototype.addEventListener, media = [], loud = false;
+  function hear() {
+    var now = false;
+    for (var i = media.length - 1; i >= 0; i--) {
+      var m = media[i];
+      if (m.paused || m.ended) media.splice(i, 1);
+      else if (!m.muted && m.volume > 0) now = true;
+    }
+    if (now !== loud) { loud = now; port.postMessage(now ? '$AUDIO_AUDIBLE' : '$AUDIO_SILENT'); }
+  }
+  if (onEl) {
+    w.addEventListener('playing', function (e) {
+      var m = e.target;
+      if (!e.isTrusted || !m || typeof m.paused !== 'boolean') return;
+      if (media.indexOf(m) < 0) {
+        media.push(m);
+        for (var i = 0; i < AUDIO_EVENTS.length; i++) onEl.call(m, AUDIO_EVENTS[i], hear);
+      }
+      hear();
+    }, true);
+    w.addEventListener('pagehide', function () { if (loud) { loud = false; port.postMessage('$AUDIO_SILENT'); } }, true);
+    w.addEventListener('pageshow', function (e) { if (e.persisted) hear(); }, true);
+  }
   if (w.top !== w) return;
   var P = w.performance, pnow = P && P.now && P.now.bind(P), EP = w.Event && w.Event.prototype,
       tsd = EP && Object.getOwnPropertyDescriptor(EP, 'timeStamp'), tsOf = tsd && tsd.get;

@@ -416,6 +416,20 @@ class BrowserState(val id: Long) {
     internal var surfaceArgb: Int = 0xFF000000.toInt()
 
     /**
+     * Something in this tab's pages is audible (#91): a media element
+     * playing, unmuted by the page, volume above zero — as the tab's
+     * frames report it (see [TabAudioFrames]). Stays true while the tab
+     * is muted with [audioMuted]: the page is still playing, the user just
+     * doesn't hear it.
+     */
+    var playingAudio by mutableStateOf(false)
+        internal set
+
+    /** The user muted this tab's WebView (#91, [TabsState.setAudioMuted]). */
+    var audioMuted by mutableStateOf(false)
+        internal set
+
+    /**
      * Most recent page-preview bitmap for this tab, shown in the tab
      * switcher grid. Captured from the live WebView after each successful
      * load and whenever the user opens the switcher (so the thumbnail
