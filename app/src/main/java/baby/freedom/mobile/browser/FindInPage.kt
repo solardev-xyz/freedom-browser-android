@@ -166,6 +166,18 @@ class FindInPageState {
         private set
 
     /**
+     * What the bar's count and arrows show: the latest report of the live
+     * search, held across keystrokes. Typing sends a new search per
+     * character, and blanking the count (and greying the arrows) until
+     * each one's first report made them flicker while typing — so the
+     * previous count stays up until the new one lands. Null only once the
+     * session has ended or the query is empty. Decisions about the *new*
+     * search (Search vs Step, announcing) still read [result].
+     */
+    var displayed: FindResult? by mutableStateOf(null)
+        private set
+
+    /**
      * A search for a non-empty [query] has been sent to the WebView in
      * this session (whether or not its first report is in yet). False on
      * a freshly opened bar whose prefilled query hasn't been run.
@@ -182,6 +194,7 @@ class FindInPageState {
         open = false
         searching = false
         result = null
+        displayed = null
     }
 
     /**
@@ -193,6 +206,7 @@ class FindInPageState {
         query = text
         searching = text.isNotEmpty()
         result = null
+        if (!searching) displayed = null
     }
 
     /**
@@ -204,6 +218,7 @@ class FindInPageState {
     fun onResult(result: FindResult) {
         if (!open || !searching) return
         this.result = result
+        displayed = result
     }
 
     /**
@@ -256,7 +271,7 @@ internal fun FindBar(
 ) {
     val colors = MaterialTheme.colorScheme
     val find = tab.find
-    val result = find.result
+    val result = find.displayed
     val focusRequester = remember { FocusRequester() }
     // Prefilled with last time's query, cursor at the end — a user who
     // wants it again just hits Search. Not select-all: the IME answers an
@@ -281,13 +296,14 @@ internal fun FindBar(
     // Derived so a ticking load only recomposes at the idle/busy
     // boundary; the percentage itself is read in the trace's draw phase.
     val loading by remember(tab) { derivedStateOf { isCapsuleLoading(tab) } }
-    // Room for "000/000" in tabular figures, so stepping 9/10 → 10/10
-    // (or a count converging past a digit) doesn't nudge the field.
+    // Room for "0000/0000" in tabular figures, so stepping 9/10 → 10/10
+    // or 999/1200 → 1000/1200 (or a count converging past a digit)
+    // doesn't nudge the field. Past that the label just grows.
     val countStyle = MaterialTheme.typography.labelLarge.copy(fontFeatureSettings = "tnum")
     val measurer = rememberTextMeasurer()
     val density = LocalDensity.current
     val countMinWidth = remember(countStyle, density) {
-        with(density) { measurer.measure("000/000", countStyle).size.width.toDp() }
+        with(density) { measurer.measure("0000/0000", countStyle).size.width.toDp() }
     }
 
     Box(
@@ -359,7 +375,9 @@ internal fun FindBar(
                 },
             )
             val spoken = findCountSpoken(result)
-            val live = findCountLiveRegion(result)
+            // Announce only the new search's own report, not the count
+            // held over from the previous keystroke.
+            val live = findCountLiveRegion(find.result)
             Text(
                 text = findCountLabel(result),
                 style = countStyle,

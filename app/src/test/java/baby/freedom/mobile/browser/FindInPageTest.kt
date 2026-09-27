@@ -62,13 +62,25 @@ class FindInPageTest {
     }
 
     @Test
-    fun `a new query blanks the previous count until the webview reports`() {
+    fun `a new query keeps the previous count on the bar until the webview reports`() {
         val find = FindInPageState()
         find.show()
         find.startSearch("needle")
-        find.onResult(FindResult(2, 7, true))
+        val old = FindResult(2, 7, true)
+        find.onResult(old)
         find.startSearch("needles")
+        // The new search has no report of its own yet (so Enter steps and
+        // nothing is announced), but the bar keeps showing the last count
+        // and arrows instead of blanking between keystrokes (R3-F1).
         assertNull(find.result)
+        assertEquals(old, find.displayed)
+        assertEquals("2/7", findCountLabel(find.displayed))
+        assertTrue(findNavigationEnabled(find.displayed))
+        assertFalse(findCountLiveRegion(find.result))
+        val new = FindResult(1, 3, false)
+        find.onResult(new)
+        assertEquals(new, find.result)
+        assertEquals(new, find.displayed)
     }
 
     @Test
@@ -79,6 +91,18 @@ class FindInPageTest {
         find.startSearch("")
         find.onResult(FindResult(1, 3, true))
         assertNull(find.result)
+        assertNull(find.displayed)
+    }
+
+    @Test
+    fun `an emptied query blanks the held count`() {
+        val find = FindInPageState()
+        find.show()
+        find.startSearch("needle")
+        find.onResult(FindResult(1, 3, true))
+        find.startSearch("")
+        assertNull(find.displayed)
+        assertEquals("", findCountLabel(find.displayed))
     }
 
     @Test
@@ -92,6 +116,7 @@ class FindInPageTest {
 
         assertFalse(find.open)
         assertNull(find.result)
+        assertNull(find.displayed)
         assertEquals("needle", find.query)
         // A report from the old document arriving after the commit is dropped.
         find.onResult(FindResult(1, 3, true))
