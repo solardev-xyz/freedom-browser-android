@@ -54,7 +54,11 @@ import org.json.JSONTokener
  *     is verified. A stuck provider that reads a *different* record is
  *     set aside (the record may have changed since it stalled) — but a
  *     different block hash is a conflict: Tezos blocks that deep are
- *     final, so one of the two is lying.
+ *     final, so one of the two is lying. That only applies when the
+ *     device clock shows the answering provider's head is recent: if
+ *     every head looks stuck, the newest one may just be *less* stuck
+ *     (or the clock fast — there's no telling), and its answer stays
+ *     unverified.
  *
  * Website records may be `ipfs://` / `ipns://` (served natively, the
  * `.tez` name stays the origin; a published base path is kept) or
@@ -161,14 +165,18 @@ class TezosDomainsResolver internal constructor(
         // stale one — so it would push the *healthy* provider out and the
         // name would be refused. Stuck is judged by the block's own
         // timestamp, which a lying provider can't make an honest, live
-        // one fail. If every head looks stuck, it's this device's clock
-        // that's fast: measure age from the newest head instead, so a
-        // live provider still stands out from a stuck one.
+        // one fail. If every head looks stuck, either this device's clock
+        // is fast or every reachable provider is stuck, and nothing here
+        // can tell which: measure age from the newest head instead, so a
+        // clearly-behind provider still sits out the quorum — but the
+        // newest head is then only *less* stuck, not known live, so a
+        // stuck provider's older record can't vouch for it (see below).
         fun stuckBy(reference: Long) =
             reachable.partition { it.timestamp != null && it.timestamp < reference - STALE_HEAD_AGE_MS }
         var clock = now()
         var (stale, allHeads) = stuckBy(clock)
-        if (allHeads.isEmpty()) {
+        val liveByClock = allHeads.isNotEmpty()
+        if (!liveByClock) {
             clock = reachable.maxOf { it.timestamp!! }
             stuckBy(clock).let { (s, c) -> stale = s; allHeads = c }
         }
@@ -229,8 +237,11 @@ class TezosDomainsResolver internal constructor(
         var agreed = winner.size
         // Only a website answer is worth the extra round: verification
         // changes nothing for not-found / unsupported, and a stuck node's
-        // 404 can as well mean "that block isn't on this backend".
-        if (agreed < 2 && stale.isNotEmpty() && winner[0].second.type == Leg.Type.OK) {
+        // 404 can as well mean "that block isn't on this backend". And
+        // only when the device clock showed the answering provider live:
+        // otherwise it may itself be hours behind, and an even older
+        // record agreeing with it proves nothing about the chain today.
+        if (agreed < 2 && liveByClock && stale.isNotEmpty() && winner[0].second.type == Leg.Type.OK) {
             val live = winner[0].first
             // The stuck nodes are known to be unhealthy: they share one
             // short budget instead of each RPC's full timeout, so a flaky

@@ -442,7 +442,30 @@ class TezosDomainsResolverTest {
         )
         val a = answer(TezosDomainsResolver(listOf(one, two), http) { fast }.resolveOutcome("skew.tez"))
         assertEquals("ipfs://bafybeigdyrzt", a.leg.uri)
-        assertTrue(a.verified)
+        // Resolved, but the device clock can't vouch that the newest head
+        // is live, so the stuck node's older record doesn't verify it.
+        assertFalse(a.verified)
+        assertEquals(1, a.agreed)
+        assertFalse(http.calls.any { it.startsWith(one) && it.contains("/hash") })
+    }
+
+    @Test
+    fun `when every reachable provider is stuck, the less stuck one isn't verified by the more stuck one`() = runBlocking {
+        // Clock correct; one stuck 12 h, two stuck 6 h, three down. Two is
+        // only less stuck — not live — so one agreeing at an older block
+        // must not turn two's hours-old answer into a verified one.
+        val http = rpc(
+            record("web:content_url" to "ipfs://bafybeigdyrzt"),
+            headLevels = mapOf(one to 15_126_718, two to 15_130_198),
+            headTimes = mapOf(one to "2026-09-27T12:00:00Z", two to stuckTime),
+            down = setOf(three),
+        )
+        val resolver = TezosDomainsResolver(threeEndpoints, http) { clock }
+        val a = answer(resolver.resolveOutcome("allstuck.tez"))
+        assertEquals("ipfs://bafybeigdyrzt", a.leg.uri)
+        assertFalse(a.verified)
+        assertEquals(1, a.agreed)
+        assertEquals(TezosDomainsResolver.UNVERIFIED_TTL_MS, resolver.cacheDuration(a))
     }
 
     @Test
