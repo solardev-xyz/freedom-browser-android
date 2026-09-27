@@ -305,8 +305,13 @@ class TezosDomainsResolverTest {
     fun `excludes a provider whose head level deviates wildly from the median`() = runBlocking {
         val http = rpc(record("web:content_url" to "ipfs://bafybeigdyrzt/site"), headLevels = mapOf(three to 100))
         val a = answer(TezosDomainsResolver(threeEndpoints, http).resolveOutcome("anchored.tez"))
+        // Left out *below* the others: the kept heads are the newer ones,
+        // so their agreement stands. The outlier was still asked, and
+        // disagreed about the head.
         assertTrue(a.verified)
-        assertEquals(2, a.asked)
+        assertEquals(2, a.agreed)
+        assertEquals(3, a.asked)
+        assertEquals(listOf("rpc-three.test"), a.dissentedHosts)
         assertFalse(http.calls.any { it.startsWith(three) && it.contains("/big_maps/") })
     }
 
@@ -442,18 +447,56 @@ class TezosDomainsResolverTest {
     }
 
     @Test
-    fun `two stuck providers that agree outvote a lone live one`() = runBlocking {
-        // The device clock sides with the live one — but it is only a
-        // sanity check, and a majority of providers is trusted over it.
+    fun `two stuck heads that agree don't verify a record the lone live one has moved past`() = runBlocking {
+        // R1-F1: octez stuck ~6 h (honest), a liar copying its level and
+        // timestamp, tzkt live, device clock correct. Nothing is set aside
+        // as stuck (the majority *is* the stuck head) and the median drops
+        // the live one — the two stuck legs read the pre-change record.
+        // That must not come back verified.
         val http = rpc(
-            record("web:content_url" to "ipfs://bafybeigdyrzt"),
+            null,
             headLevels = mapOf(one to 15_130_198, two to 15_130_198, three to 15_133_180),
             headTimes = mapOf(one to stuckTime, two to stuckTime, three to liveTime),
+            recordsByEndpoint = mapOf(
+                one to record("web:content_url" to "ipfs://bafyold"),
+                two to record("web:content_url" to "ipfs://bafyold"),
+                three to record("web:content_url" to "ipfs://bafynew"),
+            ),
         )
-        val a = answer(TezosDomainsResolver(threeEndpoints, http) { clock }.resolveOutcome("majority.tez"))
-        assertTrue(a.verified)
+        val resolver = TezosDomainsResolver(threeEndpoints, http) { clock }
+        val a = answer(resolver.resolveOutcome("majority.tez"))
+        assertEquals("ipfs://bafyold", a.leg.uri)
+        assertFalse(a.verified)
         assertEquals(2, a.agreed)
+        assertEquals(3, a.asked)
+        assertEquals(listOf("rpc-three.test"), a.dissentedHosts)
+        assertEquals(TezosDomainsResolver.UNVERIFIED_TTL_MS, resolver.cacheDuration(a))
+        assertFalse((resolver.resolve("majority.tez") as EnsResult.Ok).trust.verified)
         assertFalse(http.calls.any { it.startsWith(three) && it.contains("/big_maps/") })
+    }
+
+    @Test
+    fun `a majority outvoting a newer head is verified only when the device clock shows it live`() = runBlocking {
+        // Same claims as a liar reporting a far higher head against two
+        // live providers. With the clock off by more than the stale
+        // window either way — or with no head timestamps at all — nothing
+        // corroborates the majority, so its answer is one side's word.
+        for (skew in listOf(3_600_000L, -12 * 3_600_000L)) {
+            val http = rpc(
+                record("web:content_url" to "ipfs://bafyreal"),
+                headLevels = mapOf(one to 15_133_180, two to 15_133_180, three to 15_200_000),
+                headTimes = mapOf(one to liveTime, two to liveTime, three to "2026-09-28T12:00:00Z"),
+            )
+            val a = answer(TezosDomainsResolver(threeEndpoints, http) { clock + skew }.resolveOutcome("future.tez"))
+            assertEquals("skew $skew", "ipfs://bafyreal", a.leg.uri)
+            assertFalse("skew $skew", a.verified)
+            assertEquals(3, a.asked)
+        }
+        val untimed = rpc(
+            record("web:content_url" to "ipfs://bafyreal"),
+            headLevels = mapOf(one to 15_133_180, two to 15_133_180, three to 15_200_000),
+        )
+        assertFalse(answer(TezosDomainsResolver(threeEndpoints, untimed) { clock }.resolveOutcome("future.tez")).verified)
     }
 
     @Test
@@ -521,8 +564,11 @@ class TezosDomainsResolverTest {
         )
         val a = answer(TezosDomainsResolver(threeEndpoints, http) { clock }.resolveOutcome("future.tez"))
         assertEquals("ipfs://bafyreal", a.leg.uri)
+        // The device clock shows both kept heads as live: the higher one lies.
         assertTrue(a.verified)
         assertEquals(2, a.agreed)
+        assertEquals(3, a.asked)
+        assertEquals(listOf("rpc-three.test"), a.dissentedHosts)
     }
 
     @Test

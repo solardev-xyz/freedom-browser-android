@@ -32,7 +32,8 @@ import org.json.JSONTokener
  *     of providers reports is *stuck*, not disagreeing: it sits out the
  *     round entirely (see [resolveUncached]). Neither the device clock
  *     nor any one provider's timestamp decides that. Of the rest,
- *     drop heads more than [MAX_HEAD_LAG_BLOCKS] from the median, then
+ *     drop heads more than [MAX_HEAD_LAG_BLOCKS] from the median (both
+ *     kinds still count as asked; dropped heads as dissenting), then
  *     have each remaining provider name the hash
  *     of one shared block [ANCHOR_DEPTH] below the lowest head. Every
  *     read below happens *at that block*, so honest providers answer
@@ -50,11 +51,18 @@ import org.json.JSONTokener
  *     asks before loading it, as for ENS (`EnsTrust`). Providers
  *     that disagree without a strict majority (about the head, the
  *     anchor hash, or the record) are a [Outcome.Conflict] — refused,
- *     never settled by picking a side. A stuck provider never counts
- *     towards verification: it can only attest to the chain as it was
- *     when it stalled, and a live provider serving a record rolled back
- *     to that point would read the same — so it sits out, and its
- *     agreement is never counted.
+ *     never settled by picking a side. A provider judged stuck never
+ *     counts towards verification: it can only attest to the chain as it
+ *     was when it stalled, and a live provider serving a record rolled
+ *     back to that point would read the same — so it sits out. Stuck
+ *     providers that are the *majority* can't be told apart that way
+ *     (an honest stalled node plus a liar copying its head look like two
+ *     live heads against one liar claiming a later one), so when the
+ *     median drops a head *newer* than the kept ones, their agreement is
+ *     verified only if the device clock shows every kept head as live
+ *     (within [STALE_HEAD_AGE_MS] of now). Otherwise the answer is
+ *     unverified. The clock can only withhold verification, never set a
+ *     provider aside.
  *
  * Website records may be `ipfs://` / `ipns://` (served natively, the
  * `.tez` name stays the origin; a published base path is kept) or
@@ -187,9 +195,11 @@ class TezosDomainsResolver internal constructor(
         // disagreement between the two stays a Conflict.
         // The device clock is never the reference: it is off by hours on
         // phones often enough (no NTP, set by hand), and then it would be
-        // the lone "vote" that sets honest providers aside. It is only a
-        // sanity check, logged when the providers' consensus disagrees
-        // with it — and then the consensus is trusted.
+        // the lone "vote" that sets honest providers aside. Here it is
+        // only logged when the providers' consensus disagrees with it; its
+        // one other use is to corroborate a majority that outvoted a newer
+        // head, below — it can withhold verification, never set anyone
+        // aside.
         // A stuck provider takes no further part: it can't vouch for the
         // chain after it stalled (see the class doc, step 4).
         val reference = consensusHeadTime(reachable)
@@ -212,7 +222,8 @@ class TezosDomainsResolver internal constructor(
         val sorted = allHeads.map { it.level }.sorted()
         val median = sorted[(sorted.size - 1) / 2]
         val heads = allHeads.filter { kotlin.math.abs(it.level - median) <= MAX_HEAD_LAG_BLOCKS }
-        for (h in allHeads - heads.toSet()) {
+        val outliers = allHeads - heads.toSet()
+        for (h in outliers) {
             Log.w(TAG, "excluding ${h.endpoint}: head ${h.level} deviates from median $median")
         }
         // A median only survives a minority of liars. Two reachable
@@ -272,13 +283,33 @@ class TezosDomainsResolver internal constructor(
             Log.w(TAG, "$dissenting disagreed with the majority for a .tez name")
         }
         val agreed = winner.size
+        // A head left out *above* the kept ones says the chain has moved
+        // on past them. The providers' claims alone can't tell a liar
+        // claiming a later head from a majority stuck at the same point
+        // (an honest stalled node plus a liar copying its head): both look
+        // like two older heads against one newer. In the second case the
+        // kept heads read a record the chain may have changed since, so
+        // their agreement proves nothing. It only counts when the device
+        // clock independently puts every kept head within
+        // [STALE_HEAD_AGE_MS] of now — the clock never sets a provider
+        // aside, it can only fail to corroborate, and then the answer is
+        // one side's word: unverified, short-cached, asked about.
+        val newerLeftOut = outliers.filter { it.level > median }
+        val corroborated = newerLeftOut.isEmpty() || keptHeadsLive(heads)
+        if (!corroborated) {
+            Log.w(
+                TAG,
+                "${newerLeftOut.joinToString(", ") { it.endpoint }} reported a later head than the majority, " +
+                    "which the device clock doesn't show as live; answer not cross-checked",
+            )
+        }
         val answer = Outcome.Answer(
             leg = winner[0].second,
-            verified = agreed >= 2,
+            verified = agreed >= 2 && corroborated,
             agreed = agreed,
-            asked = legs.size + stale.size,
+            asked = legs.size + stale.size + outliers.size,
             agreedHosts = winner.map { hostOf(it.first) },
-            dissentedHosts = legs.filter { it !in winner }.map { hostOf(it.first) },
+            dissentedHosts = legs.filter { it !in winner }.map { hostOf(it.first) } + outliers.map { hostOf(it.endpoint) },
             block = anchorLevel,
         )
         synchronized(resultCache) {
@@ -296,6 +327,16 @@ class TezosDomainsResolver internal constructor(
     private fun consensusHeadTime(reachable: List<Head>): Long? {
         val times = reachable.mapNotNull { it.timestamp }.sortedDescending()
         return times.getOrNull(reachable.size / 2)
+    }
+
+    /**
+     * Whether the device clock puts every one of [heads] within
+     * [STALE_HEAD_AGE_MS] of now, either way. A head without a timestamp,
+     * or a clock off by more than that, corroborates nothing.
+     */
+    private fun keptHeadsLive(heads: List<Head>): Boolean {
+        val t = now()
+        return heads.all { it.timestamp != null && kotlin.math.abs(t - it.timestamp) <= STALE_HEAD_AGE_MS }
     }
 
     /** `Promise.allSettled` + keep the fulfilled: one bad provider never fails the round. */
