@@ -146,6 +146,7 @@
           .toLowerCase();
         if (host.endsWith('.wei')) return 'WNS';
         if (host.endsWith('.gwei')) return 'GNS';
+        if (host.endsWith('.tez')) return 'Tezos Domains';
         return 'ENS';
       }
 
@@ -181,18 +182,24 @@
           titleEl.textContent = 'No content for this ' + nameLabel + ' name';
           // ENS goes through a per-name resolver; WNS/GNS store records
           // straight on their registry, so there the other cause is the
-          // name not being registered.
+          // name not being registered. Tezos Domains publishes a website
+          // record rather than a contenthash, and names expire.
           const otherCause =
             nameLabel === 'ENS' ? 'the name has no resolver' : "the name isn't registered";
           descriptionEl.innerHTML =
-            "This " + nameLabel + " name doesn't point at any content yet. The owner may not have set a " +
-            '<code>contenthash</code> record, or ' + otherCause + '.';
+            nameLabel === 'Tezos Domains'
+              ? "This Tezos Domains name doesn't point at a website. The owner may not have set a " +
+                "<code>web:content_url</code> record, the name isn't registered, or it has expired."
+              : "This " + nameLabel + " name doesn't point at any content yet. The owner may not have set a " +
+                '<code>contenthash</code> record, or ' + otherCause + '.';
         } else if (error === 'ens_wrong_protocol') {
           titleEl.textContent = 'Name lives on a different network';
           descriptionEl.innerHTML =
             'This ' + nameLabel + ' name resolves to content on a different network than the ' +
             'scheme you typed asks for. Try the name on its own &mdash; the browser ' +
-            'will follow wherever its <code>contenthash</code> points.';
+            'will follow wherever its ' +
+            (nameLabel === 'Tezos Domains' ? 'website record' : '<code>contenthash</code>') +
+            ' points.';
         } else if (error === 'ens_unsupported_codec') {
           titleEl.textContent = 'Unsupported content format';
           descriptionEl.innerHTML =
@@ -200,8 +207,12 @@
         } else if (error === 'ens_lookup_failed') {
           titleEl.textContent = nameLabel + ' lookup failed';
           descriptionEl.innerHTML =
-            "Couldn't reach an Ethereum RPC endpoint to resolve this name. Check your " +
-            'connection and try again.';
+            nameLabel === 'Tezos Domains' && detail && detail.indexOf('PROVIDER_CONFLICT') === 0
+              ? // A quorum split is a refusal, not a connectivity problem.
+                "The Tezos RPC providers Freedom asks gave conflicting answers for this name, " +
+                "so it can't be resolved safely right now."
+              : "Couldn't reach " + (nameLabel === 'Tezos Domains' ? 'a Tezos' : 'an Ethereum') +
+                ' RPC endpoint to resolve this name. Check your connection and try again.';
         } else if (error === 'swarm_content_not_found') {
           titleEl.textContent = 'Content not ready yet';
           descriptionEl.innerHTML =

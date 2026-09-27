@@ -67,6 +67,7 @@ import androidx.webkit.WebMessageCompat
 import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
 import baby.freedom.mobile.data.BrowsingRepository
+import baby.freedom.mobile.ens.NameSystem
 import kotlinx.coroutines.flow.collectLatest
 import java.io.ByteArrayInputStream
 import java.io.FilterInputStream
@@ -177,15 +178,23 @@ internal fun isDocumentRequest(
  * the name. No script: the document is on the name's origin.
  */
 internal fun nameResolutionRefusal(name: String, code: String): WebResourceResponse {
+    val system = NameSystem.forName(name)
+    val label = system.label
+    val tezos = system == NameSystem.TEZOS
     val (title, description) = when (code) {
-        "ens_not_found" -> "No content for this ENS name" to
-            "This ENS name doesn't point at any content any more. The owner may " +
-            "have removed its <code>contenthash</code> record, or the name has no resolver."
+        "ens_not_found" -> "No content for this $label name" to
+            if (tezos) {
+                "This $label name doesn't point at a website any more. The owner may " +
+                    "have removed its <code>web:content_url</code> record, or the name has expired."
+            } else {
+                "This $label name doesn't point at any content any more. The owner may " +
+                    "have removed its <code>contenthash</code> record, or the name has no resolver."
+            }
         "ens_unsupported_codec" -> "Unsupported content format" to
-            "This ENS name now resolves to a content format Freedom Browser " +
+            "This $label name now resolves to a content format Freedom Browser " +
             "cannot load yet on mobile."
-        else -> "ENS lookup failed" to
-            "Couldn't reach an Ethereum RPC endpoint to resolve this name. " +
+        else -> "$label lookup failed" to
+            "Couldn't reach ${if (tezos) "a Tezos" else "an Ethereum"} RPC endpoint to resolve this name. " +
             "Check your connection and try again."
     }
     val safeName = name.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")

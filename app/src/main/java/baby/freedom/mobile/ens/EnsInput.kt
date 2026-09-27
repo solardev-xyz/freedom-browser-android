@@ -10,9 +10,10 @@ package baby.freedom.mobile.ens
  *   - `ens://VITALIK.eth/docs?q=1`
  *   - `foo.box/path`
  *   - `alice.wei` (WNS) and `name.gwei` (GNS) — see [NameSystem]
+ *   - `alice.tez` (Tezos Domains)
  *
  * Returns `null` for anything that doesn't end in one of
- * [NameSystem.navigableSuffixes] (`.eth`, `.box`, `.wei`, `.gwei`).
+ * [NameSystem.navigableSuffixes] (`.eth`, `.box`, `.wei`, `.gwei`, `.tez`).
  *
  * [parseConstrained] handles the scheme-constrained forms
  * (`bzz://name.eth`, `ipfs://name.eth`, `ipns://name.eth`): the name is

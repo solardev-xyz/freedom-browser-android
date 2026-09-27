@@ -339,9 +339,11 @@ object Gateways {
         is ContentRoot.IpnsName -> ipfsBase.ifEmpty { null }?.let { "$it/ipns/${root.name}$pathAndQuery" }
         is ContentRoot.Ens ->
             ((page?.uriFor(root.name) ?: pins?.uriFor(root.name))
-                ?.let { VirtualOrigin.parseContentUrl(it)?.first }
-                ?: resolveEnsRoot(root.name))
-                ?.let { gatewayUrlFor(it, pathAndQuery) }
+                ?.let { VirtualOrigin.parseContentUrl(it) }
+                ?: resolveEnsContent(root.name))
+                // A `.tez` website record may publish a base path
+                // (`ipfs://<cid>/site`); ENS contenthashes never carry one.
+                ?.let { (target, basePath) -> gatewayUrlFor(target, basePath.trimEnd('/') + pathAndQuery) }
     }
 
     /**
@@ -355,14 +357,18 @@ object Gateways {
      * uses the resolver's own TTL cache after the first call. Blocking
      * is fine — the interceptor never runs on the UI thread.
      */
-    internal fun resolveEnsRoot(name: String): ContentRoot? {
+    internal fun resolveEnsRoot(name: String): ContentRoot? = resolveEnsContent(name)?.first
+
+    /** [resolveEnsRoot] plus the base path the resolved URI carries (`""` for ENS). */
+    private fun resolveEnsContent(name: String): Pair<ContentRoot, String>? {
         KnownEnsNames.uriFor(name)?.let { uri ->
-            VirtualOrigin.parseContentUrl(uri)?.let { return it.first }
+            VirtualOrigin.parseContentUrl(uri)?.let { return it }
         }
         val result = ensLookup(name)
         if (result is EnsResult.Ok) {
+            val content = VirtualOrigin.parseContentUrl(result.uri) ?: return null
             KnownEnsNames.record(result.uri, name)
-            return VirtualOrigin.parseContentUrl(result.uri)?.first
+            return content
         }
         return null
     }

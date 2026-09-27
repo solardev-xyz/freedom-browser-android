@@ -38,6 +38,10 @@ import org.json.JSONObject
  * Universal Resolver (see [NameSystem]). Same namehash, same record
  * decoding, same cache and RPC rotation; no CCIP-Read.
  *
+ * Tezos Domains (`.tez`) names are delegated to [TezosDomainsResolver]
+ * — a different chain entirely — so every caller of this resolver
+ * (the submit flow, the request interceptor) covers them too.
+ *
  * Known limitations vs. the desktop resolver:
  *   - ENSIP-15 normalization is lowercased-ASCII only. Pure-ASCII names
  *     round-trip correctly; emoji / non-ASCII labels may normalize
@@ -46,6 +50,7 @@ import org.json.JSONObject
 class EnsResolver internal constructor(
     private val rpcEndpoints: List<String>,
     private val http: EnsHttp,
+    private val tezos: TezosDomainsResolver = TezosDomainsResolver(),
 ) {
     constructor(rpcEndpoints: List<String> = DEFAULT_RPC_ENDPOINTS) :
         this(rpcEndpoints, EnsHttp.Default)
@@ -85,13 +90,16 @@ class EnsResolver internal constructor(
             return EnsResult.Error(name = "", reason = "INVALID_NAME", error = "empty name")
         }
 
+        val system = NameSystem.forName(normalized)
+        // `.tez` isn't Ethereum: its own resolver, quorum and TTL cache.
+        if (system == NameSystem.TEZOS) return tezos.resolve(normalized)
+
         cache[normalized]?.let {
             if (System.currentTimeMillis() - it.timestamp < CACHE_TTL_MS) {
                 return it.result
             }
         }
 
-        val system = NameSystem.forName(normalized)
         val contract = system.contractAddress
         val target = contract ?: UNIVERSAL_RESOLVER
         val callData = if (contract != null) {

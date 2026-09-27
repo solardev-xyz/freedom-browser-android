@@ -13,12 +13,23 @@ sealed class EnsResult {
     /** Successful resolution to a content-addressed URI. */
     data class Ok(
         override val name: String,
-        /** `bzz`, `ipfs`, `ipns` — the scheme of [uri]. */
+        /**
+         * `bzz`, `ipfs`, `ipns` — the scheme of [uri]. A `.tez` name's
+         * website record may also be `http` / `https`.
+         */
         val protocol: String,
-        /** `bzz://<hash>`, `ipfs://<cidv0>`, `ipns://<cidv0>`. */
+        /**
+         * `bzz://<hash>`, `ipfs://<cidv0>`, `ipns://<cidv0>`. A `.tez`
+         * record can add a base path (`ipfs://<cid>/site`), or be a web URL.
+         */
         val uri: String,
         /** Just the decoded hash / CID, for caching / display. */
         val decoded: String,
+        /**
+         * Tezos Domains only: [uri] is an `http(s)` `web:redirect_url`,
+         * navigated to as is — no address-bar path appended.
+         */
+        val redirect: Boolean = false,
     ) : EnsResult()
 
     /**
