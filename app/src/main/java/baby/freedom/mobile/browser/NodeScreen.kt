@@ -21,6 +21,11 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
+import androidx.compose.ui.platform.LocalContext
+import baby.freedom.mobile.data.NodeSettings
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -45,6 +50,9 @@ fun NodeScreen(
 ) {
     BackHandler(onBack = onDismiss)
     val triple = nodeStatusTriple(nodeInfo.status)
+    val context = LocalContext.current
+    val externalSwarm by remember(context) { NodeSettings.get(context).externalSwarmEndpoint }
+        .collectAsState(initial = "")
 
     FullScreenScaffold(
         title = "Swarm node",
@@ -59,6 +67,7 @@ fun NodeScreen(
                 StatusSection(
                     triple = triple,
                     runNodeEnabled = runNodeEnabled,
+                    external = externalSwarm.isNotEmpty(),
                     onToggleRunNode = onToggleRunNode,
                 )
             }
@@ -66,7 +75,7 @@ fun NodeScreen(
                 DetailsSection(nodeInfo = nodeInfo)
             }
             item("gateway") {
-                GatewaySection()
+                GatewaySection(externalSwarm = externalSwarm)
             }
         }
     }
@@ -76,6 +85,7 @@ fun NodeScreen(
 private fun StatusSection(
     triple: NodeStatusTriple,
     runNodeEnabled: Boolean,
+    external: Boolean,
     onToggleRunNode: (Boolean) -> Unit,
 ) {
     SectionCard(title = "Status") {
@@ -90,8 +100,13 @@ private fun StatusSection(
             Column(modifier = Modifier.weight(1f)) {
                 Text(triple.label, fontWeight = FontWeight.Medium)
                 Text(
-                    if (runNodeEnabled) "Serving bzz:// via local gateway"
-                    else "Gateway disabled",
+                    when {
+                        // Settings → Nodes (#125): bzz:// goes to the
+                        // user's own node, whatever this one is doing.
+                        external -> "bzz:// served by an external endpoint"
+                        runNodeEnabled -> "Serving bzz:// via local gateway"
+                        else -> "Gateway disabled"
+                    },
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -120,9 +135,12 @@ private fun DetailsSection(nodeInfo: NodeInfo) {
 }
 
 @Composable
-private fun GatewaySection() {
+private fun GatewaySection(externalSwarm: String) {
     SectionCard(title = "Gateway") {
         DetailRow("URL", SwarmNode.GATEWAY_URL, mono = true)
+        if (externalSwarm.isNotEmpty()) {
+            DetailRow("In use", externalSwarm, mono = true, singleLine = false)
+        }
     }
 }
 

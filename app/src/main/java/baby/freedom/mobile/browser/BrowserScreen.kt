@@ -564,9 +564,14 @@ fun BrowserScreen(
     // counter growth of every poll during which the superseded load
     // was still busy in the node, and skips the node-wide snapshot while
     // it has any request open ([BrowserState.gatewayWork]).
+    // The counters are the embedded node's; an external gateway (#125)
+    // serves the load without them moving. Observed, so switching the
+    // source mid-load starts / stops the polling straight away.
+    val externalIpfsGateway by Gateways.externalIpfsBaseFlow.collectAsState()
     val pollIpfsProgress = state.ipfsLoad &&
         isCapsuleLoading(state) &&
-        ipfsInfo.status == IpfsStatus.Running
+        ipfsInfo.status == IpfsStatus.Running &&
+        externalIpfsGateway.isEmpty()
     val ipfsLoadKey = state.id to state.loadGeneration
     var ipfsStatus by remember { mutableStateOf<String?>(null) }
     var ipfsStatusTab by remember { mutableStateOf<Long?>(null) }
@@ -707,7 +712,15 @@ fun BrowserScreen(
         // here so we don't pay the IPFS bootstrap cost on cold app
         // launch. Idempotent on the service side; safe to call on
         // every IPFS navigation.
-        val readiness = if (isIpfs) {
+        //
+        // An external endpoint (#125) replaces the embedded node, so
+        // there's no node to wait for (or start): the probe below
+        // tells whether the endpoint answers.
+        Gateways.awaitExternalEndpoints()
+        val external = if (isIpfs) Gateways.externalIpfsBase else Gateways.externalSwarmBase
+        val readiness = if (external.isNotEmpty()) {
+            NodeReadyOutcome.Running
+        } else if (isIpfs) {
             onEnsureIpfsStarted()
             awaitIpfsRunning(
                 currentIpfsInfoProvider = { currentIpfsInfo },
@@ -726,10 +739,11 @@ fun BrowserScreen(
             return
         }
 
-        // Probe the gateway directly (`http://127.0.0.1:…`) — the
-        // WebView gets the virtual-origin URL, but readiness is a
-        // question for the node itself. Resolved after the node flips
-        // to Running, in case ipfsBase was still empty before.
+        // Probe the gateway directly (`http://127.0.0.1:…`, or the
+        // external endpoint) — the WebView gets the virtual-origin URL,
+        // but readiness is a question for the node itself. Resolved
+        // after the node flips to Running, in case ipfsBase was still
+        // empty before.
         val resolved = Gateways.toGatewayUrl(contentUri)
         val headUrl = GatewayUrls.extractBase(resolved)?.prefix ?: resolved
 
