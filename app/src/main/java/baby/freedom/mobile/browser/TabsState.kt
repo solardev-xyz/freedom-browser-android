@@ -75,6 +75,16 @@ class TabsState(
     var find: ((BrowserState, FindAction) -> Unit)? = null
 
     /**
+     * Hook installed by the [BrowserWebViewHost] so the overflow menu's
+     * Print item can hand the given tab's page to the system print
+     * framework (#89) — like [stopLoading], only the host knows which
+     * [android.webkit.WebView] backs the tab. `null` before the host has
+     * composed, or after it disposes.
+     */
+    @Volatile
+    var printPage: ((BrowserState) -> Unit)? = null
+
+    /**
      * Hook installed by [BrowserScreen] so the WebView layer can bounce
      * `bzz://` / `ens://` navigations (in-page link clicks, error-page
      * "Try Again" button) back through the screen's probe-gated submit

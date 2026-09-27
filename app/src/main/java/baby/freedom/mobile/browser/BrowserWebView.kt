@@ -747,6 +747,11 @@ fun BrowserWebViewHost(
                 }
             }
         }
+        tabs.printPage = { tab ->
+            webViews[tab.id]?.let { wv ->
+                printWebView(wv, printJobName(tab.title, tab.addressBarText, tab.url))
+            }
+        }
         tabs.clearWebViewData = {
             // Globally-scoped stores: cookies and DOM storage / IndexedDB /
             // WebSQL are shared across every WebView in the process, so
@@ -775,6 +780,7 @@ fun BrowserWebViewHost(
             tabs.clearWebViewData = null
             tabs.stopLoading = null
             tabs.find = null
+            tabs.printPage = null
         }
     }
 

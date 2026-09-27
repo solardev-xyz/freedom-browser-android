@@ -1412,6 +1412,7 @@ fun BrowserScreen(
                         submit(fresh, tabs.homepageUrl)
                     },
                     onFindInPage = { state.find.show() },
+                    onPrint = { tabs.printPage?.invoke(state) },
                     modifier = Modifier
                         .widthIn(max = CHROME_MAX_WIDTH)
                         .fillMaxWidth(),
