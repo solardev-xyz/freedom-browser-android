@@ -13,6 +13,7 @@ import android.graphics.ColorFilter
 import android.graphics.PixelFormat
 import android.graphics.Rect
 import android.graphics.drawable.Drawable
+import android.net.Uri
 import android.os.Message
 import android.os.SystemClock
 import android.util.Log
@@ -24,6 +25,7 @@ import android.view.ViewGroup
 import android.view.animation.DecelerateInterpolator
 import android.webkit.CookieManager
 import android.webkit.MimeTypeMap
+import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
@@ -552,6 +554,7 @@ fun BrowserWebViewHost(
 ) {
     val context = LocalContext.current
     val repo = remember(context) { BrowsingRepository.get(context) }
+    val fileChooser = rememberFileChooser()
 
     // Enable Chrome DevTools inspection for debug builds so we can
     // diagnose broken subresources on Swarm-hosted pages. Cheap no-op
@@ -629,6 +632,7 @@ fun BrowserWebViewHost(
             // Handed to Chromium by `onCreateWindow`, which needs it
             // never to have navigated.
             isPopup = tab.openerId != null,
+            fileChooser = fileChooser,
         )
         webViews[tab.id] = wv
         refreshLayouts[tab.id] = layout
@@ -721,6 +725,9 @@ fun BrowserWebViewHost(
                 runCatching { wv.clearFormData() }
                 runCatching { wv.clearHistory() }
             }
+            // Camera captures handed to pages live in our own cache/uploads
+            // (served by our FileProvider), outside Chromium's cache dir.
+            runCatching { fileChooser.clearCaptures() }
         }
         onDispose {
             tabs.captureActiveThumbnail = null
@@ -750,6 +757,7 @@ private fun buildRefreshableWebView(
     onEnterFullscreen: (View, WebChromeClient.CustomViewCallback?) -> Unit,
     onExitFullscreen: () -> Unit,
     onRecoverNodes: () -> Unit = {},
+    fileChooser: FileChooser? = null,
     onCreateWindow: () -> WebView,
     onCloseWindow: () -> Unit,
     isPopup: Boolean = false,
@@ -1879,6 +1887,16 @@ private fun buildRefreshableWebView(
 
             override fun onHideCustomView() {
                 onExitFullscreen()
+            }
+
+            // `<input type=file>` (#80) — see [FileChooser].
+            override fun onShowFileChooser(
+                webView: WebView?,
+                filePathCallback: ValueCallback<Array<Uri>>?,
+                fileChooserParams: FileChooserParams?,
+            ): Boolean {
+                if (filePathCallback == null || fileChooserParams == null) return false
+                return fileChooser?.show(filePathCallback, fileChooserParams) ?: false
             }
 
             // A new window the page asked for (`target=_blank`,

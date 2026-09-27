@@ -64,6 +64,21 @@
         </activity>
 
         <!--
+          Serves camera captures for <input type=file capture> — the
+          camera app writes the photo into it, the page reads it back
+          (see FileChooser.kt). Scoped to cache/uploads/ only.
+        -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.files"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
+
+        <!--
           NodeService lives in its own `:node` process so we can exit
           that process (and everything native inside it — ant's tokio
           runtime, the freedom-ipfs store) when the user toggles the node
