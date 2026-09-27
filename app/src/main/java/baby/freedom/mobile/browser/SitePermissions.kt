@@ -148,6 +148,13 @@ sealed interface PromptAnswer {
      * Deny once, count nothing.
      */
     data object Withdrawn : PromptAnswer
+
+    /**
+     * Another tab answered the same question for the same origin while
+     * this prompt was up ([awaitPromptSuperseded]): take it down and
+     * re-plan, without asking the user the same thing twice.
+     */
+    data object Superseded : PromptAnswer
 }
 
 /** How a request should be handled before any prompt. */
@@ -268,6 +275,25 @@ class PermissionSession {
         /** Chromium's (and the desktop browser's) dismissal embargo. */
         const val DISMISS_EMBARGO_THRESHOLD = 3
     }
+}
+
+/**
+ * Suspends until a prompt asking about [undecided] for [origin] no
+ * longer asks the right question — some of it was decided elsewhere
+ * (another tab's prompt for the same origin answered, or an embargo
+ * reached) — and returns. Re-checks on every [PermissionSession]
+ * change, against the remembered decisions too ([stored]): an
+ * "Allow + remember" moves from the session tier into the store, and a
+ * re-check that only runs after that move must still see it.
+ */
+suspend fun awaitPromptSuperseded(
+    origin: String,
+    undecided: List<SitePermission>,
+    session: PermissionSession,
+    stored: suspend () -> Map<SitePermission, PermissionDecision>,
+) {
+    val asked = PermissionPlan.Ask(undecided)
+    session.version.first { planFor(origin, undecided, stored(), session) != asked }
 }
 
 /**

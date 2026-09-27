@@ -10,6 +10,7 @@ import baby.freedom.mobile.data.SitePermissionStore
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.MainScope
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.combine
@@ -266,35 +267,63 @@ class SitePermissionBroker private constructor(
         if (!live()) return finish(false)
         val lock = tabLocks.getOrPut(tab.id) { Mutex() }
         val siteAllowed = lock.withLock {
-            if (!live()) return@withLock false
-            val stored = store.decisionsFor(origin).mapNotNull { (k, v) ->
-                val p = SitePermission.forKey(k) ?: return@mapNotNull null
-                val d = PermissionDecision.fromStored(v) ?: return@mapNotNull null
-                p to d
-            }.toMap()
-            if (!live()) return@withLock false
-            when (val plan = planFor(origin, permissions, stored, session)) {
-                PermissionPlan.Deny -> false
-                PermissionPlan.Grant -> true
-                is PermissionPlan.Ask -> ask(tab, entry, origin, plan.undecided)
+            var allowed: Boolean? = null
+            while (allowed == null) {
+                if (!live()) return@withLock false
+                val stored = storedDecisions(origin)
+                if (!live()) return@withLock false
+                allowed = when (val plan = planFor(origin, permissions, stored, session)) {
+                    PermissionPlan.Deny -> false
+                    PermissionPlan.Grant -> true
+                    // null: settled by another tab's answer meanwhile — re-plan.
+                    is PermissionPlan.Ask -> ask(tab, entry, origin, plan.undecided)
+                }
             }
+            allowed
         }
         if (!siteAllowed || !live()) return finish(false)
         finish(ensureAndroidPermissions(entry, permissions, live))
     }
 
-    /** Show the prompt, record the answer, and say whether the site is now allowed. */
+    private suspend fun storedDecisions(origin: String): Map<SitePermission, PermissionDecision> =
+        store.decisionsFor(origin).mapNotNull { (k, v) ->
+            val p = SitePermission.forKey(k) ?: return@mapNotNull null
+            val d = PermissionDecision.fromStored(v) ?: return@mapNotNull null
+            p to d
+        }.toMap()
+
+    /**
+     * Show the prompt, record the answer, and say whether the site is
+     * now allowed — or `null` if the question was settled elsewhere
+     * while the prompt was up and the request must re-plan.
+     *
+     * Per-tab locks don't serialise tabs against each other, so two
+     * tabs on the same origin can each have a prompt up for the same
+     * thing. When one is answered (or an embargo lands), the other is
+     * taken down ([PromptAnswer.Superseded]) instead of asking the user
+     * again and overwriting the first answer.
+     */
     private suspend fun ask(
         tab: BrowserState,
         entry: Pending,
         origin: String,
         undecided: List<SitePermission>,
-    ): Boolean {
+    ): Boolean? {
         val prompt = PermissionPrompt(origin, undecided)
         entry.prompt = prompt
         tab.permissionPrompt = prompt
         val answer = try {
-            prompt.answer.await()
+            coroutineScope {
+                val watcher = launch {
+                    awaitPromptSuperseded(origin, undecided, session) { storedDecisions(origin) }
+                    prompt.respond(PromptAnswer.Superseded)
+                }
+                try {
+                    prompt.answer.await()
+                } finally {
+                    watcher.cancel()
+                }
+            }
         } finally {
             entry.prompt = null
             if (tab.permissionPrompt === prompt) tab.permissionPrompt = null
@@ -313,6 +342,7 @@ class SitePermissionBroker private constructor(
                 false
             }
             PromptAnswer.Withdrawn -> false
+            PromptAnswer.Superseded -> null
         }
     }
 

@@ -196,4 +196,54 @@ class SitePermissionsTest {
         // Already on screen returns at once.
         assertTrue(awaitTabOnScreen(MutableStateFlow(2L), 2L, MutableStateFlow(false)))
     }
+
+    @Test
+    fun `a prompt is superseded when another tab answers the same question`() = runBlocking {
+        val o = "https://example.com"
+        val cam = SitePermission.CAMERA
+        val mic = SitePermission.MICROPHONE
+        val session = PermissionSession()
+        val wait = async(start = CoroutineStart.UNDISPATCHED) {
+            awaitPromptSuperseded(o, listOf(cam, mic), session) { emptyMap() }
+        }
+        // Unrelated changes leave the prompt up: another origin, another
+        // permission, a dismissal short of the embargo.
+        session.record("https://other.example", cam, PermissionDecision.ALLOW, remembered = false)
+        session.record(o, SitePermission.LOCATION, PermissionDecision.ALLOW, remembered = false)
+        session.dismiss(o, cam)
+        repeat(3) { yield() }
+        assertFalse(wait.isCompleted)
+        // Tab 1 answers half of it: this prompt asks the wrong question now.
+        session.record(o, cam, PermissionDecision.ALLOW, remembered = false)
+        withTimeout(1_000) { wait.await() }
+    }
+
+    @Test
+    fun `a remembered answer elsewhere supersedes even once it left the session tier`() = runBlocking {
+        val o = "https://example.com"
+        val cam = SitePermission.CAMERA
+        val session = PermissionSession()
+        var stored = emptyMap<SitePermission, PermissionDecision>()
+        val wait = async(start = CoroutineStart.UNDISPATCHED) {
+            awaitPromptSuperseded(o, listOf(cam), session) { stored }
+        }
+        // "Allow + remember": the write lands, then the session entry is
+        // dropped — all before the watcher gets to run.
+        session.record(o, cam, PermissionDecision.ALLOW, remembered = false)
+        stored = mapOf(cam to PermissionDecision.ALLOW)
+        session.record(o, cam, PermissionDecision.ALLOW, remembered = true)
+        withTimeout(1_000) { wait.await() }
+    }
+
+    @Test
+    fun `an embargo reached elsewhere supersedes the prompt`() = runBlocking {
+        val o = "https://example.com"
+        val loc = SitePermission.LOCATION
+        val session = PermissionSession()
+        val wait = async(start = CoroutineStart.UNDISPATCHED) {
+            awaitPromptSuperseded(o, listOf(loc), session) { emptyMap() }
+        }
+        repeat(PermissionSession.DISMISS_EMBARGO_THRESHOLD) { session.dismiss(o, loc) }
+        withTimeout(1_000) { wait.await() }
+    }
 }
