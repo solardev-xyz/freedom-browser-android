@@ -112,9 +112,13 @@ internal class FileChooser(private val context: Context) {
         } catch (e: Exception) {
             // Whatever the failure (no camera app, a camera that throws
             // SecurityException, a FileProvider mismatch), don't leave
-            // the empty placeholder or a stale request behind; show()
-            // falls back to the picker.
-            if (pending?.captureFile == file) pending = null
+            // the empty placeholder, a grant or a stale request behind;
+            // show() falls back to the picker.
+            val p = pending?.takeIf { it.captureFile == file }
+            if (p != null) {
+                pending = null
+                p.captureUri?.let(::revokeCaptureGrant)
+            }
             file.delete()
             if (e is ActivityNotFoundException) return false
             throw e
@@ -189,25 +193,38 @@ internal class FileChooser(private val context: Context) {
         return info?.packageName == context.packageName
     }
 
-    private fun captureResult(p: Pending, result: ActivityResult): Array<Uri>? {
-        val file = p.captureFile!!
-        if (result.resultCode == android.app.Activity.RESULT_OK) {
-            if (file.length() > 0) return arrayOf(p.captureUri!!)
-            // Some camera apps ignore EXTRA_OUTPUT (more often for video)
-            // and hand back their own content URI instead.
-            val returned = result.data?.data
-            file.delete()
-            if (returned != null && isUploadable(returned)) return arrayOf(returned)
-            return null
-        }
-        file.delete()
-        return null
+    private fun captureResult(p: Pending, result: ActivityResult): Array<Uri>? =
+        finishCapture(
+            file = p.captureFile!!,
+            captureUri = p.captureUri!!,
+            ok = result.resultCode == android.app.Activity.RESULT_OK,
+            returned = result.data?.data,
+            uploadable = ::isUploadable,
+            revoke = ::revokeCaptureGrant,
+        )?.let { arrayOf(it) }
+
+    /**
+     * Take back the read/write grant the camera app got on [uri]. The
+     * camera runs in the browser's task, so the grant would otherwise
+     * outlive the capture for as long as that task does — long enough
+     * for the camera app to rewrite the file the page reads lazily
+     * (up to [CAPTURE_MAX_AGE_MS] later). Our own reads (WebView reads
+     * as the provider's owner) don't depend on any grant.
+     */
+    private fun revokeCaptureGrant(uri: Uri) {
+        runCatching {
+            context.revokeUriPermission(
+                uri,
+                Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION,
+            )
+        }.onFailure { Log.w(LOG_TAG, "can't revoke capture grant", it) }
     }
 
     /** Answer any open request with "nothing selected". */
     fun cancelPending() {
         val p = pending ?: return
         pending = null
+        p.captureUri?.let(::revokeCaptureGrant)
         p.captureFile?.delete()
         runCatching { p.callback.onReceiveValue(null) }
     }
@@ -281,6 +298,32 @@ internal fun rememberFileChooser(): FileChooser {
 }
 
 internal enum class CaptureKind { IMAGE, VIDEO }
+
+/**
+ * The upload for a finished camera capture into [file] (served to the
+ * camera as [captureUri]), or null for none. Whatever the outcome, the
+ * camera app's grant on [captureUri] is [revoke]d first: from here on
+ * only the browser may touch the file, so what the page uploads is
+ * what the user reviewed. An empty [file] is deleted.
+ *
+ * On [ok] a written [file] is the capture; some camera apps ignore
+ * EXTRA_OUTPUT (more often for video) and hand back their own content
+ * URI as [returned] instead, taken if [uploadable].
+ */
+internal fun <U : Any> finishCapture(
+    file: File,
+    captureUri: U,
+    ok: Boolean,
+    returned: U?,
+    uploadable: (U) -> Boolean,
+    revoke: (U) -> Unit,
+): U? {
+    revoke(captureUri)
+    if (ok && file.length() > 0) return captureUri
+    file.delete()
+    if (ok && returned != null && uploadable(returned)) return returned
+    return null
+}
 
 /**
  * Delete the files in the capture directory [dir], except [keep]. A

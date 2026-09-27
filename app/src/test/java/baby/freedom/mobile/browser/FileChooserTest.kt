@@ -134,4 +134,37 @@ class FileChooserTest {
     @Test fun `deleteCaptures tolerates a missing dir`() {
         assertEquals(0, deleteCaptures(File(tmp.root, "never-created"), keep = null))
     }
+
+    private val captureUri = "content://baby.freedom.mobile.files/uploads/IMG.jpg"
+    private val cameraUri = "content://com.camera/1"
+
+    private fun finish(file: File, ok: Boolean, returned: String?): Pair<String?, List<String>> {
+        val revoked = mutableListOf<String>()
+        val out = finishCapture(file, captureUri, ok, returned, { it == cameraUri }, { revoked += it })
+        return out to revoked
+    }
+
+    @Test fun `a written capture is uploaded and the camera's grant revoked`() {
+        val file = tmp.newFile("IMG.jpg").apply { writeText("jpeg") }
+        assertEquals(captureUri to listOf(captureUri), finish(file, ok = true, returned = null))
+        assertTrue(file.exists())
+    }
+
+    @Test fun `a camera's own returned uri is used, and the grant still revoked`() {
+        val file = tmp.newFile("IMG.jpg")
+        assertEquals(cameraUri to listOf(captureUri), finish(file, ok = true, returned = cameraUri))
+        assertFalse(file.exists())
+    }
+
+    @Test fun `a non-uploadable returned uri is dropped, and the grant still revoked`() {
+        val file = tmp.newFile("IMG.jpg")
+        assertEquals(null to listOf(captureUri), finish(file, ok = true, returned = captureUri))
+        assertFalse(file.exists())
+    }
+
+    @Test fun `a cancelled capture uploads nothing, deletes the file and revokes the grant`() {
+        val file = tmp.newFile("IMG.jpg").apply { writeText("partial") }
+        assertEquals(null to listOf(captureUri), finish(file, ok = false, returned = cameraUri))
+        assertFalse(file.exists())
+    }
 }
