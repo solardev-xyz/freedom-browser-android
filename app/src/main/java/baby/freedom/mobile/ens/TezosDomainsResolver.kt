@@ -58,11 +58,12 @@ import org.json.JSONTokener
  *     providers that are the *majority* can't be told apart that way
  *     (an honest stalled node plus a liar copying its head look like two
  *     live heads against one liar claiming a later one), so when the
- *     median drops a head *newer* than the kept ones, their agreement is
- *     verified only if the device clock shows every kept head as live
- *     (within [STALE_HEAD_AGE_MS] of now). Otherwise the answer is
- *     unverified. The clock can only withhold verification, never set a
- *     provider aside.
+ *     median drops a head *newer* than the kept ones — or when a provider
+ *     asked gave no head at all, which may be exactly the newer one —
+ *     their agreement is verified only if the device clock shows every
+ *     kept head as live (within [STALE_HEAD_AGE_MS] of now). Otherwise
+ *     the answer is unverified. The clock can only withhold
+ *     verification, never set a provider aside.
  *
  * Website records may be `ipfs://` / `ipns://` (served natively, the
  * `.tez` name stays the origin; a published base path is kept) or
@@ -198,8 +199,8 @@ class TezosDomainsResolver internal constructor(
         // the lone "vote" that sets honest providers aside. Here it is
         // only logged when the providers' consensus disagrees with it; its
         // one other use is to corroborate a majority that outvoted a newer
-        // head, below — it can withhold verification, never set anyone
-        // aside.
+        // head, or that stands while a provider gave no head, below — it
+        // can withhold verification, never set anyone aside.
         // A stuck provider takes no further part: it can't vouch for the
         // chain after it stalled (see the class doc, step 4).
         val reference = consensusHeadTime(reachable)
@@ -294,14 +295,21 @@ class TezosDomainsResolver internal constructor(
         // [STALE_HEAD_AGE_MS] of now — the clock never sets a provider
         // aside, it can only fail to corroborate, and then the answer is
         // one side's word: unverified, short-cached, asked about.
+        // A provider that gave no head at all is the same unknown: it may
+        // be the live one the median would have dropped (a stuck node and
+        // a copy of it agreeing while tzkt is unreachable), so the kept
+        // heads' agreement needs the clock then too. Stuck and lagging
+        // heads don't: they are *older* than the kept ones.
         val newerLeftOut = outliers.filter { it.level > median }
-        val corroborated = newerLeftOut.isEmpty() || keptHeadsLive(heads)
+        val unheard = endpoints.size - reachable.size
+        val corroborated = (newerLeftOut.isEmpty() && unheard == 0) || keptHeadsLive(heads)
         if (!corroborated) {
-            Log.w(
-                TAG,
-                "${newerLeftOut.joinToString(", ") { it.endpoint }} reported a later head than the majority, " +
-                    "which the device clock doesn't show as live; answer not cross-checked",
-            )
+            val why = listOfNotNull(
+                newerLeftOut.takeIf { it.isNotEmpty() }
+                    ?.joinToString(", ", postfix = " reported a later head than the majority") { it.endpoint },
+                "$unheard provider(s) gave no head".takeIf { unheard > 0 },
+            ).joinToString("; ")
+            Log.w(TAG, "$why, and the device clock doesn't show the kept heads as live; answer not cross-checked")
         }
         val answer = Outcome.Answer(
             leg = winner[0].second,

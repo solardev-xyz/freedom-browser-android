@@ -476,6 +476,42 @@ class TezosDomainsResolverTest {
     }
 
     @Test
+    fun `two stuck heads that agree don't verify a record while the live provider is unreachable`() = runBlocking {
+        // R2-F1: R1-F1's providers, but tzkt's head request fails. Nothing
+        // is set aside and nothing is dropped, yet the missing provider may
+        // be exactly the live one — so the device clock must corroborate.
+        val http = rpc(
+            record("web:content_url" to "ipfs://bafyold"),
+            headLevels = mapOf(one to 15_130_198, two to 15_130_198),
+            headTimes = mapOf(one to stuckTime, two to stuckTime),
+            down = setOf(three),
+        )
+        val resolver = TezosDomainsResolver(threeEndpoints, http) { clock }
+        val a = answer(resolver.resolveOutcome("majority.tez"))
+        assertEquals("ipfs://bafyold", a.leg.uri)
+        assertFalse(a.verified)
+        assertEquals(2, a.agreed)
+        assertEquals(TezosDomainsResolver.UNVERIFIED_TTL_MS, resolver.cacheDuration(a))
+        assertFalse((resolver.resolve("majority.tez") as EnsResult.Ok).trust.verified)
+    }
+
+    @Test
+    fun `two live heads that agree verify while the third provider is unreachable`() = runBlocking {
+        val http = rpc(
+            record("web:content_url" to "ipfs://bafyreal"),
+            headLevels = mapOf(one to 15_133_180, two to 15_133_180),
+            headTimes = mapOf(one to liveTime, two to liveTime),
+            down = setOf(three),
+        )
+        val a = answer(TezosDomainsResolver(threeEndpoints, http) { clock }.resolveOutcome("live.tez"))
+        assertTrue(a.verified)
+        assertEquals(2, a.agreed)
+        // With the device clock off, the same two heads are one side's word.
+        val skewed = answer(TezosDomainsResolver(threeEndpoints, http) { clock + 3_600_000L }.resolveOutcome("live.tez"))
+        assertFalse(skewed.verified)
+    }
+
+    @Test
     fun `a majority outvoting a newer head is verified only when the device clock shows it live`() = runBlocking {
         // Same claims as a liar reporting a far higher head against two
         // live providers. With the clock off by more than the stale
