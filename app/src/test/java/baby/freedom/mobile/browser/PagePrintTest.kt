@@ -14,7 +14,7 @@ class PagePrintTest {
     }
 
     @Test
-    fun `untitled page falls back to the address the capsule shows, not the gateway url`() {
+    fun `untitled page falls back to the display address, not the gateway url`() {
         assertEquals(
             "vitalik.eth/docs",
             printJobName("", "vitalik.eth/docs", "http://127.0.0.1:1633/bzz/abc/"),
@@ -29,5 +29,13 @@ class PagePrintTest {
     @Test
     fun `nothing at all still names the job`() {
         assertEquals("Page", printJobName("  ", "", ""))
+    }
+
+    @Test
+    fun `untitled website uses its full address, not just the host`() {
+        assertEquals(
+            "http://127.0.0.1:8701/notitle.html",
+            printJobName("", "http://127.0.0.1:8701/notitle.html", "http://127.0.0.1:8701/notitle.html"),
+        )
     }
 }

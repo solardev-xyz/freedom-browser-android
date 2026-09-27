@@ -31,9 +31,14 @@ internal fun printWebView(webView: WebView, jobName: String) {
 
 /**
  * The print job's name: the page title when it has one, otherwise the
- * address the capsule shows (`vitalik.eth/docs`, `bzz://…`) — never the
- * loopback gateway URL the WebView fetched, which would make a
- * meaningless PDF file name.
+ * tab's full display address — what the address field holds and what
+ * Copy/Share hand out ([urlActionTarget]): `vitalik.eth/docs` or
+ * `bzz://…` for dweb content, the whole URL
+ * (`http://127.0.0.1:8701/notitle.html`) for an ordinary website. That
+ * is deliberately more than the bare host the resting capsule shows for
+ * http(s) pages, so two untitled pages on one site don't get the same
+ * PDF name. Never the loopback gateway URL the WebView fetched, which
+ * would make a meaningless file name.
  */
 internal fun printJobName(title: String, addressBarText: String, url: String): String =
     title.trim().ifEmpty { urlActionTarget(addressBarText, url) ?: "Page" }
