@@ -503,18 +503,16 @@ fun BrowserWebViewHost(
                     onRecoverNodes = { tabs.requestNodeRecovery?.invoke() },
                     // Only the tab on screen raises a menu, and only over a
                     // real page (the home overlay covers `about:blank`).
-                    // Pinned to the document it describes; see
-                    // [PageContextMenuRequest].
-                    onContextMenu = { target ->
+                    // Pinned at the press to the document pressed on; see
+                    // [PageContextMenuPin].
+                    onContextMenuPress = {
                         if (tab === tabs.active && tab.url.isNotEmpty()) {
-                            tabs.pageContextMenu = PageContextMenuRequest(
-                                tabId = tab.id,
-                                pageUrl = tab.url,
-                                navCounter = tab.navCounter,
-                                target = target,
-                            )
+                            PageContextMenuPin(tab.id, tab.url, tab.navCounter)
+                        } else {
+                            null
                         }
                     },
+                    onContextMenu = { pin, target -> tabs.pageContextMenu = pin.request(target) },
                     onSearchSelection = { query ->
                         tabs.requestOpenInNewTab?.invoke(UrlParser.searchUrl(query), false)
                     },
@@ -636,7 +634,8 @@ private fun buildRefreshableWebView(
     onEnterFullscreen: (View, WebChromeClient.CustomViewCallback?) -> Unit,
     onExitFullscreen: () -> Unit,
     onRecoverNodes: () -> Unit = {},
-    onContextMenu: (PageContextTarget) -> Unit = {},
+    onContextMenuPress: () -> PageContextMenuPin? = { null },
+    onContextMenu: (PageContextMenuPin, PageContextTarget) -> Unit = { _, _ -> },
     onSearchSelection: (String) -> Unit = {},
 ): Pair<SwipeRefreshLayout, WebView> {
     val refreshLayout = SwipeRefreshLayout(context).apply {
@@ -855,13 +854,17 @@ private fun buildRefreshableWebView(
             // hangs on the link, which may yet resolve to nothing
             // (`javascript:`), so that case stays Chromium's.
             if (!pageContextMenuIsCertain(type, extra)) return@setOnLongClickListener false
+            // Which document this press is on is read now, not when the
+            // href lands: a navigation committing in between must leave
+            // the menu stale, not re-pin it to the new page.
+            val pin = onContextMenuPress() ?: return@setOnLongClickListener false
             val reply = android.os.Handler(android.os.Looper.getMainLooper()) { msg ->
                 pageContextTargetFor(
                     type = type,
                     extra = extra,
                     focusHref = msg.data.getString("url"),
                     focusTitle = msg.data.getString("title"),
-                )?.let(onContextMenu)
+                )?.let { onContextMenu(pin, it) }
                 true
             }
             requestFocusNodeHref(reply.obtainMessage())

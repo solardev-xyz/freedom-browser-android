@@ -16,8 +16,14 @@ import android.webkit.MimeTypeMap
 import android.webkit.WebResourceRequest
 import android.widget.Toast
 import androidx.core.content.FileProvider
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
+import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
@@ -49,17 +55,84 @@ internal class FetchedImage(val bytes: ByteArray, val mime: String)
 private const val MAX_IMAGE_BYTES = 50 * 1024 * 1024
 
 internal suspend fun fetchImage(url: String, pageUrl: String?, userAgent: String?): FetchedImage? =
-    withContext(Dispatchers.IO) {
-        runCatching {
-            if (url.startsWith("data:", ignoreCase = true)) return@runCatching decodeDataUrl(url)
-            interceptVirtualRequest(GetRequest(url))?.let { response ->
-                if (response.statusCode !in 200..299) return@runCatching null
-                val bytes = response.data?.use { readCapped(it) } ?: return@runCatching null
-                return@runCatching imageMime(response.mimeType, bytes, url)?.let { FetchedImage(bytes, it) }
+    withHardDeadline(IMAGE_FETCH_DEADLINE_MS) { guard ->
+        if (url.startsWith("data:", ignoreCase = true)) return@withHardDeadline decodeDataUrl(url)
+        interceptVirtualRequest(GetRequest(url))?.let { response ->
+            val data = response.data ?: return@withHardDeadline null
+            if (!guard.register(data)) return@withHardDeadline null
+            data.use {
+                if (response.statusCode !in 200..299) return@withHardDeadline null
+                val bytes = readCapped(it) ?: return@withHardDeadline null
+                return@withHardDeadline imageMime(response.mimeType, bytes, url)?.let { FetchedImage(bytes, it) }
             }
-            fetchHttpImage(url, pageUrl, userAgent)
-        }.getOrNull()
+        }
+        fetchHttpImage(url, pageUrl, userAgent, guard)
     }
+
+/**
+ * What a [withHardDeadline] block hands its blocking I/O to, so the
+ * deadline can cut it off mid-read: a registered connection or stream
+ * is closed the moment the deadline passes (or the caller goes away),
+ * and one registered after that is closed on the spot and refused.
+ */
+internal class FetchGuard {
+    private var abandoned = false
+    private val open = mutableListOf<java.io.Closeable>()
+
+    /** `false` (and [c] already closed) once the fetch is abandoned. */
+    @Synchronized
+    fun register(c: java.io.Closeable): Boolean {
+        if (abandoned) {
+            runCatching { c.close() }
+            return false
+        }
+        open += c
+        return true
+    }
+
+    @Synchronized
+    fun abandon() {
+        abandoned = true
+        open.forEach { runCatching { it.close() } }
+        open.clear()
+    }
+}
+
+/** Blocking fetches outlive their caller only until [FetchGuard] closes them. */
+private val imageFetchScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+/**
+ * Run the blocking [block] on the IO pool and return its result, or
+ * `null` once [timeoutMs] has passed — a hard stop for the caller, not
+ * a per-read timeout: a server trickling a byte just inside every read
+ * timeout, or a dweb fetch retrying inside [interceptVirtualRequest]
+ * (which no timeout here reaches), still ends at [timeoutMs]. At that
+ * point the block is abandoned: everything it registered with the
+ * guard is closed (unblocking its socket reads), its thread is
+ * interrupted (ending any retry sleep), and whatever it would still
+ * return is dropped. Any exception from the block is a `null` too.
+ */
+internal suspend fun <T : Any> withHardDeadline(
+    timeoutMs: Long,
+    block: (FetchGuard) -> T?,
+): T? {
+    val guard = FetchGuard()
+    val work = imageFetchScope.async {
+        runInterruptible { runCatching { block(guard) }.getOrNull() }
+    }
+    try {
+        return withTimeoutOrNull(timeoutMs) { work.await() }
+    } catch (e: CancellationException) {
+        throw e
+    } catch (_: Exception) {
+        return null
+    } finally {
+        if (!work.isCompleted) {
+            guard.abandon()
+            work.cancel()
+        }
+    }
+}
 
 private const val MAX_REDIRECTS = 10
 
@@ -80,12 +153,18 @@ private const val MAX_REDIRECTS = 10
  * https → http redirect) on an https or dweb page is fetched over https
  * — as Chromium's mixed-content autoupgrade would have — or not at all.
  *
- * The whole chain shares one [IMAGE_FETCH_DEADLINE_MS] budget: each
- * hop's connect / read timeouts are clamped to what is left of it, and
- * the body read stops at it, so a stalled host fails in bounded time
- * rather than after 11 hops' worth of per-hop timeouts.
+ * The whole chain shares one [IMAGE_FETCH_DEADLINE_MS] budget, which
+ * [withHardDeadline] enforces by disconnecting the live hop (each is
+ * registered with [guard]) when it runs out. Each hop's connect / read
+ * timeouts are also clamped to what is left of it, so an abandoned
+ * fetch's thread doesn't linger past it either.
  */
-private fun fetchHttpImage(url: String, pageUrl: String?, userAgent: String?): FetchedImage? {
+private fun fetchHttpImage(
+    url: String,
+    pageUrl: String?,
+    userAgent: String?,
+    guard: FetchGuard,
+): FetchedImage? {
     val deadline = System.currentTimeMillis() + IMAGE_FETCH_DEADLINE_MS
     var current = url
     var sameSiteChain = true
@@ -103,6 +182,7 @@ private fun fetchHttpImage(url: String, pageUrl: String?, userAgent: String?): F
                 CookieManager.getInstance().getCookie(current)?.let { setRequestProperty("Cookie", it) }
             }
         }
+        if (!guard.register { conn.disconnect() }) return null
         try {
             val code = conn.responseCode
             if (code in 300..399) {
@@ -120,7 +200,10 @@ private fun fetchHttpImage(url: String, pageUrl: String?, userAgent: String?): F
     return null
 }
 
-/** The most a Copy / Save / Share image refetch may take, redirects and all. */
+/**
+ * The most a Copy / Save / Share image refetch may take, redirects and
+ * all, dweb or http — a hard stop, see [withHardDeadline].
+ */
 internal const val IMAGE_FETCH_DEADLINE_MS = 30_000L
 
 /** How long a refetch may run before the user is told it is under way. */
@@ -144,9 +227,7 @@ internal fun secureHopFor(pageUrl: String?, url: String): String? {
     val pageScheme = pageUrl?.let { runCatching { java.net.URI(it).scheme }.getOrNull() }?.lowercase()
     if (pageScheme == "http") return url
     val host = uri.host?.lowercase()?.trimEnd('.')?.removePrefix("[")?.removeSuffix("]") ?: return null
-    if (host == "localhost" || host.endsWith(".localhost") || host == "::1" || host.startsWith("127.")) {
-        return url
-    }
+    if (isLoopbackHost(host)) return url
     // Rebuilt by hand so the rest of the URL stays byte-for-byte (URI's
     // component constructor would re-encode its `%` escapes). An explicit
     // :80 is http's default port, so it becomes https's default.
@@ -155,6 +236,21 @@ internal fun secureHopFor(pageUrl: String?, url: String): String? {
     if (start < 0 || !url.startsWith(authority, start + 2)) return null
     val rest = url.substring(start + 2 + authority.length)
     return "https://" + (if (uri.port == 80) authority.removeSuffix(":80") else authority) + rest
+}
+
+/**
+ * Whether [host] (lowercased, brackets and trailing dot stripped) is one
+ * Chromium deems potentially trustworthy as loopback: `localhost` and
+ * `*.localhost`, `::1`, or an IPv4 *literal* in 127.0.0.0/8. Only a
+ * literal: `127.tracker.example` is a DNS name like any other, and is
+ * upgraded.
+ */
+internal fun isLoopbackHost(host: String): Boolean {
+    if (host == "localhost" || host.endsWith(".localhost") || host == "::1") return true
+    val octets = host.split('.')
+    return octets.size == 4 &&
+        octets.all { o -> o.length in 1..3 && o.all { it in '0'..'9' } && o.toInt() <= 255 } &&
+        octets[0].toInt() == 127
 }
 
 /**

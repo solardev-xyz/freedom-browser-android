@@ -137,6 +137,24 @@ internal class PageContextMenuRequest(
 )
 
 /**
+ * The document a long-press landed on, captured *at the press*. The
+ * menu's target arrives later (asynchronously, from
+ * `requestFocusNodeHref`), and a navigation can commit in between: a
+ * request built from the tab's state at arrival would pin the old
+ * page's link to the new document, where [pageContextMenuIsStale] could
+ * no longer tell. Built from the pin, it describes the page pressed,
+ * and a navigation since makes it stale as it should.
+ */
+internal class PageContextMenuPin(
+    val tabId: Long,
+    val pageUrl: String,
+    val navCounter: Int,
+) {
+    fun request(target: PageContextTarget) =
+        PageContextMenuRequest(tabId, pageUrl, navCounter, target)
+}
+
+/**
  * Whether [request] no longer describes what is on screen: its tab is
  * closed or in the background, or has navigated since.
  */

@@ -103,11 +103,99 @@ class ImageActionsTest {
         assertEquals("http://127.0.0.1:1633/bzz/x", secureHopFor(page, "http://127.0.0.1:1633/bzz/x"))
         assertEquals("http://localhost:8080/a.png", secureHopFor(page, "http://localhost:8080/a.png"))
         assertEquals("http://[::1]:8080/a.png", secureHopFor(page, "http://[::1]:8080/a.png"))
+        assertEquals("http://127.8.9.10/a.png", secureHopFor(page, "http://127.8.9.10/a.png"))
+        assertEquals("http://a.localhost/a.png", secureHopFor(page, "http://a.localhost/a.png"))
+        // ...but only as an IP literal: a DNS name that starts with "127." is
+        // an ordinary host and goes out over https.
+        assertEquals("https://127.tracker.example/x.png", secureHopFor(page, "http://127.tracker.example/x.png"))
+        assertEquals("https://127.0.0.1.evil.example/x.png", secureHopFor(page, "http://127.0.0.1.evil.example/x.png"))
+        assertEquals("https://localhost.evil.example/x.png", secureHopFor(page, "http://localhost.evil.example/x.png"))
         // An http page's http images load in the clear, as they did in the page.
         assertEquals("http://x.example/a.png", secureHopFor("http://site.example/", "http://x.example/a.png"))
         // Nothing but http(s) is fetched.
         assertNull(secureHopFor(page, "ftp://x.example/a.png"))
         assertNull(secureHopFor(page, "file:///sdcard/a.png"))
         assertNull(secureHopFor(page, "not a url"))
+    }
+
+    // ---- hard deadline ------------------------------------------------
+
+    @Test
+    fun `a trickling server is cut off at the deadline, not per read`() {
+        // One byte every 300 ms: every read is well inside any sane read
+        // timeout, so only a hard stop ends it.
+        val server = java.net.ServerSocket(0, 1, java.net.InetAddress.getLoopbackAddress())
+        val feeder = Thread {
+            runCatching {
+                server.accept().use { s ->
+                    while (true) {
+                        s.getOutputStream().write('x'.code)
+                        s.getOutputStream().flush()
+                        Thread.sleep(300)
+                    }
+                }
+            }
+        }.apply { isDaemon = true; start() }
+        try {
+            var socket: java.net.Socket? = null
+            val started = System.nanoTime()
+            val result = kotlinx.coroutines.runBlocking {
+                withHardDeadline(1_000) { guard ->
+                    val s = java.net.Socket(server.inetAddress, server.localPort).apply { soTimeout = 20_000 }
+                    socket = s
+                    if (!guard.register(s)) return@withHardDeadline null
+                    val input = s.getInputStream()
+                    var n = 0
+                    while (input.read() >= 0) n++
+                    n
+                }
+            }
+            val elapsedMs = (System.nanoTime() - started) / 1_000_000
+            assertNull(result)
+            assertTrue("took $elapsedMs ms", elapsedMs in 900..2_500)
+            // The abandoned read's socket was closed, so its thread is free.
+            Thread.sleep(100)
+            assertTrue(socket!!.isClosed)
+        } finally {
+            server.close()
+            feeder.interrupt()
+        }
+    }
+
+    @Test
+    fun `a block that ignores the guard is still abandoned at the deadline`() {
+        // Stands in for interceptVirtualRequest, whose own connections the
+        // guard cannot reach.
+        val release = java.util.concurrent.CountDownLatch(1)
+        val started = System.nanoTime()
+        val result = kotlinx.coroutines.runBlocking {
+            withHardDeadline(500) {
+                while (release.count > 0) {
+                    runCatching { release.await() } // swallows the interrupt
+                }
+                "late"
+            }
+        }
+        val elapsedMs = (System.nanoTime() - started) / 1_000_000
+        release.countDown()
+        assertNull(result)
+        assertTrue("took $elapsedMs ms", elapsedMs in 400..2_000)
+    }
+
+    @Test
+    fun `a fetch inside the deadline returns its result, and a throwing one null`() {
+        assertEquals("ok", kotlinx.coroutines.runBlocking { withHardDeadline(5_000) { "ok" } })
+        assertNull(kotlinx.coroutines.runBlocking { withHardDeadline<String>(5_000) { error("boom") } })
+    }
+
+    @Test
+    fun `a guard registered after abandon closes on the spot`() {
+        val guard = FetchGuard()
+        var closed = 0
+        assertTrue(guard.register { closed++ })
+        guard.abandon()
+        assertEquals(1, closed)
+        assertFalse(guard.register { closed++ })
+        assertEquals(2, closed)
     }
 }

@@ -151,6 +151,21 @@ class PageContextMenuTest {
         assertTrue(pageContextMenuIsStale(request, 3, null, null))
     }
 
+    @Test
+    fun `a target landing after a navigation stays pinned to the page pressed`() {
+        // Pinned at the long-press; the href reply lands after the tab
+        // moved on (url and navCounter both changed).
+        val pin = PageContextMenuPin(tabId = 3, pageUrl = "https://a.com/", navCounter = 7)
+        val late = pin.request(PageContextTarget("https://a.com/x", null, null))
+        assertEquals("https://a.com/", late.pageUrl)
+        assertEquals(7, late.navCounter)
+        assertTrue(pageContextMenuIsStale(late, 3, "https://b.com/", 8))
+        // Same-URL reload in between: still stale by navCounter.
+        assertTrue(pageContextMenuIsStale(late, 3, "https://a.com/", 8))
+        // Nothing happened in between: live.
+        assertFalse(pageContextMenuIsStale(late, 3, "https://a.com/", 7))
+    }
+
     // ---- search query -------------------------------------------------
 
     @Test
