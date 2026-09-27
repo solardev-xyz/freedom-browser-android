@@ -66,7 +66,9 @@
         <!--
           Serves camera captures for <input type=file capture> — the
           camera app writes the photo into it, the page reads it back
-          (see FileChooser.kt). Scoped to cache/uploads/ only.
+          (see FileChooser.kt) — and the page context menu's Copy image /
+          Share image files (see ImageActions.kt). Scoped to
+          cache/uploads/ and cache/shared/ only (res/xml/file_paths.xml).
         -->
         <provider
             android:name="androidx.core.content.FileProvider"

@@ -23,6 +23,15 @@ object UrlParser {
         if (bareHostRegex.matches(trimmed) || ipPortRegex.matches(trimmed)) {
             return "https://$trimmed"
         }
-        return SearchEngines.searchUrl(searchTemplate, trimmed)
+        return searchUrl(trimmed, searchTemplate)
     }
+
+    /**
+     * The web search for [query] on [searchTemplate] — the engine chosen
+     * in Settings ([SearchEngines.templateFor]). The address bar's "not a
+     * URL" fallback above and the selection toolbar's "Search" (#84) both
+     * build their URL here, so the two can never name different engines.
+     */
+    fun searchUrl(query: String, searchTemplate: String): String =
+        SearchEngines.searchUrl(searchTemplate, query.trim())
 }

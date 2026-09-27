@@ -100,6 +100,34 @@ class TabsState(
     var requestNodeRecovery: (() -> Unit)? = null
 
     /**
+     * Hook installed by [BrowserScreen]: open a URL in a new tab through
+     * the screen's submit flow — in the background (with a snackbar to
+     * switch to it) or in front. Used by the page context menu and the
+     * text-selection "Search" (#84). `null` before the screen has
+     * composed.
+     */
+    @Volatile
+    var requestOpenInNewTab: ((url: String, background: Boolean) -> Unit)? = null
+
+    /**
+     * Hook installed by [BrowserScreen]: search [query] with the engine
+     * chosen in Settings, in a new tab in front — the text-selection
+     * toolbar's "Search" (#84). The screen owns the engine setting, so
+     * the URL is built there ([UrlParser.searchUrl]). `null` before the
+     * screen has composed.
+     */
+    @Volatile
+    var requestSearchInNewTab: ((query: String) -> Unit)? = null
+
+    /**
+     * The link / image menu currently raised over a page, set by
+     * [BrowserWebViewHost] on a long-press and drawn by [BrowserScreen]
+     * (which also drops it the moment it goes stale — see
+     * [PageContextMenuRequest]). `null` when no menu is up.
+     */
+    internal var pageContextMenu: PageContextMenuRequest? by mutableStateOf(null)
+
+    /**
      * An HTML5 fullscreen session (`element.requestFullscreen()`) in
      * progress. Android WebView hands the fullscreen content over as a
      * plain [View] via `WebChromeClient.onShowCustomView`; the browser
@@ -162,12 +190,13 @@ class TabsState(
      * Open a new tab. If [url] is null (typical "+" button) the tab starts
      * blank and the caller is expected to load the homepage once the node
      * is running; otherwise [url] is submitted immediately (typical
-     * "open link in new tab" flow).
+     * "open link in new tab" flow). With [activate] false the tab opens
+     * behind the current one, which stays on screen.
      */
-    fun newTab(url: String? = null): BrowserState {
+    fun newTab(url: String? = null, activate: Boolean = true): BrowserState {
         val tab = newBlankTab()
         tabs.add(tab)
-        activeIndex = tabs.lastIndex
+        if (activate) activeIndex = tabs.lastIndex
         if (url != null) tab.loadUrl(url)
         return tab
     }

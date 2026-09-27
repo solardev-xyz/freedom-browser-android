@@ -67,7 +67,17 @@ class BottomUiDetectorScriptTest {
         }
         function matchMedia(q) { return { matches: !!mediaMatches[q] }; }
         function setTimeout(f, ms) { timers.push({ f: f, ms: ms }); return ++timerSeq; }
-        function addEventListener(t, f) { windowListeners++; if (t === 'resize') resizeListeners.push(f); }
+        var contextMenuListeners = [];
+        function addEventListener(t, f, c) {
+          if (t === 'contextmenu') { contextMenuListeners.push({ f: f, capture: c === true }); return; }
+          windowListeners++; if (t === 'resize') resizeListeners.push(f);
+        }
+        // A trusted long-press's `contextmenu`: our listener, then the page's handlers, then tasks.
+        function pressAndHold(e, pageCancels) {
+          for (var i = 0; i < contextMenuListeners.length; i++) contextMenuListeners[i].f(e);
+          if (pageCancels) e.defaultPrevented = true;
+          flushTimers();
+        }
         function MutationObserver(cb) { mutationCb = cb; this.observe = function (n, o) { this.target = n; this.opts = o; }; }
         function ResizeObserver(cb) { this.cb = cb; var self = this;
           this.observe = function (e) { observed.push({ kind: 'resize', el: e, cb: cb, obs: self }); };
@@ -348,6 +358,55 @@ class BottomUiDetectorScriptTest {
         assertEquals(0, sent)
         assertEquals(0, num("channelListeners.length"))
         assertTrue(eval("mutationCb === null") as Boolean)
+        // …and reports the page's say on a long-press (#84): the press may land in an iframe.
+        assertEquals(1, num("contextMenuListeners.length"))
+    }
+
+    // ---- the page's say on a long-press (#84) -------------------------
+
+    private fun Page.verdicts(): String = Context.toString(eval("sent.filter(function (s) { return /^contextmenu /.test(s); }).join('|')"))
+
+    @Test
+    fun `a let-through long-press is reported, from document start, as a capture listener`() = page {
+        documentStart()
+        assertEquals(1, num("contextMenuListeners.length"))
+        assertTrue(eval("contextMenuListeners[0].capture") as Boolean)
+        eval("pressAndHold({ isTrusted: true, defaultPrevented: false }, false)")
+        assertEquals(CONTEXT_MENU_ALLOWED, verdicts())
+        assertEquals(true, parseContextMenuVerdict(verdicts()))
+    }
+
+    @Test
+    fun `the outcome is read after every page handler has run`() = page {
+        documentStart()
+        eval("pressAndHold({ isTrusted: true, defaultPrevented: false }, true)")
+        assertEquals(CONTEXT_MENU_KEPT, verdicts())
+        assertEquals(false, parseContextMenuVerdict(verdicts()))
+    }
+
+    @Test
+    fun `a synthetic contextmenu is ignored`() = page {
+        documentStart()
+        eval("pressAndHold({ isTrusted: false, defaultPrevented: false }, false)")
+        assertEquals("", verdicts())
+    }
+
+    @Test
+    fun `a page replacing setTimeout later can't see or stop the report`() = page {
+        documentStart()
+        eval("var pageTimers = 0; setTimeout = function () { pageTimers++; }")
+        eval("pressAndHold({ isTrusted: true, defaultPrevented: false }, false)")
+        assertEquals(CONTEXT_MENU_ALLOWED, verdicts())
+        assertEquals(0, num("pageTimers"))
+    }
+
+    @Test
+    fun `a verdict is reported in a subframe too, and nothing else`() = page {
+        eval("top = {}")
+        documentStart()
+        eval("pressAndHold({ isTrusted: true, defaultPrevented: false }, false)")
+        assertEquals(CONTEXT_MENU_ALLOWED, verdicts())
+        assertEquals(1, sent)
     }
 
     @Test
@@ -359,6 +418,8 @@ class BottomUiDetectorScriptTest {
         assertEquals(0, timers)
         assertEquals(0, num("reads"))
         assertEquals(0, num("windowListeners"))
+        // The one listener it adds at document start: the long-press verdict (#84).
+        assertEquals(1, num("contextMenuListeners.length"))
         assertEquals(0, num("docListeners.length"))
         assertEquals(0, num("observed.length"))
         assertTrue(eval("mutationCb === null") as Boolean)
@@ -452,6 +513,7 @@ class BottomUiDetectorScriptTest {
         eval("delete window.$channel; hit = tab")
         install()
         assertEquals(0, sent)
+        assertEquals(0, num("contextMenuListeners.length"))
         assertEquals(0, timers)
         assertTrue(eval("mutationCb === null") as Boolean)
     }

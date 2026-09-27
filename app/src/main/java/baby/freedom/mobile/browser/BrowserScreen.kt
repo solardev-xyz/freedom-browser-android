@@ -1,5 +1,7 @@
 package baby.freedom.mobile.browser
 
+import android.webkit.WebSettings
+import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.Animatable
 import androidx.compose.animation.core.animateFloatAsState
@@ -863,9 +865,38 @@ fun BrowserScreen(
     DisposableEffect(tabs) {
         tabs.requestSubmit = { tab, url -> submit(tab, url, SubmitSource.Renderer) }
         tabs.requestNodeRecovery = onRecoverNodes
+        // The page context menu's "Open in new tab" and the selection
+        // toolbar's "Search" (#84). Both are the user's own choice, so
+        // they submit as [SubmitSource.User]. A background tab says so
+        // in a snackbar that can bring it forward — otherwise nothing
+        // on screen would change.
+        tabs.requestOpenInNewTab = { url, background ->
+            val fresh = tabs.newTab(activate = !background)
+            submit(fresh, url)
+            if (background) {
+                scope.launch {
+                    val result = snackbarHostState.showSnackbar(
+                        message = "Opened in new tab",
+                        actionLabel = "Switch",
+                        duration = SnackbarDuration.Short,
+                    )
+                    if (result == SnackbarResult.ActionPerformed) {
+                        val index = tabs.tabs.indexOf(fresh)
+                        if (index >= 0) tabs.switchTo(index)
+                    }
+                }
+            }
+        }
+        // Read [searchTemplate] when the search runs, so a change of
+        // engine in Settings applies to the next one.
+        tabs.requestSearchInNewTab = { query ->
+            tabs.requestOpenInNewTab?.invoke(UrlParser.searchUrl(query, searchTemplate), false)
+        }
         onDispose {
             tabs.requestSubmit = null
             tabs.requestNodeRecovery = null
+            tabs.requestOpenInNewTab = null
+            tabs.requestSearchInNewTab = null
         }
     }
 
@@ -1457,6 +1488,66 @@ fun BrowserScreen(
                 submit(state, url)
             },
         )
+    }
+
+    // Long-press menu for a link / image on the page (#84). Dropped the
+    // moment it stops describing what is on screen: the tab navigated,
+    // closed, or another tab came to the front.
+    tabs.pageContextMenu?.let { request ->
+        val owner = tabs.tabs.firstOrNull { it.id == request.tabId }
+        if (pageContextMenuIsStale(request, tabs.active.id, owner?.url, owner?.navCounter)) {
+            LaunchedEffect(request) {
+                if (tabs.pageContextMenu === request) tabs.pageContextMenu = null
+            }
+        } else if (owner != null) {
+            fun withImage(url: String, action: suspend (FetchedImage) -> Boolean, failure: String) {
+                scope.launch {
+                    // The sheet is already gone: a refetch that isn't back
+                    // almost at once says so, rather than leaving the user
+                    // with nothing until the result (or failure) toast.
+                    // The fetch itself is bounded by IMAGE_FETCH_DEADLINE_MS.
+                    val progress = launch {
+                        delay(IMAGE_FETCH_PROGRESS_DELAY_MS)
+                        Toast.makeText(context, "Loading image\u2026", Toast.LENGTH_SHORT).show()
+                    }
+                    val image = try {
+                        fetchImage(url, request.pageUrl, WebSettings.getDefaultUserAgent(context))
+                    } finally {
+                        progress.cancel()
+                    }
+                    val ok = image != null && action(image)
+                    if (!ok) Toast.makeText(context, failure, Toast.LENGTH_SHORT).show()
+                }
+            }
+            key(request) {
+                PageContextMenuSheet(
+                    target = request.target,
+                    displayUrl = { displayFor(it, owner) },
+                    onOpenInNewTab = { tabs.requestOpenInNewTab?.invoke(displayFor(it, owner), true) },
+                    onCopyLink = { copyUrlToClipboard(context, it) },
+                    onShareLink = { url, title -> shareUrl(context, url, title) },
+                    onOpenImage = { tabs.requestOpenInNewTab?.invoke(displayFor(it, owner), true) },
+                    onCopyImage = { url ->
+                        withImage(url, { copyImageToClipboard(context, it, url) }, "Couldn't copy image")
+                    },
+                    onSaveImage = { url ->
+                        withImage(url, { image ->
+                            saveImage(context, image, url).also { saved ->
+                                if (saved) {
+                                    Toast.makeText(context, "Image saved", Toast.LENGTH_SHORT).show()
+                                }
+                            }
+                        }, "Couldn't save image")
+                    },
+                    onShareImage = { url ->
+                        withImage(url, { shareImage(context, it, url) }, "Couldn't share image")
+                    },
+                    onDismiss = {
+                        if (tabs.pageContextMenu === request) tabs.pageContextMenu = null
+                    },
+                )
+            }
+        }
     }
 
     // Nothing a page asks to download is saved without a yes here: the

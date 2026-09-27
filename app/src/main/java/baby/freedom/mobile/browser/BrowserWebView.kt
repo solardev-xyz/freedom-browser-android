@@ -17,6 +17,9 @@ import android.net.Uri
 import android.os.Message
 import android.os.SystemClock
 import android.util.Log
+import android.view.ActionMode
+import android.view.Menu
+import android.view.MenuItem
 import android.view.PixelCopy
 import android.view.MotionEvent
 import android.view.View
@@ -633,6 +636,19 @@ fun BrowserWebViewHost(
             // never to have navigated.
             isPopup = tab.openerId != null,
             fileChooser = fileChooser,
+            // Only the tab on screen raises a menu, and only over a
+            // real page (the home overlay covers `about:blank`).
+            // Pinned at the press to the document pressed on; see
+            // [PageContextMenuPin].
+            onContextMenuPress = {
+                if (tab === tabs.active && tab.url.isNotEmpty()) {
+                    PageContextMenuPin(tab.id, tab.url, tab.navCounter)
+                } else {
+                    null
+                }
+            },
+            onContextMenu = { pin, target -> tabs.pageContextMenu = pin.request(target) },
+            onSearchSelection = { query -> tabs.requestSearchInNewTab?.invoke(query) },
         )
         webViews[tab.id] = wv
         refreshLayouts[tab.id] = layout
@@ -780,6 +796,9 @@ private fun buildRefreshableWebView(
     onCreateWindow: () -> WebView,
     onCloseWindow: () -> Unit,
     isPopup: Boolean = false,
+    onContextMenuPress: () -> PageContextMenuPin? = { null },
+    onContextMenu: (PageContextMenuPin, PageContextTarget) -> Unit = { _, _ -> },
+    onSearchSelection: (String) -> Unit = {},
 ): Pair<SwipeRefreshLayout, WebView> {
     val refreshLayout = SwipeRefreshLayout(context).apply {
         layoutParams = ViewGroup.LayoutParams(
@@ -864,6 +883,15 @@ private fun buildRefreshableWebView(
     // which document sent it, so it only counts once a report does
     // ([BottomUiChannels]).
     val bottomUiChannels = BottomUiChannels<JavaScriptReplyProxy>()
+
+    // Page context menu (#84): the long-press waiting on the page's
+    // `contextmenu` verdict, which the detector's document-start script
+    // reports on the same hidden channel as the bottom-UI reports (see
+    // [bottomUiDetectorJs]). Without that channel the page's say can't
+    // be heard, so there is no menu and every long-press stays
+    // Chromium's.
+    val contextMenuSupported = bottomUiSupported
+    var contextMenuPress: PageContextMenuPress? = null
 
     /** Send the current document's token to [targets]: the detector's start, or a fresh probe. */
     fun postBottomUiProbe(targets: List<JavaScriptReplyProxy> = bottomUiChannels.targets) {
@@ -995,6 +1023,11 @@ private fun buildRefreshableWebView(
             // actually requires a tap is still gated by the browser's
             // own per-frame autoplay policy.
             mediaPlaybackRequiresUserGesture = false
+            // The selection toolbar's search is ours ("Search", added in
+            // [PageWebView.startActionMode]): it uses the engine chosen
+            // in Settings, in a new tab. Chromium's "Web search" would hand the
+            // text to whichever app answers ACTION_WEB_SEARCH instead.
+            disabledActionModeMenuItems = android.webkit.WebSettings.MENU_ITEM_WEB_SEARCH
             // `target=_blank` links and `window.open()` get a real
             // window — a new tab, see `onCreateWindow` below — instead
             // of silently replacing the page that asked (#82).
@@ -1003,6 +1036,53 @@ private fun buildRefreshableWebView(
             // window only opens from a user gesture (a tap on the link
             // or button), never from a script on its own.
             setSupportMultipleWindows(true)
+        }
+
+        this.onSearchSelection = onSearchSelection
+
+        // Long-press on a link or an image raises the page context menu
+        // (#84) — but only once the page has had its DOM `contextmenu`
+        // event and let it through ([PageContextMenuPress]). The press
+        // itself is never taken: Chromium calls this listener *before*
+        // it hands the long-press to the page, so returning `true` here
+        // would keep the event from the page altogether (no
+        // preventDefault, no site long-press UI).
+        // Anything that isn't a link or image stays wholly Chromium's: a
+        // long-press on text starts a selection, whose toolbar carries
+        // the selection actions.
+        //
+        // The hit test is answered synchronously; the link's own address
+        // and text (for an image inside a link, the hit test only
+        // reports the image) come from `requestFocusNodeHref`, which
+        // answers through a Message, and the page's verdict comes
+        // through the bottom-UI channel, from the `contextmenu` listener
+        // the detector's document-start script adds in every frame
+        // ([bottomUiDetectorJs], registered below). The menu opens when
+        // both have landed.
+        setOnLongClickListener {
+            if (!contextMenuSupported) return@setOnLongClickListener false
+            val hit = hitTestResult
+            val type = hit.type
+            val extra = hit.extra
+            // Only a press certain to have a target once the href lands.
+            // An image inside a link is certain when the image itself is
+            // fetchable; a `blob:` image inside a link hangs on the link,
+            // which may yet resolve to nothing (`javascript:`), so that
+            // case gets no menu.
+            if (!pageContextMenuIsCertain(type, extra)) return@setOnLongClickListener false
+            // Which document this press is on is read now, not when the
+            // answers land: a navigation committing in between must
+            // leave the menu stale, not re-pin it to the new page.
+            val pin = onContextMenuPress() ?: return@setOnLongClickListener false
+            val press = PageContextMenuPress(pin, type, extra, SystemClock.uptimeMillis())
+            contextMenuPress = press
+            val reply = android.os.Handler(android.os.Looper.getMainLooper()) { msg ->
+                press.onHref(msg.data.getString("url"), msg.data.getString("title"))
+                    ?.let { onContextMenu(press.pin, it) }
+                true
+            }
+            requestFocusNodeHref(reply.obtainMessage())
+            false
         }
 
         // Scroll-to-reveal (#65), the View half; the decisions are in
@@ -1393,6 +1473,14 @@ private fun buildRefreshableWebView(
             val listener = WebViewCompat.WebMessageListener { view, message, sourceOrigin, isMainFrame, replyProxy ->
                 if (sourceOrigin.scheme != "https" && sourceOrigin.scheme != "http") return@WebMessageListener
                 if (message.type != WebMessageCompat.TYPE_STRING) return@WebMessageListener
+                // The page's say on a long-press (#84): any frame, since
+                // the press may land in an iframe. It can only ever open
+                // a menu for a press the user actually made.
+                parseContextMenuVerdict(message.data)?.let { allowed ->
+                    contextMenuPress?.onPageVerdict(allowed, SystemClock.uptimeMillis())
+                        ?.let { target -> contextMenuPress?.let { onContextMenu(it.pin, target) } }
+                    return@WebMessageListener
+                }
                 if (message.data == BOTTOM_UI_READY) {
                     // A main-frame detector at document start, from the
                     // document on screen or one still on its way in. It
@@ -2125,6 +2213,21 @@ private const val REVEAL_HANDOVER_TIMEOUT_MS = 1_000L
  * protected: Chromium's unconsumed overscroll, and the scroll range.
  */
 internal class PageWebView(context: Context) : WebView(context) {
+    /** "Search" on the text-selection toolbar, with the selected text (#84). */
+    var onSearchSelection: ((String) -> Unit)? = null
+
+    /**
+     * Chromium raises its text-selection toolbar through here; the
+     * callback is wrapped to add the "Search" item (see
+     * [SearchSelectionCallback]). Every other action mode — and every
+     * other item on this one — is Chromium's, untouched.
+     */
+    override fun startActionMode(callback: ActionMode.Callback?, type: Int): ActionMode? {
+        val search = onSearchSelection
+        if (callback == null || search == null) return super.startActionMode(callback, type)
+        return super.startActionMode(SearchSelectionCallback(callback, this, search), type)
+    }
+
     /**
      * Chromium overscrolled past the bottom edge (the page didn't take
      * a drag towards the end) — never the top edge, even on a page with
@@ -2179,6 +2282,149 @@ internal class PageWebView(context: Context) : WebView(context) {
         }
     }
 }
+
+/**
+ * Chromium's selection-toolbar callback plus one item, "Search", which
+ * searches the selection with the browser's engine in a new tab.
+ *
+ * The item is only on the toolbar while there is something to search:
+ * the same toolbar also comes up for a bare caret in a text field
+ * (Paste only) and for a selection inside a password field, and
+ * Chromium's own items can't tell us which — their ids are WebView-
+ * package resources, not a stable API. So the page is asked instead
+ * ([SELECTION_TEXT_SCRIPT], which reads a password field as empty),
+ * and a probe whose answer flips "is there a selection" invalidates
+ * the toolbar so prepare adds or drops the item.
+ *
+ * That script runs in the page's own JS world, where a page that wraps
+ * `getSelection` / `activeElement` can count the calls — so the page
+ * is asked as rarely as the answer can change: on create, and on a
+ * prepare only when Chromium's own items differ from the last probe's
+ * ([SelectionProbeGate]). A caret becoming a selection, or a selection
+ * moving into a password field, swaps Chromium's items (Paste only ↔
+ * Copy / Share / Select all; Copy dropped for a password), so those
+ * still re-probe; dragging the handles or our own invalidate doesn't.
+ *
+ * Syncing happens on prepare as well as create because Chromium rebuilds
+ * its menu on prepare, clearing whatever else was on it. On click the
+ * selection is read afresh (the user may have dragged the handles since
+ * the last probe) and *before* the toolbar is finished, since finishing
+ * it clears the selection.
+ *
+ * It is a [ActionMode.Callback2] because Chromium's is: the floating
+ * toolbar asks it where the selection is ([onGetContentRect]), and a
+ * plain Callback would park the toolbar at the top of the view.
+ */
+private class SearchSelectionCallback(
+    private val delegate: ActionMode.Callback,
+    private val view: WebView,
+    private val onSearch: (String) -> Unit,
+) : ActionMode.Callback2() {
+    /** The last probe's answer: is there a selection worth searching? */
+    private var searchable = false
+    private var destroyed = false
+    private val gate = SelectionProbeGate()
+
+    override fun onCreateActionMode(mode: ActionMode, menu: Menu): Boolean {
+        val created = delegate.onCreateActionMode(mode, menu)
+        if (created && gate.shouldProbe(chromiumItems(menu))) probe(mode)
+        return created
+    }
+
+    override fun onPrepareActionMode(mode: ActionMode, menu: Menu): Boolean {
+        val changed = delegate.onPrepareActionMode(mode, menu)
+        // Read Chromium's items before ours is synced in: the
+        // signature must not change just because "Search" came or went.
+        val items = chromiumItems(menu)
+        val synced = syncSearchItem(menu)
+        if (gate.shouldProbe(items)) probe(mode)
+        return changed || synced
+    }
+
+    /** Chromium's own items on [menu], by id, in order; "Search" left out. */
+    private fun chromiumItems(menu: Menu): List<Int> =
+        (0 until menu.size()).map { menu.getItem(it).itemId }.filter { it != SEARCH_SELECTION_ITEM_ID }
+
+    override fun onActionItemClicked(mode: ActionMode, item: MenuItem): Boolean {
+        if (item.itemId != SEARCH_SELECTION_ITEM_ID) return delegate.onActionItemClicked(mode, item)
+        view.evaluateJavascript(SELECTION_TEXT_SCRIPT) { json ->
+            mode.finish()
+            searchSelectionQuery(decodeJsString(json))?.let(onSearch)
+        }
+        return true
+    }
+
+    override fun onDestroyActionMode(mode: ActionMode) {
+        destroyed = true
+        delegate.onDestroyActionMode(mode)
+    }
+
+    override fun onGetContentRect(mode: ActionMode, view: View, outRect: Rect) {
+        if (delegate is ActionMode.Callback2) {
+            delegate.onGetContentRect(mode, view, outRect)
+        } else {
+            super.onGetContentRect(mode, view, outRect)
+        }
+    }
+
+    private fun probe(mode: ActionMode) {
+        view.evaluateJavascript(SELECTION_TEXT_SCRIPT) { json ->
+            if (destroyed) return@evaluateJavascript
+            val now = searchSelectionQuery(decodeJsString(json)) != null
+            if (now != searchable) {
+                searchable = now
+                mode.invalidate()
+            }
+        }
+    }
+
+    /** Adds or removes "Search" to match [searchable]; `true` if the menu changed. */
+    private fun syncSearchItem(menu: Menu): Boolean {
+        val present = menu.findItem(SEARCH_SELECTION_ITEM_ID) != null
+        if (searchable == present) return false
+        if (searchable) {
+            menu.add(Menu.NONE, SEARCH_SELECTION_ITEM_ID, SEARCH_SELECTION_ITEM_ORDER, "Search")
+                .setShowAsAction(MenuItem.SHOW_AS_ACTION_IF_ROOM)
+        } else {
+            menu.removeItem(SEARCH_SELECTION_ITEM_ID)
+        }
+        return true
+    }
+}
+
+/**
+ * When [SearchSelectionCallback] asks the page for its selection: the
+ * first time, and afterwards only when Chromium's items (their ids, in
+ * order) differ from the last time it asked — the page's answer can
+ * only flip with a change Chromium's menu reflects too.
+ */
+internal class SelectionProbeGate {
+    private var last: List<Int>? = null
+
+    fun shouldProbe(items: List<Int>): Boolean {
+        if (items == last) return false
+        last = items
+        return true
+    }
+}
+
+/** An `evaluateJavascript` result (a JSON value) as a string, or `null`. */
+private fun decodeJsString(json: String?): String? =
+    runCatching { org.json.JSONTokener(json ?: return null).nextValue() as? String }.getOrNull()
+
+/** Outside the resource-id range Chromium's own items use. */
+private const val SEARCH_SELECTION_ITEM_ID = 0x5EA4C4
+
+/**
+ * Where "Search" sits among Chromium's items. Chromium's default group
+ * numbers its items from 1 (Copy 1, Share 2, Select all 3 on a page
+ * selection; Cut / Copy / Paste / Select all in a field) and "Read
+ * aloud" and the text-processing apps come after, in another group. At
+ * 2 the item lands just after Select all and ahead of those, which
+ * keeps it on the visible bar rather than in the overflow in both
+ * cases (checked on the API 36 AVD).
+ */
+private const val SEARCH_SELECTION_ITEM_ORDER = 2
 
 private fun Context.findActivity(): Activity? {
     var c: Context? = this

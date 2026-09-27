@@ -1,8 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
   What the FileProvider may serve: only camera captures for
-  <input type=file capture> (see FileChooser.kt, CAPTURE_DIR).
+  <input type=file capture> (see FileChooser.kt, CAPTURE_DIR), and the
+  images the page context menu's Copy image / Share image hand out (see
+  ImageActions.kt, SHARED_DIR). Nothing else in the app's storage is
+  reachable.
 -->
 <paths>
     <cache-path name="uploads" path="uploads/" />
+    <cache-path name="shared" path="shared/" />
 </paths>

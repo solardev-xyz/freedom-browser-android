@@ -397,6 +397,12 @@ private val CHANNEL_SAFE = Regex("[a-z]{8,64}")
 /** What the detector posts once, at document start, so Kotlin has a way to reach it. */
 internal const val BOTTOM_UI_READY = "ready"
 
+/** The detector's report that the page let a long-press's `contextmenu` through (#84). */
+internal const val CONTEXT_MENU_ALLOWED = "contextmenu 1"
+
+/** The detector's report that the page kept a long-press (`preventDefault()` on its `contextmenu`). */
+internal const val CONTEXT_MENU_KEPT = "contextmenu 0"
+
 /** What Kotlin sends back through the channel to ask for a fresh, reported probe. */
 internal fun bottomUiProbeRequest(token: String): String = "probe $token"
 
@@ -410,7 +416,19 @@ internal fun bottomUiProbeRequest(token: String): String = "probe $token"
  * (`delete`: the platform defines it as an ordinary configurable
  * property) and keep it in its closure. No script of the page's, the top
  * document's or any iframe's, can then find it — not by name, not by
- * walking `window`'s properties. In a subframe that is all it does.
+ * walking `window`'s properties.
+ *
+ * **The page's say on a long-press** (#84), in every frame: a capture
+ * listener for `contextmenu` on `window` — the first one there, since
+ * this runs before the page — reports each trusted event's outcome
+ * through the same channel, [CONTEXT_MENU_ALLOWED] or
+ * [CONTEXT_MENU_KEPT], a task after dispatch (with the `setTimeout`
+ * saved at document start), when every page handler, including a
+ * bubbling one on `window` registered after ours, has had its say. The
+ * browser's link / image menu opens only for a press the page didn't
+ * `preventDefault()` ([PageContextMenuPress]). (`-webkit-touch-callout`
+ * needs no check: Android's Blink doesn't parse it — `CSS.supports` is
+ * false on the API 36 AVD.) In a subframe that is all it does.
  *
  * **Dormant until first paint.** In the main frame it posts
  * [BOTTOM_UI_READY] (so Kotlin holds a reply channel for the document)
@@ -418,7 +436,7 @@ internal fun bottomUiProbeRequest(token: String): String = "probe $token"
  * arrives, which Kotlin sends at `onPageCommitVisible` ([BottomChromeSlot.install])
  * — the same install point as when this script was injected there.
  * Until then it touches nothing: no probe, no observer, no listener on
- * the page. The request's token tags every report after it; a request
+ * the page but the `contextmenu` one above. The request's token tags every report after it; a request
  * with a different token (a new install for the same document) re-tags
  * them and is answered like the first.
  *
@@ -496,9 +514,15 @@ internal fun bottomUiDetectorJs(channel: String, debounceMs: Int = BOTTOM_UI_DEB
   var w = window, d = document, N = '$channel', port = w[N];
   if (port === undefined) return;
   try { delete w[N]; } catch (e) {}
-  if (!port || typeof port.postMessage !== 'function' || w.top !== w) return;
+  if (!port || typeof port.postMessage !== 'function') return;
+  var setT = w.setTimeout;
+  w.addEventListener('contextmenu', function (e) {
+    if (!e.isTrusted) return;
+    setT(function () { port.postMessage(e.defaultPrevented ? '$CONTEXT_MENU_KEPT' : '$CONTEXT_MENU_ALLOWED'); }, 0);
+  }, true);
+  if (w.top !== w) return;
   var T = null, started = false, ASK = /^probe ([0-9a-f]{1,64})$/, SEL = 'a, button, [role="button"], [role="tab"], [role="link"]';
-  var gcs = w.getComputedStyle, setT = w.setTimeout, MO = w.MutationObserver,
+  var gcs = w.getComputedStyle, MO = w.MutationObserver,
       RO = w.ResizeObserver, IO = w.IntersectionObserver, str = JSON.stringify;
   var timer = 0, last = null, owed = false, mo = null, watched = null, ro = null, io = null, fullW = -1, fullH = 0, ctx = null;
   var RGBA = /^rgba?\(\s*([\d.]+)[\s,]+([\d.]+)[\s,]+([\d.]+)\s*(?:[,\/]\s*([\d.]+)(%?)\s*)?\)$/;
