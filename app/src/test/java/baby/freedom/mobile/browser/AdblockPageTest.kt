@@ -24,10 +24,46 @@ class AdblockPageTest {
         val p = onA()
         p.answered(b, replacesDocument = true, fetchedByWebView = true)
         assertEquals(a, p.current())
+        assertEquals(a, p.current(referer = a))
         p.redirected("https://elsewhere.example/")
         assertEquals(a, p.current())
         p.committed("https://elsewhere.example/")
         assertEquals("https://elsewhere.example/", p.current())
+    }
+
+    @Test
+    fun `the fetched page's own requests, naming it as referrer, are its before the commit`() {
+        val p = onA()
+        p.answered(b, replacesDocument = true, fetchedByWebView = true)
+        // Same-origin: the full URL. Cross-origin: the origin alone.
+        assertEquals(b, p.current(referer = b))
+        assertEquals(b, p.current(referer = "http://127.0.0.1:8711/"))
+        // The page on screen's, and a stranger's, stay the page on screen's.
+        assertEquals(a, p.current(referer = "http://10.0.2.2:8710/other"))
+        assertEquals(a, p.current(referer = "https://third.example/"))
+        p.redirected("https://elsewhere.example/landing")
+        assertEquals("https://elsewhere.example/landing", p.current(referer = "https://elsewhere.example/"))
+        assertEquals(a, p.current(referer = b))
+    }
+
+    @Test
+    fun `a same-origin destination claims only requests naming its exact URL`() {
+        val p = onA()
+        val next = "http://10.0.2.2:8710/next"
+        p.answered(next, replacesDocument = true, fetchedByWebView = true)
+        assertEquals(next, p.current(referer = next))
+        assertEquals(a, p.current(referer = "http://10.0.2.2:8710/"))
+    }
+
+    @Test
+    fun `a fetched navigation that never commits stops claiming requests`() {
+        val p = onA()
+        p.answered(b, replacesDocument = true, fetchedByWebView = true)
+        p.kept(b)
+        assertEquals(a, p.current(referer = b))
+        p.answered(b, replacesDocument = true, fetchedByWebView = true)
+        p.kept()
+        assertEquals(a, p.current(referer = b))
     }
 
     @Test

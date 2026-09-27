@@ -168,6 +168,10 @@ internal fun isDocumentRequest(
     return header("Accept")?.trim()?.lowercase()?.startsWith("text/html") == true
 }
 
+/** A request's `Referer` header, if it sent one (see [AdblockPage]). */
+internal fun refererOf(headers: Map<String, String>?): String? =
+    headers?.entries?.firstOrNull { it.key.equals("Referer", ignoreCase = true) }?.value?.trim()?.ifEmpty { null }
+
 /**
  * The interceptor's answer to an ENS document it refuses: the error
  * page itself, served *as* the history entry's document rather than
@@ -1902,8 +1906,9 @@ private fun buildRefreshableWebView(
         // the network filters' `third-party` / `domain=` options and the
         // allowlist are judged against. The committed one, or one whose
         // answer the browser itself just handed over and is about to
-        // commit; never one a navigation still waiting on the network, or
-        // one that didn't commit, was headed for (see [AdblockPage]).
+        // commit, or — for a request whose Referer names it — the one a
+        // network navigation is fetching; never one that didn't commit
+        // (see [AdblockPage]).
         // The cosmetic channel reads it on the main thread.
         val adblockPage = AdblockPage()
         AdblockCosmetic.install(this, state.private) { adblockPage.current() }
@@ -2639,7 +2644,12 @@ private fun buildRefreshableWebView(
                 if (!mainFrame && request != null) {
                     val url = request.url?.toString()
                     if (url != null &&
-                        Adblock.shouldBlock(url, request.requestHeaders, adblockPage.current(), state.private)
+                        Adblock.shouldBlock(
+                            url,
+                            request.requestHeaders,
+                            adblockPage.current(refererOf(request.requestHeaders)),
+                            state.private,
+                        )
                     ) {
                         return Adblock.blockedResponse()
                     }
