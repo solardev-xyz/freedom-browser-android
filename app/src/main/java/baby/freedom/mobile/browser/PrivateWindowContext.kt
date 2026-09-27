@@ -7,6 +7,7 @@ import android.view.LayoutInflater
 import android.view.View
 import android.view.WindowManager
 import baby.freedom.mobile.R
+import java.lang.ref.WeakReference
 import java.util.WeakHashMap
 
 /**
@@ -27,8 +28,9 @@ import java.util.WeakHashMap
  *
  * Windows only: views inflated into a window that's already on screen
  * (the Activity's own, whose flag [PrivateScreenGuard] owns) are left
- * alone. One instance per Activity, so Chromium (which keys its window
- * bookkeeping by context) sees the same one for every private tab.
+ * alone. One instance per Activity while any private tab holds it, so
+ * Chromium (which keys its window bookkeeping by context) sees the same
+ * one for every private tab.
  */
 internal class PrivateWindowContext private constructor(base: Context) : ContextWrapper(base) {
 
@@ -44,12 +46,29 @@ internal class PrivateWindowContext private constructor(base: Context) : Context
         if (name == LAYOUT_INFLATER_SERVICE) inflater else super.getSystemService(name)
 
     companion object {
-        private val instances = WeakHashMap<Context, PrivateWindowContext>()
+        // Each wrapper's base is its key (the Activity), so the cache
+        // holds wrappers weakly: a strong value would keep its own key
+        // reachable and pin every Activity that ever opened a private tab.
+        private val instances = WeakValueCache<Context, PrivateWindowContext>(::PrivateWindowContext)
 
         fun of(context: Context): PrivateWindowContext =
-            context as? PrivateWindowContext
-                ?: instances.getOrPut(context) { PrivateWindowContext(context) }
+            context as? PrivateWindowContext ?: instances[context]
     }
+}
+
+/**
+ * A per-key cache that holds neither side strongly: the key weakly (as
+ * [WeakHashMap] does) and the value through a [WeakReference], so a
+ * value that references its own key — a [ContextWrapper] around the
+ * Activity it's keyed by — doesn't keep that key, and so itself, alive.
+ * A value lives as long as something outside the cache holds it; once
+ * nothing does, the next lookup builds a fresh one.
+ */
+internal class WeakValueCache<K : Any, V : Any>(private val create: (K) -> V) {
+    private val map = WeakHashMap<K, WeakReference<V>>()
+
+    operator fun get(key: K): V =
+        map[key]?.get() ?: create(key).also { map[key] = WeakReference(it) }
 }
 
 /**
