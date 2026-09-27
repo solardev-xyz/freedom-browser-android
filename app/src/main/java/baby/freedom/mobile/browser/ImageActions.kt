@@ -74,17 +74,29 @@ private const val MAX_REDIRECTS = 10
  * image on [pageUrl]: to a hop that is same-site with the page
  * ([sendsCookiesTo]; third-party cookies are off in the WebView), and
  * never again once the chain has left the page's site.
+ *
+ * Nor does a secure page's image come back in cleartext: every hop is
+ * passed through [secureHopFor] first, so an `http://` image (or an
+ * https → http redirect) on an https or dweb page is fetched over https
+ * — as Chromium's mixed-content autoupgrade would have — or not at all.
+ *
+ * The whole chain shares one [IMAGE_FETCH_DEADLINE_MS] budget: each
+ * hop's connect / read timeouts are clamped to what is left of it, and
+ * the body read stops at it, so a stalled host fails in bounded time
+ * rather than after 11 hops' worth of per-hop timeouts.
  */
 private fun fetchHttpImage(url: String, pageUrl: String?, userAgent: String?): FetchedImage? {
+    val deadline = System.currentTimeMillis() + IMAGE_FETCH_DEADLINE_MS
     var current = url
     var sameSiteChain = true
     repeat(MAX_REDIRECTS + 1) {
-        val scheme = Uri.parse(current).scheme?.lowercase()
-        if (scheme != "http" && scheme != "https") return null
+        current = secureHopFor(pageUrl, current) ?: return null
+        val remaining = (deadline - System.currentTimeMillis()).toInt()
+        if (remaining <= 0) return null
         sameSiteChain = sameSiteChain && sendsCookiesTo(pageUrl, current)
         val conn = (URL(current).openConnection() as HttpURLConnection).apply {
-            connectTimeout = 10_000
-            readTimeout = 20_000
+            connectTimeout = minOf(10_000, remaining)
+            readTimeout = minOf(20_000, remaining)
             instanceFollowRedirects = false
             if (!userAgent.isNullOrEmpty()) setRequestProperty("User-Agent", userAgent)
             if (sameSiteChain) {
@@ -99,13 +111,50 @@ private fun fetchHttpImage(url: String, pageUrl: String?, userAgent: String?): F
                 return@repeat
             }
             if (code !in 200..299) return null
-            val bytes = conn.inputStream.use { readCapped(it) } ?: return null
+            val bytes = conn.inputStream.use { readCapped(it, deadline) } ?: return null
             return imageMime(conn.contentType, bytes, current)?.let { FetchedImage(bytes, it) }
         } finally {
             conn.disconnect()
         }
     }
     return null
+}
+
+/** The most a Copy / Save / Share image refetch may take, redirects and all. */
+internal const val IMAGE_FETCH_DEADLINE_MS = 30_000L
+
+/** How long a refetch may run before the user is told it is under way. */
+internal const val IMAGE_FETCH_PROGRESS_DELAY_MS = 600L
+
+/**
+ * The URL to fetch for a hop to [url] of an image on [pageUrl], or
+ * `null` to refuse it. Only http(s) is fetched. A page that isn't plain
+ * `http://` — https, a dweb display URL (served from a virtual https
+ * origin), or unknown — is a secure context, and its images never go
+ * out in cleartext: an `http://` hop is upgraded to `https://` (port
+ * kept), the way Chromium autoupgrades mixed-content images, except to
+ * a loopback host, which Chromium treats as potentially trustworthy
+ * and loads as-is.
+ */
+internal fun secureHopFor(pageUrl: String?, url: String): String? {
+    val uri = runCatching { java.net.URI(url) }.getOrNull() ?: return null
+    val scheme = uri.scheme?.lowercase() ?: return null
+    if (scheme == "https") return url
+    if (scheme != "http") return null
+    val pageScheme = pageUrl?.let { runCatching { java.net.URI(it).scheme }.getOrNull() }?.lowercase()
+    if (pageScheme == "http") return url
+    val host = uri.host?.lowercase()?.trimEnd('.')?.removePrefix("[")?.removeSuffix("]") ?: return null
+    if (host == "localhost" || host.endsWith(".localhost") || host == "::1" || host.startsWith("127.")) {
+        return url
+    }
+    // Rebuilt by hand so the rest of the URL stays byte-for-byte (URI's
+    // component constructor would re-encode its `%` escapes). An explicit
+    // :80 is http's default port, so it becomes https's default.
+    val authority = uri.rawAuthority ?: return null
+    val start = url.indexOf("//")
+    if (start < 0 || !url.startsWith(authority, start + 2)) return null
+    val rest = url.substring(start + 2 + authority.length)
+    return "https://" + (if (uri.port == 80) authority.removeSuffix(":80") else authority) + rest
 }
 
 /**
@@ -130,10 +179,11 @@ private fun cookieSite(url: String): Pair<String, String>? {
     return scheme to site
 }
 
-private fun readCapped(input: java.io.InputStream): ByteArray? {
+private fun readCapped(input: java.io.InputStream, deadline: Long = Long.MAX_VALUE): ByteArray? {
     val out = java.io.ByteArrayOutputStream()
     val buf = ByteArray(64 * 1024)
     while (true) {
+        if (System.currentTimeMillis() > deadline) return null
         val n = input.read(buf)
         if (n < 0) break
         out.write(buf, 0, n)

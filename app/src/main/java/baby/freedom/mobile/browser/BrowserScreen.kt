@@ -1385,7 +1385,19 @@ fun BrowserScreen(
         } else if (owner != null) {
             fun withImage(url: String, action: suspend (FetchedImage) -> Boolean, failure: String) {
                 scope.launch {
-                    val image = fetchImage(url, request.pageUrl, WebSettings.getDefaultUserAgent(context))
+                    // The sheet is already gone: a refetch that isn't back
+                    // almost at once says so, rather than leaving the user
+                    // with nothing until the result (or failure) toast.
+                    // The fetch itself is bounded by IMAGE_FETCH_DEADLINE_MS.
+                    val progress = launch {
+                        delay(IMAGE_FETCH_PROGRESS_DELAY_MS)
+                        Toast.makeText(context, "Loading image\u2026", Toast.LENGTH_SHORT).show()
+                    }
+                    val image = try {
+                        fetchImage(url, request.pageUrl, WebSettings.getDefaultUserAgent(context))
+                    } finally {
+                        progress.cancel()
+                    }
                     val ok = image != null && action(image)
                     if (!ok) Toast.makeText(context, failure, Toast.LENGTH_SHORT).show()
                 }

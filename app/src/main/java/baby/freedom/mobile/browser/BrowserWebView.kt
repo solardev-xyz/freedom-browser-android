@@ -1846,11 +1846,18 @@ internal class PageWebView(context: Context) : WebView(context) {
  * (Paste only) and for a selection inside a password field, and
  * Chromium's own items can't tell us which — their ids are WebView-
  * package resources, not a stable API. So the page is asked instead
- * ([SELECTION_TEXT_SCRIPT], which reads a password field as empty):
- * each create / prepare re-probes, and a probe whose answer flips
- * "is there a selection" invalidates the toolbar so prepare adds or
- * drops the item. A probe that doesn't flip it doesn't invalidate, so
- * the round trip settles after one pass.
+ * ([SELECTION_TEXT_SCRIPT], which reads a password field as empty),
+ * and a probe whose answer flips "is there a selection" invalidates
+ * the toolbar so prepare adds or drops the item.
+ *
+ * That script runs in the page's own JS world, where a page that wraps
+ * `getSelection` / `activeElement` can count the calls — so the page
+ * is asked as rarely as the answer can change: on create, and on a
+ * prepare only when Chromium's own items differ from the last probe's
+ * ([SelectionProbeGate]). A caret becoming a selection, or a selection
+ * moving into a password field, swaps Chromium's items (Paste only ↔
+ * Copy / Share / Select all; Copy dropped for a password), so those
+ * still re-probe; dragging the handles or our own invalidate doesn't.
  *
  * Syncing happens on prepare as well as create because Chromium rebuilds
  * its menu on prepare, clearing whatever else was on it. On click the
@@ -1870,19 +1877,27 @@ private class SearchSelectionCallback(
     /** The last probe's answer: is there a selection worth searching? */
     private var searchable = false
     private var destroyed = false
+    private val gate = SelectionProbeGate()
 
     override fun onCreateActionMode(mode: ActionMode, menu: Menu): Boolean {
         val created = delegate.onCreateActionMode(mode, menu)
-        if (created) probe(mode)
+        if (created && gate.shouldProbe(chromiumItems(menu))) probe(mode)
         return created
     }
 
     override fun onPrepareActionMode(mode: ActionMode, menu: Menu): Boolean {
         val changed = delegate.onPrepareActionMode(mode, menu)
+        // Read Chromium's items before ours is synced in: the
+        // signature must not change just because "Search" came or went.
+        val items = chromiumItems(menu)
         val synced = syncSearchItem(menu)
-        probe(mode)
+        if (gate.shouldProbe(items)) probe(mode)
         return changed || synced
     }
+
+    /** Chromium's own items on [menu], by id, in order; "Search" left out. */
+    private fun chromiumItems(menu: Menu): List<Int> =
+        (0 until menu.size()).map { menu.getItem(it).itemId }.filter { it != SEARCH_SELECTION_ITEM_ID }
 
     override fun onActionItemClicked(mode: ActionMode, item: MenuItem): Boolean {
         if (item.itemId != SEARCH_SELECTION_ITEM_ID) return delegate.onActionItemClicked(mode, item)
@@ -1927,6 +1942,22 @@ private class SearchSelectionCallback(
         } else {
             menu.removeItem(SEARCH_SELECTION_ITEM_ID)
         }
+        return true
+    }
+}
+
+/**
+ * When [SearchSelectionCallback] asks the page for its selection: the
+ * first time, and afterwards only when Chromium's items (their ids, in
+ * order) differ from the last time it asked — the page's answer can
+ * only flip with a change Chromium's menu reflects too.
+ */
+internal class SelectionProbeGate {
+    private var last: List<Int>? = null
+
+    fun shouldProbe(items: List<Int>): Boolean {
+        if (items == last) return false
+        last = items
         return true
     }
 }

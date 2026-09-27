@@ -83,4 +83,31 @@ class ImageActionsTest {
         assertFalse(sendsCookiesTo("name.eth/path", "https://a.com/x.png"))
         assertFalse(sendsCookiesTo("bzz://abc/", "https://a.com/x.png"))
     }
+
+    @Test
+    fun `a secure page's image is never refetched in cleartext`() {
+        val page = "https://news.example/article"
+        // https hops pass as they are.
+        assertEquals("https://cdn.example/a.png", secureHopFor(page, "https://cdn.example/a.png"))
+        // http hops (the src itself, or an https -> http redirect) are upgraded,
+        // rest of the URL untouched, explicit ports kept except http's :80.
+        assertEquals("https://x.example/a%20b.png?q=1", secureHopFor(page, "http://x.example/a%20b.png?q=1"))
+        assertEquals("https://x.example:8080/a.png", secureHopFor(page, "http://x.example:8080/a.png"))
+        assertEquals("https://x.example/a.png", secureHopFor(page, "http://x.example:80/a.png"))
+        assertEquals("https://u@x.example/a.png", secureHopFor(page, "HTTP://u@x.example/a.png"))
+        // Dweb pages (virtual https origins) and an unknown page count as secure.
+        assertEquals("https://x.example/a.png", secureHopFor("bzz://abc/", "http://x.example/a.png"))
+        assertEquals("https://x.example/a.png", secureHopFor("name.eth/path", "http://x.example/a.png"))
+        assertEquals("https://x.example/a.png", secureHopFor(null, "http://x.example/a.png"))
+        // Loopback is potentially trustworthy: the local gateway stays http.
+        assertEquals("http://127.0.0.1:1633/bzz/x", secureHopFor(page, "http://127.0.0.1:1633/bzz/x"))
+        assertEquals("http://localhost:8080/a.png", secureHopFor(page, "http://localhost:8080/a.png"))
+        assertEquals("http://[::1]:8080/a.png", secureHopFor(page, "http://[::1]:8080/a.png"))
+        // An http page's http images load in the clear, as they did in the page.
+        assertEquals("http://x.example/a.png", secureHopFor("http://site.example/", "http://x.example/a.png"))
+        // Nothing but http(s) is fetched.
+        assertNull(secureHopFor(page, "ftp://x.example/a.png"))
+        assertNull(secureHopFor(page, "file:///sdcard/a.png"))
+        assertNull(secureHopFor(page, "not a url"))
+    }
 }
