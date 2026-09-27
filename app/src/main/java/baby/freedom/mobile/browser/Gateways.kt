@@ -3,12 +3,16 @@ package baby.freedom.mobile.browser
 import baby.freedom.mobile.ens.EnsResolver
 import baby.freedom.mobile.ens.EnsResult
 import baby.freedom.swarm.SwarmNode
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeoutOrNull
 import java.util.concurrent.ConcurrentHashMap
@@ -42,23 +46,34 @@ object Gateways {
     const val EMBEDDED_SWARM_BASE: String = SwarmNode.GATEWAY_URL
 
     /*
-     * `@Volatile` because the writers (the AIDL callback on the Binder
-     * thread, the settings collector on the main thread) and the readers
-     * (webview interceptors, suspend navigation gates on the UI and IO
-     * threads) are all on different threads.
+     * `@Volatile` (and state flows below) because the writers (the AIDL
+     * callback on the Binder thread, the settings collector on the main
+     * thread) and the readers (webview interceptors, suspend navigation
+     * gates on the UI and IO threads) are all on different threads.
      */
     @Volatile
     private var embeddedIpfsBase: String = ""
 
+    private val externalSwarm = MutableStateFlow("")
+    private val externalIpfs = MutableStateFlow("")
+
     /** External Swarm endpoint base URL, or `""` for the embedded node. */
-    @Volatile
-    var externalSwarmBase: String = ""
-        private set
+    val externalSwarmBase: String get() = externalSwarm.value
 
     /** External IPFS gateway base URL, or `""` for the embedded node. */
+    val externalIpfsBase: String get() = externalIpfs.value
+
+    /** [externalIpfsBase] as a flow, for UI that must follow a switch. */
+    val externalIpfsBaseFlow: StateFlow<String> = externalIpfs.asStateFlow()
+
+    /**
+     * Completed once the external endpoint settings are known.
+     * Already complete unless [expectExternalEndpoints] armed it (the
+     * app does, at start; tests that never load the settings don't).
+     */
     @Volatile
-    var externalIpfsBase: String = ""
-        private set
+    private var endpointsKnown: CompletableDeferred<Unit> =
+        CompletableDeferred<Unit>().apply { complete(Unit) }
 
     /** The Swarm gateway in use: the external endpoint, else the embedded node's. */
     val swarmBase: String
@@ -77,11 +92,42 @@ object Gateways {
         embeddedIpfsBase = base
     }
 
+    /**
+     * The external endpoint settings are being loaded: until
+     * [setExternalEndpoints] lands, [awaitExternalEndpoints] waits. So a
+     * cold-start deep link or restored tab can't reach the embedded
+     * node's gateway before the setting is read — without blocking the
+     * main thread on the read.
+     */
+    fun expectExternalEndpoints() {
+        if (endpointsKnown.isCompleted) endpointsKnown = CompletableDeferred()
+    }
+
     /** The user's external endpoints (`""` = embedded node); normalized base URLs. */
     fun setExternalEndpoints(swarm: String, ipfs: String) {
-        externalSwarmBase = swarm
-        externalIpfsBase = ipfs
+        externalSwarm.value = swarm
+        externalIpfs.value = ipfs
+        endpointsKnown.complete(Unit)
     }
+
+    /** Wait until the external endpoint settings are known (see [expectExternalEndpoints]). */
+    suspend fun awaitExternalEndpoints() {
+        withTimeoutOrNull(ENDPOINTS_WAIT_MS) { endpointsKnown.await() }
+    }
+
+    /**
+     * [awaitExternalEndpoints] for the request interceptor, which runs
+     * on WebView's IO threads (never the main thread). Returns at once
+     * in the common case.
+     */
+    fun awaitExternalEndpointsBlocking() {
+        val known = endpointsKnown
+        if (known.isCompleted) return
+        runBlocking { withTimeoutOrNull(ENDPOINTS_WAIT_MS) { known.await() } }
+    }
+
+    /** A bound on [awaitExternalEndpoints]: a DataStore read takes milliseconds. */
+    private const val ENDPOINTS_WAIT_MS = 5_000L
 
     /**
      * Shared ENS resolver. One instance so the submit flow and the
@@ -244,6 +290,30 @@ object Gateways {
         if (url.startsWith("$swarmBase/")) return true
         val ipfs = ipfsBase
         return ipfs.isNotEmpty() && url.startsWith("$ipfs/")
+    }
+
+    /**
+     * Does [url] belong to one of the *embedded* nodes' gateways
+     * (`http://127.0.0.1:…`)? Unlike [isLocalGateway] this never matches
+     * an external endpoint (#125): the interceptor answers CORS
+     * preflights for the embedded node API itself, but an external node
+     * is somebody else's server with its own CORS policy, which a web
+     * page must not be able to skip.
+     */
+    fun isEmbeddedGateway(url: String): Boolean {
+        if (url.startsWith("$EMBEDDED_SWARM_BASE/")) return true
+        val ipfs = embeddedIpfsBase
+        return ipfs.isNotEmpty() && url.startsWith("$ipfs/")
+    }
+
+    /**
+     * The external IPFS gateway [gatewayUrl] (a [gatewayUrlFor] answer)
+     * is served from, or `null` when it isn't one — an embedded node's,
+     * or an external Swarm endpoint's.
+     */
+    fun externalIpfsGatewayOf(gatewayUrl: String): String? {
+        val ipfs = externalIpfsBase
+        return ipfs.takeIf { it.isNotEmpty() && gatewayUrl.startsWith("$it/") }
     }
 
     /**

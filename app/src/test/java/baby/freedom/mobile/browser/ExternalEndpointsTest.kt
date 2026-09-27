@@ -41,6 +41,23 @@ class ExternalEndpointsTest {
     }
 
     @Test
+    fun `a mistyped scheme is refused, not turned into a host named http`() {
+        assertEquals(Rejection.NOT_A_URL, rejection("http:/nas:1633"))
+        assertEquals(Rejection.NOT_A_URL, rejection("https:nas"))
+        assertEquals(Rejection.NOT_A_URL, rejection("http//nas:1633"))
+        assertEquals(Rejection.SCHEME, rejection("ftp:gw.example"))
+        assertEquals("http://localhost", ExternalEndpoints.normalize("localhost"))
+    }
+
+    @Test
+    fun `underscore hostnames are accepted`() {
+        assertEquals("http://my_node:1633", ExternalEndpoints.normalize("my_node:1633"))
+        assertEquals("https://my_node.lan/api", ExternalEndpoints.normalize("https://My_Node.lan/api/"))
+        assertEquals(Rejection.NOT_A_URL, rejection("my_node:99999"))
+        assertEquals(Rejection.CREDENTIALS, rejection("http://me@my_node:1633"))
+    }
+
+    @Test
     fun `the ipfs row carries the unverified warning only while external`() {
         val embedded = nodeRows("", "", showIpfsUi = true).single { it.key == "ipfs" }
         assertFalse(embedded.texts.any { it.startsWith("Unverified") })

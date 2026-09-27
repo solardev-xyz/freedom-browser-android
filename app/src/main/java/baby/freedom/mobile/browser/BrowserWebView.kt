@@ -2910,7 +2910,11 @@ internal fun interceptVirtualRequest(
     val req = request ?: return null
     val url = req.url?.toString() ?: return null
     val incoming = if (req.isForMainFrame) ensPins?.beginNavigation(url) else null
-    val response = interceptVirtualRequestFor(req, ensPins, incoming)
+    // An origin an unverified external IPFS gateway served before the
+    // user switched away from it (#125): its next document first clears
+    // what that gateway's pages left there, before anything else runs.
+    val response = siteDataCleanupFor(req, url)
+        ?: interceptVirtualRequestFor(req, ensPins, incoming)
     if (incoming != null && response != null &&
         rendersInPlace(response.statusCode, response.mimeType, response.responseHeaders)
     ) {
@@ -2965,6 +2969,54 @@ private val DOWNLOADED_TEXT_TYPES = setOf(
     "text/vnd.sun.j2me.app-descriptor",
 )
 
+/**
+ * The document that clears a swept origin's site data
+ * ([UnverifiedOrigins.takeClearFor]) — once, in place of the first
+ * document requested there after the switch — or `null`. It runs on
+ * the origin itself, which is the only way to reach its localStorage,
+ * sessionStorage, Cache Storage and service workers: neither
+ * `WebStorage.deleteOrigin` nor a `Clear-Site-Data` header on an
+ * intercepted response touches those. Then it reloads the URL in
+ * place, which is served normally.
+ */
+private fun siteDataCleanupFor(req: WebResourceRequest, url: String): WebResourceResponse? {
+    if (!isDocumentRequest(req.isForMainFrame, req.requestHeaders)) return null
+    val origin = VirtualOrigin.parseHostOfUrl(url)?.let(VirtualOrigin::originFor) ?: return null
+    if (!UnverifiedOrigins.takeClearFor(origin)) return null
+    return WebResourceResponse(
+        "text/html", "utf-8", 200, "OK",
+        mapOf("Cache-Control" to "no-store"),
+        ByteArrayInputStream(SITE_DATA_CLEANUP_HTML.toByteArray(Charsets.UTF_8)),
+    )
+}
+
+internal const val SITE_DATA_CLEANUP_HTML = """<!doctype html><meta charset="utf-8"><script>
+(async () => {
+  const quietly = async (f) => { try { await f(); } catch (e) {} };
+  await quietly(() => localStorage.clear());
+  await quietly(() => sessionStorage.clear());
+  await quietly(async () => {
+    for (const db of await indexedDB.databases()) {
+      await new Promise((done) => {
+        const r = indexedDB.deleteDatabase(db.name);
+        r.onsuccess = r.onerror = r.onblocked = done;
+      });
+    }
+  });
+  await quietly(async () => { for (const k of await caches.keys()) await caches.delete(k); });
+  await quietly(async () => {
+    for (const r of await navigator.serviceWorker.getRegistrations()) await r.unregister();
+  });
+  await quietly(() => {
+    for (const c of document.cookie.split(';')) {
+      const name = c.split('=')[0].trim();
+      if (name) document.cookie = name + '=; Max-Age=0; path=/';
+    }
+  });
+  location.replace(location.href);
+})();
+</script>"""
+
 private fun interceptVirtualRequestFor(
     req: WebResourceRequest,
     ensPins: EnsDocumentPins?,
@@ -2981,8 +3033,9 @@ private fun interceptVirtualRequestFor(
     // node's own CORS configuration. The node must still stamp
     // `Access-Control-Allow-Origin` on the actual response (see
     // docs/virtual-origins-hardening.md for the ant/freedom-ipfs
-    // config status).
-    if (req.method == "OPTIONS" && isLocalGatewayUrl(url)) {
+    // config status). Only the embedded nodes: an external endpoint
+    // (#125) keeps its own CORS policy, so its preflights go through.
+    if (req.method == "OPTIONS" && Gateways.isEmbeddedGateway(url)) {
         return corsPreflightResponse(req)
     }
 
@@ -3037,12 +3090,32 @@ private fun interceptVirtualRequestFor(
         }
     }
 
+    // At a cold start the external endpoint settings (#125) are still
+    // being read: a restored tab must not reach the embedded gateway
+    // meanwhile. Immediate once they're known.
+    Gateways.awaitExternalEndpointsBlocking()
     val target = Gateways.gatewayUrlFor(root, pathAndQuery, page = page)
         ?: return syntheticResponse(
             502, "Bad Gateway",
             "No local gateway can serve this content root " +
                 "(node not running, or name resolution failed).",
         )
+
+    // An unverified external IPFS gateway (#125) shares the root's
+    // virtual origin with the verified embedded node: note the origin so
+    // its storage is wiped once this gateway is no longer in use, and
+    // don't let the gateway install a service worker there — one would
+    // keep answering the origin from its own code after the switch.
+    Gateways.externalIpfsGatewayOf(target)?.let { gateway ->
+        VirtualOrigin.originFor(root)?.let { UnverifiedOrigins.record(gateway, it) }
+        if (isServiceWorkerScript(req.requestHeaders)) {
+            return syntheticResponse(
+                403, "Forbidden",
+                "Service workers aren't installed from an external IPFS gateway: " +
+                    "its content isn't verified against the CID.",
+            )
+        }
+    }
 
     val response = if (isMediaLikeUrl(target)) {
         fetchMediaWithRangeSupport(req, target)

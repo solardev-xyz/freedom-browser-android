@@ -66,6 +66,49 @@ class GatewaysTest {
         )
     }
 
+    @Test
+    fun `local cors preflights are answered only for the embedded nodes`() {
+        Gateways.setIpfsBase("http://127.0.0.1:58312")
+        Gateways.setExternalEndpoints("http://10.0.2.2:8701", "http://10.0.2.2:8702")
+        // The external endpoints are the ones in use...
+        assertTrue(Gateways.isLocalGateway("http://10.0.2.2:8701/stamps/topup/x/1"))
+        // ...but their preflights are theirs to answer.
+        assertFalse(Gateways.isEmbeddedGateway("http://10.0.2.2:8701/stamps/topup/x/1"))
+        assertFalse(Gateways.isEmbeddedGateway("http://10.0.2.2:8702/api/v0/pin/rm"))
+        assertTrue(Gateways.isEmbeddedGateway("http://127.0.0.1:1633/bzz"))
+        assertTrue(Gateways.isEmbeddedGateway("http://127.0.0.1:58312/ipfs/x"))
+    }
+
+    @Test
+    fun `externalIpfsGatewayOf names the unverified gateway only`() {
+        Gateways.setIpfsBase("http://127.0.0.1:58312")
+        assertNull(Gateways.externalIpfsGatewayOf("http://127.0.0.1:58312/ipfs/bafy/"))
+        Gateways.setExternalEndpoints("http://10.0.2.2:8701", "https://gw.example/sub")
+        assertEquals(
+            "https://gw.example/sub",
+            Gateways.externalIpfsGatewayOf(Gateways.gatewayUrlFor(ContentRoot.Ipfs("bafy"), "/")!!),
+        )
+        assertNull(Gateways.externalIpfsGatewayOf(Gateways.gatewayUrlFor(ContentRoot.Bzz(ref64), "/")!!))
+        assertEquals("https://gw.example/sub", Gateways.externalIpfsBaseFlow.value)
+    }
+
+    @Test
+    fun `requests wait for the endpoint settings once they are expected`() {
+        Gateways.expectExternalEndpoints()
+        val waited = java.util.concurrent.atomic.AtomicReference<String>()
+        val t = Thread {
+            Gateways.awaitExternalEndpointsBlocking()
+            waited.set(Gateways.gatewayUrlFor(ContentRoot.Bzz(ref64), "/"))
+        }.apply { start() }
+        Thread.sleep(200)
+        assertNull("must not route before the settings are known", waited.get())
+        Gateways.setExternalEndpoints("http://10.0.2.2:8701", "")
+        t.join(2_000)
+        assertEquals("http://10.0.2.2:8701/bzz/$ref64/", waited.get())
+        // Known now: no more waiting.
+        Gateways.awaitExternalEndpointsBlocking()
+    }
+
     private val ref64 = "8f1d385f2493d4bcd4d3b2c1e3c1b8f7d1a09876543210fedcba98765432abcd"
     private val bzzLabel = "3kescpgjpg23w0jk9ccszdtmgq3mcqnthwg1oxbfcnb6w68t71"
 

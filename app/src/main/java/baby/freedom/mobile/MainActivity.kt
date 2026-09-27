@@ -23,6 +23,7 @@ import baby.freedom.mobile.browser.BrowserScreen
 import baby.freedom.mobile.browser.Gateways
 import baby.freedom.mobile.browser.HOME_URL
 import baby.freedom.mobile.browser.PublicSuffixList
+import baby.freedom.mobile.browser.UnverifiedOrigins
 import baby.freedom.mobile.browser.VirtualOrigin
 import baby.freedom.mobile.data.NodeSettings
 import baby.freedom.mobile.node.INodeCallback
@@ -37,7 +38,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
 
 /**
  * Hosts the browser UI and brokers the bind/unbind lifecycle of the
@@ -117,19 +118,24 @@ class MainActivity : ComponentActivity() {
             if (settings.runNodeEnabled.first()) startAndBindService()
         }
 
-        // External Swarm endpoint / IPFS gateway (#125). Read once
-        // before the first frame, so a cold-start deep link or restored
-        // tab can't reach the embedded node's gateway before the
-        // setting lands (one small DataStore read), then followed live
-        // so switching in Settings applies to the next request.
-        val externalEndpoints = combine(
-            settings.externalSwarmEndpoint,
-            settings.externalIpfsGateway,
-        ) { swarm, ipfs -> swarm to ipfs }
-        runBlocking { externalEndpoints.first() }
-            .let { (swarm, ipfs) -> Gateways.setExternalEndpoints(swarm, ipfs) }
+        // External Swarm endpoint / IPFS gateway (#125), followed live
+        // so switching in Settings applies to the next request. Until
+        // the first value lands, the interceptor and the navigation gate
+        // wait for it (so a cold-start deep link or restored tab can't
+        // reach the embedded node's gateway first) — the main thread
+        // doesn't.
+        Gateways.expectExternalEndpoints()
         lifecycleScope.launch {
-            externalEndpoints.collect { (swarm, ipfs) -> Gateways.setExternalEndpoints(swarm, ipfs) }
+            withContext(Dispatchers.IO) { UnverifiedOrigins.init(this@MainActivity) }
+            combine(
+                settings.externalSwarmEndpoint,
+                settings.externalIpfsGateway,
+            ) { swarm, ipfs -> swarm to ipfs }.collect { (swarm, ipfs) ->
+                // What an unverified gateway left on the virtual origins
+                // goes before anything else is served there.
+                UnverifiedOrigins.sweep(ipfs, UnverifiedOrigins::wipeWebData)
+                Gateways.setExternalEndpoints(swarm, ipfs)
+            }
         }
 
         // The address label's resting form needs the vendored Public
