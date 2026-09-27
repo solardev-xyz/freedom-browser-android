@@ -11,10 +11,11 @@ import androidx.datastore.preferences.core.emptyPreferences
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import java.io.IOException
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.retryWhen
 
 /**
  * Remembered per-site permission decisions (#81) — the "remember this
@@ -41,15 +42,26 @@ import kotlinx.coroutines.flow.map
  */
 class SitePermissionStore internal constructor(
     private val store: DataStore<Preferences>,
+    /** First back-off before re-reading after a failed read; doubles up to 32×. */
+    private val readRetryMs: Long = 1_000,
 ) {
     /** One stored decision. */
     data class Record(val origin: String, val permission: String, val decision: String)
 
-    /** Every stored decision, sorted by origin then permission. */
-    val all: Flow<List<Record>> = store.data.catch { e ->
-        if (e !is IOException) throw e
+    /**
+     * Every stored decision, sorted by origin then permission.
+     *
+     * A failed read emits "none" and then re-subscribes (with back-off)
+     * instead of completing: DataStore's `data` ends at the first error,
+     * and a long-lived collector (Settings) would otherwise stay stuck
+     * on the empty list through every later successful write.
+     */
+    val all: Flow<List<Record>> = store.data.retryWhen { e, attempt ->
+        if (e !is IOException) return@retryWhen false
         Log.w(TAG, "reading site permissions failed; treating as none", e)
         emit(emptyPreferences())
+        delay(readRetryMs shl attempt.coerceAtMost(5).toInt())
+        true
     }.map { prefs ->
         prefs.asMap().mapNotNull { (k, v) ->
             val name = k.name

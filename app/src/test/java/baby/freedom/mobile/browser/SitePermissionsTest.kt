@@ -1,5 +1,11 @@
 package baby.freedom.mobile.browser
 
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.async
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.yield
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -155,5 +161,39 @@ class SitePermissionsTest {
         assertFalse(androidPermissionBlockedInSettings(rationale = false, deniedBefore = false))
         // Denied for good.
         assertTrue(androidPermissionBlockedInSettings(rationale = false, deniedBefore = true))
+    }
+
+    @Test
+    fun `android dialog waits for the requesting tab to be on screen`() = runBlocking {
+        // Tab 2 is active but Settings covers it (null), then tab 1 shows.
+        val onScreen = MutableStateFlow<Long?>(1L)
+        val withdrawn = MutableStateFlow(false)
+        onScreen.value = null
+        val wait = async(start = CoroutineStart.UNDISPATCHED) {
+            awaitTabOnScreen(onScreen, 2L, withdrawn)
+        }
+        onScreen.value = 1L
+        repeat(3) { yield() }
+        assertFalse("must not raise over another tab", wait.isCompleted)
+        onScreen.value = null
+        repeat(3) { yield() }
+        assertFalse("must not raise over a panel", wait.isCompleted)
+        onScreen.value = 2L
+        assertTrue(withTimeout(1_000) { wait.await() })
+    }
+
+    @Test
+    fun `android dialog wait ends when the request is withdrawn`() = runBlocking {
+        val onScreen = MutableStateFlow<Long?>(1L)
+        val withdrawn = MutableStateFlow(false)
+        val wait = async(start = CoroutineStart.UNDISPATCHED) {
+            awaitTabOnScreen(onScreen, 2L, withdrawn)
+        }
+        withdrawn.value = true
+        assertFalse(withTimeout(1_000) { wait.await() })
+        // Already withdrawn beats already on screen.
+        assertFalse(awaitTabOnScreen(MutableStateFlow(2L), 2L, MutableStateFlow(true)))
+        // Already on screen returns at once.
+        assertTrue(awaitTabOnScreen(MutableStateFlow(2L), 2L, MutableStateFlow(false)))
     }
 }

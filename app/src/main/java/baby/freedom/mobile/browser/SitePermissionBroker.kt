@@ -11,6 +11,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.MainScope
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -51,7 +52,8 @@ class PermissionPrompt internal constructor(
  *     to it.
  *  4. Site allowed → *only now* ask Android for the runtime permission
  *     (CAMERA / RECORD_AUDIO / location) if the app doesn't hold it,
- *     via [requestAndroidPermissions]. Granted to the page only if the
+ *     via [requestAndroidPermissions] — once that tab is on screen,
+ *     as for the prompt. Granted to the page only if the
  *     user allowed both the site and the app.
  *
  * A request is withdrawn — denied once, nothing recorded, prompt taken
@@ -83,11 +85,19 @@ class SitePermissionBroker private constructor(
     @Volatile
     var onAndroidPermissionMissing: ((List<SitePermission>) -> Unit)? = null
 
+    /**
+     * Set by [BrowserScreen]: the tab whose page is what's on screen —
+     * the active tab, with no full-screen panel over it — or `null`.
+     * Android's runtime-permission dialog names no site, so like the
+     * Freedom prompt it is only ever raised over the page that asked.
+     */
+    val onScreenTab = MutableStateFlow<Long?>(null)
+
     private val androidDialogLock = Mutex()
 
     /** A request in flight, from arrival until it's granted or denied. */
     private class Pending(val tabId: Long, val token: Any) {
-        var withdrawn = false
+        val withdrawn = MutableStateFlow(false)
         var prompt: PermissionPrompt? = null
     }
 
@@ -218,7 +228,7 @@ class SitePermissionBroker private constructor(
         val doc = documents[tab.id] ?: 0
         val entry = Pending(tab.id, token)
         pending += entry
-        fun live() = !entry.withdrawn && (documents[tab.id] ?: 0) == doc
+        fun live() = !entry.withdrawn.value && (documents[tab.id] ?: 0) == doc
         var finished = false
         fun finish(allowed: Boolean) {
             if (finished) return
@@ -270,7 +280,7 @@ class SitePermissionBroker private constructor(
             }
         }
         if (!siteAllowed || !live()) return finish(false)
-        finish(ensureAndroidPermissions(permissions, live))
+        finish(ensureAndroidPermissions(entry, permissions, live))
     }
 
     /** Show the prompt, record the answer, and say whether the site is now allowed. */
@@ -336,8 +346,16 @@ class SitePermissionBroker private constructor(
      * for what's missing, one system dialog at a time — and not at all
      * for a request that was withdrawn while it queued for the dialog
      * ([live] false), which is denied without a word.
+     *
+     * The dialog waits, like the Freedom prompt, until the requesting
+     * tab's page is on screen ([onScreenTab]): a remembered Allow in a
+     * background tab (or behind Settings) must not pop a site-less
+     * system dialog over something else. The wait happens outside the
+     * dialog lock so a background request can't hold up the tab the
+     * user is actually looking at.
      */
     private suspend fun ensureAndroidPermissions(
+        entry: Pending,
         permissions: List<SitePermission>,
         live: () -> Boolean,
     ): Boolean {
@@ -345,14 +363,20 @@ class SitePermissionBroker private constructor(
             ContextCompat.checkSelfPermission(appContext, it) == PackageManager.PERMISSION_GRANTED
         }
         if (permissions.all(::held)) return true
-        val missing = androidDialogLock.withLock {
-            if (!live()) return false
-            val before = permissions.filterNot(::held)
-            if (before.isEmpty()) return@withLock before
-            val launch = requestAndroidPermissions ?: return@withLock before
-            runCatching { launch(before.flatMap { it.androidPermissions }.distinct()) }
-                .onFailure { Log.w(TAG, "runtime permission request failed", it) }
-            permissions.filterNot(::held)
+        var missing: List<SitePermission>? = null
+        while (missing == null) {
+            if (!awaitTabOnScreen(onScreenTab, entry.tabId, entry.withdrawn)) return false
+            missing = androidDialogLock.withLock {
+                if (!live()) return false
+                val before = permissions.filterNot(::held)
+                if (before.isEmpty()) return@withLock before
+                // Switched away while queued behind another dialog: wait again.
+                if (onScreenTab.value != entry.tabId) return@withLock null
+                val launch = requestAndroidPermissions ?: return@withLock before
+                runCatching { launch(before.flatMap { it.androidPermissions }.distinct()) }
+                    .onFailure { Log.w(TAG, "runtime permission request failed", it) }
+                permissions.filterNot(::held)
+            }
         }
         if (missing.isEmpty()) return true
         if (live()) onAndroidPermissionMissing?.invoke(missing)
@@ -362,7 +386,7 @@ class SitePermissionBroker private constructor(
     private fun withdraw(tabId: Long, match: (Pending) -> Boolean) {
         for (p in pending.toList()) {
             if (p.tabId != tabId || !match(p)) continue
-            p.withdrawn = true
+            p.withdrawn.value = true
             p.prompt?.respond(PromptAnswer.Withdrawn)
         }
     }

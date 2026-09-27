@@ -1,6 +1,10 @@
 package baby.freedom.mobile.browser
 
 import android.Manifest
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.filterNotNull
+import kotlinx.coroutines.flow.first
 
 /**
  * Site permissions (#81): which powerful web capabilities a site may
@@ -265,6 +269,24 @@ class PermissionSession {
         const val DISMISS_EMBARGO_THRESHOLD = 3
     }
 }
+
+/**
+ * Suspends until tab [tabId]'s page is the one on screen ([onScreenTab])
+ * and returns `true`, or returns `false` as soon as the request is
+ * [withdrawn] — whichever comes first. Gates Android's runtime-permission
+ * dialog the way `BrowserScreen` gates the Freedom prompt.
+ */
+suspend fun awaitTabOnScreen(
+    onScreenTab: StateFlow<Long?>,
+    tabId: Long,
+    withdrawn: StateFlow<Boolean>,
+): Boolean = combine(onScreenTab, withdrawn) { shown, gone ->
+    when {
+        gone -> false
+        shown == tabId -> true
+        else -> null
+    }
+}.filterNotNull().first()
 
 /**
  * Tap protection for the permission prompt. A page chooses *when* its

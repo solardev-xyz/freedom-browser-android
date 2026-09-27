@@ -1358,6 +1358,13 @@ fun BrowserScreen(
     state.permissionPrompt?.takeIf { pageOnScreen }?.let { prompt ->
         androidx.compose.runtime.key(prompt) { SitePermissionPrompt(prompt) }
     }
+    // The same gate for Android's own runtime-permission dialog, which
+    // the broker raises only over the tab named here.
+    val onScreenTabId = state.id.takeIf { pageOnScreen }
+    androidx.compose.runtime.SideEffect { sitePermissions.onScreenTab.value = onScreenTabId }
+    DisposableEffect(sitePermissions) {
+        onDispose { sitePermissions.onScreenTab.value = null }
+    }
 
     // HTML5 fullscreen. Last, so it paints over every overlay above.
     tabs.fullscreen?.let { session ->

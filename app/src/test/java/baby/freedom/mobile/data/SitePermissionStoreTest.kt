@@ -5,7 +5,11 @@ import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.emptyPreferences
 import java.io.IOException
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.emitAll
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flow
@@ -75,5 +79,36 @@ class SitePermissionStoreTest {
         )
         assertTrue(store.remove("https://a.example", "camera"))
         assertEquals(mapOf("microphone" to "deny"), store.decisionsFor("https://a.example"))
+    }
+
+    /** Reads fail until [healed]; then it behaves like [MemoryStore]. */
+    private class FlakyStore : DataStore<Preferences> {
+        @Volatile var healed = false
+        val backing = MutableStateFlow(emptyPreferences())
+        override val data: Flow<Preferences> = flow {
+            if (!healed) throw IOException("transient")
+            emitAll(backing)
+        }
+        override suspend fun updateData(
+            transform: suspend (t: Preferences) -> Preferences,
+        ): Preferences = transform(backing.value).also { backing.value = it }
+    }
+
+    @Test
+    fun transientReadFailureDoesNotEndTheFlow() = runBlocking {
+        val flaky = FlakyStore()
+        val store = SitePermissionStore(flaky, readRetryMs = 1)
+        val seen = Channel<List<SitePermissionStore.Record>>(Channel.UNLIMITED)
+        val collector = launch { store.all.collect { seen.send(it) } }
+        // The failure reads as "none"…
+        assertEquals(emptyList<SitePermissionStore.Record>(), seen.receive())
+        flaky.healed = true
+        assertTrue(store.set("https://a.example", "camera", "allow"))
+        // …and a later write still reaches the same collector.
+        val expected = listOf(SitePermissionStore.Record("https://a.example", "camera", "allow"))
+        withTimeout(5_000) {
+            while (seen.receive() != expected) Unit
+        }
+        collector.cancel()
     }
 }

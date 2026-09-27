@@ -59,9 +59,10 @@ import kotlinx.coroutines.launch
  * ellipsising, since the tail of a host is exactly the part a spoof
  * would hide.
  *
- * Block / Allow ignore taps for the first [PromptTapGuard.PROTECTION_MS]
- * the prompt is on screen (and show as disabled meanwhile), so a page
- * can't time its request to catch a tap meant for the page.
+ * Block / Allow — and dismissal (tap outside, Back) — ignore taps for
+ * the first [PromptTapGuard.PROTECTION_MS] the prompt is on screen (the
+ * buttons show as disabled meanwhile), so a page can't time its request
+ * to catch a tap meant for the page.
  */
 @Composable
 fun SitePermissionPrompt(prompt: PermissionPrompt) {
@@ -82,7 +83,10 @@ fun SitePermissionPrompt(prompt: PermissionPrompt) {
         else -> Icons.Filled.LocationOn
     }
     AlertDialog(
-        onDismissRequest = { prompt.respond(PromptAnswer.Dismiss) },
+        // Guarded like the buttons: a tap meant for the page that lands
+        // outside the freshly shown prompt must not count towards the
+        // three-dismissals embargo. (The prompt just stays up.)
+        onDismissRequest = { if (guard.accepts()) prompt.respond(PromptAnswer.Dismiss) },
         icon = { Icon(icon, contentDescription = null) },
         title = {
             Text(
