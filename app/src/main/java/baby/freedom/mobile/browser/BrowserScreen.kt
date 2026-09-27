@@ -52,6 +52,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -471,6 +472,19 @@ fun BrowserScreen(
         }
     }
     BackHandler(enabled = backHandledFor(state.canGoBack, state.isHome), onBack = goBack)
+
+    // Find in page (#83). The bar stands in for the capsule while the
+    // active tab's session is open — never on the home surface, which has
+    // nothing to search. Registered after the history handler so that,
+    // while the bar is up, Back closes it rather than leaving the page
+    // (the IME, when showing, still takes the first press itself).
+    val findOpen = state.find.open && !isHomeTab
+    val closeFind: () -> Unit = {
+        tabs.find?.invoke(state, FindAction.Clear)
+        keyboard?.hide()
+        focusManager.clearFocus()
+    }
+    BackHandler(enabled = findOpen, onBack = closeFind)
 
     // Run the peer-warmup probe against a bzz:// / ipfs:// / ipns://
     // URL, then either load it or fall back to the in-app error page.
@@ -1186,7 +1200,21 @@ fun BrowserScreen(
                     ),
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
-                BottomToolbar(
+                if (findOpen) {
+                    // Keyed on the tab: each tab's bar is its own field,
+                    // seeded from that tab's query.
+                    key(state.id) {
+                        FindBar(
+                            tab = state,
+                            onQueryChange = { tabs.find?.invoke(state, FindAction.Search(it)) },
+                            onStep = { tabs.find?.invoke(state, FindAction.Step(it)) },
+                            onClose = closeFind,
+                            modifier = Modifier
+                                .widthIn(max = CHROME_MAX_WIDTH)
+                                .fillMaxWidth(),
+                        )
+                    }
+                } else BottomToolbar(
                     state = state,
                     tabCount = tabs.tabs.size,
                     nodeInfo = nodeInfo,
@@ -1276,6 +1304,7 @@ fun BrowserScreen(
                         val fresh = tabs.newTab()
                         submit(fresh, tabs.homepageUrl)
                     },
+                    onFindInPage = { state.find.show() },
                     modifier = Modifier
                         .widthIn(max = CHROME_MAX_WIDTH)
                         .fillMaxWidth(),

@@ -706,6 +706,24 @@ fun BrowserWebViewHost(
         // also clears the counter itself so the capsule's edge trace
         // goes out on the same frame as the tap.
         tabs.stopLoading = { tab -> webViews[tab.id]?.stopLoading() }
+        // Find in page (#83). Results come back through the WebView's
+        // FindListener into the tab's [FindInPageState] (see
+        // [buildRefreshableWebView]).
+        tabs.find = { tab, action ->
+            val wv = webViews[tab.id]
+            when (action) {
+                is FindAction.Search -> {
+                    tab.find.startSearch(action.text)
+                    if (action.text.isEmpty()) wv?.clearMatches()
+                    else wv?.findAllAsync(action.text)
+                }
+                is FindAction.Step -> wv?.findNext(action.forward)
+                FindAction.Clear -> {
+                    tab.find.close()
+                    wv?.clearMatches()
+                }
+            }
+        }
         tabs.clearWebViewData = {
             // Globally-scoped stores: cookies and DOM storage / IndexedDB /
             // WebSQL are shared across every WebView in the process, so
@@ -733,6 +751,7 @@ fun BrowserWebViewHost(
             tabs.captureActiveThumbnail = null
             tabs.clearWebViewData = null
             tabs.stopLoading = null
+            tabs.find = null
         }
     }
 
@@ -945,6 +964,12 @@ private fun buildRefreshableWebView(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.MATCH_PARENT,
         )
+        // Find-in-page counts (#83), interim ones included so a long
+        // page's count converges visibly. Reports for a session that has
+        // since ended are dropped by [FindInPageState.onResult].
+        setFindListener { activeMatchOrdinal, numberOfMatches, isDoneCounting ->
+            state.find.onResult(findResultFrom(activeMatchOrdinal, numberOfMatches, isDoneCounting))
+        }
 
         // Use a white WebView background (the browser default) so that
         // pages without their own styling — most notably Chromium's
@@ -1438,6 +1463,12 @@ private fun buildRefreshableWebView(
                 // the page on screen's, and subresources held waiting on
                 // the commit go ahead (#99, [EnsDocumentPins]).
                 ensPins.documentStarted(url)
+                // A new document ends the tab's find session (#83): the
+                // bar closes and the highlights go, even for a page
+                // restored from the back/forward cache with the ones it
+                // was cached with.
+                view?.clearMatches()
+                state.find.onDocumentCommitted()
                 // A new document arrives with the chrome whole, however
                 // far the previous one was scrolled…
                 state.capsuleCollapse.expand()
