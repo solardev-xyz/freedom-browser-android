@@ -83,6 +83,13 @@ object Gateways {
      * each Back would otherwise pay [reverifyDeadlineMs] anew on a dead
      * network. They join the lookup still in flight, if any, without
      * waiting on it. `internal var` for tests.
+     *
+     * The window is kept by the lookups themselves, never by a document
+     * that merely skipped the wait: a lookup that fails re-opens it when
+     * it finishes, one that *answers* (in the background or not) closes
+     * it, so the next document waits for — and takes — a fresh answer
+     * instead of staying on the stale root for as long as documents keep
+     * arriving inside the window.
      */
     @Volatile
     internal var reverifyFailureWindowMs: Long = 30_000
@@ -91,8 +98,13 @@ object Gateways {
     private val lookupsInFlight = ConcurrentHashMap<String, Deferred<EnsResult>>()
     private val lookupFailedAt = ConcurrentHashMap<String, Long>()
 
-    /** Forget recent lookup failures (tests swapping [ensLookup]). */
+    /**
+     * Forget recent lookup failures and detach lookups still in flight
+     * (tests swapping [ensLookup]); a detached lookup's outcome is not
+     * recorded.
+     */
     internal fun resetEnsLookupState() {
+        lookupsInFlight.clear()
         lookupFailedAt.clear()
     }
 
@@ -115,14 +127,33 @@ object Gateways {
             }.also { started = it }
         }
         started?.let { own ->
-            own.invokeOnCompletion { lookupsInFlight.remove(key, own) }
+            own.invokeOnCompletion { cause ->
+                if (!lookupsInFlight.remove(key, own) || cause != null) return@invokeOnCompletion
+                // Record the outcome whoever (if anyone) is still waiting:
+                // a failure opens the failure window, an answer closes it.
+                @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+                val outcome = own.getCompleted()
+                if (outcome is EnsResult.Error) {
+                    lookupFailedAt[key] = System.currentTimeMillis()
+                } else {
+                    lookupFailedAt.remove(key)
+                }
+            }
             own.start()
         }
-        return runBlocking {
+        val result = runBlocking {
             if (deadlineMs == null) job.await()
             else if (deadlineMs <= 0) (if (job.isCompleted) job.await() else null)
             else withTimeoutOrNull(deadlineMs) { job.await() }
         }
+        // Waited the full deadline and it's still running: later documents
+        // shouldn't wait for it again. Not for a zero deadline — that
+        // document skipped the wait, it didn't find the network any slower,
+        // and the running lookup records its own outcome when it finishes.
+        if (result == null && deadlineMs != null && deadlineMs > 0 && !job.isCompleted) {
+            lookupFailedAt[key] = System.currentTimeMillis()
+        }
+        return result
     }
 
     /**
@@ -276,12 +307,8 @@ object Gateways {
             } == true -> 0L
             else -> reverifyDeadlineMs
         }
+        // [lookupWithin] keeps [lookupFailedAt] — see [reverifyFailureWindowMs].
         val result = lookupWithin(name, deadline)
-        if (result == null || result is EnsResult.Error) {
-            lookupFailedAt[key] = System.currentTimeMillis()
-        } else {
-            lookupFailedAt.remove(key)
-        }
         return when (result) {
             is EnsResult.Ok -> {
                 if (VirtualOrigin.parseContentUrl(result.uri) == null) {

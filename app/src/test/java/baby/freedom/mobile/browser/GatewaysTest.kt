@@ -176,6 +176,36 @@ class GatewaysTest {
     }
 
     @Test
+    fun `after a timeout, a background answer is taken even while documents keep coming`() {
+        // One timeout opens the failure window; the network then recovers
+        // and the name's contenthash is gone. Documents loading every few
+        // ms (well inside the window) must not stay on the stale root.
+        KnownEnsNames.record("bzz://$ref64", "gone.eth")
+        val first = java.util.concurrent.atomic.AtomicBoolean(true)
+        val deadline = Gateways.reverifyDeadlineMs
+        Gateways.reverifyDeadlineMs = 100
+        try {
+            withLookup({ name ->
+                if (first.getAndSet(false)) Thread.sleep(300) // the one slow answer
+                EnsResult.NotFound(name, "NO_CONTENTHASH")
+            }) {
+                val pins = EnsDocumentPins()
+                assertNull(Gateways.reverifyEnsDocument("gone.eth", pins))
+                assertEquals("bzz://$ref64", pins.uriFor("gone.eth"))
+                var refused: String? = null
+                val until = System.currentTimeMillis() + 3_000
+                while (refused == null && System.currentTimeMillis() < until) {
+                    Thread.sleep(20)
+                    refused = Gateways.reverifyEnsDocument("gone.eth", pins)
+                }
+                assertEquals("ens_not_found", refused)
+            }
+        } finally {
+            Gateways.reverifyDeadlineMs = deadline
+        }
+    }
+
+    @Test
     fun `with no earlier answer a slow lookup is waited for`() {
         val deadline = Gateways.reverifyDeadlineMs
         Gateways.reverifyDeadlineMs = 50
