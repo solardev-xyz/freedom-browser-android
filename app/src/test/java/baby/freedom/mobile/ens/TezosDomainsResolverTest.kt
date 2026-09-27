@@ -75,8 +75,16 @@ class TezosDomainsResolverTest {
         private val headTimes: Map<String, String> = emptyMap(),
         /** Anchor hashes per provider and level, over [anchorHashes]. */
         private val hashAt: (String, Long) -> String? = { _, _ -> null },
+        /** Requests that hang until their timeout (a flaky node). */
+        private val hangs: (String, String) -> Boolean = { _, _ -> false },
+        /** Head levels a provider reports on successive head reads (a load balancer). */
+        private val headSequence: Map<String, List<Int>> = emptyMap(),
+        /** Block levels a provider doesn't have (404). */
+        private val missingAt: (String, Long) -> Boolean = { _, _ -> false },
     ) : EnsHttp {
         val calls: MutableList<String> = Collections.synchronizedList(mutableListOf())
+        val timeouts: MutableList<Int> = Collections.synchronizedList(mutableListOf())
+        private val headReads = java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.atomic.AtomicInteger>()
 
         override fun request(
             method: String,
@@ -90,15 +98,27 @@ class TezosDomainsResolverTest {
             calls += url
             val origin = Regex("^https://[^/]+").find(url)!!.value
             if (origin in down) throw java.io.IOException("connection refused")
+            if (hangs(origin, url)) {
+                timeouts += timeoutMs
+                Thread.sleep(timeoutMs.toLong())
+                throw java.net.SocketTimeoutException("timeout")
+            }
             fun ok(json: String) = EnsHttp.Reply(200, json)
             return when {
                 url.endsWith("/chains/main/chain_id") -> ok("\"NetXdQprcVkpaWU\"")
                 url.endsWith("/blocks/head/header") -> ok(
-                    JSONObject().put("level", headLevels[origin] ?: 1000)
+                    JSONObject().put(
+                        "level",
+                        headSequence[origin]?.let { seq ->
+                            seq[minOf(headReads.getOrPut(origin) { java.util.concurrent.atomic.AtomicInteger() }
+                                .getAndIncrement(), seq.size - 1)]
+                        } ?: headLevels[origin] ?: 1000,
+                    )
                         .apply { headTimes[origin]?.let { put("timestamp", it) } }.toString(),
                 )
                 Regex("/blocks/\\d+/hash$").containsMatchIn(url) -> {
                     val level = Regex("/blocks/(\\d+)/hash$").find(url)!!.groupValues[1].toLong()
+                    if (missingAt(origin, level)) return EnsHttp.Reply(404, "")
                     ok("\"${hashAt(origin, level) ?: anchorHashes[origin] ?: "BLockHashSharedByProviders"}\"")
                 }
                 url.contains("KT1F7JKNqwaoLzRsMio1MQC7zv3jG9dHcDdJ/script/normalized") -> ok(scripts["proxy"].toString())
@@ -122,9 +142,13 @@ class TezosDomainsResolverTest {
         down: Set<String> = emptySet(),
         headTimes: Map<String, String> = emptyMap(),
         hashAt: (String, Long) -> String? = { _, _ -> null },
+        hangs: (String, String) -> Boolean = { _, _ -> false },
+        headSequence: Map<String, List<Int>> = emptyMap(),
+        missingAt: (String, Long) -> Boolean = { _, _ -> false },
     ) = Rpc(
         record, expiry, headLevels, recordsByEndpoint, anchorHashes, down,
         mapOf("proxy" to proxyScript, "registry" to registryScript), headTimes, hashAt,
+        hangs, headSequence, missingAt,
     )
 
     private fun answer(outcome: Outcome): Outcome.Answer {
@@ -403,6 +427,70 @@ class TezosDomainsResolverTest {
         val a = answer(TezosDomainsResolver(listOf(one, two), http) { clock }.resolveOutcome("clock.tez"))
         assertTrue(a.verified)
         assertEquals(2, a.agreed)
+    }
+
+    @Test
+    fun `with the device clock fast, a stuck provider is still told from a live one`() = runBlocking {
+        // 20 min fast: even the live head looks 20 min old. Measured
+        // against the newest head, only the stuck one is stale — it must
+        // not become the median and push the live provider out.
+        val fast = clock + 20 * 60_000
+        val http = rpc(
+            record("web:content_url" to "ipfs://bafybeigdyrzt"),
+            headLevels = mapOf(one to 15_130_198, two to 15_133_180),
+            headTimes = mapOf(one to stuckTime, two to liveTime),
+        )
+        val a = answer(TezosDomainsResolver(listOf(one, two), http) { fast }.resolveOutcome("skew.tez"))
+        assertEquals("ipfs://bafybeigdyrzt", a.leg.uri)
+        assertTrue(a.verified)
+    }
+
+    @Test
+    fun `a flaky stuck provider gets one short budget to corroborate, not every RPC's timeout`() = runBlocking {
+        val http = rpc(
+            record("web:content_url" to "ipfs://bafybeigdyrzt"),
+            headLevels = mapOf(one to 15_130_198, two to 15_133_180),
+            headTimes = mapOf(one to stuckTime, two to liveTime),
+            // The stuck node answered its head, then stops answering.
+            hangs = { origin, url -> origin == one && !url.endsWith("/chain_id") && !url.endsWith("/head/header") },
+        )
+        val resolver = TezosDomainsResolver(listOf(one, two), http, corroborationBudgetMs = 400) { clock }
+        val started = System.nanoTime()
+        val a = answer(resolver.resolveOutcome("flaky.tez"))
+        val tookMs = (System.nanoTime() - started) / 1_000_000
+        assertFalse(a.verified)
+        assertEquals("ipfs://bafybeigdyrzt", a.leg.uri)
+        assertTrue("took $tookMs ms", tookMs < 2_000)
+        assertTrue("${http.timeouts}", http.timeouts.isNotEmpty() && http.timeouts.all { it <= 400 })
+    }
+
+    @Test
+    fun `a not-found answer isn't worth corroborating by a stuck provider`() = runBlocking {
+        val http = rpc(
+            null,
+            headLevels = mapOf(one to 15_130_198, two to 15_133_180),
+            headTimes = mapOf(one to stuckTime, two to liveTime),
+        )
+        val a = answer(TezosDomainsResolver(listOf(one, two), http) { clock }.resolveOutcome("nobody.tez"))
+        assertEquals(Leg.Type.NOT_FOUND, a.leg.type)
+        assertFalse(http.calls.any { it.startsWith(one) && it.contains("/hash") })
+    }
+
+    @Test
+    fun `a load-balanced stuck provider retries from a fresh head when its anchor block is missing`() = runBlocking {
+        // Head read on the higher backend, anchor read on the lower one
+        // (404), then a fresh head read lands on the lower backend.
+        val http = rpc(
+            record("web:content_url" to "ipfs://bafybeigdyrzt"),
+            headLevels = mapOf(two to 15_133_180),
+            headSequence = mapOf(one to listOf(15_130_198, 15_126_718)),
+            headTimes = mapOf(one to stuckTime, two to liveTime),
+            missingAt = { origin, level -> origin == one && level > 15_126_718 },
+        )
+        val a = answer(TezosDomainsResolver(listOf(one, two), http) { clock }.resolveOutcome("balanced.tez"))
+        assertTrue(a.verified)
+        assertEquals(2, a.agreed)
+        assertTrue(http.calls.any { it.startsWith(one) && it.contains("/blocks/15126710/hash") })
     }
 
     @Test

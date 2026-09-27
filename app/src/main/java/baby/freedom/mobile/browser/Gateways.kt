@@ -370,7 +370,8 @@ object Gateways {
         val result = ensLookup(name)
         if (result is EnsResult.Ok) {
             val content = VirtualOrigin.parseContentUrl(result.uri) ?: return null
-            KnownEnsNames.record(result.uri, name)
+            // One provider's word is served, not remembered for the session.
+            if (result.verified) KnownEnsNames.record(result.uri, name)
             return content
         }
         return null
@@ -436,6 +437,16 @@ object Gateways {
      * (`http(s)`) returns [ENS_WEB_RECORD] after handing the answer to
      * [onWebRecord]: the document can't be served on the name's origin,
      * so the caller sends the frame there instead.
+     *
+     * A provider conflict hands the resolver's error to [onConflict]
+     * first, so the refusal page can say which providers disagreed.
+     *
+     * An *unverified* answer (one Tezos RPC provider, see
+     * `EnsResult.Ok.verified`) is served — pinned for [page] — but is
+     * neither the tab's last answer nor recorded in [KnownEnsNames]: a
+     * later failed lookup must not fall back on a destination only one
+     * operator vouched for. [onUnverified] is told, so the tab can say so
+     * as the typed flow does.
      */
     /** [reverifyEnsDocument]'s refusal when the name's providers contradict each other. */
     const val ENS_PROVIDER_CONFLICT = "ens_provider_conflict"
@@ -455,6 +466,8 @@ object Gateways {
         pins: EnsDocumentPins? = null,
         page: EnsDocumentPins.Page? = null,
         onWebRecord: (EnsResult.Ok) -> Unit = {},
+        onConflict: (EnsResult.Error) -> Unit = {},
+        onUnverified: (EnsResult.Ok) -> Unit = {},
     ): String? {
         val key = name.lowercase()
         val last = (pins?.lastAnswerFor(name) ?: KnownEnsNames.uriFor(name))
@@ -484,6 +497,10 @@ object Gateways {
                     gone(ENS_WEB_RECORD)
                 } else if (VirtualOrigin.parseContentUrl(result.uri) == null) {
                     gone("ens_unsupported_codec")
+                } else if (!result.verified) {
+                    pins?.pin(name, result.uri, page, remember = false)
+                    onUnverified(result)
+                    null
                 } else {
                     KnownEnsNames.record(result.uri, name)
                     pins?.pin(name, result.uri, page)
@@ -493,7 +510,10 @@ object Gateways {
             is EnsResult.NotFound -> gone("ens_not_found")
             is EnsResult.Unsupported -> gone("ens_unsupported_codec")
             // Providers contradicting each other: a refusal, not an outage.
-            is EnsResult.Error if isProviderConflict(result) -> ENS_PROVIDER_CONFLICT
+            is EnsResult.Error if isProviderConflict(result) -> {
+                onConflict(result)
+                ENS_PROVIDER_CONFLICT
+            }
             // Failed, or still running at the deadline: not an answer.
             is EnsResult.Error, null -> {
                 if (last == null) {
@@ -561,12 +581,20 @@ class EnsDocumentPins {
     private val last = ConcurrentHashMap<String, String>()
 
     /**
-     * Pin [name] to [uri] for [page] (the incoming page from
-     * [beginNavigation]), or for the page on screen when `null`.
+     * Told (on the interceptor's thread) when a document re-check served
+     * an answer only one provider gave — [Gateways.reverifyEnsDocument].
      */
-    fun pin(name: String, uri: String, page: Page? = null) {
+    @Volatile
+    var onUnverified: ((name: String) -> Unit)? = null
+
+    /**
+     * Pin [name] to [uri] for [page] (the incoming page from
+     * [beginNavigation]), or for the page on screen when `null`. With
+     * [remember], it also becomes the tab's last answer for the name.
+     */
+    fun pin(name: String, uri: String, page: Page? = null, remember: Boolean = true) {
         (page ?: current).pins[name.lowercase()] = uri
-        last[name.lowercase()] = uri
+        if (remember) last[name.lowercase()] = uri
     }
 
     /** The root the current page's documents on [name] were served from. */

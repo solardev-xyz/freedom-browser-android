@@ -474,6 +474,26 @@ fun BrowserScreen(
     // text lives here until it is submitted.
     var addressQuery by remember { mutableStateOf("") }
     val snackbarHostState = remember { SnackbarHostState() }
+
+    // A `.tez` answer only one Tezos RPC provider gave (the others down
+    // or stuck) still loads — as on desktop — but not silently: one
+    // operator chose this destination. Said by the typed flow and by a
+    // tab's document re-check (Back, Forward, reload); once per name
+    // while that answer is cached, since the typed flow's load is
+    // re-checked right after and every iframe on the name is too.
+    val unverifiedNotices = remember { mutableMapOf<String, Long>() }
+    fun noteUnverifiedName(name: String) {
+        val key = name.lowercase()
+        val now = System.currentTimeMillis()
+        if (unverifiedNotices[key]?.let { now - it < TezosDomainsResolver.UNVERIFIED_TTL_MS } == true) return
+        unverifiedNotices[key] = now
+        scope.launch {
+            snackbarHostState.showSnackbar(
+                "$key: only one Tezos RPC provider answered, so this destination isn't cross-checked",
+                duration = SnackbarDuration.Long,
+            )
+        }
+    }
     val sitePermissions = remember(context) { SitePermissionBroker.get(context) }
     SitePermissionAndroidBridge(sitePermissions, snackbarHostState)
     // Any full-screen panel over the browser (they're all opaque).
@@ -886,20 +906,11 @@ fun BrowserScreen(
                             // trip through [Gateways] + [DisplayUrl] now. A
                             // `.tez` name's http(s) website is not content
                             // the name's origin serves, so it isn't recorded.
-                            if (!webRecord) KnownEnsNames.record(result.uri, name)
-                            // A `.tez` answer only one Tezos RPC provider
-                            // gave (the others down or stuck) still loads —
-                            // as on desktop — but not silently: one operator
-                            // chose this destination.
+                            // Nor is an unverified one: a later failed
+                            // re-check would fall back on it.
+                            if (!webRecord && result.verified) KnownEnsNames.record(result.uri, name)
                             fun noteUnverified() {
-                                if (result.verified) return
-                                scope.launch {
-                                    snackbarHostState.showSnackbar(
-                                        "$name: only one Tezos RPC provider answered, " +
-                                            "so this destination isn't cross-checked",
-                                        duration = SnackbarDuration.Long,
-                                    )
-                                }
+                                if (!result.verified) noteUnverifiedName(name)
                             }
                             if (requiredProtocol != null && result.protocol != requiredProtocol) {
                                 // Retry with the generic ens:// form: the
@@ -1066,11 +1077,13 @@ fun BrowserScreen(
         tabs.requestSearchInNewTab = { query ->
             tabs.requestOpenInNewTab?.invoke(UrlParser.searchUrl(query, searchTemplate), false)
         }
+        tabs.requestUnverifiedNameNotice = { name -> noteUnverifiedName(name) }
         onDispose {
             tabs.requestSubmit = null
             tabs.requestNodeRecovery = null
             tabs.requestOpenInNewTab = null
             tabs.requestSearchInNewTab = null
+            tabs.requestUnverifiedNameNotice = null
         }
     }
 

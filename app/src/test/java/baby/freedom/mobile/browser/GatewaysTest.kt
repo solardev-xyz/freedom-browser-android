@@ -562,6 +562,45 @@ class GatewaysTest {
     }
 
     @Test
+    fun `a provider conflict on re-check hands the refusal its detail`() {
+        withLookup({ EnsResult.Error(it, "PROVIDER_CONFLICT", "providers disagree (a: x; b: y)", retryable = false) }) {
+            var conflict: EnsResult.Error? = null
+            assertEquals(
+                Gateways.ENS_PROVIDER_CONFLICT,
+                Gateways.reverifyEnsDocument("alice.tez", EnsDocumentPins(), onConflict = { conflict = it }),
+            )
+            assertEquals("providers disagree (a: x; b: y)", conflict?.error)
+        }
+    }
+
+    @Test
+    fun `an unverified tez answer on re-check is served and reported, but not remembered`() {
+        KnownEnsNames.record("ipfs://bafyold", "alice.tez")
+        val pins = EnsDocumentPins()
+        pins.pin("alice.tez", "ipfs://bafyold")
+        val lone = { name: String -> EnsResult.Ok(name, "ipfs", "ipfs://bafynew", "bafynew", verified = false) }
+        withLookup(lone) {
+            val page = pins.beginNavigation("https://alice.tez.ens.freedom.baby/")
+            var noted: EnsResult.Ok? = null
+            assertNull(Gateways.reverifyEnsDocument("alice.tez", pins, page, onUnverified = { noted = it }))
+            // Served: this document is pinned to the lone answer…
+            assertEquals("ipfs://bafynew", page.uriFor("alice.tez"))
+            // …and the tab is told, so it can say so.
+            assertEquals("ipfs://bafynew", noted?.uri)
+            // Not the fall-back for a later failed lookup, in this tab or the session.
+            assertEquals("ipfs://bafyold", pins.lastAnswerFor("alice.tez"))
+            assertEquals("ipfs://bafyold", KnownEnsNames.uriFor("alice.tez"))
+        }
+        // A verified answer is remembered as before, and not reported.
+        withLookup({ EnsResult.Ok(it, "ipfs", "ipfs://bafynew", "bafynew") }) {
+            var noted = false
+            assertNull(Gateways.reverifyEnsDocument("alice.tez", pins, onUnverified = { noted = true }))
+            assertFalse(noted)
+            assertEquals("ipfs://bafynew", pins.lastAnswerFor("alice.tez"))
+        }
+    }
+
+    @Test
     fun `a tez name whose record moved to the web sends the document there`() {
         KnownEnsNames.record("ipfs://bafyold", "alice.tez")
         val pins = EnsDocumentPins()
@@ -570,7 +609,7 @@ class GatewaysTest {
             var web: EnsResult.Ok? = null
             assertEquals(
                 Gateways.ENS_WEB_RECORD,
-                Gateways.reverifyEnsDocument("alice.tez", pins) { web = it },
+                Gateways.reverifyEnsDocument("alice.tez", pins, onWebRecord = { web = it }),
             )
             assertEquals("https://alice.example/", web?.uri)
             // The old IPFS root no longer describes the name.

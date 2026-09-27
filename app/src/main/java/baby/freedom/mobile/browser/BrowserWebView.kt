@@ -179,7 +179,15 @@ internal fun isDocumentRequest(
  * place, Back and Forward move past it as usual and Reload re-checks
  * the name. No script: the document is on the name's origin.
  */
-internal fun nameResolutionRefusal(name: String, code: String): WebResourceResponse {
+internal fun nameResolutionRefusal(name: String, code: String, detail: String? = null): WebResourceResponse =
+    WebResourceResponse(
+        "text/html", "utf-8", statusForNameResolutionError(code), "Name Resolution Failed",
+        mapOf(NAME_RESOLUTION_ERROR_HEADER to code, "Cache-Control" to "no-store"),
+        ByteArrayInputStream(nameResolutionRefusalHtml(name, code, detail).toByteArray(Charsets.UTF_8)),
+    )
+
+/** [nameResolutionRefusal]'s page; [detail] is what the resolver said, if worth showing. */
+internal fun nameResolutionRefusalHtml(name: String, code: String, detail: String? = null): String {
     val system = NameSystem.forName(name)
     val label = system.label
     val tezos = system == NameSystem.TEZOS
@@ -202,8 +210,12 @@ internal fun nameResolutionRefusal(name: String, code: String): WebResourceRespo
             "Couldn't reach ${if (tezos) "a Tezos" else "an Ethereum"} RPC endpoint to resolve this name. " +
             "Check your connection and try again."
     }
-    val safeName = name.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-    val html = """<!doctype html><html lang="en"><head><meta charset="utf-8">
+    fun escape(text: String) = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    val safeName = escape(name)
+    // What the resolver said — for a provider conflict, which providers
+    // disagreed about what, as the typed flow's error page shows.
+    val safeDetail = detail?.takeIf { it.isNotBlank() }?.let { "\n\n" + escape(it) }.orEmpty()
+    return """<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'">
 <title>$title</title><style>
@@ -222,12 +234,7 @@ p{color:#57606a}.d{background:#f6f8fa;color:#cf222e}a{background:#f6f8fa;border-
 </style></head><body><div class="c"><h1>$title</h1><p>$description</p>
 <div class="d">ens://$safeName
 
-$code</div><a href="">Try again</a></div></body></html>"""
-    return WebResourceResponse(
-        "text/html", "utf-8", statusForNameResolutionError(code), "Name Resolution Failed",
-        mapOf(NAME_RESOLUTION_ERROR_HEADER to code, "Cache-Control" to "no-store"),
-        ByteArrayInputStream(html.toByteArray(Charsets.UTF_8)),
-    )
+$code$safeDetail</div><a href="">Try again</a></div></body></html>"""
 }
 
 /** Where [nameWebRecordNavigation] sends a request for [pathAndQuery] on the name's origin. */
@@ -729,6 +736,7 @@ fun BrowserWebViewHost(
             },
             onContextMenu = { pin, target -> tabs.pageContextMenu = pin.request(target) },
             onSearchSelection = { query -> tabs.requestSearchInNewTab?.invoke(query) },
+            onUnverifiedName = { name -> tabs.requestUnverifiedNameNotice?.invoke(name) },
         )
         webViews[tab.id] = wv
         refreshLayouts[tab.id] = layout
@@ -998,6 +1006,7 @@ private fun buildRefreshableWebView(
     onContextMenuPress: () -> PageContextMenuPin? = { null },
     onContextMenu: (PageContextMenuPin, PageContextTarget) -> Unit = { _, _ -> },
     onSearchSelection: (String) -> Unit = {},
+    onUnverifiedName: (String) -> Unit = {},
 ): Pair<SwipeRefreshLayout, WebView> {
     val refreshLayout = SwipeRefreshLayout(context).apply {
         layoutParams = ViewGroup.LayoutParams(
@@ -1017,6 +1026,9 @@ private fun buildRefreshableWebView(
     // The ENS roots this tab's documents were served from, so their
     // subresources don't follow another tab's newer answer (#99).
     val ensPins = EnsDocumentPins()
+    // Reported from the interceptor's IO thread; the notice is UI.
+    val mainThread = android.os.Handler(android.os.Looper.getMainLooper())
+    ensPins.onUnverified = { name -> mainThread.post { onUnverifiedName(name) } }
 
     // Is the document on screen the interceptor's in-place refusal of an
     // ENS name? Kept out of history like any other error page (#99).
@@ -3793,9 +3805,15 @@ private fun interceptVirtualRequestFor(
         (req.isForMainFrame || page?.uriFor(root.name) == null)
     ) {
         var web: EnsResult.Ok? = null
-        Gateways.reverifyEnsDocument(root.name, ensPins, page) { web = it }?.let { code ->
+        var conflict: EnsResult.Error? = null
+        Gateways.reverifyEnsDocument(
+            root.name, ensPins, page,
+            onWebRecord = { web = it },
+            onConflict = { conflict = it },
+            onUnverified = { ensPins?.onUnverified?.invoke(it.name) },
+        )?.let { code ->
             web?.let { return nameWebRecordNavigation(it, pathAndQuery) }
-            return nameResolutionRefusal(root.name, code)
+            return nameResolutionRefusal(root.name, code, conflict?.let { "${it.reason}: ${it.error}" })
         }
     }
 

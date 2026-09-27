@@ -45,6 +45,21 @@ class NameResolutionErrorTest {
     }
 
     @Test
+    fun `a provider-conflict refusal says which providers disagreed`() {
+        val html = nameResolutionRefusalHtml(
+            "alice.tez",
+            Gateways.ENS_PROVIDER_CONFLICT,
+            "PROVIDER_CONFLICT: Tezos RPC providers returned conflicting results " +
+                "(ipfs://bafyA: rpc.tzkt.io; ipfs://<b>: rpc.tzbeta.net)",
+        )
+        assertTrue(html.contains("lookup refused"))
+        assertTrue(html.contains("ipfs://bafyA: rpc.tzkt.io; ipfs://&lt;b&gt;: rpc.tzbeta.net"))
+        assertFalse(html.contains("<b>"))
+        // Without a detail, just the code.
+        assertTrue(nameResolutionRefusalHtml("alice.tez", "ens_not_found").contains("ens_not_found</div>"))
+    }
+
+    @Test
     fun `a tez web record keeps the requested path unless it is a redirect`() {
         val content = EnsResult.Ok("hen.tez", "https", "https://example.com/site?v=2", "https://example.com/site?v=2")
         assertEquals("https://example.com/site?v=2", webRecordTarget(content, "/"))

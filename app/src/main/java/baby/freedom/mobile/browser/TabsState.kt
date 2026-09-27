@@ -193,6 +193,15 @@ class TabsState(
     var requestSearchInNewTab: ((query: String) -> Unit)? = null
 
     /**
+     * Hook installed by [BrowserScreen]: a tab's document re-check (Back,
+     * Forward, reload, an iframe) served a `.tez` answer only one Tezos
+     * RPC provider gave. The screen says so, as the typed flow does.
+     * Main thread. `null` before the screen has composed.
+     */
+    @Volatile
+    var requestUnverifiedNameNotice: ((name: String) -> Unit)? = null
+
+    /**
      * The link / image menu currently raised over a page, set by
      * [BrowserWebViewHost] on a long-press and drawn by [BrowserScreen]
      * (which also drops it the moment it goes stale — see
