@@ -619,4 +619,89 @@ class ExternalAppsTest {
         assertEquals("mailto:<redacted>", externalUrlForLog("mailto:someone@example.com"))
         assertEquals("unknown", externalUrlForLog("garbage"))
     }
+
+    // R1-F1 / R1-F2 (#173): the chain a user-named load may end in an
+    // app link through, hop by hop.
+    @Test
+    fun `a user-named chain asks for the hop that redirected, not the address typed`() {
+        val chain = UserNamedChain()
+        chain.started("https://a.example/go")
+        chain.mainFrameRequested("https://a.example/go")
+        assertEquals("https://a.example/go", chain.asker())
+        // a.example is an open redirect to evil.example, which answers intent:.
+        chain.redirected("https://evil.example/x")
+        chain.mainFrameRequested("https://evil.example/x")
+        assertEquals("https://evil.example/x", chain.asker())
+    }
+
+    @Test
+    fun `a main-frame request of the page's own ends a user-named chain`() {
+        // Typed /stall answered 204 (or stopped); the page on screen then
+        // posts a form whose 302 goes to tel:.
+        val chain = UserNamedChain()
+        chain.started("http://10.0.2.2:8701/stall")
+        chain.mainFrameRequested("http://10.0.2.2:8701/stall")
+        chain.mainFrameRequested("http://10.0.2.2:8700/form")
+        assertNull(chain.asker())
+        // Nor does a later redirect start it again.
+        chain.redirected("http://10.0.2.2:8700/next")
+        assertNull(chain.asker())
+    }
+
+    @Test
+    fun `a repeated request for the awaited hop keeps the chain`() {
+        // A cold load: Chromium asked for the typed address twice.
+        val chain = UserNamedChain()
+        chain.started("https://meet.google.com/abc-defg-hij")
+        chain.mainFrameRequested("https://meet.google.com/abc-defg-hij")
+        chain.mainFrameRequested("https://meet.google.com/abc-defg-hij")
+        chain.redirected("https://meet.app.goo.gl/?link=x")
+        chain.mainFrameRequested("https://meet.app.goo.gl/?link=x")
+        assertEquals("https://meet.app.goo.gl/?link=x", chain.asker())
+    }
+
+    @Test
+    fun `a first request that isn't the named address ends the chain`() {
+        val chain = UserNamedChain()
+        chain.started("https://meet.google.com/abc-defg-hij")
+        chain.mainFrameRequested("https://other.example/")
+        assertNull(chain.asker())
+    }
+
+    @Test
+    fun `a redirect hop Chromium does or doesn't re-request keeps the chain`() {
+        val seen = UserNamedChain()
+        seen.started("https://Meet.Google.com")
+        seen.mainFrameRequested("https://meet.google.com/")
+        seen.redirected("https://meet.app.goo.gl/?link=x")
+        seen.mainFrameRequested("https://meet.app.goo.gl/?link=x")
+        assertEquals("https://meet.app.goo.gl/?link=x", seen.asker())
+
+        val unseen = UserNamedChain()
+        unseen.started("https://meet.google.com/abc")
+        unseen.mainFrameRequested("https://meet.google.com/abc")
+        unseen.redirected("https://meet.app.goo.gl/?link=x")
+        assertEquals("https://meet.app.goo.gl/?link=x", unseen.asker())
+        // But a request that is neither hop still ends it.
+        unseen.mainFrameRequested("https://page.example/post")
+        assertNull(unseen.asker())
+    }
+
+    @Test
+    fun `an ended chain stays ended`() {
+        val chain = UserNamedChain()
+        chain.started("https://a.example/")
+        chain.ended()
+        chain.mainFrameRequested("https://a.example/")
+        assertNull(chain.asker())
+    }
+
+    @Test
+    fun `request urls compare as Chromium canonicalizes them`() {
+        assertTrue(sameRequestUrl("https://Example.COM", "https://example.com/"))
+        assertTrue(sameRequestUrl("http://example.com:80/a?b=1#frag", "http://example.com/a?b=1"))
+        assertFalse(sameRequestUrl("https://example.com/a", "https://example.com/b"))
+        assertFalse(sameRequestUrl("https://example.com:8443/", "https://example.com/"))
+        assertFalse(sameRequestUrl("https://example.com/?a", "https://example.com/?b"))
+    }
 }

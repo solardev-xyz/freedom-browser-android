@@ -290,17 +290,29 @@ class BrowserState(val id: Long, val private: Boolean = false) {
         internal set
 
     /**
-     * The user named the load this tab is about to hand its WebView — an
-     * address they typed or picked (`SubmitSource.User`), not one a page
-     * asked for. Its WebView takes it, once, with that load
-     * ([takeUserNamedLoad]): the load's server redirects may then end in
-     * a link to another app without a tap on any page (#173, see
-     * [externalLinkVerdict]). Main thread; not UI state.
+     * The submit in progress on this tab is the user's own — an address
+     * they typed or picked (`SubmitSource.User`), not one a page asked
+     * for. Set by every submit; the navigation it schedules ([loadUrl])
+     * takes it, so a load nobody submitted never does (#173). Main
+     * thread; not UI state.
      */
-    internal var userNamedLoad = false
+    internal var userNamedSubmit = false
 
-    /** [userNamedLoad], cleared: one load's worth. */
-    internal fun takeUserNamedLoad(): Boolean = userNamedLoad.also { userNamedLoad = false }
+    /**
+     * The WebView URL of the navigation the user named, scheduled as
+     * [pendingUrl] by the submit they made ([userNamedSubmit]), until
+     * the WebView takes it ([takeUserNamedLoad]).
+     */
+    private var userNamedPendingUrl: String? = null
+
+    /**
+     * Whether the load of [url] the tab's WebView is starting from
+     * [pendingUrl] is the one the user named: its server redirects may
+     * then end in a link to another app without a tap on any page
+     * (#173, see [externalLinkVerdict]). One load's worth: taken here.
+     */
+    internal fun takeUserNamedLoad(url: String): Boolean =
+        (userNamedPendingUrl == url).also { userNamedPendingUrl = null }
 
     /**
      * The site-permission prompt this tab is waiting on (#81), or null.
@@ -580,6 +592,10 @@ class BrowserState(val id: Long, val private: Boolean = false) {
         ipfsLoad = ipfsLoadFor(url, ipfsLoad)
         val loadable = Gateways.toLoadable(url)
         pendingUrl = loadable
+        // The user's submit is named by the one load it schedules, not
+        // by a later one (an error page, a restore) it didn't (#173).
+        userNamedPendingUrl = loadable.takeIf { userNamedSubmit }
+        userNamedSubmit = false
         if (displayPrefix != null) {
             // The override base is the virtual origin the content is
             // served from — in-manifest navigation stays under it, so

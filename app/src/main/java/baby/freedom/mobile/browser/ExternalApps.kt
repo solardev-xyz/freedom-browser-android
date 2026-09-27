@@ -42,7 +42,12 @@ import java.net.URISyntaxException
  *    `meet.app.goo.gl`, which answers with an `intent:` for the Meet
  *    app via Play services, and refusing it left the tab blank.
  *    Chrome, likewise, launches an app from the redirect of a typed
- *    URL.
+ *    URL. The chain ([UserNamedChain]) ends with that navigation —
+ *    at its commit, Stop, a download, or any main-frame request that
+ *    isn't one of its own hops (the page's own form post after a
+ *    `204`) — and the site asked is the hop whose answer was the app
+ *    link, not the address typed: an open redirect on a site the user
+ *    trusts can't borrow its remembered Allow.
  * 3. The site-permission prompt (#81), keyed by origin + scheme
  *    ([ExternalScheme], stored as `external:<scheme>` like desktop), so
  *    allowing `magnet:` for a site never allows `sms:` too. Remembered
@@ -164,6 +169,88 @@ internal enum class ExternalLinkVerdict {
      * named ([userNamedRedirect]).
      */
     AskUserNamed,
+}
+
+/**
+ * The server-redirect chain of a load the user named (#173): which
+ * main-frame redirect may end in an app link with no page tap, and the
+ * site asked for it. Started by that load, followed hop by hop through
+ * `shouldOverrideUrlLoading`, and ended by anything that ends the
+ * navigation. `shouldInterceptRequest` reports main-frame requests from
+ * a WebView IO thread: one for any URL but the hop awaited is a new
+ * navigation — a page's form post, which never reaches
+ * `shouldOverrideUrlLoading` — and ends the chain before that
+ * navigation's redirects arrive. Thread-safe.
+ */
+internal class UserNamedChain {
+    // The URL whose answer is awaited: the named address, then each
+    // redirect hop let through. A redirect from it to an app link is
+    // asked for its site. Null: no chain.
+    private var hop: String? = null
+
+    /** A load the user named, of [url], starts. */
+    @Synchronized
+    fun started(url: String) {
+        hop = url
+    }
+
+    /** The navigation is over, or isn't the user's load. */
+    @Synchronized
+    fun ended() {
+        hop = null
+    }
+
+    /** The WebView follows a main-frame redirect to [url]. */
+    @Synchronized
+    fun redirected(url: String) {
+        if (hop != null) hop = url
+    }
+
+    /**
+     * The WebView requests [url] for the main frame. The awaited hop may
+     * be requested more than once (Chromium retries a first request on
+     * a fresh connection — seen on the AVD for every cold Meet load), or
+     * not at all for a redirect hop; a request for any other URL is a
+     * navigation of the page's own.
+     */
+    @Synchronized
+    fun mainFrameRequested(url: String) {
+        val awaited = hop ?: return
+        if (!sameRequestUrl(awaited, url)) ended()
+    }
+
+    /**
+     * The URL whose answer redirected, for a main-frame redirect of the
+     * named load: the site to ask. Null when there is no chain.
+     */
+    @Synchronized
+    fun asker(): String? = hop
+}
+
+/**
+ * Whether two spellings name the same request: Chromium canonicalizes
+ * the URL it requests (lower-case scheme and host, no default port, `/`
+ * for an empty path, no fragment), so a typed address is compared the
+ * same way. Unparseable URLs compare as strings.
+ */
+internal fun sameRequestUrl(a: String, b: String): Boolean {
+    if (a == b) return true
+    fun canonical(url: String): String? = runCatching {
+        val u = java.net.URI(url)
+        val scheme = u.scheme?.lowercase() ?: return null
+        val host = u.host?.lowercase() ?: return null
+        val port = when {
+            u.port == -1 -> ""
+            scheme == "http" && u.port == 80 -> ""
+            scheme == "https" && u.port == 443 -> ""
+            else -> ":${u.port}"
+        }
+        val path = u.rawPath?.takeIf { it.isNotEmpty() } ?: "/"
+        val query = u.rawQuery?.let { "?$it" } ?: ""
+        "$scheme://$host$port$path$query"
+    }.getOrNull()
+    val ca = canonical(a) ?: return false
+    return ca == canonical(b)
 }
 
 /**
