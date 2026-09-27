@@ -98,6 +98,170 @@ class BrowserState(val id: Long) {
         internal set
 
     /**
+     * This tab's current (or pending) load is content the embedded IPFS
+     * node serves — an `ipfs://` / `ipns://` page, or an ENS name whose
+     * contenthash points there. While it is and the tab is busy, the
+     * chrome polls the node's retrieval progress and shows which phase
+     * the fetch is in (#94). Kept by [loadUrl] and navigation commit via
+     * [ipfsLoadFor], and set outright by the probe-gated submit path,
+     * which is the one place that knows where an ENS name leads.
+     */
+    var ipfsLoad by mutableStateOf(false)
+        internal set
+
+    /**
+     * Bumped each time a new navigation starts on this tab — a submit
+     * (typed, bookmark, reload button, detoured link), a main-frame link
+     * the WebView follows itself, Back / Forward, and pull-to-refresh.
+     * Not by the probe → WebView hand-off inside one submit, which is
+     * the same load. The IPFS phase line (#94) keys its counter reading
+     * on it, so a load that supersedes one still in flight is measured
+     * from its own start, not the previous load's.
+     */
+    var loadGeneration by mutableIntStateOf(0)
+        private set
+
+    /**
+     * The [loadGeneration] of the navigation the WebView itself was last
+     * handed. It trails [loadGeneration] while a submit is still in its
+     * probe phase — the WebView is still on (or still fetching) the
+     * previous load then. Read on the request-interceptor thread, so a
+     * late main-frame request of the outgoing navigation is attributed
+     * to that navigation and not to the submit that is still probing.
+     */
+    @Volatile
+    internal var webViewGeneration: Int = 0
+        private set
+
+    /**
+     * The [loadGeneration] the WebView's subresource requests belong to:
+     * that of the last navigation whose main-frame answer the
+     * interceptor handed to Chromium ([mainFrameAnswered]), or that a
+     * same-document history step adopted ([historyUpdated]).
+     *
+     * Advanced on the interceptor thread as the answer goes out, not at
+     * `onPageStarted`: Chromium starts the new document's subresource
+     * fetches as soon as it has the main-frame response, well before
+     * the posted `onPageStarted` runs on the UI thread, so a commit-time
+     * advance would file a load's own requests under the load before it
+     * (R3-F1). The cost is the other way round and bounded: a request
+     * the outgoing document starts between that answer and the commit
+     * counts as the new load's.
+     */
+    @Volatile
+    internal var documentGeneration: Int = 0
+        private set
+
+    /** The [webViewGeneration] of the last main-frame request seen. */
+    @Volatile
+    private var mainFrameGeneration: Int = 0
+
+    private val documentLock = Any()
+
+    /** This tab's open gateway requests, by load (see [GatewayWork]). */
+    internal val gatewayWork = GatewayWork()
+
+    /**
+     * Mark the start of a new navigation (see [loadGeneration]).
+     * [inWebView]: the WebView is already navigating (a link it follows,
+     * a reload) rather than waiting for a probe to hand it the URL.
+     */
+    internal fun beginLoad(inWebView: Boolean = false) {
+        loadGeneration++
+        if (inWebView) webViewGeneration = loadGeneration
+    }
+
+    /** The WebView is being handed this tab's current navigation. */
+    internal fun handLoadToWebView() {
+        webViewGeneration = loadGeneration
+    }
+
+    /**
+     * The WebView is requesting a main frame (interceptor thread): the
+     * request belongs to the navigation it was last handed, whose
+     * generation this returns.
+     */
+    internal fun mainFrameRequested(): Int {
+        val generation = webViewGeneration
+        synchronized(documentLock) {
+            if (generation > mainFrameGeneration) mainFrameGeneration = generation
+        }
+        return generation
+    }
+
+    /**
+     * The main-frame answer of navigation [generation] is being handed
+     * to Chromium (interceptor thread), so the subresource requests from
+     * here on are that navigation's (see [documentGeneration]).
+     *
+     * [replacesDocument] false — a 204, an attachment: the navigation
+     * ends there and the document on screen stays. It is this load's
+     * document now, so its open requests move to [generation] too
+     * instead of counting as a superseded load's for the rest of the
+     * load (R3-F2).
+     */
+    internal fun mainFrameAnswered(generation: Int, replacesDocument: Boolean) {
+        synchronized(documentLock) {
+            val kept = documentGeneration
+            if (generation <= kept) return
+            documentGeneration = generation
+            if (replacesDocument) {
+                replacedDocument = kept
+            } else {
+                replacedDocument = null
+                gatewayWork.retag(from = kept, to = generation)
+            }
+        }
+    }
+
+    /**
+     * The [documentGeneration] a main-frame answer took over from while
+     * that answer's document has yet to commit: the page still on
+     * screen. Null once it commits or the answer kept the page anyway.
+     */
+    private var replacedDocument: Int? = null
+
+    /**
+     * The last main-frame answer committed a new document (UI thread,
+     * `onPageStarted`): the page it took over from is gone.
+     */
+    internal fun documentCommitted() {
+        synchronized(documentLock) { replacedDocument = null }
+    }
+
+    /**
+     * The last main-frame answer, taken for a new document, went to the
+     * download listener instead (UI thread). Chromium downloads every
+     * type it can't render, not only what [mainFrameAnswerReplacesDocument]
+     * can tell from the headers (an inline `application/zip`, say), so
+     * the page on screen stayed after all: adopt its open requests the
+     * way [mainFrameAnswered] does for a known non-replacing answer
+     * (R2-F1).
+     */
+    internal fun mainFrameBecameDownload() {
+        synchronized(documentLock) {
+            val kept = replacedDocument ?: return
+            replacedDocument = null
+            gatewayWork.retag(from = kept, to = documentGeneration)
+        }
+    }
+
+    /**
+     * The WebView updated its history (UI thread). With no main-frame
+     * request for the navigation it was last handed, that navigation
+     * was a same-document one — Back / Forward onto a hash or
+     * `pushState` entry — and the document on screen is now that
+     * load's (R3-F2). [isHome]: the `about:blank` home entry, which is
+     * loaded without a request but does replace the document.
+     */
+    internal fun historyUpdated(isHome: Boolean) {
+        if (isHome) return
+        val generation = webViewGeneration
+        if (mainFrameGeneration >= generation) return
+        mainFrameAnswered(generation, replacesDocument = false)
+    }
+
+    /**
      * True between a Stop tap and the tab's next navigation.
      *
      * Chromium answers `stopLoading()` on an *uncommitted* navigation
@@ -359,6 +523,7 @@ class BrowserState(val id: Long) {
         // A new load supersedes whatever the last Stop aborted, so the
         // progress latch opens again.
         loadAborted = false
+        ipfsLoad = ipfsLoadFor(url, ipfsLoad)
         val loadable = Gateways.toLoadable(url)
         pendingUrl = loadable
         if (displayPrefix != null) {
@@ -422,6 +587,7 @@ class BrowserState(val id: Long) {
         addressBarText = ""
         progress = -1
         resolving = false
+        ipfsLoad = false
         loadUrl(HOME_URL)
     }
 
@@ -465,6 +631,7 @@ class BrowserState(val id: Long) {
         progress = -1
         resolving = false
         loadAborted = false
+        ipfsLoad = false
         canGoBack = false
         canGoForward = false
         override = null

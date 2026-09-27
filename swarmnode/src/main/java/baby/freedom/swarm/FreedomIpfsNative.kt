@@ -56,6 +56,14 @@ internal object FreedomIpfsNative {
      */
     external fun diagnostics(handle: Long): LongArray
 
+    /**
+     * `freedom_ipfs_node_progress_snapshot_json` as UTF-8 bytes (see
+     * the shim for why not a String): `{"active":[…],"events":[…]}`,
+     * one entry per in-flight retrieval / recent trace event, each
+     * with a UI `phase`. Null only on allocation failure.
+     */
+    external fun progressSnapshotJson(handle: Long): ByteArray?
+
     /** Tell the node connectivity changed (drops stale provider state). */
     external fun handleNetworkChange(handle: Long): Boolean
 

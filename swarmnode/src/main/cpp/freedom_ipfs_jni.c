@@ -13,6 +13,7 @@
 #include <jni.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "freedom_ipfs.h"
 
@@ -149,4 +150,33 @@ Java_baby_freedom_swarm_FreedomIpfsNative_enterForeground(JNIEnv *env,
     return freedom_ipfs_node_enter_foreground((FreedomIpfsNode *)(uintptr_t)handle)
                ? JNI_TRUE
                : JNI_FALSE;
+}
+
+/*
+ * The node's retrieval-progress snapshot as compact JSON — active
+ * targets plus a bounded ring of recent events, each tagged with a
+ * UI phase (`resolving_name`, `provider_lookup`, `fetching_bitswap`,
+ * …). The same feed the desktop browser renders as its IPFS load
+ * status line.
+ *
+ * Handed back as raw UTF-8 bytes rather than a jstring: serde_json
+ * leaves non-ASCII unescaped, and NewStringUTF expects *modified*
+ * UTF-8 — a 4-byte sequence (an emoji in a requested path) aborts
+ * under CheckJNI. Kotlin decodes the bytes as real UTF-8.
+ */
+JNIEXPORT jbyteArray JNICALL
+Java_baby_freedom_swarm_FreedomIpfsNative_progressSnapshotJson(JNIEnv *env,
+                                                               jobject thiz,
+                                                               jlong handle) {
+    (void)thiz;
+    char *json = freedom_ipfs_node_progress_snapshot_json(
+        (FreedomIpfsNode *)(uintptr_t)handle);
+    if (json == NULL) return NULL;
+    size_t len = strlen(json);
+    jbyteArray out = (*env)->NewByteArray(env, (jsize)len);
+    if (out != NULL) {
+        (*env)->SetByteArrayRegion(env, out, 0, (jsize)len, (const jbyte *)json);
+    }
+    freedom_ipfs_string_free(json);
+    return out;
 }
