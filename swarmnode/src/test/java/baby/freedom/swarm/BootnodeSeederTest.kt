@@ -7,6 +7,11 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.File
+import java.net.HttpURLConnection
+import java.net.ServerSocket
+import java.net.URL
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 import java.nio.file.Files
 
 class BootnodeSeederTest {
@@ -101,5 +106,50 @@ class BootnodeSeederTest {
         f.writeText("not json")
         assertFalse(BootnodeSeeder.needsSeed(f))
         dir.deleteRecursively()
+    }
+
+    @Test
+    fun runWithinReturnsResultOrNullOnThrow() {
+        assertEquals("ok", BootnodeSeeder.runWithin(1_000) { "ok" })
+        assertNull(BootnodeSeeder.runWithin<String>(1_000) { error("boom") })
+    }
+
+    @Test
+    fun runWithinIsAHardBoundOnATricklingServer() {
+        // Accepts, sends headers, then trickles one body byte every 500 ms:
+        // every single read beats a 2 s read timeout, so only a wall-clock
+        // bound stops it.
+        val server = ServerSocket(0)
+        val stop = AtomicBoolean(false)
+        val serverThread = Thread {
+            try {
+                server.accept().use { s ->
+                    val out = s.getOutputStream()
+                    out.write("HTTP/1.1 200 OK\r\nContent-Length: 1000\r\n\r\n".toByteArray())
+                    out.flush()
+                    while (!stop.get()) {
+                        out.write('x'.code); out.flush(); Thread.sleep(500)
+                    }
+                }
+            } catch (_: Exception) {
+            }
+        }.apply { isDaemon = true; start() }
+        val conn = AtomicReference<HttpURLConnection>()
+        val cancelled = AtomicBoolean(false)
+        val t0 = System.currentTimeMillis()
+        val out = BootnodeSeeder.runWithin(1_500, onTimeout = { cancelled.set(true); conn.get()?.disconnect() }) {
+            val c = URL("http://127.0.0.1:${server.localPort}/").openConnection() as HttpURLConnection
+            conn.set(c)
+            c.readTimeout = 2_000
+            c.inputStream.readBytes().size
+        }
+        val elapsed = System.currentTimeMillis() - t0
+        stop.set(true)
+        server.close()
+        serverThread.join(2_000)
+        assertNull(out)
+        Thread.sleep(200) // onTimeout runs on its own thread
+        assertTrue(cancelled.get())
+        assertTrue("took ${elapsed}ms", elapsed in 1_400..2_000)
     }
 }

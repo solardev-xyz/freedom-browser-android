@@ -8,6 +8,8 @@ import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 
 /**
  * Makes sure a fresh node always has bootnodes it can dial, even where
@@ -53,9 +55,13 @@ internal object BootnodeSeeder {
     private const val PEERSTORE_VERSION = 1
 
     /**
-     * Plain-TCP leaves of every regional `_dnsaddr.<region>.mainnet.ethswarm.org`
-     * record (ams, hel, jhb, sgp, syd, tor, sao), captured 2026-09-27
-     * with `dig TXT`. Used only when the DoH lookup returns nothing.
+     * Plain-TCP bootnodes of every regional `_dnsaddr.<region>.mainnet.ethswarm.org`
+     * record, captured 2026-09-27 with `dig TXT`, one line per node in
+     * the order ams, hel, jhb, sgp, syd, tor (also `sao`'s only TCP
+     * leaf), hil, hil. hil's second node, 5.78.94.214, is published
+     * only as a `/tls/sni/…/ws` leaf on port 1635; its entry here uses
+     * that record's peer id on the standard TCP port 1634, which was
+     * checked open. Used only when the DoH lookup returns nothing.
      * The root currently lists only the `emea` region, so this list
      * has wider coverage than a live lookup. If an entry goes stale,
      * ant drops it after five failed dials, and any one live bootnode
@@ -69,6 +75,7 @@ internal object BootnodeSeeder {
         "/ip4/170.64.184.25/tcp/1634/p2p/Qmeh2e7U2FWrSooyrjWjnNKGceJWbRxLLx8Ppy5CimzsGH",
         "/ip4/172.105.9.172/tcp/1634/p2p/QmQq7zXgZ2Up5NF1tsCP2odgxzU4N3Evx2trkmFYnHm27w",
         "/ip4/216.238.102.247/tcp/1634/p2p/QmQYFDafiKuWUDknur8VcTUVgJgNxJevLxzYRKDKKvvv1r",
+        "/ip4/5.78.94.214/tcp/1634/p2p/QmfEugihe2Pm78YomGupdxSt46Uxgg4DLpjkzgzzeouiKg",
     )
 
     /**
@@ -106,9 +113,13 @@ internal object BootnodeSeeder {
 
     /**
      * True when the peerstore file is missing, or is a valid snapshot of
-     * our version with no peers. A file we can't read is left alone, so
-     * we never overwrite something that a newer ant wrote in a newer
-     * schema. (This ant ignores such a file anyway.)
+     * our version with no peers. A file we can't parse, or one with a
+     * different version, is left alone so we never clobber a snapshot a
+     * newer ant wrote in a newer schema. This ant's `PeerStore::load`
+     * treats such a file as empty and overwrites it with its own
+     * snapshot on the next flush, so a corrupt file costs at most one
+     * unseeded launch; the next launch sees a valid (possibly empty)
+     * snapshot and seeds as usual.
      */
     fun needsSeed(file: File): Boolean {
         if (!file.exists()) return true
@@ -151,12 +162,74 @@ internal object BootnodeSeeder {
      * Walk [ROOT]'s TXT tree over DoH and return the dialable leaves,
      * or an empty list on any failure (timeout, HTTP error, bad JSON,
      * DNS error status, nothing dialable).
+     *
+     * [TOTAL_TIMEOUT_MS] is a hard wall-clock bound on the caller's
+     * wait. `HttpURLConnection`'s connect and read timeouts apply to
+     * each connect/handshake/read step separately, so a server that
+     * accepts the connection and then trickles bytes could otherwise
+     * hold every query for several multiples of its per-query timeout.
+     * The walk runs on its own thread; when the deadline passes we stop
+     * waiting, disconnect the query in flight, and every query the
+     * abandoned walk still attempts fails at once.
      */
     fun resolveOverDoh(): List<String> {
         val deadline = System.currentTimeMillis() + TOTAL_TIMEOUT_MS
-        return walk(ROOT) { name ->
-            val remaining = deadline - System.currentTimeMillis()
-            if (remaining <= 0) null else queryTxt(name, minOf(remaining, PER_QUERY_TIMEOUT_MS))
+        val inFlight = InFlight()
+        return runWithin(TOTAL_TIMEOUT_MS, onTimeout = { inFlight.cancel() }) {
+            walk(ROOT) { name ->
+                val remaining = deadline - System.currentTimeMillis()
+                if (remaining <= 0) null else queryTxt(name, minOf(remaining, PER_QUERY_TIMEOUT_MS), inFlight)
+            }
+        } ?: emptyList()
+    }
+
+    /**
+     * Run [block] on a daemon thread and return its result, or null if
+     * it hasn't finished within [timeoutMs] (or threw). On timeout the
+     * block is left to wind down on its own, its result discarded, and
+     * [onTimeout] is started on another daemon thread rather than run
+     * here: aborting a connection can itself block (the JDK's
+     * `HttpURLConnection.disconnect()` waits for a read in progress on
+     * the same connection), and the caller must not wait for that.
+     */
+    fun <T : Any> runWithin(timeoutMs: Long, onTimeout: () -> Unit = {}, block: () -> T): T? {
+        val done = CountDownLatch(1)
+        var result: T? = null
+        val worker = Thread({
+            try {
+                result = block()
+            } catch (t: Throwable) {
+                Log.d(TAG, "bootnode lookup failed: $t")
+            } finally {
+                done.countDown()
+            }
+        }, "BootnodeSeeder-doh")
+        worker.isDaemon = true
+        worker.start()
+        if (done.await(timeoutMs, TimeUnit.MILLISECONDS)) return result
+        Log.d(TAG, "DoH lookup exceeded ${timeoutMs}ms; giving up")
+        Thread(onTimeout, "BootnodeSeeder-cancel").apply { isDaemon = true }.start()
+        return null
+    }
+
+    /** The connection a walk currently has open, so a timeout can abort it. */
+    private class InFlight {
+        private var conn: HttpURLConnection? = null
+        private var cancelled = false
+
+        /** False if already cancelled, in which case [c] must not be used. */
+        @Synchronized fun set(c: HttpURLConnection?): Boolean {
+            if (cancelled) return false
+            conn = c
+            return true
+        }
+
+        fun cancel() {
+            val c = synchronized(this) {
+                cancelled = true
+                conn.also { conn = null }
+            }
+            c?.disconnect()
         }
     }
 
@@ -186,9 +259,10 @@ internal object BootnodeSeeder {
         return out.toList()
     }
 
-    private fun queryTxt(name: String, timeoutMs: Long): List<String>? {
+    private fun queryTxt(name: String, timeoutMs: Long, inFlight: InFlight): List<String>? {
         val url = URL("$DOH_ENDPOINT?name=${URLEncoder.encode(name, "UTF-8")}&type=TXT")
         val conn = url.openConnection() as HttpURLConnection
+        if (!inFlight.set(conn)) return null
         return try {
             conn.connectTimeout = timeoutMs.toInt()
             conn.readTimeout = timeoutMs.toInt()
@@ -199,6 +273,7 @@ internal object BootnodeSeeder {
             Log.d(TAG, "DoH query for $name failed: $t")
             null
         } finally {
+            inFlight.set(null)
             conn.disconnect()
         }
     }
