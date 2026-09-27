@@ -130,12 +130,28 @@ object VirtualOrigin {
      * 4. else the ASCII reading.
      *
      * Only `xn--` labels reach ENSIP-15 here; see [needsEnsTables].
+     *
+     * The label is page-controlled (any link can name any host), so this
+     * fails closed: malformed Punycode ([Punycode.decode] → `null`, e.g.
+     * an overflowing delta) keeps only a navigable ASCII reading
+     * (`xn----2i8h-eth` → `xn--2i8h.eth`), and otherwise — like anything
+     * that still throws — makes the host invalid (`null` → [parseHost]
+     * rejects it, the normal error page) instead of crashing or handing
+     * the label on as a search query.
      */
-    private fun decodeEnsLabel(label: String): ContentRoot.Ens {
+    private fun decodeEnsLabel(label: String): ContentRoot.Ens? =
+        try {
+            decodeEnsLabelUnchecked(label)
+        } catch (e: RuntimeException) {
+            null
+        }
+
+    private fun decodeEnsLabelUnchecked(label: String): ContentRoot.Ens? {
         val ascii = unescapeName(label)
         if (!label.startsWith("xn--")) return ContentRoot.Ens(ascii)
-        val decoded = Punycode.decode(label.substring(4))
-            ?.takeIf { d -> d.any { it.code >= 0x80 } }
+        val raw = Punycode.decode(label.substring(4))
+            ?: return ContentRoot.Ens(ascii).takeIf { isNavigableEns(ascii) }
+        val decoded = raw.takeIf { d -> d.any { it.code >= 0x80 } }
             ?.let { unescapeName(it) }
             ?: return ContentRoot.Ens(ascii)
         val normalized = EnsNormalize.normalizeOrNull(decoded)

@@ -79,8 +79,16 @@ internal object Punycode {
         return out.toString()
     }
 
-    /** Decode [input] (without the `xn--` prefix), or `null` if malformed. */
+    /**
+     * Decode [input] (without the `xn--` prefix), or `null` if malformed.
+     * Follows RFC 3492 §6.2 / the §C reference decoder, including its
+     * overflow checks before every multiply and add, so hostile input
+     * (any page can link to an arbitrary `xn--` host) can only ever
+     * yield `null`, never a wrapped-negative or out-of-range code point.
+     * Also rejects code points past U+10FFFF and surrogates.
+     */
     fun decode(input: String): String? {
+        val maxInt = Int.MAX_VALUE
         val lastDash = input.lastIndexOf('-')
         val out = ArrayList<Int>()
         if (lastDash > 0) {
@@ -91,17 +99,18 @@ internal object Punycode {
             }
         }
         var n = INITIAL_N
-        var i = 0L
+        var i = 0
         var bias = INITIAL_BIAS
         var pos = if (lastDash > 0) lastDash + 1 else 0
         while (pos < input.length) {
             val oldi = i
-            var w = 1L
+            var w = 1
             var k = BASE
             while (true) {
                 if (pos >= input.length) return null
                 val d = value(input[pos++])
                 if (d < 0) return null
+                if (d > (maxInt - i) / w) return null
                 i += d * w
                 val t = when {
                     k <= bias -> TMIN
@@ -109,15 +118,17 @@ internal object Punycode {
                     else -> k - bias
                 }
                 if (d < t) break
+                if (w > maxInt / (BASE - t)) return null
                 w *= (BASE - t)
-                if (i > Int.MAX_VALUE || w > Int.MAX_VALUE) return null
                 k += BASE
             }
-            bias = adapt((i - oldi).toInt(), out.size + 1, oldi == 0L)
-            n += (i / (out.size + 1)).toInt()
-            if (n > 0x10FFFF) return null
-            i %= (out.size + 1)
-            out.add(i.toInt(), n)
+            val len = out.size + 1
+            bias = adapt(i - oldi, len, oldi == 0)
+            if (i / len > maxInt - n) return null
+            n += i / len
+            if (n > 0x10FFFF || n in 0xD800..0xDFFF) return null
+            i %= len
+            out.add(i, n)
             i++
         }
         val sb = StringBuilder()

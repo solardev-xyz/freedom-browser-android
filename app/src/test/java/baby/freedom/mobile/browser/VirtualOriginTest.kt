@@ -375,6 +375,44 @@ class VirtualOriginTest {
     }
 
     @Test
+    fun `overflowing punycode is rejected, never a wrapped code point`() {
+        // R6-F1: `i` ran past Int.MAX_VALUE, `n` wrapped negative and
+        // appendCodePoint threw — a remote crash from any link.
+        for (bad in listOf("0s23082r", "pz50266x", "dx49084u2bh")) {
+            assertNull(bad, Punycode.decode(bad))
+            val host = "xn--$bad.ens.freedom.baby"
+            // Fails closed: no navigable ASCII reading either → invalid host.
+            assertNull(host, VirtualOrigin.parseHost(host))
+            assertNull(VirtualOrigin.parseHostOfUrl("https://$host/"))
+            assertNull(VirtualOrigin.displayUrlFor("https://$host/"))
+            assertFalse(VirtualOrigin.isVirtualUrl("https://$host/"))
+        }
+        // A lone surrogate is not a code point; U+10FFFF is the last one.
+        assertNull(Punycode.decode(Punycode.encode("\uD800")))
+        assertNull(Punycode.decode(Punycode.encode("a\uDFFFb")))
+        assertEquals("\uDBFF\uDFFF", Punycode.decode(Punycode.encode("\uDBFF\uDFFF")))
+    }
+
+    @Test
+    fun `random xn-- labels never throw through the decode path`() {
+        val rnd = Random(0x5EED)
+        val alphabet = "abcdefghijklmnopqrstuvwxyz0123456789-"
+        repeat(5000) {
+            val len = 1 + rnd.nextInt(24)
+            val label = buildString { repeat(len) { append(alphabet[rnd.nextInt(alphabet.length)]) } }
+            val decoded = Punycode.decode(label)
+            decoded?.codePoints()?.forEach { cp ->
+                assertTrue(label, cp in 0..0x10FFFF && cp !in 0xD800..0xDFFF)
+            }
+            for (host in listOf("xn--$label.ens.freedom.baby", "xn--$label-eth.ens.freedom.baby")) {
+                VirtualOrigin.parseHost(host)
+                VirtualOrigin.needsEnsTables("https://$host/")
+                VirtualOrigin.displayUrlFor("https://$host/x")
+            }
+        }
+    }
+
+    @Test
     fun `a punycode host of a name ENSIP-15 refuses stays that name, not its xn-- spelling`() {
         val name = "a\u0661b.eth"
         assertNull(baby.freedom.mobile.ens.EnsNormalize.normalizeOrNull(name))
