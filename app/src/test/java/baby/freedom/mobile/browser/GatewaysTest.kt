@@ -227,7 +227,7 @@ class GatewaysTest {
     fun `a new page drops the page's pins but keeps the tab's last answer`() {
         val pins = EnsDocumentPins()
         pins.pin("swarm.eth", "bzz://$otherRef")
-        pins.newPage()
+        pins.commit(pins.beginNavigation("https://other.example/"))
         assertNull(pins.uriFor("swarm.eth"))
         assertEquals("bzz://$otherRef", pins.lastAnswerFor("swarm.eth"))
         // …which a failed lookup on the next page still falls back on.
@@ -262,10 +262,22 @@ class GatewaysTest {
     @Test
     fun `reverifyEnsDocument refuses a name that no longer resolves`() {
         KnownEnsNames.record("bzz://$ref64", "swarm.eth")
+        val pins = EnsDocumentPins()
+        pins.pin("swarm.eth", "bzz://$ref64")
         withLookup({ EnsResult.NotFound(it, "NO_CONTENTHASH") }) {
-            assertEquals("ens_not_found", Gateways.reverifyEnsDocument("swarm.eth"))
-            // Left alone: the refusal is the document's, not other tabs'.
-            assertEquals("bzz://$ref64", KnownEnsNames.uriFor("swarm.eth"))
+            assertEquals("ens_not_found", Gateways.reverifyEnsDocument("swarm.eth", pins))
+            // The name's old root is forgotten — the address bar's badge
+            // and hash-to-name mapping no longer describe it, and a later
+            // failed lookup doesn't bring it back…
+            assertNull(KnownEnsNames.uriFor("swarm.eth"))
+            assertNull(KnownEnsNames.protocolFor("swarm.eth"))
+            assertNull(KnownEnsNames.nameFor(ref64))
+            assertNull(pins.lastAnswerFor("swarm.eth"))
+            // …but the page on screen keeps serving from its own pin.
+            assertEquals("bzz://$ref64", pins.uriFor("swarm.eth"))
+        }
+        withLookup({ EnsResult.Error(it, "PROVIDER_ERROR", "down", retryable = true) }) {
+            assertEquals("ens_lookup_failed", Gateways.reverifyEnsDocument("swarm.eth", pins))
         }
     }
 
@@ -274,6 +286,45 @@ class GatewaysTest {
         KnownEnsNames.record("bzz://$ref64", "swarm.eth")
         withLookup({ EnsResult.Unsupported(it, "0xe5", "") }) {
             assertEquals("ens_unsupported_codec", Gateways.reverifyEnsDocument("swarm.eth"))
+            assertNull(KnownEnsNames.uriFor("swarm.eth"))
+        }
+    }
+
+    @Test
+    fun `a navigation's pins reach the page on screen only when it commits`() {
+        val pins = EnsDocumentPins()
+        var current = ref64
+        withLookup({ EnsResult.Ok(it, "bzz", "bzz://$current", current) }) {
+            val root = ContentRoot.Ens("swarm.eth")
+            val first = pins.beginNavigation("https://swarm.eth.ens.freedom.baby/")
+            assertNull(Gateways.reverifyEnsDocument("swarm.eth", pins, first))
+            pins.commit(first)
+            // The name moves; the page follows a link that never commits
+            // (a download): its re-check pins the incoming page only.
+            current = otherRef
+            val download = pins.beginNavigation("https://swarm.eth.ens.freedom.baby/file.bin")
+            assertNull(Gateways.reverifyEnsDocument("swarm.eth", pins, download))
+            assertEquals(
+                "http://127.0.0.1:1633/bzz/$otherRef/file.bin",
+                Gateways.gatewayUrlFor(root, "/file.bin", pins, download),
+            )
+            assertEquals(
+                "http://127.0.0.1:1633/bzz/$ref64/chunk.js",
+                Gateways.gatewayUrlFor(root, "/chunk.js", pins),
+            )
+            // A stale commit signal for another URL doesn't promote it…
+            pins.documentStarted("https://swarm.eth.ens.freedom.baby/")
+            assertEquals("bzz://$ref64", pins.uriFor("swarm.eth"))
+            // …and a later navigation that does commit replaces it.
+            val next = pins.beginNavigation("https://swarm.eth.ens.freedom.baby/b.html")
+            assertNull(Gateways.reverifyEnsDocument("swarm.eth", pins, next))
+            pins.commit(download) // superseded: ignored
+            assertEquals("bzz://$ref64", pins.uriFor("swarm.eth"))
+            pins.documentStarted("https://swarm.eth.ens.freedom.baby/b.html#top")
+            assertEquals("bzz://$otherRef", pins.uriFor("swarm.eth"))
+            // A document that never went through the interceptor starts empty.
+            pins.documentStarted("data:text/html,x")
+            assertNull(pins.uriFor("swarm.eth"))
         }
     }
 

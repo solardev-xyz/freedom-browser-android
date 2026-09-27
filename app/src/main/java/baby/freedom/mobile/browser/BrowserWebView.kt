@@ -126,8 +126,10 @@ internal class NameRefusalSlot {
 /**
  * Is [req] a document load — the top-level page, or an iframe — as
  * opposed to a subresource of one? The name re-check (#99) keys on this.
- * `isForMainFrame` alone misses iframes, and requests a service worker
- * forwards on (which WebView hands over as not-main-frame). Chromium
+ * `isForMainFrame` alone misses iframes, and navigations a service
+ * worker forwards to the network (which WebView hands over as
+ * not-main-frame). A navigation the SW answers from its own cache never
+ * reaches us, and so isn't re-checked. Chromium
  * marks a navigation's own request with `Sec-Fetch-Dest` and an
  * `Accept` that leads with `text/html`; subresources (`fetch`, XHR,
  * scripts, styles, images) never lead with it by default.
@@ -1357,6 +1359,10 @@ private fun buildRefreshableWebView(
             }
 
             override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
+                // The main-frame document committed: its ENS pins are now
+                // the page on screen's, if the interceptor hadn't already
+                // promoted them (#99, [EnsDocumentPins]).
+                ensPins.documentStarted(url)
                 // A new document arrives with the chrome whole, however
                 // far the previous one was scrolled…
                 state.capsuleCollapse.expand()
@@ -2153,18 +2159,54 @@ private fun syntheticResponse(
  *
  * [ensPins] is the requesting tab's (null for service-worker fetches,
  * which belong to no tab): the ENS roots its documents were served from.
+ * A main-frame request — any URL, not only a virtual one — starts the
+ * incoming page's pins; they replace the page on screen's only when the
+ * new document commits (#99, see [EnsDocumentPins]): here, when the
+ * answer is one WebView renders in place, else from `onPageStarted`.
  */
 internal fun interceptVirtualRequest(
     request: WebResourceRequest?,
     ensPins: EnsDocumentPins? = null,
 ): WebResourceResponse? {
     val req = request ?: return null
+    val url = req.url?.toString() ?: return null
+    val incoming = if (req.isForMainFrame) ensPins?.beginNavigation(url) else null
+    val response = interceptVirtualRequestFor(req, ensPins, incoming)
+    if (incoming != null && response != null &&
+        rendersInPlace(response.statusCode, response.mimeType, response.responseHeaders)
+    ) {
+        ensPins?.commit(incoming)
+    }
+    return response
+}
+
+/**
+ * Will WebView commit a main-frame response as the tab's new document,
+ * rather than hand it to a download (or drop it: 204/205, a redirect)?
+ * Conservative: a type not listed here waits for `onPageStarted` to
+ * promote its pins instead, which is late for the first subresources
+ * but never wrong for a navigation that doesn't commit.
+ */
+internal fun rendersInPlace(
+    status: Int,
+    mimeType: String?,
+    headers: Map<String, String>?,
+): Boolean {
+    if (status == 204 || status == 205 || status in 300..399) return false
+    val disposition = headers?.entries
+        ?.firstOrNull { it.key.equals("Content-Disposition", ignoreCase = true) }?.value
+    if (disposition?.trim()?.lowercase()?.startsWith("attachment") == true) return false
+    val mime = mimeType?.substringBefore(';')?.trim()?.lowercase() ?: return false
+    return mime == "text/html" || mime == "application/xhtml+xml" || mime == "text/plain"
+}
+
+private fun interceptVirtualRequestFor(
+    req: WebResourceRequest,
+    ensPins: EnsDocumentPins?,
+    incoming: EnsDocumentPins.Page?,
+): WebResourceResponse? {
     val uri = req.url ?: return null
     val url = uri.toString()
-
-    // A new main-frame document — any URL, not only a virtual one — is
-    // a new page: the previous page's ENS pins stop applying (#99).
-    if (req.isForMainFrame) ensPins?.newPage()
 
     // Sanctioned write path: pages on virtual origins POST/upload to
     // the node API origin (`http://127.0.0.1:…`) directly. Those
@@ -2221,12 +2263,12 @@ internal fun interceptVirtualRequest(
         isDocumentRequest(req.isForMainFrame, req.requestHeaders) &&
         (req.isForMainFrame || ensPins?.uriFor(root.name) == null)
     ) {
-        Gateways.reverifyEnsDocument(root.name, ensPins)?.let { code ->
+        Gateways.reverifyEnsDocument(root.name, ensPins, incoming)?.let { code ->
             return nameResolutionRefusal(root.name, code)
         }
     }
 
-    val target = Gateways.gatewayUrlFor(root, pathAndQuery, ensPins)
+    val target = Gateways.gatewayUrlFor(root, pathAndQuery, ensPins, incoming)
         ?: return syntheticResponse(
             502, "Bad Gateway",
             "No local gateway can serve this content root " +

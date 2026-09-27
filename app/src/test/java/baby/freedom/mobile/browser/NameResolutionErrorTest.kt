@@ -84,4 +84,18 @@ class NameResolutionErrorTest {
         slot.onMainFrameResponse(url, null)
         assertFalse(slot.isRefused(url))
     }
+
+    @Test
+    fun `only a response WebView renders in place commits a navigation's pins`() {
+        assertTrue(rendersInPlace(200, "text/html", emptyMap()))
+        assertTrue(rendersInPlace(404, "text/html", mapOf("X-Name-Resolution-Error" to "ens_not_found")))
+        assertTrue(rendersInPlace(200, "application/xhtml+xml", null))
+        assertFalse(rendersInPlace(200, "application/octet-stream", emptyMap()))
+        assertFalse(rendersInPlace(204, "text/html", emptyMap()))
+        assertFalse(rendersInPlace(302, "text/html", emptyMap()))
+        assertFalse(rendersInPlace(200, null, emptyMap()))
+        assertFalse(
+            rendersInPlace(200, "text/html", mapOf("content-disposition" to "attachment; filename=a.html")),
+        )
+    }
 }

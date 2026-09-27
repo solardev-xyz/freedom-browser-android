@@ -284,6 +284,44 @@ class VirtualOriginContractTest {
     }
 
     @Test
+    fun aNavigationThatNeverCommitsKeepsThePagesRoot() {
+        val ensUrl = VirtualOrigin.toVirtualUrl("ens://testdapp.eth")!!
+        testdappContent = FixtureGateway.REF_A
+        harness.load(ensUrl)
+        harness.awaitJsTrue("window.results && window.results.loaded === true")
+        assertEquals("bzz://${FixtureGateway.REF_A}", harness.ensPins.uriFor("testdapp.eth"))
+
+        // The name moves; the page follows a link to a download. With no
+        // DownloadListener the navigation is dropped: A's document stays
+        // on screen, so its subresources must keep coming from A even
+        // though the link's own request was re-checked against B.
+        testdappContent = FixtureGateway.REF_B
+        val before = ensLookups.get()
+        harness.js("location.href = 'file.bin'")
+        val deadline = System.currentTimeMillis() + 10_000
+        while (ensLookups.get() == before && System.currentTimeMillis() < deadline) {
+            Thread.sleep(50)
+        }
+        assertTrue("the link's request was re-checked", ensLookups.get() > before)
+        Thread.sleep(1_500)
+        assertEquals("\"$ensUrl\"", harness.js("location.href"))
+        assertEquals("\"VERSION_A\"", harness.js("document.getElementById('version').textContent"))
+        assertEquals("bzz://${FixtureGateway.REF_A}", harness.ensPins.uriFor("testdapp.eth"))
+        harness.js(
+            "fetch('index.html').then(r => r.text())" +
+                ".then(t => { window.__xhr = t.includes('VERSION_B') ? 'B' : 'A' })",
+        )
+        harness.awaitJsTrue("window.__xhr !== undefined")
+        assertEquals("\"A\"", harness.js("window.__xhr"))
+
+        // A navigation that does commit moves the page on.
+        harness.load(ensUrl)
+        harness.awaitJsTrue("window.results && window.results.loaded === true")
+        assertEquals("\"VERSION_B\"", harness.js("document.getElementById('version').textContent"))
+        assertEquals("bzz://${FixtureGateway.REF_B}", harness.ensPins.uriFor("testdapp.eth"))
+    }
+
+    @Test
     fun backWithTheRpcStalledServesTheLastAnswerWithinTheDeadline() {
         val ensUrl = VirtualOrigin.toVirtualUrl("ens://testdapp.eth")!!
         testdappContent = FixtureGateway.REF_A

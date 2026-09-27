@@ -81,6 +81,19 @@ object KnownEnsNames {
         hashToName.remove(hashOrCid.lowercase())
     }
 
+    /**
+     * [name] answered that it points at no loadable content any more
+     * (#99): drop what it used to resolve to — its URI, its protocol,
+     * and the hash-to-name mapping of that old root — so the address bar
+     * stops describing content the name no longer points at.
+     */
+    fun forgetName(name: String) {
+        val lowerName = name.lowercase()
+        nameToProtocol.remove(lowerName)
+        nameToUri.remove(lowerName)
+        hashToName.entries.removeIf { it.value == lowerName }
+    }
+
     /** Tests only. */
     fun clear() {
         hashToName.clear()

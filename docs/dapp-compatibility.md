@@ -46,7 +46,7 @@ interceptor answers first. Label encoding (source of truth:
 | Absolute-root URLs (`/_next/static/…`-style) resolve under the content root — no rewrite heuristics involved | same test |
 | Per-root storage isolation (localStorage/IndexedDB invisible across roots) | `VirtualOriginContractTest.storageWrittenUnderRootAIsInvisibleUnderRootB` |
 | ENS sites keep storage across contenthash updates (origin derives from the *name*) | `VirtualOriginContractTest.ensSiteKeepsStorageAcrossAContenthashUpdate` |
-| Back / Forward to an ENS site (or an ENS iframe) re-resolve the name and serve its current content, never the first visit's answer; a name that no longer resolves is refused in place (forward history kept); with the RPC unreachable the last answer is served | `VirtualOriginContractTest.backAndForwardReResolveAnEnsNameInsteadOfRestoringTheFirstAnswer`, `VirtualOriginContractTest.forwardToAnEnsNameThatNoLongerResolvesIsRefused`, `VirtualOriginContractTest.aRefusedBackKeepsTheForwardEntry`, `VirtualOriginContractTest.backWithTheRpcDownServesTheLastAnswer`, `VirtualOriginContractTest.anEnsIframeReChecksTheName` |
+| Back / Forward to an ENS site (or an ENS iframe) re-resolve the name and serve its current content, never the first visit's answer; a name that no longer resolves is refused in place (forward history kept); with the RPC unreachable the last answer is served | `VirtualOriginContractTest.backAndForwardReResolveAnEnsNameInsteadOfRestoringTheFirstAnswer`, `VirtualOriginContractTest.forwardToAnEnsNameThatNoLongerResolvesIsRefused`, `VirtualOriginContractTest.aRefusedBackKeepsTheForwardEntry`, `VirtualOriginContractTest.backWithTheRpcDownServesTheLastAnswer`, `VirtualOriginContractTest.anEnsIframeReChecksTheName`, `VirtualOriginContractTest.aNavigationThatNeverCommitsKeepsThePagesRoot` |
 | Same-origin `fetch()` / XHR works | `VirtualOriginContractTest.sameOriginFetchWorks` |
 | Cross-root reads succeed (CORS: `Access-Control-Allow-Origin: *`, preflights answered locally) | `VirtualOriginContractTest.crossRootFetchSucceedsUnderThePermissiveCorsPolicy` |
 | Secure context (https origin — crypto.subtle, SW eligibility, etc.) | implied by every test running on `https://…` origins |
@@ -88,6 +88,14 @@ response-side CORS headers are the node's job (status tracked in
   `SERVICE_WORKER_SHOULD_INTERCEPT_REQUEST`** — nothing is installed
   and SW fetches would bypass the content resolver; ship a no-SW
   fallback path (the suite feature-gates the same way).
+- **Service-worker-controlled ENS sites and the name re-check (#99)** —
+  WebView reports a SW's fetches with no tab attached, so they can't use
+  a tab's per-page ENS pins: a SW's lazy chunks come from the name's
+  latest answer this session (another tab's re-check can move them to a
+  newer root), and a navigation the SW answers from Cache Storage
+  never reaches the interceptor, so it serves what the SW cached, with
+  no lookup. Only navigations the SW forwards to the network are
+  re-checked.
 
 ## Shared links and App Links
 

@@ -213,21 +213,23 @@ object Gateways {
      * yet) or an ENS name doesn't resolve; the interceptor turns that
      * into a clean synthesized error instead of a hanging load.
      *
-     * An ENS root is served from the requesting tab's [pins] first — the
-     * root its document was just checked against — then the session
-     * registry.
+     * An ENS root is served from the incoming [page]'s pin (a main-frame
+     * document that was just checked), then the requesting tab's [pins]
+     * for the page on screen, then the session registry.
      */
     fun gatewayUrlFor(
         root: ContentRoot,
         pathAndQuery: String,
         pins: EnsDocumentPins? = null,
+        page: EnsDocumentPins.Page? = null,
     ): String? = when (root) {
         is ContentRoot.Bzz -> "$SWARM_BASE/bzz/${root.ref}$pathAndQuery"
         is ContentRoot.Ipfs -> ipfsBase.ifEmpty { null }?.let { "$it/ipfs/${root.cid}$pathAndQuery" }
         is ContentRoot.IpnsKey -> ipfsBase.ifEmpty { null }?.let { "$it/ipns/${root.key}$pathAndQuery" }
         is ContentRoot.IpnsName -> ipfsBase.ifEmpty { null }?.let { "$it/ipns/${root.name}$pathAndQuery" }
         is ContentRoot.Ens ->
-            (pins?.uriFor(root.name)?.let { VirtualOrigin.parseContentUrl(it)?.first }
+            ((page?.uriFor(root.name) ?: pins?.uriFor(root.name))
+                ?.let { VirtualOrigin.parseContentUrl(it)?.first }
                 ?: resolveEnsRoot(root.name))
                 ?.let { gatewayUrlFor(it, pathAndQuery) }
     }
@@ -290,11 +292,24 @@ object Gateways {
      * With no earlier answer the document waits for the resolver, as a
      * typed navigation does.
      *
+     * A main-frame document passes its incoming [page]
+     * ([EnsDocumentPins.beginNavigation]); the answer is pinned there, and
+     * reaches the page on screen only once that document commits. An
+     * iframe (no [page]) pins the page on screen.
+     *
      * Returns `null` when the document may be served (its root is now
-     * pinned), or the [ErrorPage] code for the refusal. A refusal
-     * leaves the registry and the pins untouched.
+     * pinned), or the [ErrorPage] code for the refusal. A refusal that
+     * is an *answer* (the name has no loadable content any more) drops
+     * the name from the session registry and from this tab's last
+     * answers, so neither the address bar's protocol badge / hash-to-name
+     * mapping nor a later failed lookup describes content the name no
+     * longer points at. Pages already on screen keep their own pins.
      */
-    fun reverifyEnsDocument(name: String, pins: EnsDocumentPins? = null): String? {
+    fun reverifyEnsDocument(
+        name: String,
+        pins: EnsDocumentPins? = null,
+        page: EnsDocumentPins.Page? = null,
+    ): String? {
         val key = name.lowercase()
         val last = (pins?.lastAnswerFor(name) ?: KnownEnsNames.uriFor(name))
             ?.takeIf { VirtualOrigin.parseContentUrl(it) != null }
@@ -309,24 +324,29 @@ object Gateways {
         }
         // [lookupWithin] keeps [lookupFailedAt] — see [reverifyFailureWindowMs].
         val result = lookupWithin(name, deadline)
+        fun gone(code: String): String {
+            KnownEnsNames.forgetName(name)
+            pins?.forgetLastAnswer(name)
+            return code
+        }
         return when (result) {
             is EnsResult.Ok -> {
                 if (VirtualOrigin.parseContentUrl(result.uri) == null) {
-                    "ens_unsupported_codec"
+                    gone("ens_unsupported_codec")
                 } else {
                     KnownEnsNames.record(result.uri, name)
-                    pins?.pin(name, result.uri)
+                    pins?.pin(name, result.uri, page)
                     null
                 }
             }
-            is EnsResult.NotFound -> "ens_not_found"
-            is EnsResult.Unsupported -> "ens_unsupported_codec"
+            is EnsResult.NotFound -> gone("ens_not_found")
+            is EnsResult.Unsupported -> gone("ens_unsupported_codec")
             // Failed, or still running at the deadline: not an answer.
             is EnsResult.Error, null -> {
                 if (last == null) {
                     "ens_lookup_failed"
                 } else {
-                    pins?.pin(name, last)
+                    pins?.pin(name, last, page)
                     null
                 }
             }
@@ -335,37 +355,97 @@ object Gateways {
 }
 
 /**
- * One tab's `name → content URI` answers (#99), in two parts:
+ * One tab's `name → content URI` answers (#99), in three parts:
  *
  * - **the current page's**: the root each ENS document of the page on
  *   screen (its main frame and its iframes) was served from. Its
  *   subresources come from the same root even if another tab — or a
  *   later Back in this one — re-checks the name and gets a newer
  *   answer, so an already-loaded page never gets its lazy chunks from
- *   a different version. Cleared by [newPage] when the tab's main frame
- *   requests a new document; read by [Gateways.gatewayUrlFor].
+ *   a different version. Read by [Gateways.gatewayUrlFor].
+ * - **the incoming page's** ([Page] from [beginNavigation]): what the
+ *   main-frame request now in flight was checked against. It replaces
+ *   the current page's only once that document *commits* — [commit]
+ *   when the interceptor hands WebView a response that renders in place,
+ *   [documentStarted] from `onPageStarted` otherwise. A navigation that
+ *   never commits (a download link, Stop, a 204) leaves the page on
+ *   screen where it is and so must leave its pins alone too.
  * - **the tab's last answer** per name, kept across pages: what a
  *   re-check whose lookup failed falls back on.
  *
  * Written by [Gateways.reverifyEnsDocument]. Owned by the tab's WebView
- * client; the interceptor runs on WebView's IO threads, hence the
- * concurrent maps.
+ * client; the interceptor runs on WebView's IO threads and
+ * `onPageStarted` on the main thread, hence the concurrent maps and the
+ * lock around the page swap.
  */
 class EnsDocumentPins {
-    private val page = ConcurrentHashMap<String, String>()
+    /** One document's pins; [url] is the main-frame URL it was requested for. */
+    class Page internal constructor(internal val url: String?) {
+        internal val pins = ConcurrentHashMap<String, String>()
+
+        fun uriFor(name: String): String? = pins[name.lowercase()]
+    }
+
+    @Volatile
+    private var current = Page(null)
+    private var pending: Page? = null
     private val last = ConcurrentHashMap<String, String>()
 
-    fun pin(name: String, uri: String) {
-        page[name.lowercase()] = uri
+    /**
+     * Pin [name] to [uri] for [page] (the incoming page from
+     * [beginNavigation]), or for the page on screen when `null`.
+     */
+    fun pin(name: String, uri: String, page: Page? = null) {
+        (page ?: current).pins[name.lowercase()] = uri
         last[name.lowercase()] = uri
     }
 
     /** The root the current page's documents on [name] were served from. */
-    fun uriFor(name: String): String? = page[name.lowercase()]
+    fun uriFor(name: String): String? = current.uriFor(name)
 
     /** The last answer this tab had for [name], on any page. */
     fun lastAnswerFor(name: String): String? = last[name.lowercase()]
 
-    /** The main frame is loading a new document: the page's pins go. */
-    fun newPage() = page.clear()
+    /**
+     * The name answered that it no longer points at loadable content:
+     * a later failed lookup must not bring its old root back.
+     */
+    fun forgetLastAnswer(name: String) {
+        last.remove(name.lowercase())
+    }
+
+    /**
+     * The main frame requests [url]: start the incoming page's pins. The
+     * page on screen keeps its own until this one commits.
+     */
+    @Synchronized
+    fun beginNavigation(url: String): Page = Page(url.substringBefore('#')).also { pending = it }
+
+    /** [page]'s document is committing: it is now the page on screen. */
+    @Synchronized
+    fun commit(page: Page) {
+        if (pending === page) {
+            current = page
+            pending = null
+        }
+    }
+
+    /**
+     * `onPageStarted([url])`: a main-frame document committed. The
+     * incoming page for that URL becomes current; a document that never
+     * went through the interceptor (bfcache, `data:`) starts with no pins
+     * rather than inheriting the previous page's.
+     */
+    @Synchronized
+    fun documentStarted(url: String?) {
+        val key = url?.substringBefore('#')
+        val incoming = pending
+        when {
+            incoming != null && incoming.url == key -> {
+                current = incoming
+                pending = null
+            }
+            current.url != key -> current = Page(key)
+        }
+    }
 }

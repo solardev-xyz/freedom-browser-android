@@ -46,6 +46,14 @@ class WebViewHarness {
                         request: WebResourceRequest?,
                     ): WebResourceResponse? = interceptVirtualRequest(request, ensPins)
 
+                    override fun onPageStarted(
+                        view: WebView?,
+                        url: String?,
+                        favicon: android.graphics.Bitmap?,
+                    ) {
+                        ensPins.documentStarted(url)
+                    }
+
                     override fun onPageFinished(view: WebView?, url: String?) {
                         pageFinished.countDown()
                     }
