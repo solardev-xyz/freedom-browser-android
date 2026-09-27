@@ -13,6 +13,7 @@ import android.graphics.ColorFilter
 import android.graphics.PixelFormat
 import android.graphics.Rect
 import android.graphics.drawable.Drawable
+import android.net.Uri
 import android.os.SystemClock
 import android.util.Log
 import android.view.PixelCopy
@@ -23,6 +24,7 @@ import android.view.ViewGroup
 import android.view.animation.DecelerateInterpolator
 import android.webkit.CookieManager
 import android.webkit.MimeTypeMap
+import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
@@ -430,6 +432,7 @@ fun BrowserWebViewHost(
 ) {
     val context = LocalContext.current
     val repo = remember(context) { BrowsingRepository.get(context) }
+    val fileChooser = rememberFileChooser()
 
     // Enable Chrome DevTools inspection for debug builds so we can
     // diagnose broken subresources on Swarm-hosted pages. Cheap no-op
@@ -498,6 +501,7 @@ fun BrowserWebViewHost(
                     },
                     onExitFullscreen = { tabs.onFullscreenHidden(tab) },
                     onRecoverNodes = { tabs.requestNodeRecovery?.invoke() },
+                    fileChooser = fileChooser,
                 )
                 webViews[tab.id] = wv
                 refreshLayouts[tab.id] = layout
@@ -616,6 +620,7 @@ private fun buildRefreshableWebView(
     onEnterFullscreen: (View, WebChromeClient.CustomViewCallback?) -> Unit,
     onExitFullscreen: () -> Unit,
     onRecoverNodes: () -> Unit = {},
+    fileChooser: FileChooser? = null,
 ): Pair<SwipeRefreshLayout, WebView> {
     val refreshLayout = SwipeRefreshLayout(context).apply {
         layoutParams = ViewGroup.LayoutParams(
@@ -1643,6 +1648,16 @@ private fun buildRefreshableWebView(
 
             override fun onHideCustomView() {
                 onExitFullscreen()
+            }
+
+            // `<input type=file>` (#80) — see [FileChooser].
+            override fun onShowFileChooser(
+                webView: WebView?,
+                filePathCallback: ValueCallback<Array<Uri>>?,
+                fileChooserParams: FileChooserParams?,
+            ): Boolean {
+                if (filePathCallback == null || fileChooserParams == null) return false
+                return fileChooser?.show(filePathCallback, fileChooserParams) ?: false
             }
 
             override fun onReceivedIcon(view: WebView?, icon: Bitmap?) {
