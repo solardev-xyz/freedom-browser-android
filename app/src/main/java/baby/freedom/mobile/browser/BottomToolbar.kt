@@ -39,6 +39,7 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Menu
@@ -1400,6 +1401,7 @@ internal fun BottomToolbar(
     onOpenTabs: () -> Unit,
     onOpenHistory: () -> Unit,
     onOpenBookmarks: () -> Unit,
+    onOpenDownloads: () -> Unit,
     onReload: () -> Unit,
     onStop: () -> Unit,
     onNewTab: () -> Unit,
@@ -1679,6 +1681,7 @@ internal fun BottomToolbar(
                     onOpenNode = onOpenNode,
                     onOpenHistory = onOpenHistory,
                     onOpenBookmarks = onOpenBookmarks,
+                    onOpenDownloads = onOpenDownloads,
                     onReload = onReload,
                     onNewTab = onNewTab,
                 )
@@ -2851,6 +2854,7 @@ private fun OverflowMenuButton(
     onOpenNode: () -> Unit,
     onOpenHistory: () -> Unit,
     onOpenBookmarks: () -> Unit,
+    onOpenDownloads: () -> Unit,
     onReload: () -> Unit,
     onNewTab: () -> Unit,
 ) {
@@ -2974,6 +2978,14 @@ private fun OverflowMenuButton(
                             onClick = {
                                 menuExpanded = false
                                 onOpenBookmarks()
+                            },
+                        )
+                        DropdownMenuItem(
+                            text = { MenuItemLabel("Downloads") },
+                            leadingIcon = { Icon(Icons.Filled.Download, contentDescription = null) },
+                            onClick = {
+                                menuExpanded = false
+                                onOpenDownloads()
                             },
                         )
                         DropdownMenuItem(

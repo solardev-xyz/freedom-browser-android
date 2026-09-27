@@ -44,7 +44,9 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Snackbar
 import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarDuration
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.SnackbarResult
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -409,6 +411,7 @@ fun BrowserScreen(
     var showTabSwitcher by rememberSaveable { mutableStateOf(false) }
     var showHistory by rememberSaveable { mutableStateOf(false) }
     var showBookmarks by rememberSaveable { mutableStateOf(false) }
+    var showDownloads by rememberSaveable { mutableStateOf(false) }
     // Intentionally NOT `rememberSaveable`: rotation and the other
     // declared `configChanges` don't recreate the Activity (see the
     // manifest), but process death or an undeclared config change still
@@ -431,6 +434,47 @@ fun BrowserScreen(
     // text lives here until it is submitted.
     var addressQuery by remember { mutableStateOf("") }
     val snackbarHostState = remember { SnackbarHostState() }
+    val downloads = remember(context) { DownloadManager.get(context) }
+
+    // Download notices (#79): the start, and the end with an action —
+    // Open for a finished file, the Downloads list for a failed one.
+    // Collected for the screen's lifetime, so a download that finishes
+    // while the Downloads list is up still reports.
+    LaunchedEffect(downloads) {
+        downloads.events.collect { event ->
+            when (event) {
+                is DownloadEvent.Started -> launch {
+                    snackbarHostState.showSnackbar(
+                        "Downloading ${event.fileName}",
+                        duration = SnackbarDuration.Short,
+                    )
+                }
+                is DownloadEvent.Completed -> launch {
+                    // Supersedes this download's own "Downloading…".
+                    snackbarHostState.currentSnackbarData?.dismiss()
+                    val result = snackbarHostState.showSnackbar(
+                        "Downloaded ${event.fileName}",
+                        actionLabel = "Open",
+                        duration = SnackbarDuration.Long,
+                    )
+                    if (result == SnackbarResult.ActionPerformed) {
+                        downloads.entry(event.id)?.let { entry ->
+                            downloads.open(context, entry)?.let { snackbarHostState.showSnackbar(it) }
+                        }
+                    }
+                }
+                is DownloadEvent.Failed -> launch {
+                    snackbarHostState.currentSnackbarData?.dismiss()
+                    val result = snackbarHostState.showSnackbar(
+                        "Download failed: ${event.reason}",
+                        actionLabel = "Details",
+                        duration = SnackbarDuration.Long,
+                    )
+                    if (result == SnackbarResult.ActionPerformed) showDownloads = true
+                }
+            }
+        }
+    }
 
     val state = tabs.active
     val isBookmarked by repo.isBookmarked(state.url).collectAsState(initial = false)
@@ -805,6 +849,7 @@ fun BrowserScreen(
         showTabSwitcher = false
         showHistory = false
         showBookmarks = false
+        showDownloads = false
         submit(tabs.newTab(), url)
         onDeepLinkHandled()
     }
@@ -1242,6 +1287,7 @@ fun BrowserScreen(
                     onOpenTabs = { showTabSwitcher = true },
                     onOpenHistory = { showHistory = true },
                     onOpenBookmarks = { showBookmarks = true },
+                    onOpenDownloads = { showDownloads = true },
                     onReload = {
                         val url = state.url.ifBlank { state.addressBarText }
                         if (url.isNotBlank()) submit(state, url)
@@ -1341,6 +1387,18 @@ fun BrowserScreen(
             onOpen = { url ->
                 showBookmarks = false
                 submit(state, url)
+            },
+        )
+    }
+
+    if (showDownloads) {
+        DownloadsScreen(
+            downloads = downloads,
+            onDismiss = { showDownloads = false },
+            onOpen = { entry ->
+                scope.launch {
+                    downloads.open(context, entry)?.let { snackbarHostState.showSnackbar(it) }
+                }
             },
         )
     }

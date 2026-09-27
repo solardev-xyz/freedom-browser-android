@@ -8,14 +8,20 @@ import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 
 @Database(
-    entities = [HistoryEntry::class, BookmarkEntry::class, FaviconEntry::class],
-    version = 2,
+    entities = [
+        HistoryEntry::class,
+        BookmarkEntry::class,
+        FaviconEntry::class,
+        DownloadEntry::class,
+    ],
+    version = 3,
     exportSchema = false,
 )
 abstract class AppDatabase : RoomDatabase() {
     abstract fun history(): HistoryDao
     abstract fun bookmarks(): BookmarkDao
     abstract fun favicons(): FaviconDao
+    abstract fun downloads(): DownloadDao
 
     companion object {
         @Volatile private var instance: AppDatabase? = null
@@ -37,6 +43,34 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * v2 -> v3: add the `downloads` table (download history, #79).
+         * Additive like v1 -> v2.
+         */
+        private val MIGRATION_2_3 = object : Migration(2, 3) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `downloads` (" +
+                        "`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
+                        "`fileName` TEXT NOT NULL, " +
+                        "`displayUrl` TEXT NOT NULL, " +
+                        "`sourceUrl` TEXT NOT NULL, " +
+                        "`mimeType` TEXT NOT NULL, " +
+                        "`contentUri` TEXT, " +
+                        "`status` TEXT NOT NULL, " +
+                        "`totalBytes` INTEGER NOT NULL, " +
+                        "`receivedBytes` INTEGER NOT NULL, " +
+                        "`error` TEXT, " +
+                        "`startedAt` INTEGER NOT NULL, " +
+                        "`finishedAt` INTEGER)",
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `index_downloads_startedAt` " +
+                        "ON `downloads` (`startedAt`)",
+                )
+            }
+        }
+
         fun get(context: Context): AppDatabase =
             instance ?: synchronized(this) {
                 instance ?: Room.databaseBuilder(
@@ -44,7 +78,7 @@ abstract class AppDatabase : RoomDatabase() {
                     AppDatabase::class.java,
                     "freedom.db",
                 )
-                    .addMigrations(MIGRATION_1_2)
+                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
                     .build()
                     .also { instance = it }
             }

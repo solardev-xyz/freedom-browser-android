@@ -58,3 +58,45 @@ data class FaviconEntry(
     val data: ByteArray,
     val updatedAt: Long,
 )
+
+/**
+ * One file the user downloaded (or tried to). The download manager
+ * (`browser/Downloads.kt`) owns the rows: it inserts one as
+ * [DownloadStatus.RUNNING] when a download starts and moves it to a
+ * terminal status when it ends. Live byte counts while it runs are in
+ * memory only (see `DownloadManager.progress`); [receivedBytes] is
+ * written once, at the end.
+ *
+ * [displayUrl] is the user-facing source (`bzz://…`, `ipfs://…`,
+ * `name.eth/…`, `https://…`, or `data:` — truncated for data URIs, whose
+ * bytes are the file itself); [sourceUrl] is what the WebView handed us
+ * and what a retry fetches again. [contentUri] is the MediaStore
+ * Downloads entry the bytes were written to — null until one was
+ * created, and the thing "open" hands to other apps.
+ */
+@Entity(
+    tableName = "downloads",
+    indices = [Index(value = ["startedAt"])],
+)
+data class DownloadEntry(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val fileName: String,
+    val displayUrl: String,
+    val sourceUrl: String,
+    val mimeType: String,
+    val contentUri: String?,
+    val status: String,
+    val totalBytes: Long,
+    val receivedBytes: Long,
+    val error: String?,
+    val startedAt: Long,
+    val finishedAt: Long?,
+)
+
+/** Values of [DownloadEntry.status]. Strings, so the column reads in `sqlite3`. */
+object DownloadStatus {
+    const val RUNNING = "running"
+    const val COMPLETED = "completed"
+    const val FAILED = "failed"
+    const val CANCELLED = "cancelled"
+}

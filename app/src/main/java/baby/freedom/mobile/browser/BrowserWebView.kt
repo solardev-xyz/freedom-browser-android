@@ -1204,6 +1204,42 @@ private fun buildRefreshableWebView(
         // is valid even before the user submits a URL.
         loadUrl(ABOUT_BLANK)
 
+        // Downloads (#79): anything Chromium decides not to render — a
+        // `Content-Disposition: attachment`, a non-renderable type, a
+        // `<a download>` — lands here, dweb origins and `data:` URIs
+        // included. [DownloadManager] does the fetching; WebView itself
+        // saves nothing.
+        setDownloadListener { url, userAgent, contentDisposition, mimeType, contentLength ->
+            DownloadManager.get(context).start(
+                url = url,
+                userAgent = userAgent,
+                contentDisposition = contentDisposition,
+                mimeType = mimeType,
+                contentLength = contentLength,
+                pageUrl = this.url,
+            )
+            // A main-frame navigation that turned out to be a file never
+            // commits: no onPageStarted, no final progress callback. Left
+            // alone, the capsule keeps the typed address, the progress
+            // trace and Stop over the previous page for good. That load
+            // is over — it *became* the download — so clear the busy
+            // chrome the way Stop does and put the label back on the page
+            // that is actually on screen. Unlike Stop, a blank committed
+            // address wins too (the download started from home): the
+            // request was served, so there's nothing left to keep the
+            // typed address for, and home comes back instead of a blank
+            // page under a label for a file.
+            if (downloadEndsPendingNavigation(
+                    committedUrl = state.url,
+                    addressBarText = state.addressBarText,
+                    resolving = state.resolving,
+                )
+            ) {
+                state.stopProgress()
+                state.addressBarText = state.url
+            }
+        }
+
         webViewClient = object : WebViewClient() {
             // A probe the *page* asked for belongs to the page that
             // asked: any document that replaces it takes the probe with
@@ -2377,6 +2413,24 @@ private fun fetchOnce(
         FetchAttempt.Unreachable
     }
 }
+
+/**
+ * Does a download that just started end the tab's pending navigation?
+ *
+ * Yes when the tab is showing an address that never committed
+ * ([addressBarText] ahead of [committedUrl] — after a commit
+ * `onPageStarted` writes the same string into both) and the load has
+ * been handed to the WebView ([resolving] is the ENS / gateway phase in
+ * front of it, which can't have produced a download yet). Chromium runs
+ * one main-frame navigation at a time, so a download arriving then is
+ * that navigation's response. A download from a committed page — an
+ * `<a download>`, an attachment link — leaves the tab alone.
+ */
+internal fun downloadEndsPendingNavigation(
+    committedUrl: String,
+    addressBarText: String,
+    resolving: Boolean,
+): Boolean = !resolving && addressBarText.isNotBlank() && addressBarText != committedUrl
 
 internal fun isLocalGatewayUrl(url: String): Boolean = Gateways.isLocalGateway(url)
 
