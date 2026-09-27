@@ -177,9 +177,17 @@ class TabsState(
     fun adoptPopup(opener: BrowserState): BrowserState {
         val tab = newBlankTab()
         tab.openerId = opener.id
+        // Its blank document is the page's until something commits: not
+        // the home overlay (see [BrowserState.blankIsPage]).
+        tab.blankIsPage = true
+        tab.showBlankPage()
         val openerIndex = tabs.indexOfFirst { it.id == opener.id }
         val at = if (openerIndex < 0) tabs.size else openerIndex + 1
         captureActiveThumbnail?.invoke()
+        // Fullscreen belongs to the active tab only (see [fullscreen]):
+        // a player's own `_blank` link must not leave the opener's
+        // session covering the popup that is now on screen.
+        exitFullscreen()
         tabs.add(at, tab)
         activeIndex = at
         return tab

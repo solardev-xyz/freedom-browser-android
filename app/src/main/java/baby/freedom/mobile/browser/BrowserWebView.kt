@@ -1290,9 +1290,18 @@ private fun buildRefreshableWebView(
                     // want the same end state: a home-looking tab
                     // (empty url/title/address bar) so the Compose
                     // HomeScreen overlay takes over.
-                    state.url = ""
+                    //
+                    // Except in a popup whose opener hasn't navigated
+                    // it yet: there the blank document is the page's
+                    // own (`window.open('')` + `document.write`), and
+                    // it stays a page (see [BrowserState.blankIsPage]).
+                    if (state.blankIsPage) {
+                        state.showBlankPage()
+                    } else {
+                        state.url = ""
+                        state.addressBarText = ""
+                    }
                     state.title = ""
-                    state.addressBarText = ""
                     state.progress = -1
                     lastLoadedDisplayUrl = null
                     visitGate.startNavigation()
@@ -1307,6 +1316,9 @@ private fun buildRefreshableWebView(
                     return
                 }
                 visitGate.startNavigation()
+                // A real document: a popup's blank start is over, and
+                // `about:blank` in this tab is the home sentinel again.
+                state.blankIsPage = false
                 // Whatever is parked belongs to the document this one is
                 // replacing, and it never painted (a paint is what would
                 // have flushed it). Dropping it here is what keeps the
@@ -1405,9 +1417,14 @@ private fun buildRefreshableWebView(
                     // overlay would stay hidden, showing a blank
                     // WebView instead.
                     refreshLayout.isRefreshing = false
-                    state.url = ""
+                    // …with the same popup exception (see above).
+                    if (state.blankIsPage) {
+                        state.showBlankPage()
+                    } else {
+                        state.url = ""
+                        state.addressBarText = ""
+                    }
                     state.title = ""
-                    state.addressBarText = ""
                     state.canGoBack = view?.canGoBack() == true
                     state.canGoForward = view?.canGoForward() == true
                     state.progress = -1

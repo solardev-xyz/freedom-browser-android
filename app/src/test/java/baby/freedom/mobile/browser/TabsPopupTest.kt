@@ -1,8 +1,12 @@
 package baby.freedom.mobile.browser
 
+import android.view.View
+import android.webkit.WebChromeClient
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -104,5 +108,51 @@ class TabsPopupTest {
         tabs.closePopup(popup)
         assertEquals(2, tabs.tabs.size)
         assertSame(before, tabs.active)
+    }
+
+    @Test
+    fun `a popup's blank document is a page, not the home overlay`() {
+        // `window.open('')` + `document.write(...)` never commits a
+        // non-blank URL; the home overlay must not cover what was
+        // written.
+        val tabs = tabsWith(1)
+        val popup = tabs.adoptPopup(tabs.active)
+        assertTrue(popup.blankIsPage)
+        assertFalse(popup.isHome)
+        assertEquals(ABOUT_BLANK, popup.addressBarText)
+    }
+
+    @Test
+    fun `a popup taken Home is home`() {
+        val tabs = tabsWith(1)
+        val popup = tabs.adoptPopup(tabs.active)
+        popup.navigateHome()
+        assertFalse(popup.blankIsPage)
+        assertTrue(popup.isHome)
+    }
+
+    @Test
+    fun `user-opened tabs start at home`() {
+        val tabs = tabsWith(1)
+        val tab = tabs.newTab()
+        assertFalse(tab.blankIsPage)
+        assertTrue(tab.isHome)
+    }
+
+    @Test
+    fun `a popup from a fullscreen opener ends the opener's fullscreen`() {
+        // Fullscreen belongs to the active tab only; the popup becomes
+        // active, so the opener's session must go, and the page is told.
+        val tabs = tabsWith(1)
+        val opener = tabs.active
+        var hidden = 0
+        val callback = object : WebChromeClient.CustomViewCallback {
+            override fun onCustomViewHidden() { hidden++ }
+        }
+        tabs.enterFullscreen(opener, View(null), callback)
+        assertEquals(opener.id, tabs.fullscreen?.tabId)
+        tabs.adoptPopup(opener)
+        assertNull(tabs.fullscreen)
+        assertEquals(1, hidden)
     }
 }
