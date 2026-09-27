@@ -6,6 +6,7 @@ import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.os.Bundle
 import android.provider.MediaStore
 import android.util.Log
 import android.webkit.CookieManager
@@ -257,18 +258,18 @@ class DownloadManager private constructor(context: Context) {
      */
     suspend fun open(context: Context, entry: DownloadEntry): String? {
         val uri = entry.contentUri?.let(Uri::parse) ?: return "File not available"
-        val exists = withContext(Dispatchers.IO) {
-            runCatching {
-                resolver.query(uri, arrayOf(MediaStore.MediaColumns._ID), null, null, null)
-                    ?.use { it.count > 0 } ?: false
-            }.getOrDefault(false)
-        }
-        if (!exists) {
-            // Deleted outside the app: the row is no longer "completed" —
-            // mark it failed so it stops offering an open that can't work
-            // and offers Retry instead.
-            markFileDeleted(entry.id)
-            return "The file was deleted"
+        when (withContext(Dispatchers.IO) { queryDownloadFileState(resolver, uri) }) {
+            DownloadFileState.PRESENT, DownloadFileState.UNKNOWN -> Unit
+            // In the system trash (restorable for 30 days): keep the row
+            // and its URI, so it opens again once the user restores it.
+            DownloadFileState.TRASHED -> return "The file is in the trash"
+            DownloadFileState.GONE -> {
+                // Deleted outside the app: the row is no longer "completed" —
+                // mark it failed so it stops offering an open that can't work
+                // and offers Retry instead.
+                markFileDeleted(entry.id)
+                return "The file was deleted"
+            }
         }
         val intent = Intent(Intent.ACTION_VIEW)
             .setDataAndType(uri, entry.mimeType.ifBlank { "*/*" })
@@ -611,3 +612,41 @@ private fun normalizeMime(raw: String?): String? =
 
 private fun extensionForMime(mime: String): String? =
     MimeTypeMap.getSingleton().getExtensionFromMimeType(mime)
+
+/** What [DownloadManager.open] found behind a completed row's URI. */
+internal enum class DownloadFileState {
+    /** The item exists and isn't trashed. */
+    PRESENT,
+
+    /** The item is in the system trash — restorable, so not deleted. */
+    TRASHED,
+
+    /** No such item any more: deleted for good. */
+    GONE,
+
+    /** The query failed; nothing is known, so nothing is dropped. */
+    UNKNOWN,
+}
+
+/** Classify an item the query found, by its IS_TRASHED flag. */
+internal fun downloadFileState(isTrashed: Boolean): DownloadFileState =
+    if (isTrashed) DownloadFileState.TRASHED else DownloadFileState.PRESENT
+
+/**
+ * Where [uri]'s MediaStore item stands. Blocking. The query opts in to
+ * trashed items — the default excludes them, which would make a file the
+ * user can still restore look deleted.
+ */
+internal fun queryDownloadFileState(resolver: ContentResolver, uri: Uri): DownloadFileState =
+    runCatching {
+        val args = Bundle().apply {
+            putInt(MediaStore.QUERY_ARG_MATCH_TRASHED, MediaStore.MATCH_INCLUDE)
+        }
+        resolver.query(uri, arrayOf(MediaStore.MediaColumns.IS_TRASHED), args, null).use { c ->
+            when {
+                c == null -> DownloadFileState.UNKNOWN
+                !c.moveToFirst() -> DownloadFileState.GONE
+                else -> downloadFileState(c.getInt(0) != 0)
+            }
+        }
+    }.getOrDefault(DownloadFileState.UNKNOWN)
