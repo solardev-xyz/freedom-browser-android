@@ -540,6 +540,15 @@ fun BrowserScreen(
     }
 
     val state = tabs.active
+    // Private pages stay out of the Recents snapshot and screenshots (#86).
+    PrivateScreenGuard(
+        privateContentOnScreen(
+            activePrivate = state.private,
+            anyPrivate = tabs.tabs.any { it.private },
+            switcherShown = showTabSwitcher,
+            downloadsShown = showDownloads,
+        ),
+    )
     val isBookmarked by repo.isBookmarked(state.url).collectAsState(initial = false)
 
     // IPFS load progress (#94): while the active tab is busy on content

@@ -388,7 +388,9 @@ fun PrivateHomeScreen(
             )
             Spacer(Modifier.height(12.dp))
             Text(
-                text = "Downloaded files and bookmarks you add are still saved.",
+                text = "Downloaded files and bookmarks you add are still saved. So is Swarm and " +
+                    "IPFS content you open: your Swarm and IPFS nodes keep what they fetch in " +
+                    "their own storage on this device, for private tabs too.",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
