@@ -34,8 +34,10 @@ import baby.freedom.swarm.IpfsInfo
 import baby.freedom.swarm.NodeInfo
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 
 /**
  * Hosts the browser UI and brokers the bind/unbind lifecycle of the
@@ -113,6 +115,21 @@ class MainActivity : ComponentActivity() {
         // open unnecessarily.
         lifecycleScope.launch {
             if (settings.runNodeEnabled.first()) startAndBindService()
+        }
+
+        // External Swarm endpoint / IPFS gateway (#125). Read once
+        // before the first frame, so a cold-start deep link or restored
+        // tab can't reach the embedded node's gateway before the
+        // setting lands (one small DataStore read), then followed live
+        // so switching in Settings applies to the next request.
+        val externalEndpoints = combine(
+            settings.externalSwarmEndpoint,
+            settings.externalIpfsGateway,
+        ) { swarm, ipfs -> swarm to ipfs }
+        runBlocking { externalEndpoints.first() }
+            .let { (swarm, ipfs) -> Gateways.setExternalEndpoints(swarm, ipfs) }
+        lifecycleScope.launch {
+            externalEndpoints.collect { (swarm, ipfs) -> Gateways.setExternalEndpoints(swarm, ipfs) }
         }
 
         // The address label's resting form needs the vendored Public

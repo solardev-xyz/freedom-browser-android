@@ -132,6 +132,6 @@ class FixtureGateway {
     }
 }
 
-/** Port half of [Gateways.SWARM_BASE] (`http://127.0.0.1:1633`). */
+/** Port half of [Gateways.EMBEDDED_SWARM_BASE] (`http://127.0.0.1:1633`). */
 val GATEWAY_PORT: Int =
-    Gateways.SWARM_BASE.substringAfterLast(':').toInt()
+    Gateways.EMBEDDED_SWARM_BASE.substringAfterLast(':').toInt()

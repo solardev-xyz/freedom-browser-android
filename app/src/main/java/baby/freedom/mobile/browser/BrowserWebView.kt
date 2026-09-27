@@ -3012,7 +3012,7 @@ private fun interceptVirtualRequestFor(
         return syntheticResponse(
             405, "Method Not Allowed",
             "Virtual dweb origins are read-only (GET/HEAD). " +
-                "Send writes to the node API at ${Gateways.SWARM_BASE}.",
+                "Send writes to the node API at ${Gateways.swarmBase}.",
         )
     }
 
@@ -3426,7 +3426,7 @@ private fun protocolForErrorPage(failedUrl: String): String {
         is ContentRoot.Ens -> return "ens"
         null -> {}
     }
-    if (failedUrl.startsWith("${Gateways.SWARM_BASE}/")) return "swarm"
+    if (failedUrl.startsWith("${Gateways.swarmBase}/")) return "swarm"
     val ipfsBase = Gateways.ipfsBase
     if (ipfsBase.isNotEmpty() && failedUrl.startsWith("$ipfsBase/")) {
         return if (failedUrl.startsWith("$ipfsBase/ipns/")) "ipns" else "ipfs"

@@ -18,6 +18,52 @@ class GatewaysTest {
     @After
     fun tearDown() {
         Gateways.setIpfsBase("")
+        Gateways.setExternalEndpoints("", "")
+    }
+
+    @Test
+    fun `external endpoints replace the embedded gateways and switch back`() {
+        Gateways.setIpfsBase("http://127.0.0.1:58312")
+        Gateways.setExternalEndpoints("http://192.168.1.10:1633", "https://gw.example/sub")
+        assertEquals(
+            "http://192.168.1.10:1633/bzz/$ref64/x?q=1",
+            Gateways.gatewayUrlFor(ContentRoot.Bzz(ref64), "/x?q=1"),
+        )
+        assertEquals(
+            "https://gw.example/sub/ipfs/bafy/",
+            Gateways.gatewayUrlFor(ContentRoot.Ipfs("bafy"), "/"),
+        )
+        assertEquals(
+            "https://gw.example/sub/ipns/ipfs.tech/",
+            Gateways.gatewayUrlFor(ContentRoot.IpnsName("ipfs.tech"), "/"),
+        )
+        assertEquals("http://192.168.1.10:1633/bzz/$ref64/", Gateways.toGatewayUrl("bzz://$ref64"))
+        assertEquals("https://gw.example/sub/ipfs/bafy/p", Gateways.toGatewayUrl("ipfs://bafy/p"))
+        assertEquals("bzz://abc/p", Gateways.toDisplay("http://192.168.1.10:1633/bzz/abc/p"))
+        assertEquals("ipfs://bafy/p", Gateways.toDisplay("https://gw.example/sub/ipfs/bafy/p"))
+        assertTrue(Gateways.isLocalGateway("http://192.168.1.10:1633/bzz/abc"))
+        assertFalse(Gateways.isLocalGateway("http://127.0.0.1:1633/bzz/abc"))
+
+        // Back to the embedded nodes.
+        Gateways.setExternalEndpoints("", "")
+        assertEquals(
+            "http://127.0.0.1:1633/bzz/$ref64/x?q=1",
+            Gateways.gatewayUrlFor(ContentRoot.Bzz(ref64), "/x?q=1"),
+        )
+        assertEquals(
+            "http://127.0.0.1:58312/ipfs/bafy/",
+            Gateways.gatewayUrlFor(ContentRoot.Ipfs("bafy"), "/"),
+        )
+        assertFalse(Gateways.isLocalGateway("http://192.168.1.10:1633/bzz/abc"))
+    }
+
+    @Test
+    fun `an external ipfs gateway serves while the embedded node is down`() {
+        Gateways.setExternalEndpoints("", "http://10.0.0.2:8080")
+        assertEquals(
+            "http://10.0.0.2:8080/ipfs/bafy/",
+            Gateways.gatewayUrlFor(ContentRoot.Ipfs("bafy"), "/"),
+        )
     }
 
     private val ref64 = "8f1d385f2493d4bcd4d3b2c1e3c1b8f7d1a09876543210fedcba98765432abcd"
