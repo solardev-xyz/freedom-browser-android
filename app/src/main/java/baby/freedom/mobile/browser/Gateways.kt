@@ -377,6 +377,19 @@ object Gateways {
         return null
     }
 
+    /** [reverifyEnsDocument]'s refusal when the name's providers contradict each other. */
+    const val ENS_PROVIDER_CONFLICT = "ens_provider_conflict"
+
+    /** [reverifyEnsDocument]'s answer for a `.tez` name whose website is now on the web. */
+    const val ENS_WEB_RECORD = "ens_web_record"
+
+    /**
+     * Tezos Domains providers that disagree: a non-retryable refusal, not
+     * a transport failure (see `TezosDomainsResolver.toEnsResult`).
+     */
+    internal fun isProviderConflict(result: EnsResult.Error): Boolean =
+        !result.retryable && result.reason == "PROVIDER_CONFLICT"
+
     /**
      * Resolve [name] again for a document on its `<name>.ens.…` host
      * (the top-level page or an iframe), and make this tab's [pins] —
@@ -448,19 +461,6 @@ object Gateways {
      * operator vouched for. [onUnverified] is told, so the tab can say so
      * as the typed flow does.
      */
-    /** [reverifyEnsDocument]'s refusal when the name's providers contradict each other. */
-    const val ENS_PROVIDER_CONFLICT = "ens_provider_conflict"
-
-    /** [reverifyEnsDocument]'s answer for a `.tez` name whose website is now on the web. */
-    const val ENS_WEB_RECORD = "ens_web_record"
-
-    /**
-     * Tezos Domains providers that disagree: a non-retryable refusal, not
-     * a transport failure (see `TezosDomainsResolver.toEnsResult`).
-     */
-    internal fun isProviderConflict(result: EnsResult.Error): Boolean =
-        !result.retryable && result.reason == "PROVIDER_CONFLICT"
-
     fun reverifyEnsDocument(
         name: String,
         pins: EnsDocumentPins? = null,

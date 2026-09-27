@@ -29,7 +29,7 @@ import org.json.JSONTokener
  *  1. **Anchor.** Ask up to three RPC providers for chain id (must be
  *     mainnet) and head level. A provider whose head block is more than
  *     [STALE_HEAD_AGE_MS] old is *stuck*, not disagreeing: it sits out
- *     the quorum (see step 4 for what it still contributes). Of the rest,
+ *     the round entirely (see [resolveUncached]). Of the rest,
  *     drop heads more than [MAX_HEAD_LAG_BLOCKS] from the median, then
  *     have each remaining provider name the hash
  *     of one shared block [ANCHOR_DEPTH] below the lowest head. Every
@@ -47,18 +47,11 @@ import org.json.JSONTokener
  *     lone provider's is *unverified* and only short-cached. Providers
  *     that disagree without a strict majority (about the head, the
  *     anchor hash, or the record) are a [Outcome.Conflict] — refused,
- *     never settled by picking a side. A lone answer can still be
- *     corroborated by a stuck provider: if the live one agrees on the
- *     hash of a block below the stuck one's head, and the stuck one
- *     reads the same record there, two operators agree and the answer
- *     is verified. A stuck provider that reads a *different* record is
- *     set aside (the record may have changed since it stalled) — but a
- *     different block hash is a conflict: Tezos blocks that deep are
- *     final, so one of the two is lying. That only applies when the
- *     device clock shows the answering provider's head is recent: if
- *     every head looks stuck, the newest one may just be *less* stuck
- *     (or the clock fast — there's no telling), and its answer stays
- *     unverified.
+ *     never settled by picking a side. A stuck provider never counts
+ *     towards verification: it can only attest to the chain as it was
+ *     when it stalled, and a live provider serving a record rolled back
+ *     to that point would read the same — so a live provider answering
+ *     next to a stuck one is still a lone, unverified answer.
  *
  * Website records may be `ipfs://` / `ipns://` (served natively, the
  * `.tez` name stays the origin; a published base path is kept) or
@@ -68,8 +61,6 @@ import org.json.JSONTokener
 class TezosDomainsResolver internal constructor(
     private val rpcEndpoints: List<String>,
     private val http: EnsHttp,
-    /** Wall time stuck providers get, all told, to corroborate a lone answer. */
-    private val corroborationBudgetMs: Long = CORROBORATION_BUDGET_MS,
     private val now: () -> Long = System::currentTimeMillis,
 ) {
     constructor(rpcEndpoints: List<String> = DEFAULT_RPC_ENDPOINTS) :
@@ -164,24 +155,37 @@ class TezosDomainsResolver internal constructor(
         // a live one leaves no majority, and the median of two is the
         // stale one — so it would push the *healthy* provider out and the
         // name would be refused. Stuck is judged by the block's own
-        // timestamp, which a lying provider can't make an honest, live
-        // one fail. If every head looks stuck, either this device's clock
-        // is fast or every reachable provider is stuck, and nothing here
-        // can tell which: measure age from the newest head instead, so a
-        // clearly-behind provider still sits out the quorum — but the
-        // newest head is then only *less* stuck, not known live, so a
-        // stuck provider's older record can't vouch for it (see below).
+        // timestamp against the device clock, which a lying provider
+        // can't make an honest, live one fail. Unless the clock is
+        // plainly wrong, and then age is measured from the newest head
+        // instead, so a clearly-behind provider still sits out:
+        //  - every head looks stale: the clock is fast, or every reachable
+        //    provider is stuck (the newest is then only *less* stuck —
+        //    no telling which, but it's still the best answer there is);
+        //  - a head is further in the future than a live chain can be
+        //    (Tezos nodes don't take blocks from the future): the clock
+        //    is slow — or that provider is lying, so it may push aside
+        //    no more heads than it keeps. Two honest heads outvote one
+        //    from the future; one against one is the slow-clock case, and the
+        //    newest provider's answer is then a lone, unverified one.
+        // A stuck provider takes no further part: it can't vouch for the
+        // chain after it stalled (see the class doc, step 4).
+        val clock = now()
         fun stuckBy(reference: Long) =
             reachable.partition { it.timestamp != null && it.timestamp < reference - STALE_HEAD_AGE_MS }
-        var clock = now()
+        val newest = reachable.mapNotNull { it.timestamp }.maxOrNull()
+        var ageFrom = clock
         var (stale, allHeads) = stuckBy(clock)
-        val liveByClock = allHeads.isNotEmpty()
-        if (!liveByClock) {
-            clock = reachable.maxOf { it.timestamp!! }
-            stuckBy(clock).let { (s, c) -> stale = s; allHeads = c }
+        if (newest != null && (allHeads.isEmpty() || newest > clock + STALE_HEAD_AGE_MS)) {
+            val (s, c) = stuckBy(newest)
+            if (allHeads.isEmpty() || s.size <= c.size) {
+                ageFrom = newest
+                stale = s
+                allHeads = c
+            }
         }
         for (h in stale) {
-            Log.w(TAG, "setting aside ${h.endpoint}: head ${h.level} is ${(clock - h.timestamp!!) / 60_000} min old")
+            Log.w(TAG, "setting aside ${h.endpoint}: head ${h.level} is ${(ageFrom - h.timestamp!!) / 60_000} min old")
         }
 
         // Median-referenced outlier rejection: tolerates one provider far
@@ -234,23 +238,7 @@ class TezosDomainsResolver internal constructor(
             val dissenting = legs.filter { it !in winner }.joinToString(", ") { it.first }
             Log.w(TAG, "$dissenting disagreed with the majority for a .tez name")
         }
-        var agreed = winner.size
-        // Only a website answer is worth the extra round: verification
-        // changes nothing for not-found / unsupported, and a stuck node's
-        // 404 can as well mean "that block isn't on this backend". And
-        // only when the device clock showed the answering provider live:
-        // otherwise it may itself be hours behind, and an even older
-        // record agreeing with it proves nothing about the chain today.
-        if (agreed < 2 && liveByClock && stale.isNotEmpty() && winner[0].second.type == Leg.Type.OK) {
-            val live = winner[0].first
-            // The stuck nodes are known to be unhealthy: they share one
-            // short budget instead of each RPC's full timeout, so a flaky
-            // one costs the lookup seconds, not tens of seconds.
-            val deadline = System.nanoTime() + corroborationBudgetMs * 1_000_000
-            val corroborations = settle(stale) { corroborate(it, live, anchorLevel, winner[0].second, name, deadline) }
-            corroborations.firstNotNullOfOrNull { it.conflict }?.let { return it }
-            agreed += corroborations.size
-        }
+        val agreed = winner.size
         val answer = Outcome.Answer(
             leg = winner[0].second,
             verified = agreed >= 2,
@@ -262,60 +250,6 @@ class TezosDomainsResolver internal constructor(
         }
         return answer
     }
-
-    /**
-     * Can [stuck] vouch for [leg], the answer the live provider [live]
-     * gave (at a block no higher than [ceiling])? A [Vouch] without
-     * [Vouch.conflict] = yes; with one = the two disagree about a final
-     * block; throws (a failed leg) when the stuck provider can't help:
-     * unreachable, out of time ([deadline], `System.nanoTime`), or its
-     * record differs, which after it stalled is no evidence against the
-     * live answer.
-     *
-     * A stuck provider is often a load balancer over backends at
-     * different heights, so its head, its anchor and its record may come
-     * from different machines: an anchor the backend doesn't have yet is
-     * a 404, a record read at a hash it doesn't know differs. Either way
-     * it gets one more try from a fresh head read (whichever backend
-     * answers that), within the same [deadline].
-     */
-    private fun corroborate(stuck: Head, live: String, ceiling: Long, leg: Leg, name: String, deadline: Long): Vouch {
-        try {
-            return corroborateAt(stuck.endpoint, stuck.level, live, ceiling, leg, name, deadline)
-        } catch (e: Exception) {
-            Log.w(TAG, "${stuck.endpoint} could not corroborate (${e.message}); retrying from a fresh head")
-        }
-        val head = fetchHead(stuck.endpoint, deadline)
-        return corroborateAt(stuck.endpoint, head.level, live, ceiling, leg, name, deadline)
-    }
-
-    private fun corroborateAt(
-        endpoint: String,
-        headLevel: Long,
-        live: String,
-        ceiling: Long,
-        leg: Leg,
-        name: String,
-        deadline: Long,
-    ): Vouch {
-        val level = minOf(headLevel - ANCHOR_DEPTH, ceiling)
-        val theirs = fetchAnchor(endpoint, level, deadline)
-        val ours = fetchAnchor(live, level, deadline)
-        if (theirs.hash != ours.hash) {
-            return Vouch(
-                Outcome.Conflict(
-                    "Tezos RPC providers returned conflicting anchor blocks",
-                    "block #$level ${ours.hash.take(10)}…: ${hostOf(live)}; " +
-                        "block #$level ${theirs.hash.take(10)}…: ${hostOf(endpoint)}",
-                ),
-            )
-        }
-        val old = resolveAtBlock(endpoint, theirs.hash, name, deadline)
-        if (old != leg) throw IllegalStateException("$endpoint: record at stale head #$level differs")
-        return Vouch(null)
-    }
-
-    private class Vouch(val conflict: Outcome.Conflict?)
 
     /** `Promise.allSettled` + keep the fulfilled: one bad provider never fails the round. */
     private suspend fun <T, R> settle(items: List<T>, block: (T) -> R): List<R> = coroutineScope {
@@ -348,25 +282,14 @@ class TezosDomainsResolver internal constructor(
 
     // ---- RPC ----
 
-    /**
-     * GET/POST [path] on [endpoint]; `null` for 404, throws for any other
-     * failure. A [deadline] (`System.nanoTime`) caps the request's
-     * timeout to the time left, and fails it once none is.
-     */
-    private fun rpc(endpoint: String, path: String, body: JSONObject? = null, deadline: Long? = null): Any? {
-        val timeoutMs = if (deadline == null) {
-            REQUEST_TIMEOUT_MS
-        } else {
-            val left = (deadline - System.nanoTime()) / 1_000_000
-            if (left <= 0) throw IllegalStateException("out of time")
-            minOf(left, REQUEST_TIMEOUT_MS.toLong()).toInt()
-        }
+    /** GET/POST [path] on [endpoint]; `null` for 404, throws for any other failure. */
+    private fun rpc(endpoint: String, path: String, body: JSONObject? = null): Any? {
         val reply = http.request(
             method = if (body != null) "POST" else "GET",
             url = endpoint + path,
             headers = if (body != null) mapOf("content-type" to "application/json") else emptyMap(),
             body = body?.toString(),
-            timeoutMs = timeoutMs,
+            timeoutMs = REQUEST_TIMEOUT_MS,
             maxBytes = MAX_RPC_RESPONSE_BYTES,
             followRedirects = false,
         )
@@ -375,39 +298,38 @@ class TezosDomainsResolver internal constructor(
         return JSONTokener(reply.body).nextValue()
     }
 
-    private fun fetchHead(endpoint: String, deadline: Long? = null): Head {
-        val chainId = rpc(endpoint, "/chains/main/chain_id", deadline = deadline)
+    private fun fetchHead(endpoint: String): Head {
+        val chainId = rpc(endpoint, "/chains/main/chain_id")
         if (chainId != MAINNET_CHAIN_ID) throw IllegalStateException("unexpected Tezos chain: $chainId")
-        val header = rpc(endpoint, "/chains/main/blocks/head/header", deadline = deadline) as? JSONObject
+        val header = rpc(endpoint, "/chains/main/blocks/head/header") as? JSONObject
         val level = header?.opt("level").toString().toLongOrNull()
         if (level == null || level <= ANCHOR_DEPTH) throw IllegalStateException("invalid Tezos head level")
         return Head(endpoint, level, parseTimestamp(header?.optString("timestamp")))
     }
 
-    private fun fetchAnchor(endpoint: String, level: Long, deadline: Long? = null): Anchor {
-        val hash = rpc(endpoint, "/chains/main/blocks/$level/hash", deadline = deadline) as? String
+    private fun fetchAnchor(endpoint: String, level: Long): Anchor {
+        val hash = rpc(endpoint, "/chains/main/blocks/$level/hash") as? String
         if (hash == null || !hash.startsWith("B") || !base58Regex.matches(hash)) {
             throw IllegalStateException("invalid Tezos block hash")
         }
         return Anchor(endpoint, level, hash)
     }
 
-    private fun fetchNormalizedScript(endpoint: String, block: String, contract: String, deadline: Long?): JSONObject? =
+    private fun fetchNormalizedScript(endpoint: String, block: String, contract: String): JSONObject? =
         rpc(
             endpoint,
             "/chains/main/blocks/$block/context/contracts/$contract/script/normalized",
             JSONObject().put("unparsing_mode", "Readable"),
-            deadline,
         ) as? JSONObject
 
-    private fun discoverRegistry(endpoint: String, block: String, deadline: Long?): Discovery {
-        val proxy = fetchNormalizedScript(endpoint, block, PROXY_CONTRACT, deadline)
+    private fun discoverRegistry(endpoint: String, block: String): Discovery {
+        val proxy = fetchNormalizedScript(endpoint, block, PROXY_CONTRACT)
         val registry = (findAnnotatedValue(storageType(proxy), proxy?.opt("storage"), "%contract")
             ?.second as? JSONObject)?.optString("string").orEmpty()
         if (!contractRegex.matches(registry)) {
             throw IllegalStateException("Tezos Domains proxy returned an invalid registry contract")
         }
-        val script = fetchNormalizedScript(endpoint, block, registry, deadline)
+        val script = fetchNormalizedScript(endpoint, block, registry)
         val type = storageType(script)
         val records = findAnnotatedValue(type, script?.opt("storage"), "%records")
         val expiryMap = findAnnotatedValue(type, script?.opt("storage"), "%expiry_map")
@@ -420,11 +342,11 @@ class TezosDomainsResolver internal constructor(
         return Discovery(recordsId, expiryId, recordType)
     }
 
-    private fun resolveAtBlock(endpoint: String, block: String, name: String, deadline: Long? = null): Leg {
+    private fun resolveAtBlock(endpoint: String, block: String, name: String): Leg {
         discoveryCache[endpoint]?.let { cached ->
             if (cached.expiresAt > now()) {
                 try {
-                    return lookupRecord(endpoint, block, name, cached.value, deadline)
+                    return lookupRecord(endpoint, block, name, cached.value)
                 } catch (e: Exception) {
                     // Stale ids (registry migration) or a transient
                     // failure: rediscover once before failing the leg.
@@ -432,16 +354,15 @@ class TezosDomainsResolver internal constructor(
                 }
             }
         }
-        val discovery = discoverRegistry(endpoint, block, deadline)
+        val discovery = discoverRegistry(endpoint, block)
         discoveryCache[endpoint] = Timed(discovery, now() + DISCOVERY_TTL_MS)
-        return lookupRecord(endpoint, block, name, discovery, deadline)
+        return lookupRecord(endpoint, block, name, discovery)
     }
 
-    private fun lookupRecord(endpoint: String, block: String, name: String, d: Discovery, deadline: Long?): Leg {
+    private fun lookupRecord(endpoint: String, block: String, name: String, d: Discovery): Leg {
         val record = rpc(
             endpoint,
             "/chains/main/blocks/$block/context/big_maps/${d.recordsId}/${scriptExprHash(name.toByteArray(Charsets.UTF_8))}",
-            deadline = deadline,
         ) ?: return Leg(Leg.Type.NOT_FOUND, reason = "NOT_REGISTERED")
 
         val data = findAnnotatedValue(d.recordType, record, "%data")?.second
@@ -458,7 +379,6 @@ class TezosDomainsResolver internal constructor(
             val expiryRecord = rpc(
                 endpoint,
                 "/chains/main/blocks/$block/context/big_maps/${d.expiryMapId}/${scriptExprHash(bytesFromHex(expiryKeyHex))}",
-                deadline = deadline,
             ) as? JSONObject
             expiry = expiryRecord?.opt("string") as? String
                 ?: throw IllegalStateException("Tezos Domains expiry record is missing")
@@ -515,11 +435,6 @@ class TezosDomainsResolver internal constructor(
          * minutes off doesn't turn live providers into stuck ones.
          */
         internal const val STALE_HEAD_AGE_MS = 15L * 60_000
-        /**
-         * What corroboration by stuck providers may add to a lookup, all
-         * RPCs and the retry included (see [corroborate]).
-         */
-        internal const val CORROBORATION_BUDGET_MS = 4_000L
         internal const val DEFAULT_TTL_MS = 5L * 60_000
         internal const val MAX_TTL_MS = 60L * 60_000
         internal const val NEGATIVE_TTL_MS = 30_000L
