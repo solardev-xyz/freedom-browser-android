@@ -16,13 +16,17 @@ import kotlinx.coroutines.launch
  *   and never another download's;
  * - opening the Downloads list [cancelAll]s every download notice —
  *   the one on screen *and* the ones queued behind it — while a
- *   snackbar that isn't a download notice stays where it is.
+ *   snackbar that isn't a download notice stays where it is;
+ * - a background tab dropping download offers is [announceDrops]ed
+ *   once per episode, and that notice is a download notice too.
  *
  * Main thread only (it's driven from Compose effects), so no locking.
  */
 internal class DownloadNotices {
     private val live = HashSet<Job>()
     private val starts = HashMap<Long, Job>()
+    private val announcedDrops = HashSet<Long>()
+    private val dropNotices = HashMap<Long, Job>()
 
     /**
      * Launch notice [block] for download [id] in [scope]. A [start]
@@ -45,6 +49,37 @@ internal class DownloadNotices {
         return job
     }
 
+    /**
+     * Announce, once per episode, each tab in [dropping] (tabs whose
+     * download offers are being dropped) other than [activeTab], by
+     * launching [block] for it in [scope]. A tab that stops dropping
+     * ends its episode: its notice is withdrawn and a later episode is
+     * announced afresh. Pass a [scope] that outlives the caller's
+     * effect — a tab starting to drop must not cancel another tab's
+     * notice — and don't call this while the Downloads list is up: an
+     * unannounced tab is picked up by the next call.
+     */
+    fun announceDrops(
+        scope: CoroutineScope,
+        dropping: Set<Long>,
+        activeTab: Long,
+        block: suspend CoroutineScope.(tabId: Long) -> Unit,
+    ) {
+        announcedDrops.retainAll(dropping)
+        dropNotices.keys.filter { it !in dropping }.forEach { dropNotices.remove(it)?.cancel() }
+        for (tabId in dropping) {
+            if (tabId == activeTab || !announcedDrops.add(tabId)) continue
+            val job = scope.launch { block(tabId) }
+            if (job.isCompleted) continue
+            live += job
+            dropNotices[tabId] = job
+            job.invokeOnCompletion {
+                live.remove(job)
+                dropNotices.remove(tabId, job)
+            }
+        }
+    }
+
     /** Withdraw download [id]'s "Downloading…" notice, if still up or queued. */
     fun supersedeStart(id: Long) {
         starts.remove(id)?.cancel()
@@ -56,5 +91,6 @@ internal class DownloadNotices {
         live.toList().forEach { it.cancel() }
         live.clear()
         starts.clear()
+        dropNotices.clear()
     }
 }

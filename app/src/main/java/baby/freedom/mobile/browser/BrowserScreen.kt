@@ -1449,21 +1449,22 @@ fun BrowserScreen(
     // asking is invisible from here (its prompt waits until it's in
     // view), so say so once per episode instead of dropping silently.
     // The active tab needs no snackbar: its prompt carries the note.
-    val announcedDrops = remember { mutableSetOf<Long>() }
-    LaunchedEffect(droppedOffers.keys) {
-        announcedDrops.retainAll(droppedOffers.keys)
-        val fresh = droppedOffers.keys.filter { it != tabs.active.id && announcedDrops.add(it) }
-        for (tabId in fresh) {
-            launch {
-                val result = snackbarHostState.showSnackbar(
-                    "A background tab is asking for more downloads than can wait; extras are dropped",
-                    actionLabel = "Show",
-                    duration = SnackbarDuration.Long,
-                )
-                if (result == SnackbarResult.ActionPerformed) {
-                    val index = tabs.tabs.indexOfFirst { it.id == tabId }
-                    if (index >= 0) tabs.switchTo(index)
-                }
+    // It's a download notice, so opening the Downloads list withdraws
+    // it and none is shown while the list is up (a tab that starts
+    // dropping then is announced once it closes). Launched in the
+    // screen's [scope], not this effect's, so another tab starting to
+    // drop (which restarts the effect) can't cancel it.
+    LaunchedEffect(droppedOffers.keys, showDownloads) {
+        if (showDownloads) return@LaunchedEffect
+        downloadNotices.announceDrops(scope, droppedOffers.keys, tabs.active.id) { tabId ->
+            val result = snackbarHostState.showSnackbar(
+                "A background tab is asking for more downloads than can wait; extras are dropped",
+                actionLabel = "Show",
+                duration = SnackbarDuration.Long,
+            )
+            if (result == SnackbarResult.ActionPerformed) {
+                val index = tabs.tabs.indexOfFirst { it.id == tabId }
+                if (index >= 0) tabs.switchTo(index)
             }
         }
     }

@@ -81,4 +81,93 @@ class DownloadNoticesTest {
         assertTrue(next.isCancelled)
         assertFalse(done.isCancelled)
     }
+
+    @Test
+    fun `a second tab starting to drop leaves the first tab's notice alone`() = runBlocking {
+        val host = SnackbarHostState()
+        val notices = DownloadNotices()
+        val shown = mutableListOf<Long>()
+        val announce: suspend kotlinx.coroutines.CoroutineScope.(Long) -> Unit = { tabId ->
+            shown += tabId
+            host.showSnackbar("tab $tabId dropping")
+        }
+        notices.announceDrops(this, setOf(1L), activeTab = 9, block = announce)
+        yield()
+        assertEquals("tab 1 dropping", host.currentSnackbarData?.visuals?.message)
+
+        notices.announceDrops(this, setOf(1L, 2L), activeTab = 9, block = announce)
+        yield()
+        // Tab 1's notice is still up, tab 2's queued behind it; each once.
+        assertEquals("tab 1 dropping", host.currentSnackbarData?.visuals?.message)
+        host.currentSnackbarData!!.dismiss()
+        repeat(5) { yield() }
+        assertEquals("tab 2 dropping", host.currentSnackbarData?.visuals?.message)
+        host.currentSnackbarData!!.dismiss()
+        repeat(5) { yield() }
+        notices.announceDrops(this, setOf(1L, 2L), activeTab = 9, block = announce)
+        yield()
+        assertNull(host.currentSnackbarData)
+        assertEquals(listOf(1L, 2L), shown)
+    }
+
+    @Test
+    fun `the active tab isn't announced and an ended episode is announced afresh`() = runBlocking {
+        val host = SnackbarHostState()
+        val notices = DownloadNotices()
+        val shown = mutableListOf<Long>()
+        val announce: suspend kotlinx.coroutines.CoroutineScope.(Long) -> Unit = { tabId ->
+            shown += tabId
+            host.showSnackbar("tab $tabId dropping")
+        }
+        notices.announceDrops(this, setOf(1L), activeTab = 1, block = announce)
+        yield()
+        assertNull(host.currentSnackbarData)
+
+        notices.announceDrops(this, setOf(2L), activeTab = 1, block = announce)
+        yield()
+        assertEquals("tab 2 dropping", host.currentSnackbarData?.visuals?.message)
+        // Tab 2 stops dropping (navigated or closed): its notice goes.
+        notices.announceDrops(this, emptySet(), activeTab = 1, block = announce)
+        yield()
+        assertNull(host.currentSnackbarData)
+        notices.announceDrops(this, setOf(2L), activeTab = 1, block = announce)
+        yield()
+        assertEquals("tab 2 dropping", host.currentSnackbarData?.visuals?.message)
+        notices.cancelAll()
+        assertEquals(listOf(2L, 2L), shown)
+    }
+
+    @Test
+    fun `cancelAll withdraws a drop notice, showing or queued`() = runBlocking {
+        val host = SnackbarHostState()
+        val notices = DownloadNotices()
+        val other = launch(start = CoroutineStart.UNDISPATCHED) { host.showSnackbar("Unrelated") }
+        notices.announceDrops(this, setOf(1L, 2L), activeTab = 9) { tabId ->
+            host.showSnackbar("tab $tabId dropping")
+        }
+        yield()
+        notices.cancelAll()
+        yield()
+        assertEquals("Unrelated", host.currentSnackbarData?.visuals?.message)
+        host.currentSnackbarData!!.dismiss()
+        other.join()
+        yield()
+        assertNull(host.currentSnackbarData)
+        // Same episode: not announced again after the list closes.
+        notices.announceDrops(this, setOf(1L, 2L), activeTab = 9) { host.showSnackbar("again") }
+        yield()
+        assertNull(host.currentSnackbarData)
+    }
+
+    @Test
+    fun `cancelAll dismisses a drop notice that is on screen`() = runBlocking {
+        val host = SnackbarHostState()
+        val notices = DownloadNotices()
+        notices.announceDrops(this, setOf(1L), activeTab = 9) { host.showSnackbar("tab 1 dropping") }
+        yield()
+        assertEquals("tab 1 dropping", host.currentSnackbarData?.visuals?.message)
+        notices.cancelAll()
+        yield()
+        assertNull(host.currentSnackbarData)
+    }
 }
