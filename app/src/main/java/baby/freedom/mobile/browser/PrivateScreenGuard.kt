@@ -47,8 +47,9 @@ internal fun privateContentOnScreen(
  * after the browser in this Activity isn't left secure.
  *
  * `FLAG_SECURE` covers this window only; the other windows a private
- * page can open — JavaScript dialogs — are made secure themselves
- * ([showPrivateJsDialog]).
+ * page can open are made secure themselves: JavaScript dialogs
+ * ([showPrivateJsDialog]) and Chromium's own `<select>` lists and
+ * pickers ([PrivateWindowContext]).
  */
 @Composable
 internal fun PrivateScreenGuard(secure: Boolean) {

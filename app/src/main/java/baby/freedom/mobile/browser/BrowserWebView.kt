@@ -1147,7 +1147,12 @@ private fun buildRefreshableWebView(
     // recover again.
     var autoRecoveredUrl: String? = null
 
-    val webView = PageWebView(context).apply {
+    // A private tab's pickers and `<select>` lists open in windows of
+    // their own, built on this context: [PrivateWindowContext] makes
+    // them FLAG_SECURE like the Activity window (#86).
+    val webView = PageWebView(
+        if (state.private) PrivateWindowContext.of(context) else context,
+    ).apply {
         // A private tab's WebView goes on the private session's profile
         // (#86) before anything else touches it: Chromium only takes a
         // profile change on a WebView that has never been used.
