@@ -176,7 +176,8 @@ internal enum class ExternalLinkVerdict {
  * main-frame redirect may end in an app link with no page tap, and the
  * site asked for it. Started by that load, followed hop by hop through
  * `shouldOverrideUrlLoading`, and ended by anything that ends the
- * navigation. `shouldInterceptRequest` reports main-frame requests from
+ * navigation — including its load stopping with no commit
+ * ([loadFinished]). `shouldInterceptRequest` reports main-frame requests from
  * a WebView IO thread: one for any URL but the hop awaited is a new
  * navigation — a page's form post, which never reaches
  * `shouldOverrideUrlLoading` — and ends the chain before that
@@ -217,6 +218,28 @@ internal class UserNamedChain {
     fun mainFrameRequested(url: String) {
         val awaited = hop ?: return
         if (!sameRequestUrl(awaited, url)) ended()
+    }
+
+    /**
+     * `onPageFinished` for [url] while [committedUrl] is the document on
+     * screen. WebView reports it when loading stops — including for a
+     * navigation that ends without a commit, such as a `204` answer,
+     * with that navigation's URL — so the named load is over and no
+     * later redirect is one of its hops (R2-F1). A service worker's
+     * answer to the page's own form post never reaches
+     * `shouldInterceptRequest`, so [mainFrameRequested] can't be relied
+     * on to end the chain first. The one exception: the document on
+     * screen finishing its own load (its `load` event) while the named
+     * load is still in flight, which reports the committed page's URL
+     * rather than the awaited hop's — or the tab's blank entry (Home, a
+     * fresh tab), which no named load is.
+     */
+    @Synchronized
+    fun loadFinished(url: String?, committedUrl: String?) {
+        val awaited = hop ?: return
+        val onScreen = url == ABOUT_BLANK ||
+            (url != null && committedUrl != null && sameRequestUrl(url, committedUrl))
+        if (!onScreen || sameRequestUrl(awaited, url!!)) ended()
     }
 
     /**

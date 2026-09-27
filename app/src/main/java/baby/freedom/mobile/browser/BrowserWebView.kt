@@ -1939,9 +1939,15 @@ private fun buildRefreshableWebView(
         // it may end in an app link with no tap on a page, asked for the
         // hop that redirected there (#173 — a Meet link redirects to the
         // Meet app's `intent:`). Ended wherever [navigationHadGesture] is
-        // dropped, on Stop, and by a main-frame request of the page's own
+        // dropped, on Stop, when loading stops without a commit (a 204,
+        // R2-F1), and by a main-frame request of the page's own
         // ([UserNamedChain]).
         val userNamedChain = UserNamedChain()
+        // The URL of the document on screen, as last committed (or moved
+        // by history.pushState): tells the page's own `load` event from
+        // the end of a navigation that never commits
+        // ([UserNamedChain.loadFinished]).
+        var committedPageUrl: String? = null
         // A load the browser starts itself (typed URL, reload, back /
         // forward) replaces whatever navigation was in flight without a
         // first hop through shouldOverrideUrlLoading: the replaced
@@ -2097,6 +2103,7 @@ private fun buildRefreshableWebView(
                 navigationHadGesture = false
                 userNamedChain.ended()
                 documentStartedOnce = true
+                committedPageUrl = url
                 // The previous document, and its frames, are gone: what a
                 // sweep held for them is cleared once more, now that they
                 // can't write to it again, and the tab no longer counts
@@ -2301,6 +2308,9 @@ private fun buildRefreshableWebView(
             }
 
             override fun onPageFinished(view: WebView?, url: String?) {
+                // Loading stopped: the user's named load, if this is its
+                // end (a 204, a cancelled hop), has no more hops (R2-F1).
+                userNamedChain.loadFinished(url, committedPageUrl)
                 // Re-probe: a page's own stylesheet (or its first
                 // script) can be what sets `touch-action: none`, and
                 // that is not necessarily in place at first paint (#56).
@@ -2484,6 +2494,7 @@ private fun buildRefreshableWebView(
             // before first paint; the detector isn't installed yet then,
             // and this doesn't install it (see [requestBottomUiProbe]).
             override fun doUpdateVisitedHistory(view: WebView?, url: String?, isReload: Boolean) {
+                committedPageUrl = url
                 // A same-document step keeps the page on screen as the
                 // load's document for the IPFS phase line (#94, R3-F2).
                 state.historyUpdated(isHome = url == ABOUT_BLANK)

@@ -696,6 +696,61 @@ class ExternalAppsTest {
         assertNull(chain.asker())
     }
 
+    // R2-F1: a service worker answers the page's form post, so no
+    // main-frame request is seen — the named load's end must be.
+    @Test
+    fun `a named load that stops without a commit ends the chain`() {
+        val chain = UserNamedChain()
+        chain.started("http://localhost:8701/nc")
+        chain.mainFrameRequested("http://localhost:8701/nc")
+        // 204: WebView reports onPageFinished for the aborted navigation.
+        chain.loadFinished("http://localhost:8701/nc", "http://localhost:8700/p")
+        assertNull(chain.asker())
+        // The page's SW-answered post then redirects: not the chain's.
+        chain.redirected("tel:5551234")
+        assertNull(chain.asker())
+    }
+
+    @Test
+    fun `a named load's redirect hop that stops ends the chain`() {
+        val chain = UserNamedChain()
+        chain.started("https://a.example/go")
+        chain.redirected("https://b.example/nc")
+        chain.loadFinished("https://b.example/nc", "https://page.example/")
+        assertNull(chain.asker())
+    }
+
+    @Test
+    fun `the page on screen finishing its own load keeps a named chain in flight`() {
+        val chain = UserNamedChain()
+        chain.started("https://meet.google.com/abc")
+        chain.loadFinished("https://page.example/", "https://page.example/")
+        assertEquals("https://meet.google.com/abc", chain.asker())
+        // But the same URL as the awaited hop is the named load's end.
+        val same = UserNamedChain()
+        same.started("https://page.example/")
+        same.loadFinished("https://page.example/", "https://page.example/")
+        assertNull(same.asker())
+    }
+
+    @Test
+    fun `any other finished load ends a named chain`() {
+        val chain = UserNamedChain()
+        chain.started("https://meet.google.com/abc")
+        chain.loadFinished("tel:5551234", "https://page.example/")
+        assertNull(chain.asker())
+        // With nothing committed yet (a fresh tab), nothing is on screen.
+        val fresh = UserNamedChain()
+        fresh.started("https://meet.google.com/abc")
+        fresh.loadFinished("https://page.example/", null)
+        assertNull(fresh.asker())
+        // …but the blank entry of Home / a fresh tab finishing is no end.
+        val home = UserNamedChain()
+        home.started("https://meet.google.com/abc")
+        home.loadFinished(ABOUT_BLANK, null)
+        assertEquals("https://meet.google.com/abc", home.asker())
+    }
+
     @Test
     fun `request urls compare as Chromium canonicalizes them`() {
         assertTrue(sameRequestUrl("https://Example.COM", "https://example.com/"))
