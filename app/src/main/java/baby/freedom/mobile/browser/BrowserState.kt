@@ -1,5 +1,6 @@
 package baby.freedom.mobile.browser
 
+import android.os.Bundle
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -143,6 +144,54 @@ class BrowserState(val id: Long) {
 
     var override: Override? by mutableStateOf<Override?>(null)
         internal set
+
+    /**
+     * What a tab brought back by [TabsState.reopenClosedTab] should be
+     * rebuilt from: the closed WebView's saved state, the URL to
+     * bring back afresh if that state can't be restored, and — for a
+     * tab closed before its page committed — the address to put back
+     * even after a successful restore ([resubmitUrl], blank otherwise).
+     * [submit] is false when that first navigation was one the user
+     * had stopped: the address comes back in the bar, with Reload, but
+     * isn't fetched again. Consumed (and cleared) by
+     * [BrowserWebViewHost] when it creates this tab's WebView; null for
+     * every other tab.
+     */
+    class PendingRestore(
+        val webViewState: Bundle?,
+        val fallbackUrl: String,
+        val resubmitUrl: String = "",
+        val submit: Boolean = true,
+    ) {
+        /**
+         * What the rebuilt WebView should do once its blank entry
+         * finishes: [restored] says whether `restoreState` took the
+         * saved state (else the host loaded the blank entry itself),
+         * [currentEntryUrl] is the entry the WebView is now on. Null
+         * unless there is an address to put back *and* the WebView is
+         * on the blank entry — an address left armed while it sits on
+         * a real page would fire on some later trip Home.
+         */
+        fun afterBlank(restored: Boolean, currentEntryUrl: String?): AfterBlank? {
+            val address = if (restored) resubmitUrl else fallbackUrl
+            val onBlank = currentEntryUrl == null || currentEntryUrl == ABOUT_BLANK
+            return if (address.isNotBlank() && onBlank) AfterBlank(address, submit) else null
+        }
+    }
+
+    internal var pendingRestore: PendingRestore? = null
+
+    /**
+     * An address to put back once the WebView's blank home entry has
+     * finished loading — and, if [submit], to submit. Set by
+     * [BrowserWebViewHost] for a reopened tab whose restored (or
+     * unrestorable) state leaves the WebView *on* that entry, and
+     * consumed by the first `onPageFinished` that follows, whichever
+     * entry it is for: only the blank one acts on it.
+     */
+    class AfterBlank(val address: String, val submit: Boolean)
+
+    internal var afterBlank: AfterBlank? = null
 
     /**
      * Compact-on-scroll state of the floating capsule for this tab.
