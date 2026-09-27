@@ -364,7 +364,7 @@ object Gateways {
         // One server's word isn't served unasked (#96); the submit flow
         // records what the user let through.
         if (result is EnsResult.Ok && result.trust.verified) {
-            KnownEnsNames.record(result.uri, name)
+            KnownEnsNames.record(result.uri, name, result.trust)
             return VirtualOrigin.parseContentUrl(result.uri)?.first
         }
         return null
@@ -427,11 +427,21 @@ object Gateways {
      * answers, so neither the address bar's protocol badge / hash-to-name
      * mapping nor a later failed lookup describes content the name no
      * longer points at. Pages already on screen keep their own pins.
+     *
+     * [assertedProtocol] is the transport the tab's address asserts for
+     * [name] — `bzz` for a tab the user sent to `bzz://name.eth` (#97,
+     * [BrowserState.Override.assertedProtocol]). An answer on another
+     * transport is refused with `ens_wrong_protocol` rather than served:
+     * a typed scheme is an assertion, and a Reload or Back must not
+     * switch networks under it any more than the typed navigation did.
+     * Not an answer to forget — the name does point at content, just not
+     * the kind the address promises.
      */
     fun reverifyEnsDocument(
         name: String,
         pins: EnsDocumentPins? = null,
         page: EnsDocumentPins.Page? = null,
+        assertedProtocol: String? = null,
     ): String? {
         val key = name.lowercase()
         val last = (pins?.lastAnswerFor(name) ?: KnownEnsNames.uriFor(name))
@@ -463,6 +473,8 @@ object Gateways {
             is EnsResult.Ok -> {
                 if (VirtualOrigin.parseContentUrl(result.uri) == null) {
                     noContent("ens_unsupported_codec", result.trust)
+                } else if (assertedProtocol != null && result.protocol != assertedProtocol) {
+                    "ens_wrong_protocol"
                 } else if (!result.trust.verified &&
                     result.uri != pins?.lastAnswerFor(name) &&
                     result.uri != KnownEnsNames.uriFor(name)
@@ -472,7 +484,7 @@ object Gateways {
                     // then, or let through by the user (#96).
                     "ens_unverified"
                 } else {
-                    KnownEnsNames.record(result.uri, name)
+                    KnownEnsNames.record(result.uri, name, result.trust)
                     pins?.pin(name, result.uri, page)
                     null
                 }

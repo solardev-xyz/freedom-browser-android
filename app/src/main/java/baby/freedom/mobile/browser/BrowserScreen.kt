@@ -284,8 +284,17 @@ private fun contentUriForSubmit(url: String): String? {
         url.startsWith("ipns://")
     ) return url
     val display = Gateways.toDisplay(url)
+    // A name's own virtual origin (`https://<name>.ens.…`, what Reload
+    // of a name-addressed page maps to via [BrowserState.effectiveFetchUrl])
+    // displays as the bare name — not content to probe: the gateway
+    // would be asked for `vitalik.eth/`. It loads as a plain URL, and
+    // the interceptor's document re-check resolves the name (#99), and
+    // holds a typed-scheme assertion (#97).
+    if (!CONTENT_SCHEMES_FOR_SUBMIT.any { display.startsWith(it) }) return null
     return if (display != url) display else null
 }
+
+private val CONTENT_SCHEMES_FOR_SUBMIT = listOf("bzz://", "ipfs://", "ipns://")
 
 /**
  * Which gateway logo (if any) to show in the leading end of the
@@ -878,6 +887,7 @@ fun BrowserScreen(
                 detail: String,
                 retryUrl: String = retryDisplay,
                 continueUrl: String? = null,
+                resolvedProtocol: String? = null,
             ) {
                 target.clearEnsOverride()
                 target.loadUrl(
@@ -888,6 +898,7 @@ fun BrowserScreen(
                         retryUrl = retryUrl,
                         detail = detail,
                         continueUrl = continueUrl,
+                        resolvedProtocol = resolvedProtocol,
                     ),
                 )
             }
@@ -905,6 +916,28 @@ fun BrowserScreen(
                     // itself; this is the tab's own last word on it.
                     ensureActive()
                     when (result) {
+                        // A typed scheme is an assertion (#97): content
+                        // on another transport is a "resolves to X, not
+                        // Y" page, never a silent switch. Checked before
+                        // the cross-check gate — asking the user to
+                        // accept an answer that couldn't load anyway
+                        // would be a question with no good answer; the
+                        // page says whose word it is instead. Its button
+                        // opens the name under the transport it does
+                        // resolve to: the user switching, by name.
+                        is EnsResult.Ok if requiredProtocol != null &&
+                            result.protocol != requiredProtocol -> {
+                            ensError(
+                                errorCode = "ens_wrong_protocol",
+                                detail = EnsGate.withTrustNote(
+                                    "$name resolves to ${result.protocol}:// content, " +
+                                        "not $requiredProtocol://",
+                                    result.trust,
+                                ),
+                                retryUrl = "${result.protocol}://$name$suffix",
+                                resolvedProtocol = result.protocol,
+                            )
+                        }
                         // Only one RPC server's word for it (#96): ask
                         // first. The user's "Continue once" comes back
                         // here with this very answer approved.
@@ -922,18 +955,10 @@ fun BrowserScreen(
                             // (cross-tab address-bar preservation). Safe for
                             // every protocol — bzz, ipfs, and ipns all round-
                             // trip through [Gateways] + [DisplayUrl] now.
-                            KnownEnsNames.record(result.uri, name)
-                            if (requiredProtocol != null && result.protocol != requiredProtocol) {
-                                // Retry with the generic ens:// form: the
-                                // same constrained URL would fail forever,
-                                // but the content itself is loadable.
-                                ensError(
-                                    errorCode = "ens_wrong_protocol",
-                                    detail = "$name resolves to ${result.protocol}:// content, " +
-                                        "not $requiredProtocol://",
-                                    retryUrl = "ens://$name$suffix",
-                                )
-                            } else if (result.protocol == "bzz" ||
+                            // With how it was checked, for the bar's
+                            // trust shield (#97).
+                            KnownEnsNames.record(result.uri, name, result.trust)
+                            if (result.protocol == "bzz" ||
                                 result.protocol == "ipfs" ||
                                 result.protocol == "ipns"
                             ) {
@@ -1618,7 +1643,7 @@ fun BrowserScreen(
                     onOpenBookmarks = { showBookmarks = true },
                     onOpenDownloads = { showDownloads = true },
                     onReload = {
-                        val url = state.url.ifBlank { state.addressBarText }
+                        val url = state.reloadUrl()
                         if (url.isNotBlank()) submit(state, url)
                     },
                     // Stop covers both halves of a load: the WebView's

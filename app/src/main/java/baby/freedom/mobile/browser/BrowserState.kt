@@ -63,8 +63,27 @@ class BrowserState(val id: Long, val private: Boolean = false) {
      * override only catches in-manifest navigation within a tab, the
      * registry catches raw `bzz://<hash>` loads of a previously-resolved
      * hash in any tab.
+     *
+     * A bare-name [prefix] (a generic `name.eth` submit) makes no claim
+     * about the transport, so what the bar shows ([shown]) follows the
+     * name's current answer — `ipfs://vitalik.eth` (#97). A scheme
+     * prefix (`bzz://name.eth`, typed) is an assertion
+     * ([assertedProtocol]) and is shown as typed.
      */
-    data class Override(val baseUrl: String, val prefix: String)
+    data class Override(val baseUrl: String, val prefix: String) {
+        /** The prefix as the address bar shows it; see [DisplayUrl.withTransport]. */
+        val shown: String get() = DisplayUrl.withTransport(prefix)
+
+        /**
+         * `bzz` / `ipfs` / `ipns` when the prefix is a typed-scheme form
+         * — the transport this tab's address asserts, which a document
+         * re-check holds the name to ([Gateways.reverifyEnsDocument]).
+         * `null` for a bare name, which accepts any transport.
+         */
+        val assertedProtocol: String?
+            get() = prefix.substringBefore("://", "").lowercase()
+                .takeIf { it in ASSERTING_SCHEMES }
+    }
 
     var url by mutableStateOf("")
         internal set
@@ -103,6 +122,14 @@ class BrowserState(val id: Long, val private: Boolean = false) {
      */
     var resolving by mutableStateOf(false)
         internal set
+
+    /**
+     * How the name the page on screen was reached through was checked
+     * (#96) — the trust shield on the protocol badge (#97, [TrustShield]).
+     * Taken at each document's commit from the answer it was served
+     * from; `null` for a page that isn't a name's (or is an error page).
+     */
+    internal var nameTrust by mutableStateOf<NameTrust?>(null)
 
     /**
      * The "Continue once" the tab's *not cross-checked* warning offers,
@@ -630,6 +657,18 @@ class BrowserState(val id: Long, val private: Boolean = false) {
         navCounter++
     }
 
+    /**
+     * The transport this tab's address asserts for [name] (#97): the
+     * typed scheme of the display override, if that override is the
+     * name's own origin. `null` — any transport — otherwise. Read from
+     * the interceptor's threads for a document's re-check.
+     */
+    fun assertedProtocolFor(name: String): String? {
+        val o = override ?: return null
+        if (o.baseUrl != VirtualOrigin.originFor(ContentRoot.Ens(name.lowercase()))) return null
+        return o.assertedProtocol
+    }
+
     /** Drop any active ENS display override. Call before loading a URL
      *  that the user explicitly typed (and that isn't an ENS name). */
     fun clearEnsOverride() {
@@ -654,6 +693,7 @@ class BrowserState(val id: Long, val private: Boolean = false) {
         cancelPendingProbe()
         capsuleCollapse.expand()
         override = null
+        nameTrust = null
         url = ""
         title = ""
         addressBarText = ""
@@ -694,6 +734,27 @@ class BrowserState(val id: Long, val private: Boolean = false) {
         return raw
     }
 
+    /**
+     * What Reload submits: the page on screen ([url]), or the pending
+     * address if nothing has committed yet.
+     *
+     * A generic ENS load shows its transport (`ipfs://vitalik.eth/p`,
+     * #97), but that scheme is the bar describing the answer, not the
+     * user asserting one — so Reload hands back the override's own
+     * bare form, which [effectiveFetchUrl] maps onto the loaded
+     * manifest, instead of re-submitting the shown string as a
+     * typed-scheme assertion. Typing `ipfs://vitalik.eth` yourself
+     * still asserts.
+     */
+    fun reloadUrl(): String {
+        val shown = url.ifBlank { addressBarText }
+        val o = override ?: return shown
+        if (o.shown != o.prefix && shown.startsWith(o.shown)) {
+            return o.prefix + shown.substring(o.shown.length)
+        }
+        return shown
+    }
+
     /** Tokens the WebView client should not treat as "new" navigations. */
     fun reset() {
         cancelPendingProbe()
@@ -707,6 +768,10 @@ class BrowserState(val id: Long, val private: Boolean = false) {
         canGoBack = false
         canGoForward = false
         override = null
+        nameTrust = null
         thumbnail = null
     }
 }
+
+/** Schemes that, typed in front of a name, assert its transport (#97). */
+private val ASSERTING_SCHEMES = setOf("bzz", "ipfs", "ipns")

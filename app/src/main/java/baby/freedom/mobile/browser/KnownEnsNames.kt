@@ -1,5 +1,6 @@
 package baby.freedom.mobile.browser
 
+import baby.freedom.mobile.ens.EnsTrust
 import java.util.concurrent.ConcurrentHashMap
 
 /**
@@ -7,7 +8,7 @@ import java.util.concurrent.ConcurrentHashMap
  * `<ens name> → <protocol>` mappings, populated every time the ENS resolver
  * returns a `bzz://|ipfs://|ipns://` URI for a name.
  *
- * This is what lets the address bar show `ens://swarm.eth` consistently:
+ * This is what lets the address bar show `bzz://swarm.eth` consistently:
  *  - after navigation under the resolved manifest (handled by
  *    [BrowserState.Override]);
  *  - after tab switches / new-tab loads of a bare `bzz://<hash>`, where no
@@ -27,6 +28,7 @@ object KnownEnsNames {
     private val hashToName = ConcurrentHashMap<String, String>()
     private val nameToProtocol = ConcurrentHashMap<String, String>()
     private val nameToUri = ConcurrentHashMap<String, String>()
+    private val nameToTrust = ConcurrentHashMap<String, EnsTrust>()
 
     private val bzzRegex = Regex("^bzz://([a-fA-F0-9]+)")
     private val ipfsRegex = Regex("^ipfs://([A-Za-z0-9]+)")
@@ -36,10 +38,17 @@ object KnownEnsNames {
      * Extract the `(hash|cid, protocol)` from a resolved [uri] and remember
      * that it was reached via [name]. Safe to call with any URI — unrecognized
      * schemes are ignored.
+     *
+     * [trust] is how the answer was checked (#96) — what the address
+     * bar's trust shield shows for the name (#97, [TrustShield]). No
+     * default, for the reason [baby.freedom.mobile.ens.EnsResult.Ok.trust]
+     * has none: an answer recorded without saying how it was checked
+     * must not come out of here looking verified.
      */
-    fun record(uri: String, name: String) {
+    fun record(uri: String, name: String, trust: EnsTrust) {
         val lowerName = name.lowercase()
         nameToUri[lowerName] = uri
+        nameToTrust[lowerName] = trust
         val (hash, protocol) = rootOf(uri) ?: return
         hashToName[hash] = lowerName
         nameToProtocol[lowerName] = protocol
@@ -73,6 +82,12 @@ object KnownEnsNames {
      */
     fun uriFor(name: String): String? = nameToUri[name.lowercase()]
 
+    /**
+     * How the name's current answer ([uriFor]) was checked — the last
+     * lookup that answered, typed or a document's re-check (#97).
+     */
+    fun trustFor(name: String): EnsTrust? = nameToTrust[name.lowercase()]
+
     fun forget(hashOrCid: String) {
         hashToName.remove(hashOrCid)
         hashToName.remove(hashOrCid.lowercase())
@@ -90,6 +105,7 @@ object KnownEnsNames {
         val lowerName = name.lowercase()
         nameToProtocol.remove(lowerName)
         nameToUri.remove(lowerName)
+        nameToTrust.remove(lowerName)
         val stillNamed = nameToUri.entries.mapNotNull { (other, uri) ->
             rootOf(uri)?.let { it.first to other }
         }.toMap()
@@ -104,5 +120,6 @@ object KnownEnsNames {
         hashToName.clear()
         nameToProtocol.clear()
         nameToUri.clear()
+        nameToTrust.clear()
     }
 }

@@ -118,6 +118,17 @@ internal fun nameResolutionErrorIn(headers: Map<String, String>?): String? =
         ?.firstOrNull { it.key.equals(NAME_RESOLUTION_ERROR_HEADER, ignoreCase = true) }
         ?.value
 
+/**
+ * The trust shield for a document that just committed at [url] (#97):
+ * the recorded check of the name its address shows ([displayUrl]), or
+ * `null` for an [ErrorPage] or a document the interceptor refused
+ * ([NameRefusalSlot]) — neither was served from the name's answer.
+ */
+internal fun committedNameTrust(url: String?, displayUrl: String, refusal: NameRefusalSlot): NameTrust? {
+    if (url == null || ErrorPage.isErrorPage(url) || refusal.isRefused(url)) return null
+    return nameTrustFor(displayUrl)
+}
+
 /** Status for the interceptor's refusal of an ENS document. */
 internal fun statusForNameResolutionError(code: String): Int =
     if (code == "ens_lookup_failed") 502 else 404
@@ -178,8 +189,29 @@ internal fun isDocumentRequest(
  * place, Back and Forward move past it as usual and Reload re-checks
  * the name. No script: the document is on the name's origin.
  */
-internal fun nameResolutionRefusal(name: String, code: String): WebResourceResponse {
+internal fun nameResolutionRefusal(
+    name: String,
+    code: String,
+    assertedProtocol: String? = null,
+): WebResourceResponse {
     val (title, description) = when (code) {
+        // A Reload / Back under a typed `bzz://name.eth` whose name now
+        // points elsewhere (#97): the assertion holds, as it did when
+        // typed — see [Gateways.reverifyEnsDocument].
+        "ens_wrong_protocol" -> {
+            val network = when (assertedProtocol) {
+                "bzz" -> "Swarm"
+                "ipfs" -> "IPFS"
+                "ipns" -> "IPNS"
+                else -> "the network"
+            }
+            val scheme = assertedProtocol?.let { "<code>$it://</code>" } ?: "scheme"
+            "Name lives on a different network" to
+                "This name no longer resolves to $network content, which the $scheme " +
+                "address asks for, so nothing was loaded: Freedom doesn't switch networks " +
+                "behind the address bar. Enter the name on its own to follow wherever it " +
+                "points now."
+        }
         "ens_not_found" -> "No content for this ENS name" to
             "This ENS name doesn't point at any content any more. The owner may " +
             "have removed its <code>contenthash</code> record, or the name has no resolver."
@@ -2224,6 +2256,8 @@ private fun buildRefreshableWebView(
                     }
                     state.title = ""
                     state.progress = -1
+                    // No name behind Home, so no shield (#97).
+                    state.nameTrust = null
                     // No page colour behind Home (#92). A popup's own
                     // blank page keeps the old one until it draws.
                     if (!state.blankIsPage) state.themeColorArgb = null
@@ -2278,6 +2312,11 @@ private fun buildRefreshableWebView(
                     // content it describes.
                     state.addressBarText = uiDisplay
                 }
+                // The trust shield (#97) describes this document's
+                // answer, taken now — the interceptor recorded it before
+                // handing the document over. An error page or a name
+                // refusal was served from no answer, so it has none.
+                state.nameTrust = committedNameTrust(url, state.url, nameRefusal)
                 // Refresh navigation flags here (as well as in
                 // onPageFinished) so the system-back hardware button
                 // works the instant a new page starts loading. If we
@@ -2712,7 +2751,7 @@ private fun buildRefreshableWebView(
                 }
                 val work = state.gatewayWork.start(generation)
                 val response = try {
-                    interceptVirtualRequest(request, ensPins, view)
+                    interceptVirtualRequest(request, ensPins, view, state::assertedProtocolFor)
                 } catch (t: Throwable) {
                     state.gatewayWork.finish(work)
                     throw t
@@ -3776,11 +3815,17 @@ private fun syntheticResponse(
  * [tab] is the requesting tab's WebView (null for a service worker): a
  * cleanup page another tab's hold asks for is served to it only once
  * ([UnverifiedOrigins.takeClearFor]).
+ *
+ * [assertedProtocol] is the requesting tab's typed-scheme assertion for
+ * a name, if its address makes one (#97,
+ * [BrowserState.assertedProtocolFor]); a document re-check holds the
+ * name to it.
  */
 internal fun interceptVirtualRequest(
     request: WebResourceRequest?,
     ensPins: EnsDocumentPins? = null,
     tab: Any? = null,
+    assertedProtocol: (name: String) -> String? = { null },
 ): WebResourceResponse? {
     val req = request ?: return null
     val url = req.url?.toString() ?: return null
@@ -3789,7 +3834,7 @@ internal fun interceptVirtualRequest(
     // user switched away from it (#125): its next document first clears
     // what that gateway's pages left there, before anything else runs.
     val response = siteDataCleanupFor(req, url, tab)
-        ?: interceptVirtualRequestFor(req, ensPins, incoming)
+        ?: interceptVirtualRequestFor(req, ensPins, incoming, assertedProtocol)
     if (incoming != null && response != null &&
         rendersInPlace(response.statusCode, response.mimeType, response.responseHeaders)
     ) {
@@ -3901,6 +3946,7 @@ private fun interceptVirtualRequestFor(
     req: WebResourceRequest,
     ensPins: EnsDocumentPins?,
     incoming: EnsDocumentPins.Page?,
+    assertedProtocol: (name: String) -> String?,
 ): WebResourceResponse? {
     val uri = req.url ?: return null
     val url = uri.toString()
@@ -3965,8 +4011,9 @@ private fun interceptVirtualRequestFor(
         isDocumentRequest(req.isForMainFrame, req.requestHeaders) &&
         (req.isForMainFrame || page?.uriFor(root.name) == null)
     ) {
-        Gateways.reverifyEnsDocument(root.name, ensPins, page)?.let { code ->
-            return nameResolutionRefusal(root.name, code)
+        val asserted = assertedProtocol(root.name)
+        Gateways.reverifyEnsDocument(root.name, ensPins, page, asserted)?.let { code ->
+            return nameResolutionRefusal(root.name, code, asserted)
         }
     }
 

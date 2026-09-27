@@ -1,5 +1,6 @@
 package baby.freedom.mobile.browser
 
+import baby.freedom.mobile.ens.EnsTrust
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -168,11 +169,11 @@ class IpfsProgressTest {
         assertFalse(ipfsLoadFor("https://vitalik-eth.ens.freedom.baby/", current = true))
         assertFalse(ipfsLoadFor("ens://vitalik.eth/", current = false))
 
-        KnownEnsNames.record("ipfs://$cid", "vitalik.eth")
+        KnownEnsNames.record("ipfs://$cid", "vitalik.eth", EnsTrust.ASSUMED)
         assertTrue(ipfsLoadFor("ens://vitalik.eth/", current = false))
         assertTrue(ipfsLoadFor("https://vitalik-eth.ens.freedom.baby/", current = false))
 
-        KnownEnsNames.record("bzz://8f1d385f2493d4bcd4d3b2c1e3c1b8f7d1a09876543210fedcba98765432abcd", "swarm.eth")
+        KnownEnsNames.record("bzz://8f1d385f2493d4bcd4d3b2c1e3c1b8f7d1a09876543210fedcba98765432abcd", "swarm.eth", EnsTrust.ASSUMED)
         assertFalse(ipfsLoadFor("ens://swarm.eth/", current = true))
     }
 
