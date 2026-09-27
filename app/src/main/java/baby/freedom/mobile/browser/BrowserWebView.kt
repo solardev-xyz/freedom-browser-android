@@ -518,10 +518,15 @@ fun BrowserWebViewHost(
                         tab.canGoForward = wv.canGoForward()
                     } else {
                         wv.loadUrl(ABOUT_BLANK)
-                        if (restore.fallbackUrl.isNotBlank()) {
-                            tabs.requestSubmit?.invoke(tab, restore.fallbackUrl)
-                        }
                     }
+                    // Closed before its page committed, the restored
+                    // list ends on the blank entry; without a restore
+                    // the WebView is on it too. Either way the address
+                    // is submitted once that entry has finished — any
+                    // earlier and the blank entry's `onPageFinished`
+                    // wipes the tab's address after the submit, and
+                    // the tab loads behind the home overlay.
+                    tab.submitAfterBlank = if (restored) restore.resubmitUrl else restore.fallbackUrl
                 }
             }
         }
@@ -1432,6 +1437,17 @@ private fun buildRefreshableWebView(
                     // the hijack #54 is about (see
                     // [cancelProbeSupersededBy]).
                     cancelProbeSupersededBy(url)
+                    // A reopened tab waiting on this blank entry to
+                    // submit its address (see [BrowserState.submitAfterBlank]).
+                    // The hook submits as the renderer, which leaves the
+                    // address bar as it is until the page commits — so
+                    // put the address the user had there back first, or
+                    // the tab loads behind the home overlay.
+                    state.submitAfterBlank.takeIf { it.isNotBlank() }?.let {
+                        state.submitAfterBlank = ""
+                        state.addressBarText = it
+                        onSubmitUrl(state, it)
+                    }
                     return
                 }
                 // Dismiss the pull-to-refresh spinner once the page has

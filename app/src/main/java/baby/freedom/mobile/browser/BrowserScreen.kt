@@ -1295,6 +1295,9 @@ fun BrowserScreen(
             repo = repo,
             ipfsInfo = ipfsInfo,
             onIpfsToggle = onIpfsToggle,
+            // The reopen stack keeps closed tabs' pages, titles and
+            // back/forward lists — history by any other name.
+            onClearHistory = { tabs.forgetClosedTabs() },
             onClearWebViewData = {
                 // Closed tabs carry their saved back/forward history.
                 tabs.forgetClosedTabs()

@@ -93,14 +93,33 @@ class TabsStateTest {
     }
 
     @Test
-    fun `closing the last tab can still be undone`() {
+    fun `undoing the close of the last tab replaces the blank tab put in its place`() {
         val tabs = TabsState(homepage = HOME_URL)
         tabs.tabs[0].visit("a")
         tabs.closeTab(0)
         assertEquals(listOf(""), tabs.titles) // fresh home tab
         tabs.reopenClosedTab()
-        assertEquals(listOf("a", ""), tabs.titles)
+        assertEquals(listOf("a"), tabs.titles)
         assertEquals("a", tabs.active.title)
+    }
+
+    @Test
+    fun `the replacement tab is kept once it has been used`() {
+        val tabs = TabsState(homepage = HOME_URL)
+        tabs.tabs[0].visit("a")
+        tabs.closeTab(0)
+        tabs.tabs[0].visit("b")
+        tabs.reopenClosedTab()
+        assertEquals(listOf("a", "b"), tabs.titles)
+
+        // Only the replacement of *that* close: an ordinary blank tab
+        // opened later stays.
+        val other = TabsState(homepage = HOME_URL)
+        other.tabs[0].visit("a")
+        other.newTab()
+        other.closeTab(0)
+        other.reopenClosedTab()
+        assertEquals(listOf("a", ""), other.titles)
     }
 
     @Test
@@ -109,6 +128,68 @@ class TabsStateTest {
         tabs.newTab() // still on the home overlay
         tabs.closeTab(3)
         assertFalse(tabs.canReopenClosedTab)
+    }
+
+    @Test
+    fun `a tab closed before its first page committed comes back loading it`() {
+        val tabs = threeTabs()
+        val pending = tabs.newTab()
+        pending.addressBarText = "https://d.example/" // submitted, not committed
+        tabs.closeTab(3)
+        assertTrue(tabs.canReopenClosedTab)
+        val reopened = tabs.reopenClosedTab()!!
+        assertEquals("https://d.example/", reopened.addressBarText)
+        assertEquals("https://d.example/", reopened.pendingRestore?.fallbackUrl)
+        assertEquals("https://d.example/", reopened.pendingRestore?.resubmitUrl)
+    }
+
+    @Test
+    fun `a tab sent home after browsing is remembered for its history`() {
+        val tabs = threeTabs()
+        tabs.switchTo(1)
+        tabs.active.apply {
+            url = ""
+            title = ""
+            addressBarText = ""
+            canGoBack = true
+        }
+        tabs.closeTab(1)
+        assertTrue(tabs.canReopenClosedTab)
+        val reopened = tabs.reopenClosedTab()!!
+        assertTrue(reopened.isHome)
+        assertNotNull(reopened.pendingRestore)
+        // Nothing to submit on top: the restored list ends on home.
+        assertEquals("", reopened.pendingRestore?.resubmitUrl)
+    }
+
+    @Test
+    fun `a committed tab is restored without a resubmit`() {
+        val tabs = threeTabs()
+        tabs.closeTab(1)
+        assertEquals("", tabs.reopenClosedTab()?.pendingRestore?.resubmitUrl)
+    }
+
+    @Test
+    fun `move actions offer only moves that go somewhere`() {
+        assertEquals(emptyList<Pair<String, Int>>(), tabMoveTargets(0, 1))
+        assertEquals(listOf("Move tab later" to 1), tabMoveTargets(0, 2))
+        assertEquals(
+            listOf("Move tab later" to 1, "Move tab to end" to 3),
+            tabMoveTargets(0, 4),
+        )
+        assertEquals(
+            listOf(
+                "Move tab earlier" to 1,
+                "Move tab to start" to 0,
+                "Move tab later" to 3,
+            ),
+            tabMoveTargets(2, 4),
+        )
+        assertEquals(
+            listOf("Move tab earlier" to 2, "Move tab to start" to 0),
+            tabMoveTargets(3, 4),
+        )
+        assertEquals(emptyList<Pair<String, Int>>(), tabMoveTargets(4, 4))
     }
 
     @Test

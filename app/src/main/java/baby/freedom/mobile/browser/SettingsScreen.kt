@@ -76,6 +76,7 @@ fun SettingsScreen(
     repo: BrowsingRepository,
     ipfsInfo: IpfsInfo,
     onIpfsToggle: (Boolean) -> Unit,
+    onClearHistory: () -> Unit,
     onClearWebViewData: () -> Unit,
     onDismiss: () -> Unit,
 ) {
@@ -142,6 +143,7 @@ fun SettingsScreen(
             confirmLabel = "Clear history",
             onConfirm = {
                 repo.clearHistory()
+                onClearHistory()
                 confirmClearHistory = false
             },
             onDismiss = { confirmClearHistory = false },

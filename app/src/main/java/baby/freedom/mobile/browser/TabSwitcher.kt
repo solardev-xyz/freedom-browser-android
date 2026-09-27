@@ -59,6 +59,9 @@ import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.semantics.CustomAccessibilityAction
+import androidx.compose.ui.semantics.customActions
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -184,9 +187,34 @@ fun TabSwitcherScreen(
                         onDismiss()
                     },
                     onClose = { tabs.closeTab(index) },
+                    // The drag has no TalkBack equivalent, so the same
+                    // moves are offered as accessibility actions.
+                    moveActions = tabMoveTargets(index, tabs.tabs.size).map { (label, to) ->
+                        CustomAccessibilityAction(label) {
+                            tabs.moveTab(index, to)
+                            true
+                        }
+                    },
                 )
             }
         }
+    }
+}
+
+/**
+ * The accessibility actions that move the tab at [index] in a list of
+ * [count] tabs, as (label, target index) — the non-gesture way to do
+ * what dragging a card does. Only moves that go somewhere are listed.
+ */
+internal fun tabMoveTargets(index: Int, count: Int): List<Pair<String, Int>> = buildList {
+    if (index !in 0 until count) return@buildList
+    if (index > 0) {
+        add("Move tab earlier" to index - 1)
+        if (index > 1) add("Move tab to start" to 0)
+    }
+    if (index < count - 1) {
+        add("Move tab later" to index + 1)
+        if (index < count - 2) add("Move tab to end" to count - 1)
     }
 }
 
@@ -382,6 +410,7 @@ private fun TabCard(
     onClick: () -> Unit,
     onClose: () -> Unit,
     modifier: Modifier = Modifier,
+    moveActions: List<CustomAccessibilityAction> = emptyList(),
 ) {
     val borderColor = if (isActive) {
         MaterialTheme.colorScheme.primary
@@ -401,7 +430,8 @@ private fun TabCard(
                 color = borderColor,
                 shape = MaterialTheme.shapes.large,
             )
-            .clickable { onClick() },
+            .clickable { onClick() }
+            .semantics { if (moveActions.isNotEmpty()) customActions = moveActions },
     ) {
         Row(
             modifier = Modifier

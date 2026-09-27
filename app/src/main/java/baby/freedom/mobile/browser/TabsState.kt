@@ -104,6 +104,12 @@ class TabsState(
         val webViewState: Bundle?,
     )
 
+    /**
+     * The blank tab [closeTab] created because the last tab was closed,
+     * so [reopenClosedTab] can drop it again if it was never used.
+     */
+    private var lastTabReplacementId: Long? = null
+
     /** Most recently closed last. Capped at [MAX_CLOSED_TABS]. */
     private val closedTabs = mutableStateListOf<ClosedTab>()
 
@@ -223,7 +229,7 @@ class TabsState(
         rememberClosed(index)
         tabs.removeAt(index)
         if (tabs.isEmpty()) {
-            tabs.add(newBlankTab())
+            tabs.add(newBlankTab().also { lastTabReplacementId = it.id })
             activeIndex = 0
             return
         }
@@ -232,13 +238,17 @@ class TabsState(
     }
 
     /**
-     * Push the tab at [index] onto the reopen stack. The home overlay
-     * isn't worth bringing back (the same rule as desktop's
-     * Ctrl+Shift+T stack): a tab with nothing committed is skipped.
+     * Push the tab at [index] onto the reopen stack. Only a tab with
+     * nothing in it is skipped (the same rule as desktop's Ctrl+Shift+T
+     * stack): the home overlay with no back/forward history and nothing
+     * submitted. A tab closed before its first page committed (an
+     * address submitted, `url` still blank) is kept and comes back
+     * loading that address; a tab sent Home after browsing is kept for
+     * its history.
      */
     private fun rememberClosed(index: Int) {
         val tab = tabs[index]
-        if (tab.url.isBlank()) return
+        if (tab.isHome && !tab.canGoBack && !tab.canGoForward) return
         closedTabs.add(
             ClosedTab(
                 index = index,
@@ -272,8 +282,19 @@ class TabsState(
             pendingRestore = BrowserState.PendingRestore(
                 webViewState = closed.webViewState,
                 fallbackUrl = closed.addressBarText.ifBlank { closed.url },
+                // Closed before its page committed: the saved state
+                // ends on the blank entry, so submit the address again.
+                resubmitUrl = closed.addressBarText.takeIf { closed.url.isBlank() }.orEmpty(),
             )
         }
+        // Undoing the close of the last tab: the blank tab [closeTab]
+        // put in its place was only there so the list isn't empty. If
+        // it's still untouched, the reopened tab takes its place.
+        val placeholder = tabs.indexOfFirst {
+            it.id == lastTabReplacementId && it.isUntouched()
+        }
+        if (placeholder >= 0) tabs.removeAt(placeholder)
+        lastTabReplacementId = null
         val at = closed.index.coerceIn(0, tabs.size)
         if (tabs.isNotEmpty()) captureActiveThumbnail?.invoke()
         tabs.add(at, tab)
@@ -281,10 +302,15 @@ class TabsState(
         return tab
     }
 
+    /** Still the fresh home overlay it was created as. */
+    private fun BrowserState.isUntouched(): Boolean =
+        isHome && !canGoBack && !canGoForward && !resolving && progress < 0
+
     /**
      * Forget every closed tab. Their saved WebView state carries
-     * back/forward history, so "clear browsing data" has to drop it
-     * along with the live tabs' history.
+     * back/forward history (and the entries keep page titles, URLs and
+     * thumbnails), so both "Clear history" and "Clear cookies & site
+     * data" drop it.
      */
     fun forgetClosedTabs() {
         closedTabs.clear()

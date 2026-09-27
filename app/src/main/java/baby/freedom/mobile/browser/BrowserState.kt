@@ -110,14 +110,28 @@ class BrowserState(val id: Long) {
 
     /**
      * What a tab brought back by [TabsState.reopenClosedTab] should be
-     * rebuilt from: the closed WebView's saved state, and the URL to
-     * submit afresh if that state can't be restored. Consumed (and
-     * cleared) by [BrowserWebViewHost] when it creates this tab's
-     * WebView; null for every other tab.
+     * rebuilt from: the closed WebView's saved state, the URL to
+     * submit afresh if that state can't be restored, and — for a tab
+     * closed before its page committed — the address to submit even
+     * after a successful restore ([resubmitUrl], blank otherwise).
+     * Consumed (and cleared) by [BrowserWebViewHost] when it creates
+     * this tab's WebView; null for every other tab.
      */
-    class PendingRestore(val webViewState: Bundle?, val fallbackUrl: String)
+    class PendingRestore(
+        val webViewState: Bundle?,
+        val fallbackUrl: String,
+        val resubmitUrl: String = "",
+    )
 
     internal var pendingRestore: PendingRestore? = null
+
+    /**
+     * An address to submit once the WebView's blank home entry has
+     * finished loading: set by [BrowserWebViewHost] for a reopened tab
+     * whose restored (or unrestorable) state leaves it on that entry,
+     * consumed by the entry's `onPageFinished`. Blank otherwise.
+     */
+    internal var submitAfterBlank: String = ""
 
     /**
      * Compact-on-scroll state of the floating capsule for this tab.
