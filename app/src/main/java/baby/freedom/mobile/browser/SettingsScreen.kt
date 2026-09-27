@@ -685,7 +685,10 @@ private fun AboutSection(visible: Set<Any>, version: String) {
                 )
             }
         }
-        if ("app" in visible && visible.size > 1) Spacer(Modifier.height(8.dp))
+        // Spaced off the detail rows only; the blurb adds its own spacer.
+        if ("app" in visible && ("version" in visible || "package" in visible)) {
+            Spacer(Modifier.height(8.dp))
+        }
         if ("version" in visible) DetailRow("Version", version)
         if ("package" in visible) DetailRow("Package", context.packageName, mono = true)
         if ("blurb" in visible) {
@@ -758,14 +761,14 @@ private const val ROUTING_MODE_HELPER =
  * describe the switch), and the routing-mode picker with every mode it
  * offers and its helper line.
  */
-private fun ipfsRows(info: IpfsInfo) = listOf(
+internal fun ipfsRows(info: IpfsInfo) = listOf(
     settingsRow(
         "status",
         "IPFS",
         ipfsStatusTriple(info).label,
         // The details [IpfsSection] lists under the switch.
         *(if (info.gatewayUrl.isNotBlank()) arrayOf(
-            "Blocks fetched",
+            "Blocks fetched", info.connectedPeers.toString(),
             "Gateway", info.gatewayUrl,
             "Client", info.clientVersion.takeIf { it.isNotBlank() }?.let { "freedom-ipfs/$it" },
         ) else emptyArray()),

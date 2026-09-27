@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.systemBars
 import androidx.compose.foundation.layout.windowInsetsPadding
@@ -71,7 +72,12 @@ internal fun FullScreenScaffold(
             }
         }
 
-        Box(modifier = Modifier.fillMaxSize()) {
+        // The activity is edge-to-edge with adjustResize, so the keyboard
+        // doesn't shrink this window by itself: pad the body by the IME
+        // inset (less the navigation bar the root already consumed) so a
+        // page with a text field, like Settings search, can scroll its
+        // last rows above the keyboard.
+        Box(modifier = Modifier.fillMaxSize().imePadding()) {
             content()
         }
     }

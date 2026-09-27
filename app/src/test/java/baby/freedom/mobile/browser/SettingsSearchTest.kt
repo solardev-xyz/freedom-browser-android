@@ -1,5 +1,7 @@
 package baby.freedom.mobile.browser
 
+import baby.freedom.swarm.IpfsInfo
+import baby.freedom.swarm.IpfsStatus
 import org.junit.Assert.assertEquals
 import org.junit.Test
 
@@ -64,5 +66,15 @@ class SettingsSearchTest {
     @Test
     fun `keeps row order`() {
         assertEquals(listOf("history", "bookmarks", "site-data"), visible("c").toList())
+    }
+
+    @Test
+    fun `ipfs blocks fetched value is searchable`() {
+        val info = IpfsInfo(
+            status = IpfsStatus.Running,
+            connectedPeers = 4217L,
+            gatewayUrl = "http://127.0.0.1:58312",
+        )
+        assertEquals(setOf("status"), visibleSettingsRows("4217", "IPFS", ipfsRows(info)))
     }
 }
