@@ -46,6 +46,7 @@ interceptor answers first. Label encoding (source of truth:
 | Absolute-root URLs (`/_next/static/…`-style) resolve under the content root — no rewrite heuristics involved | same test |
 | Per-root storage isolation (localStorage/IndexedDB invisible across roots) | `VirtualOriginContractTest.storageWrittenUnderRootAIsInvisibleUnderRootB` |
 | ENS sites keep storage across contenthash updates (origin derives from the *name*) | `VirtualOriginContractTest.ensSiteKeepsStorageAcrossAContenthashUpdate` |
+| Back / Forward to an ENS site re-resolve the name and serve its current content, never the first visit's answer; a name that no longer resolves gets the ENS error page | `VirtualOriginContractTest.backAndForwardReResolveAnEnsNameInsteadOfRestoringTheFirstAnswer`, `VirtualOriginContractTest.forwardToAnEnsNameThatNoLongerResolvesIsRefused` |
 | Same-origin `fetch()` / XHR works | `VirtualOriginContractTest.sameOriginFetchWorks` |
 | Cross-root reads succeed (CORS: `Access-Control-Allow-Origin: *`, preflights answered locally) | `VirtualOriginContractTest.crossRootFetchSucceedsUnderThePermissiveCorsPolicy` |
 | Secure context (https origin — crypto.subtle, SW eligibility, etc.) | implied by every test running on `https://…` origins |

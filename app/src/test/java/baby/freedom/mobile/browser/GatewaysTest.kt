@@ -1,8 +1,10 @@
 package baby.freedom.mobile.browser
 
+import baby.freedom.mobile.ens.EnsResult
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -111,6 +113,61 @@ class GatewaysTest {
             )
         } finally {
             KnownEnsNames.clear()
+        }
+    }
+
+    private val otherRef = "1111111111111111111111111111111111111111111111111111111111111111"
+
+    private fun withLookup(answer: (String) -> EnsResult, block: () -> Unit) {
+        val real = Gateways.ensLookup
+        Gateways.ensLookup = answer
+        try {
+            block()
+        } finally {
+            Gateways.ensLookup = real
+            KnownEnsNames.clear()
+        }
+    }
+
+    @Test
+    fun `reverifyEnsDocument replaces the first visit's answer with the current one`() {
+        // First visit recorded ref64; the name has since moved on.
+        KnownEnsNames.record("bzz://$ref64", "swarm.eth")
+        val lookups = mutableListOf<String>()
+        withLookup({ name ->
+            lookups += name
+            EnsResult.Ok(name, "bzz", "bzz://$otherRef", otherRef)
+        }) {
+            assertNull(Gateways.reverifyEnsDocument("swarm.eth"))
+            assertEquals(listOf("swarm.eth"), lookups)
+            // The registry — what the document and its subresources are
+            // served from — now follows the fresh answer.
+            assertEquals("bzz://$otherRef", KnownEnsNames.uriFor("swarm.eth"))
+            assertEquals(
+                "http://127.0.0.1:1633/bzz/$otherRef/p",
+                Gateways.gatewayUrlFor(ContentRoot.Ens("swarm.eth"), "/p"),
+            )
+        }
+    }
+
+    @Test
+    fun `reverifyEnsDocument refuses a name that no longer resolves`() {
+        KnownEnsNames.record("bzz://$ref64", "swarm.eth")
+        withLookup({ EnsResult.NotFound(it, "NO_CONTENTHASH") }) {
+            assertEquals("ens_not_found", Gateways.reverifyEnsDocument("swarm.eth"))
+            // Left alone: the refusal is the document's, not other tabs'.
+            assertEquals("bzz://$ref64", KnownEnsNames.uriFor("swarm.eth"))
+        }
+    }
+
+    @Test
+    fun `reverifyEnsDocument does not fall back to the old answer when the lookup fails`() {
+        KnownEnsNames.record("bzz://$ref64", "swarm.eth")
+        withLookup({ EnsResult.Error(it, "PROVIDER_ERROR", "down", retryable = true) }) {
+            assertEquals("ens_lookup_failed", Gateways.reverifyEnsDocument("swarm.eth"))
+        }
+        withLookup({ EnsResult.Unsupported(it, "0xe5", "") }) {
+            assertEquals("ens_unsupported_codec", Gateways.reverifyEnsDocument("swarm.eth"))
         }
     }
 

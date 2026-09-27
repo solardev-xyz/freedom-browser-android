@@ -47,6 +47,15 @@ object Gateways {
     val ensResolver: EnsResolver by lazy { EnsResolver() }
 
     /**
+     * Blocking ENS lookup used by the request interceptor. A seam so the
+     * instrumented WebView suite can answer for a fixture name without
+     * reaching a real RPC; production always goes through [ensResolver].
+     */
+    @Volatile
+    internal var ensLookup: (String) -> EnsResult =
+        { name -> runBlocking { ensResolver.resolveContenthash(name) } }
+
+    /**
      * Rewrite a user-facing URL (`bzz://` / `ipfs://` / `ipns://` /
      * `ens://`) to what the WebView should load: the per-root virtual
      * https origin. Ids that can't be label-encoded (malformed refs)
@@ -126,11 +135,48 @@ object Gateways {
         KnownEnsNames.uriFor(name)?.let { uri ->
             VirtualOrigin.parseContentUrl(uri)?.let { return it.first }
         }
-        val result = runBlocking { ensResolver.resolveContenthash(name) }
+        val result = ensLookup(name)
         if (result is EnsResult.Ok) {
             KnownEnsNames.record(result.uri, name)
             return VirtualOrigin.parseContentUrl(result.uri)?.first
         }
         return null
     }
+
+    /**
+     * Resolve [name] again for a main-frame document on its
+     * `<name>.ens.…` host, and make the session registry follow the
+     * answer (#99).
+     *
+     * The registry is what [gatewayUrlFor] serves a name from, and only
+     * the submit flow ever wrote it — so Back / Forward (the bar, the
+     * system gesture, a page's own `history.back()`), which restore a
+     * history entry without going through submit, used to serve the
+     * page from whatever the name resolved to when it was first
+     * visited, however long ago. Every document load now takes the same
+     * lookup a typed navigation does: the resolver's answer, subject to
+     * the resolver's own freshness rules and nothing older. Subresources
+     * keep the registry hot path; they belong to a document that was
+     * just checked.
+     *
+     * Returns `null` when the name resolved to loadable content (the
+     * registry now holds it), or the [ErrorPage] code for the page the
+     * user should see instead. A failure leaves the registry untouched:
+     * other tabs on the name keep their subresources, and the failed
+     * history entry is what Reload retries.
+     */
+    fun reverifyEnsDocument(name: String): String? =
+        when (val result = ensLookup(name)) {
+            is EnsResult.Ok -> {
+                if (VirtualOrigin.parseContentUrl(result.uri) == null) {
+                    "ens_unsupported_codec"
+                } else {
+                    KnownEnsNames.record(result.uri, name)
+                    null
+                }
+            }
+            is EnsResult.NotFound -> "ens_not_found"
+            is EnsResult.Unsupported -> "ens_unsupported_codec"
+            is EnsResult.Error -> "ens_lookup_failed"
+        }
 }

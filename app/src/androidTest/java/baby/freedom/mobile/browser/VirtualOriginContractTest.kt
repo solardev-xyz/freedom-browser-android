@@ -3,6 +3,7 @@ package baby.freedom.mobile.browser
 import android.webkit.CookieManager
 import android.webkit.WebStorage
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import baby.freedom.mobile.ens.EnsResult
 import androidx.test.platform.app.InstrumentationRegistry
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -31,11 +32,30 @@ class VirtualOriginContractTest {
     private val originA = VirtualOrigin.toVirtualUrl("bzz://${FixtureGateway.REF_A}")!!
     private val originB = VirtualOrigin.toVirtualUrl("bzz://${FixtureGateway.REF_B}")!!
 
+    private val realEnsLookup = Gateways.ensLookup
+
+    /**
+     * What `testdapp.eth` resolves to right now — the fixture's stand-in
+     * for the name's on-chain contenthash. `null` = no contenthash.
+     */
+    @Volatile
+    private var testdappContent: String? = null
+    private val ensLookups = java.util.concurrent.atomic.AtomicInteger(0)
+
     @Before
     fun setUp() {
         gateway.start()
         harness.setUp()
         KnownEnsNames.clear()
+        Gateways.ensLookup = { name ->
+            ensLookups.incrementAndGet()
+            val ref = testdappContent
+            if (name == "testdapp.eth" && ref != null) {
+                EnsResult.Ok(name, "bzz", "bzz://$ref", ref)
+            } else {
+                EnsResult.NotFound(name, "NO_CONTENTHASH")
+            }
+        }
         clearWebStorage()
     }
 
@@ -44,6 +64,7 @@ class VirtualOriginContractTest {
         harness.tearDown()
         gateway.shutdown()
         KnownEnsNames.clear()
+        Gateways.ensLookup = realEnsLookup
     }
 
     private fun clearWebStorage() {
@@ -75,7 +96,7 @@ class VirtualOriginContractTest {
     @Test
     fun ensSiteKeepsStorageAcrossAContenthashUpdate() {
         // The name resolves to root A…
-        KnownEnsNames.record("bzz://${FixtureGateway.REF_A}", "testdapp.eth")
+        testdappContent = FixtureGateway.REF_A
         val ensUrl = VirtualOrigin.toVirtualUrl("ens://testdapp.eth")!!
         harness.load(ensUrl)
         harness.awaitJsTrue("window.results && window.results.loaded === true")
@@ -83,13 +104,72 @@ class VirtualOriginContractTest {
         harness.js("localStorage.setItem('kept', 'yes')")
 
         // …the site publishes an update (contenthash now points at B)…
-        KnownEnsNames.record("bzz://${FixtureGateway.REF_B}", "testdapp.eth")
+        testdappContent = FixtureGateway.REF_B
         harness.load(ensUrl)
         harness.awaitJsTrue("window.results && window.results.loaded === true")
 
         // …new content, same name-derived origin, same storage.
         assertEquals("\"VERSION_B\"", harness.js("document.getElementById('version').textContent"))
         assertEquals("\"yes\"", harness.js("localStorage.getItem('kept')"))
+    }
+
+    // ------------------------------------------------------------------
+    // Back / Forward re-check the name (#99)
+    // ------------------------------------------------------------------
+
+    @Test
+    fun backAndForwardReResolveAnEnsNameInsteadOfRestoringTheFirstAnswer() {
+        val ensUrl = VirtualOrigin.toVirtualUrl("ens://testdapp.eth")!!
+        testdappContent = FixtureGateway.REF_A
+        harness.load(ensUrl)
+        harness.awaitJsTrue("window.results && window.results.loaded === true")
+        assertEquals("\"VERSION_A\"", harness.js("document.getElementById('version').textContent"))
+
+        // Leave the name, and while away it moves to B.
+        harness.load(originB)
+        harness.awaitJsTrue("window.results && window.results.loaded === true")
+        testdappContent = FixtureGateway.REF_B
+        val before = ensLookups.get()
+
+        // Back to the name's history entry: the document is fetched
+        // from the name's *current* answer, not the one recorded when
+        // it was first visited.
+        harness.goBack()
+        assertEquals(ensUrl, harness.js("location.href").trim('"'))
+        harness.awaitJsTrue("window.results && window.results.loaded === true")
+        assertEquals("\"VERSION_B\"", harness.js("document.getElementById('version').textContent"))
+        assertTrue("Back looked the name up", ensLookups.get() > before)
+
+        // Forward away and Back again after it moves once more: same.
+        harness.goForward()
+        harness.awaitJsTrue("window.results && window.results.loaded === true")
+        testdappContent = FixtureGateway.REF_A
+        harness.goBack()
+        harness.awaitJsTrue("window.results && window.results.loaded === true")
+        assertEquals("\"VERSION_A\"", harness.js("document.getElementById('version').textContent"))
+    }
+
+    @Test
+    fun forwardToAnEnsNameThatNoLongerResolvesIsRefused() {
+        val ensUrl = VirtualOrigin.toVirtualUrl("ens://testdapp.eth")!!
+        harness.load(originA)
+        harness.awaitJsTrue("window.results && window.results.loaded === true")
+        testdappContent = FixtureGateway.REF_B
+        harness.load(ensUrl)
+        harness.awaitJsTrue("window.results && window.results.loaded === true")
+        harness.goBack()
+        harness.awaitJsTrue("window.results && window.results.loaded === true")
+
+        // The name loses its contenthash; Forward must not serve B from
+        // the answer recorded on the first visit.
+        testdappContent = null
+        harness.goForward()
+        assertEquals(404, harness.lastHttpError.get())
+        assertEquals(
+            "ens_not_found",
+            errorCodeForMainFrameHttpError(404, harness.lastHttpErrorHeaders.get()),
+        )
+        assertFalse(harness.js("document.body.innerText").contains("VERSION_B"))
     }
 
     // ------------------------------------------------------------------

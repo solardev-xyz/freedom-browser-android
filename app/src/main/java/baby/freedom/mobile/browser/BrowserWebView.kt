@@ -74,7 +74,39 @@ private const val LOG_TAG = "BrowserWebView"
 private val HEADERS_TO_STRIP = setOf(
     "transfer-encoding", "content-encoding", "connection", "keep-alive",
     "set-cookie", "set-cookie2",
+    // Ours alone to set: a gateway response carrying it would pick the
+    // error page the user sees (see [errorCodeForMainFrameHttpError]).
+    NAME_RESOLUTION_ERROR_HEADER.lowercase(),
 )
+
+/**
+ * Header on the interceptor's synthetic answer to a main-frame
+ * `<name>.ens.…` document whose name no longer resolves to loadable
+ * content (#99). Carries the [ErrorPage] code, so `onReceivedHttpError`
+ * can say what went wrong instead of guessing from the status. Only
+ * ever on a response that is replaced by the error page before the
+ * page could read it.
+ */
+internal const val NAME_RESOLUTION_ERROR_HEADER = "X-Name-Resolution-Error"
+
+/**
+ * [ErrorPage] code for a main-frame HTTP error on a dweb page: the code
+ * the interceptor named in [NAME_RESOLUTION_ERROR_HEADER] if it refused
+ * the document itself, otherwise the status's usual reading — a
+ * synthesized 502 is the gateway socket being gone, anything else is
+ * content the gateway couldn't find.
+ */
+internal fun errorCodeForMainFrameHttpError(status: Int, headers: Map<String, String>?): String {
+    headers?.entries
+        ?.firstOrNull { it.key.equals(NAME_RESOLUTION_ERROR_HEADER, ignoreCase = true) }
+        ?.value
+        ?.let { return it }
+    return if (status == 502) "ERR_CONNECTION_REFUSED" else "swarm_content_not_found"
+}
+
+/** Status for the interceptor's refusal of an ENS document. */
+internal fun statusForNameResolutionError(code: String): Int =
+    if (code == "ens_lookup_failed") 502 else 404
 
 // Request headers we never forward upstream — either managed by
 // `HttpURLConnection` itself or carrying state tied to the WebView's
@@ -1584,8 +1616,7 @@ private fun buildRefreshableWebView(
                 // gateway socket itself is gone (node not running).
                 val display = displayFor(failed, state).ifBlank { failed }
                 val errorCode =
-                    if (status == 502) "ERR_CONNECTION_REFUSED"
-                    else "swarm_content_not_found"
+                    errorCodeForMainFrameHttpError(status, errorResponse?.responseHeaders)
                 val page = ErrorPage.url(
                     errorCode = errorCode,
                     displayUrl = display,
@@ -2053,6 +2084,19 @@ internal fun interceptVirtualRequest(
             "Virtual dweb origins are read-only (GET/HEAD). " +
                 "Send writes to the node API at ${Gateways.SWARM_BASE}.",
         )
+    }
+
+    // A document on a name-derived origin re-checks the name first —
+    // Back / Forward included, which restore the history entry without
+    // going through submit (#99, see [Gateways.reverifyEnsDocument]).
+    if (root is ContentRoot.Ens && req.isForMainFrame) {
+        Gateways.reverifyEnsDocument(root.name)?.let { code ->
+            return syntheticResponse(
+                statusForNameResolutionError(code), "Name Resolution Failed",
+                "${root.name} did not resolve to loadable content ($code).",
+                extraHeaders = mapOf(NAME_RESOLUTION_ERROR_HEADER to code),
+            )
+        }
     }
 
     val target = Gateways.gatewayUrlFor(root, pathAndQuery)
