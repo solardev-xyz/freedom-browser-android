@@ -201,4 +201,65 @@ class DownloadRequestTest {
     fun `a pending navigation still resolving can't be the download`() {
         assertEquals(false, downloadEndsPendingNavigation("swarm.eth", "bzz://abc", resolving = true, downloadIsNavigationResponse = true))
     }
+
+    // ------------------------------------------------------------------
+    // downloadRefererOrigin / downloadReferer
+    // ------------------------------------------------------------------
+
+    @Test
+    fun `only the page's origin is kept, never its path or query`() {
+        assertEquals(
+            "https://mail.example.com/",
+            downloadRefererOrigin("https://user:pw@Mail.Example.com:443/inbox/msg?id=123&token=abc#top"),
+        )
+        assertEquals("http://h.example:8080/", downloadRefererOrigin("http://h.example:8080/a"))
+    }
+
+    @Test
+    fun `no origin for home, about, data or virtual dweb pages`() {
+        assertNull(downloadRefererOrigin(null))
+        assertNull(downloadRefererOrigin(""))
+        assertNull(downloadRefererOrigin("about:blank"))
+        assertNull(downloadRefererOrigin("data:text/plain,hi"))
+        assertNull(downloadRefererOrigin(VirtualOrigin.toVirtualUrl("bzz://$ref/index.html")))
+    }
+
+    @Test
+    fun `same-origin request gets the bare origin`() {
+        val origin = downloadRefererOrigin("https://mail.example.com/inbox/msg?id=123&token=abc")
+        assertEquals("https://mail.example.com/", downloadReferer(origin, "https://mail.example.com/att/1.pdf"))
+        assertEquals("https://mail.example.com/", downloadReferer(origin, "https://MAIL.example.com:443/x"))
+    }
+
+    @Test
+    fun `cross-origin request gets no referer`() {
+        val origin = downloadRefererOrigin("https://mail.example.com/inbox/msg?id=123&token=abc")
+        assertNull(downloadReferer(origin, "https://files.other.net/tool.zip"))
+        assertNull(downloadReferer(origin, "https://cdn.mail.example.com/tool.zip"))
+        assertNull(downloadReferer(origin, "https://mail.example.com:8443/tool.zip"))
+    }
+
+    @Test
+    fun `https to http downgrade gets no referer, even on the same host`() {
+        val origin = downloadRefererOrigin("https://mail.example.com/inbox")
+        assertNull(downloadReferer(origin, "http://files.other.net/tool.zip"))
+        assertNull(downloadReferer(origin, "http://mail.example.com/tool.zip"))
+    }
+
+    @Test
+    fun `referer is re-decided per redirect hop`() {
+        val origin = downloadRefererOrigin("https://site.example/downloads")
+        val hops = listOf(
+            "https://site.example/get?id=1",
+            "https://storage.cdn.example/signed?sig=x",
+            "http://site.example/final.zip",
+        )
+        assertEquals(listOf("https://site.example/", null, null), hops.map { downloadReferer(origin, it) })
+    }
+
+    @Test
+    fun `a typed navigation (no page) sends no referer`() {
+        assertNull(downloadReferer(downloadRefererOrigin(null), "https://files.other.net/tool.zip"))
+        assertNull(downloadReferer(null, "https://mail.example.com/x"))
+    }
 }

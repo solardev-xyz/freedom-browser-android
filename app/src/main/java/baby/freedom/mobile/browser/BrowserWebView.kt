@@ -1216,41 +1216,50 @@ private fun buildRefreshableWebView(
         val pendingNavigationUrls = java.util.Collections.synchronizedSet(LinkedHashSet<String>())
 
         setDownloadListener { url, userAgent, contentDisposition, mimeType, contentLength ->
+            // A download that is the response of a main-frame navigation
+            // since the last commit (the typed URL or a redirect hop).
+            // That navigation is over either way — it *became* the
+            // download — so its URLs go, and can't make a later download
+            // of the same URL look like a navigation's (a link that
+            // turned into a download leaves the tab committed, so
+            // nothing else would clear them).
+            val wasPending = pendingNavigationUrls.remove(url)
+            if (wasPending) pendingNavigationUrls.clear()
+            // A main-frame navigation that turned out to be a file never
+            // commits: no onPageStarted, no final progress callback. Left
+            // alone, the capsule keeps the typed address, the progress
+            // trace and Stop over the previous page for good. That load
+            // is over, so clear the busy chrome the way Stop does and
+            // put the label back on the page that is actually on
+            // screen. Unlike Stop, a blank committed address wins too
+            // (the download started from home): the request was served,
+            // so there's nothing left to keep the typed address for, and
+            // home comes back instead of a blank page under a label for
+            // a file.
+            //
+            // Only a download *of* that navigation, though: one the
+            // committed page starts meanwhile (a "your download begins in
+            // 5 s" timer) has a URL the pending navigation never
+            // requested, and leaves it loading.
+            val endsTypedNavigation = downloadEndsPendingNavigation(
+                committedUrl = state.url,
+                addressBarText = state.addressBarText,
+                resolving = state.resolving,
+                // A typed `data:` URL is never seen by the request
+                // hooks; it is the address itself.
+                downloadIsNavigationResponse = wasPending || url == state.addressBarText,
+            )
             DownloadManager.get(context).start(
                 url = url,
                 userAgent = userAgent,
                 contentDisposition = contentDisposition,
                 mimeType = mimeType,
                 contentLength = contentLength,
-                pageUrl = this.url,
+                // An address the user submitted has no referrer — the
+                // page on screen had nothing to do with it.
+                pageUrl = if (endsTypedNavigation) null else this.url,
             )
-            // A main-frame navigation that turned out to be a file never
-            // commits: no onPageStarted, no final progress callback. Left
-            // alone, the capsule keeps the typed address, the progress
-            // trace and Stop over the previous page for good. That load
-            // is over — it *became* the download — so clear the busy
-            // chrome the way Stop does and put the label back on the page
-            // that is actually on screen. Unlike Stop, a blank committed
-            // address wins too (the download started from home): the
-            // request was served, so there's nothing left to keep the
-            // typed address for, and home comes back instead of a blank
-            // page under a label for a file.
-            //
-            // Only a download *of* that navigation, though: one the
-            // committed page starts meanwhile (a "your download begins in
-            // 5 s" timer) has a URL the pending navigation never
-            // requested, and leaves it loading.
-            if (downloadEndsPendingNavigation(
-                    committedUrl = state.url,
-                    addressBarText = state.addressBarText,
-                    resolving = state.resolving,
-                    // A typed `data:` URL is never seen by the request
-                    // hooks; it is the address itself.
-                    downloadIsNavigationResponse = url in pendingNavigationUrls ||
-                        url == state.addressBarText,
-                )
-            ) {
-                pendingNavigationUrls.clear()
+            if (endsTypedNavigation) {
                 state.stopProgress()
                 state.addressBarText = state.url
             }

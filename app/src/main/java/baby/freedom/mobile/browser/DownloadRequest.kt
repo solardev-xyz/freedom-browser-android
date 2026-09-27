@@ -275,3 +275,44 @@ internal fun formatBytes(bytes: Long): String {
     return if (value >= 100) "${value.toLong()} ${units[unit]}"
     else String.format(java.util.Locale.US, "%.1f %s", value, units[unit])
 }
+
+/**
+ * The origin (`https://host[:port]/`) of the page a web download came
+ * from, if it's one worth naming at all: an ordinary http(s) page, not
+ * a virtual dweb origin, home or `about:`. This — never the page's
+ * path or query — is all a download remembers about its page.
+ */
+internal fun downloadRefererOrigin(pageUrl: String?): String? {
+    if (pageUrl.isNullOrBlank() || VirtualOrigin.isVirtualUrl(pageUrl)) return null
+    return originOf(pageUrl)?.let { "$it/" }
+}
+
+/**
+ * The `Referer` a native re-fetch of [requestUrl] sends, given the
+ * page's [refererOrigin] (from [downloadRefererOrigin]): that origin,
+ * and only when [requestUrl] is on the same origin.
+ *
+ * Chromium's own request would have obeyed the page's Referrer-Policy,
+ * which `DownloadListener` doesn't report. Sending just the page's
+ * origin to that same origin reveals nothing the server doesn't already
+ * know from `Host`, so it is within what every policy allows in
+ * substance, while still satisfying the "came from our own site" check
+ * that gates some downloads. Cross-origin requests, https→http
+ * downgrades (a different origin by scheme) and every redirect hop that
+ * leaves the origin get none. Evaluated per hop.
+ */
+internal fun downloadReferer(refererOrigin: String?, requestUrl: String): String? {
+    val origin = refererOrigin?.removeSuffix("/") ?: return null
+    return if (originOf(requestUrl) == origin) "$origin/" else null
+}
+
+/** `scheme://host[:port]` of an http(s) URL, default port dropped; null otherwise. */
+private fun originOf(url: String): String? {
+    val uri = runCatching { java.net.URI(url) }.getOrNull() ?: return null
+    val scheme = uri.scheme?.lowercase() ?: return null
+    if (scheme != "http" && scheme != "https") return null
+    val host = uri.host?.lowercase()?.takeIf { it.isNotEmpty() } ?: return null
+    val defaultPort = if (scheme == "https") 443 else 80
+    val port = uri.port.takeIf { it != -1 && it != defaultPort }
+    return "$scheme://$host" + (port?.let { ":$it" } ?: "")
+}

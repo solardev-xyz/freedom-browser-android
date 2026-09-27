@@ -91,6 +91,12 @@ data class DownloadEntry(
     val error: String?,
     val startedAt: Long,
     val finishedAt: Long?,
+    /**
+     * Origin of the web page the download came from (`https://host/`),
+     * for the same-origin Referer a Retry sends again — see
+     * [baby.freedom.mobile.browser.downloadReferer]. Never a path.
+     */
+    val refererOrigin: String? = null,
 )
 
 /** Values of [DownloadEntry.status]. Strings, so the column reads in `sqlite3`. */

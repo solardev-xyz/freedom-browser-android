@@ -62,7 +62,8 @@ abstract class AppDatabase : RoomDatabase() {
                         "`receivedBytes` INTEGER NOT NULL, " +
                         "`error` TEXT, " +
                         "`startedAt` INTEGER NOT NULL, " +
-                        "`finishedAt` INTEGER)",
+                        "`finishedAt` INTEGER, " +
+                        "`refererOrigin` TEXT)",
                 )
                 db.execSQL(
                     "CREATE INDEX IF NOT EXISTS `index_downloads_startedAt` " +

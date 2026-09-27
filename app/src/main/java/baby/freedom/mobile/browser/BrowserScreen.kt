@@ -443,7 +443,11 @@ fun BrowserScreen(
     // Download notices (#79): the start, and the end with an action —
     // Open for a finished file, the Downloads list for a failed one.
     // Collected for the screen's lifetime, so a download that finishes
-    // while the Downloads list is up still reports.
+    // while another panel (Settings, History…) is up still reports.
+    // Not while the Downloads list itself is up, though: the list shows
+    // the same start and end live, "Details" would open what's already
+    // open, and a Long snackbar would sit over the bottom row's Retry
+    // and × for ten seconds.
     LaunchedEffect(downloads) {
         // Each download's own "Downloading…" notice, so its end can
         // supersede exactly that one — cancelling a pending
@@ -451,6 +455,10 @@ fun BrowserScreen(
         // queue — and never another download's "Downloaded · Open".
         val startNotices = mutableMapOf<Long, Job>()
         downloads.events.collect { event ->
+            if (showDownloads) {
+                startNotices.remove(event.id)?.cancel()
+                return@collect
+            }
             when (event) {
                 is DownloadEvent.Started -> {
                     val notice = launch {
@@ -490,6 +498,12 @@ fun BrowserScreen(
                 }
             }
         }
+    }
+
+    // …and a download notice already up when the list opens goes: the
+    // list has the same news, and the notice would cover its bottom row.
+    LaunchedEffect(showDownloads) {
+        if (showDownloads) snackbarHostState.currentSnackbarData?.dismiss()
     }
 
     val state = tabs.active

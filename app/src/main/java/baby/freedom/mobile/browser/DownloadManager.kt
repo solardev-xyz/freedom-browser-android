@@ -10,6 +10,7 @@ import android.provider.MediaStore
 import android.util.Log
 import android.webkit.CookieManager
 import android.webkit.MimeTypeMap
+import android.webkit.WebSettings
 import baby.freedom.mobile.data.AppDatabase
 import baby.freedom.mobile.data.DownloadEntry
 import baby.freedom.mobile.data.DownloadStatus
@@ -87,8 +88,10 @@ sealed class DownloadEvent {
  *   `ens://`): mapped onto the local gateway through
  *   [Gateways.gatewayUrlFor], the interceptor's own mapping, with the
  *   Swarm retrieval headers and a retry budget for cold content.
- * - **http(s)**: fetched with the WebView's cookies and User-Agent and
- *   the page as Referer, so logged-in / session-gated downloads work.
+ * - **http(s)**: fetched with the WebView's cookies and User-Agent, so
+ *   logged-in / session-gated downloads work. The only Referer is the
+ *   page's bare origin, and only to that same origin
+ *   ([downloadReferer]).
  * - **`data:`**: decoded in-process.
  *
  * Bytes stream straight into a pending `MediaStore.Downloads` entry
@@ -143,7 +146,9 @@ class DownloadManager private constructor(context: Context) {
     /**
      * Start downloading [url] — the arguments of
      * `DownloadListener.onDownloadStart`, plus the page the download
-     * came from ([pageUrl], sent as Referer for plain web downloads).
+     * came from ([pageUrl]; null for a navigation the user started,
+     * which has no referrer). Only [pageUrl]'s origin is kept, for a
+     * same-origin Referer ([downloadReferer]).
      */
     fun start(
         url: String,
@@ -152,6 +157,15 @@ class DownloadManager private constructor(context: Context) {
         mimeType: String?,
         contentLength: Long,
         pageUrl: String?,
+    ) = enqueue(url, userAgent, contentDisposition, mimeType, contentLength, downloadRefererOrigin(pageUrl))
+
+    private fun enqueue(
+        url: String,
+        userAgent: String?,
+        contentDisposition: String?,
+        mimeType: String?,
+        contentLength: Long,
+        refererOrigin: String?,
     ) {
         val target = classifyDownloadUrl(url, Gateways::isLocalGateway, Gateways::toDisplay)
         val guessedMime = normalizeMime(mimeType)
@@ -174,11 +188,12 @@ class DownloadManager private constructor(context: Context) {
                     error = null,
                     startedAt = System.currentTimeMillis(),
                     finishedAt = null,
+                    refererOrigin = refererOrigin.takeIf { target is DownloadTarget.Web },
                 ),
             )
             _events.tryEmit(DownloadEvent.Started(id, initialName))
             val job = scope.launch(start = CoroutineStart.LAZY) {
-                run(id, target, userAgent, contentDisposition, pageUrl)
+                run(id, target, userAgent, contentDisposition, refererOrigin)
             }
             val cancelled = !cancellation.register(id, job)
             // Cancelled before it began: run() never starts, so mark the
@@ -203,13 +218,15 @@ class DownloadManager private constructor(context: Context) {
     fun retry(entry: DownloadEntry) {
         if (entry.sourceUrl.isBlank()) return
         scope.launch { dao.delete(entry.id) }
-        start(
+        enqueue(
             url = entry.sourceUrl,
-            userAgent = null,
+            // The app never overrides the WebView's User-Agent, so the
+            // default one is what the first attempt sent.
+            userAgent = runCatching { WebSettings.getDefaultUserAgent(appContext) }.getOrNull(),
             contentDisposition = null,
             mimeType = entry.mimeType,
             contentLength = -1,
-            pageUrl = null,
+            refererOrigin = entry.refererOrigin,
         )
     }
 
@@ -265,7 +282,7 @@ class DownloadManager private constructor(context: Context) {
         target: DownloadTarget,
         userAgent: String?,
         contentDisposition: String?,
-        pageUrl: String?,
+        refererOrigin: String?,
     ) {
         var entry = dao.get(id) ?: return
         var pending: Uri? = null
@@ -275,7 +292,7 @@ class DownloadManager private constructor(context: Context) {
         val job = currentCoroutineContext()[Job]
         val track: (AutoCloseable) -> Unit = { cancellation.track(id, job, it) }
         try {
-            val body = openBody(target, userAgent, contentDisposition, pageUrl, track)
+            val body = openBody(target, userAgent, contentDisposition, refererOrigin, track)
             body.use { src ->
                 track(src)
                 currentCoroutineContext().ensureActive()
@@ -369,7 +386,7 @@ class DownloadManager private constructor(context: Context) {
         target: DownloadTarget,
         userAgent: String?,
         contentDisposition: String?,
-        pageUrl: String?,
+        refererOrigin: String?,
         track: (AutoCloseable) -> Unit,
     ): Body = when (target) {
         is DownloadTarget.Data -> {
@@ -395,7 +412,7 @@ class DownloadManager private constructor(context: Context) {
             }, track = track)
         }
         is DownloadTarget.LocalGateway -> fetchDweb(target.url, nameUrl = target.displayUrl, track = track)
-        is DownloadTarget.Web -> fetchWeb(target.url, userAgent, pageUrl, track)
+        is DownloadTarget.Web -> fetchWeb(target.url, userAgent, refererOrigin, track)
         is DownloadTarget.Unsupported ->
             throw DownloadFailure("${target.scheme}: downloads aren't supported")
     }
@@ -460,7 +477,7 @@ class DownloadManager private constructor(context: Context) {
     private suspend fun fetchWeb(
         url: String,
         userAgent: String?,
-        pageUrl: String?,
+        refererOrigin: String?,
         track: (AutoCloseable) -> Unit,
     ): Body {
         var current = url
@@ -476,10 +493,9 @@ class DownloadManager private constructor(context: Context) {
                 runCatching { CookieManager.getInstance().getCookie(current) }.getOrNull()
                     ?.takeIf { it.isNotBlank() }
                     ?.let { setRequestProperty("Cookie", it) }
-                // Only a web page's own URL is a sensible Referer — never
-                // a virtual dweb origin or the home sentinel.
-                pageUrl?.takeIf { it.startsWith("http") && !VirtualOrigin.isVirtualUrl(it) }
-                    ?.let { setRequestProperty("Referer", it) }
+                // Re-decided per hop: a redirect off the page's origin
+                // (or down to http) drops it.
+                downloadReferer(refererOrigin, current)?.let { setRequestProperty("Referer", it) }
             }
             val status = conn.responseCode
             if (status in 300..399) {
