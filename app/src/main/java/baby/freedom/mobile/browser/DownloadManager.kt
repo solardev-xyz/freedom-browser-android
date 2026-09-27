@@ -7,6 +7,8 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
+import android.os.Environment
+import android.os.storage.StorageManager
 import android.provider.MediaStore
 import android.util.Log
 import android.webkit.CookieManager
@@ -60,6 +62,15 @@ private val DWEB_RETRY_DELAYS_MS = longArrayOf(0, 500, 1_000, 2_000, 3_000, 5_00
 private val DWEB_TRANSIENT_STATUSES = setOf(404, 500, 502, 503, 504)
 
 private const val MAX_REDIRECTS = 8
+
+/**
+ * Free space a download never takes: it fails as "Not enough storage"
+ * rather than write the device full (a server can stream forever).
+ */
+internal const val STORAGE_FLOOR_BYTES = 256L * 1024 * 1024
+
+/** How often, in bytes written, a running download re-checks free space. */
+private const val STORAGE_CHECK_EVERY_BYTES = 16L * 1024 * 1024
 
 /** Live byte counts of a running download. [total] is -1 when unknown. */
 data class DownloadProgress(val received: Long, val total: Long)
@@ -122,6 +133,13 @@ class DownloadManager private constructor(context: Context) {
     private val _events = MutableSharedFlow<DownloadEvent>(extraBufferCapacity = 16)
     val events: SharedFlow<DownloadEvent> = _events.asSharedFlow()
 
+    private val offerQueue = DownloadOffers()
+    /**
+     * Downloads pages asked for, waiting for the user's yes
+     * ([accept] / [decline]); nothing is fetched or written before it.
+     */
+    val offers: StateFlow<List<DownloadOffer>> = offerQueue.pending
+
     /** Download history, newest first. */
     val downloads: Flow<List<DownloadEntry>> = dao.all()
 
@@ -145,11 +163,15 @@ class DownloadManager private constructor(context: Context) {
     }
 
     /**
-     * Start downloading [url] — the arguments of
+     * Offer to download [url] — the arguments of
      * `DownloadListener.onDownloadStart`, plus the page the download
      * came from ([pageUrl]; null for a navigation the user started,
      * which has no referrer). Only [pageUrl]'s origin is kept, for a
      * same-origin Referer ([downloadReferer]).
+     *
+     * Nothing is fetched yet: the listener fires for script-initiated
+     * downloads too, with no tap, so the download waits in [offers]
+     * until the user accepts it.
      */
     fun start(
         url: String,
@@ -158,7 +180,24 @@ class DownloadManager private constructor(context: Context) {
         mimeType: String?,
         contentLength: Long,
         pageUrl: String?,
-    ) = enqueue(url, userAgent, contentDisposition, mimeType, contentLength, downloadRefererOrigin(pageUrl))
+    ) {
+        val target = classifyDownloadUrl(url, Gateways::isLocalGateway, Gateways::toDisplay)
+        val name = downloadFileName(contentDisposition, url, normalizeMime(mimeType), ::extensionForMime)
+        val refererOrigin = downloadRefererOrigin(pageUrl)
+        val queued = offerQueue.offer(name, target.displayUrl, contentLength.coerceAtLeast(-1)) {
+            enqueue(url, userAgent, contentDisposition, mimeType, contentLength, refererOrigin)
+        }
+        if (!queued) Log.i(LOG_TAG, "download offer dropped, ${MAX_PENDING_OFFERS} already waiting")
+    }
+
+    /** The user wants [DownloadOffer.key]'s file: start it. */
+    fun accept(key: Long) = offerQueue.accept(key)
+
+    /** The user doesn't want [DownloadOffer.key]'s file. */
+    fun decline(key: Long) = offerQueue.decline(key)
+
+    /** Decline every offer waiting. */
+    fun declineAll() = offerQueue.declineAll()
 
     private fun enqueue(
         url: String,
@@ -305,6 +344,9 @@ class DownloadManager private constructor(context: Context) {
     ) {
         var entry = dao.get(id) ?: return
         var pending: Uri? = null
+        // Set once the file is public: from then on it's the user's
+        // file, and nothing here — a late cancel included — deletes it.
+        var published = false
         // Everything that can block on the network is tracked as soon as
         // it exists — each connection before connect(), then the body —
         // so [cancel] can close it (see [DownloadCancellation]).
@@ -322,7 +364,11 @@ class DownloadManager private constructor(context: Context) {
                     mimeType = mime,
                     extensionForMime = ::extensionForMime,
                 )
-                val uri = createPending(name, mime)
+                if (!downloadFitsStorage(allocatableBytes(), src.length.coerceAtLeast(0), STORAGE_FLOOR_BYTES)) {
+                    throw DownloadFailure("Not enough storage")
+                }
+                val uri = insertPendingDownload(resolver, "Download/$DOWNLOAD_SUBDIR", "dl$id", name, mime)
+                    ?: throw DownloadFailure("Couldn't create the file in Downloads")
                 pending = uri
                 entry = entry.copy(
                     fileName = name,
@@ -332,24 +378,45 @@ class DownloadManager private constructor(context: Context) {
                 )
                 dao.update(entry)
                 val received = copyWithProgress(id, src.stream, uri, src.length)
+                // With a Content-Length a short body is caught here, and a
+                // chunked body cut off mid-stream fails in read() (the
+                // chunk framing is incomplete). A close-delimited body —
+                // no length, not chunked, the HTTP/1.0 way — can't be
+                // checked: a connection that drops cleanly looks exactly
+                // like its end, so such a body is taken as complete. A
+                // reset still fails; the storage floor bounds the rest.
                 if (src.length >= 0 && received < src.length) {
                     throw IOException("Connection closed early")
                 }
-                publish(uri)
-                // MediaStore settles a name collision ("x (1).pdf") when
-                // the item stops being pending; show the name it chose.
-                val finalName = queryDisplayName(uri) ?: name
-                entry = entry.copy(
-                    fileName = finalName,
-                    status = DownloadStatus.COMPLETED,
-                    totalBytes = received,
-                    receivedBytes = received,
-                    finishedAt = System.currentTimeMillis(),
-                )
-                withContext(NonCancellable) { dao.update(entry) }
-                _events.tryEmit(DownloadEvent.Completed(id, finalName))
+                if (!publishPendingDownload(resolver, uri, name)) {
+                    throw DownloadFailure("Couldn't save the file in Downloads")
+                }
+                pending = null
+                published = true
+                afterPublishForTest?.invoke(id)
+                withContext(NonCancellable) {
+                    // MediaStore settles a name collision ("x (1).pdf") when
+                    // the item stops being pending; show the name it chose.
+                    val finalName = queryDisplayName(uri) ?: name
+                    entry = entry.copy(
+                        fileName = finalName,
+                        status = DownloadStatus.COMPLETED,
+                        totalBytes = received,
+                        receivedBytes = received,
+                        finishedAt = System.currentTimeMillis(),
+                    )
+                    dao.update(entry)
+                    _events.tryEmit(DownloadEvent.Completed(id, finalName))
+                }
             }
         } catch (t: Throwable) {
+            // Finished: a cancel that lands now (withContext rethrows it
+            // on the way out) is too late to undo anything.
+            if (published) {
+                if (t is CancellationException) throw t
+                Log.w(LOG_TAG, "download $id: after publishing", t)
+                return
+            }
             // [cancel] closes the socket under a blocked read, so a
             // cancelled download usually surfaces as an IOException, not
             // a CancellationException — the job's state is the truth.
@@ -455,15 +522,26 @@ class DownloadManager private constructor(context: Context) {
                     setRequestProperty("Swarm-Chunk-Retrieval-Timeout", "30s")
                     setRequestProperty("Swarm-Redundancy-Strategy", "3")
                     setRequestProperty("Swarm-Redundancy-Fallback-Mode", "true")
-                    connect()
                 }
-            } catch (_: java.net.ConnectException) {
-                throw DownloadFailure("Node not running")
             } catch (e: IOException) {
                 Log.i(LOG_TAG, "dweb download attempt failed: $gatewayUrl", e)
                 continue
             }
-            val status = conn.responseCode
+            // The header wait is part of the attempt: a cold node that
+            // accepts the connection and then stalls (read timeout) or
+            // resets gets the rest of the retry budget, like a 404.
+            val status = try {
+                conn.connect()
+                conn.responseCode
+            } catch (_: java.net.ConnectException) {
+                conn.disconnect()
+                throw DownloadFailure("Node not running")
+            } catch (e: IOException) {
+                conn.disconnect()
+                currentCoroutineContext().ensureActive()
+                Log.i(LOG_TAG, "dweb download attempt failed: $gatewayUrl", e)
+                continue
+            }
             if (status in 200..299) return bodyOf(conn, nameUrl)
             lastStatus = status
             conn.disconnect()
@@ -544,18 +622,15 @@ class DownloadManager private constructor(context: Context) {
         onClose = { conn.disconnect() },
     )
 
-    private fun createPending(name: String, mime: String): Uri {
-        val values = ContentValues().apply {
-            put(MediaStore.Downloads.DISPLAY_NAME, name)
-            put(MediaStore.Downloads.MIME_TYPE, mime)
-            put(MediaStore.Downloads.RELATIVE_PATH, "Download/$DOWNLOAD_SUBDIR")
-            put(MediaStore.Downloads.IS_PENDING, 1)
-        }
-        return resolver.insert(
-            MediaStore.Downloads.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY),
-            values,
-        ) ?: throw DownloadFailure("Couldn't create the file in Downloads")
-    }
+    /**
+     * Bytes the shared-storage volume can still take (cache the system
+     * may evict counted in); null when it can't be told, which doesn't
+     * block the download.
+     */
+    private fun allocatableBytes(): Long? = runCatching {
+        val storage = appContext.getSystemService(StorageManager::class.java)
+        storage.getAllocatableBytes(storage.getUuidForPath(Environment.getExternalStorageDirectory()))
+    }.getOrNull()
 
     private fun queryDisplayName(uri: Uri): String? = runCatching {
         resolver.query(uri, arrayOf(MediaStore.MediaColumns.DISPLAY_NAME), null, null, null)
@@ -566,6 +641,7 @@ class DownloadManager private constructor(context: Context) {
         val out = resolver.openOutputStream(uri) ?: throw DownloadFailure("Couldn't write to Downloads")
         var received = 0L
         var lastPublish = 0L
+        var nextStorageCheck = STORAGE_CHECK_EVERY_BYTES
         _progress.update { it + (id to DownloadProgress(0, total)) }
         out.use { sink ->
             val buffer = ByteArray(64 * 1024)
@@ -575,6 +651,13 @@ class DownloadManager private constructor(context: Context) {
                 if (n < 0) break
                 sink.write(buffer, 0, n)
                 received += n
+                if (received >= nextStorageCheck) {
+                    nextStorageCheck = received + STORAGE_CHECK_EVERY_BYTES
+                    val stillToWrite = if (total >= 0) (total - received).coerceAtLeast(0) else 0
+                    if (!downloadFitsStorage(allocatableBytes(), stillToWrite, STORAGE_FLOOR_BYTES)) {
+                        throw DownloadFailure("Not enough storage")
+                    }
+                }
                 val now = System.currentTimeMillis()
                 if (now - lastPublish >= PROGRESS_INTERVAL_MS) {
                     lastPublish = now
@@ -586,15 +669,17 @@ class DownloadManager private constructor(context: Context) {
         return received
     }
 
-    private fun publish(uri: Uri) {
-        val values = ContentValues().apply { put(MediaStore.Downloads.IS_PENDING, 0) }
-        resolver.update(uri, values, null, null)
-    }
-
     private fun deleteQuietly(uri: String) {
         runCatching { resolver.delete(Uri.parse(uri), null, null) }
             .onFailure { Log.w(LOG_TAG, "couldn't delete partial download $uri", it) }
     }
+
+    /**
+     * Test hook: runs right after a download's file is published, with
+     * no suspension point before the completion write — the spot a late
+     * cancel can land in.
+     */
+    @Volatile internal var afterPublishForTest: ((Long) -> Unit)? = null
 
     companion object {
         @Volatile private var instance: DownloadManager? = null
@@ -654,3 +739,52 @@ internal fun queryDownloadFileState(resolver: ContentResolver, uri: Uri): Downlo
             }
         }
     }.getOrDefault(DownloadFileState.UNKNOWN)
+
+/**
+ * Does a download leave at least [floor] bytes free? [allocatable] is
+ * what the volume can still take (null: unknown, which lets it through)
+ * and [stillToWrite] what the download is yet to write (0 when unknown —
+ * then the running re-checks catch it).
+ */
+internal fun downloadFitsStorage(allocatable: Long?, stillToWrite: Long, floor: Long): Boolean =
+    allocatable == null || allocatable - stillToWrite >= floor
+
+/**
+ * The name a download's pending item is inserted under: unique per
+ * download ([tag]), so it never shares a file with another one.
+ * MediaProvider keeps a pending item at `.pending-<expiry seconds>-<name>`
+ * and settles name collisions only on publish, so two pending items of
+ * the same name inserted in the same second would get the *same* file
+ * and interleave their bytes. The wanted name is set on publish, where
+ * MediaStore does its "x (1).pdf" collision handling.
+ */
+internal fun pendingDownloadName(tag: String, name: String): String = "$tag-$name"
+
+/** Insert [name]'s pending item under [relativePath]. Blocking. */
+internal fun insertPendingDownload(
+    resolver: ContentResolver,
+    relativePath: String,
+    tag: String,
+    name: String,
+    mime: String,
+): Uri? {
+    val values = ContentValues().apply {
+        put(MediaStore.Downloads.DISPLAY_NAME, pendingDownloadName(tag, name))
+        put(MediaStore.Downloads.MIME_TYPE, mime)
+        put(MediaStore.Downloads.RELATIVE_PATH, relativePath)
+        put(MediaStore.Downloads.IS_PENDING, 1)
+    }
+    return resolver.insert(MediaStore.Downloads.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY), values)
+}
+
+/**
+ * Make [uri] public under [name] (or the "name (1)" MediaStore picks if
+ * it's taken). Blocking. False when MediaStore didn't take the update.
+ */
+internal fun publishPendingDownload(resolver: ContentResolver, uri: Uri, name: String): Boolean {
+    val values = ContentValues().apply {
+        put(MediaStore.Downloads.DISPLAY_NAME, name)
+        put(MediaStore.Downloads.IS_PENDING, 0)
+    }
+    return resolver.update(uri, values, null, null) > 0
+}

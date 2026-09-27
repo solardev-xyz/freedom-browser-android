@@ -21,12 +21,14 @@ import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.outlined.Download
 import androidx.compose.material.icons.outlined.ErrorOutline
 import androidx.compose.material.icons.outlined.InsertDriveFile
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -206,4 +208,57 @@ private fun RowAction(
     ) {
         Icon(icon, contentDescription = description, modifier = Modifier.size(18.dp))
     }
+}
+
+/** The line under an offered file's name: its size, or that it's unknown. */
+internal fun downloadOfferSizeLine(totalBytes: Long): String =
+    if (totalBytes > 0) formatBytes(totalBytes) else "Size unknown"
+
+/**
+ * "Download file?" for a download a page asked for (#79): its name,
+ * size and source, with Download / Cancel. Dismissing it declines —
+ * nothing is saved without an explicit yes. When a page has asked for
+ * more, they wait behind this one and can all be declined at once.
+ */
+@Composable
+internal fun DownloadOfferDialog(
+    offer: DownloadOffer,
+    othersWaiting: Int,
+    onAccept: () -> Unit,
+    onDecline: () -> Unit,
+    onDeclineAll: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDecline,
+        title = { Text("Download file?") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text(offer.fileName, fontWeight = FontWeight.SemiBold)
+                Text(downloadOfferSizeLine(offer.totalBytes))
+                Text(
+                    "From ${offer.source}",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                if (othersWaiting > 0) {
+                    Text(
+                        if (othersWaiting == 1) "1 more download waiting" else "$othersWaiting more downloads waiting",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onAccept) { Text("Download") }
+        },
+        dismissButton = {
+            Row {
+                if (othersWaiting > 0) {
+                    TextButton(onClick = onDeclineAll) { Text("Cancel all") }
+                }
+                TextButton(onClick = onDecline) { Text("Cancel") }
+            }
+        },
+    )
 }

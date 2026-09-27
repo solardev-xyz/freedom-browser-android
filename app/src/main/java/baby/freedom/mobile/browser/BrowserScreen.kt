@@ -1419,6 +1419,19 @@ fun BrowserScreen(
         )
     }
 
+    // Nothing a page asks to download is saved without a yes here: the
+    // listener fires for script-driven downloads too, with no tap.
+    val downloadOffers by downloads.offers.collectAsState()
+    downloadOffers.firstOrNull()?.let { offer ->
+        DownloadOfferDialog(
+            offer = offer,
+            othersWaiting = downloadOffers.size - 1,
+            onAccept = { downloads.accept(offer.key) },
+            onDecline = { downloads.decline(offer.key) },
+            onDeclineAll = { downloads.declineAll() },
+        )
+    }
+
     if (showDownloads) {
         DownloadsScreen(
             downloads = downloads,
