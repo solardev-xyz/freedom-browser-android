@@ -100,6 +100,27 @@ class TabsPopupTest {
     }
 
     @Test
+    fun `window close from a user-opened tab is ignored`() {
+        // Chromium allows window.close() in a tab with one history entry;
+        // only windows a page opened may close themselves.
+        val tabs = tabsWith(2)
+        val tab = tabs.tabs[1]
+        tabs.switchTo(1)
+        tabs.closePopup(tab)
+        assertEquals(2, tabs.tabs.size)
+        assertSame(tab, tabs.active)
+    }
+
+    @Test
+    fun `window close from the only user-opened tab is ignored`() {
+        val tabs = tabsWith(1)
+        val tab = tabs.active
+        tabs.closePopup(tab)
+        assertEquals(1, tabs.tabs.size)
+        assertSame(tab, tabs.active)
+    }
+
+    @Test
     fun `closing an already closed popup is a no-op`() {
         val tabs = tabsWith(2)
         val popup = tabs.adoptPopup(tabs.tabs[0])
