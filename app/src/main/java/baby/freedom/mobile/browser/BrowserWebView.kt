@@ -75,7 +75,128 @@ private const val LOG_TAG = "BrowserWebView"
 private val HEADERS_TO_STRIP = setOf(
     "transfer-encoding", "content-encoding", "connection", "keep-alive",
     "set-cookie", "set-cookie2",
+    // Ours alone to set: a gateway response carrying it would pass for
+    // our own in-place refusal and keep the real error page away (see
+    // [nameResolutionErrorIn]).
+    NAME_RESOLUTION_ERROR_HEADER.lowercase(),
 )
+
+/**
+ * Header on the interceptor's refusal of a `<name>.ens.…` document whose
+ * name no longer resolves to loadable content (#99). Carries the
+ * [ErrorPage] code, and tells `onReceivedHttpError` that the response
+ * already *is* the error page (see [nameResolutionRefusal]).
+ */
+internal const val NAME_RESOLUTION_ERROR_HEADER = "X-Name-Resolution-Error"
+
+/**
+ * The [ErrorPage] code in a main-frame HTTP error's headers if the
+ * interceptor refused the document itself, else `null`.
+ */
+internal fun nameResolutionErrorIn(headers: Map<String, String>?): String? =
+    headers?.entries
+        ?.firstOrNull { it.key.equals(NAME_RESOLUTION_ERROR_HEADER, ignoreCase = true) }
+        ?.value
+
+/** Status for the interceptor's refusal of an ENS document. */
+internal fun statusForNameResolutionError(code: String): Int =
+    if (code == "ens_lookup_failed") 502 else 404
+
+/**
+ * "The main-frame document the interceptor last served for this tab was
+ * a name refusal" (#99), keyed by its URL. The refusal is served on the
+ * name's real URL, not on an [ErrorPage] URL, so the
+ * `ErrorPage.isErrorPage` guards that keep error pages out of history
+ * can't see it; the tab's client asks this instead. Written from
+ * `shouldInterceptRequest` (IO thread) for every main-frame request —
+ * which WebView makes before the document commits — and read on the
+ * main thread from `onPageFinished`.
+ */
+internal class NameRefusalSlot {
+    @Volatile
+    private var refusedUrl: String? = null
+
+    fun onMainFrameResponse(url: String, refusalCode: String?) {
+        refusedUrl = if (refusalCode != null) url.substringBefore('#') else null
+    }
+
+    fun isRefused(url: String?): Boolean =
+        url != null && url.substringBefore('#') == refusedUrl
+}
+
+/**
+ * Is [req] a document load — the top-level page, or an iframe — as
+ * opposed to a subresource of one? The name re-check (#99) keys on this.
+ * `isForMainFrame` alone misses iframes, and navigations a service
+ * worker forwards to the network (which WebView hands over as
+ * not-main-frame). A navigation the SW answers from its own cache never
+ * reaches us, and so isn't re-checked. Chromium
+ * marks a navigation's own request with `Sec-Fetch-Dest` and an
+ * `Accept` that leads with `text/html`; subresources (`fetch`, XHR,
+ * scripts, styles, images) never lead with it by default.
+ */
+internal fun isDocumentRequest(
+    isForMainFrame: Boolean,
+    headers: Map<String, String>?,
+): Boolean {
+    if (isForMainFrame) return true
+    fun header(name: String) =
+        headers?.entries?.firstOrNull { it.key.equals(name, ignoreCase = true) }?.value
+    header("Sec-Fetch-Dest")?.trim()?.lowercase()?.let {
+        return it == "document" || it == "iframe" || it == "frame"
+    }
+    return header("Accept")?.trim()?.lowercase()?.startsWith("text/html") == true
+}
+
+/**
+ * The interceptor's answer to an ENS document it refuses: the error
+ * page itself, served *as* the history entry's document rather than
+ * via a `loadUrl(ErrorPage.url(…))` afterwards (#99). That navigation
+ * would push a new entry and so truncate forward history — a refused
+ * Back would delete the page the user just came from, and Back from
+ * the error page would only land on the refused entry again. Served in
+ * place, Back and Forward move past it as usual and Reload re-checks
+ * the name. No script: the document is on the name's origin.
+ */
+internal fun nameResolutionRefusal(name: String, code: String): WebResourceResponse {
+    val (title, description) = when (code) {
+        "ens_not_found" -> "No content for this ENS name" to
+            "This ENS name doesn't point at any content any more. The owner may " +
+            "have removed its <code>contenthash</code> record, or the name has no resolver."
+        "ens_unsupported_codec" -> "Unsupported content format" to
+            "This ENS name now resolves to a content format Freedom Browser " +
+            "cannot load yet on mobile."
+        else -> "ENS lookup failed" to
+            "Couldn't reach an Ethereum RPC endpoint to resolve this name. " +
+            "Check your connection and try again."
+    }
+    val safeName = name.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    val html = """<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'">
+<title>$title</title><style>
+html,body{margin:0;min-height:100%}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
+background:#141414;color:#f5f5f5;padding:32px 20px;box-sizing:border-box;text-align:center}
+.c{max-width:560px;margin:0 auto}
+h1{font-size:22px;margin:24px 0 12px;color:#ff5e5e}
+p{line-height:1.55;margin:0 0 20px;color:#ccc;font-size:15px}
+.d{background:#1a1a1a;padding:14px 16px;border-radius:8px;font-family:ui-monospace,Menlo,monospace;
+font-size:13px;color:#ff8a8a;margin:0 0 24px;word-break:break-all;white-space:pre-wrap;text-align:left}
+a{display:inline-block;padding:12px 22px;background:#2c2c2c;color:#fff;border:1px solid #444;
+border-radius:8px;font-size:15px;text-decoration:none}
+@media (prefers-color-scheme:light){body{background:#fff;color:#24292f}h1{color:#cf222e}
+p{color:#57606a}.d{background:#f6f8fa;color:#cf222e}a{background:#f6f8fa;border-color:#d0d7de;color:#24292f}}
+</style></head><body><div class="c"><h1>$title</h1><p>$description</p>
+<div class="d">ens://$safeName
+
+$code</div><a href="">Try again</a></div></body></html>"""
+    return WebResourceResponse(
+        "text/html", "utf-8", statusForNameResolutionError(code), "Name Resolution Failed",
+        mapOf(NAME_RESOLUTION_ERROR_HEADER to code, "Cache-Control" to "no-store"),
+        ByteArrayInputStream(html.toByteArray(Charsets.UTF_8)),
+    )
+}
 
 // Request headers we never forward upstream — either managed by
 // `HttpURLConnection` itself or carrying state tied to the WebView's
@@ -647,6 +768,14 @@ private fun buildRefreshableWebView(
     // we still want to attribute the icon to the page it actually
     // belongs to.
     var lastLoadedDisplayUrl: String? = null
+
+    // The ENS roots this tab's documents were served from, so their
+    // subresources don't follow another tab's newer answer (#99).
+    val ensPins = EnsDocumentPins()
+
+    // Is the document on screen the interceptor's in-place refusal of an
+    // ENS name? Kept out of history like any other error page (#99).
+    val nameRefusal = NameRefusalSlot()
 
     // "The document on screen has painted, and has not been written to
     // history yet." Commits in `onPageCommitVisible`, resets in
@@ -1297,6 +1426,10 @@ private fun buildRefreshableWebView(
             }
 
             override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
+                // The main-frame document committed: its ENS pins are now
+                // the page on screen's, and subresources held waiting on
+                // the commit go ahead (#99, [EnsDocumentPins]).
+                ensPins.documentStarted(url)
                 // A new document arrives with the chrome whole, however
                 // far the previous one was scrolled…
                 state.capsuleCollapse.expand()
@@ -1526,7 +1659,9 @@ private fun buildRefreshableWebView(
                 // the address bar (displayFor returns "") and shouldn't
                 // clutter the history either. The error page is also
                 // deliberately kept out of history — it's a transient
-                // state, not a destination the user meant to visit.
+                // state, not a destination the user meant to visit —
+                // and so is the in-place refusal of an ENS name, which
+                // sits on the name's own URL (#99, [NameRefusalSlot]).
                 //
                 // The gate's commit half is only reset by `onPageStarted`,
                 // which an aborted load never gets — so on its synthetic
@@ -1551,6 +1686,7 @@ private fun buildRefreshableWebView(
                 // [CommittedVisitGate]).
                 if (display.isNotBlank() &&
                     !ErrorPage.isErrorPage(url) &&
+                    !nameRefusal.isRefused(url) &&
                     isCurrent
                 ) {
                     if (visitGate.isCommitted) {
@@ -1615,7 +1751,16 @@ private fun buildRefreshableWebView(
             override fun shouldInterceptRequest(
                 view: WebView?,
                 request: WebResourceRequest?,
-            ): WebResourceResponse? = interceptVirtualRequest(request)
+            ): WebResourceResponse? {
+                val response = interceptVirtualRequest(request, ensPins)
+                if (request?.isForMainFrame == true) {
+                    nameRefusal.onMainFrameResponse(
+                        request.url.toString(),
+                        response?.let { nameResolutionErrorIn(it.responseHeaders) },
+                    )
+                }
+                return response
+            }
 
             override fun onReceivedError(
                 view: WebView?,
@@ -1667,6 +1812,13 @@ private fun buildRefreshableWebView(
                 // synthesized 502 is the interceptor telling us the
                 // gateway socket itself is gone (node not running).
                 val display = displayFor(failed, state).ifBlank { failed }
+                // The interceptor's refusal of an ENS document (#99) is
+                // already the error page, served in place — loading
+                // ErrorPage on top would truncate forward history.
+                if (nameResolutionErrorIn(errorResponse?.responseHeaders) != null) {
+                    Log.i(LOG_TAG, "main-frame HTTP $status for $failed → name refused in place")
+                    return
+                }
                 val errorCode =
                     if (status == 502) "ERR_CONNECTION_REFUSED"
                     else "swarm_content_not_found"
@@ -2149,11 +2301,83 @@ private fun syntheticResponse(
  * into [ErrorPage] instead of hanging; non-GET/HEAD methods get a 405
  * (WebView interception can't carry request bodies — writes go to the
  * node API origin directly).
+ *
+ * [ensPins] is the requesting tab's (null for service-worker fetches,
+ * which belong to no tab): the ENS roots its documents were served from.
+ * A main-frame request — any URL, not only a virtual one — starts the
+ * incoming page's pins; they replace the page on screen's only when the
+ * new document commits, from `onPageStarted` (#99, see [EnsDocumentPins]).
+ * Handing WebView an answer that renders in place only marks the page
+ * delivered, so the subresources that race `onPageStarted` wait for it
+ * rather than guess which page they belong to.
  */
 internal fun interceptVirtualRequest(
     request: WebResourceRequest?,
+    ensPins: EnsDocumentPins? = null,
 ): WebResourceResponse? {
     val req = request ?: return null
+    val url = req.url?.toString() ?: return null
+    val incoming = if (req.isForMainFrame) ensPins?.beginNavigation(url) else null
+    val response = interceptVirtualRequestFor(req, ensPins, incoming)
+    if (incoming != null && response != null &&
+        rendersInPlace(response.statusCode, response.mimeType, response.responseHeaders)
+    ) {
+        ensPins?.delivered(incoming)
+    }
+    return response
+}
+
+/**
+ * Will WebView commit a main-frame response as the tab's new document,
+ * rather than hand it to a download (or drop it: 204/205, a redirect)?
+ * Every type WebView renders itself: markup (HTML, XHTML, SVG, XML — any
+ * `+xml`), text (any `text/` type: plain, CSS, JS shown as source…), JSON,
+ * images, audio and video (the media document). Anything else goes to
+ * the download listener. A type missing here would leave the
+ * subresources that race `onPageStarted` on the previous page's pins; a
+ * type listed that doesn't render costs the page on screen's
+ * subresources [EnsDocumentPins.pageFor]'s bounded wait.
+ */
+internal fun rendersInPlace(
+    status: Int,
+    mimeType: String?,
+    headers: Map<String, String>?,
+): Boolean {
+    if (status == 204 || status == 205 || status in 300..399) return false
+    val disposition = headers?.entries
+        ?.firstOrNull { it.key.equals("Content-Disposition", ignoreCase = true) }?.value
+    if (disposition?.trim()?.lowercase()?.startsWith("attachment") == true) return false
+    val mime = mimeType?.substringBefore(';')?.trim()?.lowercase() ?: return false
+    if (mime in DOWNLOADED_TEXT_TYPES) return false
+    return mime.startsWith("text/") ||
+        mime.startsWith("image/") ||
+        mime.startsWith("audio/") ||
+        mime.startsWith("video/") ||
+        mime == "application/xml" ||
+        mime.endsWith("+xml") ||
+        mime == "application/json" ||
+        mime.endsWith("+json") ||
+        mime == "application/javascript"
+}
+
+/**
+ * `text/` types Chromium hands to a download instead of rendering
+ * (its `IsUnsupportedTextMimeType` list, the common ones).
+ */
+private val DOWNLOADED_TEXT_TYPES = setOf(
+    "text/csv", "text/x-csv", "text/comma-separated-values",
+    "text/tab-separated-values", "text/tsv",
+    "text/calendar", "text/x-calendar", "text/vcalendar", "text/x-vcalendar",
+    "text/vcard", "text/x-vcard", "text/x-vcf", "text/directory",
+    "text/rtf", "text/ldif", "text/qif", "text/x-qif", "text/ofx",
+    "text/vnd.sun.j2me.app-descriptor",
+)
+
+private fun interceptVirtualRequestFor(
+    req: WebResourceRequest,
+    ensPins: EnsDocumentPins?,
+    incoming: EnsDocumentPins.Page?,
+): WebResourceResponse? {
     val uri = req.url ?: return null
     val url = uri.toString()
 
@@ -2200,7 +2424,28 @@ internal fun interceptVirtualRequest(
         )
     }
 
-    val target = Gateways.gatewayUrlFor(root, pathAndQuery)
+    // A document on a name-derived origin re-checks the name first —
+    // Back / Forward included, which restore the history entry without
+    // going through submit (#99, see [Gateways.reverifyEnsDocument]).
+    // Except a non-main-frame document on a name the page on screen is
+    // already pinned to — a same-name iframe, a pjax `fetch` asking for
+    // `text/html`: that is part of the page, and re-pinning the name
+    // would move the rest of the page's subresources to a newer root
+    // under its old HTML.
+    //
+    // Anything but the main frame belongs to the page on screen — once
+    // it is known which page that is ([EnsDocumentPins.pageFor]).
+    val page = incoming ?: (root as? ContentRoot.Ens)?.let { ensPins?.pageFor(it.name) }
+    if (root is ContentRoot.Ens &&
+        isDocumentRequest(req.isForMainFrame, req.requestHeaders) &&
+        (req.isForMainFrame || page?.uriFor(root.name) == null)
+    ) {
+        Gateways.reverifyEnsDocument(root.name, ensPins, page)?.let { code ->
+            return nameResolutionRefusal(root.name, code)
+        }
+    }
+
+    val target = Gateways.gatewayUrlFor(root, pathAndQuery, page = page)
         ?: return syntheticResponse(
             502, "Bad Gateway",
             "No local gateway can serve this content root " +
