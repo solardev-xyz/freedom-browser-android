@@ -13,8 +13,11 @@ import androidx.datastore.preferences.preferencesDataStore
 import java.io.IOException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.emitAll
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.retryWhen
 
 /**
@@ -42,8 +45,13 @@ import kotlinx.coroutines.flow.retryWhen
  */
 class SitePermissionStore internal constructor(
     private val store: DataStore<Preferences>,
-    /** First back-off before re-reading after a failed read; doubles up to 32×. */
+    /**
+     * First back-off before re-reading after a failed read; doubles per
+     * consecutive failure up to 32×, and resets after a successful read.
+     */
     private val readRetryMs: Long = 1_000,
+    /** How the back-off waits; replaced in tests to record the delays. */
+    private val backOff: suspend (Long) -> Unit = { delay(it) },
 ) {
     /** One stored decision. */
     data class Record(val origin: String, val permission: String, val decision: String)
@@ -55,13 +63,26 @@ class SitePermissionStore internal constructor(
      * instead of completing: DataStore's `data` ends at the first error,
      * and a long-lived collector (Settings) would otherwise stay stuck
      * on the empty list through every later successful write.
+     *
+     * The back-off counts *consecutive* failures, per collector: any
+     * successful read resets it, so failures hours apart each start
+     * again from [readRetryMs] (`retryWhen`'s own `attempt` counts every
+     * retry over the flow's lifetime and would stay pinned at 32×).
      */
-    val all: Flow<List<Record>> = store.data.retryWhen { e, attempt ->
-        if (e !is IOException) return@retryWhen false
-        Log.w(TAG, "reading site permissions failed; treating as none", e)
-        emit(emptyPreferences())
-        delay(readRetryMs shl attempt.coerceAtMost(5).toInt())
-        true
+    val all: Flow<List<Record>> = flow {
+        var failures = 0
+        emitAll(
+            store.data
+                .onEach { failures = 0 }
+                .retryWhen { e, _ ->
+                    if (e !is IOException) return@retryWhen false
+                    Log.w(TAG, "reading site permissions failed; treating as none", e)
+                    emit(emptyPreferences())
+                    backOff(readRetryMs shl failures.coerceAtMost(5))
+                    failures++
+                    true
+                },
+        )
     }.map { prefs ->
         prefs.asMap().mapNotNull { (k, v) ->
             val name = k.name

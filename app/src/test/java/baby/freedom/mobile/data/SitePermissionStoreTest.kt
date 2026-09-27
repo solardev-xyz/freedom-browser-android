@@ -5,11 +5,13 @@ import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.emptyPreferences
 import java.io.IOException
+import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.emitAll
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.yield
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flow
@@ -110,5 +112,42 @@ class SitePermissionStoreTest {
             while (seen.receive() != expected) Unit
         }
         collector.cancel()
+    }
+
+    /**
+     * Reads follow [script]: `true` succeeds once (emits and ends the
+     * read, like a file that later goes bad), `false` fails; past the
+     * end, reads hang.
+     */
+    private class ScriptedStore(private val script: List<Boolean>) : DataStore<Preferences> {
+        private var reads = 0
+        override val data: Flow<Preferences> = flow {
+            val ok = script.getOrNull(reads++) ?: awaitCancellation()
+            if (!ok) throw IOException("transient")
+            emit(emptyPreferences())
+            throw IOException("went bad after a good read")
+        }
+        override suspend fun updateData(
+            transform: suspend (t: Preferences) -> Preferences,
+        ): Preferences = throw UnsupportedOperationException()
+    }
+
+    @Test
+    fun readBackOffResetsAfterASuccessfulRead() = runBlocking {
+        // 6 failures in a row, then a good read, then 2 more failures.
+        // (Each good read here is followed by a failure of its own.)
+        val script = List(6) { false } + true + listOf(false)
+        val delays = mutableListOf<Long>()
+        val store = SitePermissionStore(
+            ScriptedStore(script),
+            readRetryMs = 1,
+            backOff = { delays += it },
+        )
+        val collector = launch { store.all.collect {} }
+        withTimeout(5_000) { while (delays.size < 8) yield() }
+        collector.cancel()
+        // Doubles up to the 32× cap, then starts again at 1× after the
+        // good read instead of staying pinned at 32×.
+        assertEquals(listOf(1L, 2L, 4L, 8L, 16L, 32L, 1L, 2L), delays)
     }
 }
