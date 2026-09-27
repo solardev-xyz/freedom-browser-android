@@ -126,8 +126,19 @@ internal fun nameResolutionErrorIn(headers: Map<String, String>?): String? =
  */
 internal fun committedNameTrust(url: String?, displayUrl: String, refusal: NameRefusalSlot): NameTrust? {
     if (url == null || ErrorPage.isErrorPage(url) || refusal.isRefused(url)) return null
-    return nameTrustFor(displayUrl)
+    val trust = nameTrustFor(displayUrl) ?: return null
+    // A raw `bzz://<hash>` load shown as the name (name preservation)
+    // is the name's page only while the name still resolves to that
+    // hash (R1-F2): the name's trust says nothing about content it
+    // pointed at before. A load on the name's own origin is served
+    // from its current answer, so it needs no such check.
+    val loaded = Gateways.toDisplay(url)
+    val raw = CONTENT_ROOT_SCHEMES.any { loaded.startsWith(it) }
+    if (raw && !KnownEnsNames.isCurrentRoot(trust.name, loaded)) return null
+    return trust
 }
+
+private val CONTENT_ROOT_SCHEMES = listOf("bzz://", "ipfs://", "ipns://")
 
 /** Status for the interceptor's refusal of an ENS document. */
 internal fun statusForNameResolutionError(code: String): Int =

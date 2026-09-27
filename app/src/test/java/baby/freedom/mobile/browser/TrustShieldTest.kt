@@ -131,6 +131,68 @@ class TrustShieldTest {
         assertNull(ErrorPage.paramFor(ErrorPage.url("ens_not_found", "x.eth"), "resolved"))
     }
 
+    @Test
+    fun `reload keeps the transport the bar showed, not the one the name has moved to`() {
+        // R1-F1: shown as bzz://, then another lookup moved the name.
+        KnownEnsNames.record("bzz://$REF", "name.eth", verified)
+        val state = BrowserState(id = 1L)
+        val origin = VirtualOrigin.originFor(ContentRoot.Ens("name.eth"))!!
+        state.override = BrowserState.Override(baseUrl = origin, prefix = "name.eth")
+        state.url = "bzz://name.eth/"
+        KnownEnsNames.record("ipfs://$CID", "name.eth", verified)
+        assertEquals("name.eth/", state.reloadUrl())
+        assertEquals("$origin/", state.effectiveFetchUrl("bzz://name.eth/"))
+    }
+
+    @Test
+    fun `editing the shown generic address stays generic, typing another scheme asserts`() {
+        // R1-F4.
+        KnownEnsNames.record("ipfs://$CID", "vitalik.eth", verified)
+        val state = BrowserState(id = 1L)
+        val origin = VirtualOrigin.originFor(ContentRoot.Ens("vitalik.eth"))!!
+        state.override = BrowserState.Override(baseUrl = origin, prefix = "vitalik.eth")
+        state.url = "ipfs://vitalik.eth/"
+        assertEquals("$origin/general/", state.effectiveFetchUrl("ipfs://vitalik.eth/general/"))
+        assertEquals("$origin/general/", state.effectiveFetchUrl("vitalik.eth/general/"))
+        assertEquals("$origin?q=1", state.effectiveFetchUrl("ipfs://vitalik.eth?q=1"))
+        assertEquals("bzz://vitalik.eth/", state.effectiveFetchUrl("bzz://vitalik.eth/"))
+        assertEquals("ipfs://vitalik.ethx/", state.effectiveFetchUrl("ipfs://vitalik.ethx/"))
+        assertEquals("vitalik.ethx", state.effectiveFetchUrl("vitalik.ethx"))
+        // …and the load it maps to keeps the tab's override.
+        assertTrue(state.isUnderOverride("$origin/general/"))
+        assertTrue(!state.isUnderOverride("${origin}x/"))
+        assertTrue(!state.isUnderOverride("https://example.com/"))
+    }
+
+    @Test
+    fun `a hash the name no longer resolves to gets no shield`() {
+        // R1-F2: name.eth moved from A to B.
+        val a = REF
+        val b = "1".repeat(64)
+        KnownEnsNames.record("bzz://$a", "name.eth", unverified)
+        KnownEnsNames.record("bzz://$b", "name.eth", verified)
+        assertNull(KnownEnsNames.nameFor(a))
+        val refusal = NameRefusalSlot()
+        val rawA = VirtualOrigin.toVirtualUrl("bzz://$a/")!!
+        val rawB = VirtualOrigin.toVirtualUrl("bzz://$b/")!!
+        assertEquals("bzz://$a", DisplayUrl.forActualUrl(rawA, null))
+        assertNull(committedNameTrust(rawA, "bzz://$a/", refusal))
+        // Even a display that still says the name.
+        assertNull(committedNameTrust(rawA, "bzz://name.eth/", refusal))
+        assertEquals(TrustTier.Verified, committedNameTrust(rawB, "bzz://name.eth/", refusal)?.tier)
+    }
+
+    @Test
+    fun `the shield keeps the answer it was taken with`() {
+        // R1-F3.
+        KnownEnsNames.record("bzz://$REF", "name.eth", unverified)
+        val shown = nameTrustFor("bzz://name.eth")!!
+        KnownEnsNames.record("ipfs://$CID", "name.eth", verified)
+        assertEquals("bzz://$REF", shown.answer)
+        assertEquals(unverified, shown.trust)
+        assertEquals("ipfs://$CID", nameTrustFor("ipfs://name.eth")!!.answer)
+    }
+
     private companion object {
         const val REF = "8f1d385f2493d4bcd4d3b2c1e3c1b8f7d1a09876543210fedcba98765432abcd"
         const val CID = "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi"

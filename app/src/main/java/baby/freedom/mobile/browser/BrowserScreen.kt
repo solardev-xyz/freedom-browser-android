@@ -1025,7 +1025,12 @@ fun BrowserScreen(
         // `bzz://` / `ipfs://` click waits for the commit before the
         // pill describes where it is going.
         target.addressBarText = pendingAddressBarText(target.addressBarText, url, source)
-        target.clearEnsOverride()
+        // A Reload, or an edited path, of the name on screen maps onto
+        // its own origin ([BrowserState.effectiveFetchUrl]) and keeps the
+        // tab's override — generic stays generic, a typed scheme keeps
+        // asserting — instead of the next Reload re-reading the shown
+        // `ipfs://name.eth` as a fresh assertion (#97).
+        if (!target.isUnderOverride(url)) target.clearEnsOverride()
 
         // Direct content-addressed URLs (bzz://, ipfs://, ipns://, or
         // their loaded gateway form) get the same probe-gated treatment

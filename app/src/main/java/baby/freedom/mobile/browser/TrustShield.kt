@@ -64,8 +64,13 @@ internal enum class TrustTier(
     Unverified("Name not cross-checked", Icons.Filled.GppMaybe, Color(0xFFF0A020)),
 }
 
-/** The trust behind [name] (`vitalik.eth`) on the page on screen. */
-internal data class NameTrust(val name: String, val trust: EnsTrust) {
+/**
+ * The trust behind [name] (`vitalik.eth`) on the page on screen, and the
+ * [answer] (`ipfs://<cid>`) it was given for — taken together, when the
+ * document committed, so the details dialog never pairs one answer's
+ * servers and block with a later answer's URI.
+ */
+internal data class NameTrust(val name: String, val trust: EnsTrust, val answer: String? = null) {
     val tier: TrustTier get() = if (trust.verified) TrustTier.Verified else TrustTier.Unverified
 
     /** ENS, WNS or GNS — whose records these are. */
@@ -104,8 +109,8 @@ internal fun nameTrustFor(displayUrl: String): NameTrust? {
     val name = EnsInput.parse(displayUrl)?.name
         ?: EnsInput.parseConstrained(displayUrl)?.name
         ?: return null
-    val trust = KnownEnsNames.trustFor(name) ?: return null
-    return NameTrust(name, trust)
+    val (answer, trust) = KnownEnsNames.answerFor(name) ?: return null
+    return NameTrust(name, trust, answer)
 }
 
 /** Diameter of the shield riding the protocol badge's corner. */
@@ -169,9 +174,9 @@ internal fun ProtocolBadgeMark(
 @Composable
 internal fun TrustDetailsDialog(
     trust: NameTrust,
-    answer: String?,
     onDismiss: () -> Unit,
 ) {
+    val answer = trust.answer
     AlertDialog(
         onDismissRequest = onDismiss,
         icon = {

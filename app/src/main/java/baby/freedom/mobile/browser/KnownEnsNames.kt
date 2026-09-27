@@ -44,14 +44,65 @@ object KnownEnsNames {
      * default, for the reason [baby.freedom.mobile.ens.EnsResult.Ok.trust]
      * has none: an answer recorded without saying how it was checked
      * must not come out of here looking verified.
+     *
+     * A name that moved to a new root stops naming its old one (#97
+     * R1-F2): a raw load of the old hash is not the name's page any
+     * more, and must not be shown — or vouched for — as the name.
      */
+    @Synchronized
     fun record(uri: String, name: String, trust: EnsTrust) {
         val lowerName = name.lowercase()
         nameToUri[lowerName] = uri
         nameToTrust[lowerName] = trust
-        val (hash, protocol) = rootOf(uri) ?: return
-        hashToName[hash] = lowerName
-        nameToProtocol[lowerName] = protocol
+        val root = rootOf(uri)
+        if (root != null) {
+            hashToName[root.first] = lowerName
+            nameToProtocol[lowerName] = root.second
+        } else {
+            nameToProtocol.remove(lowerName)
+        }
+        releaseStaleRoots(lowerName)
+    }
+
+    /**
+     * The name's answer as one snapshot — its URI and how it was
+     * checked, from the same [record] — for a document's trust shield
+     * (#97), so the dialog's "Resolves to" can't come from a later
+     * answer than the trust beside it.
+     */
+    @Synchronized
+    fun answerFor(name: String): Pair<String, EnsTrust>? {
+        val lowerName = name.lowercase()
+        val uri = nameToUri[lowerName] ?: return null
+        val trust = nameToTrust[lowerName] ?: return null
+        return uri to trust
+    }
+
+    /**
+     * Is [contentUri] (`bzz://<hash>/…`, `ipfs://<cid>/…`) under the
+     * root [name] currently resolves to? `false` for a URI with no
+     * content root, or a name with no answer.
+     */
+    fun isCurrentRoot(name: String, contentUri: String): Boolean {
+        val root = rootOf(contentUri) ?: return false
+        val current = uriFor(name)?.let(::rootOf) ?: return false
+        return root.first == current.first
+    }
+
+    /**
+     * Hash-to-name mappings to [lowerName] whose root it no longer
+     * resolves to: handed to another name that still resolves there,
+     * or dropped. Callers hold the lock.
+     */
+    private fun releaseStaleRoots(lowerName: String) {
+        val stillNamed = nameToUri.entries.mapNotNull { (other, uri) ->
+            rootOf(uri)?.let { it.first to other }
+        }.toMap()
+        for (hash in hashToName.filterValues { it == lowerName }.keys) {
+            val other = stillNamed[hash]
+            if (other == lowerName) continue
+            if (other != null) hashToName[hash] = other else hashToName.remove(hash, lowerName)
+        }
     }
 
     /** `(hash-to-name key, protocol)` of a `bzz|ipfs|ipns` [uri]. */
@@ -106,16 +157,11 @@ object KnownEnsNames {
         nameToProtocol.remove(lowerName)
         nameToUri.remove(lowerName)
         nameToTrust.remove(lowerName)
-        val stillNamed = nameToUri.entries.mapNotNull { (other, uri) ->
-            rootOf(uri)?.let { it.first to other }
-        }.toMap()
-        for (hash in hashToName.filterValues { it == lowerName }.keys) {
-            val other = stillNamed[hash]
-            if (other != null) hashToName[hash] = other else hashToName.remove(hash, lowerName)
-        }
+        releaseStaleRoots(lowerName)
     }
 
     /** Tests only. */
+    @Synchronized
     fun clear() {
         hashToName.clear()
         nameToProtocol.clear()

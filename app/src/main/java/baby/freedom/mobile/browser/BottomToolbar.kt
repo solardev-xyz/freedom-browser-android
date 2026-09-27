@@ -2954,7 +2954,6 @@ private fun OverflowMenuButton(
         if (trustShown && nameTrust != null) {
             TrustDetailsDialog(
                 trust = nameTrust,
-                answer = KnownEnsNames.uriFor(nameTrust.name),
                 onDismiss = { trustShown = false },
             )
         }

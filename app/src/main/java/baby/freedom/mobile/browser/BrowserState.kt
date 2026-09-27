@@ -669,6 +669,12 @@ class BrowserState(val id: Long, val private: Boolean = false) {
         return o.assertedProtocol
     }
 
+    /** Is [url] on the display override's origin (its manifest)? */
+    fun isUnderOverride(url: String): Boolean {
+        val o = override ?: return false
+        return startsWithPrefix(url, o.baseUrl)
+    }
+
     /** Drop any active ENS display override. Call before loading a URL
      *  that the user explicitly typed (and that isn't an ENS name). */
     fun clearEnsOverride() {
@@ -728,8 +734,8 @@ class BrowserState(val id: Long, val private: Boolean = false) {
      */
     fun effectiveFetchUrl(raw: String): String {
         val o = override ?: return raw
-        if (raw.startsWith(o.prefix)) {
-            return o.baseUrl + raw.substring(o.prefix.length)
+        for (p in listOfNotNull(o.prefix, shownPrefixOf(o)).distinct()) {
+            if (startsWithPrefix(raw, p)) return o.baseUrl + raw.substring(p.length)
         }
         return raw
     }
@@ -749,10 +755,28 @@ class BrowserState(val id: Long, val private: Boolean = false) {
     fun reloadUrl(): String {
         val shown = url.ifBlank { addressBarText }
         val o = override ?: return shown
-        if (o.shown != o.prefix && shown.startsWith(o.shown)) {
-            return o.prefix + shown.substring(o.shown.length)
+        val p = shownPrefixOf(o) ?: return shown
+        if (p != o.prefix && startsWithPrefix(shown, p)) {
+            return o.prefix + shown.substring(p.length)
         }
         return shown
+    }
+
+    /**
+     * The override's prefix in the form the bar *showed* it for the page
+     * on screen — the scheme [url] was committed with, not the one
+     * [Override.shown] would pick now. A generic name's transport is
+     * read at display time, so it can have moved since (another tab's
+     * re-check, R1-F1); what the user saw, and edits, is this form.
+     * Falls back to [Override.shown] before anything has committed.
+     */
+    private fun shownPrefixOf(o: Override): String? {
+        if (o.prefix.contains("://")) return o.prefix
+        if (url.isBlank()) return o.shown
+        val scheme = url.substringBefore("://", "")
+        if (scheme !in ASSERTING_SCHEMES) return null
+        val p = "$scheme://${o.prefix}"
+        return p.takeIf { startsWithPrefix(url, it) }
     }
 
     /** Tokens the WebView client should not treat as "new" navigations. */
@@ -772,6 +796,13 @@ class BrowserState(val id: Long, val private: Boolean = false) {
         thumbnail = null
     }
 }
+
+/**
+ * Does [s] start with [prefix] at an address boundary — the prefix is
+ * the whole host, not `vitalik.eth` inside `vitalik.ethx`?
+ */
+private fun startsWithPrefix(s: String, prefix: String): Boolean =
+    s.startsWith(prefix) && (s.length == prefix.length || s[prefix.length] in "/?#")
 
 /** Schemes that, typed in front of a name, assert its transport (#97). */
 private val ASSERTING_SCHEMES = setOf("bzz", "ipfs", "ipns")

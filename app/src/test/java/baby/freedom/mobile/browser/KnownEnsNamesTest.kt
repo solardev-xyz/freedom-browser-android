@@ -73,4 +73,19 @@ class KnownEnsNamesTest {
         KnownEnsNames.forgetName("a.eth")
         assertNull(KnownEnsNames.nameFor("abcdef0123"))
     }
+
+    @Test
+    fun `a name that moves stops naming its old root, unless another name holds it`() {
+        KnownEnsNames.record("bzz://aaa", "a.eth", EnsTrust.ASSUMED)
+        KnownEnsNames.record("bzz://aaa", "b.eth", EnsTrust.ASSUMED)
+        KnownEnsNames.record("bzz://ccc", "c.eth", EnsTrust.ASSUMED)
+        KnownEnsNames.record("ipfs://bafy", "c.eth", EnsTrust.ASSUMED)
+        assertNull(KnownEnsNames.nameFor("ccc"))
+        assertEquals("c.eth", KnownEnsNames.nameFor("bafy"))
+        assertEquals("ipfs", KnownEnsNames.protocolFor("c.eth"))
+        // b.eth held aaa last; moving b.eth hands aaa back to a.eth.
+        KnownEnsNames.record("bzz://bbb", "b.eth", EnsTrust.ASSUMED)
+        assertEquals("a.eth", KnownEnsNames.nameFor("aaa"))
+        assertEquals("b.eth", KnownEnsNames.nameFor("bbb"))
+    }
 }
