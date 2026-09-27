@@ -1437,6 +1437,9 @@ fun BrowserScreen(
             ) {
                 // A private tab's chrome wears the private scheme (#86).
                 PrivateTheme(state.private) {
+                // …and its text fields (address bar, find bar) keep the
+                // keyboard from learning what is typed in them.
+                TabTextInput(state.private) {
                 if (findOpen) {
                     // Keyed on the tab: each tab's bar is its own field,
                     // seeded from that tab's query.
@@ -1559,6 +1562,7 @@ fun BrowserScreen(
                         .widthIn(max = CHROME_MAX_WIDTH)
                         .fillMaxWidth(),
                 )
+                }
                 }
             }
         }
