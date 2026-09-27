@@ -391,6 +391,34 @@ class GatewaysTest {
     }
 
     @Test
+    fun `an iframe on a name neither page pins waits for the commit and pins the new page`() {
+        val pins = EnsDocumentPins()
+        val wait = EnsDocumentPins.commitWaitMs
+        EnsDocumentPins.commitWaitMs = 10_000
+        try {
+            pins.pin("swarm.eth", "bzz://$ref64")
+            val next = pins.beginNavigation("https://swarm.eth.ens.freedom.baby/p.html")
+            pins.pin("swarm.eth", "bzz://$ref64", next)
+            pins.delivered(next)
+            // The new page's iframe on iframe.eth reaches the interceptor
+            // before onPageStarted: neither page pins the name yet.
+            val got = java.util.concurrent.atomic.AtomicReference<EnsDocumentPins.Page?>()
+            val io = Thread { got.set(pins.pageFor("iframe.eth")) }
+            io.start()
+            Thread.sleep(150)
+            assertNull(got.get())
+            pins.documentStarted("https://swarm.eth.ens.freedom.baby/p.html")
+            io.join(5_000)
+            assertTrue(got.get() === next)
+            // The re-check's answer lands on the page that asked for it.
+            pins.pin("iframe.eth", "bzz://$otherRef", got.get())
+            assertEquals("bzz://$otherRef", pins.uriFor("iframe.eth"))
+        } finally {
+            EnsDocumentPins.commitWaitMs = wait
+        }
+    }
+
+    @Test
     fun `an undelivered navigation never holds a subresource`() {
         val pins = EnsDocumentPins()
         pins.pin("swarm.eth", "bzz://$ref64")

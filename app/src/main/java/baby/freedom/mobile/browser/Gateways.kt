@@ -380,8 +380,9 @@ object Gateways {
  * place ([delivered]) and `onPageStarted`, a subresource request can't
  * say which document it belongs to: the new one may already have
  * committed and be parsing, or the navigation may have been cancelled
- * and the request is the old page's. When the two pages disagree on the
- * name, [pageFor] holds the request until the answer is known — the
+ * and the request is the old page's. Unless the two pages pin the name
+ * to the same root, [pageFor] holds the request until the answer is
+ * known — the
  * commit (`onPageStarted`), or [commitWaitMs] passing without one, which
  * means the navigation didn't commit (Stop / `window.stop()` give no
  * other signal) and the request is the old page's.
@@ -424,19 +425,23 @@ class EnsDocumentPins {
 
     /**
      * The page a subresource (or iframe) request on [name] belongs to:
-     * the page on screen, once it is known which page that is. If a
-     * delivered navigation that pins [name] differently is waiting on its
-     * commit, wait for `onPageStarted` — at most until [commitWaitMs]
-     * after delivery, after which it didn't commit and the page on screen
-     * is still the old one. Never call on the main thread.
+     * the page on screen, once it is known which page that is. While a
+     * delivered navigation is waiting on its commit, only a name both
+     * pages pin to the same root is answered at once; for any other —
+     * pinned differently, or pinned by neither (a new iframe the incoming
+     * document may be asking for, whose answer must land in *its* pins)
+     * — wait for `onPageStarted`, at most until [commitWaitMs] after
+     * delivery, after which it didn't commit and the page on screen is
+     * still the old one. Never call on the main thread.
      */
     fun pageFor(name: String): Page {
         val key = name.lowercase()
         lock.withLock {
             while (true) {
                 val incoming = pending
+                val agreed = incoming?.pins?.get(key)
                 if (incoming == null || incoming.deliveredAt == 0L ||
-                    incoming.pins[key] == current.pins[key]
+                    (agreed != null && agreed == current.pins[key])
                 ) {
                     return current
                 }
