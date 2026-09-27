@@ -1965,7 +1965,9 @@ private fun buildRefreshableWebView(
             // for must still get rid of the stale document, so that one
             // moves straight on to a GET of the same address (#125,
             // R6-F1, [SweptReload]) — posted, not run inside WebView's
-            // own callback.
+            // own callback. A prompt for a load started after the sweep's
+            // reload (the user's Back to a POST entry) is that load's, and
+            // [SweptReload.refused] leaves it alone (R1-F1).
             override fun onFormResubmission(view: WebView?, dontResend: Message?, resend: Message?) {
                 dontResend?.sendToTarget()
                 if (view is PageWebView) view.post { view.sweptReload.refused() }
@@ -2936,60 +2938,67 @@ internal class PageWebView(context: Context) : WebView(context) {
      */
     var onBrowserInitiatedLoad: () -> Unit = {}
 
+    private fun browserInitiatedLoad() {
+        // Any load but a sweep's own step supersedes its reload: a later
+        // resubmission prompt is that load's, not the sweep's (R1-F1).
+        sweptReload.navigationStarted()
+        onBrowserInitiatedLoad()
+    }
+
     // Navigations the app starts, noted before Chromium has them (see
     // [TabDocuments.navigationStarted]); the page's own go through
     // `shouldOverrideUrlLoading`.
     override fun loadUrl(url: String) {
         documents.navigationStarted(url)
-        onBrowserInitiatedLoad()
+        browserInitiatedLoad()
         super.loadUrl(url)
     }
 
     override fun loadUrl(url: String, additionalHttpHeaders: MutableMap<String, String>) {
         documents.navigationStarted(url)
-        onBrowserInitiatedLoad()
+        browserInitiatedLoad()
         super.loadUrl(url, additionalHttpHeaders)
     }
 
     override fun postUrl(url: String, postData: ByteArray) {
         documents.navigationStarted(url)
-        onBrowserInitiatedLoad()
+        browserInitiatedLoad()
         super.postUrl(url, postData)
     }
 
     override fun loadData(data: String, mimeType: String?, encoding: String?) {
-        onBrowserInitiatedLoad()
+        browserInitiatedLoad()
         super.loadData(data, mimeType, encoding)
     }
 
     override fun loadDataWithBaseURL(
         baseUrl: String?, data: String, mimeType: String?, encoding: String?, historyUrl: String?,
     ) {
-        onBrowserInitiatedLoad()
+        browserInitiatedLoad()
         super.loadDataWithBaseURL(baseUrl, data, mimeType, encoding, historyUrl)
     }
 
     override fun reload() {
         url?.let(documents::navigationStarted)
-        onBrowserInitiatedLoad()
+        browserInitiatedLoad()
         super.reload()
     }
 
     override fun goBack() {
         historyStepStarting(-1)
-        onBrowserInitiatedLoad()
+        browserInitiatedLoad()
         super.goBack()
     }
 
     override fun goForward() {
         historyStepStarting(1)
-        onBrowserInitiatedLoad()
+        browserInitiatedLoad()
         super.goForward()
     }
 
     override fun goBackOrForward(steps: Int) {
         historyStepStarting(steps)
-        onBrowserInitiatedLoad()
+        browserInitiatedLoad()
         super.goBackOrForward(steps)
     }
 

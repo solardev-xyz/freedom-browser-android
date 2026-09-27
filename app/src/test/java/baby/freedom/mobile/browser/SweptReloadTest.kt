@@ -147,6 +147,40 @@ class SweptReloadTest {
     }
 
     @Test
+    fun `a prompt for the user's own navigation after the sweep's reload isn't the sweep's`() {
+        val navigations = mutableListOf<Step>()
+        val timers = mutableListOf<() -> Unit>()
+        lateinit var swept: SweptReload
+        // The WebView's load overrides report every load, the sweep's own too.
+        swept = SweptReload(
+            navigate = { navigations += it; swept.navigationStarted() },
+            schedule = { _, a -> timers += a },
+        )
+        swept.swept(page)
+        // Before the reload commits, the user goes Back to a POST entry.
+        swept.navigationStarted()
+        // Its resubmission prompt doesn't send them to the stale address.
+        assertFalse(swept.refused())
+        assertEquals(listOf(Step.RELOAD), navigations)
+        // If that Back never commits either, the deadline still moves on.
+        timers.last()()
+        assertEquals(listOf(Step.RELOAD, Step.GET), navigations)
+    }
+
+    @Test
+    fun `the sweep's own reload, reported as a load, can still be refused`() {
+        val navigations = mutableListOf<Step>()
+        lateinit var swept: SweptReload
+        swept = SweptReload(
+            navigate = { navigations += it; swept.navigationStarted() },
+            schedule = { _, _ -> },
+        )
+        swept.swept(page)
+        assertTrue(swept.refused())
+        assertEquals(listOf(Step.RELOAD, Step.GET), navigations)
+    }
+
+    @Test
     fun `a deadline from an earlier sweep doesn't act on a later one`() {
         val navigations = mutableListOf<Step>()
         val timers = mutableListOf<() -> Unit>()

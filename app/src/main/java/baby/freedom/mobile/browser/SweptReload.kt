@@ -52,6 +52,17 @@ internal class SweptReload(
 
     private var generation = 0L
 
+    /** Inside [navigate]: the loads it starts are this class's own. */
+    private var navigating = false
+
+    /**
+     * The last load the tab started is [Step.RELOAD]'s own. Cleared by any
+     * other load ([navigationStarted]) — a Back to a POST entry, the
+     * user's own reload — so their resubmission prompt isn't taken for
+     * the sweep's (R1-F1).
+     */
+    private var ownReloadIsLatest = false
+
     /** A sweep found the tab on a stale document at [address]. */
     fun swept(address: String?) {
         this.address = address
@@ -62,12 +73,25 @@ internal class SweptReload(
      * WebView refused the navigation just asked for — the POST
      * resubmission prompt, answered "don't resend". Moves on at once
      * rather than waiting out [OVERDUE_MS]. Only [Step.RELOAD] can be
-     * refused that way; returns whether this was it.
+     * refused that way, and only while no other load has started since
+     * ([navigationStarted]): a prompt for the user's own navigation —
+     * Back to a POST entry — is theirs, not the sweep's, and doesn't send
+     * them to the stale page's address. (If that navigation is refused
+     * too, the stale document stays until [OVERDUE_MS] moves on.)
+     * Returns whether this was it.
      */
     fun refused(): Boolean {
-        if (step != Step.RELOAD) return false
+        if (step != Step.RELOAD || !ownReloadIsLatest) return false
         next(Step.RELOAD)
         return true
+    }
+
+    /**
+     * The tab started a load — any the app asks of the WebView: typed URL,
+     * reload, back / forward. Those [navigate] starts are ignored.
+     */
+    fun navigationStarted() {
+        if (!navigating) ownReloadIsLatest = false
     }
 
     /** The tab committed a new document: the stale one is gone. */
@@ -75,6 +99,7 @@ internal class SweptReload(
         if (step == null) return
         step = null
         address = null
+        ownReloadIsLatest = false
         generation++
     }
 
@@ -90,7 +115,13 @@ internal class SweptReload(
     private fun go(to: Step) {
         step = to
         val g = ++generation
-        navigate(to)
+        navigating = true
+        try {
+            navigate(to)
+        } finally {
+            navigating = false
+        }
+        ownReloadIsLatest = to == Step.RELOAD
         schedule(OVERDUE_MS) { if (generation == g) next(to) }
     }
 
