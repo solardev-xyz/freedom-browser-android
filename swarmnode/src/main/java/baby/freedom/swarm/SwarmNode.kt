@@ -14,6 +14,8 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
 /**
@@ -27,9 +29,34 @@ import kotlinx.coroutines.withContext
  * The UI observes [state]. Because it's a [StateFlow], any new collector
  * immediately receives the current value — there is no edge to miss.
  */
-class SwarmNode(
+class SwarmNode internal constructor(
     private val config: Config,
+    private val ops: NodeOps,
 ) {
+    constructor(config: Config) : this(config, NodeOps.Native)
+
+    /** The native calls [SwarmNode] makes; swapped for a fake in tests. */
+    internal interface NodeOps {
+        fun seed(antDir: File)
+        fun init(dataDir: String): Long
+        fun startGateway(handle: Long, apiAddr: String, lightMode: Boolean, gnosisRpc: String)
+        fun agentString(handle: Long): String?
+        fun peerCount(handle: Long): Int
+        fun stopGateway(handle: Long)
+        fun shutdown(handle: Long)
+
+        object Native : NodeOps {
+            override fun seed(antDir: File) = BootnodeSeeder.seedIfEmpty(antDir)
+            override fun init(dataDir: String) = AntNative.init(dataDir)
+            override fun startGateway(handle: Long, apiAddr: String, lightMode: Boolean, gnosisRpc: String) =
+                AntNative.startGateway(handle, apiAddr, lightMode, gnosisRpc)
+            override fun agentString(handle: Long) = AntNative.agentString(handle)
+            override fun peerCount(handle: Long) = AntNative.peerCount(handle)
+            override fun stopGateway(handle: Long) = AntNative.stopGateway(handle)
+            override fun shutdown(handle: Long) = AntNative.shutdown(handle)
+        }
+    }
+
     data class Config(
         val dataDir: String,
         /**
@@ -51,40 +78,69 @@ class SwarmNode(
     private var handle: Long = 0L
     private var peerPoller: Job? = null
 
+    /**
+     * Guards [generation], and orders it with the Starting/Stopped/
+     * Running transitions and the [handle] hand-off.
+     */
+    private val lock = Any()
+
+    /** Bumped by every [start] and [stop]; a launch acts only while its own is current. */
+    private var generation = 0L
+    private val startMutex = Mutex()
+
     private val _state = MutableStateFlow(NodeInfo())
     val state: StateFlow<NodeInfo> = _state.asStateFlow()
 
     fun start() {
-        if (_state.value.status == NodeStatus.Starting ||
-            _state.value.status == NodeStatus.Running
-        ) return
-
-        _state.update { it.copy(status = NodeStatus.Starting, errorMessage = null) }
+        val gen = synchronized(lock) {
+            if (_state.value.status == NodeStatus.Starting ||
+                _state.value.status == NodeStatus.Running
+            ) return
+            _state.update { it.copy(status = NodeStatus.Starting, errorMessage = null) }
+            ++generation
+        }
 
         scope.launch {
+            // One launch at a time: a launch that [stop] superseded
+            // mid-init finishes shutting its node down before the next
+            // one binds the same gateway port.
+            startMutex.withLock { bringUp(gen) }
+        }
+    }
+
+    /**
+     * Bring the node up for start generation [gen]. [stop] (or a later
+     * [start]) bumps [generation], and seeding alone can block for
+     * seconds, so the generation is re-checked before the native init
+     * and again, under [lock], before the handle and Running status are
+     * published. A superseded launch never touches [state] and tears
+     * down any node it already created.
+     */
+    private fun bringUp(gen: Long) {
+        if (!isCurrent(gen)) return
+        try {
+            val antDir = config.dataDir + "/ant"
+            // Give a fresh install dialable bootnodes even if
+            // ant's own port-53 dnsaddr lookup is blocked.
+            ops.seed(File(antDir))
+            if (!isCurrent(gen)) return
+            val h = ops.init(antDir)
             try {
-                val h = withContext(Dispatchers.IO) {
-                    val antDir = config.dataDir + "/ant"
-                    // Give a fresh install dialable bootnodes even if
-                    // ant's own port-53 dnsaddr lookup is blocked.
-                    BootnodeSeeder.seedIfEmpty(File(antDir))
-                    val h = AntNative.init(antDir)
-                    try {
-                        AntNative.startGateway(
-                            handle = h,
-                            apiAddr = GATEWAY_ADDR,
-                            // Ultra-light: read path only, no publishing.
-                            lightMode = false,
-                            gnosisRpc = config.rpcEndpoint,
-                        )
-                    } catch (t: Throwable) {
-                        runCatching { AntNative.shutdown(h) }
-                        throw t
-                    }
-                    h
-                }
+                ops.startGateway(
+                    handle = h,
+                    apiAddr = GATEWAY_ADDR,
+                    // Ultra-light: read path only, no publishing.
+                    lightMode = false,
+                    gnosisRpc = config.rpcEndpoint,
+                )
+            } catch (t: Throwable) {
+                runCatching { ops.shutdown(h) }
+                throw t
+            }
+            val agent = runCatching { ops.agentString(h) }.getOrNull().orEmpty()
+            val published = synchronized(lock) {
+                if (generation != gen) return@synchronized false
                 handle = h
-                val agent = runCatching { AntNative.agentString(h) }.getOrNull().orEmpty()
                 _state.update {
                     it.copy(
                         status = NodeStatus.Running,
@@ -93,7 +149,18 @@ class SwarmNode(
                     )
                 }
                 startPeerPolling()
-            } catch (t: Throwable) {
+                true
+            }
+            if (!published) {
+                Log.i(TAG, "stopped while starting; shutting the new node down")
+                runCatching {
+                    ops.stopGateway(h)
+                    ops.shutdown(h)
+                }.onFailure { Log.w(TAG, "shutdown threw", it) }
+            }
+        } catch (t: Throwable) {
+            synchronized(lock) {
+                if (generation != gen) return
                 Log.e(TAG, "Failed to start Swarm node", t)
                 _state.update {
                     it.copy(
@@ -105,22 +172,25 @@ class SwarmNode(
         }
     }
 
+    private fun isCurrent(gen: Long) = synchronized(lock) { generation == gen }
+
     fun stop() {
-        peerPoller?.cancel()
-        peerPoller = null
-
-        val h = handle
-        handle = 0L
-
-        _state.update {
-            it.copy(status = NodeStatus.Stopped, connectedPeers = 0, clientVersion = "")
+        val h = synchronized(lock) {
+            // Supersede any launch still in flight.
+            generation++
+            peerPoller?.cancel()
+            peerPoller = null
+            _state.update {
+                it.copy(status = NodeStatus.Stopped, connectedPeers = 0, clientVersion = "")
+            }
+            handle.also { handle = 0L }
         }
 
         if (h != 0L) {
             scope.launch {
                 runCatching {
-                    AntNative.stopGateway(h)
-                    AntNative.shutdown(h)
+                    ops.stopGateway(h)
+                    ops.shutdown(h)
                 }.onFailure { Log.w(TAG, "shutdown threw", it) }
             }
         }
@@ -167,7 +237,7 @@ class SwarmNode(
             while (isActive) {
                 val h = handle
                 if (h == 0L) break
-                val peers = runCatching { AntNative.peerCount(h) }.getOrDefault(-1)
+                val peers = runCatching { ops.peerCount(h) }.getOrDefault(-1)
                 _state.update { it.copy(connectedPeers = peers.coerceAtLeast(0).toLong()) }
                 delay(if (peers > 100) 5_000L else 1_000L)
             }

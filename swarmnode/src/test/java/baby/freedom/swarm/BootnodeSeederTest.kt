@@ -87,6 +87,16 @@ class BootnodeSeederTest {
     }
 
     @Test
+    fun doHResultIsMergedWithFallbackNotReplacingIt() {
+        val live = "/ip4/1.2.3.4/tcp/1634/p2p/QmLive"
+        val merged = BootnodeSeeder.seedAddrs(listOf(live, ams))
+        assertEquals(live, merged.first())
+        assertEquals(BootnodeSeeder.FALLBACK_BOOTNODES.size + 1, merged.size)
+        assertTrue(merged.containsAll(BootnodeSeeder.FALLBACK_BOOTNODES))
+        assertEquals(BootnodeSeeder.FALLBACK_BOOTNODES, BootnodeSeeder.seedAddrs(emptyList()))
+    }
+
+    @Test
     fun fallbackListIsAllDialable() {
         val snap = JSONObject(BootnodeSeeder.peerstoreJson(BootnodeSeeder.FALLBACK_BOOTNODES))
         assertEquals(BootnodeSeeder.FALLBACK_BOOTNODES.size, snap.getJSONArray("peers").length())

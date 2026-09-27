@@ -29,8 +29,11 @@ import java.util.concurrent.TimeUnit
  *     approach, see freedom-browser-ios `docs/bootnode-resolution.md`).
  *     The endpoint is an IP literal, so it works even if the system
  *     DNS is broken.
- *  2. If DoH fails, use [FALLBACK_BOOTNODES], the list shipped with the
- *     app.
+ *  2. Add [FALLBACK_BOOTNODES], the list shipped with the app, whether
+ *     or not DoH succeeded. The live root currently lists a single
+ *     region, so a DoH answer alone can be narrower than the shipped
+ *     list; merging means a network that reaches 1.1.1.1:443 but not
+ *     that region's nodes still has other regions to dial.
  *
  * When `peers.json` already has entries (every launch after the first
  * successful one) this does nothing: no network request, no startup
@@ -61,9 +64,9 @@ internal object BootnodeSeeder {
      * leaf), hil, hil. hil's second node, 5.78.94.214, is published
      * only as a `/tls/sni/…/ws` leaf on port 1635; its entry here uses
      * that record's peer id on the standard TCP port 1634, which was
-     * checked open. Used only when the DoH lookup returns nothing.
-     * The root currently lists only the `emea` region, so this list
-     * has wider coverage than a live lookup. If an entry goes stale,
+     * checked open. Always merged in after the DoH result (see
+     * [seedAddrs]): the root currently lists only the `emea` region,
+     * so this list has wider coverage than a live lookup. If an entry goes stale,
      * ant drops it after five failed dials, and any one live bootnode
      * is enough to join the network.
      */
@@ -95,8 +98,7 @@ internal object BootnodeSeeder {
             val file = File(antDataDir, "peers.json")
             if (!needsSeed(file)) return
             val resolved = resolveOverDoh()
-            val (source, addrs) =
-                if (resolved.isNotEmpty()) "DoH" to resolved else "fallback" to FALLBACK_BOOTNODES
+            val addrs = seedAddrs(resolved)
             antDataDir.mkdirs()
             val tmp = File(antDataDir, "peers.json.seed")
             tmp.writeText(peerstoreJson(addrs))
@@ -105,11 +107,22 @@ internal object BootnodeSeeder {
                 Log.w(TAG, "could not write $file")
                 return
             }
-            Log.i(TAG, "seeded peers.json with ${addrs.size} bootnodes from $source")
+            Log.i(TAG, "seeded peers.json with ${addrs.size} bootnodes (${resolved.size} from DoH)")
         } catch (t: Throwable) {
             Log.w(TAG, "bootnode seeding failed; ant falls back to its own DNS", t)
         }
     }
+
+    /**
+     * The addresses to seed: the live DoH leaves first, then every
+     * shipped [FALLBACK_BOOTNODES] entry not already among them. A DoH
+     * success never narrows the seed below the shipped list.
+     */
+    fun seedAddrs(resolved: List<String>): List<String> =
+        LinkedHashSet<String>().apply {
+            addAll(resolved)
+            addAll(FALLBACK_BOOTNODES)
+        }.toList()
 
     /**
      * True when the peerstore file is missing, or is a valid snapshot of
