@@ -309,6 +309,89 @@ class IpfsProgressTest {
     }
 
     @Test
+    fun `an answered body is busy only while it is read (R4-F2)`() {
+        var clock = 0L
+        val work = GatewayWork { clock }
+        val video = work.start(1)
+        // Waiting for its answer: busy, however long that takes.
+        clock += 30_000
+        assertTrue(work.activeBefore(2))
+        work.answered(video)
+        assertTrue(work.activeBefore(2))
+        // Chromium stops pulling the body: open, but idle.
+        clock += GatewayWork.IDLE_MS
+        assertFalse(work.activeBefore(2))
+        assertTrue(work.openBefore(2))
+        // A read blocked on the node is busy for as long as it blocks.
+        work.reading(video, started = true)
+        clock += 5_000
+        assertTrue(work.activeBefore(2))
+        work.reading(video, started = false)
+        clock += GatewayWork.IDLE_MS - 1
+        assertTrue(work.activeBefore(2))
+        clock += 1
+        assertFalse(work.activeBefore(2))
+        work.finish(video)
+        assertFalse(work.openBefore(2))
+    }
+
+    @Test
+    fun `a tracked body reports each read around it`() {
+        val events = mutableListOf<Boolean>()
+        val stream = CloseNotifyingInputStream("abcdef".byteInputStream(), { events += it }) {}
+        stream.read()
+        stream.read(ByteArray(2))
+        stream.skip(1)
+        assertEquals(listOf(true, false, true, false, true, false), events)
+        val failing = object : java.io.InputStream() {
+            override fun read(): Int = throw java.io.IOException("reset")
+        }
+        events.clear()
+        val broken = CloseNotifyingInputStream(failing, { events += it }) {}
+        runCatching { broken.read() }
+        assertEquals(listOf(true, false), events)
+    }
+
+    @Test
+    fun `an idle superseded page masks neither the counters nor its absence (R4-F2)`() {
+        // An IPFS page's paused <video> keeps its range body open while
+        // an unprovided CID is submitted: its DHT search reads as such.
+        val meter = IpfsProgress.LoadMeter()
+        val start = counters(0, 0, 10, 0, 5, 3, 1, 0, 0, 0, 0)
+        meter.poll(null, start, supersededActive = false, supersededOpen = true)
+        val dht = counters(0, 0, 10, 0, 5, 4, 1, 0, 2, 0, 0)
+        assertEquals(
+            "IPFS: Searching the DHT…",
+            meter.poll(null, dht, supersededActive = false, supersededOpen = true),
+        )
+    }
+
+    @Test
+    fun `the snapshot is not read while a superseded load has a request open (R4-F1)`() {
+        // An ipns:// site still fetching in the node when an unprovided
+        // CID is submitted: its Bitswap target tops the snapshot.
+        val oldSite = """{"active":[
+            {"kind":"gateway_request","phase":"fetching_bitswap","status":"active","top_level_path":"/ipns/docs.ipfs.tech/"},
+            {"kind":"gateway_request","phase":"provider_lookup","status":"active","top_level_path":"/ipfs/bafyunprovided/"}
+        ]}"""
+        val meter = IpfsProgress.LoadMeter()
+        val start = counters(0, 0, 0, 0, 0, 3, 2, 0, 0, 0, 0)
+        assertEquals("IPFS: Looking up content…", meter.poll(oldSite, start, supersededActive = true))
+        // Gone idle but still open (R4-F2): still not the snapshot, but
+        // this load's own counter growth now reads through.
+        val lookup = counters(0, 0, 0, 0, 0, 3, 2, 0, 0, 0, 0)
+        meter.poll(oldSite, lookup, supersededActive = false, supersededOpen = true)
+        val own = counters(0, 0, 0, 0, 0, 4, 2, 0, 0, 0, 0)
+        assertEquals(
+            "IPFS: Finding providers…",
+            meter.poll(oldSite, own, supersededActive = false, supersededOpen = true),
+        )
+        // Every old request closed: the snapshot is this load's again.
+        val mine = """{"active":[{"kind":"gateway_request","phase":"dht_fallback_started","status":"active"}]}"""
+        assertEquals("IPFS: Searching the DHT…", meter.poll(mine, own, supersededActive = false, supersededOpen = false))
+    }
+
+    @Test
     fun `a tracked body reports its close once`() {
         var closes = 0
         val stream = CloseNotifyingInputStream("abc".byteInputStream()) { closes++ }

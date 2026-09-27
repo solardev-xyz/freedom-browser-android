@@ -1576,7 +1576,11 @@ private fun buildRefreshableWebView(
                 if (mainFrame) {
                     state.mainFrameAnswered(generation, mainFrameAnswerReplacesDocument(response))
                 }
-                return trackedUntilClosed(response) { state.gatewayWork.finish(work) }
+                state.gatewayWork.answered(work)
+                return trackedUntilClosed(
+                    response,
+                    onReading = { started -> state.gatewayWork.reading(work, started) },
+                ) { state.gatewayWork.finish(work) }
             }
 
             override fun onReceivedError(
@@ -2606,10 +2610,12 @@ internal fun mainFrameAnswerReplacesDocument(
 
 /**
  * [response], with [onDone] run once its body is closed — or at once
- * when there is no body to wait for.
+ * when there is no body to wait for — and [onReading] told when each
+ * read of the body starts (`true`) and returns (`false`).
  */
 internal fun trackedUntilClosed(
     response: WebResourceResponse?,
+    onReading: (Boolean) -> Unit = {},
     onDone: () -> Unit,
 ): WebResourceResponse? {
     val body = response?.data
@@ -2617,16 +2623,35 @@ internal fun trackedUntilClosed(
         onDone()
         return response
     }
-    response.data = CloseNotifyingInputStream(body, onDone)
+    response.data = CloseNotifyingInputStream(body, onReading, onDone)
     return response
 }
 
-/** Runs [onClose] once, the first time the stream is closed. */
+/**
+ * Runs [onClose] once, the first time the stream is closed, and
+ * [onReading] around every read / skip (see [GatewayWork.activeBefore]).
+ */
 internal class CloseNotifyingInputStream(
     inner: InputStream,
+    private val onReading: (Boolean) -> Unit = {},
     private val onClose: () -> Unit,
 ) : FilterInputStream(inner) {
     private val closed = AtomicBoolean(false)
+
+    private inline fun <T> tracked(block: () -> T): T {
+        onReading(true)
+        try {
+            return block()
+        } finally {
+            onReading(false)
+        }
+    }
+
+    override fun read(): Int = tracked { super.read() }
+
+    override fun read(b: ByteArray, off: Int, len: Int): Int = tracked { super.read(b, off, len) }
+
+    override fun skip(n: Long): Long = tracked { super.skip(n) }
 
     override fun close() {
         try {

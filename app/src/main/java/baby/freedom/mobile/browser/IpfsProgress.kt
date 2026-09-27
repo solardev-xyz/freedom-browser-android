@@ -135,8 +135,8 @@ object IpfsProgress {
      * snapshot [message] reads is per-request. The one blend we can see
      * coming — this load superseding one on the same tab that is still
      * running in the node — is handled by [carried] (see [LoadMeter]):
-     * the growth that happened while the old load still had gateway
-     * requests open is subtracted, so the line may under-report a phase
+     * the growth that happened while the old load was still busy in the
+     * node is subtracted, so the line may under-report a phase
      * for that stretch but never shows the old load's.
      */
     fun fromCounters(baseline: Counters, now: Counters, carried: Counters? = null): String {
@@ -212,20 +212,30 @@ object IpfsProgress {
     }
 
     /**
-     * One load's reading of the node-wide counters, poll by poll.
+     * One load's reading of the node's progress, poll by poll.
      *
-     * The first reading is the load's baseline. After that, each poll's
-     * growth is the load's own — unless a load it superseded on the same
-     * tab still had gateway requests open at either end of that poll
-     * interval ([GatewayWork.activeBefore]). The node doesn't stop a
-     * fetch because the WebView went elsewhere, so while such a request
-     * is open the old load can move *any* counter, at any time, in
-     * bursts; there is no telling its growth from this load's. That
+     * The first counter reading is the load's baseline. After that, each
+     * poll's growth is the load's own — unless a load it superseded on
+     * the same tab was busy in the node at either end of that poll
+     * interval ([GatewayWork.activeBefore]: a request still waiting for
+     * its answer, or a body Chromium is still reading). The node doesn't
+     * stop a fetch because the WebView went elsewhere, so while such a
+     * request is busy the old load can move *any* counter, at any time,
+     * in bursts; there is no telling its growth from this load's. That
      * interval's growth is set aside as carried, whole, and subtracted
      * from this load's (see [fromCounters]). Once the superseded
-     * requests have all closed, growth counts again — so a link tapped
-     * while the page is still loading advances as soon as the old page's
-     * requests are gone, instead of being masked for the whole load.
+     * requests have all closed or gone idle (a paused `<video>`'s range
+     * body, R4-F2), growth counts again — so a link tapped while the
+     * page is still loading advances as soon as the old page's requests
+     * are done, instead of being masked for the whole load.
+     *
+     * The snapshot is node-wide too, and an old load's request stays in
+     * its `active` list for as long as the request is open, idle or not
+     * — so it is only read while no superseded request is open at all
+     * ([GatewayWork.openBefore]); until then the counters speak for this
+     * load (R4-F1). Its entries can't be matched to a load by path: an
+     * ENS site's is its resolved CID, and the node's spelling of a CID
+     * needn't be ours.
      */
     class LoadMeter {
         private var baseline: Counters? = null
@@ -236,9 +246,16 @@ object IpfsProgress {
         /**
          * Record a poll ([now] null when the node didn't answer) and
          * return the line to show. [supersededActive]: a superseded load
-         * of this tab has a gateway request open right now.
+         * of this tab is busy in the node right now
+         * ([GatewayWork.activeBefore]). [supersededOpen]: one has any
+         * request open, busy or idle ([GatewayWork.openBefore]).
          */
-        fun poll(snapshotJson: String?, now: Counters?, supersededActive: Boolean): String? {
+        fun poll(
+            snapshotJson: String?,
+            now: Counters?,
+            supersededActive: Boolean,
+            supersededOpen: Boolean = supersededActive,
+        ): String? {
             overlapping = overlapping || supersededActive
             if (now != null) {
                 val prev = last
@@ -250,7 +267,8 @@ object IpfsProgress {
                 last = now
                 overlapping = supersededActive
             }
-            return line(snapshotJson, baseline, now, carried)
+            val snapshot = if (supersededOpen || supersededActive) null else snapshotJson
+            return line(snapshot, baseline, now, carried)
         }
     }
 
@@ -323,14 +341,20 @@ object IpfsProgress {
  * guessing from which counters it had moved by some earlier poll.
  *
  * A request counts as open until its response body is closed (Chromium
- * closes it on EOF and on cancel) or its probe attempt returns. Entries
+ * closes it on EOF and on cancel) or its probe attempt returns, and as
+ * busy while it waits for its answer or its body is being read. Entries
  * older than [STALE_MS] are ignored, so a body some path forgets to
  * close can't hold every later load's line back for good.
  */
 internal class GatewayWork(
     private val clockMs: () -> Long = { System.nanoTime() / 1_000_000 },
 ) {
-    private class Entry(val generation: Int, val startedAt: Long)
+    private class Entry(var generation: Int, val startedAt: Long) {
+        /** The answer is out; from here on only reads mean work. */
+        var answered = false
+        var readsInFlight = 0
+        var lastReadAt = startedAt
+    }
 
     private val lock = Any()
     private var nextToken = 0L
@@ -341,6 +365,27 @@ internal class GatewayWork(
         val token = ++nextToken
         open[token] = Entry(generation, clockMs())
         token
+    }
+
+    /**
+     * The request [token]'s answer went out to Chromium: it now counts
+     * as busy only while its body is being read (see [activeBefore]).
+     */
+    fun answered(token: Long) {
+        synchronized(lock) {
+            val entry = open[token] ?: return
+            entry.answered = true
+            entry.lastReadAt = clockMs()
+        }
+    }
+
+    /** A read of [token]'s body starts ([started]) or returns. */
+    fun reading(token: Long, started: Boolean) {
+        synchronized(lock) {
+            val entry = open[token] ?: return
+            entry.readsInFlight = (entry.readsInFlight + if (started) 1 else -1).coerceAtLeast(0)
+            entry.lastReadAt = clockMs()
+        }
     }
 
     /** The request [token] is done. Idempotent. */
@@ -355,22 +400,43 @@ internal class GatewayWork(
      */
     fun retag(from: Int, to: Int) {
         synchronized(lock) {
-            for (item in open.entries) {
-                val entry = item.value
-                if (entry.generation in from until to) item.setValue(Entry(to, entry.startedAt))
+            for (entry in open.values) {
+                if (entry.generation in from until to) entry.generation = to
             }
         }
     }
 
-    /** Some load older than [generation] still has a request open. */
+    /**
+     * Some load older than [generation] is busy in the node: a request
+     * still waiting for its answer, or one whose body is being read or
+     * was read within [IDLE_MS]. A body Chromium stopped pulling (a
+     * paused `<video>`'s open range request, say) holds the node to no
+     * more than a pipe's worth of work, so it doesn't count (R4-F2).
+     */
     fun activeBefore(generation: Int): Boolean = synchronized(lock) {
-        val now = clockMs()
-        open.values.removeAll { now - it.startedAt >= STALE_MS }
+        val now = dropStale(now = clockMs())
+        open.values.any {
+            it.generation < generation &&
+                (!it.answered || it.readsInFlight > 0 || now - it.lastReadAt < IDLE_MS)
+        }
+    }
+
+    /** Some load older than [generation] has a request open, busy or idle. */
+    fun openBefore(generation: Int): Boolean = synchronized(lock) {
+        dropStale(now = clockMs())
         open.values.any { it.generation < generation }
+    }
+
+    private fun dropStale(now: Long): Long {
+        open.values.removeAll { now - it.startedAt >= STALE_MS }
+        return now
     }
 
     companion object {
         const val STALE_MS: Long = 60_000L
+
+        /** How long after its last read an answered body still counts as busy. */
+        const val IDLE_MS: Long = 1_000L
     }
 }
 

@@ -481,7 +481,8 @@ fun BrowserScreen(
     // supersedes one still loading (and so never lets the tab go idle)
     // starts a fresh [IpfsProgress.LoadMeter], which sets aside the
     // counter growth of every poll during which the superseded load
-    // still had gateway requests open ([BrowserState.gatewayWork]).
+    // was still busy in the node, and skips the node-wide snapshot while
+    // it has any request open ([BrowserState.gatewayWork]).
     val pollIpfsProgress = state.ipfsLoad &&
         isCapsuleLoading(state) &&
         ipfsInfo.status == IpfsStatus.Running
@@ -512,6 +513,7 @@ fun BrowserScreen(
                 snapshot,
                 counters,
                 supersededActive = state.gatewayWork.activeBefore(generation),
+                supersededOpen = state.gatewayWork.openBefore(generation),
             )
             ipfsStatusTab = state.id
             delay(IpfsProgress.POLL_INTERVAL_MS)
