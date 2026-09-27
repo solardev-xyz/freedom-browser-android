@@ -165,46 +165,55 @@ class NodeSettings private constructor(
         ccipRead = prefs[Keys.ENS_CCIP_READ] ?: true,
     )
 
-    private suspend fun editEnsRpc(change: (EnsRpcConfig) -> EnsRpcConfig) {
+    /**
+     * Apply [change] to the stored settings. `false`, writing nothing,
+     * if the result would leave the resolver no endpoint to ask: the
+     * page greys those controls out, this is the backstop for a write
+     * that races past it (a double tap before recomposition), and the
+     * caller tells the user it didn't happen.
+     */
+    private suspend fun editEnsRpc(change: (EnsRpcConfig) -> EnsRpcConfig): Boolean {
+        var applied = false
         store.edit { prefs ->
             val next = change(readEnsRpc(prefs))
-            // Never write a configuration that leaves the resolver
-            // nothing to ask; the page greys those controls out, this
-            // is the backstop.
             if (next.endpoints.isEmpty()) return@edit
+            applied = true
             prefs[Keys.ENS_RPC_CUSTOM] = EnsRpcConfig.encodeList(next.customEndpoints)
             prefs[Keys.ENS_RPC_DISABLED_PUBLIC] = next.disabledPublicEndpoints
             prefs[Keys.ENS_RPC_API_KEYS] = EnsRpcConfig.encodeKeys(next.apiKeys)
             prefs[Keys.ENS_CCIP_READ] = next.ccipRead
         }
+        return applied
     }
+
+    /** Why [addEnsRpcEndpoint] didn't add. */
+    enum class AddEndpointResult { ADDED, INVALID, DUPLICATE, FULL }
 
     /**
      * Add [url] to the user's own endpoints (after the ones already
-     * there). `false`, changing nothing, if it isn't a valid endpoint,
-     * is already listed, or the list is full.
+     * there), unless it isn't a valid endpoint, is already listed
+     * ([EnsRpcConfig.endpointKey]), or the list is full.
      */
-    suspend fun addEnsRpcEndpoint(url: String): Boolean {
-        val normalized = EnsRpcConfig.normalizeEndpoint(url) ?: return false
-        var added = false
+    suspend fun addEnsRpcEndpoint(url: String): AddEndpointResult {
+        val normalized = EnsRpcConfig.normalizeEndpoint(url) ?: return AddEndpointResult.INVALID
+        var result = AddEndpointResult.ADDED
         editEnsRpc { c ->
-            if (normalized in c.customEndpoints ||
-                c.customEndpoints.size >= EnsRpcConfig.MAX_CUSTOM_ENDPOINTS
-            ) {
-                c
-            } else {
-                added = true
-                c.copy(customEndpoints = c.customEndpoints + normalized)
+            when {
+                c.hasCustomEndpoint(normalized) -> c.also { result = AddEndpointResult.DUPLICATE }
+                c.customEndpoints.size >= EnsRpcConfig.MAX_CUSTOM_ENDPOINTS ->
+                    c.also { result = AddEndpointResult.FULL }
+                else -> c.copy(customEndpoints = c.customEndpoints + normalized)
             }
         }
-        return added
+        return result
     }
 
-    suspend fun removeEnsRpcEndpoint(url: String) =
+    /** `false`, changing nothing, if it was the last endpoint. */
+    suspend fun removeEnsRpcEndpoint(url: String): Boolean =
         editEnsRpc { it.copy(customEndpoints = it.customEndpoints - url) }
 
     /** Move one of the user's endpoints up (-1) or down (+1) the order. */
-    suspend fun moveEnsRpcEndpoint(url: String, by: Int) = editEnsRpc { c ->
+    suspend fun moveEnsRpcEndpoint(url: String, by: Int): Boolean = editEnsRpc { c ->
         val list = c.customEndpoints.toMutableList()
         val from = list.indexOf(url)
         val to = from + by
@@ -213,7 +222,8 @@ class NodeSettings private constructor(
         c.copy(customEndpoints = list)
     }
 
-    suspend fun setPublicEnsRpcEnabled(url: String, enabled: Boolean) = editEnsRpc { c ->
+    /** `false`, changing nothing, if it would switch off the last endpoint. */
+    suspend fun setPublicEnsRpcEnabled(url: String, enabled: Boolean): Boolean = editEnsRpc { c ->
         c.copy(
             disabledPublicEndpoints = if (enabled) {
                 c.disabledPublicEndpoints - url
@@ -223,13 +233,16 @@ class NodeSettings private constructor(
         )
     }
 
-    /** Save (or, with a blank [key], remove) a keyed provider's API key. */
-    suspend fun setRpcApiKey(providerId: String, key: String) = editEnsRpc { c ->
+    /**
+     * Save (or, with a blank [key], remove) a keyed provider's API key.
+     * `false`, changing nothing, if removing it would leave no endpoint.
+     */
+    suspend fun setRpcApiKey(providerId: String, key: String): Boolean = editEnsRpc { c ->
         val trimmed = key.trim()
         c.copy(apiKeys = if (trimmed.isEmpty()) c.apiKeys - providerId else c.apiKeys + (providerId to trimmed))
     }
 
-    suspend fun setEnsCcipRead(enabled: Boolean) = editEnsRpc { it.copy(ccipRead = enabled) }
+    suspend fun setEnsCcipRead(enabled: Boolean): Boolean = editEnsRpc { it.copy(ccipRead = enabled) }
 
     private object Keys {
         val RUN_NODE_ENABLED = booleanPreferencesKey("run_node_enabled")
@@ -266,6 +279,9 @@ class NodeSettings private constructor(
 
         @Volatile
         private var instance: NodeSettings? = null
+
+        /** Over an arbitrary [store], for unit tests. */
+        internal fun forTesting(store: DataStore<Preferences>): NodeSettings = NodeSettings(store)
 
         fun get(context: Context): NodeSettings =
             instance ?: synchronized(this) {

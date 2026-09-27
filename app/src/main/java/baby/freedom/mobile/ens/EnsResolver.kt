@@ -68,19 +68,32 @@ class EnsResolver internal constructor(
 
     private data class Cached(val result: EnsResult, val timestamp: Long)
 
-    private val cache = ConcurrentHashMap<String, Cached>()
-
-    /** The settings the cache was filled under. */
-    @Volatile
-    private var cachedUnder: Settings? = null
-
     /**
-     * When each endpoint last failed. An endpoint that failed within
-     * [FAILED_ENDPOINT_COOLDOWN_MS] is tried after the others, so a
-     * provider outage costs one timeout rather than one per lookup,
-     * while the configured order comes back once it has passed.
+     * The answer cache and endpoint failure times, together with the
+     * [settings] they were filled under. A settings change swaps in a
+     * fresh [Epoch] rather than clearing a shared map, and every lookup
+     * reads and writes only the epoch it started under: a lookup still
+     * waiting on an endpoint the user has since removed then finishes
+     * into the discarded epoch, never into the one later lookups read.
      */
-    private val failedAt = ConcurrentHashMap<String, Long>()
+    private class Epoch(val settings: Settings) {
+        val cache = ConcurrentHashMap<String, Cached>()
+
+        /**
+         * When each endpoint last failed. An endpoint that failed within
+         * [FAILED_ENDPOINT_COOLDOWN_MS] is tried after the others, so a
+         * provider outage costs one timeout rather than one per lookup,
+         * while the configured order comes back once it has passed.
+         */
+        val failedAt = ConcurrentHashMap<String, Long>()
+    }
+
+    @Volatile
+    private var epoch: Epoch? = null
+
+    private fun epochFor(config: Settings): Epoch = synchronized(this) {
+        epoch?.takeIf { it.settings == config } ?: Epoch(config).also { epoch = it }
+    }
 
     /**
      * Resolve [rawName] (e.g. `swarm.eth`) to a content-addressed URI.
@@ -111,14 +124,12 @@ class EnsResolver internal constructor(
         }
 
         val config = settings()
-        if (config != cachedUnder) {
-            // Answers from endpoints the user has since dropped (or got
-            // with CCIP-Read on) must not outlive the change by the
-            // cache TTL.
-            cache.clear()
-            failedAt.clear()
-            cachedUnder = config
-        }
+        // Answers from endpoints the user has since dropped (or got
+        // with CCIP-Read on) must not outlive the change by the cache
+        // TTL: a new configuration starts a new, empty epoch.
+        val epoch = epochFor(config)
+        val cache = epoch.cache
+        val failedAt = epoch.failedAt
         if (config.endpoints.isEmpty()) {
             return EnsResult.Error(normalized, "NO_RPC_ENDPOINTS", "no RPC endpoints configured")
         }
@@ -140,7 +151,7 @@ class EnsResolver internal constructor(
 
         var lastError: EnsResult.Error? = null
         // Each endpoint once, in the configured order — except that the
-        // ones that failed recently go last (see [failedAt]).
+        // ones that failed recently go last (see [Epoch.failedAt]).
         val now = System.currentTimeMillis()
         val order = config.endpoints.sortedBy { rpc ->
             if (failedAt[rpc]?.let { now - it < FAILED_ENDPOINT_COOLDOWN_MS } == true) 1 else 0
@@ -202,7 +213,7 @@ class EnsResolver internal constructor(
                 val mapped = if (contract == null) mapRevert(normalized, call.revertData) else null
                 if (mapped != null) {
                     failedAt.remove(rpc)
-                    return cacheAndReturn(normalized, mapped)
+                    return cacheAndReturn(cache, normalized, mapped)
                 }
                 lastError = EnsResult.Error(
                     name = normalized,
@@ -230,7 +241,7 @@ class EnsResolver internal constructor(
             } else {
                 decodeContenthashResponse(normalized, raw)
             }
-            return cacheAndReturn(normalized, decoded)
+            return cacheAndReturn(cache, normalized, decoded)
         }
 
         return lastError ?: EnsResult.Error(
@@ -241,7 +252,11 @@ class EnsResolver internal constructor(
         )
     }
 
-    private fun cacheAndReturn(name: String, result: EnsResult): EnsResult {
+    private fun cacheAndReturn(
+        cache: ConcurrentHashMap<String, Cached>,
+        name: String,
+        result: EnsResult,
+    ): EnsResult {
         cache[name] = Cached(result, System.currentTimeMillis())
         Log.i(TAG, "[$name] → $result")
         return result

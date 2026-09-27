@@ -297,7 +297,9 @@ object Gateways {
      * merely failed (RPC unreachable) serves the last answer this tab
      * or this session had for the name, as it did before the re-check
      * existed — the network being down is no reason to stop Back from
-     * working. With no earlier answer at all it's `ens_lookup_failed`.
+     * working. With no earlier answer at all it's `ens_lookup_failed`
+     * (`ens_ccip_disabled` if the name needs CCIP-Read and the user
+     * switched it off).
      * The same goes for a lookup that hasn't answered within
      * [reverifyDeadlineMs] when there is an earlier answer: a stalled
      * network costs Back a few seconds at most, and nothing on the
@@ -358,7 +360,13 @@ object Gateways {
             // Failed, or still running at the deadline: not an answer.
             is EnsResult.Error, null -> {
                 if (last == null) {
-                    "ens_lookup_failed"
+                    // CCIP-Read switched off isn't a network problem;
+                    // the refusal page says what it is (#102).
+                    if ((result as? EnsResult.Error)?.reason == "CCIP_DISABLED") {
+                        "ens_ccip_disabled"
+                    } else {
+                        "ens_lookup_failed"
+                    }
                 } else {
                     pins?.pin(name, last, page)
                     null

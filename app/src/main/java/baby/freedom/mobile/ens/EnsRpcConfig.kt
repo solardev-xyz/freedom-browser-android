@@ -54,19 +54,21 @@ data class EnsRpcConfig(
     /** Every endpoint the resolver will try, in order, each once. */
     val sources: List<Source>
         get() {
+            // Keyed by [endpointKey]: `https://eth.drpc.org/` is the
+            // same endpoint as the built-in `https://eth.drpc.org`.
             val seen = HashSet<String>()
             val out = ArrayList<Source>()
             for (url in customEndpoints) {
-                if (seen.add(url)) out += Source(Kind.CUSTOM, "Your endpoint", url)
+                if (seen.add(endpointKey(url))) out += Source(Kind.CUSTOM, "Your endpoint", url)
             }
             for (provider in KEYED_PROVIDERS) {
                 val key = apiKeys[provider.id]?.trim().orEmpty()
                 if (key.isEmpty()) continue
                 val url = provider.urlFor(key)
-                if (seen.add(url)) out += Source(Kind.KEYED, provider.name, url)
+                if (seen.add(endpointKey(url))) out += Source(Kind.KEYED, provider.name, url)
             }
             for (url in enabledPublicEndpoints) {
-                if (seen.add(url)) out += Source(Kind.PUBLIC, "Public", url)
+                if (seen.add(endpointKey(url))) out += Source(Kind.PUBLIC, "Public", url)
             }
             return out
         }
@@ -78,11 +80,29 @@ data class EnsRpcConfig(
         get() = EnsResolver.Settings(endpoints = endpoints, ccipRead = ccipRead)
 
     /**
-     * Whether removing [url] from the order still leaves the resolver
-     * something to ask. The settings page greys out the switch / remove
-     * button that would take the last endpoint away.
+     * Whether removing one of the user's own endpoints / switching off a
+     * public one / deleting a provider's key still leaves the resolver
+     * something to ask. The settings page greys out the control that
+     * would take the last endpoint away, and `NodeSettings` refuses the
+     * write. Each is judged on the configuration the change would
+     * produce, not on [endpoints]: an endpoint listed both as your own
+     * and as a public one shows once in the order, yet dropping either
+     * copy leaves the other.
      */
-    fun canRemove(url: String): Boolean = endpoints.any { it != url }
+    fun canRemoveCustom(url: String): Boolean =
+        copy(customEndpoints = customEndpoints - url).endpoints.isNotEmpty()
+
+    fun canDisablePublic(url: String): Boolean =
+        copy(disabledPublicEndpoints = disabledPublicEndpoints + url).endpoints.isNotEmpty()
+
+    fun canRemoveKey(providerId: String): Boolean =
+        copy(apiKeys = apiKeys - providerId).endpoints.isNotEmpty()
+
+    /** Whether [url] is already one of the user's own endpoints ([endpointKey]). */
+    fun hasCustomEndpoint(url: String): Boolean {
+        val key = endpointKey(url)
+        return customEndpoints.any { endpointKey(it) == key }
+    }
 
     companion object {
         /** The built-in public mainnet endpoints, tried in this order. */
@@ -136,6 +156,22 @@ data class EnsRpcConfig(
             if (uri.rawUserInfo != null) return no(Rejection.USER_INFO)
             if (uri.host.isNullOrEmpty()) return no(Rejection.NOT_A_URL)
             return Validation(text, null)
+        }
+
+        /**
+         * What two endpoint URLs are compared by to tell whether they
+         * are the same endpoint: scheme and host are case-insensitive,
+         * and a trailing `/` on the path makes no difference.
+         */
+        fun endpointKey(url: String): String {
+            val uri = runCatching { URI(url.trim()) }.getOrNull()
+            val scheme = uri?.scheme
+            val host = uri?.host
+            if (uri == null || scheme == null || host == null) return url.trim().trimEnd('/')
+            val port = if (uri.port >= 0) ":${uri.port}" else ""
+            val path = uri.rawPath.orEmpty().trimEnd('/')
+            val query = uri.rawQuery?.let { "?$it" }.orEmpty()
+            return "${scheme.lowercase()}://${host.lowercase()}$port$path$query"
         }
 
         /** `null` if [validateEndpoint] refuses [raw]. */

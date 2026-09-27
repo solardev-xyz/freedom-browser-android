@@ -1,6 +1,10 @@
 package baby.freedom.mobile.ens
 
 import java.io.IOException
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicReference
+import kotlin.concurrent.thread
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -63,10 +67,40 @@ class EnsRpcConfigTest {
     fun `the last endpoint can't be removed`() {
         val allButOne = EnsRpcConfig.PUBLIC_ENDPOINTS.drop(1).toSet()
         val c = EnsRpcConfig(disabledPublicEndpoints = allButOne)
-        assertFalse(c.canRemove(EnsRpcConfig.PUBLIC_ENDPOINTS[0]))
+        assertFalse(c.canDisablePublic(EnsRpcConfig.PUBLIC_ENDPOINTS[0]))
         val withOwn = c.copy(customEndpoints = listOf("https://my.node"))
-        assertTrue(withOwn.canRemove(EnsRpcConfig.PUBLIC_ENDPOINTS[0]))
-        assertTrue(withOwn.canRemove("https://my.node"))
+        assertTrue(withOwn.canDisablePublic(EnsRpcConfig.PUBLIC_ENDPOINTS[0]))
+        assertTrue(withOwn.canRemoveCustom("https://my.node"))
+        val onlyOwn = withOwn.copy(disabledPublicEndpoints = EnsRpcConfig.PUBLIC_ENDPOINTS.toSet())
+        assertFalse(onlyOwn.canRemoveCustom("https://my.node"))
+        val onlyKey = onlyOwn.copy(customEndpoints = emptyList(), apiKeys = mapOf("infura" to "K"))
+        assertFalse(onlyKey.canRemoveKey("infura"))
+        assertTrue(onlyKey.copy(customEndpoints = listOf("https://my.node")).canRemoveKey("infura"))
+    }
+
+    @Test
+    fun `an own endpoint equal to a public one doesn't lock either`() {
+        val drpc = "https://eth.drpc.org"
+        val c = EnsRpcConfig(
+            customEndpoints = listOf("$drpc/"),
+            disabledPublicEndpoints = EnsRpcConfig.PUBLIC_ENDPOINTS.toSet() - drpc,
+        )
+        // Listed once (a trailing slash is the same endpoint)…
+        assertEquals(listOf("$drpc/"), c.endpoints)
+        // …but dropping either copy still leaves the other.
+        assertTrue(c.canRemoveCustom("$drpc/"))
+        assertTrue(c.canDisablePublic(drpc))
+        assertEquals(listOf(drpc), c.copy(customEndpoints = emptyList()).endpoints)
+    }
+
+    @Test
+    fun `duplicate endpoints are spotted regardless of case and trailing slash`() {
+        val c = EnsRpcConfig(customEndpoints = listOf("https://My.Node:8545/rpc"))
+        assertTrue(c.hasCustomEndpoint("https://my.node:8545/rpc/"))
+        assertTrue(c.hasCustomEndpoint("HTTPS://MY.NODE:8545/rpc"))
+        assertFalse(c.hasCustomEndpoint("https://my.node:8545/RPC"))
+        assertFalse(c.hasCustomEndpoint("http://my.node:8545/rpc"))
+        assertFalse(c.hasCustomEndpoint("https://my.node:8546/rpc"))
     }
 
     @Test
@@ -167,6 +201,45 @@ class EnsRpcConfigTest {
             resolver.resolveContenthash("x.eth")
             assertEquals(listOf("https://b.test"), http.asked)
         }
+    }
+
+    @Test
+    fun `a lookup that outlives a settings change doesn't fill the new cache`() {
+        // Lookup A starts under [a.test] and is still waiting on it when
+        // the user swaps it for [b.test]; lookup B runs under the new
+        // settings. A's answer (from the dropped endpoint) must not be
+        // served to lookups under the new settings.
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val asked = java.util.Collections.synchronizedList(mutableListOf<String>())
+        val http = object : EnsHttp {
+            override fun request(
+                method: String, url: String, headers: Map<String, String>, body: String?,
+                timeoutMs: Int, maxBytes: Long, followRedirects: Boolean,
+            ): EnsHttp.Reply {
+                asked += url
+                if (url == "https://a.test") {
+                    entered.countDown()
+                    release.await(10, TimeUnit.SECONDS)
+                }
+                return EnsHttp.Reply(
+                    200,
+                    """{"jsonrpc":"2.0","id":1,"error":{"code":3,"message":"reverted","data":"0x77209fe8"}}""",
+                )
+            }
+        }
+        val settings = AtomicReference(EnsResolver.Settings(listOf("https://a.test")))
+        val resolver = EnsResolver({ settings.get() }, http)
+        val a = thread { runBlocking { resolver.resolveContenthash("x.eth") } }
+        assertTrue(entered.await(10, TimeUnit.SECONDS))
+        settings.set(EnsResolver.Settings(listOf("https://b.test")))
+        runBlocking { resolver.resolveContenthash("other.eth") }
+        release.countDown()
+        a.join(10_000)
+
+        asked.clear()
+        runBlocking { resolver.resolveContenthash("x.eth") }
+        assertEquals(listOf("https://b.test"), asked.toList())
     }
 
     @Test

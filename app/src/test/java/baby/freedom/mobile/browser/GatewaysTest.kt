@@ -283,6 +283,15 @@ class GatewaysTest {
     }
 
     @Test
+    fun `reverifyEnsDocument says CCIP-Read is off rather than lookup failed`() {
+        withLookup({ EnsResult.Error(it, "CCIP_DISABLED", "off") }) {
+            val code = Gateways.reverifyEnsDocument("offchain.eth", EnsDocumentPins())
+            assertEquals("ens_ccip_disabled", code)
+            assertEquals(502, statusForNameResolutionError(code!!))
+        }
+    }
+
+    @Test
     fun `reverifyEnsDocument refuses a name whose content is no longer loadable`() {
         KnownEnsNames.record("bzz://$ref64", "swarm.eth")
         withLookup({ EnsResult.Unsupported(it, "0xe5", "") }) {

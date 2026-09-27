@@ -1,5 +1,6 @@
 package baby.freedom.mobile.browser
 
+import android.widget.Toast
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -36,6 +37,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
@@ -171,8 +173,18 @@ internal fun RpcProvidersSection(
     settings: NodeSettings,
 ) {
     val scope = rememberCoroutineScope()
+    val context = LocalContext.current
     var addingEndpoint by remember { mutableStateOf(false) }
+    var addError by remember { mutableStateOf<String?>(null) }
     var editingProvider by remember { mutableStateOf<KeyedRpcProvider?>(null) }
+    var keyError by remember { mutableStateOf<String?>(null) }
+
+    // `NodeSettings` refuses a write that would leave no endpoint (the
+    // greyed-out controls can still race it, e.g. a double tap before
+    // recomposition); say so rather than look as if it was saved.
+    fun refused() {
+        Toast.makeText(context, "Not changed: $LAST_ENDPOINT_HELP", Toast.LENGTH_SHORT).show()
+    }
 
     SectionCard(title = SECTION_RPC) {
         var first = true
@@ -205,8 +217,10 @@ internal fun RpcProvidersSection(
                         ) { Icon(Icons.Filled.ArrowDownward, contentDescription = "Move $url down") }
                     }
                     IconButton(
-                        onClick = { scope.launch { settings.removeEnsRpcEndpoint(url) } },
-                        enabled = config.canRemove(url),
+                        onClick = {
+                            scope.launch { if (!settings.removeEnsRpcEndpoint(url)) refused() }
+                        },
+                        enabled = config.canRemoveCustom(url),
                     ) { Icon(Icons.Filled.Close, contentDescription = "Remove $url") }
                 }
             }
@@ -216,7 +230,10 @@ internal fun RpcProvidersSection(
                     subtitle = "Your own node or a provider URL",
                     style = PageRowStyle.Inset,
                     leadingIcon = Icons.Filled.Add,
-                    onClick = { addingEndpoint = true },
+                    onClick = {
+                        addError = null
+                        addingEndpoint = true
+                    },
                 )
             }
         }
@@ -232,7 +249,10 @@ internal fun RpcProvidersSection(
                     subtitle = keyedSubtitle(config, provider),
                     style = PageRowStyle.Inset,
                     leadingIcon = Icons.Filled.Key,
-                    onClick = { editingProvider = provider },
+                    onClick = {
+                        keyError = null
+                        editingProvider = provider
+                    },
                 )
             }
         }
@@ -245,7 +265,7 @@ internal fun RpcProvidersSection(
                 val on = url !in config.disabledPublicEndpoints
                 // Switching off the last endpoint would leave nothing
                 // to resolve with.
-                val locked = on && !config.canRemove(url)
+                val locked = on && !config.canDisablePublic(url)
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically,
@@ -269,7 +289,9 @@ internal fun RpcProvidersSection(
                         checked = on,
                         enabled = !locked,
                         onCheckedChange = { enable ->
-                            scope.launch { settings.setPublicEnsRpcEnabled(url, enable) }
+                            scope.launch {
+                                if (!settings.setPublicEnsRpcEnabled(url, enable)) refused()
+                            }
                         },
                     )
                 }
@@ -279,10 +301,23 @@ internal fun RpcProvidersSection(
 
     if (addingEndpoint) {
         AddEndpointDialog(
-            existing = config.customEndpoints,
+            isDuplicate = config::hasCustomEndpoint,
+            saveError = addError,
             onAdd = { url ->
-                scope.launch { settings.addEnsRpcEndpoint(url) }
-                addingEndpoint = false
+                addError = null
+                scope.launch {
+                    // The dialog closes only once the endpoint is saved.
+                    addError = when (settings.addEnsRpcEndpoint(url)) {
+                        NodeSettings.AddEndpointResult.ADDED -> {
+                            addingEndpoint = false
+                            null
+                        }
+                        NodeSettings.AddEndpointResult.DUPLICATE -> "Not added: already in your endpoints"
+                        NodeSettings.AddEndpointResult.FULL ->
+                            "Not added: at most ${EnsRpcConfig.MAX_CUSTOM_ENDPOINTS} endpoints"
+                        NodeSettings.AddEndpointResult.INVALID -> "Not added: not a valid endpoint URL"
+                    }
+                }
             },
             onDismiss = { addingEndpoint = false },
         )
@@ -293,14 +328,32 @@ internal fun RpcProvidersSection(
             provider = provider,
             savedKey = saved,
             // Removing the key takes that provider's endpoint away.
-            canRemove = saved.isEmpty() || config.canRemove(provider.urlFor(saved)),
+            canRemove = saved.isEmpty() || config.canRemoveKey(provider.id),
+            saveError = keyError,
             onSave = { key ->
-                scope.launch { settings.setRpcApiKey(provider.id, key) }
-                editingProvider = null
+                keyError = null
+                scope.launch {
+                    // The dialog closes only once the change is saved.
+                    if (settings.setRpcApiKey(provider.id, key)) {
+                        editingProvider = null
+                    } else {
+                        keyError = "Not removed: $LAST_ENDPOINT_HELP"
+                    }
+                }
             },
             onDismiss = { editingProvider = null },
         )
     }
+}
+
+/** A dialog's "that wasn't saved" line; the dialog stays open under it. */
+@Composable
+private fun SaveErrorText(text: String) {
+    Text(
+        text,
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.error,
+    )
 }
 
 @Composable
@@ -393,13 +446,14 @@ private fun EndpointTestRow(url: String?) {
 
 @Composable
 private fun AddEndpointDialog(
-    existing: List<String>,
+    isDuplicate: (String) -> Boolean,
+    saveError: String?,
     onAdd: (String) -> Unit,
     onDismiss: () -> Unit,
 ) {
     var draft by remember { mutableStateOf("") }
     val validation = EnsRpcConfig.validateEndpoint(draft)
-    val duplicate = validation.url != null && validation.url in existing
+    val duplicate = validation.url != null && isDuplicate(validation.url)
     val url = validation.url?.takeIf { !duplicate }
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -432,6 +486,7 @@ private fun AddEndpointDialog(
                     modifier = Modifier.fillMaxWidth(),
                 )
                 androidx.compose.runtime.key(url) { EndpointTestRow(url) }
+                saveError?.let { SaveErrorText(it) }
             }
         },
         confirmButton = {
@@ -448,6 +503,7 @@ private fun ApiKeyDialog(
     provider: KeyedRpcProvider,
     savedKey: String,
     canRemove: Boolean,
+    saveError: String?,
     onSave: (String) -> Unit,
     onDismiss: () -> Unit,
 ) {
@@ -507,6 +563,7 @@ private fun ApiKeyDialog(
                         )
                     }
                 }
+                saveError?.let { SaveErrorText(it) }
             }
         },
         confirmButton = {

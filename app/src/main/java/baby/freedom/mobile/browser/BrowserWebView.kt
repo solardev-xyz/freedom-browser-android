@@ -116,7 +116,7 @@ internal fun nameResolutionErrorIn(headers: Map<String, String>?): String? =
 
 /** Status for the interceptor's refusal of an ENS document. */
 internal fun statusForNameResolutionError(code: String): Int =
-    if (code == "ens_lookup_failed") 502 else 404
+    if (code == "ens_lookup_failed" || code == "ens_ccip_disabled") 502 else 404
 
 /**
  * "The main-frame document the interceptor last served for this tab was
@@ -182,9 +182,12 @@ internal fun nameResolutionRefusal(name: String, code: String): WebResourceRespo
         "ens_unsupported_codec" -> "Unsupported content format" to
             "This ENS name now resolves to a content format Freedom Browser " +
             "cannot load yet on mobile."
+        "ens_ccip_disabled" -> "ENS lookup failed" to
+            "This name is resolved through an off-chain gateway (CCIP-Read), which is " +
+            "turned off in Settings &rarr; Name resolution."
         else -> "ENS lookup failed" to
-            "Couldn't reach an Ethereum RPC endpoint to resolve this name. " +
-            "Check your connection and try again."
+            "Couldn't reach an Ethereum RPC endpoint to resolve this name. Check your " +
+            "connection, or the endpoints in Settings &rarr; RPC providers, and try again."
     }
     val safeName = name.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
     val html = """<!doctype html><html lang="en"><head><meta charset="utf-8">
