@@ -146,7 +146,12 @@ internal fun relativeLuminance(argb: Int): Double {
  *   (`null`) before first paint unless the caller knows the document is
  *   the one on screen (`onPageFinished` for the current load, which a
  *   document that never reports a first paint still gets);
- * - [accept] lets an answer land only while its generation is current.
+ * - [accept] lets an answer land only while its generation is current;
+ * - [detectorHeard] records that the document's own detector has spoken
+ *   (a report or a theme answer with its token), and [fallbackDue] says
+ *   whether a read sent to the detector [DETECTOR_THEME_WAIT_MS] ago
+ *   still needs the page-visible [THEME_COLOR_JS] instead: only while
+ *   that read's document is current and its detector was never heard.
  *
  * The colour itself is not cleared at [startDocument]: until the new
  * document paints, the old one is what the user sees, and its tint with
@@ -160,11 +165,29 @@ internal class ThemeColorSlot {
     private var generation = 0
     private var hasPainted = false
 
+    /** Has the current document's own detector answered anything yet? */
+    var heard = false
+        private set
+
     /** A new document is starting; no read of the old one may speak for it. */
     fun startDocument() {
         generation++
         hasPainted = false
+        heard = false
     }
+
+    /** The current document's detector sent a message tagged with its token. */
+    fun detectorHeard() {
+        heard = true
+    }
+
+    /**
+     * The detector was asked for the read stamped [token] and has had
+     * [DETECTOR_THEME_WAIT_MS] to answer: read with [THEME_COLOR_JS] now?
+     * Only if that document is still current and its detector never
+     * spoke — it has none that runs (a CSP `sandbox` document).
+     */
+    fun fallbackDue(token: Int): Boolean = token == generation && !heard
 
     /** The document on screen has painted. */
     fun painted() {
@@ -181,6 +204,17 @@ internal class ThemeColorSlot {
     /** May the answer to the read stamped [token] land? */
     fun accept(token: Int): Boolean = token == generation
 }
+
+/**
+ * How long a read sent to a detector that hasn't been heard from yet
+ * waits before falling back to [THEME_COLOR_JS]. A running detector
+ * reports as soon as it is started (first paint, or its ready), within
+ * a few frames; only a document without one (a CSP `sandbox` document,
+ * which has an opaque origin and no channel) should ever reach the
+ * fallback. Generous, because a fallback on a page whose detector is
+ * merely slow runs the page-visible read the detector exists to avoid.
+ */
+internal const val DETECTOR_THEME_WAIT_MS = 2_000L
 
 /** How long a popup's written blank page's frames wait for their theme-colour read, at first. */
 internal const val BLANK_PAGE_READ_MS = 250L

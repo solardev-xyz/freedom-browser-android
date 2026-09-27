@@ -210,6 +210,35 @@ class ThemeColorTest {
     }
 
     @Test
+    fun `a detector ask falls back to the page-visible read only if the detector never spoke`() {
+        // #92 R5-F1: on a fast load `onPageFinished` beats the detector's
+        // first report. Its read must still go to the detector, not to
+        // THEME_COLOR_JS the page can watch: the fallback is only for a
+        // document whose detector never speaks (a CSP sandbox one).
+        val slot = ThemeColorSlot()
+        slot.startDocument()
+        val finished = slot.beginRead(onScreen = true)!!
+        assertFalse(slot.heard)
+        slot.detectorHeard()            // its first report lands after the finish
+        assertFalse(slot.fallbackDue(finished))
+
+        // A sandboxed document: nothing ever comes back.
+        slot.startDocument()
+        slot.painted()
+        val sandboxed = slot.beginRead()!!
+        assertTrue(slot.fallbackDue(sandboxed))
+
+        // A heard document's heard-ness doesn't carry over to the next one,
+        // and a wait for a document that's gone does nothing.
+        slot.detectorHeard()
+        val stale = slot.beginRead()!!
+        slot.startDocument()
+        assertFalse(slot.heard)
+        assertFalse(slot.fallbackDue(stale))
+        assertFalse(slot.fallbackDue(sandboxed))
+    }
+
+    @Test
     fun `a written blank page reads once per burst of frames, and frames after a read read again`() {
         val reads = BlankPageReads()
         assertEquals(BLANK_PAGE_READ_MS, reads.drawn()) // first frame: schedule a read
