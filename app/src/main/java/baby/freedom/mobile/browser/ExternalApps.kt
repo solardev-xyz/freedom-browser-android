@@ -182,6 +182,49 @@ internal class UserGestureLatch(private val clock: () -> Long) {
     }
 }
 
+/**
+ * Tells a tap from the end of a scroll, fling or pinch, so only a tap
+ * arms the [UserGestureLatch]: every one of those ends in an `ACTION_UP`
+ * too. A tap is one finger that went down and came up within [slopPx]
+ * of where it started — the same touch slop Android uses to decide a
+ * touch has become a scroll.
+ */
+internal class TapTracker(private val slopPx: Float) {
+    private var downX = 0f
+    private var downY = 0f
+    private var tracking = false
+
+    /** The first finger went down. */
+    fun onDown(x: Float, y: Float) {
+        downX = x
+        downY = y
+        tracking = true
+    }
+
+    /** The finger moved; past the slop, this touch is a scroll. */
+    fun onMove(x: Float, y: Float) {
+        if (tracking && movedPastSlop(x, y)) tracking = false
+    }
+
+    /** A second finger, or the system took the touch: no tap. */
+    fun onCancel() {
+        tracking = false
+    }
+
+    /** The finger lifted; true when the whole touch was a tap. */
+    fun onUp(x: Float, y: Float): Boolean {
+        val tap = tracking && !movedPastSlop(x, y)
+        tracking = false
+        return tap
+    }
+
+    private fun movedPastSlop(x: Float, y: Float): Boolean {
+        val dx = x - downX
+        val dy = y - downY
+        return dx * dx + dy * dy > slopPx * slopPx
+    }
+}
+
 /** An allowed link, ready to start. */
 internal class ExternalAppLaunch(
     val scheme: ExternalScheme,
@@ -209,11 +252,7 @@ internal fun externalAppLaunch(url: String, ownPackage: String): ExternalAppLaun
     val scheme = externalLinkScheme(url)?.takeIf(::isExternalSchemeAllowed) ?: return null
     var fallbackUrl: String? = null
     val intent = if (scheme == "intent") {
-        val parsed = try {
-            Intent.parseUri(url, Intent.URI_INTENT_SCHEME)
-        } catch (_: URISyntaxException) {
-            return null
-        }
+        val parsed = parseIntentUrl(url) ?: return null
         parsed.component = null
         parsed.selector = null
         parsed.flags = 0
@@ -234,6 +273,25 @@ internal fun externalAppLaunch(url: String, ownPackage: String): ExternalAppLaun
     intent.addCategory(Intent.CATEGORY_BROWSABLE)
     intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
     return ExternalAppLaunch(ExternalScheme(scheme), intent, fallbackUrl)
+}
+
+/**
+ * [url] parsed as an `intent:` URL, or `null` when it doesn't parse.
+ * `Intent.parseUri` reports a malformed URL as `URISyntaxException`
+ * only for some errors: a bad typed extra (`i.n=zz`, `b.x=…`) or
+ * `launchFlags=` escapes as `NumberFormatException`, others as other
+ * runtime exceptions. Any of them, thrown out of a WebView callback,
+ * takes the whole app down — so every failure is "not a link".
+ */
+internal fun parseIntentUrl(
+    url: String,
+    parse: (String) -> Intent = { Intent.parseUri(it, Intent.URI_INTENT_SCHEME) },
+): Intent? = try {
+    parse(url)
+} catch (_: URISyntaxException) {
+    null
+} catch (_: RuntimeException) {
+    null
 }
 
 /** Start [launch]; `false` when no app on the device can take it. */

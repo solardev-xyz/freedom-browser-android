@@ -121,6 +121,45 @@ class ExternalAppsTest {
     }
 
     @Test
+    fun `an intent URL that fails to parse in any way is no link, not a crash`() {
+        // Intent.parseUri throws NumberFormatException for `i.n=zz` or
+        // `launchFlags=zz`, not only URISyntaxException.
+        for (thrown in listOf(
+            java.net.URISyntaxException("x", "bad"),
+            NumberFormatException("zz"),
+            IllegalArgumentException("bad"),
+            IndexOutOfBoundsException(),
+        )) {
+            assertNull(parseIntentUrl("intent://x#Intent;scheme=foo;i.n=zz;end") { throw thrown })
+        }
+    }
+
+    @Test
+    fun `only a tap arms the latch, not a scroll, fling or pinch`() {
+        val taps = TapTracker(slopPx = 10f)
+        taps.onDown(100f, 100f)
+        taps.onMove(104f, 103f)
+        assertTrue(taps.onUp(105f, 105f))
+
+        taps.onDown(100f, 100f)
+        taps.onMove(100f, 160f)
+        // Scrolled away and back: still a scroll.
+        taps.onMove(100f, 101f)
+        assertFalse(taps.onUp(100f, 101f))
+
+        // A fling whose lift lands past the slop with no move in between.
+        taps.onDown(100f, 100f)
+        assertFalse(taps.onUp(100f, 300f))
+
+        taps.onDown(100f, 100f)
+        taps.onCancel() // second finger down
+        assertFalse(taps.onUp(100f, 100f))
+
+        // An up with no down (touch that started elsewhere) is no tap.
+        assertFalse(taps.onUp(100f, 100f))
+    }
+
+    @Test
     fun `log lines never carry the address`() {
         assertEquals("mailto:<redacted>", externalUrlForLog("mailto:someone@example.com"))
         assertEquals("unknown", externalUrlForLog("garbage"))

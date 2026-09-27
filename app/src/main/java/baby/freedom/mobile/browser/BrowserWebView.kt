@@ -1557,7 +1557,9 @@ private fun buildRefreshableWebView(
         // gesture. WebView reports `hasGesture()` false on every redirect
         // hop, so a tapped link whose server redirects to another app's
         // link (a meeting invite's tracking URL → `zoomus:`) would be
-        // refused without it (#85). Reset when a document starts.
+        // refused without it (#85). Reset when a document starts, and
+        // when the navigation ends without one (handed to an app,
+        // detoured to the submit flow, or turned into a download).
         var navigationHadGesture = false
 
         // Whether this WebView has started a document yet. A popup
@@ -1599,7 +1601,11 @@ private fun buildRefreshableWebView(
             // turned into a download leaves the tab committed, so
             // nothing else would clear them).
             val wasPending = pendingNavigationUrls.remove(url)
-            if (wasPending) pendingNavigationUrls.clear()
+            if (wasPending) {
+                pendingNavigationUrls.clear()
+                // Nor does its gesture carry over to the next load.
+                navigationHadGesture = false
+            }
             // A main-frame navigation that turned out to be a file never
             // commits: no onPageStarted, no final progress callback. Left
             // alone, the capsule keeps the typed address, the progress
@@ -2002,6 +2008,9 @@ private fun buildRefreshableWebView(
                     consumeGesture = { (askingView as? PageWebView)?.userGestures?.consume() == true },
                 )
                 if (verdict != ExternalLinkVerdict.NotExternal) {
+                    // Cancelled here, so it never reaches onPageStarted:
+                    // its gesture mustn't carry over to the next load.
+                    if (request.isForMainFrame) navigationHadGesture = false
                     if (verdict == ExternalLinkVerdict.Ask && askingView != null) {
                         offerExternalLink(askingView, opener?.first ?: state, target)
                     } else {
@@ -2034,6 +2043,7 @@ private fun buildRefreshableWebView(
                     state.loadAborted = false
                 }
                 if (detoured) {
+                    navigationHadGesture = false
                     onSubmitUrl(state, target)
                     return true
                 }
@@ -2341,8 +2351,16 @@ internal class PageWebView(context: Context) : WebView(context) {
      */
     val userGestures = UserGestureLatch(SystemClock::uptimeMillis)
 
+    /** Only a tap counts: not the lift at the end of a scroll or fling. */
+    private val taps = TapTracker(ViewConfiguration.get(context).scaledTouchSlop.toFloat())
+
     override fun dispatchTouchEvent(event: MotionEvent): Boolean {
-        if (event.actionMasked == MotionEvent.ACTION_UP) userGestures.onInput()
+        when (event.actionMasked) {
+            MotionEvent.ACTION_DOWN -> taps.onDown(event.x, event.y)
+            MotionEvent.ACTION_MOVE -> taps.onMove(event.x, event.y)
+            MotionEvent.ACTION_POINTER_DOWN, MotionEvent.ACTION_CANCEL -> taps.onCancel()
+            MotionEvent.ACTION_UP -> if (taps.onUp(event.x, event.y)) userGestures.onInput()
+        }
         return super.dispatchTouchEvent(event)
     }
 
