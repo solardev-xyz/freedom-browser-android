@@ -18,6 +18,9 @@ import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.VisibilityOff
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -30,6 +33,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
@@ -342,3 +346,69 @@ private fun tileAccentFor(url: String): Color {
     val idx = (h and Int.MAX_VALUE) % TILE_PALETTE.size
     return TILE_PALETTE[idx]
 }
+
+/**
+ * The home surface of a private tab (#86), in place of [HomeScreen]:
+ * no bookmarks or recent pages (the private tab isn't where the
+ * browsing trail belongs), just what a private tab does and doesn't
+ * do. Drawn in the private scheme by the caller ([PrivateTheme]).
+ */
+@Composable
+fun PrivateHomeScreen(
+    bottomContentPadding: Dp = 0.dp,
+    modifier: Modifier = Modifier,
+) {
+    Box(modifier = modifier.background(MaterialTheme.colorScheme.background)) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = 24.dp)
+                .padding(top = 48.dp, bottom = 24.dp + bottomContentPadding),
+        ) {
+            Icon(
+                imageVector = PrivateTabIcon,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.size(40.dp),
+            )
+            Spacer(Modifier.height(16.dp))
+            Text(
+                text = "Private tab",
+                style = MaterialTheme.typography.headlineSmall,
+                color = MaterialTheme.colorScheme.onSurface,
+            )
+            Spacer(Modifier.height(12.dp))
+            Text(
+                text = "Pages you open in private tabs aren't kept in your history, and their " +
+                    "cookies, site data and cache are deleted when you close your last private " +
+                    "tab. Site permissions and zoom levels you set here last only until then too.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(12.dp))
+            Text(
+                text = "Downloaded files and bookmarks you add are still saved. So is Swarm and " +
+                    "IPFS content you open: your Swarm and IPFS nodes keep what they fetch in " +
+                    "their own storage on this device, for private tabs too.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(24.dp))
+            SectionHeader("What private tabs don't do")
+            Spacer(Modifier.height(8.dp))
+            Text(
+                text = "This is privacy on this device, not anonymity. Sites you sign in to " +
+                    "still know it's you, your network operator can still see your traffic, " +
+                    "Swarm and IPFS peers still see your nodes' requests, and your IP address " +
+                    "stays visible to sites and peers.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+}
+
+/** The mark of a private tab (#86): on its home page, its switcher card and its menu entry. */
+internal val PrivateTabIcon: ImageVector
+    get() = Icons.Filled.VisibilityOff

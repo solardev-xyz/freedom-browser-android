@@ -170,4 +170,22 @@ class PageZoomTest {
         assertEquals(110, h.zoom.levelFor("a.com"))
         assertEquals(listOf("a.com" to 110), h.writes)
     }
+
+    @Test
+    fun `a private tab's zoom stays in memory, over the remembered level, until the session ends`() {
+        val h = Harness(mapOf("a.com" to 150))
+        // Reads the remembered level until it changes one of its own.
+        assertEquals(150, h.zoom.levelFor("a.com", private = true))
+        h.zoom.apply("a.com", ZoomAction.Reset, private = true)
+        h.zoom.apply("b.com", ZoomAction.In, private = true)
+        assertEquals(100, h.zoom.levelFor("a.com", private = true))
+        assertEquals(110, h.zoom.levelFor("b.com", private = true))
+        // Normal tabs neither see it nor get anything written.
+        assertEquals(150, h.zoom.levelFor("a.com"))
+        assertEquals(100, h.zoom.levelFor("b.com"))
+        assertEquals(emptyList<Pair<String, Int?>>(), h.writes)
+        h.zoom.clearPrivate()
+        assertEquals(150, h.zoom.levelFor("a.com", private = true))
+        assertEquals(100, h.zoom.levelFor("b.com", private = true))
+    }
 }

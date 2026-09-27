@@ -10,6 +10,7 @@ import androidx.compose.foundation.gestures.awaitLongPressOrCancellation
 import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -50,6 +51,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import baby.freedom.mobile.ui.PrivateTheme
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.graphicsLayer
@@ -88,12 +90,17 @@ import kotlinx.coroutines.launch
  * Long-press a card and drag it to move the tab ([TabsState.moveTab]);
  * the header's "Reopen" brings back the most recently closed tab
  * ([TabsState.reopenClosedTab]) while there is one.
+ *
+ * "Private" opens a private tab (#86) — offered only where the WebView
+ * can run them ([onNewPrivateTab] non-null) — and private tabs' cards
+ * wear the private scheme and mark.
  */
 @Composable
 fun TabSwitcherScreen(
     tabs: TabsState,
     onDismiss: () -> Unit,
     onNewTab: () -> Unit,
+    onNewPrivateTab: (() -> Unit)? = null,
 ) {
     // Snapshot the currently-active tab right before we render so the
     // user sees an up-to-date preview of whatever they were last reading.
@@ -109,25 +116,48 @@ fun TabSwitcherScreen(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(horizontal = 8.dp, vertical = 4.dp),
-            verticalAlignment = Alignment.CenterVertically,
+            // Top: the × stays on the first line when the actions wrap
+            // (every control here is a 48dp touch target, so one line
+            // is centred either way).
+            verticalAlignment = Alignment.Top,
         ) {
-            TextButton(onClick = {
-                onNewTab()
-                onDismiss()
-            }) {
-                Icon(Icons.Filled.Add, contentDescription = null)
-                Spacer(Modifier.size(8.dp))
-                Text("New tab", fontWeight = FontWeight.Medium)
-            }
-            Spacer(Modifier.weight(1f))
-            if (tabs.canReopenClosedTab) {
+            // The actions wrap onto a second line rather than squeezing
+            // each other (or the ×) when they don't fit — a narrow
+            // screen or a large font with Private and Reopen both shown.
+            // The × sits outside the flow, so it's always there.
+            FlowRow(
+                modifier = Modifier.weight(1f),
+                itemVerticalAlignment = Alignment.CenterVertically,
+            ) {
                 TextButton(onClick = {
-                    tabs.reopenClosedTab()
+                    onNewTab()
                     onDismiss()
                 }) {
-                    Icon(Icons.Filled.Restore, contentDescription = null)
+                    Icon(Icons.Filled.Add, contentDescription = null)
                     Spacer(Modifier.size(8.dp))
-                    Text("Reopen", fontWeight = FontWeight.Medium)
+                    Text("New tab", fontWeight = FontWeight.Medium, softWrap = false)
+                }
+                if (onNewPrivateTab != null) {
+                    TextButton(onClick = {
+                        onNewPrivateTab()
+                        onDismiss()
+                    }) {
+                        Icon(PrivateTabIcon, contentDescription = null)
+                        Spacer(Modifier.size(8.dp))
+                        Text("Private", fontWeight = FontWeight.Medium, softWrap = false)
+                    }
+                }
+                if (tabs.canReopenClosedTab) {
+                    // Pushes Reopen to the end of its line.
+                    Spacer(Modifier.weight(1f))
+                    TextButton(onClick = {
+                        tabs.reopenClosedTab()
+                        onDismiss()
+                    }) {
+                        Icon(Icons.Filled.Restore, contentDescription = null)
+                        Spacer(Modifier.size(8.dp))
+                        Text("Reopen", fontWeight = FontWeight.Medium, softWrap = false)
+                    }
                 }
             }
             IconButton(onClick = onDismiss, shapes = IconButtonDefaults.shapes()) {
@@ -416,7 +446,7 @@ private fun TabCard(
     onToggleMute: (() -> Unit)?,
     modifier: Modifier = Modifier,
     moveActions: List<CustomAccessibilityAction> = emptyList(),
-) {
+) = PrivateTheme(tab.private) {
     val borderColor = if (isActive) {
         MaterialTheme.colorScheme.primary
     } else {
@@ -447,7 +477,16 @@ private fun TabCard(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             val title = tab.title.ifBlank {
-                tab.url.ifBlank { "New tab" }
+                tab.url.ifBlank { if (tab.private) "Private tab" else "New tab" }
+            }
+            if (tab.private) {
+                Icon(
+                    PrivateTabIcon,
+                    contentDescription = "Private",
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(14.dp),
+                )
+                Spacer(Modifier.size(6.dp))
             }
             Text(
                 text = title,
@@ -552,12 +591,20 @@ private fun ThumbnailPlaceholder(tab: BrowserState) {
                 .background(MaterialTheme.colorScheme.primaryContainer),
             contentAlignment = Alignment.Center,
         ) {
-            Text(
-                letter,
-                color = MaterialTheme.colorScheme.onPrimaryContainer,
-                fontWeight = FontWeight.Bold,
-                fontSize = 22.sp,
-            )
+            if (tab.private && letter == "•") {
+                Icon(
+                    PrivateTabIcon,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                )
+            } else {
+                Text(
+                    letter,
+                    color = MaterialTheme.colorScheme.onPrimaryContainer,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 22.sp,
+                )
+            }
         }
     }
 }

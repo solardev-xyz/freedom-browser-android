@@ -37,6 +37,8 @@ import android.webkit.MimeTypeMap
 import android.webkit.GeolocationPermissions
 import android.webkit.PermissionRequest
 import android.webkit.ValueCallback
+import android.webkit.JsPromptResult
+import android.webkit.JsResult
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
@@ -587,6 +589,9 @@ fun BrowserWebViewHost(
         // interceptor as everything else (feature-gated no-op where the
         // WebView doesn't support SW interception).
         ServiceWorkerInterception.install()
+        // A private session a dead process left behind (#86) goes
+        // before any page — private or not — can load.
+        PrivateProfile.discardLeftovers()
         Unit
     }
 
@@ -617,6 +622,23 @@ fun BrowserWebViewHost(
     // is what actually lives under [frame]; the WebView is its only child.
     val webViews = remember { mutableMapOf<Long, WebView>() }
     val refreshLayouts = remember { mutableMapOf<Long, SwipeRefreshLayout>() }
+    // The ids in [webViews] of private tabs (#86).
+    val privateIds = remember { mutableSetOf<Long>() }
+
+    /**
+     * No private tab is left (#86): wipe the private profile's cookies
+     * and site storage (its HTTP cache was cleared through the last
+     * private WebView) and retire it for deletion, and drop
+     * what the app itself kept for the session in memory: its
+     * site-permission answers, zoom levels, and downloads list (a
+     * private download still running is cancelled, as in Chrome).
+     */
+    fun endPrivateSession() {
+        PrivateProfile.discard()
+        sitePermissions.onPrivateSessionEnded()
+        pageZoom.clearPrivate()
+        DownloadManager.get(context).endPrivateSession()
+    }
 
     // Per-tab navigation observers (coroutine jobs, tracked so we can cancel
     // them if the tab is closed).
@@ -679,9 +701,10 @@ fun BrowserWebViewHost(
                 }
             },
             onContextMenu = { pin, target -> tabs.pageContextMenu = pin.request(target) },
-            onSearchSelection = { query -> tabs.requestSearchInNewTab?.invoke(query) },
+            onSearchSelection = { query -> tabs.requestSearchInNewTab?.invoke(query, tab.private) },
         )
         webViews[tab.id] = wv
+        if (tab.private) privateIds += tab.id
         refreshLayouts[tab.id] = layout
         frame.addView(layout)
         return wv
@@ -727,8 +750,16 @@ fun BrowserWebViewHost(
             )
         }
         val toRemove = webViews.keys.filter { it !in idsNow }
+        var closedPrivate = false
         for (id in toRemove) {
             val wv = webViews.remove(id) ?: continue
+            if (privateIds.remove(id)) {
+                closedPrivate = true
+                // The last private WebView is the only handle on the
+                // private profile's HTTP cache (#86): clear it through
+                // this one before it goes.
+                if (privateIds.isEmpty()) runCatching { wv.clearCache(true) }
+            }
             val layout = refreshLayouts.remove(id)
             if (layout != null) frame.removeView(layout)
             // Take down any permission prompt the tab still had up;
@@ -739,6 +770,9 @@ fun BrowserWebViewHost(
             wv.stopLoading()
             wv.destroy()
         }
+        // The last private tab is gone (its WebView destroyed above):
+        // the private session ends, and everything it kept goes with it.
+        if (closedPrivate && privateIds.isEmpty()) endPrivateSession()
     }
 
     // Visibility: only the active tab draws. Toggle the SwipeRefreshLayout
@@ -866,6 +900,9 @@ fun BrowserWebViewHost(
             runCatching { CookieManager.getInstance().removeAllCookies(null) }
             runCatching { CookieManager.getInstance().flush() }
             runCatching { WebStorage.getInstance().deleteAllData() }
+            // …and a private session's own (#86), which lives in its
+            // profile's stores.
+            PrivateProfile.clearData()
             // Per-instance state: HTTP cache, autofill form data, and the
             // back/forward stack live on each WebView, so clear them on
             // every live tab.
@@ -904,7 +941,7 @@ fun BrowserWebViewHost(
         snapshotFlow {
             val scale = fontScale.value
             tabs.tabs.map {
-                it.id to PageZoomLevels.textZoom(pageZoom.levelFor(it.zoomSite), scale)
+                it.id to PageZoomLevels.textZoom(pageZoom.levelFor(it.zoomSite, it.private), scale)
             }
         }
             .collect { zooms ->
@@ -917,6 +954,9 @@ fun BrowserWebViewHost(
 
     DisposableEffect(Unit) {
         onDispose {
+            // As when the last private tab closes (#86): the private
+            // cache goes through a private WebView, before they all do.
+            privateIds.firstNotNullOfOrNull { webViews[it] }?.let { runCatching { it.clearCache(true) } }
             for (wv in webViews.values) {
                 UnverifiedOrigins.release(wv)
                 (wv as? PageWebView)?.sweptReload?.committed()
@@ -925,6 +965,13 @@ fun BrowserWebViewHost(
             }
             webViews.clear()
             refreshLayouts.clear()
+            // The tabs don't outlive this host (a recreated screen
+            // starts from a fresh blank tab), so neither does a private
+            // session.
+            if (privateIds.isNotEmpty()) {
+                privateIds.clear()
+                endPrivateSession()
+            }
         }
     }
 }
@@ -1243,7 +1290,16 @@ private fun buildRefreshableWebView(
     // recover again.
     var autoRecoveredUrl: String? = null
 
-    val webView = PageWebView(context).apply {
+    // A private tab's pickers and `<select>` lists open in windows of
+    // their own, built on this context: [PrivateWindowContext] makes
+    // them FLAG_SECURE like the Activity window (#86).
+    val webView = PageWebView(
+        if (state.private) PrivateWindowContext.of(context) else context,
+    ).apply {
+        // A private tab's WebView goes on the private session's profile
+        // (#86) before anything else touches it: Chromium only takes a
+        // profile change on a WebView that has never been used.
+        if (state.private) PrivateProfile.attach(this)
         layoutParams = ViewGroup.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.MATCH_PARENT,
@@ -1950,6 +2006,7 @@ private fun buildRefreshableWebView(
             )
             DownloadManager.get(context).start(
                 tabId = state.id,
+                private = state.private,
                 url = url,
                 userAgent = userAgent,
                 contentDisposition = contentDisposition,
@@ -2084,7 +2141,7 @@ private fun buildRefreshableWebView(
                 // WebView's own default text zoom is.
                 view?.let {
                     it.settings.textZoom = PageZoomLevels.textZoom(
-                        pageZoom.levelFor(zoomSite),
+                        pageZoom.levelFor(zoomSite, state.private),
                         it.resources.configuration.fontScale,
                     )
                 }
@@ -2210,7 +2267,8 @@ private fun buildRefreshableWebView(
                 // case in #53) would find the slot untouched and record
                 // the same visit again.
                 val flushed = pendingVisit.flush(url)
-                if (flushed != null && visitGate.recordOnce(flushed.display)) {
+                // A private tab (#86) claims the slot and writes nothing.
+                if (flushed != null && visitGate.recordOnce(flushed.display) && !state.private) {
                     repo.recordVisit(flushed.display, flushed.title)
                 }
             }
@@ -2372,7 +2430,9 @@ private fun buildRefreshableWebView(
                     isCurrent
                 ) {
                     if (visitGate.isCommitted) {
-                        if (visitGate.recordOnce(display)) repo.recordVisit(display, state.title)
+                        if (visitGate.recordOnce(display) && !state.private) {
+                            repo.recordVisit(display, state.title)
+                        }
                     } else if (url != null) {
                         pendingVisit.park(PendingVisit(url, display, state.title))
                     }
@@ -2670,6 +2730,31 @@ private fun buildRefreshableWebView(
                 state.title = sanitizeTitle(title, view?.url)
             }
 
+            // JavaScript dialogs from a private tab (#86) go in a secure
+            // window of our own ([showPrivateJsDialog]); a normal tab's
+            // keep WebView's default dialog (false).
+            override fun onJsAlert(view: WebView?, url: String?, message: String?, result: JsResult?): Boolean =
+                state.private && result != null &&
+                    showPrivateJsDialog(context, JsDialogKind.ALERT, url, message, null, result)
+
+            override fun onJsConfirm(view: WebView?, url: String?, message: String?, result: JsResult?): Boolean =
+                state.private && result != null &&
+                    showPrivateJsDialog(context, JsDialogKind.CONFIRM, url, message, null, result)
+
+            override fun onJsPrompt(
+                view: WebView?,
+                url: String?,
+                message: String?,
+                defaultValue: String?,
+                result: JsPromptResult?,
+            ): Boolean =
+                state.private && result != null &&
+                    showPrivateJsDialog(context, JsDialogKind.PROMPT, url, message, defaultValue, result)
+
+            override fun onJsBeforeUnload(view: WebView?, url: String?, message: String?, result: JsResult?): Boolean =
+                state.private && result != null &&
+                    showPrivateJsDialog(context, JsDialogKind.BEFORE_UNLOAD, url, message, null, result)
+
             // HTML5 fullscreen (`element.requestFullscreen()`, and the
             // native `<video>` fullscreen button). Without these two
             // overrides the WebView rejects every request and the
@@ -2779,6 +2864,9 @@ private fun buildRefreshableWebView(
                 // a "page load failed" icon persisted against the
                 // origin the user was actually trying to visit.
                 if (ErrorPage.isErrorPage(display)) return
+                // Nor anything from a private tab (#86): the favicon
+                // cache is a list of sites visited.
+                if (state.private) return
                 val bytes = encodePngBytes(icon) ?: return
                 repo.storeFavicon(display, bytes)
             }
