@@ -27,10 +27,13 @@ import android.webkit.WebStorage
  * Documents the gateway already served may still be alive when the
  * switch happens — one live WebView per tab. [sweep] hands the swept
  * origins to [onSweep] (the tab host), which reloads every tab that
- * showed one and [hold]s those origins until each such tab has
- * committed its next document: until then every document requested
- * there is the cleanup page again ([takeClearFor]), so storage a stale
- * document writes in the meantime is cleared after it's gone.
+ * showed one (in any frame; frame documents a service worker fetched
+ * count for every tab, [noteWorkerDocument]) and [hold]s those origins
+ * until each such tab has committed its next document: until then
+ * every document requested there is the cleanup page again
+ * ([takeClearFor]), and once it has, the next one is again
+ * ([release]), so storage a stale document wrote before it went is
+ * cleared after it's gone.
  *
  * Service workers: the interceptor refuses a service-worker script from
  * an external gateway (see [isServiceWorkerScript]), and stamps
@@ -70,6 +73,9 @@ object UnverifiedOrigins {
 
     /** Origins held for cleanup, by holder, with their expiry ([hold]). */
     private val holds = HashMap<Any, Pair<Set<String>, Long>>()
+
+    /** Origins a service worker fetched a document on ([noteWorkerDocument]). */
+    private val workerDocuments = LinkedHashSet<String>()
 
     /**
      * The tab host's reaction to a sweep: reload the tabs whose documents
@@ -167,9 +173,38 @@ object UnverifiedOrigins {
         synchronized(lock) { holds[holder] = origins to clock() + HOLD_MS }
     }
 
-    /** [holder]'s stale document is gone (see [hold]). */
+    /**
+     * [holder]'s stale document is gone (see [hold]). What it wrote
+     * before going may postdate every cleanup page run so far — another
+     * tab can have consumed the one-shot clear first — so each held
+     * origin's next document is the cleanup page once more, whichever
+     * tab or frame requests it.
+     */
     fun release(holder: Any) {
-        synchronized(lock) { holds.remove(holder) }
+        synchronized(lock) {
+            val (held, _) = holds.remove(holder) ?: return
+            if (toClear.addAll(held)) persist()
+        }
+    }
+
+    /**
+     * A service worker fetched a document (typically a frame's) on
+     * [origin]. Worker fetches reach no tab's `WebViewClient`, so the
+     * tab host can't tell which tab it's in: a sweep of [origin] treats
+     * every tab as having it ([takeWorkerDocuments]). Any thread.
+     */
+    fun noteWorkerDocument(origin: String) {
+        synchronized(lock) { workerDocuments.add(origin) }
+    }
+
+    /**
+     * The [swept] origins a service worker fetched a document on, now
+     * handed to the tab host to reload every tab for, and forgotten.
+     */
+    fun takeWorkerDocuments(swept: Set<String>): Set<String> = synchronized(lock) {
+        val taken = workerDocuments.intersect(swept)
+        workerDocuments.removeAll(taken)
+        taken
     }
 
     /** A bound on [hold], for a tab whose reload never commits. */
@@ -184,12 +219,18 @@ object UnverifiedOrigins {
      * and service workers [wipeWebData] can't.
      */
     fun takeClearFor(origin: String): Boolean = synchronized(lock) {
+        // An expired hold ends like a released one (see [release]).
+        val now = clock()
+        val expired = holds.values.filter { (_, until) -> until <= now }
+        if (expired.isNotEmpty()) {
+            holds.values.removeAll { (_, until) -> until <= now }
+            expired.forEach { (held, _) -> toClear.addAll(held) }
+            persist()
+        }
         if (toClear.remove(origin)) {
             persist()
             return true
         }
-        val now = clock()
-        holds.values.removeAll { (_, until) -> until <= now }
         holds.values.any { (held, _) -> origin in held }
     }
 
@@ -224,6 +265,7 @@ object UnverifiedOrigins {
             origins.clear()
             toClear.clear()
             holds.clear()
+            workerDocuments.clear()
             current = null
             generation = 0
             persist()

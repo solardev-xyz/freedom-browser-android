@@ -815,8 +815,11 @@ fun BrowserWebViewHost(
         // Reload those tabs, and hold the origins for cleanup until each
         // has committed its next document.
         UnverifiedOrigins.onSweep = { swept ->
+            // Frame documents a service worker fetched belong to no known
+            // tab: every tab counts as having them.
+            val anyTab = UnverifiedOrigins.takeWorkerDocuments(swept)
             for (wv in webViews.values) {
-                val stale = sweptDocuments(wv, swept)
+                val stale = sweptDocuments(wv, swept, anyTab)
                 if (stale.isEmpty()) continue
                 UnverifiedOrigins.hold(wv, stale)
                 wv.reload()
@@ -1749,11 +1752,13 @@ private fun buildRefreshableWebView(
                 // The pending navigation committed; it's no download.
                 pendingNavigationUrls.clear()
                 // The previous document, and its frames, are gone: what a
-                // sweep held for them can go, and only the new one's
-                // origin is on screen (#125).
+                // sweep held for them is cleared once more, now that they
+                // can't write to it again (#125). The tab's document
+                // origins are kept, not reset: the new document's frames
+                // may already have been requested (and added, on IO
+                // threads) before this runs.
                 if (view is PageWebView) {
                     UnverifiedOrigins.release(view)
-                    view.documentOrigins.clear()
                     url?.let(VirtualOrigin::parseHostOfUrl)?.let(VirtualOrigin::originFor)
                         ?.let(view.documentOrigins::add)
                 }
@@ -2467,10 +2472,13 @@ private const val REVEAL_HANDOVER_TIMEOUT_MS = 1_000L
  */
 internal class PageWebView(context: Context) : WebView(context) {
     /**
-     * Virtual origins this tab has documents on — the main frame's, and
-     * any frame's requested since it committed. What [sweptDocuments]
-     * checks after an external IPFS gateway is switched away from (#125).
-     * Added to from the interceptor's IO threads.
+     * Virtual origins this tab has had documents on — main frames' and
+     * frames' alike. What [sweptDocuments] checks after an external IPFS
+     * gateway is switched away from (#125). Added to from the
+     * interceptor's IO threads, and never pruned at a commit: a frame of
+     * the incoming document can be requested before `onPageStarted`
+     * runs on the UI thread, so a reset there could drop it. A tab that
+     * has since left an origin is at worst reloaded once too often.
      */
     val documentOrigins: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet()
 
@@ -3219,15 +3227,33 @@ internal fun varyAll(headers: Map<String, String>?): Map<String, String> =
     headers.orEmpty().filterKeys { !it.equals("Vary", ignoreCase = true) } + ("Vary" to "*")
 
 /**
- * The [swept] origins [webView] has a document on: its main frame's
- * (a page a service worker answered never reaches the interceptor, so
- * the committed URL is checked too) and its frames'.
+ * The [swept] origins [webView] may have a document on: its main
+ * frame's (a page a service worker answered never reaches the
+ * interceptor, so the committed URL is checked too), its frames', and
+ * [anyTab] — frame documents a service worker fetched, which can't be
+ * traced to a tab ([UnverifiedOrigins.noteWorkerDocument]).
  */
-internal fun sweptDocuments(webView: WebView, swept: Set<String>): Set<String> {
-    val onScreen = (webView as? PageWebView)?.documentOrigins.orEmpty() +
-        listOfNotNull(
-            webView.url?.let(VirtualOrigin::parseHostOfUrl)?.let(VirtualOrigin::originFor),
-        )
+internal fun sweptDocuments(
+    webView: WebView,
+    swept: Set<String>,
+    anyTab: Set<String> = emptySet(),
+): Set<String> = sweptOrigins(
+    swept = swept,
+    documentOrigins = (webView as? PageWebView)?.documentOrigins.orEmpty(),
+    committedUrl = webView.url,
+    anyTab = anyTab,
+)
+
+/** [sweptDocuments] without the WebView. */
+internal fun sweptOrigins(
+    swept: Set<String>,
+    documentOrigins: Set<String>,
+    committedUrl: String?,
+    anyTab: Set<String> = emptySet(),
+): Set<String> {
+    val onScreen = documentOrigins + anyTab + listOfNotNull(
+        committedUrl?.let(VirtualOrigin::parseHostOfUrl)?.let(VirtualOrigin::originFor),
+    )
     return onScreen.intersect(swept)
 }
 

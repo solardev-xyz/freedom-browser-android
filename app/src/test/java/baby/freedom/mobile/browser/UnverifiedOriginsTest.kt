@@ -92,14 +92,70 @@ class UnverifiedOriginsTest {
         assertTrue(UnverifiedOrigins.takeClearFor(a))
         assertTrue(UnverifiedOrigins.takeClearFor(a))
         assertFalse(UnverifiedOrigins.takeClearFor(b))
+        // The stale document is gone: the next document clears once more,
+        // for whatever it wrote before going, and then that's it.
+        UnverifiedOrigins.release(tab)
+        assertTrue(UnverifiedOrigins.takeClearFor(a))
+        assertFalse(UnverifiedOrigins.takeClearFor(a))
         UnverifiedOrigins.release(tab)
         assertFalse(UnverifiedOrigins.takeClearFor(a))
 
-        // A tab whose reload never commits doesn't hold the origin forever.
+        // A tab whose reload never commits doesn't hold the origin forever;
+        // its hold ends like a release.
         UnverifiedOrigins.hold(tab, setOf(a))
         assertTrue(UnverifiedOrigins.takeClearFor(a))
         now += 10_000
+        assertTrue(UnverifiedOrigins.takeClearFor(a))
         assertFalse(UnverifiedOrigins.takeClearFor(a))
+    }
+
+    @Test
+    fun `a frame's writes after another tab took the one-shot clear are cleared at its release`() {
+        // Tab A shows the origin, tab B embeds it in a frame; both held.
+        val tabA = Any()
+        val tabB = Any()
+        UnverifiedOrigins.onSweep = { swept ->
+            UnverifiedOrigins.hold(tabA, swept)
+            UnverifiedOrigins.hold(tabB, swept)
+        }
+        UnverifiedOrigins.sweep("https://gw.example") {}
+        UnverifiedOrigins.record("https://gw.example", a)
+        UnverifiedOrigins.sweep("") {}
+
+        // A's reload takes the one-shot clear, then commits.
+        assertTrue(UnverifiedOrigins.takeClearFor(a))
+        UnverifiedOrigins.release(tabA)
+        // B's stale frame writes storage now, then B's main frame commits:
+        // its new frame on the origin must still get the cleanup page.
+        UnverifiedOrigins.release(tabB)
+        assertTrue(UnverifiedOrigins.takeClearFor(a))
+        assertFalse(UnverifiedOrigins.takeClearFor(a))
+    }
+
+    @Test
+    fun `frame documents a service worker fetched count for every tab`() {
+        UnverifiedOrigins.noteWorkerDocument(a)
+        val anyTab = UnverifiedOrigins.takeWorkerDocuments(setOf(a, b))
+        assertEquals(setOf(a), anyTab)
+        // A tab whose own requests never showed the origin is still reloaded.
+        assertEquals(
+            setOf(a),
+            sweptOrigins(setOf(a), emptySet(), "https://example.org/", anyTab),
+        )
+        // Handed over once.
+        assertTrue(UnverifiedOrigins.takeWorkerDocuments(setOf(a)).isEmpty())
+    }
+
+    @Test
+    fun `a tab's frames count alongside its committed page`() {
+        val frame = "https://bafyframe.ipfs.freedom.baby"
+        // A frame recorded before the main frame's commit reached the UI
+        // thread is still found: commits don't prune the tab's origins.
+        assertEquals(
+            setOf(frame),
+            sweptOrigins(setOf(frame, b), setOf(frame), "https://example.org/"),
+        )
+        assertEquals(setOf(b), sweptOrigins(setOf(b), emptySet(), "$b/page"))
     }
 
     @Test

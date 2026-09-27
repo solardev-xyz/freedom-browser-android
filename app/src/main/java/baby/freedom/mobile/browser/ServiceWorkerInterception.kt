@@ -54,7 +54,18 @@ object ServiceWorkerInterception {
                 object : ServiceWorkerClientCompat() {
                     override fun shouldInterceptRequest(
                         request: WebResourceRequest,
-                    ): WebResourceResponse? = interceptVirtualRequest(request)
+                    ): WebResourceResponse? {
+                        // A frame document a worker fetches never reaches
+                        // the tab's WebViewClient, so no tab's
+                        // `documentOrigins` has it: note it for every tab
+                        // (#125, [UnverifiedOrigins.noteWorkerDocument]).
+                        if (isDocumentRequest(request.isForMainFrame, request.requestHeaders)) {
+                            request.url?.toString()?.let(VirtualOrigin::parseHostOfUrl)
+                                ?.let(VirtualOrigin::originFor)
+                                ?.let(UnverifiedOrigins::noteWorkerDocument)
+                        }
+                        return interceptVirtualRequest(request)
+                    }
                 },
             )
             installed = true
