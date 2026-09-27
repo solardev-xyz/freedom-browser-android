@@ -18,8 +18,9 @@ import java.security.SecureRandom
 // padding, see [BrowserScreen]). The strip under the bar is filled with
 // the nav's own colour so the page reads as continuing under the chrome.
 //
-// Detection is a hit test injected per document ([bottomUiDetectorJs]),
-// the heuristic of Freedom iOS but event-driven: it runs once at commit,
+// Detection is a hit test, a document-start script that stays dormant
+// until the document first paints ([bottomUiDetectorJs]), the heuristic
+// of Freedom iOS but event-driven: it runs once at first paint,
 // then only when something could have changed the answer — load
 // finished, a same-document history change, a viewport resize, DOM
 // mutations (one debounced observer) and a size/visibility change of the
@@ -258,7 +259,10 @@ internal class BottomChromeSlot(
         return t
     }
 
-    /** The detector is going in; returns the token to embed, or null if already installed. */
+    /**
+     * The document's detector is being started (its first probe request);
+     * returns the token to send, or null if already installed.
+     */
     fun install(): String? {
         val t = token ?: return null
         if (installed) return null
@@ -307,20 +311,52 @@ private fun randomToken(): String {
 }
 
 /**
- * Name of the object `addWebMessageListener` injects into pages. It is
- * the one thing detection unavoidably exposes to a page, so it is
- * deliberately generic: nothing names the browser.
+ * A fresh name for the object `addWebMessageListener` injects into pages
+ * (#69), one per WebView. The platform puts that object on `window` in
+ * every frame of every origin, before any script runs, and there is no
+ * rule that scopes it to http(s) main frames only (see
+ * [BOTTOM_UI_ORIGIN_RULES]). [bottomUiDetectorJs], registered as a
+ * document-start script, takes it off `window` again before the page's
+ * first script can look, so a page never sees it under any name; the name
+ * is random anyway, so there is no fixed global to probe for, like
+ * `typeof bottomUiChannel`, should that ever fail to happen. Lower-case
+ * letters only: a plain identifier, safe to splice into the script.
  */
-internal const val BOTTOM_UI_CHANNEL = "bottomUiChannel"
+internal fun newBottomUiChannelName(): String {
+    val letters = "abcdefghijklmnopqrstuvwxyz"
+    return String(CharArray(16) { letters[tokenRandom.nextInt(letters.length)] })
+}
+
+/** Is [name] safe to splice into the detector's source? (Lower-case letters only.) */
+private val CHANNEL_SAFE = Regex("[a-z]{8,64}")
+
+/** What the detector posts once, at document start, so Kotlin has a way to reach it. */
+internal const val BOTTOM_UI_READY = "ready"
 
 /** What Kotlin sends back through the channel to ask for a fresh, reported probe. */
 internal fun bottomUiProbeRequest(token: String): String = "probe $token"
 
-/** Is [token] safe to splice into the detector's source? (Hex only.) */
-private val TOKEN_SAFE = Regex("[0-9a-f]{1,64}")
-
 /**
- * The detector, installed once per document (see [BottomChromeSlot.install]).
+ * The detector: a document-start script ([WebViewCompat.addDocumentStartJavaScript]),
+ * registered once per WebView with that WebView's [channel] name, which
+ * runs in every frame before any of the page's own scripts.
+ *
+ * **The channel is gone before the page runs** (#69). The first thing
+ * it does, in every frame, is take the listener's object off `window`
+ * (`delete`: the platform defines it as an ordinary configurable
+ * property) and keep it in its closure. No script of the page's, the top
+ * document's or any iframe's, can then find it — not by name, not by
+ * walking `window`'s properties. In a subframe that is all it does.
+ *
+ * **Dormant until first paint.** In the main frame it posts
+ * [BOTTOM_UI_READY] (so Kotlin holds a reply channel for the document)
+ * and then waits. It starts when Kotlin's first [bottomUiProbeRequest]
+ * arrives, which Kotlin sends at `onPageCommitVisible` ([BottomChromeSlot.install])
+ * — the same install point as when this script was injected there.
+ * Until then it touches nothing: no probe, no observer, no listener on
+ * the page. The request's token tags every report after it; a request
+ * with a different token (a new install for the same document) re-tags
+ * them and is answered like the first.
  *
  * **The probe** is Freedom iOS's hit test, thresholds unchanged: take the
  * element at `(vw/2, vh-30)` and walk up for an ancestor that is
@@ -355,7 +391,7 @@ private val TOKEN_SAFE = Regex("[0-9a-f]{1,64}")
  * against the tallest viewport seen at the current width, so a nav that
  * passed at full height still passes in the shortened one.
  *
- * **When it runs.** Once at install. Then only after an event, debounced
+ * **When it runs.** Once at install (Kotlin's first request). Then only after an event, debounced
  * to one probe per [debounceMs]: a `resize` of the window (the reserve
  * itself, the keyboard, rotation), a DOM mutation (one `MutationObserver`
  * on the document, whose callback only arms the debounce timer), and a
@@ -371,23 +407,24 @@ private val TOKEN_SAFE = Regex("[0-9a-f]{1,64}")
  * **A report is owed until it is made.** A forced probe (install, or
  * Kotlin asking) that finds no `<body>` yet can't answer; the next
  * probe, whatever woke it, reports even if its answer matches the last
- * one. Kotlin has no channel back into a detector that has never
- * reported, so this is how its asks are honoured. If `<html>` itself
+ * one, so an ask that came too early is still honoured. If `<html>` itself
  * wasn't there at install, the `MutationObserver` is attached on the
  * document's next `readystatechange` (which also probes).
  *
  * **Reporting.** Only when the answer (flag, colour) changes, or when
  * Kotlin asked. Nothing is written to the page: no DOM node, attribute,
- * style or global of ours (the platform's channel object is the one
- * thing a page can see), and history methods are not patched.
+ * style or global of ours — the platform's channel object included,
+ * see above — and history methods are not patched.
  */
-internal fun bottomUiDetectorJs(token: String, debounceMs: Int = BOTTOM_UI_DEBOUNCE_MS): String {
-    require(TOKEN_SAFE.matches(token)) { "token must be hex" }
+internal fun bottomUiDetectorJs(channel: String, debounceMs: Int = BOTTOM_UI_DEBOUNCE_MS): String {
+    require(CHANNEL_SAFE.matches(channel)) { "channel must be lower-case letters" }
     return """
 (function () {
-  var w = window, d = document, port = w.$BOTTOM_UI_CHANNEL;
+  var w = window, d = document, N = '$channel', port = w[N];
+  if (port === undefined) return;
+  try { delete w[N]; } catch (e) {}
   if (!port || typeof port.postMessage !== 'function' || w.top !== w) return;
-  var T = '$token', SEL = 'a, button, [role="button"], [role="tab"], [role="link"]';
+  var T = null, started = false, ASK = /^probe ([0-9a-f]{1,64})$/, SEL = 'a, button, [role="button"], [role="tab"], [role="link"]';
   var gcs = w.getComputedStyle, setT = w.setTimeout, MO = w.MutationObserver,
       RO = w.ResizeObserver, IO = w.IntersectionObserver, str = JSON.stringify;
   var timer = 0, last = null, owed = false, mo = null, watched = null, ro = null, io = null, fullW = -1, fullH = 0, ctx = null;
@@ -466,7 +503,6 @@ internal fun bottomUiDetectorJs(token: String, debounceMs: Int = BOTTOM_UI_DEBOU
     port.postMessage(str({ token: T, hasBottomUI: !!p.nav, color: p.color }));
   }
   function soon() { if (!timer) timer = setT(function () { run(false); }, $debounceMs); }
-  port.addEventListener('message', function (e) { if (e && e.data === 'probe ' + T) run(true); });
   function attach() {
     if (mo || !MO || !d.documentElement) return;
     mo = new MO(soon);
@@ -474,10 +510,20 @@ internal fun bottomUiDetectorJs(token: String, debounceMs: Int = BOTTOM_UI_DEBOU
       childList: true, subtree: true, attributes: true, attributeFilter: ['class', 'style', 'hidden', 'open']
     });
   }
-  w.addEventListener('resize', soon);
-  if (d.addEventListener) d.addEventListener('readystatechange', function () { attach(); soon(); });
-  attach();
-  run(true);
+  function start() {
+    started = true;
+    w.addEventListener('resize', soon);
+    if (d.addEventListener) d.addEventListener('readystatechange', function () { attach(); soon(); });
+    attach();
+  }
+  port.addEventListener('message', function (e) {
+    var m = e && typeof e.data === 'string' ? ASK.exec(e.data) : null;
+    if (!m) return;
+    if (m[1] !== T) { T = m[1]; last = null; }
+    if (!started) start();
+    run(true);
+  });
+  port.postMessage('$BOTTOM_UI_READY');
 })();
 """
 }
@@ -491,6 +537,8 @@ internal const val BOTTOM_UI_DEBOUNCE_MS = 300
  * scheme-wide wildcard: WebView 133 rejects `https` plus a bare `*` host with
  * `IllegalArgumentException` (a host wildcard must be `*.` plus a
  * domain). `*` is the one rule that covers them all; the listener then
- * accepts only `http`/`https` source origins, main frame only.
+ * accepts only `http`/`https` source origins, main frame only. The
+ * detector's document-start script uses the same rule, so it runs in
+ * every frame the channel object lands in and removes it there (#69).
  */
 internal val BOTTOM_UI_ORIGIN_RULES: Set<String> = setOf("*")
