@@ -1,6 +1,7 @@
 package baby.freedom.mobile.browser
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -108,16 +109,93 @@ class ExternalAppsTest {
     fun `a tap buys one launch within the activation window`() {
         var now = 10_000L
         val latch = UserGestureLatch { now }
-        assertFalse(latch.consume())
-        latch.onInput()
-        assertTrue(latch.consume())
-        assertFalse(latch.consume())
-        latch.onInput()
+        assertNull(latch.consume())
+        latch.tap()
+        assertNotNull(latch.consume())
+        assertNull(latch.consume())
+        latch.tap()
         now += UserGestureLatch.WINDOW_MS + 1
-        assertFalse(latch.consume())
-        latch.onInput()
+        assertNull(latch.consume())
+        latch.tap()
         now += UserGestureLatch.WINDOW_MS
-        assertTrue(latch.consume())
+        assertNotNull(latch.consume())
+    }
+
+    /** A tap as PageWebView reports it: ACTION_DOWN, then the ACTION_UP of a tap. */
+    private fun UserGestureLatch.tap() {
+        onInputStart()
+        onInput()
+    }
+
+    @Test
+    fun `a tap the top document confirmed before the navigation is offered at once`() {
+        val latch = UserGestureLatch { 10_000L }
+        latch.onInputStart()
+        latch.onTopDocumentInput() // its pointerdown, before the finger lifts
+        latch.onInput()
+        var offered = 0
+        assertTrue(latch.whenInTopDocument(latch.consume()!!) { offered++ })
+        assertEquals(1, offered)
+    }
+
+    @Test
+    fun `a tap the top document confirms after the navigation is offered then`() {
+        val latch = UserGestureLatch { 10_000L }
+        latch.tap()
+        val id = latch.consume()!!
+        var offered = 0
+        assertTrue(latch.whenInTopDocument(id) { offered++ })
+        assertEquals(0, offered)
+        latch.onTopDocumentInput() // ~20 ms later on the AVD
+        assertEquals(1, offered)
+        assertFalse(latch.giveUp(id))
+        latch.onTopDocumentInput()
+        assertEquals(1, offered)
+    }
+
+    @Test
+    fun `a tap on an iframe is never offered, even one that navigates the top frame`() {
+        val latch = UserGestureLatch { 10_000L }
+        latch.tap() // the iframe got the pointerdown; the top document heard nothing
+        val id = latch.consume()!!
+        var offered = 0
+        assertTrue(latch.whenInTopDocument(id) { offered++ })
+        assertTrue(latch.giveUp(id)) // CONFIRM_MS later: refused
+        latch.onTopDocumentInput()
+        assertEquals(0, offered)
+    }
+
+    @Test
+    fun `a top-document tap can't vouch for a later tap on an iframe`() {
+        val latch = UserGestureLatch { 10_000L }
+        latch.onInputStart() // a tap on the top page, unused
+        latch.onTopDocumentInput()
+        latch.onInput()
+        latch.tap() // then a tap on the iframe
+        var offered = 0
+        assertTrue(latch.whenInTopDocument(latch.consume()!!) { offered++ })
+        assertEquals(0, offered)
+    }
+
+    @Test
+    fun `nor can a later top-document tap vouch for an earlier iframe tap`() {
+        val latch = UserGestureLatch { 10_000L }
+        latch.tap() // on the iframe
+        val id = latch.consume()!!
+        var offered = 0
+        assertTrue(latch.whenInTopDocument(id) { offered++ })
+        latch.onInputStart() // the next tap, on the top page
+        latch.onTopDocumentInput()
+        assertEquals(0, offered)
+        assertFalse(latch.whenInTopDocument(id) { offered++ })
+        assertEquals(0, offered)
+    }
+
+    @Test
+    fun `the top document's word alone, with no tap, buys nothing`() {
+        val latch = UserGestureLatch { 10_000L }
+        latch.onTopDocumentInput()
+        assertNull(latch.consume())
     }
 
     @Test

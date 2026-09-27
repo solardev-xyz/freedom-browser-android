@@ -403,6 +403,13 @@ internal const val CONTEXT_MENU_ALLOWED = "contextmenu 1"
 /** The detector's report that the page kept a long-press (`preventDefault()` on its `contextmenu`). */
 internal const val CONTEXT_MENU_KEPT = "contextmenu 0"
 
+/**
+ * The top document's detector saw trusted user input aimed at the top
+ * document itself — not at an iframe — so an app link the input leads
+ * to is the top page's to ask for (#85, see [UserGestureLatch]).
+ */
+internal const val TOP_DOCUMENT_INPUT = "input"
+
 /** What Kotlin sends back through the channel to ask for a fresh, reported probe. */
 internal fun bottomUiProbeRequest(token: String): String = "probe $token"
 
@@ -430,13 +437,21 @@ internal fun bottomUiProbeRequest(token: String): String = "probe $token"
  * needs no check: Android's Blink doesn't parse it — `CSS.supports` is
  * false on the API 36 AVD.) In a subframe that is all it does.
  *
+ * **Input in the top document** (#85): in the main frame, capture
+ * listeners for trusted `pointerdown`, `keydown` and `click` post
+ * [TOP_DOCUMENT_INPUT] at once (not a task later: it has to reach Kotlin
+ * before the navigation the input starts). A tap or key press aimed at
+ * an iframe is dispatched in the iframe's document only, so this is how
+ * Kotlin tells a tap on the top page from one on an embedded frame that
+ * navigates the top frame ([UserGestureLatch]).
+ *
  * **Dormant until first paint.** In the main frame it posts
  * [BOTTOM_UI_READY] (so Kotlin holds a reply channel for the document)
  * and then waits. It starts when Kotlin's first [bottomUiProbeRequest]
  * arrives, which Kotlin sends at `onPageCommitVisible` ([BottomChromeSlot.install])
  * — the same install point as when this script was injected there.
  * Until then it touches nothing: no probe, no observer, no listener on
- * the page but the `contextmenu` one above. The request's token tags every report after it; a request
+ * the page but the `contextmenu` and input ones above. The request's token tags every report after it; a request
  * with a different token (a new install for the same document) re-tags
  * them and is answered like the first.
  *
@@ -521,6 +536,10 @@ internal fun bottomUiDetectorJs(channel: String, debounceMs: Int = BOTTOM_UI_DEB
     setT(function () { port.postMessage(e.defaultPrevented ? '$CONTEXT_MENU_KEPT' : '$CONTEXT_MENU_ALLOWED'); }, 0);
   }, true);
   if (w.top !== w) return;
+  var said = function (e) { if (e.isTrusted) port.postMessage('$TOP_DOCUMENT_INPUT'); };
+  w.addEventListener('pointerdown', said, true);
+  w.addEventListener('keydown', said, true);
+  w.addEventListener('click', said, true);
   var T = null, started = false, ASK = /^probe ([0-9a-f]{1,64})$/, SEL = 'a, button, [role="button"], [role="tab"], [role="link"]';
   var gcs = w.getComputedStyle, MO = w.MutationObserver,
       RO = w.ResizeObserver, IO = w.IntersectionObserver, str = JSON.stringify;

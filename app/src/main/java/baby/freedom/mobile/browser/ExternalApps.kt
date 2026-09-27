@@ -27,9 +27,11 @@ import java.net.URISyntaxException
  *    interacted with it: WebView must report the navigation as carrying
  *    a user gesture, *and* the tab's WebView must have seen a tap, key
  *    press or accessibility click within [UserGestureLatch.WINDOW_MS] that no earlier launch
- *    used up ([UserGestureLatch]). A page can't open an app — or a
- *    prompt — on load, from a timer, from an embedded frame, or turn
- *    one tap into a burst of launches.
+ *    used up, and that landed in the top document itself, not in an
+ *    iframe ([UserGestureLatch]). A page can't open an app — or a
+ *    prompt — on load, from a timer, from an embedded frame (not even
+ *    by navigating the top frame, `target=_top`), or turn one tap into
+ *    a burst of launches.
  * 3. The site-permission prompt (#81), keyed by origin + scheme
  *    ([ExternalScheme], stored as `external:<scheme>` like desktop), so
  *    allowing `magnet:` for a site never allows `sms:` too. Remembered
@@ -171,25 +173,108 @@ internal fun externalLinkVerdict(
  * every one. So each tap or key press is good for one external launch
  * (or one prompt) within [WINDOW_MS] — Chromium's activation lifespan.
  *
+ * And the input has to have landed in the *top* document. A
+ * cross-origin iframe can navigate the top frame (`target=_top`), and
+ * that navigation is for the main frame and carries the tap's gesture —
+ * but consent would be asked for, and remembered against, the top
+ * page's origin, which never asked. Nothing native says which frame a
+ * tap went to, so the top document says so itself: the page detector
+ * ([bottomUiDetectorJs]) posts [TOP_DOCUMENT_INPUT] from its capture
+ * listeners for trusted `pointerdown` / `keydown` / `click`, which only
+ * fire in the top document when the input targets it (a tap on an
+ * iframe is dispatched inside the iframe's document alone), and Kotlin
+ * takes it only when WebView reports the message as the main frame's.
+ * That message is not ordered with the navigation: on the API 36 AVD it
+ * lands ~20 ms *after* `shouldOverrideUrlLoading` for the tap's link. So
+ * each input gets an id ([onInputStart]), the navigation — cancelled
+ * anyway — takes the id with the tap ([consume]), and the offer waits
+ * for the top document to confirm that same input
+ * ([whenInTopDocument]), for at most [CONFIRM_MS] ([giveUp]). A new
+ * input drops the wait: a tap in the top document can't vouch for a
+ * later one in an iframe, nor the other way round. Without the detector
+ * (a WebView lacking the document-start script) no input is ever
+ * confirmed, and app links are refused: fail closed.
+ *
  * [clock] is a monotonic millisecond clock (`SystemClock.uptimeMillis`).
+ * Main thread only.
  */
 internal class UserGestureLatch(private val clock: () -> Long) {
-    private var inputAt: Long? = null
+    private var inputId = 0
+    private var armedId: Int? = null
+    private var armedAt = 0L
+    private var topDocumentId: Int? = null
+    private var waiting: Pair<Int, () -> Unit>? = null
 
-    /** The user tapped or pressed a key on the page. */
-    fun onInput() {
-        inputAt = clock()
+    /**
+     * A touch, key press or accessibility click begins — before the page
+     * sees it. A new input id; an offer still waiting for the previous
+     * one's confirmation is refused.
+     */
+    fun onInputStart() {
+        inputId++
+        waiting = null
     }
 
-    /** True, once, when there was input within [WINDOW_MS]. */
-    fun consume(): Boolean {
-        val at = inputAt ?: return false
-        inputAt = null
-        return clock() - at <= WINDOW_MS
+    /**
+     * The top document received trusted input ([TOP_DOCUMENT_INPUT]):
+     * the current input is its own. Runs an offer waiting on it.
+     */
+    fun onTopDocumentInput() {
+        topDocumentId = inputId
+        val (id, offer) = waiting ?: return
+        if (id != inputId) return
+        waiting = null
+        offer()
+    }
+
+    /** The user tapped or pressed a key on the page: one launch's worth. */
+    fun onInput() {
+        armedId = inputId
+        armedAt = clock()
+    }
+
+    /**
+     * The id of the input that buys this launch — once, when there was
+     * input within [WINDOW_MS] — else `null`. Which frame it went to is
+     * [whenInTopDocument]'s question.
+     */
+    fun consume(): Int? {
+        val id = armedId ?: return null
+        armedId = null
+        return id.takeIf { clock() - armedAt <= WINDOW_MS }
+    }
+
+    /**
+     * Runs [offer] once the top document confirms input [id] was its own:
+     * now, if it already has, or when its message arrives. False when it
+     * never can (a newer input has begun), so the link is refused now.
+     * A caller that gets true calls [giveUp] after [CONFIRM_MS].
+     */
+    fun whenInTopDocument(id: Int, offer: () -> Unit): Boolean {
+        if (topDocumentId == id) {
+            offer()
+            return true
+        }
+        if (id != inputId) return false
+        waiting = id to offer
+        return true
+    }
+
+    /**
+     * The top document never confirmed input [id]: the offer waiting on
+     * it is refused. True when there was one still waiting.
+     */
+    fun giveUp(id: Int): Boolean {
+        if (waiting?.first != id) return false
+        waiting = null
+        return true
     }
 
     companion object {
         const val WINDOW_MS = 5_000L
+
+        /** How long an offer waits for the top document's [TOP_DOCUMENT_INPUT]. */
+        const val CONFIRM_MS = 1_000L
     }
 }
 

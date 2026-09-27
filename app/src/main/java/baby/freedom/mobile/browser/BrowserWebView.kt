@@ -1497,6 +1497,13 @@ private fun buildRefreshableWebView(
             val listener = WebViewCompat.WebMessageListener { view, message, sourceOrigin, isMainFrame, replyProxy ->
                 if (sourceOrigin.scheme != "https" && sourceOrigin.scheme != "http") return@WebMessageListener
                 if (message.type != WebMessageCompat.TYPE_STRING) return@WebMessageListener
+                // Input the top document itself received (#85): only the
+                // main frame's word counts — an iframe's would let it
+                // vouch for a tap on itself ([UserGestureLatch]).
+                if (message.data == TOP_DOCUMENT_INPUT) {
+                    if (isMainFrame) userGestures.onTopDocumentInput()
+                    return@WebMessageListener
+                }
                 // The page's say on a long-press (#84): any frame, since
                 // the press may land in an iframe. It can only ever open
                 // a menu for a press the user actually made.
@@ -1562,8 +1569,14 @@ private fun buildRefreshableWebView(
         // link (a meeting invite's tracking URL → `zoomus:`) would be
         // refused without it (#85). Reset when a document starts, and
         // when the navigation ends without one (handed to an app,
-        // detoured to the submit flow, or turned into a download).
+        // detoured to the submit flow, or turned into a download), and
+        // when the browser starts a load of its own over it.
         var navigationHadGesture = false
+        // A load the browser starts itself (typed URL, reload, back /
+        // forward) replaces whatever navigation was in flight without a
+        // first hop through shouldOverrideUrlLoading: the replaced
+        // navigation's gesture mustn't carry over to its redirects (#85).
+        this.onBrowserInitiatedLoad = { navigationHadGesture = false }
 
         // Whether this WebView has started a document yet. A popup
         // (`target=_blank`, `window.open()`) whose very first navigation
@@ -1577,8 +1590,8 @@ private fun buildRefreshableWebView(
         // remembered answer) for the page that asked, then the app is
         // started. An `intent:` no app can take goes to its http(s)
         // fallback instead, as a page navigation would.
-        fun offerExternalLink(view: WebView, tab: BrowserState, url: String) {
-            val origin = permissionOriginKey(view.url)
+        fun offerExternalLink(view: WebView, pageUrl: String?, tab: BrowserState, url: String) {
+            val origin = permissionOriginKey(pageUrl)
             val launch = externalAppLaunch(url, view.context.packageName)
             if (origin == null || launch == null) {
                 Log.i(LOG_TAG, "external link refused: ${externalUrlForLog(url)}")
@@ -1997,31 +2010,54 @@ private fun buildRefreshableWebView(
                 if (request.isForMainFrame && !request.isRedirect) {
                     navigationHadGesture = request.hasGesture()
                 }
-                val opener = if (isPopup && !documentStartedOnce && request.isForMainFrame) {
-                    popupOpener()
-                } else {
-                    null
-                }
-                val askingView = opener?.second ?: view
+                // A popup's very first navigation: an app link there is
+                // its opener's, and the popup was opened for it alone.
+                val popupFirstNavigation = isPopup && !documentStartedOnce && request.isForMainFrame
+                val opener = if (popupFirstNavigation) popupOpener() else null
+                val askingView = opener?.second as? PageWebView ?: view as? PageWebView
+                var gesture: Int? = null
                 val verdict = externalLinkVerdict(
                     url = target,
                     isForMainFrame = request.isForMainFrame,
                     hasGesture = request.hasGesture() ||
                         (request.isRedirect && request.isForMainFrame && navigationHadGesture),
-                    consumeGesture = { (askingView as? PageWebView)?.userGestures?.consume() == true },
+                    consumeGesture = {
+                        gesture = askingView?.userGestures?.consume()
+                        gesture != null
+                    },
                 )
                 if (verdict != ExternalLinkVerdict.NotExternal) {
                     // Cancelled here, so it never reaches onPageStarted:
                     // its gesture mustn't carry over to the next load.
                     if (request.isForMainFrame) navigationHadGesture = false
-                    if (verdict == ExternalLinkVerdict.Ask && askingView != null) {
-                        offerExternalLink(askingView, opener?.first ?: state, target)
+                    val input = gesture
+                    val latch = askingView?.userGestures
+                    // The tap has to have been the top document's, not an
+                    // iframe's that navigates the top frame (target=_top):
+                    // the offer waits for the top document to say so
+                    // ([UserGestureLatch]). The page it is asked for is
+                    // the one on screen now, whatever commits meanwhile.
+                    val pageUrl = askingView?.url
+                    val offerTab = opener?.first ?: state
+                    val waiting = verdict == ExternalLinkVerdict.Ask && input != null && latch != null &&
+                        latch.whenInTopDocument(input) {
+                            offerExternalLink(askingView, pageUrl, offerTab, target)
+                        }
+                    if (waiting) {
+                        askingView.postDelayed({
+                            if (latch.giveUp(input)) {
+                                Log.i(LOG_TAG, "external link refused: ${externalUrlForLog(target)}")
+                            }
+                        }, UserGestureLatch.CONFIRM_MS)
                     } else {
                         Log.i(LOG_TAG, "external link refused: ${externalUrlForLog(target)}")
                     }
                     // Posted: the tab (and this WebView) mustn't be torn
-                    // down from inside its own callback.
-                    if (opener != null) view?.post { onCloseWindow() }
+                    // down from inside its own callback. Closed whether
+                    // or not the opener is still there to ask for it (a
+                    // closed or evicted opener refuses the link): either
+                    // way the popup would stay an empty tab.
+                    if (popupFirstNavigation) view?.post { onCloseWindow() }
                     return true
                 }
                 // Redirect hops of a main-frame navigation come through
@@ -2352,7 +2388,10 @@ private class GestureArmingNodeProvider(
     private val latch: UserGestureLatch,
 ) : AccessibilityNodeProvider() {
     override fun performAction(virtualViewId: Int, action: Int, arguments: Bundle?): Boolean {
-        if (accessibilityActionArmsGestureLatch(action)) latch.onInput()
+        if (accessibilityActionArmsGestureLatch(action)) {
+            latch.onInputStart()
+            latch.onInput()
+        }
         return inner.performAction(virtualViewId, action, arguments)
     }
 
@@ -2389,7 +2428,10 @@ internal class PageWebView(context: Context) : WebView(context) {
 
     override fun dispatchTouchEvent(event: MotionEvent): Boolean {
         when (event.actionMasked) {
-            MotionEvent.ACTION_DOWN -> taps.onDown(event.x, event.y)
+            MotionEvent.ACTION_DOWN -> {
+                userGestures.onInputStart()
+                taps.onDown(event.x, event.y)
+            }
             MotionEvent.ACTION_MOVE -> taps.onMove(event.x, event.y)
             MotionEvent.ACTION_POINTER_DOWN, MotionEvent.ACTION_CANCEL -> taps.onCancel()
             MotionEvent.ACTION_UP -> if (taps.onUp(event.x, event.y)) userGestures.onInput()
@@ -2405,6 +2447,7 @@ internal class PageWebView(context: Context) : WebView(context) {
                 isModifier = KeyEvent.isModifierKey(event.keyCode),
             )
         ) {
+            userGestures.onInputStart()
             userGestures.onInput()
         }
         return super.dispatchKeyEvent(event)
@@ -2414,7 +2457,10 @@ internal class PageWebView(context: Context) : WebView(context) {
     // no virtual tree, else on one of Chromium's virtual nodes, through
     // its node provider. Either way, armed before Chromium clicks.
     override fun performAccessibilityAction(action: Int, arguments: Bundle?): Boolean {
-        if (accessibilityActionArmsGestureLatch(action)) userGestures.onInput()
+        if (accessibilityActionArmsGestureLatch(action)) {
+            userGestures.onInputStart()
+            userGestures.onInput()
+        }
         return super.performAccessibilityAction(action, arguments)
     }
 
@@ -2424,6 +2470,60 @@ internal class PageWebView(context: Context) : WebView(context) {
         val inner = super.getAccessibilityNodeProvider() ?: return null
         a11yProvider?.let { (wrapped, wrapper) -> if (wrapped === inner) return wrapper }
         return GestureArmingNodeProvider(inner, userGestures).also { a11yProvider = inner to it }
+    }
+
+    /**
+     * A load this app starts on the WebView (not the page): a typed URL,
+     * a reload, back / forward, a retry. Its first hop never reaches
+     * `shouldOverrideUrlLoading`, so the client hears of it here (#85).
+     */
+    var onBrowserInitiatedLoad: () -> Unit = {}
+
+    override fun loadUrl(url: String) {
+        onBrowserInitiatedLoad()
+        super.loadUrl(url)
+    }
+
+    override fun loadUrl(url: String, additionalHttpHeaders: MutableMap<String, String>) {
+        onBrowserInitiatedLoad()
+        super.loadUrl(url, additionalHttpHeaders)
+    }
+
+    override fun postUrl(url: String, postData: ByteArray) {
+        onBrowserInitiatedLoad()
+        super.postUrl(url, postData)
+    }
+
+    override fun loadData(data: String, mimeType: String?, encoding: String?) {
+        onBrowserInitiatedLoad()
+        super.loadData(data, mimeType, encoding)
+    }
+
+    override fun loadDataWithBaseURL(
+        baseUrl: String?, data: String, mimeType: String?, encoding: String?, historyUrl: String?,
+    ) {
+        onBrowserInitiatedLoad()
+        super.loadDataWithBaseURL(baseUrl, data, mimeType, encoding, historyUrl)
+    }
+
+    override fun reload() {
+        onBrowserInitiatedLoad()
+        super.reload()
+    }
+
+    override fun goBack() {
+        onBrowserInitiatedLoad()
+        super.goBack()
+    }
+
+    override fun goForward() {
+        onBrowserInitiatedLoad()
+        super.goForward()
+    }
+
+    override fun goBackOrForward(steps: Int) {
+        onBrowserInitiatedLoad()
+        super.goBackOrForward(steps)
     }
 
     /** "Search" on the text-selection toolbar, with the selected text (#84). */
