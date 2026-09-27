@@ -73,7 +73,7 @@ private const val ENS_ABOUT =
     "How ENS (.eth), WNS (.wei) and GNS (.gwei) names are resolved. Every answer is cross-checked: it's only trusted when at least two RPC endpoints return exactly the same one. An answer only one endpoint gave is shown to you before anything loads."
 private const val ROW_ORDER = "Resolution order"
 private const val ORDER_HELP =
-    "The first three that answer read each name; the rest are asked when those can't agree or don't answer. Change it under RPC providers."
+    "The first three in this order that are reachable read each name, so the order decides who answers; the rest are asked, in order, when those can't agree or don't answer. Change it under RPC providers."
 private const val ROW_CCIP = "Off-chain lookups (CCIP-Read)"
 private const val CCIP_HELP =
     "Some names (base.eth and cb.id subnames, NameStone names) are answered by a gateway their resolver names. The gateway sees the name you look up. Off: those names don't resolve."
