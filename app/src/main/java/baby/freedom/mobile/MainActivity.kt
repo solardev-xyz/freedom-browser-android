@@ -25,6 +25,7 @@ import baby.freedom.mobile.browser.BrowserScreen
 import baby.freedom.mobile.browser.Gateways
 import baby.freedom.mobile.browser.HOME_URL
 import baby.freedom.mobile.browser.PublicSuffixList
+import baby.freedom.mobile.browser.UnverifiedOrigins
 import baby.freedom.mobile.browser.VirtualOrigin
 import baby.freedom.mobile.browser.statusBarIconsDark
 import baby.freedom.mobile.data.NodeSettings
@@ -37,8 +38,10 @@ import baby.freedom.swarm.IpfsInfo
 import baby.freedom.swarm.NodeInfo
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * Hosts the browser UI and brokers the bind/unbind lifecycle of the
@@ -123,6 +126,31 @@ class MainActivity : ComponentActivity() {
         // open unnecessarily.
         lifecycleScope.launch {
             if (settings.runNodeEnabled.first()) startAndBindService()
+        }
+
+        // External Swarm endpoint / IPFS gateway (#125), followed live
+        // so switching in Settings applies to the next request. Until
+        // the first value lands, the interceptor and the navigation gate
+        // wait for it (so a cold-start deep link or restored tab can't
+        // reach the embedded node's gateway first) — the main thread
+        // doesn't.
+        Gateways.expectExternalEndpoints()
+        lifecycleScope.launch {
+            withContext(Dispatchers.IO) { UnverifiedOrigins.init(this@MainActivity) }
+            combine(
+                settings.externalSwarmEndpoint,
+                settings.externalIpfsGateway,
+            ) { swarm, ipfs -> swarm to ipfs }.collect { (swarm, ipfs) ->
+                // What an unverified gateway left on the virtual origins
+                // goes before anything else is served there. The switch
+                // itself lands under the sweep's lock, so no request can
+                // record against the old gateway once it's swept.
+                UnverifiedOrigins.sweep(
+                    ipfs,
+                    apply = { Gateways.setExternalEndpoints(swarm, ipfs) },
+                    wipe = UnverifiedOrigins::wipeWebData,
+                )
+            }
         }
 
         // The address label's resting form needs the vendored Public

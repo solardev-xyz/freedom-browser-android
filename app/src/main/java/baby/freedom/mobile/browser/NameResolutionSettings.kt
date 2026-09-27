@@ -52,6 +52,7 @@ import baby.freedom.mobile.data.NodeSettings
 import baby.freedom.mobile.ens.EnsRpcConfig
 import baby.freedom.mobile.ens.KeyedRpcProvider
 import baby.freedom.mobile.ens.RpcEndpointCheck
+import baby.freedom.mobile.ui.isLight
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -441,7 +442,9 @@ private fun EndpointTestRow(url: String?) {
                 checkLabel(it),
                 style = MaterialTheme.typography.bodySmall,
                 color = if (it is RpcEndpointCheck.Outcome.Ok) {
-                    Color(0xFF22C55E)
+                    // A darker green on the light scheme, where the bright
+                    // one doesn't read on the pale card (as UnverifiedWarning).
+                    if (MaterialTheme.colorScheme.isLight) Color(0xFF15803D) else Color(0xFF22C55E)
                 } else {
                     MaterialTheme.colorScheme.error
                 },

@@ -1417,6 +1417,8 @@ internal fun BottomToolbar(
     onStop: () -> Unit,
     onNewTab: () -> Unit,
     onPrint: () -> Unit,
+    /** "New private tab" (#86); null where private tabs can't run, and the menu doesn't offer it. */
+    onNewPrivateTab: (() -> Unit)? = null,
     onExpandCapsule: () -> Unit,
     onFindInPage: () -> Unit,
     zoomLevel: Int?,
@@ -1693,6 +1695,7 @@ internal fun BottomToolbar(
                     onOpenDownloads = onOpenDownloads,
                     onReload = onReload,
                     onNewTab = onNewTab,
+                    onNewPrivateTab = onNewPrivateTab,
                     onFindInPage = onFindInPage,
                     zoomLevel = zoomLevel,
                     onZoom = onZoom,
@@ -2891,6 +2894,7 @@ private fun OverflowMenuButton(
     onOpenDownloads: () -> Unit,
     onReload: () -> Unit,
     onNewTab: () -> Unit,
+    onNewPrivateTab: (() -> Unit)?,
     onFindInPage: () -> Unit,
     zoomLevel: Int?,
     onZoom: (ZoomAction) -> Unit,
@@ -2994,6 +2998,16 @@ private fun OverflowMenuButton(
                                 onNewTab()
                             },
                         )
+                        if (onNewPrivateTab != null) {
+                            DropdownMenuItem(
+                                text = { MenuItemLabel("New private tab") },
+                                leadingIcon = { Icon(PrivateTabIcon, contentDescription = null) },
+                                onClick = {
+                                    menuExpanded = false
+                                    onNewPrivateTab()
+                                },
+                            )
+                        }
                         DropdownMenuItem(
                             text = { MenuItemLabel("Reload") },
                             leadingIcon = { Icon(Icons.Filled.Refresh, contentDescription = null) },

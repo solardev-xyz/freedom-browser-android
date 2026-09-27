@@ -116,3 +116,44 @@ internal val FreedomLightColors: ColorScheme = lightColorScheme(
     tertiaryContainer = Color(0xFFD1E4FF),
     onTertiaryContainer = Color(0xFF001D33),
 )
+
+/**
+ * Private tabs' scheme (#86): always dark, whatever the system setting,
+ * on violet-tinted surfaces — so a private tab's chrome, home page and
+ * switcher card can't be mistaken for a normal one's at a glance. The
+ * dark scheme with its surfaces and outlines tinted violet, and a
+ * lavender primary (the load trace, Stop) to go with them; the
+ * wordmark's amber stays the secondary.
+ */
+internal val FreedomPrivateColors: ColorScheme = FreedomDarkColors.copy(
+    primary = Color(0xFFD0BCFF),
+    onPrimary = Color(0xFF381E72),
+    primaryContainer = Color(0xFF4F378B),
+    onPrimaryContainer = Color(0xFFEADDFF),
+    background = Color(0xFF16121F),
+    surface = Color(0xFF16121F),
+    surfaceDim = Color(0xFF16121F),
+    surfaceBright = Color(0xFF3C3448),
+    surfaceContainerLowest = Color(0xFF110D19),
+    surfaceContainerLow = Color(0xFF1E1929),
+    surfaceContainer = Color(0xFF2A2238),
+    surfaceContainerHigh = Color(0xFF342B44),
+    surfaceContainerHighest = Color(0xFF3F3550),
+    surfaceVariant = Color(0xFF3F3550),
+    onSurfaceVariant = Color(0xFFCBC2DB),
+    outline = Color(0xFF958DA5),
+    outlineVariant = Color(0xFF4A4458),
+)
+
+/** [content] in the private tabs' scheme ([FreedomPrivateColors]); as-is when not [private]. */
+@Composable
+fun PrivateTheme(
+    private: Boolean,
+    content: @Composable () -> Unit,
+) {
+    if (!private) return content()
+    androidx.compose.material3.MaterialTheme(
+        colorScheme = FreedomPrivateColors,
+        content = content,
+    )
+}

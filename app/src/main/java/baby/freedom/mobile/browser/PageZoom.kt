@@ -127,17 +127,39 @@ class PageZoom internal constructor(
         }
     }
 
-    /** The level for [site] (a [zoomSiteKey]); [PageZoomLevels.DEFAULT] for none. */
-    fun levelFor(site: String?): Int =
-        site?.let { levels[it] } ?: PageZoomLevels.DEFAULT
+    /**
+     * Private tabs' levels (#86): what was changed in a private tab
+     * this private session, kept in memory only and shared by the
+     * private tabs alone. A site not changed there reads its remembered
+     * level, as in Chrome's incognito.
+     */
+    private val privateLevels = mutableStateMapOf<String, Int>()
 
-    /** Apply [action] to [site]'s level and remember the result. */
-    fun apply(site: String, action: ZoomAction) {
-        val current = levelFor(site)
+    /**
+     * The level for [site] (a [zoomSiteKey]); [PageZoomLevels.DEFAULT]
+     * for none. [private]: as a private tab sees it.
+     */
+    fun levelFor(site: String?, private: Boolean = false): Int {
+        site ?: return PageZoomLevels.DEFAULT
+        if (private) privateLevels[site]?.let { return it }
+        return levels[site] ?: PageZoomLevels.DEFAULT
+    }
+
+    /**
+     * Apply [action] to [site]'s level and remember the result — for
+     * this private session only if [private].
+     */
+    fun apply(site: String, action: ZoomAction, private: Boolean = false) {
+        val current = levelFor(site, private)
         val next = when (action) {
             ZoomAction.In -> PageZoomLevels.step(current, zoomIn = true)
             ZoomAction.Out -> PageZoomLevels.step(current, zoomIn = false)
             ZoomAction.Reset -> PageZoomLevels.DEFAULT
+        }
+        if (private) {
+            // Kept even at the default: it overrides a remembered level.
+            privateLevels[site] = next
+            return
         }
         touched += site
         if (next == PageZoomLevels.DEFAULT) levels.remove(site) else levels[site] = next
@@ -157,7 +179,13 @@ class PageZoom internal constructor(
         cleared = true
         touched.clear()
         levels.clear()
+        privateLevels.clear()
         scope.launch { writes.withLock { clear() } }
+    }
+
+    /** The private session is over (#86): its levels go with it. */
+    fun clearPrivate() {
+        privateLevels.clear()
     }
 
     companion object {

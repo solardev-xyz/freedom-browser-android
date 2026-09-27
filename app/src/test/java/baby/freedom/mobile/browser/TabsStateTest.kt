@@ -308,4 +308,36 @@ class TabsStateTest {
         assertEquals("https://login.example/", restore.resubmitUrl)
         assertEquals("https://login.example/", restore.fallbackUrl)
     }
+
+    @Test
+    fun `a closed private tab is not remembered for reopening`() {
+        val tabs = threeTabs()
+        tabs.newTab(private = true).visit("secret")
+        assertTrue(tabs.hasPrivateTabs)
+        tabs.closeTab(tabs.activeIndex)
+        assertFalse(tabs.hasPrivateTabs)
+        assertFalse(tabs.canReopenClosedTab)
+        // A normal tab still is.
+        tabs.closeTab(0)
+        assertEquals("a", tabs.reopenClosedTab()?.title)
+        assertNull(tabs.reopenClosedTab())
+    }
+
+    @Test
+    fun `a private tab's popup is private, a normal tab's isn't`() {
+        val tabs = threeTabs()
+        assertFalse(tabs.adoptPopup(opener = tabs.tabs[0]).private)
+        val opener = tabs.newTab(private = true)
+        assertTrue(tabs.adoptPopup(opener = opener).private)
+    }
+
+    @Test
+    fun `the last tab closing as a private one leaves a normal blank tab`() {
+        val tabs = TabsState(homepage = HOME_URL)
+        tabs.newTab(private = true).visit("secret")
+        tabs.closeTab(0)
+        tabs.closeTab(0)
+        assertEquals(1, tabs.tabs.size)
+        assertFalse(tabs.active.private)
+    }
 }

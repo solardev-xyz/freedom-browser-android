@@ -54,7 +54,12 @@ internal class FetchedImage(val bytes: ByteArray, val mime: String)
 /** Images bigger than this are refused rather than buffered into memory. */
 private const val MAX_IMAGE_BYTES = 50 * 1024 * 1024
 
-internal suspend fun fetchImage(url: String, pageUrl: String?, userAgent: String?): FetchedImage? =
+internal suspend fun fetchImage(
+    url: String,
+    pageUrl: String?,
+    userAgent: String?,
+    private: Boolean = false,
+): FetchedImage? =
     withHardDeadline(IMAGE_FETCH_DEADLINE_MS) { guard ->
         if (url.startsWith("data:", ignoreCase = true)) return@withHardDeadline decodeDataUrl(url)
         interceptVirtualRequest(GetRequest(url))?.let { response ->
@@ -66,7 +71,14 @@ internal suspend fun fetchImage(url: String, pageUrl: String?, userAgent: String
                 return@withHardDeadline imageMime(response.mimeType, bytes, url)?.let { FetchedImage(bytes, it) }
             }
         }
-        fetchHttpImage(url, pageUrl, userAgent, guard)
+        // A private tab's image goes with the private session's cookies
+        // (#86) — none once it has ended, never the normal tabs'.
+        val cookies = if (private) {
+            PrivateProfile.cookieManager()
+        } else {
+            runCatching { CookieManager.getInstance() }.getOrNull()
+        }
+        fetchHttpImage(url, pageUrl, userAgent, cookies, guard)
     }
 
 /**
@@ -163,6 +175,7 @@ private fun fetchHttpImage(
     url: String,
     pageUrl: String?,
     userAgent: String?,
+    cookies: CookieManager?,
     guard: FetchGuard,
 ): FetchedImage? {
     val deadline = System.currentTimeMillis() + IMAGE_FETCH_DEADLINE_MS
@@ -179,7 +192,7 @@ private fun fetchHttpImage(
             instanceFollowRedirects = false
             if (!userAgent.isNullOrEmpty()) setRequestProperty("User-Agent", userAgent)
             if (sameSiteChain) {
-                CookieManager.getInstance().getCookie(current)?.let { setRequestProperty("Cookie", it) }
+                cookies?.getCookie(current)?.let { setRequestProperty("Cookie", it) }
             }
         }
         if (!guard.register { conn.disconnect() }) return null

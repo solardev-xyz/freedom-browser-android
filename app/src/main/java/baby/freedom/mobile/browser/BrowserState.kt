@@ -16,8 +16,15 @@ import kotlinx.coroutines.Job
  * [id] is a process-unique, stable identifier so the multi-tab host can
  * map a tab to its physical [android.webkit.WebView] instance across
  * recompositions. It should never be reused within a session.
+ *
+ * [private] marks a private tab (#86), fixed for the tab's life: its
+ * WebView runs on the throwaway [PrivateProfile] (its own cookies,
+ * storage and cache, deleted once the last private tab closes), and
+ * nothing it browses is written to history, the favicon cache,
+ * remembered zoom levels, remembered site permissions or the download
+ * list on disk. It never goes on the reopen-closed-tab stack.
  */
-class BrowserState(val id: Long) {
+class BrowserState(val id: Long, val private: Boolean = false) {
     /**
      * The tab whose page opened this one as a new window (`target=_blank`,
      * `window.open()`; see [TabsState.adoptPopup]), or null for a tab the
@@ -425,6 +432,20 @@ class BrowserState(val id: Long) {
      * see [bottomStripArgb]). Written by [BrowserScreen]; plain field.
      */
     internal var surfaceArgb: Int = 0xFF000000.toInt()
+
+    /**
+     * Something in this tab's pages is audible (#91): a media element
+     * playing, unmuted by the page, volume above zero — as the tab's
+     * frames report it (see [TabAudioFrames]). Stays true while the tab
+     * is muted with [audioMuted]: the page is still playing, the user just
+     * doesn't hear it.
+     */
+    var playingAudio by mutableStateOf(false)
+        internal set
+
+    /** The user muted this tab's WebView (#91, [TabsState.setAudioMuted]). */
+    var audioMuted by mutableStateOf(false)
+        internal set
 
     /**
      * Most recent page-preview bitmap for this tab, shown in the tab

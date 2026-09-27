@@ -46,6 +46,7 @@ import androidx.compose.material.icons.filled.HourglassTop
 import androidx.compose.material.icons.filled.PowerSettingsNew
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.Tune
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -66,6 +67,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.res.vectorResource
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
@@ -74,6 +76,7 @@ import baby.freedom.mobile.R
 import baby.freedom.mobile.data.BrowsingRepository
 import baby.freedom.mobile.data.NodeSettings
 import baby.freedom.mobile.ens.EnsRpcConfig
+import baby.freedom.mobile.ui.isLight
 import baby.freedom.swarm.IpfsInfo
 import baby.freedom.swarm.IpfsStatus
 import kotlinx.coroutines.flow.drop
@@ -97,8 +100,13 @@ import kotlinx.coroutines.launch
  *  2. **Site permissions** — every camera / microphone / location
  *     decision (remembered, or this run's), each revocable (#81), and
  *     every "open <scheme>: links in another app" one (#85).
- *  3. **About** — app name, version, package, and a short blurb.
- *  4. **Other** — a single "Show advanced options" row. Tapping it
+ *  3. **Nodes** — where `bzz://` and `ipfs://` content comes from: the
+ *     embedded nodes, or an external Swarm endpoint / IPFS gateway the
+ *     user runs (#125, [ExternalEndpoints]). The IPFS row shows only
+ *     while advanced options are on, or once an external gateway is
+ *     set — its unverified warning must stay in view while it's in use.
+ *  4. **About** — app name, version, package, and a short blurb.
+ *  5. **Other** — a single "Show advanced options" row. Tapping it
  *     flips [NodeSettings.showIpfsUi] on, which reveals an "IPFS node
  *     (experimental)" card below (status, peers, gateway URL, and
  *     routing preferences). This gate exists so IPFS support stays a
@@ -136,6 +144,9 @@ fun SettingsScreen(
     val customSearchTemplate by settings.customSearchTemplate.collectAsState(initial = "")
     var pickSearchEngine by remember { mutableStateOf(false) }
     val ensRpcConfig by settings.ensRpcConfig.collectAsState(initial = EnsRpcConfig())
+    val externalSwarm by settings.externalSwarmEndpoint.collectAsState(initial = "")
+    val externalIpfs by settings.externalIpfsGateway.collectAsState(initial = "")
+    var editEndpoint by remember { mutableStateOf<NodeEndpoint?>(null) }
 
     var confirmClearHistory by remember { mutableStateOf(false) }
     var confirmClearBookmarks by remember { mutableStateOf(false) }
@@ -162,6 +173,9 @@ fun SettingsScreen(
     val permissionRows = visibleSettingsRows(
         query, SECTION_PERMISSIONS, sitePermissionRows(permissionEntries),
     )
+    val nodeRows = visibleSettingsRows(
+        query, SECTION_NODES, nodeRows(externalSwarm, externalIpfs, showIpfsUi),
+    )
     val aboutRows = visibleSettingsRows(
         query, SECTION_ABOUT, aboutRows(appVersion, context.packageName),
     )
@@ -170,7 +184,7 @@ fun SettingsScreen(
         visibleSettingsRows(query, SECTION_IPFS, ipfsRows(ipfsInfo))
     } else emptySet()
     val nothingMatches = listOf(
-        searchRows, ensRows, rpcRows, browsingRows, permissionRows, aboutRows, otherRows, ipfsRows,
+        searchRows, ensRows, rpcRows, browsingRows, permissionRows, nodeRows, aboutRows, otherRows, ipfsRows,
     ).all { it.isEmpty() }
 
     // A new query starts the results from the top, so the first match
@@ -233,6 +247,14 @@ fun SettingsScreen(
                         onRevoke = sitePermissions::revoke,
                     )
                 }
+                if (nodeRows.isNotEmpty()) item("nodes") {
+                    NodesSection(
+                        visible = nodeRows,
+                        externalSwarm = externalSwarm,
+                        externalIpfs = externalIpfs,
+                        onEdit = { editEndpoint = it },
+                    )
+                }
                 if (aboutRows.isNotEmpty()) item("about") {
                     AboutSection(visible = aboutRows, version = appVersion)
                 }
@@ -281,6 +303,20 @@ fun SettingsScreen(
             onDismiss = { pickSearchEngine = false },
         )
     }
+    editEndpoint?.let { endpoint ->
+        EndpointDialog(
+            endpoint = endpoint,
+            saved = if (endpoint == NodeEndpoint.Swarm) externalSwarm else externalIpfs,
+            onSave = { value ->
+                scope.launch {
+                    if (endpoint == NodeEndpoint.Swarm) settings.setExternalSwarmEndpoint(value)
+                    else settings.setExternalIpfsGateway(value)
+                }
+                editEndpoint = null
+            },
+            onDismiss = { editEndpoint = null },
+        )
+    }
     if (confirmClearHistory) {
         ConfirmDialog(
             title = "Clear history?",
@@ -323,6 +359,7 @@ fun SettingsScreen(
 private const val SECTION_SEARCH = "Search"
 private const val SECTION_BROWSING = "Browsing data"
 private const val SECTION_PERMISSIONS = "Site permissions"
+private const val SECTION_NODES = "Nodes"
 private const val SECTION_ABOUT = "About"
 private const val SECTION_OTHER = "Other"
 private const val SECTION_IPFS = "IPFS"
@@ -513,6 +550,221 @@ private fun EngineRadioRow(
         Spacer(Modifier.width(12.dp))
         Text(label)
     }
+}
+
+/** The two content sources an external endpoint can replace (#125). */
+internal enum class NodeEndpoint(
+    val key: String,
+    val title: String,
+    val embeddedLabel: String,
+    val placeholder: String,
+    val helper: String,
+    /** Shown while an external endpoint of this kind is in use. */
+    val warning: String?,
+) {
+    Swarm(
+        key = "swarm",
+        title = "Swarm endpoint",
+        embeddedLabel = "Embedded Swarm node",
+        placeholder = "http://192.168.1.10:1633",
+        helper = "A Bee or Ant node API that serves /bzz/",
+        warning = null,
+    ),
+    Ipfs(
+        key = "ipfs",
+        title = "IPFS gateway",
+        embeddedLabel = "Embedded IPFS node (verified)",
+        placeholder = "http://192.168.1.10:8080",
+        helper = "A path gateway serving /ipfs/ and /ipns/",
+        warning = ExternalEndpoints.IPFS_UNVERIFIED_WARNING,
+    ),
+}
+
+private const val EXTERNAL_LABEL = "External"
+
+private fun endpointSubtitle(endpoint: NodeEndpoint, external: String) =
+    if (external.isEmpty()) endpoint.embeddedLabel else EXTERNAL_LABEL
+
+/**
+ * The Swarm row always; the IPFS row while advanced options reveal
+ * IPFS, or whenever an external gateway is in use — so its unverified
+ * warning can't be hidden away with the rest of the IPFS settings.
+ */
+internal fun nodeRows(externalSwarm: String, externalIpfs: String, showIpfsUi: Boolean) =
+    listOfNotNull(
+        settingsRow(
+            NodeEndpoint.Swarm.key,
+            NodeEndpoint.Swarm.title,
+            endpointSubtitle(NodeEndpoint.Swarm, externalSwarm),
+            externalSwarm,
+            "External node",
+        ),
+        if (showIpfsUi || externalIpfs.isNotEmpty()) settingsRow(
+            NodeEndpoint.Ipfs.key,
+            NodeEndpoint.Ipfs.title,
+            endpointSubtitle(NodeEndpoint.Ipfs, externalIpfs),
+            externalIpfs,
+            externalIpfs.takeIf { it.isNotEmpty() }?.let { NodeEndpoint.Ipfs.warning },
+            "External gateway",
+        ) else null,
+    )
+
+@Composable
+private fun NodesSection(
+    visible: Set<Any>,
+    externalSwarm: String,
+    externalIpfs: String,
+    onEdit: (NodeEndpoint) -> Unit,
+) {
+    SectionCard(title = SECTION_NODES) {
+        if (NodeEndpoint.Swarm.key in visible) {
+            EndpointRow(
+                endpoint = NodeEndpoint.Swarm,
+                external = externalSwarm,
+                icon = ImageVector.vectorResource(R.drawable.ic_swarm),
+                onClick = { onEdit(NodeEndpoint.Swarm) },
+            )
+        }
+        if (NodeEndpoint.Ipfs.key in visible) {
+            EndpointRow(
+                endpoint = NodeEndpoint.Ipfs,
+                external = externalIpfs,
+                icon = ImageVector.vectorResource(R.drawable.ic_ipfs),
+                onClick = { onEdit(NodeEndpoint.Ipfs) },
+            )
+        }
+    }
+}
+
+@Composable
+private fun EndpointRow(
+    endpoint: NodeEndpoint,
+    external: String,
+    icon: ImageVector,
+    onClick: () -> Unit,
+) {
+    PageRow(
+        title = endpoint.title,
+        subtitle = endpointSubtitle(endpoint, external),
+        style = PageRowStyle.Inset,
+        leadingIcon = icon,
+        // The whole URL, wrapped — never cut, so it's readable on the
+        // narrowest screen.
+        thirdLine = external.ifEmpty { null },
+        onClick = onClick,
+    )
+    val warning = endpoint.warning
+    if (external.isNotEmpty() && warning != null) {
+        UnverifiedWarning(warning, Modifier.padding(start = 40.dp, end = 12.dp, bottom = 8.dp))
+    }
+}
+
+@Composable
+private fun UnverifiedWarning(text: String, modifier: Modifier = Modifier) {
+    // Amber, as the node-status "Starting…" state; a darker shade on the
+    // light scheme, where the bright one doesn't read on the pale card.
+    val color = if (MaterialTheme.colorScheme.isLight) Color(0xFFB45309) else Color(0xFFF59E0B)
+    Row(modifier = modifier, verticalAlignment = Alignment.Top) {
+        Icon(
+            Icons.Filled.Warning,
+            contentDescription = null,
+            tint = color,
+            modifier = Modifier.size(16.dp),
+        )
+        Spacer(Modifier.width(6.dp))
+        Text(
+            text,
+            style = MaterialTheme.typography.bodySmall,
+            color = color,
+        )
+    }
+}
+
+/**
+ * "Embedded node" or "External" + a base-URL field, like the search
+ * engine dialog: picking the embedded node applies at once; an
+ * external URL applies on Save, which stays disabled until
+ * [ExternalEndpoints.validate] accepts it. The IPFS dialog carries the
+ * unverified warning while External is picked.
+ */
+@Composable
+private fun EndpointDialog(
+    endpoint: NodeEndpoint,
+    saved: String,
+    onSave: (String) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var externalSelected by remember { mutableStateOf(saved.isNotEmpty()) }
+    var draft by remember { mutableStateOf(saved) }
+    val validation = ExternalEndpoints.validate(draft)
+    val normalized = validation.endpoint
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(endpoint.title) },
+        text = {
+            Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
+                EngineRadioRow(
+                    label = endpoint.embeddedLabel,
+                    selected = !externalSelected,
+                    onClick = { onSave("") },
+                )
+                EngineRadioRow(
+                    label = EXTERNAL_LABEL,
+                    selected = externalSelected,
+                    onClick = { externalSelected = true },
+                )
+                if (externalSelected) {
+                    OutlinedTextField(
+                        value = draft,
+                        onValueChange = { draft = it },
+                        label = { Text("URL") },
+                        placeholder = { Text(endpoint.placeholder) },
+                        isError = draft.isNotBlank() && normalized == null,
+                        supportingText = {
+                            Text(
+                                validation.rejection
+                                    ?.takeIf { draft.isNotBlank() }
+                                    ?.let(::endpointHint)
+                                    ?: endpoint.helper,
+                            )
+                        },
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(
+                            keyboardType = KeyboardType.Uri,
+                            autoCorrectEnabled = false,
+                        ),
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    endpoint.warning?.let {
+                        Spacer(Modifier.height(8.dp))
+                        UnverifiedWarning(it)
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            if (externalSelected) {
+                TextButton(
+                    onClick = { normalized?.let(onSave) },
+                    enabled = normalized != null,
+                ) { Text("Save") }
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Cancel") }
+        },
+    )
+}
+
+/** What to fix, for each reason [ExternalEndpoints.validate] refuses a URL. */
+private fun endpointHint(rejection: ExternalEndpoints.Rejection): String = when (rejection) {
+    ExternalEndpoints.Rejection.EMPTY,
+    ExternalEndpoints.Rejection.NOT_A_URL -> "Not a URL: e.g. http://192.168.1.10:1633"
+    ExternalEndpoints.Rejection.TOO_LONG -> "Too long: at most 2048 characters"
+    ExternalEndpoints.Rejection.SCHEME -> "Needs http:// or https://"
+    ExternalEndpoints.Rejection.QUERY_OR_FRAGMENT -> "Remove the ? or # part"
+    ExternalEndpoints.Rejection.CREDENTIALS -> "Remove the user name or password before the host"
 }
 
 private const val ROW_CLEAR_HISTORY = "Clear history"

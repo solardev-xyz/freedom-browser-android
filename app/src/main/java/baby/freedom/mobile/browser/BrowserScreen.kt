@@ -94,6 +94,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.lerp
 import baby.freedom.mobile.data.BrowsingRepository
+import baby.freedom.mobile.ui.PrivateTheme
 import baby.freedom.mobile.data.NodeSettings
 import baby.freedom.mobile.data.UrlSuggestion
 import baby.freedom.mobile.ens.EnsInput
@@ -489,9 +490,23 @@ fun BrowserScreen(
     // open, and a Long snackbar would sit over the bottom row's Retry
     // and × for ten seconds.
     val downloadNotices = remember { DownloadNotices() }
+    // Is anything from a private session (#86) on screen? A private
+    // download's notice (negative id) names its file, so it's only shown
+    // while that's the case, and withdrawn when the screen goes back to
+    // normal content — before [PrivateScreenGuard] drops FLAG_SECURE.
+    val privateOnScreen = privateContentOnScreen(
+        activePrivate = tabs.active.private,
+        anyPrivate = tabs.tabs.any { it.private },
+        switcherShown = showTabSwitcher,
+        downloadsShown = showDownloads,
+    )
+    val privateOnScreenNow by rememberUpdatedState(privateOnScreen)
+    LaunchedEffect(privateOnScreen) {
+        if (!privateOnScreen) downloadNotices.cancelPrivate()
+    }
     LaunchedEffect(downloads) {
         downloads.events.collect { event ->
-            if (showDownloads) {
+            if (showDownloads || (event.id < 0 && !privateOnScreenNow)) {
                 downloadNotices.supersedeStart(event.id)
                 return@collect
             }
@@ -541,6 +556,10 @@ fun BrowserScreen(
     }
 
     val state = tabs.active
+    // Private pages stay out of the Recents snapshot and screenshots
+    // (#86) — and so does a private download's notice (it names the
+    // file) until it has left the screen.
+    PrivateScreenGuard(privateOnScreen || downloadNotices.privateShowing)
     val isBookmarked by repo.isBookmarked(state.url).collectAsState(initial = false)
 
     // IPFS load progress (#94): while the active tab is busy on content
@@ -564,9 +583,14 @@ fun BrowserScreen(
     // counter growth of every poll during which the superseded load
     // was still busy in the node, and skips the node-wide snapshot while
     // it has any request open ([BrowserState.gatewayWork]).
+    // The counters are the embedded node's; an external gateway (#125)
+    // serves the load without them moving. Observed, so switching the
+    // source mid-load starts / stops the polling straight away.
+    val externalIpfsGateway by Gateways.externalIpfsBaseFlow.collectAsState()
     val pollIpfsProgress = state.ipfsLoad &&
         isCapsuleLoading(state) &&
-        ipfsInfo.status == IpfsStatus.Running
+        ipfsInfo.status == IpfsStatus.Running &&
+        externalIpfsGateway.isEmpty()
     val ipfsLoadKey = state.id to state.loadGeneration
     var ipfsStatus by remember { mutableStateOf<String?>(null) }
     var ipfsStatusTab by remember { mutableStateOf<Long?>(null) }
@@ -707,7 +731,15 @@ fun BrowserScreen(
         // here so we don't pay the IPFS bootstrap cost on cold app
         // launch. Idempotent on the service side; safe to call on
         // every IPFS navigation.
-        val readiness = if (isIpfs) {
+        //
+        // An external endpoint (#125) replaces the embedded node, so
+        // there's no node to wait for (or start): the probe below
+        // tells whether the endpoint answers.
+        Gateways.awaitExternalEndpoints()
+        val external = if (isIpfs) Gateways.externalIpfsBase else Gateways.externalSwarmBase
+        val readiness = if (external.isNotEmpty()) {
+            NodeReadyOutcome.Running
+        } else if (isIpfs) {
             onEnsureIpfsStarted()
             awaitIpfsRunning(
                 currentIpfsInfoProvider = { currentIpfsInfo },
@@ -726,10 +758,11 @@ fun BrowserScreen(
             return
         }
 
-        // Probe the gateway directly (`http://127.0.0.1:…`) — the
-        // WebView gets the virtual-origin URL, but readiness is a
-        // question for the node itself. Resolved after the node flips
-        // to Running, in case ipfsBase was still empty before.
+        // Probe the gateway directly (`http://127.0.0.1:…`, or the
+        // external endpoint) — the WebView gets the virtual-origin URL,
+        // but readiness is a question for the node itself. Resolved
+        // after the node flips to Running, in case ipfsBase was still
+        // empty before.
         val resolved = Gateways.toGatewayUrl(contentUri)
         val headUrl = GatewayUrls.extractBase(resolved)?.prefix ?: resolved
 
@@ -963,6 +996,19 @@ fun BrowserScreen(
         target.loadUrl(url)
     }
 
+    // "New private tab" (#86), from the menu and the tab switcher —
+    // null, so neither offers it, where the WebView can't run private
+    // tabs (no multi-profile support).
+    val privateTabsSupported = remember { PrivateProfile.isSupported() }
+    val newPrivateTab: (() -> Unit)? = if (privateTabsSupported) {
+        {
+            val fresh = tabs.newTab(private = true)
+            submit(fresh, tabs.homepageUrl)
+        }
+    } else {
+        null
+    }
+
     // Wire the WebView layer's "route this URL through submit" hook up
     // to this screen's [submit] function. The callback lives on
     // [TabsState] so BrowserWebView (which is composed under us) can
@@ -982,13 +1028,13 @@ fun BrowserScreen(
         // they submit as [SubmitSource.User]. A background tab says so
         // in a snackbar that can bring it forward — otherwise nothing
         // on screen would change.
-        tabs.requestOpenInNewTab = { url, background ->
-            val fresh = tabs.newTab(activate = !background)
+        tabs.requestOpenInNewTab = { url, background, private ->
+            val fresh = tabs.newTab(activate = !background, private = private)
             submit(fresh, url)
             if (background) {
                 scope.launch {
                     val result = snackbarHostState.showSnackbar(
-                        message = "Opened in new tab",
+                        message = if (private) "Opened in new private tab" else "Opened in new tab",
                         actionLabel = "Switch",
                         duration = SnackbarDuration.Short,
                     )
@@ -1001,8 +1047,8 @@ fun BrowserScreen(
         }
         // Read [searchTemplate] when the search runs, so a change of
         // engine in Settings applies to the next one.
-        tabs.requestSearchInNewTab = { query ->
-            tabs.requestOpenInNewTab?.invoke(UrlParser.searchUrl(query, searchTemplate), false)
+        tabs.requestSearchInNewTab = { query, private ->
+            tabs.requestOpenInNewTab?.invoke(UrlParser.searchUrl(query, searchTemplate), false, private)
         }
         onDispose {
             tabs.requestSubmit = null
@@ -1367,7 +1413,14 @@ fun BrowserScreen(
             // moment the user hits Go on a typed URL, before the
             // WebView has a chance to fire onPageStarted and
             // populate `state.url`.
-            if (isHomeTab) {
+            if (isHomeTab && state.private) {
+                PrivateTheme(private = true) {
+                    PrivateHomeScreen(
+                        bottomContentPadding = capsuleOverlap,
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                }
+            } else if (isHomeTab) {
                 HomeScreen(
                     repo = repo,
                     onOpen = { submit(state, it) },
@@ -1447,6 +1500,11 @@ fun BrowserScreen(
                     ),
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
+                // A private tab's chrome wears the private scheme (#86).
+                PrivateTheme(state.private) {
+                // …and its text fields (address bar, find bar) keep the
+                // keyboard from learning what is typed in them.
+                TabTextInput(state.private) {
                 if (findOpen) {
                     // Keyed on the tab: each tab's bar is its own field,
                     // seeded from that tab's query.
@@ -1555,19 +1613,22 @@ fun BrowserScreen(
                         val fresh = tabs.newTab()
                         submit(fresh, tabs.homepageUrl)
                     },
+                    onNewPrivateTab = newPrivateTab,
                     onFindInPage = { state.find.show() },
                     // Same rule as Find in page: nothing to zoom on the
                     // home surface — nor on a document that isn't a
                     // site (an error page), which has no zoomSite.
                     zoomLevel = state.zoomSite
                         ?.takeIf { state.url.isNotBlank() }
-                        ?.let(pageZoom::levelFor),
-                    onZoom = { action -> state.zoomSite?.let { pageZoom.apply(it, action) } },
+                        ?.let { pageZoom.levelFor(it, state.private) },
+                    onZoom = { action -> state.zoomSite?.let { pageZoom.apply(it, action, state.private) } },
                     onPrint = { tabs.printPage?.invoke(state) },
                     modifier = Modifier
                         .widthIn(max = CHROME_MAX_WIDTH)
                         .fillMaxWidth(),
                 )
+                }
+                }
             }
         }
 
@@ -1660,6 +1721,7 @@ fun BrowserScreen(
                 val fresh = tabs.newTab()
                 submit(fresh, tabs.homepageUrl)
             },
+            onNewPrivateTab = newPrivateTab,
         )
     }
 
@@ -1706,7 +1768,7 @@ fun BrowserScreen(
                         Toast.makeText(context, "Loading image\u2026", Toast.LENGTH_SHORT).show()
                     }
                     val image = try {
-                        fetchImage(url, request.pageUrl, WebSettings.getDefaultUserAgent(context))
+                        fetchImage(url, request.pageUrl, WebSettings.getDefaultUserAgent(context), owner.private)
                     } finally {
                         progress.cancel()
                     }
@@ -1718,10 +1780,10 @@ fun BrowserScreen(
                 PageContextMenuSheet(
                     target = request.target,
                     displayUrl = { displayFor(it, owner) },
-                    onOpenInNewTab = { tabs.requestOpenInNewTab?.invoke(displayFor(it, owner), true) },
+                    onOpenInNewTab = { tabs.requestOpenInNewTab?.invoke(displayFor(it, owner), true, owner.private) },
                     onCopyLink = { copyUrlToClipboard(context, it) },
                     onShareLink = { url, title -> shareUrl(context, url, title) },
-                    onOpenImage = { tabs.requestOpenInNewTab?.invoke(displayFor(it, owner), true) },
+                    onOpenImage = { tabs.requestOpenInNewTab?.invoke(displayFor(it, owner), true, owner.private) },
                     onCopyImage = { url ->
                         withImage(url, { copyImageToClipboard(context, it, url) }, "Couldn't copy image")
                     },
