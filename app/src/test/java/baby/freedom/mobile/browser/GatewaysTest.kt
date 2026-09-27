@@ -1,6 +1,8 @@
 package baby.freedom.mobile.browser
 
 import baby.freedom.mobile.ens.EnsResult
+import baby.freedom.mobile.ens.EnsRpcConfig
+import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -288,6 +290,70 @@ class GatewaysTest {
             val code = Gateways.reverifyEnsDocument("offchain.eth", EnsDocumentPins())
             assertEquals("ens_ccip_disabled", code)
             assertEquals(502, statusForNameResolutionError(code!!))
+        }
+    }
+
+    @Test
+    fun `with CCIP-Read off, an earlier answer doesn't bring the name back`() {
+        // Loaded before CCIP-Read was switched off; Back / reload now.
+        KnownEnsNames.record("bzz://$ref64", "offchain.eth")
+        val pins = EnsDocumentPins()
+        withLookup({ EnsResult.Error(it, "CCIP_DISABLED", "off") }) {
+            assertEquals("ens_ccip_disabled", Gateways.reverifyEnsDocument("offchain.eth", pins))
+            // Every later document too — the refusal doesn't open the
+            // failure window that would let one skip the wait and fall back.
+            assertEquals("ens_ccip_disabled", Gateways.reverifyEnsDocument("offchain.eth", pins))
+            assertNull(pins.uriFor("offchain.eth"))
+            // The answer is kept for when CCIP-Read is back on.
+            assertEquals("bzz://$ref64", KnownEnsNames.uriFor("offchain.eth"))
+        }
+    }
+
+    @Test
+    fun `a lookup started under old settings isn't joined after a settings change`() {
+        val realConfig = Gateways.ensRpcConfig
+        var config = EnsRpcConfig(customEndpoints = listOf("https://old.example"))
+        Gateways.ensRpcConfig = { config }
+        val release = java.util.concurrent.CountDownLatch(1)
+        val lookups = java.util.concurrent.atomic.AtomicInteger(0)
+        try {
+            withLookup({ name ->
+                lookups.incrementAndGet()
+                // Which endpoints this lookup asks is fixed when it starts.
+                val old = runBlocking { Gateways.ensRpcConfig() }.customEndpoints.isNotEmpty()
+                if (old) {
+                    release.await() // the old endpoint is slow to answer
+                    EnsResult.Ok(name, "bzz", "bzz://$ref64", ref64)
+                } else {
+                    EnsResult.Ok(name, "bzz", "bzz://$otherRef", otherRef)
+                }
+            }) {
+                val oldPins = EnsDocumentPins()
+                val first = Thread { Gateways.reverifyEnsDocument("switch.eth", oldPins) }
+                first.start()
+                val until = System.currentTimeMillis() + 2_000
+                while (lookups.get() == 0 && System.currentTimeMillis() < until) Thread.sleep(5)
+                assertEquals(1, lookups.get())
+
+                // The user removes the endpoint; a page for the name arrives.
+                config = EnsRpcConfig()
+                val pins = EnsDocumentPins()
+                assertNull(Gateways.reverifyEnsDocument("switch.eth", pins))
+                assertEquals(2, lookups.get())
+                assertEquals("bzz://$otherRef", pins.uriFor("switch.eth"))
+                assertEquals("bzz://$otherRef", KnownEnsNames.uriFor("switch.eth"))
+
+                // The first document's lookup answers late, from the old
+                // endpoint: it asks again rather than taking that answer.
+                release.countDown()
+                first.join(2_000)
+                assertFalse(first.isAlive)
+                assertEquals("bzz://$otherRef", oldPins.uriFor("switch.eth"))
+                assertEquals("bzz://$otherRef", KnownEnsNames.uriFor("switch.eth"))
+            }
+        } finally {
+            release.countDown()
+            Gateways.ensRpcConfig = realConfig
         }
     }
 

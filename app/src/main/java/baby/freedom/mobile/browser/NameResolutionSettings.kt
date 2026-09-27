@@ -20,6 +20,8 @@ import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.Link
+import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -38,9 +40,13 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.dp
 import baby.freedom.mobile.data.NodeSettings
 import baby.freedom.mobile.ens.EnsRpcConfig
@@ -508,6 +514,10 @@ private fun ApiKeyDialog(
     onDismiss: () -> Unit,
 ) {
     var draft by remember { mutableStateOf(savedKey) }
+    // Masked like the settings row (•••• + last four); the eye shows it.
+    var reveal by remember { mutableStateOf(false) }
+    val uriHandler = LocalUriHandler.current
+    val context = LocalContext.current
     val key = draft.trim()
     // A key is a path segment: nothing that would change the URL's shape.
     val usable = key.isNotEmpty() && key.none { it.isWhitespace() || it in "/?#%@" }
@@ -534,6 +544,19 @@ private fun ApiKeyDialog(
                         )
                     },
                     singleLine = true,
+                    visualTransformation = if (reveal) {
+                        VisualTransformation.None
+                    } else {
+                        PasswordVisualTransformation()
+                    },
+                    trailingIcon = {
+                        IconButton(onClick = { reveal = !reveal }) {
+                            Icon(
+                                if (reveal) Icons.Filled.VisibilityOff else Icons.Filled.Visibility,
+                                contentDescription = if (reveal) "Hide key" else "Show key",
+                            )
+                        }
+                    },
                     keyboardOptions = KeyboardOptions(
                         keyboardType = KeyboardType.Password,
                         autoCorrectEnabled = false,
@@ -543,14 +566,23 @@ private fun ApiKeyDialog(
                 androidx.compose.runtime.key(key) {
                     EndpointTestRow(if (usable) provider.urlFor(key) else null)
                 }
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(
-                        Icons.Filled.Link,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
+                TextButton(
+                    onClick = {
+                        try {
+                            uriHandler.openUri(provider.website)
+                        } catch (e: Exception) {
+                            // No app to open it (IllegalStateException /
+                            // ActivityNotFoundException): say where to go.
+                            Toast.makeText(context, provider.website, Toast.LENGTH_LONG).show()
+                        }
+                    },
+                ) {
+                    Icon(Icons.Filled.Link, contentDescription = null)
                     Spacer(Modifier.width(6.dp))
-                    HelpText("Get a key: ${provider.website}")
+                    Text(
+                        "Get a key: ${provider.website}",
+                        textDecoration = TextDecoration.Underline,
+                    )
                 }
                 if (savedKey.isNotEmpty()) {
                     TextButton(
