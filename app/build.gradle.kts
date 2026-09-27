@@ -144,6 +144,9 @@ dependencies {
     // A JS engine for unit tests of injected page scripts (the #66
     // bottom-nav detector), run against a small fake DOM.
     testImplementation("org.mozilla:rhino:1.7.15")
+    // UTS-46 for WhatwgHost's JVM tests: android.icu (what the app uses)
+    // is a stub off-device, and icu4j is the same library unrepackaged.
+    testImplementation("com.ibm.icu:icu4j:77.1")
 
     androidTestImplementation("androidx.test:runner:1.6.2")
     androidTestImplementation("androidx.test:rules:1.6.1")

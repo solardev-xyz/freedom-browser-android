@@ -314,6 +314,46 @@ suspend fun awaitTabOnScreen(
     }
 }.filterNotNull().first()
 
+/** Which modal prompt the on-screen tab shows now; see [modalPromptTurn]. */
+enum class PromptTurn { None, SitePermission, DownloadOffer }
+
+/**
+ * Orders the two prompts a page can raise on its tab: the site-permission
+ * prompt (#81) and the download offer (#79). Both are modal and both are
+ * the page's doing, so they never stack — one waits while the other is
+ * answered, then gets its turn:
+ *
+ * - Whichever is already on screen keeps it ([offerHasTurn] for the
+ *   offer; a waiting permission prompt is only ever un-shown by an offer
+ *   that already had the turn), so a prompt never vanishes from under
+ *   the user's finger for the other.
+ * - When both are waiting and neither is up yet (a page asking for
+ *   location and starting a download in the same task), the permission
+ *   prompt goes first: it answers a live request the page is awaiting
+ *   and that WebView can withdraw, while an offer waits in its queue
+ *   indefinitely.
+ * - Neither shows while Android's own permission dialog is up
+ *   ([androidDialogUp]); the offer comes after it. The broker in turn
+ *   holds that dialog while the offer has the turn, since
+ *   `BrowserScreen` only reports the tab on screen when the offer
+ *   doesn't.
+ *
+ * [permissionWaiting] is already gated on the page being on screen (no
+ * full-screen panel over it, the Downloads list included); the offer
+ * keeps its own rules (see `BrowserScreen`).
+ */
+fun modalPromptTurn(
+    permissionWaiting: Boolean,
+    offerWaiting: Boolean,
+    offerHasTurn: Boolean,
+    androidDialogUp: Boolean,
+): PromptTurn = when {
+    androidDialogUp -> PromptTurn.None
+    offerWaiting && (offerHasTurn || !permissionWaiting) -> PromptTurn.DownloadOffer
+    permissionWaiting -> PromptTurn.SitePermission
+    else -> PromptTurn.None
+}
+
 /**
  * Tap protection for the permission prompt. A page chooses *when* its
  * prompt appears (it calls `getUserMedia()` / `getCurrentPosition()`),

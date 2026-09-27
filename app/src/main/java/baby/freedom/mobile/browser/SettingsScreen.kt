@@ -9,10 +9,20 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.filled.Search
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.RadioButton
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
@@ -61,6 +71,8 @@ import kotlinx.coroutines.launch
 /**
  * Full-screen settings page. Top to bottom:
  *
+ *  0. **Search** — the address bar's search engine: the desktop set
+ *     ([SearchEngines.BUILT_IN]) or a custom template (#87).
  *  1. **Browsing data** — wipe history, bookmarks, and WebView cookies /
  *     site storage / per-tab caches. Each action is guarded by a
  *     confirmation dialog.
@@ -94,6 +106,10 @@ fun SettingsScreen(
     val context = LocalContext.current
     val settings = remember(context) { NodeSettings.get(context) }
     val showIpfsUi by settings.showIpfsUi.collectAsState(initial = false)
+    val searchEngine by settings.searchEngine
+        .collectAsState(initial = SearchEngines.DEFAULT_ID)
+    val customSearchTemplate by settings.customSearchTemplate.collectAsState(initial = "")
+    var pickSearchEngine by remember { mutableStateOf(false) }
 
     var confirmClearHistory by remember { mutableStateOf(false) }
     var confirmClearBookmarks by remember { mutableStateOf(false) }
@@ -114,6 +130,13 @@ fun SettingsScreen(
             contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
             modifier = Modifier.fillMaxSize(),
         ) {
+            item("search") {
+                SearchSection(
+                    engineId = searchEngine,
+                    customTemplate = customSearchTemplate,
+                    onClick = { pickSearchEngine = true },
+                )
+            }
             item("browsing") {
                 BrowsingDataSection(
                     historyCount = history.size,
@@ -152,6 +175,21 @@ fun SettingsScreen(
         }
     }
 
+    if (pickSearchEngine) {
+        SearchEngineDialog(
+            selectedId = searchEngine,
+            savedCustomTemplate = customSearchTemplate,
+            onSelectBuiltIn = { id ->
+                scope.launch { settings.setSearchEngine(id) }
+                pickSearchEngine = false
+            },
+            onSaveCustom = { template ->
+                scope.launch { settings.setCustomSearchTemplate(template) }
+                pickSearchEngine = false
+            },
+            onDismiss = { pickSearchEngine = false },
+        )
+    }
     if (confirmClearHistory) {
         ConfirmDialog(
             title = "Clear history?",
@@ -187,6 +225,140 @@ fun SettingsScreen(
             },
             onDismiss = { confirmClearSiteData = false },
         )
+    }
+}
+
+@Composable
+private fun SearchSection(
+    engineId: String,
+    customTemplate: String,
+    onClick: () -> Unit,
+) {
+    // A `custom` id without a usable template searches with the default
+    // ([SearchEngines.effectiveId]) — say so rather than claim "Custom".
+    val isCustom = SearchEngines.effectiveId(engineId, customTemplate) == SearchEngines.CUSTOM_ID
+    SectionCard(title = "Search") {
+        PageRow(
+            title = "Search engine",
+            subtitle = SearchEngines.labelFor(engineId, customTemplate),
+            style = PageRowStyle.Inset,
+            leadingIcon = Icons.Filled.Search,
+            // The whole template, wrapped — never cut, so it's readable
+            // on the narrowest screen.
+            thirdLine = if (isCustom) customTemplate else null,
+            onClick = onClick,
+        )
+    }
+}
+
+/**
+ * Radio list of the built-in engines plus "Custom". Tapping a built-in
+ * applies it straight away; "Custom" reveals a template field and a
+ * Save button that stays disabled until [SearchEngines.normalizeTemplate]
+ * accepts the text, with the reason shown under the field.
+ */
+@Composable
+private fun SearchEngineDialog(
+    selectedId: String,
+    savedCustomTemplate: String,
+    onSelectBuiltIn: (String) -> Unit,
+    onSaveCustom: (String) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    // Check the radio of the engine search actually uses — the same
+    // resolver as the Settings row, so a stale `custom` shows DuckDuckGo
+    // here too rather than a checked "Custom" the row doesn't name.
+    val effectiveId = SearchEngines.effectiveId(selectedId, savedCustomTemplate)
+    var customSelected by remember {
+        mutableStateOf(effectiveId == SearchEngines.CUSTOM_ID)
+    }
+    var draft by remember { mutableStateOf(savedCustomTemplate) }
+    val validation = SearchEngines.validateTemplate(draft)
+    val normalized = validation.template
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Search engine") },
+        text = {
+            Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
+                SearchEngines.BUILT_IN.forEach { engine ->
+                    EngineRadioRow(
+                        label = engine.label,
+                        selected = !customSelected && effectiveId == engine.id,
+                        onClick = { onSelectBuiltIn(engine.id) },
+                    )
+                }
+                EngineRadioRow(
+                    label = "Custom",
+                    selected = customSelected,
+                    onClick = { customSelected = true },
+                )
+                if (customSelected) {
+                    OutlinedTextField(
+                        value = draft,
+                        onValueChange = { draft = it },
+                        label = { Text("Search URL") },
+                        placeholder = { Text("https://example.com/search?q={searchTerms}") },
+                        isError = draft.isNotBlank() && normalized == null,
+                        supportingText = {
+                            Text(
+                                validation.rejection
+                                    ?.takeIf { draft.isNotBlank() }
+                                    ?.let(::templateHint)
+                                    ?: "Your search replaces {searchTerms} (or %s)",
+                            )
+                        },
+                        keyboardOptions = KeyboardOptions(
+                            keyboardType = KeyboardType.Uri,
+                            autoCorrectEnabled = false,
+                        ),
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            if (customSelected) {
+                TextButton(
+                    onClick = { normalized?.let(onSaveCustom) },
+                    enabled = normalized != null,
+                ) { Text("Save") }
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Cancel") }
+        },
+    )
+}
+
+/** What to fix, for each reason [SearchEngines.validateTemplate] refuses a template. */
+private fun templateHint(rejection: SearchEngines.Rejection): String = when (rejection) {
+    SearchEngines.Rejection.EMPTY,
+    SearchEngines.Rejection.NO_PLACEHOLDER -> "Put {searchTerms} (or %s) where your search goes"
+    SearchEngines.Rejection.MULTIPLE_PLACEHOLDERS -> "Use {searchTerms} (or %s) only once"
+    SearchEngines.Rejection.TOO_LONG -> "Too long: at most 2048 characters"
+    SearchEngines.Rejection.NOT_A_URL -> "Not a full URL: start with https:// and a host name"
+    SearchEngines.Rejection.SCHEME ->
+        "Needs https:// (http:// only to localhost, 127.0.0.1 or [::1])"
+    SearchEngines.Rejection.USER_INFO -> "Remove the user name or password before the host"
+}
+
+@Composable
+private fun EngineRadioRow(
+    label: String,
+    selected: Boolean,
+    onClick: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .heightIn(min = 48.dp)
+            .selectable(selected = selected, role = Role.RadioButton, onClick = onClick),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        RadioButton(selected = selected, onClick = null)
+        Spacer(Modifier.width(12.dp))
+        Text(label)
     }
 }
 

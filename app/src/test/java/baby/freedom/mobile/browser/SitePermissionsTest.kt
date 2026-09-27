@@ -246,4 +246,25 @@ class SitePermissionsTest {
         repeat(PermissionSession.DISMISS_EMBARGO_THRESHOLD) { session.dismiss(o, loc) }
         withTimeout(1_000) { wait.await() }
     }
+
+    @Test
+    fun `permission prompt and download offer take turns, never stack`() {
+        fun turn(perm: Boolean, offer: Boolean, offerHeld: Boolean = false, android: Boolean = false) =
+            modalPromptTurn(perm, offer, offerHeld, android)
+        // Alone, each shows.
+        assertEquals(PromptTurn.SitePermission, turn(perm = true, offer = false))
+        assertEquals(PromptTurn.DownloadOffer, turn(perm = false, offer = true))
+        assertEquals(PromptTurn.None, turn(perm = false, offer = false))
+        // Both arriving together: the permission prompt first…
+        assertEquals(PromptTurn.SitePermission, turn(perm = true, offer = true))
+        // …then the offer, once the permission is answered.
+        assertEquals(PromptTurn.DownloadOffer, turn(perm = false, offer = true))
+        // An offer already up keeps the screen; the permission prompt waits.
+        assertEquals(PromptTurn.DownloadOffer, turn(perm = true, offer = true, offerHeld = true))
+        // …and comes up once the offers are answered.
+        assertEquals(PromptTurn.SitePermission, turn(perm = true, offer = false, offerHeld = true))
+        // Nothing of ours over Android's permission dialog.
+        assertEquals(PromptTurn.None, turn(perm = false, offer = true, android = true))
+        assertEquals(PromptTurn.None, turn(perm = true, offer = true, offerHeld = true, android = true))
+    }
 }

@@ -94,6 +94,13 @@ class SitePermissionBroker private constructor(
      */
     val onScreenTab = MutableStateFlow<Long?>(null)
 
+    /**
+     * `true` while Android's runtime-permission dialog is up. The
+     * download-offer prompt waits on it ([modalPromptTurn]) so it isn't
+     * composed underneath the system dialog and armed unseen.
+     */
+    val androidDialogUp = MutableStateFlow(false)
+
     private val androidDialogLock = Mutex()
 
     /** A request in flight, from arrival until it's granted or denied. */
@@ -404,8 +411,13 @@ class SitePermissionBroker private constructor(
                 // Switched away while queued behind another dialog: wait again.
                 if (onScreenTab.value != entry.tabId) return@withLock null
                 val launch = requestAndroidPermissions ?: return@withLock before
-                runCatching { launch(before.flatMap { it.androidPermissions }.distinct()) }
-                    .onFailure { Log.w(TAG, "runtime permission request failed", it) }
+                androidDialogUp.value = true
+                try {
+                    runCatching { launch(before.flatMap { it.androidPermissions }.distinct()) }
+                        .onFailure { Log.w(TAG, "runtime permission request failed", it) }
+                } finally {
+                    androidDialogUp.value = false
+                }
                 permissions.filterNot(::held)
             }
         }
