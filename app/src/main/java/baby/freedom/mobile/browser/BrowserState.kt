@@ -18,6 +18,34 @@ import kotlinx.coroutines.Job
  */
 class BrowserState(val id: Long) {
     /**
+     * The tab whose page opened this one as a new window (`target=_blank`,
+     * `window.open()`; see [TabsState.adoptPopup]), or null for a tab the
+     * user opened. Closing the popup from script returns to it.
+     */
+    var openerId: Long? = null
+        internal set
+
+    /**
+     * `about:blank` in this tab is the *page's* document, not our home
+     * sentinel. True for a popup ([TabsState.adoptPopup]) until it first
+     * commits a real URL or the user takes it Home: the page that opened
+     * it may be writing into its blank document (`window.open('')` +
+     * `document.write`) or about to navigate it, and in either case the
+     * home overlay must not cover it. While set, the WebView client
+     * shows the blank document as the page `about:blank` (see
+     * [showBlankPage]) instead of clearing the tab back to home.
+     * Plain field: the chrome reads [isHome], which this feeds through
+     * [url]/[addressBarText].
+     */
+    internal var blankIsPage: Boolean = false
+
+    /** Present the WebView's `about:blank` as a page; see [blankIsPage]. */
+    internal fun showBlankPage() {
+        url = ABOUT_BLANK
+        addressBarText = ABOUT_BLANK
+    }
+
+    /**
      * Active per-tab address-bar rewrite. While set, any actual URL
      * starting with [baseUrl] is shown as `prefix + tail` — used to keep
      * `<name>/path` (or the scheme-constrained `bzz://<name>/path`)
@@ -326,6 +354,8 @@ class BrowserState(val id: Long) {
      * of clobbering them back with display strings for a real page.
      */
     fun navigateHome() {
+        // Home is home, even for a popup whose opener left it blank.
+        blankIsPage = false
         cancelPendingProbe()
         capsuleCollapse.expand()
         override = null

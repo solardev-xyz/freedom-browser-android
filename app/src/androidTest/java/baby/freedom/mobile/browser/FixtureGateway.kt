@@ -81,6 +81,8 @@ class FixtureGateway {
                 Base64.decode(PIXEL_PNG_B64, Base64.DEFAULT), "image/png",
             )
             "clip.wav" -> return binaryResponse(silenceWav(), "audio/wav")
+            // A link that downloads instead of navigating (#99 R1-F1).
+            "file.bin" -> return binaryResponse(ByteArray(64), "application/octet-stream")
         }
         val assets = InstrumentationRegistry.getInstrumentation().context.assets
         val body = runCatching {

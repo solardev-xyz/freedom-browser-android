@@ -174,6 +174,60 @@ class TabsState(
         return tab
     }
 
+    /**
+     * Adopt a window the page in [opener] asked for — a `target=_blank`
+     * link or `window.open()` (WebView's `onCreateWindow`) — as a new
+     * tab, placed right after its opener and made active. The caller
+     * hands the tab's WebView back to Chromium, which then loads the
+     * popup's URL into it itself: nothing is scheduled here, and the
+     * `window.opener` link to the page that asked stays intact (OAuth-
+     * style popups post their result back through it).
+     */
+    fun adoptPopup(opener: BrowserState): BrowserState {
+        val tab = newBlankTab()
+        tab.openerId = opener.id
+        // Its blank document is the page's until something commits: not
+        // the home overlay (see [BrowserState.blankIsPage]).
+        tab.blankIsPage = true
+        tab.showBlankPage()
+        val openerIndex = tabs.indexOfFirst { it.id == opener.id }
+        val at = if (openerIndex < 0) tabs.size else openerIndex + 1
+        captureActiveThumbnail?.invoke()
+        // Fullscreen belongs to the active tab only (see [fullscreen]):
+        // a player's own `_blank` link must not leave the opener's
+        // session covering the popup that is now on screen.
+        exitFullscreen()
+        tabs.add(at, tab)
+        activeIndex = at
+        return tab
+    }
+
+    /**
+     * The page in [tab] closed its own window (`window.close()`,
+     * WebView's `onCloseWindow`) — typically an OAuth popup that has
+     * posted its result to its opener. The tab goes away; if it was the
+     * one on screen, the user lands back on the opener when that is
+     * still open, and a background popup closing leaves the active tab
+     * where it is.
+     *
+     * Only a window a page opened can be closed this way. Chromium also
+     * honours `window.close()` in a tab whose session history has a
+     * single entry (e.g. right after "Clear cookies & site data" clears
+     * every tab's history), which would let any page's script silently
+     * close a tab the user opened — so a tab with no opener ignores it.
+     */
+    fun closePopup(tab: BrowserState) {
+        if (tab.openerId == null) return
+        val index = tabs.indexOfFirst { it.id == tab.id }
+        if (index < 0) return
+        val wasActive = index == activeIndex
+        val previouslyActive = active
+        closeTab(index)
+        val back = if (wasActive) tab.openerId else previouslyActive.id
+        val target = tabs.indexOfFirst { it.id == back }
+        if (target >= 0) activeIndex = target
+    }
+
     fun switchTo(index: Int) {
         if (index !in tabs.indices) return
         if (index != activeIndex) captureActiveThumbnail?.invoke()

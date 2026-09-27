@@ -14,14 +14,18 @@ import org.mozilla.javascript.Scriptable
  * does no layout: each element carries its own rect, background and
  * `position`, and `elementFromPoint` returns whatever the test says is at
  * the probe point. Timers, observers and the channel object are fakes the
- * test drives by hand, so "what runs when" is observable.
+ * test drives by hand, so "what runs when" is observable. [Page.install]
+ * does what the WebView does: runs the script at "document start", then
+ * sends Kotlin's first probe request at "first paint".
  */
 class BottomUiDetectorScriptTest {
+
+    private val channel = "qwertyuiopasdfgh"
 
     private val fakeDom = """
         var window = this;
         var sent = [], channelListeners = [], timers = [], timerSeq = 0, mutationCb = null,
-            resizeListeners = [], observed = [], hit = null, metas = [], mediaMatches = {},
+            resizeListeners = [], observed = [], hit = null, readies = 0, windowListeners = 0, metas = [], mediaMatches = {},
             domWrites = 0, reads = 0;
         var innerWidth = 412, innerHeight = 863;
         function el(o) {
@@ -63,7 +67,7 @@ class BottomUiDetectorScriptTest {
         }
         function matchMedia(q) { return { matches: !!mediaMatches[q] }; }
         function setTimeout(f, ms) { timers.push({ f: f, ms: ms }); return ++timerSeq; }
-        function addEventListener(t, f) { if (t === 'resize') resizeListeners.push(f); }
+        function addEventListener(t, f) { windowListeners++; if (t === 'resize') resizeListeners.push(f); }
         function MutationObserver(cb) { mutationCb = cb; this.observe = function (n, o) { this.target = n; this.opts = o; }; }
         function ResizeObserver(cb) { this.cb = cb; var self = this;
           this.observe = function (e) { observed.push({ kind: 'resize', el: e, cb: cb, obs: self }); };
@@ -71,8 +75,9 @@ class BottomUiDetectorScriptTest {
         function IntersectionObserver(cb) { this.cb = cb; var self = this;
           this.observe = function (e) { observed.push({ kind: 'intersection', el: e, cb: cb, obs: self }); };
           this.disconnect = function () { observed = observed.filter(function (o) { return o.obs !== self; }); }; }
-        var bottomUiChannel = {
-          postMessage: function (s) { sent.push(s); },
+        // As the platform defines it: an ordinary (deletable) property of window.
+        window.$channel = {
+          postMessage: function (s) { if (s === '$BOTTOM_UI_READY') readies++; else sent.push(s); },
           addEventListener: function (t, f) { if (t === 'message') channelListeners.push(f); }
         };
         var top = window;
@@ -97,7 +102,12 @@ class BottomUiDetectorScriptTest {
 
         fun eval(js: String): Any? = cx.evaluateString(scope, js, "t", 1, null)
         fun num(js: String): Int = Context.toNumber(eval(js)).toInt()
-        fun install() = eval(bottomUiDetectorJs(token))
+        fun documentStart() = eval(bottomUiDetectorJs(channel))
+        fun firstPaint() = eval("kotlinSays('${bottomUiProbeRequest(token)}')")
+        fun install() {
+            documentStart()
+            firstPaint()
+        }
         val sent: Int get() = num("sent.length")
         fun last(): JSONObject = JSONObject(Context.toString(eval("sent[sent.length - 1]")))
         val timers: Int get() = num("timers.length")
@@ -303,31 +313,92 @@ class BottomUiDetectorScriptTest {
     }
 
     @Test
-    fun `Kotlin's probe request is answered only for this document's token`() = page {
+    fun `a request with another token re-tags the reports, anything else is ignored`() = page {
         eval("hit = tab")
         install()
         assertEquals(1, kotlinProbe())
+        // A new install for the same document: answered, under its token.
         eval("kotlinSays('probe ffff')")
-        assertEquals(2, sent)
+        assertEquals(3, sent)
+        assertEquals("ffff", last().getString("token"))
+        // Not a probe request: nothing.
+        eval("kotlinSays('probe'); kotlinSays('probe FFFF'); kotlinSays('probe ff ff'); kotlinSays(42); kotlinSays(null)")
+        assertEquals(3, sent)
+    }
+
+    @Test
+    fun `the channel object is off window before the page's first script`() = page {
+        documentStart()
+        assertTrue(eval("!('$channel' in window)") as Boolean)
+        assertTrue(eval("Object.keys(window).indexOf('$channel') < 0") as Boolean)
+        // It still works: the detector kept it.
+        firstPaint()
+        eval("hit = tab")
+        kotlinProbe()
+        assertTrue(last().has())
+    }
+
+    @Test
+    fun `in a subframe it only removes the channel object`() = page {
+        eval("top = {}")
+        documentStart()
+        assertTrue(eval("!('$channel' in window)") as Boolean)
+        firstPaint()
+        assertEquals(0, num("readies"))
+        assertEquals(0, sent)
+        assertEquals(0, num("channelListeners.length"))
+        assertTrue(eval("mutationCb === null") as Boolean)
+    }
+
+    @Test
+    fun `before first paint it only says ready`() = page {
+        eval("hit = tab")
+        documentStart()
+        assertEquals(1, num("readies"))
+        assertEquals(0, sent)
+        assertEquals(0, timers)
+        assertEquals(0, num("reads"))
+        assertEquals(0, num("windowListeners"))
+        assertEquals(0, num("docListeners.length"))
+        assertEquals(0, num("observed.length"))
+        assertTrue(eval("mutationCb === null") as Boolean)
+        // First paint: it starts, and reports.
+        firstPaint()
+        assertEquals(1, sent)
+        assertTrue(eval("mutationCb !== null") as Boolean)
+        assertEquals(1, num("resizeListeners.length"))
+        // A second request doesn't start it twice.
+        kotlinProbe()
+        assertEquals(1, num("resizeListeners.length"))
+        assertEquals(1, num("docListeners.length"))
+        assertEquals(1, num("readies"))
     }
 
     @Test
     fun `nothing is written to the page and no global is added`() = page {
         val globals = "Object.keys(window).sort().join(',')"
-        val before = Context.toString(eval(globals))
+        // The one change: the platform's channel object is gone.
+        val before = Context.toString(eval("Object.keys(window).filter(function (k) { return k !== '$channel'; }).sort().join(',')"))
         eval("hit = tab")
         install()
         mutate(); flush()
         assertEquals(before, Context.toString(eval(globals)))
         assertEquals(0, num("domWrites"))
-        assertFalse(bottomUiDetectorJs(token).contains("freedom", ignoreCase = true))
-        assertFalse(BOTTOM_UI_CHANNEL.contains("freedom", ignoreCase = true))
+        assertFalse(bottomUiDetectorJs(channel).contains("freedom", ignoreCase = true))
+    }
+
+    @Test
+    fun `channel names are fresh plain identifiers`() {
+        val names = List(50) { newBottomUiChannelName() }
+        assertTrue(names.all { Regex("[a-z]{16}").matches(it) })
+        assertEquals(50, names.toSet().size)
+        names.forEach { bottomUiDetectorJs(it) }
     }
 
     @Test
     fun `a detector installed before body exists reports once body arrives`() = page {
-        // Installed early (no <body> yet): the forced first probe can't
-        // answer and posts nothing, so Kotlin has no reply channel yet.
+        // Started early (no <body> yet): the forced first probe can't
+        // answer and posts nothing.
         eval("document.body = null; hit = tab")
         install()
         assertEquals(0, sent)
@@ -378,7 +449,7 @@ class BottomUiDetectorScriptTest {
 
     @Test
     fun `no channel object, no detector`() = page {
-        eval("bottomUiChannel = undefined; hit = tab")
+        eval("delete window.$channel; hit = tab")
         install()
         assertEquals(0, sent)
         assertEquals(0, timers)
@@ -386,10 +457,10 @@ class BottomUiDetectorScriptTest {
     }
 
     @Test
-    fun `the token must be hex so it can't break out of the script`() {
+    fun `the channel name must be letters so it can't break out of the script`() {
         try {
-            bottomUiDetectorJs("x'; alert(1); '")
-            throw AssertionError("accepted a non-hex token")
+            bottomUiDetectorJs("abcdefgh'; alert(1); '")
+            throw AssertionError("accepted a non-letter channel name")
         } catch (_: IllegalArgumentException) {
         }
     }

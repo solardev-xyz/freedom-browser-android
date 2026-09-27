@@ -29,6 +29,12 @@ class WebViewHarness {
     /** Last main-frame HTTP error status the client observed (0 = none). */
     val lastHttpError = AtomicInteger(0)
 
+    /** Response headers of that main-frame HTTP error. */
+    val lastHttpErrorHeaders = AtomicReference<Map<String, String>>(emptyMap())
+
+    /** This "tab"'s ENS pins, as `buildRefreshableWebView` keeps one per tab. */
+    val ensPins = EnsDocumentPins()
+
     fun setUp() {
         instrumentation.runOnMainSync {
             webView = WebView(instrumentation.targetContext).apply {
@@ -38,7 +44,15 @@ class WebViewHarness {
                     override fun shouldInterceptRequest(
                         view: WebView?,
                         request: WebResourceRequest?,
-                    ): WebResourceResponse? = interceptVirtualRequest(request)
+                    ): WebResourceResponse? = interceptVirtualRequest(request, ensPins)
+
+                    override fun onPageStarted(
+                        view: WebView?,
+                        url: String?,
+                        favicon: android.graphics.Bitmap?,
+                    ) {
+                        ensPins.documentStarted(url)
+                    }
 
                     override fun onPageFinished(view: WebView?, url: String?) {
                         pageFinished.countDown()
@@ -51,6 +65,7 @@ class WebViewHarness {
                     ) {
                         if (request?.isForMainFrame == true) {
                             lastHttpError.set(errorResponse?.statusCode ?: -1)
+                            lastHttpErrorHeaders.set(errorResponse?.responseHeaders.orEmpty())
                         }
                     }
                 }
@@ -68,12 +83,24 @@ class WebViewHarness {
     }
 
     /** Load [url] and block until `onPageFinished`. */
-    fun load(url: String, timeoutSeconds: Long = 60) {
+    fun load(url: String, timeoutSeconds: Long = 60) =
+        navigate("load $url", timeoutSeconds) { webView.loadUrl(url) }
+
+    /** WebView history Back; blocks until `onPageFinished`. */
+    fun goBack(timeoutSeconds: Long = 60) =
+        navigate("goBack", timeoutSeconds) { webView.goBack() }
+
+    /** WebView history Forward; blocks until `onPageFinished`. */
+    fun goForward(timeoutSeconds: Long = 60) =
+        navigate("goForward", timeoutSeconds) { webView.goForward() }
+
+    private fun navigate(what: String, timeoutSeconds: Long, action: () -> Unit) {
         pageFinished = CountDownLatch(1)
         lastHttpError.set(0)
-        instrumentation.runOnMainSync { webView.loadUrl(url) }
+        lastHttpErrorHeaders.set(emptyMap())
+        instrumentation.runOnMainSync(action)
         if (!pageFinished.await(timeoutSeconds, TimeUnit.SECONDS)) {
-            fail("page load timed out: $url")
+            fail("page load timed out: $what")
         }
     }
 
