@@ -30,6 +30,12 @@ sealed class EnsResult {
          * navigated to as is — no address-bar path appended.
          */
         val redirect: Boolean = false,
+        /**
+         * Tezos Domains only: `false` when a single RPC provider gave this
+         * answer and no second one could confirm it. The browser loads it
+         * but says so.
+         */
+        val verified: Boolean = true,
     ) : EnsResult()
 
     /**

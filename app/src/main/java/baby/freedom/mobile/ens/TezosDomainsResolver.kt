@@ -27,8 +27,11 @@ import org.json.JSONTokener
  * same algorithm, same TTLs:
  *
  *  1. **Anchor.** Ask up to three RPC providers for chain id (must be
- *     mainnet) and head level; drop heads more than [MAX_HEAD_LAG_BLOCKS]
- *     from the median, then have each remaining provider name the hash
+ *     mainnet) and head level. A provider whose head block is more than
+ *     [STALE_HEAD_AGE_MS] old is *stuck*, not disagreeing: it sits out
+ *     the quorum (see step 4 for what it still contributes). Of the rest,
+ *     drop heads more than [MAX_HEAD_LAG_BLOCKS] from the median, then
+ *     have each remaining provider name the hash
  *     of one shared block [ANCHOR_DEPTH] below the lowest head. Every
  *     read below happens *at that block*, so honest providers answer
  *     from the same chain state and can be compared byte for byte.
@@ -44,7 +47,14 @@ import org.json.JSONTokener
  *     lone provider's is *unverified* and only short-cached. Providers
  *     that disagree without a strict majority (about the head, the
  *     anchor hash, or the record) are a [Outcome.Conflict] — refused,
- *     never settled by picking a side.
+ *     never settled by picking a side. A lone answer can still be
+ *     corroborated by a stuck provider: if the live one agrees on the
+ *     hash of a block below the stuck one's head, and the stuck one
+ *     reads the same record there, two operators agree and the answer
+ *     is verified. A stuck provider that reads a *different* record is
+ *     set aside (the record may have changed since it stalled) — but a
+ *     different block hash is a conflict: Tezos blocks that deep are
+ *     final, so one of the two is lying.
  *
  * Website records may be `ipfs://` / `ipns://` (served natively, the
  * `.tez` name stays the origin; a published base path is kept) or
@@ -82,7 +92,8 @@ class TezosDomainsResolver internal constructor(
 
     private data class Discovery(val recordsId: String, val expiryMapId: String, val recordType: Any?)
     private data class Timed<T>(val value: T, val expiresAt: Long)
-    private data class Head(val endpoint: String, val level: Long)
+    /** [timestamp]: the head block's time (epoch ms), `null` if it didn't say. */
+    private data class Head(val endpoint: String, val level: Long, val timestamp: Long? = null)
     private data class Anchor(val endpoint: String, val level: Long, val hash: String)
 
     private val resultCache = object : LinkedHashMap<String, Timed<Outcome.Answer>>() {
@@ -139,8 +150,24 @@ class TezosDomainsResolver internal constructor(
 
     private suspend fun resolveUncached(name: String): Outcome {
         val endpoints = rpcEndpoints.take(3)
-        val allHeads = settle(endpoints) { fetchHead(it) }
-        if (allHeads.isEmpty()) return Outcome.Failed("all Tezos RPC providers failed")
+        val reachable = settle(endpoints) { fetchHead(it) }
+        if (reachable.isEmpty()) return Outcome.Failed("all Tezos RPC providers failed")
+
+        // A provider whose head is hours old is a stuck node, not a
+        // provider that disagrees about the chain: comparing its head with
+        // a live one leaves no majority, and the median of two is the
+        // stale one — so it would push the *healthy* provider out and the
+        // name would be refused. Stuck is judged by the block's own
+        // timestamp, which a lying provider can't make an honest, live
+        // one fail. If every head looks stuck, it's this device's clock
+        // that's off: judge the heads by each other as before.
+        val cutoff = now() - STALE_HEAD_AGE_MS
+        val (stuck, current) = reachable.partition { it.timestamp != null && it.timestamp < cutoff }
+        val allHeads = current.ifEmpty { reachable }
+        val stale = if (current.isEmpty()) emptyList() else stuck
+        for (h in stale) {
+            Log.w(TAG, "setting aside ${h.endpoint}: head ${h.level} is ${(now() - h.timestamp!!) / 60_000} min old")
+        }
 
         // Median-referenced outlier rejection: tolerates one provider far
         // behind (which would drag the anchor to before the registry) or
@@ -192,17 +219,51 @@ class TezosDomainsResolver internal constructor(
             val dissenting = legs.filter { it !in winner }.joinToString(", ") { it.first }
             Log.w(TAG, "$dissenting disagreed with the majority for a .tez name")
         }
+        var agreed = winner.size
+        if (agreed < 2 && stale.isNotEmpty()) {
+            val live = winner[0].first
+            val corroborations = settle(stale) { corroborate(it, live, winner[0].second, name) }
+            corroborations.firstNotNullOfOrNull { it.conflict }?.let { return it }
+            agreed += corroborations.size
+        }
         val answer = Outcome.Answer(
             leg = winner[0].second,
-            verified = winner.size >= 2,
-            agreed = winner.size,
-            asked = legs.size,
+            verified = agreed >= 2,
+            agreed = agreed,
+            asked = legs.size + stale.size,
         )
         synchronized(resultCache) {
             resultCache[name] = Timed(answer, now() + cacheDuration(answer))
         }
         return answer
     }
+
+    /**
+     * Can [stuck] vouch for [leg], the answer the live provider [live]
+     * gave? A [Vouch] without [Vouch.conflict] = yes; with one = the two
+     * disagree about a final block; throws (a failed leg) when the stuck
+     * provider can't help: unreachable, or its record differs, which
+     * after it stalled is no evidence against the live answer.
+     */
+    private fun corroborate(stuck: Head, live: String, leg: Leg, name: String): Vouch {
+        val level = stuck.level - ANCHOR_DEPTH
+        val theirs = fetchAnchor(stuck.endpoint, level)
+        val ours = fetchAnchor(live, level)
+        if (theirs.hash != ours.hash) {
+            return Vouch(
+                Outcome.Conflict(
+                    "Tezos RPC providers returned conflicting anchor blocks",
+                    "block #$level ${ours.hash.take(10)}…: ${hostOf(live)}; " +
+                        "block #$level ${theirs.hash.take(10)}…: ${hostOf(stuck.endpoint)}",
+                ),
+            )
+        }
+        val old = resolveAtBlock(stuck.endpoint, theirs.hash, name)
+        if (old != leg) throw IllegalStateException("${stuck.endpoint}: record at stale head #$level differs")
+        return Vouch(null)
+    }
+
+    private class Vouch(val conflict: Outcome.Conflict?)
 
     /** `Promise.allSettled` + keep the fulfilled: one bad provider never fails the round. */
     private suspend fun <T, R> settle(items: List<T>, block: (T) -> R): List<R> = coroutineScope {
@@ -257,7 +318,7 @@ class TezosDomainsResolver internal constructor(
         val header = rpc(endpoint, "/chains/main/blocks/head/header") as? JSONObject
         val level = header?.opt("level").toString().toLongOrNull()
         if (level == null || level <= ANCHOR_DEPTH) throw IllegalStateException("invalid Tezos head level")
-        return Head(endpoint, level)
+        return Head(endpoint, level, parseTimestamp(header?.optString("timestamp")))
     }
 
     private fun fetchAnchor(endpoint: String, level: Long): Anchor {
@@ -381,6 +442,13 @@ class TezosDomainsResolver internal constructor(
         private const val REQUEST_TIMEOUT_MS = 8_000
         private const val ANCHOR_DEPTH = 8L
         internal const val MAX_HEAD_LAG_BLOCKS = 60L
+
+        /**
+         * A head block older than this is a stuck node (mainnet makes a
+         * block every few seconds). Generous, so a device clock a few
+         * minutes off doesn't turn live providers into stuck ones.
+         */
+        internal const val STALE_HEAD_AGE_MS = 15L * 60_000
         internal const val DEFAULT_TTL_MS = 5L * 60_000
         internal const val MAX_TTL_MS = 60L * 60_000
         internal const val NEGATIVE_TTL_MS = 30_000L
@@ -527,6 +595,7 @@ class TezosDomainsResolver internal constructor(
                             leg.uri
                         },
                         redirect = leg.redirect,
+                        verified = outcome.verified,
                     )
                 }
             }

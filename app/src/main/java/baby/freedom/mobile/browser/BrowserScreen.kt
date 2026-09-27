@@ -887,6 +887,20 @@ fun BrowserScreen(
                             // `.tez` name's http(s) website is not content
                             // the name's origin serves, so it isn't recorded.
                             if (!webRecord) KnownEnsNames.record(result.uri, name)
+                            // A `.tez` answer only one Tezos RPC provider
+                            // gave (the others down or stuck) still loads —
+                            // as on desktop — but not silently: one operator
+                            // chose this destination.
+                            fun noteUnverified() {
+                                if (result.verified) return
+                                scope.launch {
+                                    snackbarHostState.showSnackbar(
+                                        "$name: only one Tezos RPC provider answered, " +
+                                            "so this destination isn't cross-checked",
+                                        duration = SnackbarDuration.Long,
+                                    )
+                                }
+                            }
                             if (requiredProtocol != null && result.protocol != requiredProtocol) {
                                 // Retry with the generic ens:// form: the
                                 // same constrained URL would fail forever,
@@ -912,6 +926,7 @@ fun BrowserScreen(
                                 target.addressBarText =
                                     pendingAddressBarText(target.addressBarText, web, source)
                                 target.loadUrl(web)
+                                noteUnverified()
                             } else if (result.protocol == "bzz" ||
                                 result.protocol == "ipfs" ||
                                 result.protocol == "ipns"
@@ -928,6 +943,7 @@ fun BrowserScreen(
                                     // to the name across content updates.
                                     loadUri = "ens://$name$suffix",
                                 )
+                                noteUnverified()
                             } else {
                                 ensError(
                                     errorCode = "ens_unsupported_codec",

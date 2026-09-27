@@ -535,6 +535,51 @@ class GatewaysTest {
     }
 
     @Test
+    fun `a Tezos provider conflict is refused, not served from the last answer`() {
+        KnownEnsNames.record("ipfs://bafyold", "alice.tez")
+        val pins = EnsDocumentPins()
+        pins.pin("alice.tez", "ipfs://bafyold")
+        val conflict = { name: String ->
+            EnsResult.Error(name, "PROVIDER_CONFLICT", "providers disagree", retryable = false)
+        }
+        withLookup(conflict) {
+            assertEquals(Gateways.ENS_PROVIDER_CONFLICT, Gateways.reverifyEnsDocument("alice.tez", pins))
+            // Not an answer about the name: its last answers survive for
+            // when the providers agree again…
+            assertEquals("ipfs://bafyold", pins.lastAnswerFor("alice.tez"))
+            assertEquals("ipfs://bafyold", KnownEnsNames.uriFor("alice.tez"))
+            // …and it opens no failure window: the next document within
+            // it is refused too, rather than skipping the wait.
+            Thread.sleep(50)
+            assertEquals(Gateways.ENS_PROVIDER_CONFLICT, Gateways.reverifyEnsDocument("alice.tez", pins))
+        }
+        // An ENS name's non-retryable resolution error keeps its old
+        // fall-back behaviour.
+        KnownEnsNames.record("bzz://$ref64", "swarm.eth")
+        withLookup({ EnsResult.Error(it, "RESOLUTION_ERROR", "bad", retryable = false) }) {
+            assertNull(Gateways.reverifyEnsDocument("swarm.eth", EnsDocumentPins()))
+        }
+    }
+
+    @Test
+    fun `a tez name whose record moved to the web sends the document there`() {
+        KnownEnsNames.record("ipfs://bafyold", "alice.tez")
+        val pins = EnsDocumentPins()
+        pins.pin("alice.tez", "ipfs://bafyold")
+        withLookup({ EnsResult.Ok(it, "https", "https://alice.example/", "https://alice.example/") }) {
+            var web: EnsResult.Ok? = null
+            assertEquals(
+                Gateways.ENS_WEB_RECORD,
+                Gateways.reverifyEnsDocument("alice.tez", pins) { web = it },
+            )
+            assertEquals("https://alice.example/", web?.uri)
+            // The old IPFS root no longer describes the name.
+            assertNull(KnownEnsNames.uriFor("alice.tez"))
+            assertNull(pins.lastAnswerFor("alice.tez"))
+        }
+    }
+
+    @Test
     fun `a failed lookup with no earlier answer is refused`() {
         withLookup({ EnsResult.Error(it, "PROVIDER_ERROR", "down", retryable = true) }) {
             assertEquals("ens_lookup_failed", Gateways.reverifyEnsDocument("swarm.eth"))

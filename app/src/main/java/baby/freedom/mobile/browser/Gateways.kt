@@ -215,7 +215,10 @@ object Gateways {
                 // a failure opens the failure window, an answer closes it.
                 @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
                 val outcome = own.getCompleted()
-                if (outcome is EnsResult.Error) {
+                // A provider conflict is a refusal, not a failure: it
+                // mustn't let the next documents skip the wait and fall
+                // back on the last answer.
+                if (outcome is EnsResult.Error && !isProviderConflict(outcome)) {
                     lookupFailedAt[key] = System.currentTimeMillis()
                 } else {
                     lookupFailedAt.remove(key)
@@ -421,11 +424,37 @@ object Gateways {
      * answers, so neither the address bar's protocol badge / hash-to-name
      * mapping nor a later failed lookup describes content the name no
      * longer points at. Pages already on screen keep their own pins.
+     *
+     * A lookup that failed *non-retryably* — Tezos Domains providers
+     * that contradict each other (`PROVIDER_CONFLICT`) — is a refusal
+     * ([ENS_PROVIDER_CONFLICT]), never a fall-back to the last answer:
+     * the resolver declined to pick a side, and serving the old root
+     * would pick one for it. It isn't an answer about the name either,
+     * so the last answers are kept for when the providers agree again.
+     *
+     * A `.tez` name whose website record is now on the ordinary web
+     * (`http(s)`) returns [ENS_WEB_RECORD] after handing the answer to
+     * [onWebRecord]: the document can't be served on the name's origin,
+     * so the caller sends the frame there instead.
      */
+    /** [reverifyEnsDocument]'s refusal when the name's providers contradict each other. */
+    const val ENS_PROVIDER_CONFLICT = "ens_provider_conflict"
+
+    /** [reverifyEnsDocument]'s answer for a `.tez` name whose website is now on the web. */
+    const val ENS_WEB_RECORD = "ens_web_record"
+
+    /**
+     * Tezos Domains providers that disagree: a non-retryable refusal, not
+     * a transport failure (see `TezosDomainsResolver.toEnsResult`).
+     */
+    internal fun isProviderConflict(result: EnsResult.Error): Boolean =
+        !result.retryable && result.reason == "PROVIDER_CONFLICT"
+
     fun reverifyEnsDocument(
         name: String,
         pins: EnsDocumentPins? = null,
         page: EnsDocumentPins.Page? = null,
+        onWebRecord: (EnsResult.Ok) -> Unit = {},
     ): String? {
         val key = name.lowercase()
         val last = (pins?.lastAnswerFor(name) ?: KnownEnsNames.uriFor(name))
@@ -448,7 +477,12 @@ object Gateways {
         }
         return when (result) {
             is EnsResult.Ok -> {
-                if (VirtualOrigin.parseContentUrl(result.uri) == null) {
+                if (result.protocol == "http" || result.protocol == "https") {
+                    // Not content this origin serves: drop the old root,
+                    // as for any answer that no longer loads here.
+                    onWebRecord(result)
+                    gone(ENS_WEB_RECORD)
+                } else if (VirtualOrigin.parseContentUrl(result.uri) == null) {
                     gone("ens_unsupported_codec")
                 } else {
                     KnownEnsNames.record(result.uri, name)
@@ -458,6 +492,8 @@ object Gateways {
             }
             is EnsResult.NotFound -> gone("ens_not_found")
             is EnsResult.Unsupported -> gone("ens_unsupported_codec")
+            // Providers contradicting each other: a refusal, not an outage.
+            is EnsResult.Error if isProviderConflict(result) -> ENS_PROVIDER_CONFLICT
             // Failed, or still running at the deadline: not an answer.
             is EnsResult.Error, null -> {
                 if (last == null) {

@@ -67,7 +67,9 @@ import androidx.webkit.WebMessageCompat
 import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
 import baby.freedom.mobile.data.BrowsingRepository
+import baby.freedom.mobile.ens.EnsResult
 import baby.freedom.mobile.ens.NameSystem
+import baby.freedom.mobile.ens.TezosDomainsResolver
 import kotlinx.coroutines.flow.collectLatest
 import java.io.ByteArrayInputStream
 import java.io.FilterInputStream
@@ -119,7 +121,7 @@ internal fun nameResolutionErrorIn(headers: Map<String, String>?): String? =
 
 /** Status for the interceptor's refusal of an ENS document. */
 internal fun statusForNameResolutionError(code: String): Int =
-    if (code == "ens_lookup_failed") 502 else 404
+    if (code == "ens_lookup_failed" || code == Gateways.ENS_PROVIDER_CONFLICT) 502 else 404
 
 /**
  * "The main-frame document the interceptor last served for this tab was
@@ -193,6 +195,9 @@ internal fun nameResolutionRefusal(name: String, code: String): WebResourceRespo
         "ens_unsupported_codec" -> "Unsupported content format" to
             "This $label name now resolves to a content format Freedom Browser " +
             "cannot load yet on mobile."
+        Gateways.ENS_PROVIDER_CONFLICT -> "$label lookup refused" to
+            "The ${if (tezos) "Tezos" else "Ethereum"} RPC providers Freedom asks gave conflicting " +
+            "answers for this name, so it can't be resolved safely right now."
         else -> "$label lookup failed" to
             "Couldn't reach ${if (tezos) "a Tezos" else "an Ethereum"} RPC endpoint to resolve this name. " +
             "Check your connection and try again."
@@ -221,6 +226,41 @@ $code</div><a href="">Try again</a></div></body></html>"""
     return WebResourceResponse(
         "text/html", "utf-8", statusForNameResolutionError(code), "Name Resolution Failed",
         mapOf(NAME_RESOLUTION_ERROR_HEADER to code, "Cache-Control" to "no-store"),
+        ByteArrayInputStream(html.toByteArray(Charsets.UTF_8)),
+    )
+}
+
+/** Where [nameWebRecordNavigation] sends a request for [pathAndQuery] on the name's origin. */
+internal fun webRecordTarget(result: EnsResult.Ok, pathAndQuery: String): String =
+    if (result.redirect) {
+        result.uri
+    } else {
+        // The origin's bare `/` is no path: keep the record's own.
+        TezosDomainsResolver.appendWebsiteSuffix(result.uri, pathAndQuery.takeUnless { it == "/" }.orEmpty())
+    }
+
+/**
+ * The interceptor's answer to a `.tez` document whose website record is
+ * now on the ordinary web (`http(s)`): a page that sends the frame
+ * there, as a typed `.tez` navigation does. A content URL keeps the
+ * requested [pathAndQuery]; a redirect record is the whole destination.
+ * A zero-delay meta refresh replaces the name's history entry, so Back
+ * doesn't land on it again; no script, as for [nameResolutionRefusal].
+ * It carries [NAME_RESOLUTION_ERROR_HEADER] only to stay out of history.
+ */
+internal fun nameWebRecordNavigation(result: EnsResult.Ok, pathAndQuery: String): WebResourceResponse {
+    val target = webRecordTarget(result, pathAndQuery)
+    val safe = target.replace("&", "&amp;").replace("\"", "&quot;")
+        .replace("<", "&lt;").replace(">", "&gt;")
+    val html = """<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="referrer" content="no-referrer">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'">
+<meta http-equiv="refresh" content="0;url=$safe">
+<title>${result.name.replace("<", "&lt;")}</title></head>
+<body><a href="$safe">$safe</a></body></html>"""
+    return WebResourceResponse(
+        "text/html", "utf-8", 200, "OK",
+        mapOf(NAME_RESOLUTION_ERROR_HEADER to Gateways.ENS_WEB_RECORD, "Cache-Control" to "no-store"),
         ByteArrayInputStream(html.toByteArray(Charsets.UTF_8)),
     )
 }
@@ -3752,7 +3792,9 @@ private fun interceptVirtualRequestFor(
         isDocumentRequest(req.isForMainFrame, req.requestHeaders) &&
         (req.isForMainFrame || page?.uriFor(root.name) == null)
     ) {
-        Gateways.reverifyEnsDocument(root.name, ensPins, page)?.let { code ->
+        var web: EnsResult.Ok? = null
+        Gateways.reverifyEnsDocument(root.name, ensPins, page) { web = it }?.let { code ->
+            web?.let { return nameWebRecordNavigation(it, pathAndQuery) }
             return nameResolutionRefusal(root.name, code)
         }
     }

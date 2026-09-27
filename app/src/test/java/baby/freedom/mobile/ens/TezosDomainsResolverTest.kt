@@ -71,6 +71,10 @@ class TezosDomainsResolverTest {
         private val anchorHashes: Map<String, String> = emptyMap(),
         private val down: Set<String> = emptySet(),
         private val scripts: Map<String, JSONObject>,
+        /** Head block timestamps per provider; none by default. */
+        private val headTimes: Map<String, String> = emptyMap(),
+        /** Anchor hashes per provider and level, over [anchorHashes]. */
+        private val hashAt: (String, Long) -> String? = { _, _ -> null },
     ) : EnsHttp {
         val calls: MutableList<String> = Collections.synchronizedList(mutableListOf())
 
@@ -89,9 +93,14 @@ class TezosDomainsResolverTest {
             fun ok(json: String) = EnsHttp.Reply(200, json)
             return when {
                 url.endsWith("/chains/main/chain_id") -> ok("\"NetXdQprcVkpaWU\"")
-                url.endsWith("/blocks/head/header") -> ok("""{"level":${headLevels[origin] ?: 1000}}""")
-                Regex("/blocks/\\d+/hash$").containsMatchIn(url) ->
-                    ok("\"${anchorHashes[origin] ?: "BLockHashSharedByProviders"}\"")
+                url.endsWith("/blocks/head/header") -> ok(
+                    JSONObject().put("level", headLevels[origin] ?: 1000)
+                        .apply { headTimes[origin]?.let { put("timestamp", it) } }.toString(),
+                )
+                Regex("/blocks/\\d+/hash$").containsMatchIn(url) -> {
+                    val level = Regex("/blocks/(\\d+)/hash$").find(url)!!.groupValues[1].toLong()
+                    ok("\"${hashAt(origin, level) ?: anchorHashes[origin] ?: "BLockHashSharedByProviders"}\"")
+                }
                 url.contains("KT1F7JKNqwaoLzRsMio1MQC7zv3jG9dHcDdJ/script/normalized") -> ok(scripts["proxy"].toString())
                 url.contains("KT1GBZmSxmnKJXGMdMLbugPfLyUPmuLSMwKS/script/normalized") -> ok(scripts["registry"].toString())
                 url.contains("/big_maps/1264/") -> {
@@ -111,9 +120,11 @@ class TezosDomainsResolverTest {
         recordsByEndpoint: Map<String, String?>? = null,
         anchorHashes: Map<String, String> = emptyMap(),
         down: Set<String> = emptySet(),
+        headTimes: Map<String, String> = emptyMap(),
+        hashAt: (String, Long) -> String? = { _, _ -> null },
     ) = Rpc(
         record, expiry, headLevels, recordsByEndpoint, anchorHashes, down,
-        mapOf("proxy" to proxyScript, "registry" to registryScript),
+        mapOf("proxy" to proxyScript, "registry" to registryScript), headTimes, hashAt,
     )
 
     private fun answer(outcome: Outcome): Outcome.Answer {
@@ -311,6 +322,87 @@ class TezosDomainsResolverTest {
         assertTrue(outcome.detail.contains("chain head #1000: rpc-one.test"))
         assertTrue(outcome.detail.contains("chain head #400: rpc-two.test"))
         assertFalse(outcome.toString().contains("bafyEVIL"))
+    }
+
+    // The public-RPC failure mode behind the PR's refusals: one node stuck
+    // thousands of blocks (hours) behind, one live. A median of two is
+    // the stuck one, which used to push the live one out as the outlier.
+    private val clock = java.time.Instant.parse("2026-09-28T00:00:00Z").toEpochMilli()
+    private val liveTime = "2026-09-27T23:59:50Z"
+    private val stuckTime = "2026-09-27T17:37:37Z"
+
+    @Test
+    fun `a stuck provider sits out the quorum and corroborates the live answer`() = runBlocking {
+        val http = rpc(
+            record("web:content_url" to "https://hicetnunc.example/"),
+            headLevels = mapOf(one to 15_130_198, two to 15_133_180),
+            headTimes = mapOf(one to stuckTime, two to liveTime),
+        )
+        val a = answer(TezosDomainsResolver(listOf(one, two), http) { clock }.resolveOutcome("hicetnunc.tez"))
+        assertEquals("https://hicetnunc.example/", a.leg.uri)
+        // Read at a block below the stuck head, the stuck node agrees.
+        assertTrue(a.verified)
+        assertEquals(2, a.agreed)
+        assertTrue(http.calls.any { it.startsWith(one) && it.contains("/blocks/15130190/hash") })
+        assertTrue(http.calls.any { it.startsWith(two) && it.contains("/blocks/15130190/hash") })
+    }
+
+    @Test
+    fun `a stuck provider with an older record leaves the live answer unverified`() = runBlocking {
+        val http = rpc(
+            null,
+            headLevels = mapOf(one to 15_130_198, two to 15_133_180),
+            headTimes = mapOf(one to stuckTime, two to liveTime),
+            recordsByEndpoint = mapOf(
+                one to record("web:content_url" to "ipfs://bafyold"),
+                two to record("web:content_url" to "ipfs://bafynew"),
+            ),
+        )
+        val resolver = TezosDomainsResolver(listOf(one, two), http) { clock }
+        val a = answer(resolver.resolveOutcome("updated.tez"))
+        assertEquals("ipfs://bafynew", a.leg.uri)
+        assertFalse(a.verified)
+        assertEquals(1, a.agreed)
+        assertEquals(TezosDomainsResolver.UNVERIFIED_TTL_MS, resolver.cacheDuration(a))
+        assertFalse((resolver.resolve("updated.tez") as EnsResult.Ok).verified)
+    }
+
+    @Test
+    fun `a stuck provider on a different chain is a conflict`() = runBlocking {
+        val http = rpc(
+            record("web:content_url" to "ipfs://bafybeigdyrzt"),
+            headLevels = mapOf(one to 15_130_198, two to 15_133_180),
+            headTimes = mapOf(one to stuckTime, two to liveTime),
+            hashAt = { origin, level -> if (origin == one && level == 15_130_190L) "BForgedChain" else null },
+        )
+        val outcome = TezosDomainsResolver(listOf(one, two), http) { clock }.resolveOutcome("forked.tez")
+        assertTrue("$outcome", outcome is Outcome.Conflict)
+        assertEquals("Tezos RPC providers returned conflicting anchor blocks", (outcome as Outcome.Conflict).reason)
+    }
+
+    @Test
+    fun `a live provider can't be made to look stuck by one reporting a higher head`() = runBlocking {
+        // The honest provider's head is recent; the other claims a far
+        // higher one. Neither is stuck, so there is still no majority.
+        val http = rpc(
+            record("web:content_url" to "ipfs://bafybeigdyrzt"),
+            headLevels = mapOf(one to 15_133_180, two to 15_200_000),
+            headTimes = mapOf(one to liveTime, two to liveTime),
+        )
+        val outcome = TezosDomainsResolver(listOf(one, two), http) { clock }.resolveOutcome("liar.tez")
+        assertTrue("$outcome", outcome is Outcome.Conflict)
+        assertEquals("Tezos RPC providers disagree about the chain head", (outcome as Outcome.Conflict).reason)
+    }
+
+    @Test
+    fun `if every head looks stuck, the device clock is off and heads are judged by each other`() = runBlocking {
+        val http = rpc(
+            record("web:content_url" to "ipfs://bafybeigdyrzt"),
+            headTimes = mapOf(one to stuckTime, two to stuckTime),
+        )
+        val a = answer(TezosDomainsResolver(listOf(one, two), http) { clock }.resolveOutcome("clock.tez"))
+        assertTrue(a.verified)
+        assertEquals(2, a.agreed)
     }
 
     @Test
