@@ -1014,6 +1014,104 @@ private fun buildRefreshableWebView(
     }
 
     /**
+     * Could the document at [url] answer theme-colour asks itself? Only
+     * where its detector can run: http(s) (the only origins the listener
+     * takes), past the detector's start. Whether it actually does is
+     * only known once it is heard ([ThemeColorSlot.heard]); a document
+     * whose detector never runs (a CSP `sandbox` one: opaque origin, no
+     * channel) never answers, so [readThemeColor] falls back for it.
+     */
+    fun themeColorFromDetector(url: String?): Boolean {
+        if (!bottomUiSupported || !bottomChrome.installed || !bottomUiApplies(url)) return false
+        val u = url!!.lowercase()
+        return u.startsWith("https://") || u.startsWith("http://")
+    }
+
+    /** Ask the current document's detector for its theme colour (#92). */
+    fun postThemeColorRequest(targets: List<JavaScriptReplyProxy> = bottomUiChannels.targets) {
+        val token = bottomChrome.token ?: return
+        val request = themeColorRequest(token)
+        for (reply in targets) runCatching { reply.postMessage(request) }
+    }
+
+    // The page's theme colour behind the status bar (#92). Read at first
+    // paint, when the load finishes (a tag a script adds late) and on a
+    // same-document history change (an SPA route with its own colour),
+    // and whenever the detector sees a `<meta>` change (a route that sets
+    // its colour only after its data arrives, [THEME_COLOR_PREFIX]);
+    // each read is stamped with its document and gated on that document
+    // having painted, so the outgoing page can't answer for the incoming
+    // one (see [ThemeColorSlot]).
+    val themeColor = ThemeColorSlot()
+
+    /** [THEME_COLOR_JS] in the page, for the read stamped [token]. */
+    fun readThemeColorPageVisible(view: WebView, token: Int, onAnswer: ((Int?) -> Unit)?) {
+        view.evaluateJavascript(THEME_COLOR_JS) { result ->
+            if (themeColor.accept(token)) {
+                val argb = themeColorArgb(result)
+                state.themeColorArgb = argb
+                onAnswer?.invoke(argb)
+            }
+        }
+    }
+
+    /**
+     * Read the theme colour of the document on screen. A document whose
+     * detector can run is asked through its channel: the detector reads
+     * with functions it saved at document start, so the page can't see
+     * the read, and its answer is tagged with the document's token.
+     *
+     * The ask goes out even before the detector has been heard (its
+     * first report can land after `onPageFinished` on a fast load), and
+     * isn't given up on then: if the detector still hasn't spoken
+     * [DETECTOR_THEME_WAIT_MS] later, the document has none that runs
+     * and is read with [THEME_COLOR_JS] instead; if it has, the ask is
+     * repeated on its proved channel, since one sent before its start
+     * was dropped. Anything else is read with [THEME_COLOR_JS] straight
+     * away, which the page can see; [onAnswer] hears only such an answer.
+     */
+    fun readThemeColor(view: WebView?, onScreen: Boolean = false, onAnswer: ((Int?) -> Unit)? = null) {
+        view ?: return
+        val token = themeColor.beginRead(onScreen) ?: return
+        if (themeColorFromDetector(view.url)) {
+            // The detector's answer lands through the painted gate;
+            // `onScreen` vouches for this document the same way.
+            if (onScreen) themeColor.painted()
+            postThemeColorRequest()
+            if (!themeColor.heard) {
+                view.postDelayed({
+                    if (themeColor.fallbackDue(token)) readThemeColorPageVisible(view, token, onAnswer)
+                    else if (themeColor.accept(token)) postThemeColorRequest()
+                }, DETECTOR_THEME_WAIT_MS)
+            }
+            return
+        }
+        readThemeColorPageVisible(view, token, onAnswer)
+    }
+
+    // A popup's blank document is the page's own while [BrowserState.blankIsPage]
+    // holds, and its opener can write a whole page into it
+    // (`window.open('')` + `document.write`) — which gets no navigation
+    // callback at all, not even `onPageCommitVisible` (verified on the
+    // AVD), and no detector either (#92). So while that document is the
+    // one on screen, the frames it draws ask for a read, at most one per
+    // [BLANK_PAGE_READ_MS], backing off while the answer stays the same
+    // so an animating page isn't re-read for as long as it is open
+    // ([BlankPageReads]).
+    val blankPageReads = BlankPageReads()
+
+    fun onBlankPageDrawn(view: WebView) {
+        if (!state.blankIsPage || state.url != ABOUT_BLANK) return
+        val delayMs = blankPageReads.drawn() ?: return
+        view.postDelayed({
+            blankPageReads.fired()
+            if (state.blankIsPage && state.url == ABOUT_BLANK) {
+                readThemeColor(view, onScreen = true, onAnswer = blankPageReads::answered)
+            }
+        }, delayMs)
+    }
+
+    /**
      * Start the detector in the document on screen, once. If its ready
      * hasn't arrived yet, the ready starts it instead (see the listener).
      */
@@ -1549,6 +1647,31 @@ private fun buildRefreshableWebView(
         // scroll range, or one already at the top) isn't going to reach
         // the end: the gesture is the page's, as before #138.
         onTopOverscroll = { reveal.onTopOverscroll() }
+        // A popup's written blank page tells us of itself only by drawing (#92).
+        onDrawn = { onBlankPageDrawn(this) }
+        // A `theme-color`'s `media` can ask about anything the page is
+        // rendered under: the colour scheme (a light/dark pair), but just
+        // as well the orientation, the width or the resolution (#92). The
+        // Activity handles those configuration changes itself, so no
+        // navigation follows a live light/dark switch, a rotation, a
+        // split-screen resize or a fold: read again once a frame drawn
+        // under the new environment is on screen — asked any earlier,
+        // `matchMedia` can still answer for the old one. Every tab's
+        // WebView stays attached to the one frame (a background tab is
+        // only hidden), so a background tab hears the change and
+        // re-reads too. A burst (a rotation is a configuration change
+        // and a resize) reads once, for its last change: each change asks
+        // for a frame, and only the latest ask's frame reads. (Not a
+        // "pending" flag — a hidden tab's frame may never come, and a
+        // stuck flag would silence it for good.)
+        var mediaChange = 0L
+        onMediaEnvironmentChanged = {
+            postVisualStateCallback(++mediaChange, object : WebView.VisualStateCallback() {
+                override fun onComplete(requestId: Long) {
+                    if (requestId == mediaChange) readThemeColor(this@apply)
+                }
+            })
+        }
         setOnTouchListener { _, event ->
             // The reveal owns this gesture (#65): the page follows the
             // finger by translation only, and Chromium sees none of it.
@@ -1613,12 +1736,29 @@ private fun buildRefreshableWebView(
                     // document's own late ready (see [BottomUiChannels]);
                     // otherwise it waits for its document's first paint.
                     if (!isMainFrame) return@WebMessageListener
-                    postBottomUiProbe(bottomUiChannels.onReady(replyProxy, bottomChrome.installed))
+                    val starts = bottomUiChannels.onReady(replyProxy, bottomChrome.installed)
+                    postBottomUiProbe(starts)
+                    // The theme-colour ask sent at first paint had no
+                    // channel to go to yet: ask again with the start (#92).
+                    if (starts.isNotEmpty() && themeColor.beginRead() != null) postThemeColorRequest(starts)
+                    return@WebMessageListener
+                }
+                // The current document's theme colour (#92): the answer
+                // to [readThemeColor]'s ask, or sent unasked when a
+                // `<meta>` changed (an SPA route that sets its colour
+                // only after its data arrives, well after
+                // `doUpdateVisitedHistory`'s read). Only for the current
+                // token, and only once that document has painted.
+                val theme = parseThemeColorReport(message.data, isMainFrame, bottomChrome.token)
+                if (theme != null) {
+                    themeColor.detectorHeard()
+                    if (themeColor.beginRead() != null) state.themeColorArgb = theme.argb
                     return@WebMessageListener
                 }
                 val report = parseBottomUiMessage(message.data, isMainFrame, bottomChrome.token)
                     ?: return@WebMessageListener
                 bottomUiChannels.onReport(replyProxy)
+                themeColor.detectorHeard()
                 val verdict = bottomChrome.accept(report, SystemClock.uptimeMillis())
                 if (verdict.changed) applyBottomChrome()
                 val confirmIn = verdict.confirmInMs
@@ -1817,6 +1957,11 @@ private fun buildRefreshableWebView(
                 // is none of this one's business, not even by way of a
                 // probe of its that is still in flight (#56).
                 rootPanProbe.startDocument()
+                // …and with its own theme colour once it has painted; the
+                // outgoing page keeps its tint until then, as it keeps
+                // the screen (#92).
+                themeColor.startDocument()
+                blankPageReads.reset()
                 // …and at full height again: a reveal belongs to the
                 // document it was pushed on (#65).
                 cancelReveal()
@@ -1877,6 +2022,9 @@ private fun buildRefreshableWebView(
                     }
                     state.title = ""
                     state.progress = -1
+                    // No page colour behind Home (#92). A popup's own
+                    // blank page keeps the old one until it draws.
+                    if (!state.blankIsPage) state.themeColorArgb = null
                     lastLoadedDisplayUrl = null
                     visitGate.startNavigation()
                     // Home is a navigation like any other: a page that
@@ -1948,6 +2096,12 @@ private fun buildRefreshableWebView(
                     // The bottom-nav detector starts here, once (#66).
                     installBottomUiDetector()
                 }
+                // …and its `<head>` is in: the theme colour is readable
+                // (#92) — a popup's blank page's too, which is a page.
+                if (url != ABOUT_BLANK || state.blankIsPage) {
+                    themeColor.painted()
+                    readThemeColor(view)
+                }
                 if (url == ABOUT_BLANK) return
                 visitGate.commit()
                 // A finish that beat this paint left its visit parked;
@@ -2004,6 +2158,14 @@ private fun buildRefreshableWebView(
                     state.progress = -1
                     // …and no site to zoom as (#88), for the same reason.
                     state.zoomSite = null
+                    // …and no page colour behind the status bar (#92) —
+                    // unless the blank document is a popup's page, whose
+                    // colour is its own.
+                    if (state.blankIsPage) {
+                        readThemeColor(view, onScreen = true)
+                    } else {
+                        state.themeColorArgb = null
+                    }
                     // …and drop the park for the same reason as the
                     // `onPageStarted` branch: home has the screen now, so
                     // a page that finished but had not painted by the
@@ -2068,6 +2230,12 @@ private fun buildRefreshableWebView(
                     lastLoadedDisplayUrl = display
                     state.title = sanitizeTitle(view?.title, url)
                     state.addressBarText = uiDisplay
+                    // A theme colour a script set after first paint (#92).
+                    // A current finish is the document on screen even if
+                    // it never reported a paint. Through the detector even
+                    // if it hasn't reported yet (a fast load finishes
+                    // first); one that never does gets the fallback read.
+                    readThemeColor(view, onScreen = true)
                 }
                 state.canGoBack = view?.canGoBack() == true
                 state.canGoForward = view?.canGoForward() == true
@@ -2138,6 +2306,12 @@ private fun buildRefreshableWebView(
                 // load's document for the IPFS phase line (#94, R3-F2).
                 state.historyUpdated(isHome = url == ABOUT_BLANK)
                 if (view == null || !bottomUiApplies(url)) return
+                // An SPA route can bring its own theme colour (#92). Only
+                // once the document has painted: before that, this is the
+                // cross-document commit, and first paint reads it anyway.
+                // A colour the route sets later (after a fetch) comes in
+                // through the detector's `<meta>` ping.
+                readThemeColor(view)
                 requestBottomUiProbe()
             }
 
@@ -2740,6 +2914,31 @@ internal class PageWebView(context: Context) : WebView(context) {
     /** Chromium overscrolled past the top edge (see [overscrollPastTop]). */
     var onTopOverscroll: () -> Unit = {}
 
+    /**
+     * Something a media query can ask about changed while this WebView
+     * was attached: the configuration (light/dark, orientation, screen
+     * size, density, …) or the view's own size. The manifest keeps all
+     * of those in `configChanges`, so no Activity restart (and no
+     * reload) follows one, and this is the only word of it the page's
+     * owner gets. May fire more than once for one change.
+     */
+    var onMediaEnvironmentChanged: () -> Unit = {}
+    private var lastConfiguration = android.content.res.Configuration(context.resources.configuration)
+
+    override fun onConfigurationChanged(newConfig: android.content.res.Configuration?) {
+        super.onConfigurationChanged(newConfig)
+        newConfig ?: return
+        val changed = lastConfiguration.diff(newConfig)
+        lastConfiguration = android.content.res.Configuration(newConfig)
+        if (changed != 0) onMediaEnvironmentChanged()
+    }
+
+    override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
+        super.onSizeChanged(w, h, oldw, oldh)
+        // The first layout is no change: the first paint reads anyway.
+        if (oldw != 0 && oldh != 0) onMediaEnvironmentChanged()
+    }
+
     // The vertical delta of the overScrollBy call in progress (0 outside
     // one): onOverScrolled only says a clamp happened, not which edge.
     private var overScrollDeltaY = 0
@@ -2751,6 +2950,14 @@ internal class PageWebView(context: Context) : WebView(context) {
 
     /** Called at the start of each draw of this view, before Chromium's frame is recorded. */
     var onBeforeDraw: (() -> Unit)? = null
+
+    /** Called after each draw of this view: Chromium has a new frame for it. */
+    var onDrawn: () -> Unit = {}
+
+    override fun onDraw(canvas: Canvas) {
+        super.onDraw(canvas)
+        onDrawn()
+    }
 
     override fun computeScroll() {
         super.computeScroll()
