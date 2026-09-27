@@ -1199,7 +1199,7 @@ fun BrowserScreen(
                     // seeded from that tab's query.
                     key(state.id) {
                         FindBar(
-                            find = state.find,
+                            tab = state,
                             onQueryChange = { tabs.find?.invoke(state, FindAction.Search(it)) },
                             onStep = { tabs.find?.invoke(state, FindAction.Step(it)) },
                             onClose = closeFind,

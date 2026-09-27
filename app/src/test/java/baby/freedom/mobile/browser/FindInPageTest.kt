@@ -108,4 +108,51 @@ class FindInPageTest {
         assertFalse(b.find.open)
         assertEquals("", b.find.query)
     }
+
+    @Test
+    fun `search key runs a prefilled query once, then steps - even before the first report`() {
+        val find = FindInPageState()
+        find.show()
+        find.query = "needle" // prefilled from last session
+        assertFalse(find.searching)
+        assertEquals(FindSubmit.Search, findSubmitAction(find.searching, "needle", find.result))
+
+        find.startSearch("needle")
+        // Sent, Chromium hasn't reported: result is null but the search is
+        // live, so Enter must step rather than restart at match 1 (R2-F1).
+        assertTrue(find.searching)
+        assertNull(find.result)
+        assertEquals(FindSubmit.Step, findSubmitAction(find.searching, "needle", find.result))
+
+        find.onResult(FindResult(1, 4, true))
+        assertEquals(FindSubmit.Step, findSubmitAction(find.searching, "needle", find.result))
+        // A finished search with nothing found has nowhere to go.
+        assertEquals(FindSubmit.None, findSubmitAction(true, "needle", FindResult(0, 0, true)))
+        assertEquals(FindSubmit.None, findSubmitAction(false, "", null))
+
+        find.close()
+        assertFalse(find.searching)
+        assertEquals(FindSubmit.Search, findSubmitAction(find.searching, "needle", find.result))
+    }
+
+    @Test
+    fun `clearing the field ends the live search`() {
+        val find = FindInPageState()
+        find.show()
+        find.startSearch("needle")
+        find.startSearch("")
+        assertFalse(find.searching)
+    }
+
+    @Test
+    fun `count is announced in words and only once counting is final`() {
+        assertEquals("", findCountSpoken(null))
+        assertEquals("No matches", findCountSpoken(FindResult(0, 0, true)))
+        assertEquals("5 matches", findCountSpoken(FindResult(0, 5, false)))
+        assertEquals("Match 3 of 12", findCountSpoken(FindResult(3, 12, true)))
+
+        assertFalse(findCountLiveRegion(null))
+        assertFalse("interim reports stay quiet", findCountLiveRegion(FindResult(0, 40, false)))
+        assertTrue(findCountLiveRegion(FindResult(3, 120, true)))
+    }
 }

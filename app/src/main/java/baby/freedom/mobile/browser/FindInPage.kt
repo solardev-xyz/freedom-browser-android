@@ -6,6 +6,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
@@ -23,6 +24,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -39,10 +41,14 @@ import androidx.compose.ui.input.key.isShiftPressed
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextRange
+import androidx.compose.ui.text.rememberTextMeasurer
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.TextFieldValue
@@ -80,9 +86,56 @@ internal fun findResultFrom(
 internal fun findCountLabel(result: FindResult?): String =
     if (result == null) "" else "${result.active}/${result.matches}"
 
+/**
+ * What TalkBack hears for the count: words rather than "3 slash 12", and
+ * nothing at all while no result is in (see [findCountLiveRegion]).
+ */
+internal fun findCountSpoken(result: FindResult?): String = when {
+    result == null -> ""
+    result.matches == 0 -> "No matches"
+    result.active == 0 -> "${result.matches} matches"
+    else -> "Match ${result.active} of ${result.matches}"
+}
+
+/**
+ * The count is a polite live region only once Chromium has finished
+ * counting: a long page streams interim reports several times a second,
+ * and announcing each one buries the answer under a string of partial
+ * counts. Steps arrive as final reports, so each one is still announced.
+ */
+internal fun findCountLiveRegion(result: FindResult?): Boolean = result?.final == true
+
 /** Previous / next are only worth pressing when there is somewhere to go. */
 internal fun findNavigationEnabled(result: FindResult?): Boolean =
     result != null && result.matches > 0
+
+/** What the keyboard's Search key / Enter does in the find field. */
+internal enum class FindSubmit {
+    /** Run the field's text — a prefilled query not yet searched. */
+    Search,
+
+    /** Advance to the next / previous match of the running search. */
+    Step,
+
+    /** Nothing to do: empty field, or a finished search with no matches. */
+    None,
+}
+
+/**
+ * Decide what Search / Enter does. The live search is identified by
+ * [FindInPageState.searching], not by a missing result: a result is also
+ * null in the moment between sending a search and Chromium's first
+ * report, and re-running `findAllAsync` there would restart at match 1
+ * instead of advancing. `findNext` issued while that first report is
+ * still pending is queued behind the search, so it steps as intended.
+ */
+internal fun findSubmitAction(searching: Boolean, fieldText: String, result: FindResult?): FindSubmit =
+    when {
+        fieldText.isEmpty() -> FindSubmit.None
+        !searching -> FindSubmit.Search
+        result == null || result.matches > 0 -> FindSubmit.Step
+        else -> FindSubmit.None
+    }
 
 /**
  * Per-tab find-in-page session, the way Chrome models it: every tab owns
@@ -105,8 +158,19 @@ class FindInPageState {
      */
     var query by mutableStateOf("")
 
-    /** Last result for the live search, or null when none is running. */
+    /**
+     * Last result for the live search — null when none is running, and
+     * also while one has just been sent and Chromium hasn't reported yet.
+     */
     var result: FindResult? by mutableStateOf(null)
+        private set
+
+    /**
+     * A search for a non-empty [query] has been sent to the WebView in
+     * this session (whether or not its first report is in yet). False on
+     * a freshly opened bar whose prefilled query hasn't been run.
+     */
+    var searching by mutableStateOf(false)
         private set
 
     fun show() {
@@ -116,6 +180,7 @@ class FindInPageState {
     /** Close the bar; the caller clears the WebView's highlights. */
     fun close() {
         open = false
+        searching = false
         result = null
     }
 
@@ -126,6 +191,7 @@ class FindInPageState {
      */
     fun startSearch(text: String) {
         query = text
+        searching = text.isNotEmpty()
         result = null
     }
 
@@ -136,7 +202,7 @@ class FindInPageState {
      * and it must not paint a count for text nobody is searching.
      */
     fun onResult(result: FindResult) {
-        if (!open || query.isEmpty()) return
+        if (!open || !searching) return
         this.result = result
     }
 
@@ -172,18 +238,24 @@ sealed interface FindAction {
  *
  * Left to right: the query field, the "3/12" count, previous, next and
  * close. Find runs as you type; the keyboard's Search key (or Enter on a
- * hardware keyboard) steps to the next match, Shift+Enter to the previous.
+ * hardware keyboard) steps to the next match, Shift+Enter to the previous,
+ * and Escape closes the bar.
+ *
+ * While the bar stands in for the capsule it also carries the capsule's
+ * load-progress trace ([CapsuleLoadTrace]), so a load or gateway probe
+ * started from the page with the bar up is still visible.
  */
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 internal fun FindBar(
-    find: FindInPageState,
+    tab: BrowserState,
     onQueryChange: (String) -> Unit,
     onStep: (forward: Boolean) -> Unit,
     onClose: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val colors = MaterialTheme.colorScheme
+    val find = tab.find
     val result = find.result
     val focusRequester = remember { FocusRequester() }
     // Prefilled with last time's query, cursor at the end — a user who
@@ -196,14 +268,26 @@ internal fun FindBar(
     // Focus (and so the keyboard) on a fresh open only — coming back to
     // a tab whose search already has results shows them without throwing
     // a keyboard over the page.
-    LaunchedEffect(Unit) { if (find.result == null) focusRequester.requestFocus() }
+    LaunchedEffect(Unit) { if (!find.searching) focusRequester.requestFocus() }
     // Search / Enter: step to the next match, or — for a prefilled query
     // that hasn't been searched in this session yet — run it.
     fun submit(forward: Boolean) {
-        when {
-            find.result == null -> if (fieldValue.text.isNotEmpty()) onQueryChange(fieldValue.text)
-            findNavigationEnabled(find.result) -> onStep(forward)
+        when (findSubmitAction(find.searching, fieldValue.text, find.result)) {
+            FindSubmit.Search -> onQueryChange(fieldValue.text)
+            FindSubmit.Step -> onStep(forward)
+            FindSubmit.None -> Unit
         }
+    }
+    // Derived so a ticking load only recomposes at the idle/busy
+    // boundary; the percentage itself is read in the trace's draw phase.
+    val loading by remember(tab) { derivedStateOf { isCapsuleLoading(tab) } }
+    // Room for "000/000" in tabular figures, so stepping 9/10 → 10/10
+    // (or a count converging past a digit) doesn't nudge the field.
+    val countStyle = MaterialTheme.typography.labelLarge.copy(fontFeatureSettings = "tnum")
+    val measurer = rememberTextMeasurer()
+    val density = LocalDensity.current
+    val countMinWidth = remember(countStyle, density) {
+        with(density) { measurer.measure("000/000", countStyle).size.width.toDp() }
     }
 
     Box(
@@ -246,12 +330,20 @@ internal fun FindBar(
                     .focusRequester(focusRequester)
                     .onPreviewKeyEvent { event ->
                         // Hardware keyboard: Enter / Shift+Enter walk the
-                        // matches, as in every desktop browser.
-                        if (event.key != Key.Enter && event.key != Key.NumPadEnter) {
-                            return@onPreviewKeyEvent false
+                        // matches and Escape closes, as in every desktop
+                        // browser. Both halves of the key are consumed so
+                        // the down doesn't reach the IME or the WebView.
+                        when (event.key) {
+                            Key.Enter, Key.NumPadEnter -> {
+                                if (event.type == KeyEventType.KeyUp) submit(!event.isShiftPressed)
+                                true
+                            }
+                            Key.Escape -> {
+                                if (event.type == KeyEventType.KeyUp) onClose()
+                                true
+                            }
+                            else -> false
                         }
-                        if (event.type == KeyEventType.KeyUp) submit(!event.isShiftPressed)
-                        true
                     },
                 decorationBox = { inner ->
                     Box(contentAlignment = Alignment.CenterStart) {
@@ -266,19 +358,34 @@ internal fun FindBar(
                     }
                 },
             )
+            val spoken = findCountSpoken(result)
+            val live = findCountLiveRegion(result)
             Text(
                 text = findCountLabel(result),
-                style = MaterialTheme.typography.labelLarge,
+                style = countStyle,
+                textAlign = TextAlign.End,
                 color = if (result != null && result.matches == 0) colors.error
                 else colors.onSurfaceVariant,
                 modifier = Modifier
                     .padding(horizontal = 8.dp)
-                    .semantics { liveRegion = LiveRegionMode.Polite },
+                    .widthIn(min = countMinWidth)
+                    .semantics {
+                        contentDescription = spoken
+                        if (live) liveRegion = LiveRegionMode.Polite
+                    },
             )
             val canStep = findNavigationEnabled(result)
             FindBarButton(Icons.Filled.KeyboardArrowUp, "Previous match", canStep) { onStep(false) }
             FindBarButton(Icons.Filled.KeyboardArrowDown, "Next match", canStep) { onStep(true) }
             FindBarButton(Icons.Filled.Close, "Close find", true, onClose)
+        }
+        if (loading) {
+            CapsuleLoadTrace(
+                state = tab,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(CapsuleRestingHeight),
+            )
         }
     }
 }
