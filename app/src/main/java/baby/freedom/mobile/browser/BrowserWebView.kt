@@ -1262,9 +1262,6 @@ private fun buildRefreshableWebView(
                 // entry ends a page's probe exactly like any other
                 // document does (see [cancelProbeSupersededBy]).
                 cancelProbeSupersededBy(url)
-                // …and belonging to the navigation it was last handed,
-                // for the gateway requests it makes from now on (#94).
-                state.commitLoad()
                 // …and IPFS or not by what actually committed — a link,
                 // back/forward, or a redirect can land somewhere the
                 // submit that started this load didn't name (#94).
@@ -1508,6 +1505,9 @@ private fun buildRefreshableWebView(
             // before first paint; the detector isn't installed yet then,
             // and this doesn't install it (see [requestBottomUiProbe]).
             override fun doUpdateVisitedHistory(view: WebView?, url: String?, isReload: Boolean) {
+                // A same-document step keeps the page on screen as the
+                // load's document for the IPFS phase line (#94, R3-F2).
+                state.historyUpdated(isHome = url == ABOUT_BLANK)
                 if (view == null || !bottomUiApplies(url)) return
                 requestBottomUiProbe(view)
             }
@@ -1549,23 +1549,32 @@ private fun buildRefreshableWebView(
                 request: WebResourceRequest?,
             ): WebResourceResponse? {
                 val mainFrame = request?.isForMainFrame == true
-                if (mainFrame) {
-                    noteMainFrameContentLoad(view, state, request!!.url.toString())
-                }
                 // Tagged with the load it belongs to, and open until
                 // Chromium closes the body, so the IPFS phase line can
                 // tell while a superseded load is still fetching (#94,
                 // see [GatewayWork]). A main-frame request is the
                 // navigation the WebView was handed; a subresource is
-                // the committed document's.
-                val work = state.gatewayWork.start(
-                    if (mainFrame) state.webViewGeneration else state.documentGeneration,
-                )
+                // the document's whose main-frame answer went out last
+                // (see [BrowserState.documentGeneration]).
+                val generation = if (mainFrame) {
+                    state.mainFrameRequested().also {
+                        noteMainFrameContentLoad(view, state, it, request!!.url.toString())
+                    }
+                } else {
+                    state.documentGeneration
+                }
+                val work = state.gatewayWork.start(generation)
                 val response = try {
                     interceptVirtualRequest(request)
                 } catch (t: Throwable) {
                     state.gatewayWork.finish(work)
                     throw t
+                }
+                // Before Chromium has the answer, so none of the new
+                // document's own requests can be filed under the load
+                // before it (R3-F1).
+                if (mainFrame) {
+                    state.mainFrameAnswered(generation, mainFrameAnswerReplacesDocument(response))
                 }
                 return trackedUntilClosed(response) { state.gatewayWork.finish(work) }
             }
@@ -2536,17 +2545,21 @@ internal fun sanitizeTitle(rawTitle: String?, actualUrl: String?): String {
  * [interceptVirtualRequest] is about to do, which then hits the registry)
  * so the phase line shows for the fetch itself, not only after commit.
  *
- * The request belongs to the navigation the WebView was last handed
+ * The request belongs to the navigation [generation] the WebView was last handed
  * ([BrowserState.webViewGeneration]), which is not necessarily the tab's
  * current one: a submit still in its probe phase has already started a
  * new load while the WebView is still fetching the old. The write is
  * posted to the main thread and applied only if that navigation is still
  * the tab's current load (see [mainFrameNoteApplies]).
  */
-private fun noteMainFrameContentLoad(view: WebView?, state: BrowserState, url: String) {
+private fun noteMainFrameContentLoad(
+    view: WebView?,
+    state: BrowserState,
+    generation: Int,
+    url: String,
+) {
     val root = VirtualOrigin.parseHostOfUrl(url) ?: return
     if (root is ContentRoot.Ens) Gateways.resolveEnsRoot(root.name)
-    val generation = state.webViewGeneration
     view?.post {
         if (mainFrameNoteApplies(generation, state.loadGeneration)) {
             state.ipfsLoad = ipfsLoadFor(url, state.ipfsLoad)
@@ -2561,6 +2574,35 @@ private fun noteMainFrameContentLoad(view: WebView?, state: BrowserState, url: S
  */
 internal fun mainFrameNoteApplies(requestGeneration: Int, currentGeneration: Int): Boolean =
     requestGeneration == currentGeneration
+
+/**
+ * Whether Chromium turns the main-frame answer [response] into a new
+ * document. A 204 / 205, an attachment, or an opaque binary body ends
+ * the navigation instead (no download listener is installed), leaving
+ * the page on screen. `null` — Chromium fetches it itself — is assumed
+ * to (#94, R3-F2).
+ */
+internal fun mainFrameAnswerReplacesDocument(response: WebResourceResponse?): Boolean =
+    response == null || mainFrameAnswerReplacesDocument(
+        response.statusCode,
+        response.responseHeaders,
+        response.mimeType,
+    )
+
+/** [mainFrameAnswerReplacesDocument] on the answer's parts. */
+internal fun mainFrameAnswerReplacesDocument(
+    status: Int,
+    headers: Map<String, String>?,
+    mimeType: String?,
+): Boolean {
+    if (status == 204 || status == 205) return false
+    val disposition = headers
+        ?.entries
+        ?.firstOrNull { it.key.equals("Content-Disposition", ignoreCase = true) }
+        ?.value
+    if (disposition != null && disposition.trim().lowercase().startsWith("attachment")) return false
+    return mimeType?.lowercase() != "application/octet-stream"
+}
 
 /**
  * [response], with [onDone] run once its body is closed — or at once

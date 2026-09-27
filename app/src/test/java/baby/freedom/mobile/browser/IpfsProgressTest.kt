@@ -330,7 +330,7 @@ class IpfsProgressTest {
     fun `the WebView's generation trails a submit until the hand-off (R2-F2, R2-F4)`() {
         val tab = BrowserState(id = 1)
         tab.beginLoad(inWebView = true) // a link, back/forward, a pull-to-refresh
-        tab.commitLoad()
+        tab.mainFrameAnswered(tab.mainFrameRequested(), replacesDocument = true)
         assertEquals(1, tab.webViewGeneration)
         assertEquals(1, tab.documentGeneration)
         tab.beginLoad() // a submit, still probing
@@ -340,8 +340,107 @@ class IpfsProgressTest {
         tab.handLoadToWebView()
         assertTrue(mainFrameNoteApplies(tab.webViewGeneration, tab.loadGeneration))
         assertEquals(1, tab.documentGeneration)
-        tab.commitLoad()
+    }
+
+    @Test
+    fun `a load's subresources are its own once its main frame is answered (R3-F1)`() {
+        val tab = BrowserState(id = 1)
+        tab.beginLoad(inWebView = true)
+        tab.mainFrameAnswered(tab.mainFrameRequested(), replacesDocument = true)
+        val oldAsset = tab.gatewayWork.start(tab.documentGeneration)
+        tab.beginLoad()
+        tab.handLoadToWebView()
+        val generation = tab.mainFrameRequested()
+        val mainFrame = tab.gatewayWork.start(generation)
+        // Still fetching the main frame: the page on screen is superseded.
+        assertEquals(1, tab.documentGeneration)
+        assertTrue(tab.gatewayWork.activeBefore(tab.loadGeneration))
+        // The answer goes out; no onPageStarted has run yet, and the
+        // new document's CSS/JS start right away.
+        tab.mainFrameAnswered(generation, replacesDocument = true)
+        tab.gatewayWork.finish(oldAsset) // cancelled by the commit
+        val css = tab.gatewayWork.start(tab.documentGeneration)
         assertEquals(2, tab.documentGeneration)
+        assertFalse(tab.gatewayWork.activeBefore(tab.loadGeneration))
+        tab.gatewayWork.finish(mainFrame)
+        tab.gatewayWork.finish(css)
+        // A late answer of an older navigation moves nothing back.
+        tab.mainFrameAnswered(1, replacesDocument = true)
+        assertEquals(2, tab.documentGeneration)
+    }
+
+    @Test
+    fun `a navigation that keeps the page adopts its open requests (R3-F2)`() {
+        val tab = BrowserState(id = 1)
+        tab.beginLoad(inWebView = true)
+        tab.mainFrameAnswered(tab.mainFrameRequested(), replacesDocument = true)
+        val image = tab.gatewayWork.start(tab.documentGeneration)
+        // A download link: its answer ends the navigation.
+        tab.beginLoad(inWebView = true)
+        tab.mainFrameAnswered(tab.mainFrameRequested(), replacesDocument = false)
+        assertEquals(2, tab.documentGeneration)
+        assertFalse(tab.gatewayWork.activeBefore(tab.loadGeneration))
+        tab.gatewayWork.finish(image)
+
+        // Back onto a hash entry: a history update with no main frame.
+        val script = tab.gatewayWork.start(tab.documentGeneration)
+        tab.beginLoad()
+        tab.handLoadToWebView()
+        assertTrue(tab.gatewayWork.activeBefore(tab.loadGeneration))
+        tab.historyUpdated(isHome = false)
+        assertEquals(3, tab.documentGeneration)
+        assertFalse(tab.gatewayWork.activeBefore(tab.loadGeneration))
+        tab.gatewayWork.finish(script)
+    }
+
+    @Test
+    fun `a cross-document commit's history update adopts nothing (R3-F2)`() {
+        val tab = BrowserState(id = 1)
+        tab.beginLoad(inWebView = true)
+        tab.mainFrameAnswered(tab.mainFrameRequested(), replacesDocument = true)
+        val oldAsset = tab.gatewayWork.start(tab.documentGeneration)
+        tab.beginLoad(inWebView = true)
+        tab.mainFrameAnswered(tab.mainFrameRequested(), replacesDocument = true)
+        tab.historyUpdated(isHome = false)
+        assertTrue(tab.gatewayWork.activeBefore(tab.loadGeneration))
+        tab.gatewayWork.finish(oldAsset)
+        // Home loads without a request but replaces the page all the same.
+        val asset = tab.gatewayWork.start(tab.documentGeneration)
+        tab.beginLoad()
+        tab.handLoadToWebView()
+        tab.historyUpdated(isHome = true)
+        assertEquals(2, tab.documentGeneration)
+        assertTrue(tab.gatewayWork.activeBefore(tab.loadGeneration))
+        tab.gatewayWork.finish(asset)
+    }
+
+    @Test
+    fun `gateway work retags only the kept document's loads`() {
+        val work = GatewayWork { 0L }
+        val older = work.start(1)
+        val kept = work.start(2)
+        work.retag(from = 2, to = 3)
+        assertTrue(work.activeBefore(3))
+        work.finish(older)
+        assertFalse(work.activeBefore(3))
+        work.finish(kept)
+    }
+
+    @Test
+    fun `only a renderable main-frame answer replaces the page (R3-F2)`() {
+        assertTrue(mainFrameAnswerReplacesDocument(null))
+        assertTrue(mainFrameAnswerReplacesDocument(200, mapOf("Content-Type" to "text/html"), "text/html"))
+        assertTrue(mainFrameAnswerReplacesDocument(200, mapOf("content-disposition" to "inline"), "image/png"))
+        assertFalse(mainFrameAnswerReplacesDocument(204, null, "text/plain"))
+        assertFalse(mainFrameAnswerReplacesDocument(205, null, null))
+        assertFalse(
+            mainFrameAnswerReplacesDocument(
+                200,
+                mapOf("content-disposition" to "Attachment; filename=\"a.zip\""),
+                "application/zip",
+            ),
+        )
+        assertFalse(mainFrameAnswerReplacesDocument(200, emptyMap(), "application/octet-stream"))
     }
 
     @Test

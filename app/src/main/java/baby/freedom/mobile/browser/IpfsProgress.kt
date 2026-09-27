@@ -348,6 +348,20 @@ internal class GatewayWork(
         synchronized(lock) { open.remove(token) }
     }
 
+    /**
+     * Move every open request of loads [from] up to (not including) [to]
+     * to load [to] — the document they were fetching for turned out to
+     * be [to]'s as well (see [BrowserState.mainFrameAnswered]).
+     */
+    fun retag(from: Int, to: Int) {
+        synchronized(lock) {
+            for (item in open.entries) {
+                val entry = item.value
+                if (entry.generation in from until to) item.setValue(Entry(to, entry.startedAt))
+            }
+        }
+    }
+
     /** Some load older than [generation] still has a request open. */
     fun activeBefore(generation: Int): Boolean = synchronized(lock) {
         val now = clockMs()
