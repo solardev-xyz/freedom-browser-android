@@ -115,12 +115,16 @@ object SearchEngines {
      * The name the address bar's search row (#171) gives the engine
      * behind [template]: a built-in's label ("DuckDuckGo"), or for a
      * custom template its host without a leading `www.` — "Custom" says
-     * nothing about where the query is about to go.
+     * nothing about where the query is about to go. A template whose host
+     * itself contains the terms (`https://{searchTerms}.example.org/`) has
+     * no fixed host to name, so it is "Custom" too.
      */
     fun nameForTemplate(template: String): String {
         BUILT_IN.firstOrNull { it.template == template }?.let { return it.label }
-        val host = WhatwgHost.parse(template.replace(PLACEHOLDER, "test"))?.hostname
-        return host?.removePrefix("www.")?.takeIf { it.isNotEmpty() } ?: "Custom"
+        fun hostWith(probe: String) = WhatwgHost.parse(template.replace(PLACEHOLDER, probe))?.hostname
+        val host = hostWith("a")
+        if (host == null || host != hostWith("b")) return "Custom"
+        return host.removePrefix("www.").takeIf { it.isNotEmpty() } ?: "Custom"
     }
 
     /** Results URL for [query] (already trimmed, non-empty) on [template]. */

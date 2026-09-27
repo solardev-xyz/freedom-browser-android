@@ -56,14 +56,21 @@ internal sealed interface AddressAction {
     data class Go(val input: String, val kind: AddressInput.Kind) : AddressAction {
         override val submitText: String get() = input
 
-        /** The row's second line: what going there means. */
+        /**
+         * The row's second line: what going there means. Each dweb label
+         * is claimed only by input that really takes that path; anything
+         * else (e.g. an `ens://` address [EnsInput] rejects, which submit
+         * loads as a plain scheme URL) says the neutral "Go to address".
+         */
         val subtitle: String
             get() = when {
                 kind == AddressInput.Kind.Url -> "Go to address"
                 EnsInput.parse(input) != null || EnsInput.parseConstrained(input) != null ->
                     "Open ENS name"
                 input.startsWith("bzz://", ignoreCase = true) -> "Open on Swarm"
-                else -> "Open on IPFS"
+                input.startsWith("ipfs://", ignoreCase = true) ||
+                    input.startsWith("ipns://", ignoreCase = true) -> "Open on IPFS"
+                else -> "Go to address"
             }
     }
 

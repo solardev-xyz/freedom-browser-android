@@ -85,6 +85,14 @@ class AddressInputTest {
         assertEquals("Open ENS name", (addressActions("bzz://name.eth", ddg)[0] as AddressAction.Go).subtitle)
         assertEquals("Open on Swarm", (addressActions("bzz://" + "ab".repeat(32), ddg)[0] as AddressAction.Go).subtitle)
         assertEquals("Open on IPFS", (addressActions("ipfs://bafy", ddg)[0] as AddressAction.Go).subtitle)
+        assertEquals("Open on IPFS", (addressActions("IPNS://name", ddg)[0] as AddressAction.Go).subtitle)
+    }
+
+    @Test
+    fun `an ens address EnsInput rejects is not labelled IPFS`() {
+        val go = addressActions("ens://example.com", ddg)[0] as AddressAction.Go
+        assertEquals(Kind.Dweb, go.kind)
+        assertEquals("Go to address", go.subtitle)
     }
 
     @Test
@@ -110,6 +118,8 @@ class AddressInputTest {
         }
         assertEquals("search.example.org", SearchEngines.nameForTemplate(custom))
         assertEquals("example.net", SearchEngines.nameForTemplate("https://www.example.net/s/{searchTerms}"))
+        // Terms in the host: no fixed host, never the probe substitution.
+        assertEquals("Custom", SearchEngines.nameForTemplate("https://{searchTerms}.example.org/"))
         assertEquals(
             "search.example.org",
             (addressActions("x y", custom).single() as AddressAction.Search).engine,
