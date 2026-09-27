@@ -435,14 +435,16 @@ fun BrowserScreen(
     val state = tabs.active
     val isBookmarked by repo.isBookmarked(state.url).collectAsState(initial = false)
 
-    // Gate the hardware back button on "is the user somewhere other
-    // than the home overlay?" — exactly mirroring the condition that
-    // renders [HomeScreen] below. Keying off `canGoBack` alone isn't
-    // safe because that flag is only refreshed in the WebView client's
-    // async callbacks: a user who taps an `ens://` bookmark and hits
-    // back while the resolver is still running (WebView hasn't even
-    // been told to navigate yet) would fall through the disabled
-    // handler and minimize the app.
+    // Gate the hardware back button on [backHandledFor]: enabled
+    // whenever Back has somewhere to go — off the home overlay, or on it
+    // with WebView history (Home from the menu loads `about:blank` on top
+    // of the last page). Keying off `canGoBack` alone isn't safe because
+    // that flag is only refreshed in the WebView client's async
+    // callbacks: a user who taps an `ens://` bookmark and hits back while
+    // the resolver is still running (WebView hasn't even been told to
+    // navigate yet) would fall through the disabled handler and minimize
+    // the app. Keying off "not home" alone isn't either: on home with
+    // history the bar's Back would go back while the gesture minimized.
     //
     // When fired we prefer the WebView's own history stack; if there's
     // nothing to pop (mid-probe, or a direct typed URL that failed
@@ -450,7 +452,7 @@ fun BrowserScreen(
     // work and fall back to a clean home state.
     //
     // The bar's Back button runs this same [goBack] and is enabled off
-    // the same [backActionFor] rule, so the two never disagree.
+    // the same [backHandledFor] rule, so the two never disagree.
     val isHomeTab = state.isHome
     val goBack: () -> Unit = {
         when (backActionFor(state.canGoBack, state.isHome)) {
@@ -462,7 +464,7 @@ fun BrowserScreen(
             BackAction.None -> Unit
         }
     }
-    BackHandler(enabled = !isHomeTab, onBack = goBack)
+    BackHandler(enabled = backHandledFor(state.canGoBack, state.isHome), onBack = goBack)
 
     // Run the peer-warmup probe against a bzz:// / ipfs:// / ipns://
     // URL, then either load it or fall back to the in-app error page.

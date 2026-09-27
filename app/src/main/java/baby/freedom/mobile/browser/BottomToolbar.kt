@@ -606,9 +606,20 @@ internal fun navControlsFor(
     canGoForward: Boolean,
     isHome: Boolean,
 ): NavControls = NavControls(
-    backEnabled = backActionFor(canGoBack, isHome) != BackAction.None,
+    backEnabled = backHandledFor(canGoBack, isHome),
     showsForward = canGoForward,
 )
+
+/**
+ * Whether a Back press does anything at all — gates both the bar's Back
+ * button and the system `BackHandler`. On the home overlay *with* WebView
+ * history (Home picked from the menu pushes `about:blank` on top of the
+ * last page) this is true: Back returns to that page, and the system
+ * gesture must too rather than minimizing the app. Only home with nothing
+ * to pop lets the gesture fall through to the system.
+ */
+internal fun backHandledFor(canGoBack: Boolean, isHome: Boolean): Boolean =
+    backActionFor(canGoBack, isHome) != BackAction.None
 
 /** What a Back press does — the on-bar button and the system gesture alike. */
 internal enum class BackAction {

@@ -153,14 +153,21 @@ class CapsuleCompactStateTest {
     }
 
     @Test
-    fun `bar Back is enabled exactly when the system back handler would act`() {
-        for (canGoBack in listOf(false, true)) for (isHome in listOf(false, true)) {
-            val barEnabled = navControlsFor(canGoBack, false, isHome).backEnabled
-            assertEquals(
-                "canGoBack=$canGoBack isHome=$isHome",
-                backActionFor(canGoBack, isHome) != BackAction.None,
-                barEnabled,
-            )
+    fun `bar Back and the system back handler share one explicit truth table`() {
+        // (canGoBack, isHome) -> does Back act? Written out, not derived,
+        // so a gate that drifts from backActionFor fails here.
+        val expected = mapOf(
+            (false to false) to true, // off home, pre-WebView: go home
+            (true to false) to true, // ordinary page history
+            (true to true) to true, // Home from the menu atop a page: go back to it
+            (false to true) to false, // fresh home: let the system minimize
+        )
+        for ((key, handled) in expected) {
+            val (canGoBack, isHome) = key
+            val label = "canGoBack=$canGoBack isHome=$isHome"
+            assertEquals(label, handled, backHandledFor(canGoBack, isHome))
+            assertEquals(label, handled, navControlsFor(canGoBack, false, isHome).backEnabled)
+            assertEquals(label, handled, backActionFor(canGoBack, isHome) != BackAction.None)
         }
     }
 
