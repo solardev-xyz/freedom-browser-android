@@ -528,7 +528,8 @@ class EnsResolver internal constructor(
                 val mapped = if (contract == null) mapRevert(normalized, call.revertData) else null
                 if (mapped != null) {
                     preferredRpcIndex = idx
-                    return Verdict(mapped, verified = false)
+                    val trust = EnsTrust(verified = false, agreed = listOf(hostOf(rpc)))
+                    return Verdict(mapped.withTrust(trust), verified = false)
                 }
                 lastError = EnsResult.Error(
                     name = normalized,
@@ -579,8 +580,12 @@ class EnsResolver internal constructor(
         }
     }
 
-    private fun EnsResult.withTrust(trust: EnsTrust): EnsResult =
-        if (this is EnsResult.Ok) copy(trust = trust) else this
+    private fun EnsResult.withTrust(trust: EnsTrust): EnsResult = when (this) {
+        is EnsResult.Ok -> copy(trust = trust)
+        is EnsResult.NotFound -> copy(trust = trust)
+        is EnsResult.Unsupported -> copy(trust = trust)
+        is EnsResult.Conflict, is EnsResult.Error -> this
+    }
 
     // ---- ABI / name encoding ----
 
@@ -714,7 +719,7 @@ class EnsResolver internal constructor(
             ?: return EnsResult.Error(name, "RESOLUTION_ERROR", "malformed UR outer response")
 
         if (outer.isEmpty()) {
-            return EnsResult.NotFound(name, "EMPTY_CONTENTHASH")
+            return EnsResult.NotFound(name, "EMPTY_CONTENTHASH", EnsTrust.UNCHECKED)
         }
 
         // Inner: the bytes returned by contenthash(bytes32) — themselves
@@ -734,7 +739,7 @@ class EnsResolver internal constructor(
                 name, "UNSUPPORTED_CONTENTHASH_FORMAT", "inner decode failed"
             )
         if (inner.isEmpty()) {
-            return EnsResult.NotFound(name, "EMPTY_CONTENTHASH")
+            return EnsResult.NotFound(name, "EMPTY_CONTENTHASH", EnsTrust.UNCHECKED)
         }
 
         return parseContentHash(name, inner)
@@ -742,6 +747,7 @@ class EnsResolver internal constructor(
                 name = name,
                 codec = inner.take(8).toByteArray().toHex(),
                 rawContentHash = inner.toHex(),
+                trust = EnsTrust.UNCHECKED,
             )
     }
 
@@ -757,6 +763,7 @@ class EnsResolver internal constructor(
                 protocol = "bzz",
                 uri = "bzz://$hash",
                 decoded = hash,
+                trust = EnsTrust.UNCHECKED,
             )
         }
 
@@ -777,6 +784,7 @@ class EnsResolver internal constructor(
                 protocol = "ipfs",
                 uri = "ipfs://$cid",
                 decoded = cid,
+                trust = EnsTrust.UNCHECKED,
             )
         }
 
@@ -792,6 +800,7 @@ class EnsResolver internal constructor(
                 protocol = "ipns",
                 uri = "ipns://$cid",
                 decoded = cid,
+                trust = EnsTrust.UNCHECKED,
             )
         }
 
@@ -826,7 +835,7 @@ class EnsResolver internal constructor(
         val selector = if (lower.length >= 10) lower.substring(0, 10) else return null
         return when (selector) {
             // ResolverNotFound(bytes), ResolverNotContract(bytes,address)
-            "0x77209fe8", "0x1e9535f2" -> EnsResult.NotFound(name, "NO_RESOLVER")
+            "0x77209fe8", "0x1e9535f2" -> EnsResult.NotFound(name, "NO_RESOLVER", EnsTrust.UNCHECKED)
             else -> null
         }
     }

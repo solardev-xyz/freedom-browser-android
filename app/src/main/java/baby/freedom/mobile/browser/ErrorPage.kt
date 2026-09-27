@@ -72,14 +72,17 @@ object ErrorPage {
      * page — otherwise the raw asset path would leak into the address
      * bar and the user would lose the ability to edit-and-resubmit.
      */
-    fun displayUrlFor(url: String?): String? {
+    fun displayUrlFor(url: String?): String? = paramFor(url, "url")
+
+    /** The [name] query param of an error-page URL; `null` if absent or not one. */
+    fun paramFor(url: String?, name: String): String? {
         if (!isErrorPage(url)) return null
         val query = url!!.substringAfter('?', "")
         if (query.isEmpty()) return null
         for (part in query.split('&')) {
             val eq = part.indexOf('=')
             if (eq < 0) continue
-            if (part.substring(0, eq) != "url") continue
+            if (part.substring(0, eq) != name) continue
             return runCatching {
                 // The `Charset` overloads of [URLDecoder] / [URLEncoder]
                 // are API 33; `minSdk` is 30 and the library isn't

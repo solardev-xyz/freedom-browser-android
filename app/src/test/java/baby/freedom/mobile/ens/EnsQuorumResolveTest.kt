@@ -261,7 +261,11 @@ class EnsQuorumResolveTest {
         val gone = Server(head = head, hashOf = ::canonicalHash, record = { _, _ -> noResolver })
         val servers = serversOf(gone, gone, gone)
 
-        assertEquals(EnsResult.NotFound("quorum.eth", "NO_RESOLVER"), resolve(servers))
+        val result = resolve(servers)
+        require(result is EnsResult.NotFound) { "got $result" }
+        assertEquals("NO_RESOLVER", result.reason)
+        assertTrue(result.trust.verified)
+        assertEquals(anchor, result.trust.block)
     }
 
     @Test
@@ -273,6 +277,21 @@ class EnsQuorumResolveTest {
 
         require(result is EnsResult.Ok) { "got $result" }
         assertTrue(result.trust.verified)
+    }
+
+    @Test
+    fun `a lone server's no-resolver is an unverified not-found`() {
+        val denier = Server(head = head, hashOf = ::canonicalHash, record = { _, _ -> noResolver })
+        val down = Server(head = head, hashOf = ::canonicalHash, record = { _, _ -> null })
+        val servers = serversOf(denier, down, down)
+
+        val result = resolve(servers)
+
+        require(result is EnsResult.NotFound) { "got $result" }
+        assertEquals("NO_RESOLVER", result.reason)
+        assertFalse(result.trust.verified)
+        assertEquals(1, result.trust.agreed.size)
+        assertEquals(anchor, result.trust.block)
     }
 
     @Test

@@ -183,9 +183,10 @@ internal fun nameResolutionRefusal(name: String, code: String): WebResourceRespo
             "This ENS name now resolves to a content format Freedom Browser " +
             "cannot load yet on mobile."
         "ens_unverified" -> "Not cross-checked" to
-            "Only one Ethereum RPC server answered for this name, and its answer " +
-            "differs from the one this page was loaded with. Freedom couldn't " +
-            "check it against another server, so it wasn't loaded."
+            "Only one Ethereum RPC server answered for this name, so Freedom " +
+            "couldn't check its answer against another server. It isn't an " +
+            "answer this tab has already loaded, so nothing was loaded. Try " +
+            "again, or enter the name in the address bar to review the answer."
         "ens_conflict" -> "RPC servers disagreed" to
             "The Ethereum RPC servers Freedom asked gave different answers for " +
             "this name. At least one of them is wrong, so nothing was loaded."
@@ -2372,7 +2373,12 @@ private fun buildRefreshableWebView(
                 // (#96): never a load, only a message for the submit
                 // flow, which checks it is this tab's ([EnsGate]).
                 if (EnsGate.continueToken(target) != null) {
-                    if (request.isForMainFrame) onSubmitUrl(state, target)
+                    if (request.isForMainFrame) {
+                        // A stale warning (Back, tab restore) re-runs its
+                        // navigation rather than doing nothing.
+                        EnsGate.continueDestination(target, state.ensGate, view?.url)
+                            ?.let { onSubmitUrl(state, it) }
+                    }
                     return true
                 }
                 // A link to another app (#85): never a page load. Main

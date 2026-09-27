@@ -21,10 +21,10 @@ sealed class EnsResult {
         val decoded: String,
         /**
          * Whether independent RPC servers agreed on this answer (#96).
-         * Defaults to verified so hand-built fixtures and test seams read
-         * as the ordinary case; [EnsResolver] always sets it.
+         * No default: a result must say how it was checked, so a path
+         * that forgets to label one can't pass it off as verified.
          */
-        val trust: EnsTrust = EnsTrust.ASSUMED,
+        val trust: EnsTrust,
     ) : EnsResult()
 
     /**
@@ -34,6 +34,11 @@ sealed class EnsResult {
     data class NotFound(
         override val name: String,
         val reason: String,
+        /**
+         * Whether servers agreed there's nothing here (#96) — one
+         * server's "no resolver" is a claim like any other answer.
+         */
+        val trust: EnsTrust,
         val error: String? = null,
     ) : EnsResult()
 
@@ -46,6 +51,8 @@ sealed class EnsResult {
         override val name: String,
         val codec: String,
         val rawContentHash: String,
+        /** As for [Ok.trust] (#96). */
+        val trust: EnsTrust,
     ) : EnsResult()
 
     /**
@@ -83,7 +90,8 @@ sealed class EnsResult {
 }
 
 /**
- * How far an [EnsResult.Ok] was cross-checked (#96).
+ * How far an answer ([EnsResult.Ok], [EnsResult.NotFound],
+ * [EnsResult.Unsupported]) was cross-checked (#96).
  *
  * [verified]: at least [EnsQuorum.M] independent RPC servers returned
  * byte-identical answers at a block whose hash a majority of them agreed
@@ -101,7 +109,18 @@ data class EnsTrust(
     val block: Long? = null,
 ) {
     companion object {
-        /** The default for results built outside the resolver. */
+        /**
+         * Verified with no provenance: for results built outside the
+         * resolver (fixtures, test seams). Never a default — each use
+         * says so explicitly.
+         */
         val ASSUMED = EnsTrust(verified = true)
+
+        /**
+         * Not (yet) cross-checked: what the resolver's decoding starts
+         * from before the vote labels the answer, so an unlabelled one
+         * fails closed.
+         */
+        val UNCHECKED = EnsTrust(verified = false)
     }
 }

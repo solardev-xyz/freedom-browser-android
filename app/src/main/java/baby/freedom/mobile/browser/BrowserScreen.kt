@@ -934,10 +934,18 @@ fun BrowserScreen(
                                 )
                             }
                         }
+                        // Nothing to load either way, but say when it's
+                        // only one server's word for it (#96).
                         is EnsResult.NotFound ->
-                            ensError("ens_not_found", detail = result.reason)
+                            ensError(
+                                "ens_not_found",
+                                detail = EnsGate.withTrustNote(result.reason, result.trust),
+                            )
                         is EnsResult.Unsupported ->
-                            ensError("ens_unsupported_codec", detail = "codec ${result.codec}")
+                            ensError(
+                                "ens_unsupported_codec",
+                                detail = EnsGate.withTrustNote("codec ${result.codec}", result.trust),
+                            )
                         is EnsResult.Error ->
                             ensError("ens_lookup_failed", detail = result.reason)
                         // RPC servers disagreed (#96): nothing to load.

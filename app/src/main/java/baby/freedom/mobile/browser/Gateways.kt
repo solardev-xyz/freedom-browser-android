@@ -2,6 +2,7 @@ package baby.freedom.mobile.browser
 
 import baby.freedom.mobile.ens.EnsResolver
 import baby.freedom.mobile.ens.EnsResult
+import baby.freedom.mobile.ens.EnsTrust
 import baby.freedom.swarm.SwarmNode
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
@@ -302,7 +303,9 @@ object Gateways {
      * isn't what this tab or the session already had
      * (`ens_unverified`) — the same answer again is served, since it was
      * cross-checked before or the user let it through. Neither forgets
-     * the name's earlier answer.
+     * the name's earlier answer. That includes one server alone saying
+     * the name has no (loadable) content: with an earlier answer it's
+     * `ens_unverified`, not `ens_not_found`, and the answer is kept.
      *
      * A main-frame document passes its incoming [page]
      * ([EnsDocumentPins.beginNavigation]); the answer is pinned there, and
@@ -342,10 +345,17 @@ object Gateways {
             pins?.forgetLastAnswer(name)
             return code
         }
+        // "Nothing loadable here" on one server's word only (#96) — the
+        // others failed or never answered. With an earlier answer to
+        // lose, that's a claim to question, not to act on: one server
+        // mustn't turn a real record into "no resolver". Refused, the
+        // name's earlier answer kept.
+        fun noContent(code: String, trust: EnsTrust): String =
+            if (!trust.verified && last != null) "ens_unverified" else gone(code)
         return when (result) {
             is EnsResult.Ok -> {
                 if (VirtualOrigin.parseContentUrl(result.uri) == null) {
-                    gone("ens_unsupported_codec")
+                    noContent("ens_unsupported_codec", result.trust)
                 } else if (!result.trust.verified &&
                     result.uri != pins?.lastAnswerFor(name) &&
                     result.uri != KnownEnsNames.uriFor(name)
@@ -360,8 +370,8 @@ object Gateways {
                     null
                 }
             }
-            is EnsResult.NotFound -> gone("ens_not_found")
-            is EnsResult.Unsupported -> gone("ens_unsupported_codec")
+            is EnsResult.NotFound -> noContent("ens_not_found", result.trust)
+            is EnsResult.Unsupported -> noContent("ens_unsupported_codec", result.trust)
             // Servers disagree about the name right now (#96). Not the
             // name's answer to forget, but nothing to serve on either.
             is EnsResult.Conflict -> "ens_conflict"

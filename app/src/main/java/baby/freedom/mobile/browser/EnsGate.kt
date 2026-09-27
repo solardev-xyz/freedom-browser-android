@@ -1,6 +1,7 @@
 package baby.freedom.mobile.browser
 
 import baby.freedom.mobile.ens.EnsResult
+import baby.freedom.mobile.ens.EnsTrust
 import java.security.SecureRandom
 
 /**
@@ -50,6 +51,35 @@ internal class EnsGate(
             if (result.trust.agreed.isNotEmpty()) add("From: ${result.trust.agreed.joinToString(", ")}")
             add("Block: " + (result.trust.block?.let { "#$it" } ?: "latest"))
         }.joinToString("\n")
+
+        /**
+         * [detail] for a "nothing to load" answer, plus a note when only
+         * one server gave it — the page's verdict is then that server's
+         * word, not the servers' agreement (#96).
+         */
+        fun withTrustNote(detail: String, trust: EnsTrust): String {
+            if (trust.verified) return detail
+            val from = trust.agreed.takeIf { it.isNotEmpty() }?.joinToString(", ") ?: "one RPC server"
+            val block = trust.block?.let { "#$it" } ?: "latest"
+            return "$detail\nNot cross-checked: only $from answered (block $block)"
+        }
+
+        /**
+         * Where a tap on a warning's Continue goes: [continueUrl] itself
+         * when its token is still [gate]'s. A warning the tab no longer
+         * holds a gate for — reached again via Back, or restored with the
+         * tab — would otherwise do nothing; if the page tapped on
+         * ([pageUrl]) is our not-cross-checked warning, its navigation is
+         * run again instead, unapproved, so the user gets a fresh warning
+         * (or the page, if the servers now agree). `null`: drop it — a
+         * continue URL from anywhere else is a page trying its luck.
+         */
+        fun continueDestination(continueUrl: String, gate: EnsGate?, pageUrl: String?): String? {
+            val token = continueToken(continueUrl) ?: return null
+            if (gate != null && gate.token == token) return continueUrl
+            if (ErrorPage.paramFor(pageUrl, "error") != "ens_unverified") return null
+            return ErrorPage.paramFor(pageUrl, "retry")?.takeIf { continueToken(it) == null }
+        }
 
         /** Each distinct answer and the servers that gave it. */
         fun conflictDetail(result: EnsResult.Conflict): String = buildList {
