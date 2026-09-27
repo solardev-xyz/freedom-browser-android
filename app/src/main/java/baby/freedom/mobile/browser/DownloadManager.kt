@@ -634,8 +634,12 @@ internal fun downloadFileState(isTrashed: Boolean): DownloadFileState =
 
 /**
  * Where [uri]'s MediaStore item stands. Blocking. The query opts in to
- * trashed items — the default excludes them, which would make a file the
- * user can still restore look deleted.
+ * trashed items and reads IS_TRASHED, so a file the user can still restore
+ * is told apart from a present one and never mistaken for deleted. Whether
+ * the default query hides trashed rows varies by OS version and query
+ * shape: on API 36 a single-item URI query returns them anyway (only a
+ * collection query hides them), so opt in explicitly rather than rely on
+ * either behaviour.
  */
 internal fun queryDownloadFileState(resolver: ContentResolver, uri: Uri): DownloadFileState =
     runCatching {

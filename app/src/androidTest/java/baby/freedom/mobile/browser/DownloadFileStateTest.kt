@@ -14,8 +14,11 @@ import org.junit.runner.RunWith
 
 /**
  * [queryDownloadFileState] against the real MediaStore: a trashed item
- * must read as TRASHED (restorable), not GONE — the default query hides
- * trashed rows, which made open() drop a restorable download's URI.
+ * must read as TRASHED (restorable) — neither GONE, which would make
+ * open() drop a restorable download's URI, nor PRESENT, which would launch
+ * a viewer on a file in the trash. (Whether a default query hides trashed
+ * rows depends on OS version and query shape; on API 36 a single-item URI
+ * query returns them regardless, so these cases don't rely on that.)
  */
 @RunWith(AndroidJUnit4::class)
 class DownloadFileStateTest {
