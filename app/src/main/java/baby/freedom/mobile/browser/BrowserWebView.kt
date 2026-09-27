@@ -3413,9 +3413,11 @@ internal fun mainFrameNoteApplies(requestGeneration: Int, currentGeneration: Int
 /**
  * Whether Chromium turns the main-frame answer [response] into a new
  * document. A 204 / 205, an attachment, or an opaque binary body ends
- * the navigation instead (no download listener is installed), leaving
- * the page on screen. `null` — Chromium fetches it itself — is assumed
- * to (#94, R3-F2).
+ * the navigation instead, leaving the page on screen: a 204 / 205 is
+ * simply dropped, and an attachment or binary body is handed to the
+ * download listener (#79), which saves it through DownloadManager
+ * rather than rendering it. `null` — Chromium fetches it itself — is
+ * assumed to (#94, R3-F2).
  */
 internal fun mainFrameAnswerReplacesDocument(response: WebResourceResponse?): Boolean =
     response == null || mainFrameAnswerReplacesDocument(
