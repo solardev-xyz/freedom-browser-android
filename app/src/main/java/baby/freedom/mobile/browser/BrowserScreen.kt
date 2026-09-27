@@ -85,6 +85,7 @@ import baby.freedom.swarm.IpfsInfo
 import baby.freedom.swarm.IpfsStatus
 import baby.freedom.swarm.NodeInfo
 import baby.freedom.swarm.NodeStatus
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.job
@@ -434,6 +435,9 @@ fun BrowserScreen(
     // text lives here until it is submitted.
     var addressQuery by remember { mutableStateOf("") }
     val snackbarHostState = remember { SnackbarHostState() }
+    // Any full-screen panel over the browser (they're all opaque).
+    val overlayShown = showSettings || showNode || showTabSwitcher ||
+        showHistory || showBookmarks || showDownloads
     val downloads = remember(context) { DownloadManager.get(context) }
 
     // Download notices (#79): the start, and the end with an action —
@@ -441,36 +445,48 @@ fun BrowserScreen(
     // Collected for the screen's lifetime, so a download that finishes
     // while the Downloads list is up still reports.
     LaunchedEffect(downloads) {
+        // Each download's own "Downloading…" notice, so its end can
+        // supersede exactly that one — cancelling a pending
+        // `showSnackbar` dismisses it if showing, or drops it from the
+        // queue — and never another download's "Downloaded · Open".
+        val startNotices = mutableMapOf<Long, Job>()
         downloads.events.collect { event ->
             when (event) {
-                is DownloadEvent.Started -> launch {
-                    snackbarHostState.showSnackbar(
-                        "Downloading ${event.fileName}",
-                        duration = SnackbarDuration.Short,
-                    )
+                is DownloadEvent.Started -> {
+                    val notice = launch {
+                        snackbarHostState.showSnackbar(
+                            "Downloading ${event.fileName}",
+                            duration = SnackbarDuration.Short,
+                        )
+                    }
+                    startNotices[event.id] = notice
+                    notice.invokeOnCompletion { startNotices.remove(event.id, notice) }
                 }
-                is DownloadEvent.Completed -> launch {
-                    // Supersedes this download's own "Downloading…".
-                    snackbarHostState.currentSnackbarData?.dismiss()
-                    val result = snackbarHostState.showSnackbar(
-                        "Downloaded ${event.fileName}",
-                        actionLabel = "Open",
-                        duration = SnackbarDuration.Long,
-                    )
-                    if (result == SnackbarResult.ActionPerformed) {
-                        downloads.entry(event.id)?.let { entry ->
-                            downloads.open(context, entry)?.let { snackbarHostState.showSnackbar(it) }
+                is DownloadEvent.Completed -> {
+                    startNotices.remove(event.id)?.cancel()
+                    launch {
+                        val result = snackbarHostState.showSnackbar(
+                            "Downloaded ${event.fileName}",
+                            actionLabel = "Open",
+                            duration = SnackbarDuration.Long,
+                        )
+                        if (result == SnackbarResult.ActionPerformed) {
+                            downloads.entry(event.id)?.let { entry ->
+                                downloads.open(context, entry)?.let { snackbarHostState.showSnackbar(it) }
+                            }
                         }
                     }
                 }
-                is DownloadEvent.Failed -> launch {
-                    snackbarHostState.currentSnackbarData?.dismiss()
-                    val result = snackbarHostState.showSnackbar(
-                        "Download failed: ${event.reason}",
-                        actionLabel = "Details",
-                        duration = SnackbarDuration.Long,
-                    )
-                    if (result == SnackbarResult.ActionPerformed) showDownloads = true
+                is DownloadEvent.Failed -> {
+                    startNotices.remove(event.id)?.cancel()
+                    launch {
+                        val result = snackbarHostState.showSnackbar(
+                            "Download failed: ${event.reason}",
+                            actionLabel = "Details",
+                            duration = SnackbarDuration.Long,
+                        )
+                        if (result == SnackbarResult.ActionPerformed) showDownloads = true
+                    }
                 }
             }
         }
@@ -1327,13 +1343,18 @@ fun BrowserScreen(
         // tracking the capsule's *slot* rather than its drawn height, so
         // they follow the editing morph as the bar inflates but sit
         // perfectly still when it compacts on scroll.
-        SnackbarHost(
-            hostState = snackbarHostState,
-            modifier = Modifier
-                .align(Alignment.BottomCenter)
-                .windowInsetsPadding(chromeInsets)
-                .padding(bottom = capsuleSlot + CapsuleBottomMargin),
-        ) { data -> Snackbar(snackbarData = data) }
+        // …unless a full-screen panel is up: it's opaque and composed
+        // after this Box, so a host here would draw every snackbar under
+        // it. The host then moves above the panels (see below).
+        if (!overlayShown) {
+            SnackbarHost(
+                hostState = snackbarHostState,
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .windowInsetsPadding(chromeInsets)
+                    .padding(bottom = capsuleSlot + CapsuleBottomMargin),
+            ) { data -> Snackbar(snackbarData = data) }
+        }
     }
 
     if (showSettings) {
@@ -1401,6 +1422,22 @@ fun BrowserScreen(
                 }
             },
         )
+    }
+
+    // Snackbars over a full-screen panel (Downloads' open() failures
+    // and retry outcomes, a download finishing while Settings is up):
+    // composed after the panels so they're drawn on top, at the bottom
+    // edge clear of the navigation bar. The Box doesn't take touches.
+    if (overlayShown) {
+        Box(modifier = Modifier.fillMaxSize()) {
+            SnackbarHost(
+                hostState = snackbarHostState,
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .windowInsetsPadding(WindowInsets.systemBars)
+                    .padding(bottom = 8.dp),
+            ) { data -> Snackbar(snackbarData = data) }
+        }
     }
 
     // HTML5 fullscreen. Last, so it paints over every overlay above.

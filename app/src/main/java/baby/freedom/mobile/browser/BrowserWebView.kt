@@ -1209,6 +1209,12 @@ private fun buildRefreshableWebView(
         // `<a download>` — lands here, dweb origins and `data:` URIs
         // included. [DownloadManager] does the fetching; WebView itself
         // saves nothing.
+        // Main-frame request URLs since the last commit (the pending
+        // navigation's own URL and every redirect hop). Filled from
+        // shouldInterceptRequest (a WebView IO thread) and
+        // shouldOverrideUrlLoading, emptied by onPageStarted.
+        val pendingNavigationUrls = java.util.Collections.synchronizedSet(LinkedHashSet<String>())
+
         setDownloadListener { url, userAgent, contentDisposition, mimeType, contentLength ->
             DownloadManager.get(context).start(
                 url = url,
@@ -1229,12 +1235,22 @@ private fun buildRefreshableWebView(
             // request was served, so there's nothing left to keep the
             // typed address for, and home comes back instead of a blank
             // page under a label for a file.
+            //
+            // Only a download *of* that navigation, though: one the
+            // committed page starts meanwhile (a "your download begins in
+            // 5 s" timer) has a URL the pending navigation never
+            // requested, and leaves it loading.
             if (downloadEndsPendingNavigation(
                     committedUrl = state.url,
                     addressBarText = state.addressBarText,
                     resolving = state.resolving,
+                    // A typed `data:` URL is never seen by the request
+                    // hooks; it is the address itself.
+                    downloadIsNavigationResponse = url in pendingNavigationUrls ||
+                        url == state.addressBarText,
                 )
             ) {
+                pendingNavigationUrls.clear()
                 state.stopProgress()
                 state.addressBarText = state.url
             }
@@ -1266,6 +1282,8 @@ private fun buildRefreshableWebView(
             }
 
             override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
+                // The pending navigation committed; it's no download.
+                pendingNavigationUrls.clear()
                 // A new document arrives with the chrome whole, however
                 // far the previous one was scrolled…
                 state.capsuleCollapse.expand()
@@ -1540,6 +1558,10 @@ private fun buildRefreshableWebView(
                 request: WebResourceRequest?,
             ): Boolean {
                 val target = request?.url?.toString() ?: return false
+                // Redirect hops of a main-frame navigation come through
+                // here — the download a navigation turns into has the
+                // final hop's URL.
+                if (request.isForMainFrame) pendingNavigationUrls.add(target)
                 // Route bzz:// and ens:// through the screen's submit flow
                 // so in-page clicks + error-page "Try Again" go through
                 // the same GatewayProbe gate the top address bar uses.
@@ -1567,7 +1589,12 @@ private fun buildRefreshableWebView(
             override fun shouldInterceptRequest(
                 view: WebView?,
                 request: WebResourceRequest?,
-            ): WebResourceResponse? = interceptVirtualRequest(request)
+            ): WebResourceResponse? {
+                if (request?.isForMainFrame == true) {
+                    request.url?.toString()?.let(pendingNavigationUrls::add)
+                }
+                return interceptVirtualRequest(request)
+            }
 
             override fun onReceivedError(
                 view: WebView?,
@@ -2425,12 +2452,21 @@ private fun fetchOnce(
  * one main-frame navigation at a time, so a download arriving then is
  * that navigation's response. A download from a committed page — an
  * `<a download>`, an attachment link — leaves the tab alone.
+ *
+ * And only when the download *is* that navigation's response
+ * ([downloadIsNavigationResponse]: its URL is one the main frame
+ * requested since the last commit — the typed URL or a redirect hop).
+ * The committed page can start a download of its own while the typed
+ * address is still loading; that one mustn't take the progress trace
+ * and Stop away from a navigation that's still in flight.
  */
 internal fun downloadEndsPendingNavigation(
     committedUrl: String,
     addressBarText: String,
     resolving: Boolean,
-): Boolean = !resolving && addressBarText.isNotBlank() && addressBarText != committedUrl
+    downloadIsNavigationResponse: Boolean,
+): Boolean = downloadIsNavigationResponse && !resolving &&
+    addressBarText.isNotBlank() && addressBarText != committedUrl
 
 internal fun isLocalGatewayUrl(url: String): Boolean = Gateways.isLocalGateway(url)
 

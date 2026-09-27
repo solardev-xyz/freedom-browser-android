@@ -15,6 +15,7 @@ import baby.freedom.mobile.data.DownloadEntry
 import baby.freedom.mobile.data.DownloadStatus
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
@@ -37,7 +38,6 @@ import java.io.IOException
 import java.io.InputStream
 import java.net.HttpURLConnection
 import java.net.URL
-import java.util.concurrent.ConcurrentHashMap
 
 private const val LOG_TAG = "Downloads"
 
@@ -64,10 +64,12 @@ data class DownloadProgress(val received: Long, val total: Long)
 
 /** One-shot notices for the browser chrome's snackbar. */
 sealed class DownloadEvent {
+    /** The download's [DownloadEntry.id]. */
+    abstract val id: Long
     abstract val fileName: String
-    data class Started(override val fileName: String) : DownloadEvent()
-    data class Completed(val id: Long, override val fileName: String) : DownloadEvent()
-    data class Failed(override val fileName: String, val reason: String) : DownloadEvent()
+    data class Started(override val id: Long, override val fileName: String) : DownloadEvent()
+    data class Completed(override val id: Long, override val fileName: String) : DownloadEvent()
+    data class Failed(override val id: Long, override val fileName: String, val reason: String) : DownloadEvent()
 }
 
 /**
@@ -106,14 +108,8 @@ class DownloadManager private constructor(context: Context) {
     private val resolver: ContentResolver = appContext.contentResolver
     private val dao = AppDatabase.get(appContext).downloads()
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
-    private val jobs = ConcurrentHashMap<Long, Job>()
-
-    /**
-     * Open response bodies by download id. Cancelling a coroutine does
-     * not interrupt a blocking socket read, so [cancel] closes the body
-     * too — the read fails at once instead of at the read timeout.
-     */
-    private val openBodies = ConcurrentHashMap<Long, AutoCloseable>()
+    /** Running jobs and what they block on; see [DownloadCancellation]. */
+    private val cancellation = DownloadCancellation()
 
     private val _progress = MutableStateFlow<Map<Long, DownloadProgress>>(emptyMap())
     /** Running downloads' byte counts, keyed by [DownloadEntry.id]. */
@@ -180,12 +176,26 @@ class DownloadManager private constructor(context: Context) {
                     finishedAt = null,
                 ),
             )
-            _events.tryEmit(DownloadEvent.Started(initialName))
-            val job = scope.launch {
+            _events.tryEmit(DownloadEvent.Started(id, initialName))
+            val job = scope.launch(start = CoroutineStart.LAZY) {
                 run(id, target, userAgent, contentDisposition, pageUrl)
             }
-            jobs[id] = job
-            job.invokeOnCompletion { jobs.remove(id) }
+            val cancelled = !cancellation.register(id, job)
+            // Cancelled before it began: run() never starts, so mark the
+            // row the way run() would have.
+            if (cancelled) {
+                job.cancel()
+                dao.get(id)?.let {
+                    dao.update(
+                        it.copy(
+                            status = DownloadStatus.CANCELLED,
+                            finishedAt = System.currentTimeMillis(),
+                        ),
+                    )
+                }
+            } else {
+                job.start()
+            }
         }
     }
 
@@ -207,10 +217,7 @@ class DownloadManager private constructor(context: Context) {
     suspend fun entry(id: Long): DownloadEntry? = dao.get(id)
 
     /** Stop a running download; its partial file is deleted. */
-    fun cancel(id: Long) {
-        jobs[id]?.cancel()
-        openBodies.remove(id)?.let { runCatching { it.close() } }
-    }
+    fun cancel(id: Long) = cancellation.cancel(id)
 
     /**
      * Forget a download. Only the history row goes — a completed file
@@ -219,7 +226,12 @@ class DownloadManager private constructor(context: Context) {
      */
     fun remove(id: Long) {
         cancel(id)
-        scope.launch { dao.delete(id) }
+        scope.launch {
+            dao.delete(id)
+            // A job registered after this finds no row and ends at once;
+            // an early-cancel mark has nothing left to guard.
+            cancellation.forget(id)
+        }
     }
 
     /**
@@ -257,11 +269,16 @@ class DownloadManager private constructor(context: Context) {
     ) {
         var entry = dao.get(id) ?: return
         var pending: Uri? = null
+        // Everything that can block on the network is tracked as soon as
+        // it exists — each connection before connect(), then the body —
+        // so [cancel] can close it (see [DownloadCancellation]).
+        val job = currentCoroutineContext()[Job]
+        val track: (AutoCloseable) -> Unit = { cancellation.track(id, job, it) }
         try {
-            val body = openBody(target, userAgent, contentDisposition, pageUrl)
-            openBodies[id] = body
-            currentCoroutineContext().ensureActive()
+            val body = openBody(target, userAgent, contentDisposition, pageUrl, track)
             body.use { src ->
+                track(src)
+                currentCoroutineContext().ensureActive()
                 val mime = src.mimeType ?: entry.mimeType
                 val name = downloadFileName(
                     contentDisposition = src.contentDisposition ?: contentDisposition,
@@ -321,10 +338,10 @@ class DownloadManager private constructor(context: Context) {
                     ),
                 )
             }
-            if (reason != null) _events.tryEmit(DownloadEvent.Failed(entry.fileName, reason))
+            if (reason != null) _events.tryEmit(DownloadEvent.Failed(id, entry.fileName, reason))
             if (t is CancellationException) throw t
         } finally {
-            openBodies.remove(id)
+            cancellation.release(id)
             _progress.update { it - id }
         }
     }
@@ -353,6 +370,7 @@ class DownloadManager private constructor(context: Context) {
         userAgent: String?,
         contentDisposition: String?,
         pageUrl: String?,
+        track: (AutoCloseable) -> Unit,
     ): Body = when (target) {
         is DownloadTarget.Data -> {
             val payload = parseDataUri(target.uri) ?: throw DownloadFailure("Malformed data: URI")
@@ -374,20 +392,26 @@ class DownloadManager private constructor(context: Context) {
             // (whose last segment for a bare root would be the hash).
             fetchDweb(gatewayUrl, nameUrl = target.displayUrl.let { d ->
                 if (d.contains("://")) d else "ens://$d"
-            })
+            }, track = track)
         }
-        is DownloadTarget.LocalGateway -> fetchDweb(target.url, nameUrl = target.displayUrl)
-        is DownloadTarget.Web -> fetchWeb(target.url, userAgent, pageUrl)
+        is DownloadTarget.LocalGateway -> fetchDweb(target.url, nameUrl = target.displayUrl, track = track)
+        is DownloadTarget.Web -> fetchWeb(target.url, userAgent, pageUrl, track)
         is DownloadTarget.Unsupported ->
             throw DownloadFailure("${target.scheme}: downloads aren't supported")
     }
 
-    private suspend fun fetchDweb(gatewayUrl: String, nameUrl: String): Body {
+    private suspend fun fetchDweb(
+        gatewayUrl: String,
+        nameUrl: String,
+        track: (AutoCloseable) -> Unit,
+    ): Body {
         var lastStatus = 0
         for (delayMs in DWEB_RETRY_DELAYS_MS) {
             if (delayMs > 0) delay(delayMs)
+            currentCoroutineContext().ensureActive()
             val conn = try {
                 (URL(gatewayUrl).openConnection() as HttpURLConnection).apply {
+                    track(AutoCloseable { disconnect() })
                     connectTimeout = 5_000
                     readTimeout = 60_000
                     instanceFollowRedirects = true
@@ -423,11 +447,27 @@ class DownloadManager private constructor(context: Context) {
      * Plain web download. Redirects are followed by hand so an
      * `http` → `https` hop (which `HttpURLConnection` refuses to follow)
      * works, with the cookie jar consulted for every hop.
+     *
+     * Known gaps against Chromium's own fetch (it's a re-fetch, not the
+     * page's request): `CookieManager` hands out every cookie for the
+     * URL with no SameSite attribute, so a cross-site download also
+     * carries `SameSite=Strict` cookies Chromium would have withheld;
+     * and `DownloadListener` reports neither the method nor the body,
+     * so the download of a form POST response (or a single-use URL the
+     * WebView already consumed) is re-requested as a plain GET and may
+     * fail or save different content.
      */
-    private fun fetchWeb(url: String, userAgent: String?, pageUrl: String?): Body {
+    private suspend fun fetchWeb(
+        url: String,
+        userAgent: String?,
+        pageUrl: String?,
+        track: (AutoCloseable) -> Unit,
+    ): Body {
         var current = url
         repeat(MAX_REDIRECTS + 1) {
+            currentCoroutineContext().ensureActive()
             val conn = (URL(current).openConnection() as HttpURLConnection).apply {
+                track(AutoCloseable { disconnect() })
                 connectTimeout = 15_000
                 readTimeout = 60_000
                 instanceFollowRedirects = false

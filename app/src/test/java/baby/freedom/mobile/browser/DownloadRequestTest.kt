@@ -170,19 +170,35 @@ class DownloadRequestTest {
     @Test
     fun `a download ends an uncommitted navigation`() {
         // Typed a file URL over swarm.eth: the address never committed.
-        assertTrue(downloadEndsPendingNavigation("swarm.eth", "https://x.com/a.pdf", resolving = false))
+        assertTrue(downloadEndsPendingNavigation("swarm.eth", "https://x.com/a.pdf", resolving = false, downloadIsNavigationResponse = true))
         // …from home, too.
-        assertTrue(downloadEndsPendingNavigation("", "https://x.com/a.pdf", resolving = false))
+        assertTrue(downloadEndsPendingNavigation("", "https://x.com/a.pdf", resolving = false, downloadIsNavigationResponse = true))
     }
 
     @Test
     fun `a download from a committed page leaves the tab alone`() {
-        assertEquals(false, downloadEndsPendingNavigation("swarm.eth", "swarm.eth", resolving = false))
-        assertEquals(false, downloadEndsPendingNavigation("", "", resolving = false))
+        assertEquals(false, downloadEndsPendingNavigation("swarm.eth", "swarm.eth", resolving = false, downloadIsNavigationResponse = true))
+        assertEquals(false, downloadEndsPendingNavigation("", "", resolving = false, downloadIsNavigationResponse = true))
+    }
+
+    @Test
+    fun `a download the committed page starts leaves the pending navigation alone`() {
+        // Typed a new address; before it commits, the page on screen
+        // fires a delayed download of its own — a URL the pending
+        // navigation never requested.
+        assertEquals(
+            false,
+            downloadEndsPendingNavigation(
+                "https://mirror.example/get",
+                "https://x.com/next",
+                resolving = false,
+                downloadIsNavigationResponse = false,
+            ),
+        )
     }
 
     @Test
     fun `a pending navigation still resolving can't be the download`() {
-        assertEquals(false, downloadEndsPendingNavigation("swarm.eth", "bzz://abc", resolving = true))
+        assertEquals(false, downloadEndsPendingNavigation("swarm.eth", "bzz://abc", resolving = true, downloadIsNavigationResponse = true))
     }
 }
