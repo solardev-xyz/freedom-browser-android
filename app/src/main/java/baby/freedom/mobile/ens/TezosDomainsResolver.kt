@@ -199,7 +199,7 @@ class TezosDomainsResolver internal constructor(
         if (reference != null) {
             val skew = now() - reference
             if (kotlin.math.abs(skew) > STALE_HEAD_AGE_MS) {
-                Log.w(TAG, "device clock is ${skew / 60_000} min off the providers' chain head; trusting the providers")
+                Log.w(TAG, "providers' consensus head time is ${skew / 60_000} min from the device clock; judging heads by the providers")
             }
         }
         for (h in stale) {
