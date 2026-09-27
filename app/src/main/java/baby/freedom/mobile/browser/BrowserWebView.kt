@@ -182,6 +182,13 @@ internal fun nameResolutionRefusal(name: String, code: String): WebResourceRespo
         "ens_unsupported_codec" -> "Unsupported content format" to
             "This ENS name now resolves to a content format Freedom Browser " +
             "cannot load yet on mobile."
+        "ens_unverified" -> "Not cross-checked" to
+            "Only one Ethereum RPC server answered for this name, and its answer " +
+            "differs from the one this page was loaded with. Freedom couldn't " +
+            "check it against another server, so it wasn't loaded."
+        "ens_conflict" -> "RPC servers disagreed" to
+            "The Ethereum RPC servers Freedom asked gave different answers for " +
+            "this name. At least one of them is wrong, so nothing was loaded."
         else -> "ENS lookup failed" to
             "Couldn't reach an Ethereum RPC endpoint to resolve this name. " +
             "Check your connection and try again."
@@ -2361,6 +2368,13 @@ private fun buildRefreshableWebView(
                 request: WebResourceRequest?,
             ): Boolean {
                 val target = request?.url?.toString() ?: return false
+                // "Continue once" on the not-cross-checked ENS warning
+                // (#96): never a load, only a message for the submit
+                // flow, which checks it is this tab's ([EnsGate]).
+                if (EnsGate.continueToken(target) != null) {
+                    if (request.isForMainFrame) onSubmitUrl(state, target)
+                    return true
+                }
                 // A link to another app (#85): never a page load. Main
                 // frame + user gesture only, then per-site consent.
                 if (request.isForMainFrame && !request.isRedirect) {

@@ -282,6 +282,67 @@ class GatewaysTest {
         }
     }
 
+    private fun unverified(name: String, ref: String) = EnsResult.Ok(
+        name, "bzz", "bzz://$ref", ref,
+        trust = baby.freedom.mobile.ens.EnsTrust(verified = false, agreed = listOf("rpc.test")),
+    )
+
+    @Test
+    fun `one server's word for a new answer is refused, the answer already served is not`() {
+        // #96: the page was served ref64 (cross-checked, or let through
+        // by the user); only one server now answers, with another root.
+        KnownEnsNames.record("bzz://$ref64", "swarm.eth")
+        val pins = EnsDocumentPins()
+        withLookup({ unverified(it, otherRef) }) {
+            assertEquals("ens_unverified", Gateways.reverifyEnsDocument("swarm.eth", pins))
+            // Not an answer about the name: nothing is forgotten.
+            assertEquals("bzz://$ref64", KnownEnsNames.uriFor("swarm.eth"))
+        }
+        KnownEnsNames.record("bzz://$ref64", "swarm.eth")
+        withLookup({ unverified(it, ref64) }) {
+            assertNull(Gateways.reverifyEnsDocument("swarm.eth", pins))
+            assertEquals("bzz://$ref64", pins.uriFor("swarm.eth"))
+        }
+    }
+
+    @Test
+    fun `an answer the user let through is served even if the tab had another`() {
+        // The tab was on a cross-checked ref64; the user then chose
+        // "Continue once" for one server's otherRef, which the submit
+        // flow records in the session registry.
+        val pins = EnsDocumentPins()
+        pins.pin("swarm.eth", "bzz://$ref64")
+        KnownEnsNames.record("bzz://$otherRef", "swarm.eth")
+        withLookup({ unverified(it, otherRef) }) {
+            assertNull(Gateways.reverifyEnsDocument("swarm.eth", pins))
+            assertEquals("bzz://$otherRef", pins.uriFor("swarm.eth"))
+        }
+    }
+
+    @Test
+    fun `servers that disagree refuse the document without forgetting the name`() {
+        KnownEnsNames.record("bzz://$ref64", "swarm.eth")
+        val conflict = { name: String ->
+            EnsResult.Conflict(
+                name, EnsResult.Conflict.Subject.RECORD,
+                listOf(EnsResult.Conflict.Group("bzz://$ref64", listOf("a")), EnsResult.Conflict.Group("bzz://$otherRef", listOf("b"))),
+                block = 1L,
+            )
+        }
+        withLookup(conflict) {
+            assertEquals("ens_conflict", Gateways.reverifyEnsDocument("swarm.eth"))
+            assertEquals("bzz://$ref64", KnownEnsNames.uriFor("swarm.eth"))
+        }
+    }
+
+    @Test
+    fun `subresources after a restart aren't served from one server's word`() {
+        withLookup({ unverified(it, otherRef) }) {
+            assertNull(Gateways.gatewayUrlFor(ContentRoot.Ens("fresh.eth"), "/p"))
+            assertNull(KnownEnsNames.uriFor("fresh.eth"))
+        }
+    }
+
     @Test
     fun `reverifyEnsDocument refuses a name whose content is no longer loadable`() {
         KnownEnsNames.record("bzz://$ref64", "swarm.eth")

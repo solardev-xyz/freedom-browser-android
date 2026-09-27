@@ -98,6 +98,13 @@ class BrowserState(val id: Long) {
         internal set
 
     /**
+     * The "Continue once" the tab's *not cross-checked* warning offers,
+     * if that's what it is showing (#96, see [EnsGate]). Replaced by the
+     * next such warning; used up by the Continue it was made for.
+     */
+    internal var ensGate: EnsGate? = null
+
+    /**
      * This tab's current (or pending) load is content the embedded IPFS
      * node serves — an `ipfs://` / `ipns://` page, or an ENS name whose
      * contenthash points there. While it is and the tab is busy, the
