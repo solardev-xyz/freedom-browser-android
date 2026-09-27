@@ -349,7 +349,7 @@ internal fun <T : Any> pickedUris(
  * be a `content:` URI ([scheme]) served by *someone else's* provider:
  * `file:///data/…` or `content://<our own provider>/…` (e.g. an earlier
  * capture still in cache/uploads, uploaded to a different site) would
- * have the browser upload its own private files. [encodedAuthority]
+ * have the browser upload its own private files. [authority]
  * may carry a `userId@` prefix, which ContentResolver strips before
  * resolving the provider, so it is stripped here too.
  */
