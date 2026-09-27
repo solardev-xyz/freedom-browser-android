@@ -37,6 +37,9 @@ android {
         aidl = true
     }
 
+    // BootnodeSeeder's JVM tests log through android.util.Log.
+    testOptions { unitTests.isReturnDefaultValues = true }
+
     packaging {
         resources.excludes += setOf(
             "META-INF/INDEX.LIST",
@@ -58,4 +61,8 @@ kotlin {
 dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.1")
     implementation("androidx.core:core-ktx:1.15.0")
+
+    testImplementation("junit:junit:4.13.2")
+    // Real org.json: the android.jar stub is all no-ops under unit tests.
+    testImplementation("org.json:json:20240303")
 }
