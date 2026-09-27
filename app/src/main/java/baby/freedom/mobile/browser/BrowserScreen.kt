@@ -1,5 +1,7 @@
 package baby.freedom.mobile.browser
 
+import android.webkit.WebSettings
+import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.Animatable
 import androidx.compose.animation.core.animateFloatAsState
@@ -44,7 +46,9 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Snackbar
 import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarDuration
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.SnackbarResult
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -52,6 +56,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -771,9 +776,32 @@ fun BrowserScreen(
     DisposableEffect(tabs) {
         tabs.requestSubmit = { tab, url -> submit(tab, url, SubmitSource.Renderer) }
         tabs.requestNodeRecovery = onRecoverNodes
+        // The page context menu's "Open in new tab" and the selection
+        // toolbar's "Search" (#84). Both are the user's own choice, so
+        // they submit as [SubmitSource.User]. A background tab says so
+        // in a snackbar that can bring it forward — otherwise nothing
+        // on screen would change.
+        tabs.requestOpenInNewTab = { url, background ->
+            val fresh = tabs.newTab(activate = !background)
+            submit(fresh, url)
+            if (background) {
+                scope.launch {
+                    val result = snackbarHostState.showSnackbar(
+                        message = "Opened in new tab",
+                        actionLabel = "Switch",
+                        duration = SnackbarDuration.Short,
+                    )
+                    if (result == SnackbarResult.ActionPerformed) {
+                        val index = tabs.tabs.indexOf(fresh)
+                        if (index >= 0) tabs.switchTo(index)
+                    }
+                }
+            }
+        }
         onDispose {
             tabs.requestSubmit = null
             tabs.requestNodeRecovery = null
+            tabs.requestOpenInNewTab = null
         }
     }
 
@@ -1343,6 +1371,54 @@ fun BrowserScreen(
                 submit(state, url)
             },
         )
+    }
+
+    // Long-press menu for a link / image on the page (#84). Dropped the
+    // moment it stops describing what is on screen: the tab navigated,
+    // closed, or another tab came to the front.
+    tabs.pageContextMenu?.let { request ->
+        val owner = tabs.tabs.firstOrNull { it.id == request.tabId }
+        if (pageContextMenuIsStale(request, tabs.active.id, owner?.url, owner?.navCounter)) {
+            LaunchedEffect(request) {
+                if (tabs.pageContextMenu === request) tabs.pageContextMenu = null
+            }
+        } else if (owner != null) {
+            fun withImage(url: String, action: suspend (FetchedImage) -> Boolean, failure: String) {
+                scope.launch {
+                    val image = fetchImage(url, WebSettings.getDefaultUserAgent(context))
+                    val ok = image != null && action(image)
+                    if (!ok) Toast.makeText(context, failure, Toast.LENGTH_SHORT).show()
+                }
+            }
+            key(request) {
+                PageContextMenuSheet(
+                    target = request.target,
+                    displayUrl = { displayFor(it, owner) },
+                    onOpenInNewTab = { tabs.requestOpenInNewTab?.invoke(displayFor(it, owner), true) },
+                    onCopyLink = { copyUrlToClipboard(context, it) },
+                    onShareLink = { url, title -> shareUrl(context, url, title) },
+                    onOpenImage = { tabs.requestOpenInNewTab?.invoke(displayFor(it, owner), true) },
+                    onCopyImage = { url ->
+                        withImage(url, { copyImageToClipboard(context, it, url) }, "Couldn't copy image")
+                    },
+                    onSaveImage = { url ->
+                        withImage(url, { image ->
+                            saveImage(context, image, url).also { saved ->
+                                if (saved) {
+                                    Toast.makeText(context, "Image saved", Toast.LENGTH_SHORT).show()
+                                }
+                            }
+                        }, "Couldn't save image")
+                    },
+                    onShareImage = { url ->
+                        withImage(url, { shareImage(context, it, url) }, "Couldn't share image")
+                    },
+                    onDismiss = {
+                        if (tabs.pageContextMenu === request) tabs.pageContextMenu = null
+                    },
+                )
+            }
+        }
     }
 
     // HTML5 fullscreen. Last, so it paints over every overlay above.

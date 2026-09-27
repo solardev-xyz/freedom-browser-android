@@ -75,5 +75,20 @@
             android:foregroundServiceType="dataSync"
             android:process=":node" />
 
+        <!--
+          Hands images out of the page context menu (Copy image / Share
+          image) as content:// URIs; scoped to cache/shared/ by
+          res/xml/shared_files.xml.
+        -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/shared_files" />
+        </provider>
+
     </application>
 </manifest>

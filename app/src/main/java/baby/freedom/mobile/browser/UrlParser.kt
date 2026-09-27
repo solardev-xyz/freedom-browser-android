@@ -21,6 +21,15 @@ object UrlParser {
         if (bareHostRegex.matches(trimmed) || ipPortRegex.matches(trimmed)) {
             return "https://$trimmed"
         }
-        return "https://search.brave.com/search?q=" + Uri.encode(trimmed)
+        return searchUrl(trimmed)
     }
+
+    /**
+     * The web search for [query] — the one engine the browser searches
+     * with. The address bar's "not a URL" fallback above and the page
+     * context menu's "Search for …" both build their URL here, so the two
+     * can never name different engines.
+     */
+    fun searchUrl(query: String): String =
+        "https://search.brave.com/search?q=" + Uri.encode(query.trim())
 }
