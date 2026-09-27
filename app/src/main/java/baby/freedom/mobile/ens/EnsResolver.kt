@@ -107,9 +107,18 @@ class EnsResolver internal constructor(
             try {
                 buildResolveCallData(normalized)
             } catch (e: IllegalArgumentException) {
-                // A label past the DNS encoding's 255 bytes: normalized,
-                // but not something the Universal Resolver can be asked.
-                return EnsResult.Error(name = normalized, reason = "INVALID_NAME", error = e.message.orEmpty())
+                // A label past the DNS encoding's 255 bytes is a valid
+                // ENSIP-15 name the Universal Resolver just can't be
+                // asked about — its own reason, so the error page doesn't
+                // blame the naming rules. Anything else dnsEncode refuses
+                // (an empty label from the ASCII fast path) is one ENSIP-15
+                // refuses too.
+                val tooLong = normalized.split('.').any { it.toByteArray(Charsets.UTF_8).size > MAX_DNS_LABEL_BYTES }
+                return EnsResult.Error(
+                    name = normalized,
+                    reason = if (tooLong) "NAME_TOO_LONG" else "INVALID_NAME",
+                    error = if (tooLong) "a label is longer than $MAX_DNS_LABEL_BYTES bytes" else e.message.orEmpty(),
+                )
             }
         }
 
@@ -504,6 +513,8 @@ class EnsResolver internal constructor(
     companion object {
         private const val TAG = "EnsResolver"
         private const val CACHE_TTL_MS = 15L * 60 * 1000
+        /** ENSIP-10 DNS encoding's label limit (desktop's `ethers.dnsEncode(name, 255)`). */
+        private const val MAX_DNS_LABEL_BYTES = 255
 
         private const val RPC_TIMEOUT_MS = 15_000
         private const val RPC_MAX_RESPONSE_BYTES = 1L * 1024 * 1024
@@ -579,7 +590,7 @@ class EnsResolver internal constructor(
                 // ENS's DNS encoding (ENSIP-10) allows 255-byte labels —
                 // desktop's `ethers.dnsEncode(name, 255)` — not DNS's 63:
                 // a label of 16 emoji is already 64 UTF-8 bytes.
-                require(bytes.size in 1..255) { "invalid DNS label: '$l'" }
+                require(bytes.size in 1..MAX_DNS_LABEL_BYTES) { "invalid DNS label: '$l'" }
                 out[pos++] = bytes.size.toByte()
                 bytes.copyInto(out, pos)
                 pos += bytes.size

@@ -204,6 +204,11 @@
             '(a disallowed character, mixed scripts, a lookalike, &hellip;), so Freedom Browser ' +
             "won't look it up &mdash; other " + nameLabel + ' apps refuse it too, and it could be ' +
             'mistaken for a different name. Check the spelling.';
+        } else if (error === 'ens_name_too_long') {
+          titleEl.textContent = nameLabel + ' name too long';
+          descriptionEl.innerHTML =
+            'A label of this name is longer than the 255 bytes an ' + nameLabel + ' lookup can ' +
+            'carry, so Freedom Browser can\'t ask a resolver about it. Check the address.';
         } else if (error === 'ens_lookup_failed') {
           titleEl.textContent = nameLabel + ' lookup failed';
           descriptionEl.innerHTML =

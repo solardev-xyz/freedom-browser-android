@@ -154,6 +154,18 @@ class EnsNormalizeTest {
         val r = runBlocking { EnsResolver(listOf(rpc), http).resolveContenthash(name) }
 
         require(r is EnsResult.Error) { "got $r" }
+        // ENSIP-15 accepts it — it's only too long to DNS-encode, so it
+        // must not get the "breaks the naming rules" page.
+        assertEquals("a".repeat(256) + ".eth", EnsNormalize.normalize(name))
+        assertEquals("NAME_TOO_LONG", r.reason)
+        assertTrue(http.calls.isEmpty())
+    }
+
+    @Test
+    fun `an empty label from the ASCII fast path is still INVALID_NAME`() {
+        val http = RecordingRpc()
+        val r = runBlocking { EnsResolver(listOf(rpc), http).resolveContenthash("a..eth") }
+        require(r is EnsResult.Error) { "got $r" }
         assertEquals("INVALID_NAME", r.reason)
         assertTrue(http.calls.isEmpty())
     }

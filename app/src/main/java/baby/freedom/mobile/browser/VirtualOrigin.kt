@@ -110,7 +110,8 @@ object VirtualOrigin {
 
     /**
      * Inverse of [ensLabel]. A `xn--` label is a Unicode name when it
-     * decodes to one — non-ASCII, a navigable suffix, ENSIP-15-valid;
+     * decodes to one — non-ASCII and on a navigable suffix (normalized
+     * when ENSIP-15 accepts it, as decoded when it doesn't);
      * otherwise it is a plain escaped ASCII name that happens to start
      * with `xn--` (`xn--2i8h.eth` → `xn----2i8h-eth`), which can't decode
      * to a `.eth` name: Punycode only inserts non-ASCII code points, and
@@ -119,10 +120,15 @@ object VirtualOrigin {
      */
     private fun decodeEnsLabel(label: String): ContentRoot.Ens {
         if (label.startsWith("xn--")) {
-            val unicode = Punycode.decode(label.substring(4))
+            val decoded = Punycode.decode(label.substring(4))
                 ?.takeIf { d -> d.any { it.code >= 0x80 } }
                 ?.let { unescapeName(it) }
-                ?.let { EnsNormalize.normalizeOrNull(it) }
+            // A Unicode name ENSIP-15 refuses is still that name — kept as
+            // decoded so the resolver reports it `INVALID_NAME`, rather
+            // than falling back to an on-chain lookup of the literal
+            // `xn--…` ASCII label.
+            val unicode = decoded
+                ?.let { EnsNormalize.normalizeOrNull(it) ?: it.lowercase() }
                 ?.takeIf { n -> NameSystem.navigableSuffixes.any { n.endsWith(it) } }
             if (unicode != null) return ContentRoot.Ens(unicode)
         }
@@ -218,7 +224,7 @@ object VirtualOrigin {
             "bzz" -> normalizeBzzRef(id)?.let { ContentRoot.Bzz(it) }
             "ipfs" -> normalizeCid(id)?.let { ContentRoot.Ipfs(it) }
             "ipns" -> ipnsRootFor(id)
-            "ens" -> ContentRoot.Ens(id.lowercase())
+            "ens" -> ContentRoot.Ens(ensRootName(id))
             else -> null
         } ?: return null
         // A query/fragment directly after the id still needs the root
@@ -229,6 +235,24 @@ object VirtualOrigin {
             else -> "/$tail"
         }
         return root to normalizedTail
+    }
+
+    /**
+     * The name an `ens://` URL's authority stands for. A non-ASCII name
+     * reaches us percent-encoded when WebView hands over the URL (an
+     * `ens://🦊.eth/` iframe) and possibly unnormalized (`Ⓜ️.eth`), so
+     * decode it and key it on its ENSIP-15 form — the same name the
+     * address bar, the resolver cache and the virtual origin use. A name
+     * ENSIP-15 refuses stays as decoded (lowercased), for the resolver's
+     * `INVALID_NAME` refusal to report.
+     */
+    private fun ensRootName(id: String): String {
+        val decoded = WhatwgHost.percentDecode(id)
+        return try {
+            EnsNormalize.fastNormalize(decoded)
+        } catch (_: EnsNormalize.InvalidNameException) {
+            decoded.lowercase()
+        }
     }
 
     /** Path + query of [url] (never empty — `/` for bare origins). Fragments are dropped. */

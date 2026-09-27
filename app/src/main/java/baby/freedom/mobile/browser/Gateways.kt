@@ -284,8 +284,9 @@ object Gateways {
      *
      * Only an *answer* refuses the document: `NotFound` / `Unsupported`
      * say the name no longer points at loadable content, and an
-     * `INVALID_NAME` error says ENSIP-15 refuses the name itself
-     * (`ens_invalid_name`). A lookup that
+     * `INVALID_NAME` / `NAME_TOO_LONG` error refuses the name itself
+     * (`ens_invalid_name` / `ens_name_too_long`, see
+     * [refusedNameErrorCode]). A lookup that
      * merely failed (RPC unreachable) serves the last answer this tab
      * or this session had for the name, as it did before the re-check
      * existed — the network being down is no reason to stop Back from
@@ -348,11 +349,13 @@ object Gateways {
             is EnsResult.NotFound -> gone("ens_not_found")
             is EnsResult.Unsupported -> gone("ens_unsupported_codec")
             // Failed, or still running at the deadline: not an answer —
-            // unless ENSIP-15 refused the name, which is as final as a
-            // NotFound (no lookup ran, and none ever will).
+            // unless the name itself was refused (ENSIP-15, or a label
+            // too long to encode), which is as final as a NotFound (no
+            // lookup ran, and none ever will).
             is EnsResult.Error, null -> {
-                if (result?.reason == "INVALID_NAME") {
-                    gone("ens_invalid_name")
+                val refused = result?.let { refusedNameErrorCode(it.reason) }
+                if (refused != null) {
+                    gone(refused)
                 } else if (last == null) {
                     "ens_lookup_failed"
                 } else {
@@ -523,4 +526,15 @@ class EnsDocumentPins {
         @Volatile
         internal var commitWaitMs = 2_000L
     }
+}
+
+/**
+ * The error page for an [EnsResult.Error] that refuses the *name* rather
+ * than reporting a failed lookup — no RPC ran, so "couldn't reach an
+ * Ethereum RPC endpoint" would be wrong — or `null` for a lookup failure.
+ */
+internal fun refusedNameErrorCode(reason: String): String? = when (reason) {
+    "INVALID_NAME" -> "ens_invalid_name"
+    "NAME_TOO_LONG" -> "ens_name_too_long"
+    else -> null
 }

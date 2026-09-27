@@ -62,6 +62,7 @@ import androidx.webkit.WebMessageCompat
 import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
 import baby.freedom.mobile.data.BrowsingRepository
+import baby.freedom.mobile.ens.EnsNormalize
 import kotlinx.coroutines.flow.collectLatest
 import java.io.ByteArrayInputStream
 import java.io.FilterInputStream
@@ -162,6 +163,30 @@ internal fun isDocumentRequest(
 }
 
 /**
+ * Title and description (HTML) of [nameResolutionRefusal]'s page for
+ * [code] — the same wording `error.html` uses for that code.
+ */
+internal fun nameResolutionRefusalCopy(code: String): Pair<String, String> = when (code) {
+    "ens_not_found" -> "No content for this ENS name" to
+        "This ENS name doesn't point at any content any more. The owner may " +
+        "have removed its <code>contenthash</code> record, or the name has no resolver."
+    "ens_unsupported_codec" -> "Unsupported content format" to
+        "This ENS name now resolves to a content format Freedom Browser " +
+        "cannot load yet on mobile."
+    "ens_invalid_name" -> "Not a valid ENS name" to
+        "This name breaks the ENSIP-15 naming rules " +
+        "(a disallowed character, mixed scripts, a lookalike, &hellip;), so Freedom Browser " +
+        "won't look it up &mdash; other ENS apps refuse it too, and it could be " +
+        "mistaken for a different name. Check the spelling."
+    "ens_name_too_long" -> "ENS name too long" to
+        "A label of this name is longer than the 255 bytes an ENS lookup can " +
+        "carry, so Freedom Browser can't ask a resolver about it. Check the address."
+    else -> "ENS lookup failed" to
+        "Couldn't reach an Ethereum RPC endpoint to resolve this name. " +
+        "Check your connection and try again."
+}
+
+/**
  * The interceptor's answer to an ENS document it refuses: the error
  * page itself, served *as* the history entry's document rather than
  * via a `loadUrl(ErrorPage.url(…))` afterwards (#99). That navigation
@@ -172,18 +197,16 @@ internal fun isDocumentRequest(
  * the name. No script: the document is on the name's origin.
  */
 internal fun nameResolutionRefusal(name: String, code: String): WebResourceResponse {
-    val (title, description) = when (code) {
-        "ens_not_found" -> "No content for this ENS name" to
-            "This ENS name doesn't point at any content any more. The owner may " +
-            "have removed its <code>contenthash</code> record, or the name has no resolver."
-        "ens_unsupported_codec" -> "Unsupported content format" to
-            "This ENS name now resolves to a content format Freedom Browser " +
-            "cannot load yet on mobile."
-        else -> "ENS lookup failed" to
-            "Couldn't reach an Ethereum RPC endpoint to resolve this name. " +
-            "Check your connection and try again."
+    val (title, description) = nameResolutionRefusalCopy(code)
+    fun esc(t: String) = t.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    val safeName = esc(name)
+    // The spec's reason, as the address-bar path shows it in the details box.
+    val reason = if (code == "ens_invalid_name") {
+        (runCatching { EnsNormalize.normalize(name) }.exceptionOrNull() as? EnsNormalize.InvalidNameException)
+            ?.message?.let { "\n" + esc(it) }.orEmpty()
+    } else {
+        ""
     }
-    val safeName = name.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
     val html = """<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'">
@@ -203,7 +226,7 @@ p{color:#57606a}.d{background:#f6f8fa;color:#cf222e}a{background:#f6f8fa;border-
 </style></head><body><div class="c"><h1>$title</h1><p>$description</p>
 <div class="d">ens://$safeName
 
-$code</div><a href="">Try again</a></div></body></html>"""
+$code$reason</div><a href="">Try again</a></div></body></html>"""
     return WebResourceResponse(
         "text/html", "utf-8", statusForNameResolutionError(code), "Name Resolution Failed",
         mapOf(NAME_RESOLUTION_ERROR_HEADER to code, "Cache-Control" to "no-store"),

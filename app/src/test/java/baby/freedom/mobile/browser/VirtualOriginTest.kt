@@ -342,4 +342,32 @@ class VirtualOriginTest {
         assertEquals("https://xn---eth-9y14c.ens.freedom.baby/docs?q=1", url)
         assertEquals("🦊.eth/docs?q=1", VirtualOrigin.displayUrlFor(url))
     }
+
+    @Test
+    fun `a punycode host of a name ENSIP-15 refuses stays that name, not its xn-- spelling`() {
+        val name = "a\u0661b.eth"
+        assertNull(baby.freedom.mobile.ens.EnsNormalize.normalizeOrNull(name))
+        val host = VirtualOrigin.hostFor(ContentRoot.Ens(name))!!
+        assertTrue(host, host.startsWith("xn--"))
+        // So the resolver answers INVALID_NAME instead of looking up "xn--…".
+        assertEquals(ContentRoot.Ens(name), VirtualOrigin.parseHost(host))
+    }
+
+    @Test
+    fun `ens content urls are percent-decoded and ENSIP-15 normalized`() {
+        // WebView hands over an ens:// iframe src percent-encoded.
+        assertEquals(
+            ContentRoot.Ens("🦊.eth") to "/x",
+            VirtualOrigin.parseContentUrl("ens://%F0%9F%A6%8A.eth/x"),
+        )
+        assertEquals(ContentRoot.Ens("m.eth") to "", VirtualOrigin.parseContentUrl("ens://Ⓜ️.eth"))
+        assertEquals(ContentRoot.Ens("vitalik.eth") to "", VirtualOrigin.parseContentUrl("ens://VITALIK.eth"))
+        // ASCII pre-ENSIP-15 names keep desktop's fast path.
+        assertEquals(ContentRoot.Ens("ab--c.eth") to "", VirtualOrigin.parseContentUrl("ens://AB--c.eth"))
+        // A refused name is kept (decoded) for the resolver to refuse.
+        assertEquals(
+            ContentRoot.Ens("a\u0661b.eth") to "",
+            VirtualOrigin.parseContentUrl("ens://a%D9%A1b.eth"),
+        )
+    }
 }

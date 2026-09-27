@@ -295,6 +295,17 @@ class GatewaysTest {
     }
 
     @Test
+    fun `reverifyEnsDocument refuses a name too long to look up`() {
+        val name = "a".repeat(256) + ".eth"
+        val pins = EnsDocumentPins()
+        pins.pin(name, "bzz://$ref64")
+        withLookup({ EnsResult.Error(it, "NAME_TOO_LONG", "a label is longer than 255 bytes") }) {
+            assertEquals("ens_name_too_long", Gateways.reverifyEnsDocument(name, pins))
+            assertNull(pins.lastAnswerFor(name))
+        }
+    }
+
+    @Test
     fun `reverifyEnsDocument refuses a name whose content is no longer loadable`() {
         KnownEnsNames.record("bzz://$ref64", "swarm.eth")
         withLookup({ EnsResult.Unsupported(it, "0xe5", "") }) {

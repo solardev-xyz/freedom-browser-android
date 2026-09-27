@@ -131,7 +131,7 @@ internal object WhatwgHost {
         return ascii
     }
 
-    private fun percentDecode(s: String): String {
+    internal fun percentDecode(s: String): String {
         if ('%' !in s) return s
         fun Byte.isHexByte() = toInt().toChar().isHex()
         val raw = s.toByteArray(Charsets.UTF_8)
