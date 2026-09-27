@@ -5,7 +5,12 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import java.util.concurrent.atomic.AtomicLong
 
-/** Most downloads that can wait for an answer at once; later ones are dropped. */
+/**
+ * Most page-initiated downloads one tab can have waiting for an answer
+ * at once; later ones from that tab are dropped (and counted, see
+ * [DownloadOffers.dropped]). Per tab, so a background tab can't use up
+ * another tab's room, and never applied to the user's own requests.
+ */
 internal const val MAX_PENDING_OFFERS = 10
 
 /**
@@ -35,8 +40,14 @@ class DownloadOffer internal constructor(
 
 /**
  * The offers waiting for an answer, oldest first. At most
- * [MAX_PENDING_OFFERS]: a page firing downloads in a loop can't queue
- * an endless line of prompts (or hold its `data:` payloads in memory).
+ * [MAX_PENDING_OFFERS] page-initiated ones per tab: a page firing
+ * downloads in a loop can't queue an endless line of prompts (or hold
+ * its `data:` payloads in memory). The cap counts only that tab's
+ * offers — only the tab in view shows its offers, so a shared cap would
+ * let an unanswered background tab refuse every other tab's — and never
+ * refuses a download the user asked for themselves. What it drops is
+ * counted per tab in [dropped], so the prompt can say so rather than
+ * losing downloads silently.
  *
  * The prompt is modal, so a page that keeps firing downloads could
  * otherwise re-raise it as fast as it's answered and hold the whole
@@ -52,10 +63,20 @@ internal class DownloadOffers {
     private val _pending = MutableStateFlow<List<DownloadOffer>>(emptyList())
     val pending: StateFlow<List<DownloadOffer>> = _pending.asStateFlow()
     private val blockedTabs = mutableSetOf<Long>()
+    private val _dropped = MutableStateFlow<Map<Long, Int>>(emptyMap())
+    /**
+     * Per tab, how many page-initiated offers were refused because that
+     * tab already had [MAX_PENDING_OFFERS] waiting. Cleared once the tab
+     * has no page offers waiting any more (answered, blocked or closed).
+     */
+    val dropped: StateFlow<Map<Long, Int>> = _dropped.asStateFlow()
 
     /**
      * Queue an offer from [tabId]'s page [requestedBy]. False when it was
-     * dropped: the tab is blocked, or the queue is full.
+     * dropped: the tab is blocked, or it already has
+     * [MAX_PENDING_OFFERS] page offers waiting (counted in [dropped]).
+     * An offer with no [requestedBy] — the user's own request — is
+     * always queued.
      */
     fun offer(
         tabId: Long,
@@ -68,7 +89,12 @@ internal class DownloadOffers {
         val offer = DownloadOffer(nextKey.getAndIncrement(), tabId, requestedBy, fileName, source, totalBytes, start)
         synchronized(this) {
             if (requestedBy != null && tabId in blockedTabs) return false
-            if (_pending.value.size >= MAX_PENDING_OFFERS) return false
+            if (requestedBy != null &&
+                _pending.value.count { it.tabId == tabId && it.requestedBy != null } >= MAX_PENDING_OFFERS
+            ) {
+                _dropped.value = _dropped.value + (tabId to (_dropped.value[tabId] ?: 0) + 1)
+                return false
+            }
             _pending.value = _pending.value + offer
             return true
         }
@@ -94,6 +120,7 @@ internal class DownloadOffers {
     fun decline(key: Long) = synchronized(this) {
         val offer = take(key) ?: return@synchronized
         if (offer.requestedBy != null) block(offer.tabId)
+        pruneDropped()
     }
 
     /** No to every offer [tabId] has waiting, and block it like [decline]. */
@@ -101,6 +128,7 @@ internal class DownloadOffers {
         val mine = _pending.value.filter { it.tabId == tabId }
         _pending.value = _pending.value - mine.toSet()
         if (mine.any { it.requestedBy != null }) block(tabId)
+        pruneDropped()
     }
 
     /** The user navigated [tabId] themselves: its pages may ask again. */
@@ -116,6 +144,7 @@ internal class DownloadOffers {
     fun retainTabs(tabIds: Set<Long>) = synchronized(this) {
         blockedTabs.retainAll(tabIds)
         _pending.value = _pending.value.filter { it.tabId in tabIds }
+        pruneDropped()
     }
 
     private fun block(tabId: Long) {
@@ -126,6 +155,13 @@ internal class DownloadOffers {
     private fun take(key: Long): DownloadOffer? = synchronized(this) {
         val taken = _pending.value.firstOrNull { it.key == key } ?: return@synchronized null
         _pending.value = _pending.value.filterNot { it.key == key }
+        pruneDropped()
         taken
+    }
+
+    /** A drop count lasts only while its tab still has page offers waiting. */
+    private fun pruneDropped() {
+        val live = _pending.value.filter { it.requestedBy != null }.mapTo(mutableSetOf()) { it.tabId }
+        if (_dropped.value.keys.any { it !in live }) _dropped.value = _dropped.value.filterKeys { it in live }
     }
 }

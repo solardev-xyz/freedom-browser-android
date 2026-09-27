@@ -150,6 +150,12 @@ class DownloadManager private constructor(context: Context) {
      */
     val offers: StateFlow<List<DownloadOffer>> = offerQueue.pending
 
+    /**
+     * Per tab, page downloads refused because it already had
+     * [MAX_PENDING_OFFERS] waiting ([DownloadOffers.dropped]).
+     */
+    val droppedOffers: StateFlow<Map<Long, Int>> = offerQueue.dropped
+
     /** Download history, newest first. */
     val downloads: Flow<List<DownloadEntry>> = dao.all()
 
@@ -204,7 +210,7 @@ class DownloadManager private constructor(context: Context) {
         val queued = offerQueue.offer(tabId, requestedBy, name, target.displayUrl, contentLength.coerceAtLeast(-1)) {
             enqueue(url, userAgent, contentDisposition, mimeType, contentLength, refererOrigin)
         }
-        if (!queued) Log.i(LOG_TAG, "download offer dropped (tab blocked or ${MAX_PENDING_OFFERS} waiting)")
+        if (!queued) Log.i(LOG_TAG, "download offer from tab $tabId dropped (tab blocked or $MAX_PENDING_OFFERS waiting)")
     }
 
     /** The user wants [DownloadOffer.key]'s file: start it. */

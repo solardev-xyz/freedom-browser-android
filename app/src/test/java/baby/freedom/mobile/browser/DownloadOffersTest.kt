@@ -128,6 +128,58 @@ class DownloadOffersTest {
     }
 
     @Test
+    fun aBackgroundTabAtTheCapDoesntBlockAnotherTab() {
+        // R6-F1: the cap was process-wide, and only the tab in view shows
+        // its offers, so an unanswered background tab refused every tab.
+        val offers = DownloadOffers()
+        repeat(MAX_PENDING_OFFERS + 3) { offers.offer(2, PAGE, "bg$it", "x", -1) {} }
+        assertEquals(mapOf(2L to 3), offers.dropped.value)
+        assertTrue(offers.offer(1, PAGE, "active.txt", "x", -1) {})
+        assertEquals(listOf("active.txt"), offers.pending.value.filter { it.tabId == 1L }.map { it.fileName })
+        assertEquals(null, offers.dropped.value[1])
+    }
+
+    @Test
+    fun theUsersOwnDownloadIsQueuedWithAFullQueue() {
+        val offers = DownloadOffers()
+        repeat(MAX_PENDING_OFFERS) { offers.offer(1, PAGE, "f$it", "x", -1) {} }
+        assertFalse(offers.offer(1, PAGE, "one too many", "x", -1) {})
+        // A typed download in the same, full tab still asks.
+        assertTrue(offers.offer(1, null, "typed.txt", "x", -1) {})
+        // …and doesn't count toward the page's cap either.
+        assertEquals(MAX_PENDING_OFFERS, offers.pending.value.count { it.requestedBy != null })
+    }
+
+    @Test
+    fun closingATabFreesItsSlotsAndDropCount() {
+        val offers = DownloadOffers()
+        repeat(MAX_PENDING_OFFERS + 1) { offers.offer(2, PAGE, "bg$it", "x", -1) {} }
+        assertEquals(1, offers.dropped.value[2])
+        offers.retainTabs(setOf(1))
+        assertTrue(offers.pending.value.isEmpty())
+        assertTrue(offers.dropped.value.isEmpty())
+        // Nothing of the closed tab pins the cap for the tab still open.
+        repeat(MAX_PENDING_OFFERS) { assertTrue(offers.offer(1, PAGE, "f$it", "x", -1) {}) }
+    }
+
+    @Test
+    fun theDropCountLastsUntilTheTabsQueueIsAnswered() {
+        val offers = DownloadOffers()
+        repeat(MAX_PENDING_OFFERS + 2) { offers.offer(1, PAGE, "f$it", "x", -1) {} }
+        assertEquals(2, offers.dropped.value[1])
+        offers.accept(offers.pending.value.first().key)
+        assertEquals(2, offers.dropped.value[1])
+        offers.declineAll(1)
+        assertTrue(offers.dropped.value.isEmpty())
+    }
+
+    @Test
+    fun droppedLine() {
+        assertEquals("1 further download from this tab wasn't offered: 10 were already waiting.", downloadOfferDroppedLine(1))
+        assertEquals("3 further downloads from this tab weren't offered: 10 were already waiting.", downloadOfferDroppedLine(3))
+    }
+
+    @Test
     fun keysAreUnique() {
         val offers = DownloadOffers()
         repeat(3) { offers.offer(1, PAGE, "same.txt", "x", -1) {} }

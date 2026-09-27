@@ -229,6 +229,11 @@ internal fun downloadOfferSizeLine(totalBytes: Long): String =
  */
 internal const val DOWNLOAD_OFFER_ARM_DELAY_MS = 1_000L
 
+/** The prompt's note that a tab asked for more than [MAX_PENDING_OFFERS] at once. */
+internal fun downloadOfferDroppedLine(dropped: Int): String =
+    (if (dropped == 1) "1 further download from this tab wasn't" else "$dropped further downloads from this tab weren't") +
+        " offered: $MAX_PENDING_OFFERS were already waiting."
+
 /**
  * "Download file?" for a download a page asked for (#79): its name,
  * size and source, the page that asked, with Download / Cancel.
@@ -242,6 +247,8 @@ internal const val DOWNLOAD_OFFER_ARM_DELAY_MS = 1_000L
 internal fun DownloadOfferDialog(
     offer: DownloadOffer,
     othersWaiting: Int,
+    /** Further page downloads this tab asked for and couldn't queue ([MAX_PENDING_OFFERS]). */
+    dropped: Int,
     onAccept: () -> Unit,
     onDecline: () -> Unit,
     onDeclineAll: () -> Unit,
@@ -282,6 +289,13 @@ internal fun DownloadOfferDialog(
                     Text(
                         if (othersWaiting == 1) "1 more download waiting" else "$othersWaiting more downloads waiting",
                         color = secondary,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+                if (dropped > 0) {
+                    Text(
+                        downloadOfferDroppedLine(dropped),
+                        color = MaterialTheme.colorScheme.error,
                         style = MaterialTheme.typography.bodySmall,
                     )
                 }

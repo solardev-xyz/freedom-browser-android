@@ -1432,16 +1432,40 @@ fun BrowserScreen(
     // page firing downloads in a loop can't hold the browser behind
     // this modal prompt.
     val downloadOffers by downloads.offers.collectAsState()
+    val droppedOffers by downloads.droppedOffers.collectAsState()
     val activeTabId = tabs.active.id
     val tabOffers = downloadOffers.filter { it.tabId == activeTabId }
     tabOffers.firstOrNull()?.let { offer ->
         DownloadOfferDialog(
             offer = offer,
             othersWaiting = tabOffers.size - 1,
+            dropped = droppedOffers[activeTabId] ?: 0,
             onAccept = { downloads.accept(offer.key) },
             onDecline = { downloads.decline(offer.key) },
             onDeclineAll = { downloads.declineAll(activeTabId) },
         )
+    }
+    // A background tab that has filled its own queue and is still
+    // asking is invisible from here (its prompt waits until it's in
+    // view), so say so once per episode instead of dropping silently.
+    // The active tab needs no snackbar: its prompt carries the note.
+    val announcedDrops = remember { mutableSetOf<Long>() }
+    LaunchedEffect(droppedOffers.keys) {
+        announcedDrops.retainAll(droppedOffers.keys)
+        val fresh = droppedOffers.keys.filter { it != tabs.active.id && announcedDrops.add(it) }
+        for (tabId in fresh) {
+            launch {
+                val result = snackbarHostState.showSnackbar(
+                    "A background tab is asking for more downloads than can wait; extras are dropped",
+                    actionLabel = "Show",
+                    duration = SnackbarDuration.Long,
+                )
+                if (result == SnackbarResult.ActionPerformed) {
+                    val index = tabs.tabs.indexOfFirst { it.id == tabId }
+                    if (index >= 0) tabs.switchTo(index)
+                }
+            }
+        }
     }
     // A closed tab's offers (and block) go with it.
     val openTabIds = tabs.tabs.map { it.id }.toSet()
