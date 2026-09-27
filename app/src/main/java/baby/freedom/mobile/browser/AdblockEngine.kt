@@ -675,14 +675,17 @@ internal fun parseNetworkFilter(line: String): NetworkFilter? {
     if (exception) text = text.substring(2)
 
     var options: String? = null
-    val isRegex = text.length > 2 && text.startsWith("/") && text.endsWith("/")
-    if (!isRegex) {
+    // A regex's body may hold a `$` of its own, so a whole `/…/` has no
+    // options; otherwise they follow the last `$` — and what's left may
+    // still be a `/regex/` (`/pixel[0-9]+\.gif/$image`, R1-F2).
+    if (!(text.length > 2 && text.startsWith("/") && text.endsWith("/"))) {
         val dollar = text.lastIndexOf('$')
         if (dollar >= 0) {
             options = text.substring(dollar + 1)
             text = text.substring(0, dollar)
         }
     }
+    val isRegex = text.length > 2 && text.startsWith("/") && text.endsWith("/")
 
     var types = 0
     var negatedTypes = 0

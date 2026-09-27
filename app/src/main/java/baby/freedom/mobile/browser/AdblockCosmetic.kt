@@ -78,6 +78,13 @@ internal const val COSMETIC_CSS = "1"
 /** Kotlin's answer: no hiding in this frame (allowlisted, excepted, or blocking off) — stop. */
 internal const val COSMETIC_OFF = "0"
 
+/**
+ * How often, in ms, a frame puts back hiding sheets the page dropped by
+ * assigning `document.adoptedStyleSheets` without touching the DOM (a
+ * DOM change puts them back at once).
+ */
+internal const val COSMETIC_RECHECK_MS = 2000
+
 /** Most names one report may carry; the script sends bigger finds in several. */
 internal const val COSMETIC_MAX_TOKENS = 1000
 
@@ -97,7 +104,11 @@ internal fun parseCosmeticTokens(data: String): List<String>? {
  * The page side: see [AdblockCosmetic]. Names are collected from the
  * document as it is parsed and changed (a `MutationObserver` over added
  * elements and `class` / `id` changes), and reported in batches at most
- * every 50 ms, each name once per document. It stops for good on
+ * every 50 ms, each name once per document. A page that assigns
+ * `document.adoptedStyleSheets` drops our sheets with its own; they are
+ * put back with the next batch of DOM changes, and checked for every
+ * [COSMETIC_RECHECK_MS] besides (R1-F3). Rules reach the document's own
+ * tree only, not elements inside a shadow root. It stops for good on
  * [COSMETIC_OFF]. Everything it calls is saved at document start, so a
  * page can't redirect it.
  */
@@ -115,18 +126,25 @@ internal fun adblockCosmeticJs(channel: String): String {
   var seen = new S(), found = [], queued = [], timer = 0, on = true, observer = null, sheets = [];
   var Doc = w.Document, desc = Doc && Object.getOwnPropertyDescriptor(Doc.prototype, 'adoptedStyleSheets');
   var getSheets = desc && desc.get, setSheets = desc && desc.set;
+  function keep() {
+    if (!sheets.length || !getSheets) return;
+    try {
+      var cur = getSheets.call(d), next = [], missing = false;
+      for (var i = 0; i < cur.length; i++) next.push(cur[i]);
+      for (var j = 0; j < sheets.length; j++) if (next.indexOf(sheets[j]) < 0) { next.push(sheets[j]); missing = true; }
+      if (missing) setSheets.call(d, next);
+    } catch (e) {}
+  }
   function apply(css) {
     if (!css || !Sheet || !getSheets) return;
     try {
       var s = new Sheet();
       s.replaceSync(css);
       sheets.push(s);
-      var cur = getSheets.call(d), next = [];
-      for (var i = 0; i < cur.length; i++) next.push(cur[i]);
-      for (var j = 0; j < sheets.length; j++) if (next.indexOf(sheets[j]) < 0) next.push(sheets[j]);
-      setSheets.call(d, next);
-    } catch (e) {}
+    } catch (e) { return; }
+    keep();
   }
+  function watch() { if (!on) return; keep(); setT(watch, $COSMETIC_RECHECK_MS); }
   function add(t) { if (!seen.has(t)) { seen.add(t); found.push(t); } }
   function names(el) {
     var id = el.id;
@@ -143,6 +161,7 @@ internal fun adblockCosmeticJs(channel: String): String {
   function flush() {
     timer = 0;
     if (!on) return;
+    keep();
     var roots = queued; queued = [];
     for (var i = 0; i < roots.length; i++) scan(roots[i]);
     while (found.length) {
@@ -169,6 +188,7 @@ internal fun adblockCosmeticJs(channel: String): String {
     observer.observe(d, { childList: true, subtree: true, attributes: true, attributeFilter: ['id', 'class'] });
     if (d.documentElement) queued.push(d.documentElement);
     later();
+    setT(watch, $COSMETIC_RECHECK_MS);
   };
   port.postMessage('$COSMETIC_HELLO');
 })();

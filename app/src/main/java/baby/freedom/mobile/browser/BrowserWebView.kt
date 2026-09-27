@@ -77,7 +77,6 @@ import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
 import java.util.concurrent.atomic.AtomicBoolean
-import java.util.concurrent.atomic.AtomicReference
 import kotlin.math.abs
 import kotlin.math.roundToInt
 
@@ -1899,14 +1898,14 @@ private fun buildRefreshableWebView(
             WebViewCompat.addDocumentStartJavaScript(this, bottomUiDetectorJs(channel), BOTTOM_UI_ORIGIN_RULES)
         }
 
-        // Ad blocking (#126): the tab's top-level document, as the
-        // request interceptor (a WebView IO thread) last saw its
-        // main-frame request and onPageStarted last saw it commit — the
-        // page the network filters' `third-party` / `domain=` options
-        // and the allowlist are judged against. The cosmetic channel
-        // reads it on the main thread.
-        val adblockPage = AtomicReference<String?>(null)
-        AdblockCosmetic.install(this, state.private) { adblockPage.get() }
+        // Ad blocking (#126): the tab's top-level document — the page
+        // the network filters' `third-party` / `domain=` options and the
+        // allowlist are judged against. The committed one, or one whose
+        // answer just went out and is about to commit; never one a
+        // navigation that didn't commit was headed for (see [AdblockPage]).
+        // The cosmetic channel reads it on the main thread.
+        val adblockPage = AdblockPage()
+        AdblockCosmetic.install(this, state.private) { adblockPage.current() }
 
         // Force an initial paint so the WebView's compositor surface
         // is valid even before the user submits a URL. Not for a popup:
@@ -1990,6 +1989,7 @@ private fun buildRefreshableWebView(
                 // The page on screen stays: its open requests are this
                 // load's, whatever the answer's headers suggested.
                 state.mainFrameKeptPage()
+                adblockPage.kept()
             }
             // A main-frame navigation that turned out to be a file never
             // commits: no onPageStarted, no final progress callback. Left
@@ -2077,8 +2077,9 @@ private fun buildRefreshableWebView(
             }
 
             override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
-                // A page back from the back/forward cache made no request.
-                url?.let(adblockPage::set)
+                // Ad blocking judges requests against it from here on
+                // (a page back from the back/forward cache made none).
+                url?.let(adblockPage::committed)
                 // The pending navigation committed; it's no download.
                 pendingNavigationUrls.clear()
                 navigationHadGesture = false
@@ -2287,6 +2288,10 @@ private fun buildRefreshableWebView(
             }
 
             override fun onPageFinished(view: WebView?, url: String?) {
+                // Chromium's synthetic finish for a navigation that never
+                // committed (a 204, Stop, superseded): the page on screen
+                // stays, and ad blocking goes on judging against it.
+                if (!finishedLoadIsCurrent(url, view?.url)) adblockPage.kept(url)
                 // Re-probe: a page's own stylesheet (or its first
                 // script) can be what sets `touch-action: none`, and
                 // that is not necessarily in place at first paint (#56).
@@ -2523,6 +2528,7 @@ private fun buildRefreshableWebView(
                     if (externalLinkKeepsPage(request.isForMainFrame, request.isRedirect, popupFirstNavigation)) {
                         pendingNavigationUrls.clear()
                         state.mainFrameKeptPage()
+                        adblockPage.kept()
                     }
                     val input = gesture
                     val latch = askingView?.userGestures
@@ -2578,6 +2584,9 @@ private fun buildRefreshableWebView(
                     state.beginLoad(inWebView = true)
                 }
                 if (detoured) {
+                    // The WebView's own navigation stops here; the submit
+                    // starts another, with an answer of its own.
+                    if (request.isForMainFrame) adblockPage.kept()
                     navigationHadGesture = false
                     onSubmitUrl(state, target)
                     return true
@@ -2588,6 +2597,9 @@ private fun buildRefreshableWebView(
                 if (request.isForMainFrame && view is PageWebView) {
                     view.documents.navigationStarted(target)
                 }
+                // A server redirect of a navigation already answered as a
+                // new document: that document is the redirect target's.
+                if (request.isForMainFrame && request.isRedirect) adblockPage.redirected(target)
                 return false
             }
 
@@ -2597,10 +2609,7 @@ private fun buildRefreshableWebView(
             ): WebResourceResponse? {
                 val mainFrame = request?.isForMainFrame == true
                 if (mainFrame) {
-                    request!!.url?.toString()?.let {
-                        pendingNavigationUrls.add(it)
-                        adblockPage.set(it)
-                    }
+                    request!!.url?.toString()?.let(pendingNavigationUrls::add)
                 }
                 // Tagged with the load it belongs to, and open until
                 // Chromium closes the body, so the IPFS phase line can
@@ -2629,7 +2638,7 @@ private fun buildRefreshableWebView(
                 if (!mainFrame && request != null) {
                     val url = request.url?.toString()
                     if (url != null &&
-                        Adblock.shouldBlock(url, request.requestHeaders, adblockPage.get(), state.private)
+                        Adblock.shouldBlock(url, request.requestHeaders, adblockPage.current(), state.private)
                     ) {
                         return Adblock.blockedResponse()
                     }
@@ -2651,6 +2660,7 @@ private fun buildRefreshableWebView(
                     )
                     val replaces = mainFrameAnswerReplacesDocument(response)
                     state.mainFrameAnswered(generation, replaces)
+                    adblockPage.answered(request!!.url.toString(), replaces)
                     if (replaces && view is PageWebView) {
                         view.documents.mainFrameAnswered(request!!.url.toString())
                     }

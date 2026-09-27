@@ -93,6 +93,36 @@ class AdblockCosmeticTest {
     }
 
     @Test
+    fun `puts its sheets back when the page replaces adoptedStyleSheets`() {
+        install()
+        eval("reply('1.promo{display:none!important}')")
+        eval("var ours = adopted[0]; flushTimers()")
+        // The page assigns its own list, with no DOM change: the recheck restores ours.
+        eval("document.adoptedStyleSheets = [{ page: true }]")
+        assertEquals("1", str("adopted.length"))
+        eval("flushTimers()")
+        assertEquals("2", str("adopted.length"))
+        assertEquals("true", str("adopted[0].page === true && adopted[1] === ours"))
+        // …and it keeps rechecking, without adding duplicates.
+        eval("flushTimers(); flushTimers()")
+        assertEquals("2", str("adopted.length"))
+        eval("document.adoptedStyleSheets = []")
+        // A DOM change puts them back at once, with its batch.
+        eval("observer.cb([{ type: 'childList', addedNodes: [el('', ['fresh'])] }])")
+        eval("var t = timers; timers = []; t[t.length - 1]()")
+        assertEquals("true", str("adopted.length === 1 && adopted[0] === ours"))
+    }
+
+    @Test
+    fun `stops rechecking once hiding is off`() {
+        install()
+        eval("reply('1.promo{display:none!important}'); flushTimers()")
+        eval("port.onmessage({ data: '0' }); document.adoptedStyleSheets = []; flushTimers(); flushTimers()")
+        assertEquals("0", str("adopted.length"))
+        assertEquals("0", str("timers.length"))
+    }
+
+    @Test
     fun `stops for good when told there is no hiding here`() {
         install()
         eval("reply('0')")

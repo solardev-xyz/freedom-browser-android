@@ -56,6 +56,27 @@ class AdblockEngineTest {
     }
 
     @Test
+    fun `regex filters with options, and regex exceptions`() {
+        val e = engine(
+            "/pixel[0-9]+\\.gif/\$image,third-party",
+            "/end[0-9]\$/\$image",
+            "||cdn.example^",
+            "@@/cdn\\.example\\/ok[0-9]+\\//\$image",
+        )
+        assertTrue(parseNetworkFilter("/pixel[0-9]+\\.gif/\$image,third-party")!!.regex != null)
+        assertTrue(e.blocks("https://tracker.example/pixel123.gif", types = RequestType.IMAGE))
+        assertFalse(e.blocks("https://tracker.example/pixel123.gif", types = RequestType.SCRIPT))
+        assertFalse(e.blocks("https://news.example/pixel123.gif", types = RequestType.IMAGE))
+        // A `$` in the body is the regex's, the last one the options'.
+        assertTrue(e.blocks("https://x.example/end7", types = RequestType.IMAGE))
+        assertFalse(e.blocks("https://x.example/end7x", types = RequestType.IMAGE))
+        // The exception is honoured, not dropped as a glob that never matches.
+        assertTrue(e.blocks("https://cdn.example/ads/1.gif", types = RequestType.IMAGE))
+        assertFalse(e.blocks("https://cdn.example/ok12/1.gif", types = RequestType.IMAGE))
+        assertTrue(e.blocks("https://cdn.example/ok12/1.js", types = RequestType.SCRIPT))
+    }
+
+    @Test
     fun `exceptions win unless the block is important`() {
         val e = engine(
             "||ads.example.com^",
