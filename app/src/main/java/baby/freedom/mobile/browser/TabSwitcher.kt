@@ -4,6 +4,10 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.awaitLongPressOrCancellation
+import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -19,12 +23,16 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.systemBars
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyGridItemInfo
+import androidx.compose.foundation.lazy.grid.LazyGridState
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.itemsIndexed
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Restore
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.IconButtonDefaults
@@ -33,15 +41,35 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.PointerInputScope
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.zIndex
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 
 /**
  * Full-screen, Chrome-style tab switcher.
@@ -50,6 +78,10 @@ import androidx.compose.ui.unit.sp
  * grid of tab cards. Each card shows its page title, a close (×) button,
  * and a preview thumbnail of the page (or a letter placeholder when no
  * snapshot has been captured yet).
+ *
+ * Long-press a card and drag it to move the tab ([TabsState.moveTab]);
+ * the header's "Reopen" brings back the most recently closed tab
+ * ([TabsState.reopenClosedTab]) while there is one.
  */
 @Composable
 fun TabSwitcherScreen(
@@ -82,16 +114,46 @@ fun TabSwitcherScreen(
                 Text("New tab", fontWeight = FontWeight.Medium)
             }
             Spacer(Modifier.weight(1f))
+            if (tabs.canReopenClosedTab) {
+                TextButton(onClick = {
+                    tabs.reopenClosedTab()
+                    onDismiss()
+                }) {
+                    Icon(Icons.Filled.Restore, contentDescription = null)
+                    Spacer(Modifier.size(8.dp))
+                    Text("Reopen", fontWeight = FontWeight.Medium)
+                }
+            }
             IconButton(onClick = onDismiss, shapes = IconButtonDefaults.shapes()) {
                 Icon(Icons.Filled.Close, contentDescription = "Close tab switcher")
             }
         }
 
+        val gridState = rememberLazyGridState()
+        val scope = rememberCoroutineScope()
+        val haptics = LocalHapticFeedback.current
+        val edgePx = with(LocalDensity.current) { REORDER_EDGE.toPx() }
+        val gridStartPx = with(LocalDensity.current) { GRID_PADDING_H.toPx() }
+        val reorder = remember(tabs, gridState, gridStartPx) {
+            TabReorder(tabs, gridState, gridStartPx)
+        }
+
         LazyVerticalGrid(
             columns = GridCells.Fixed(2),
-            modifier = Modifier.fillMaxSize(),
+            state = gridState,
+            modifier = Modifier
+                .fillMaxSize()
+                .pointerInput(reorder) {
+                    reorderGestures(
+                        reorder = reorder,
+                        onStart = { haptics.performHapticFeedback(HapticFeedbackType.LongPress) },
+                        onDrag = { amount ->
+                            reorder.drag(amount, scope, edgePx, size.height.toFloat())
+                        },
+                    )
+                },
             contentPadding = PaddingValues(
-                start = 12.dp, end = 12.dp, top = 4.dp, bottom = 24.dp,
+                start = GRID_PADDING_H, end = GRID_PADDING_H, top = 4.dp, bottom = 24.dp,
             ),
             verticalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(12.dp),
             horizontalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(12.dp),
@@ -100,7 +162,21 @@ fun TabSwitcherScreen(
                 items = tabs.tabs,
                 key = { _, tab -> tab.id },
             ) { index, tab ->
+                val dragged = tab.id == reorder.draggedId
                 TabCard(
+                    modifier = if (dragged) {
+                        Modifier
+                            .zIndex(1f)
+                            .graphicsLayer {
+                                translationX = reorder.offset.x
+                                translationY = reorder.offset.y
+                                scaleX = 1.04f
+                                scaleY = 1.04f
+                                alpha = 0.92f
+                            }
+                    } else {
+                        Modifier.animateItem()
+                    },
                     tab = tab,
                     isActive = index == tabs.activeIndex,
                     onClick = {
@@ -114,12 +190,198 @@ fun TabSwitcherScreen(
     }
 }
 
+/** The switcher grid's side padding. */
+private val GRID_PADDING_H = 12.dp
+
+/** How close to the grid's top or bottom a dragged card scrolls it. */
+private val REORDER_EDGE = 56.dp
+
+/** Most the grid scrolls per frame while a card is held at its edge. */
+private const val REORDER_SCROLL_STEP = 24f
+
+/**
+ * Long-press drag-to-reorder for the switcher grid.
+ *
+ * The held card follows the finger ([offset], applied as a translation
+ * on top of its slot). Whenever the card's centre crosses into another
+ * card's slot the tab moves there ([TabsState.moveTab]) and [offset] is
+ * rebased onto the new slot, so the card stays under the finger while
+ * the rest of the grid animates around it. Held near the top or bottom
+ * edge, the grid scrolls so a tab can be carried past the screenful.
+ *
+ * Positions come from the grid's own layout info, whose item offsets
+ * are measured inside the content padding: along the scroll axis
+ * `viewportStartOffset` (minus the top padding) converts them into the
+ * grid's pointer space, across it the side padding ([startPaddingPx])
+ * has to be added back.
+ */
+private class TabReorder(
+    private val tabs: TabsState,
+    private val grid: LazyGridState,
+    private val startPaddingPx: Float,
+) {
+    var draggedId: Long? by mutableStateOf(null)
+        private set
+    var offset: Offset by mutableStateOf(Offset.Zero)
+        private set
+
+    private var autoScroll: Job? = null
+    private var scrollStep = 0f
+
+    /**
+     * Where the held card is drawn, in grid pointer space: its slot at
+     * pick-up plus every finger move since. Moves and auto-scroll change
+     * the slot *and* rebase [offset] by the same amount, so this only
+     * ever follows the finger — and unlike slot + [offset] it's never
+     * read against a layout that hasn't caught up with a move yet.
+     */
+    private var cardTopLeft = Offset.Zero
+    private var cardSize = Offset.Zero
+
+    private fun topLeft(item: LazyGridItemInfo): Offset = Offset(
+        item.offset.x + startPaddingPx,
+        (item.offset.y - grid.layoutInfo.viewportStartOffset).toFloat(),
+    )
+
+    private fun contains(item: LazyGridItemInfo, point: Offset): Boolean {
+        val tl = topLeft(item)
+        return point.x >= tl.x && point.x < tl.x + item.size.width &&
+            point.y >= tl.y && point.y < tl.y + item.size.height
+    }
+
+    private fun draggedItem(): LazyGridItemInfo? =
+        grid.layoutInfo.visibleItemsInfo.firstOrNull { it.key == draggedId }
+
+    fun start(at: Offset): Boolean {
+        val item = grid.layoutInfo.visibleItemsInfo.firstOrNull { contains(it, at) }
+            ?: return false
+        draggedId = item.key as? Long ?: return false
+        offset = Offset.Zero
+        cardTopLeft = topLeft(item)
+        cardSize = Offset(item.size.width.toFloat(), item.size.height.toFloat())
+        return true
+    }
+
+    fun drag(amount: Offset, scope: CoroutineScope, edgePx: Float, heightPx: Float) {
+        offset += amount
+        cardTopLeft += amount
+        moveIfOverAnother()
+        val top = cardTopLeft.y
+        val bottom = top + cardSize.y
+        scrollStep = when {
+            top < edgePx -> -REORDER_SCROLL_STEP * ((edgePx - top) / edgePx).coerceIn(0f, 1f)
+            bottom > heightPx - edgePx ->
+                REORDER_SCROLL_STEP * ((bottom - heightPx + edgePx) / edgePx).coerceIn(0f, 1f)
+            else -> 0f
+        }
+        if (scrollStep != 0f && autoScroll?.isActive != true) {
+            autoScroll = scope.launch {
+                while (isActive && draggedId != null && scrollStep != 0f) {
+                    // A re-pin from [moveIfOverAnother]
+                    // (`requestScrollToItem`) cancels the scroll in
+                    // flight; that ends this step, not the auto-scroll
+                    // — unless it is this job itself being cancelled.
+                    val scrolled = try {
+                        grid.scrollBy(scrollStep)
+                    } catch (e: CancellationException) {
+                        if (!isActive) throw e
+                        0f
+                    }
+                    // So a step can scroll 0 without the grid being at
+                    // its end — only the end itself stops the loop.
+                    val canGoOn = if (scrollStep > 0f) grid.canScrollForward else grid.canScrollBackward
+                    if (scrolled == 0f && !canGoOn) break
+                    // The slot scrolled with the content; keep the card
+                    // where the finger is.
+                    offset += Offset(0f, scrolled)
+                    moveIfOverAnother()
+                    delay(16)
+                }
+            }
+        }
+    }
+
+    private fun moveIfOverAnother() {
+        val item = draggedItem() ?: return
+        val from = tabs.tabs.indexOfFirst { it.id == draggedId }
+        // The grid hasn't laid out the last move yet: its slots are
+        // stale, so neither the target nor the rebase below would be
+        // right. The next move or scroll step asks again.
+        if (item.index != from) return
+        val centre = cardTopLeft + cardSize / 2f
+        val target = grid.layoutInfo.visibleItemsInfo
+            .firstOrNull { it.key != draggedId && contains(it, centre) }
+            ?: return
+        // The grid keeps its first visible item pinned across a
+        // reorder; if that item is one of the two moving, it would
+        // scroll the grid along with it. Re-pin to the current
+        // position instead.
+        val first = grid.firstVisibleItemIndex
+        val firstOffset = grid.firstVisibleItemScrollOffset
+        val to = tabs.tabs.indexOfFirst { it.id == target.key }
+        if (from < 0 || to < 0) return
+        offset += topLeft(item) - topLeft(target)
+        tabs.moveTab(from, to)
+        if (from == first || to == first) {
+            // requestScrollToItem applies on the next measure without
+            // suspending, so the pin lands in the same frame as the move.
+            grid.requestScrollToItem(first, firstOffset)
+        }
+    }
+
+    fun end() {
+        autoScroll?.cancel()
+        autoScroll = null
+        scrollStep = 0f
+        draggedId = null
+        offset = Offset.Zero
+    }
+}
+
+/**
+ * Long-press, then drag, on the switcher grid.
+ *
+ * Not `detectDragGesturesAfterLongPress`: that listens in the main
+ * pass, where the grid's own scroll handling and each card's
+ * `clickable` sit *inside* this modifier and see every move first —
+ * on the AVD the long press registered and not one move reached the
+ * reorder. Once the long press has landed on a card, this reads the
+ * held pointer in the initial pass and consumes it there, so the grid
+ * doesn't scroll under the drag and lifting the finger doesn't also
+ * count as a tap that opens the tab. Before the long press nothing is
+ * consumed: a quick tap still opens a tab, a quick swipe still scrolls.
+ */
+private suspend fun PointerInputScope.reorderGestures(
+    reorder: TabReorder,
+    onStart: () -> Unit,
+    onDrag: (Offset) -> Unit,
+) = awaitEachGesture {
+    val down = awaitFirstDown(requireUnconsumed = false)
+    val press = awaitLongPressOrCancellation(down.id) ?: return@awaitEachGesture
+    if (!reorder.start(press.position)) return@awaitEachGesture
+    onStart()
+    try {
+        val pointer = press.id
+        while (true) {
+            val event = awaitPointerEvent(PointerEventPass.Initial)
+            val change = event.changes.firstOrNull { it.id == pointer } ?: break
+            val delta = change.positionChange()
+            change.consume()
+            if (!change.pressed) break
+            if (delta != Offset.Zero) onDrag(delta)
+        }
+    } finally {
+        reorder.end()
+    }
+}
+
 @Composable
 private fun TabCard(
     tab: BrowserState,
     isActive: Boolean,
     onClick: () -> Unit,
     onClose: () -> Unit,
+    modifier: Modifier = Modifier,
 ) {
     val borderColor = if (isActive) {
         MaterialTheme.colorScheme.primary
@@ -129,7 +391,7 @@ private fun TabCard(
     val borderWidth = if (isActive) 2.dp else 1.dp
 
     Column(
-        modifier = Modifier
+        modifier = modifier
             .fillMaxWidth()
             .aspectRatio(0.78f)
             .clip(MaterialTheme.shapes.large)

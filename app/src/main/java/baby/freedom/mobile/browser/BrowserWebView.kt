@@ -13,6 +13,7 @@ import android.graphics.ColorFilter
 import android.graphics.PixelFormat
 import android.graphics.Rect
 import android.graphics.drawable.Drawable
+import android.os.Bundle
 import android.os.SystemClock
 import android.util.Log
 import android.view.PixelCopy
@@ -498,10 +499,30 @@ fun BrowserWebViewHost(
                     },
                     onExitFullscreen = { tabs.onFullscreenHidden(tab) },
                     onRecoverNodes = { tabs.requestNodeRecovery?.invoke() },
+                    restoring = tab.pendingRestore != null,
                 )
                 webViews[tab.id] = wv
                 refreshLayouts[tab.id] = layout
                 frame.addView(layout)
+                // A reopened tab (see [TabsState.reopenClosedTab]): put
+                // the closed WebView's back/forward list back and load
+                // its current entry. If the saved state is missing or
+                // WebView won't take it, give the WebView the initial
+                // blank paint it skipped and submit the page's address
+                // instead — the page comes back, its history doesn't.
+                tab.pendingRestore?.let { restore ->
+                    tab.pendingRestore = null
+                    val restored = restore.webViewState?.let { wv.restoreState(it) } != null
+                    if (restored) {
+                        tab.canGoBack = wv.canGoBack()
+                        tab.canGoForward = wv.canGoForward()
+                    } else {
+                        wv.loadUrl(ABOUT_BLANK)
+                        if (restore.fallbackUrl.isNotBlank()) {
+                            tabs.requestSubmit?.invoke(tab, restore.fallbackUrl)
+                        }
+                    }
+                }
             }
         }
         val toRemove = webViews.keys.filter { it !in idsNow }
@@ -568,6 +589,11 @@ fun BrowserWebViewHost(
         // also clears the counter itself so the capsule's edge trace
         // goes out on the same frame as the tap.
         tabs.stopLoading = { tab -> webViews[tab.id]?.stopLoading() }
+        tabs.saveWebViewState = { tab ->
+            webViews[tab.id]?.let { wv ->
+                Bundle().takeIf { runCatching { wv.saveState(it) }.getOrNull() != null }
+            }
+        }
         tabs.clearWebViewData = {
             // Globally-scoped stores: cookies and DOM storage / IndexedDB /
             // WebSQL are shared across every WebView in the process, so
@@ -592,6 +618,7 @@ fun BrowserWebViewHost(
             tabs.captureActiveThumbnail = null
             tabs.clearWebViewData = null
             tabs.stopLoading = null
+            tabs.saveWebViewState = null
         }
     }
 
@@ -616,6 +643,7 @@ private fun buildRefreshableWebView(
     onEnterFullscreen: (View, WebChromeClient.CustomViewCallback?) -> Unit,
     onExitFullscreen: () -> Unit,
     onRecoverNodes: () -> Unit = {},
+    restoring: Boolean = false,
 ): Pair<SwipeRefreshLayout, WebView> {
     val refreshLayout = SwipeRefreshLayout(context).apply {
         layoutParams = ViewGroup.LayoutParams(
@@ -1201,8 +1229,12 @@ private fun buildRefreshableWebView(
         }
 
         // Force an initial paint so the WebView's compositor surface
-        // is valid even before the user submits a URL.
-        loadUrl(ABOUT_BLANK)
+        // is valid even before the user submits a URL. Not for a tab
+        // being restored: `restoreState` has to be the WebView's first
+        // navigation, and the blank load still pending here would win
+        // over the restored entry (seen on the AVD — the reopened tab
+        // came back on the home overlay).
+        if (!restoring) loadUrl(ABOUT_BLANK)
 
         webViewClient = object : WebViewClient() {
             // A probe the *page* asked for belongs to the page that

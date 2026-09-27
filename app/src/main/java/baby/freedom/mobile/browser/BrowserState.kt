@@ -1,5 +1,6 @@
 package baby.freedom.mobile.browser
 
+import android.os.Bundle
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -106,6 +107,17 @@ class BrowserState(val id: Long) {
 
     var override: Override? by mutableStateOf<Override?>(null)
         internal set
+
+    /**
+     * What a tab brought back by [TabsState.reopenClosedTab] should be
+     * rebuilt from: the closed WebView's saved state, and the URL to
+     * submit afresh if that state can't be restored. Consumed (and
+     * cleared) by [BrowserWebViewHost] when it creates this tab's
+     * WebView; null for every other tab.
+     */
+    class PendingRestore(val webViewState: Bundle?, val fallbackUrl: String)
+
+    internal var pendingRestore: PendingRestore? = null
 
     /**
      * Compact-on-scroll state of the floating capsule for this tab.

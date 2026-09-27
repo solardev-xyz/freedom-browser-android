@@ -1295,7 +1295,11 @@ fun BrowserScreen(
             repo = repo,
             ipfsInfo = ipfsInfo,
             onIpfsToggle = onIpfsToggle,
-            onClearWebViewData = { tabs.clearWebViewData?.invoke() },
+            onClearWebViewData = {
+                // Closed tabs carry their saved back/forward history.
+                tabs.forgetClosedTabs()
+                tabs.clearWebViewData?.invoke()
+            },
             onDismiss = { showSettings = false },
         )
     }
