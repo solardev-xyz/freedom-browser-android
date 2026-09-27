@@ -491,7 +491,8 @@ internal fun bottomUiProbeRequest(token: String): String = "probe $token"
  * `playing`, through
  * `EventTarget.prototype.addEventListener` saved at document start) — so
  * an element the page detaches mid-play, whose `pause` no longer reaches
- * `window`, is still heard. The frame posts [AUDIO_AUDIBLE] when one of
+ * `window`, is still heard, and one the page plays again after detaching
+ * it (its trusted `playing` fires only on itself) is tracked again. The frame posts [AUDIO_AUDIBLE] when one of
  * its elements becomes audible (playing, not `muted`, `volume` above 0,
  * and not starved of data: `readyState` past `HAVE_CURRENT_DATA`, so a
  * stream stuck `waiting`/`stalled` with `paused` still false doesn't
@@ -620,13 +621,18 @@ internal fun bottomUiDetectorJs(channel: String, debounceMs: Int = BOTTOM_UI_DEB
     if (now !== loud) { loud = now; port.postMessage(now ? '$AUDIO_AUDIBLE' : '$AUDIO_SILENT'); }
     if (loud && !recheck) recheck = setT(function () { recheck = 0; hear(); }, $AUDIO_RECHECK_MS);
   }
+  function heard(e) {
+    var m = e.currentTarget;
+    if (e.type === 'playing' && e.isTrusted && media.indexOf(m) < 0) media.push(m);
+    hear();
+  }
   if (onEl) {
     w.addEventListener('playing', function (e) {
       var m = e.target;
       if (!e.isTrusted || !m || typeof m.paused !== 'boolean') return;
       if (media.indexOf(m) < 0) {
         media.push(m);
-        for (var i = 0; i < AUDIO_EVENTS.length; i++) onEl.call(m, AUDIO_EVENTS[i], hear);
+        for (var i = 0; i < AUDIO_EVENTS.length; i++) onEl.call(m, AUDIO_EVENTS[i], heard);
       }
       hear();
     }, true);

@@ -95,7 +95,7 @@ class BottomUiDetectorScriptTest {
         };
         function media() { var m = new EventTarget(); m.paused = true; m.ended = false; m.muted = false; m.volume = 1; m.connected = true; m.readyState = 4; return m; }
         function fire(m, t) {
-          var e = { type: t, target: m, isTrusted: true };
+          var e = { type: t, target: m, currentTarget: m, isTrusted: true };
           if (m.connected) for (var i = 0; i < mediaListeners.length; i++) if (mediaListeners[i].t === t) mediaListeners[i].f(e);
           var ls = m.ls || [];
           for (var j = 0; j < ls.length; j++) if (ls[j].t === t) ls[j].f(e);
@@ -484,6 +484,18 @@ class BottomUiDetectorScriptTest {
         documentStart()
         eval("var v = media(); play(v); v.connected = false; pause(v)")
         assertEquals("$AUDIO_AUDIBLE|$AUDIO_SILENT", audio())
+    }
+
+    @Test
+    fun `an element paused by being detached is heard again when it plays detached`() = page {
+        documentStart()
+        eval("var v = media(); play(v); v.connected = false; pause(v); play(v)")
+        assertEquals("$AUDIO_AUDIBLE|$AUDIO_SILENT|$AUDIO_AUDIBLE", audio())
+        eval("pause(v)")
+        assertEquals("$AUDIO_AUDIBLE|$AUDIO_SILENT|$AUDIO_AUDIBLE|$AUDIO_SILENT", audio())
+        // A synthetic `playing` dispatched on the detached element adds nothing.
+        eval("v.paused = false; v.ls.forEach(function (l) { if (l.t === 'playing') l.f({ type: 'playing', target: v, currentTarget: v, isTrusted: false }); })")
+        assertEquals("$AUDIO_AUDIBLE|$AUDIO_SILENT|$AUDIO_AUDIBLE|$AUDIO_SILENT", audio())
     }
 
     @Test
