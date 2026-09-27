@@ -68,6 +68,15 @@ class TabsState(
     var stopLoading: ((BrowserState) -> Unit)? = null
 
     /**
+     * Hook installed by the [BrowserWebViewHost] so the find bar can drive
+     * the given tab's `findAllAsync` / `findNext` / `clearMatches`. Like
+     * [stopLoading], only the host knows which physical WebView backs a
+     * tab. `null` before the host has composed, or after it disposes.
+     */
+    @Volatile
+    var find: ((BrowserState, FindAction) -> Unit)? = null
+
+    /**
      * Hook installed by [BrowserScreen] so the WebView layer can bounce
      * `bzz://` / `ens://` navigations (in-page link clicks, error-page
      * "Try Again" button) back through the screen's probe-gated submit

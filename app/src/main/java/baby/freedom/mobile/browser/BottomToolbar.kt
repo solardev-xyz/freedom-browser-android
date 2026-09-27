@@ -43,6 +43,7 @@ import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.StarBorder
@@ -1290,7 +1291,7 @@ internal fun capsuleBorder(colors: ColorScheme): Color = colors.onSurface.copy(
  * cannot cover either.
  */
 @Composable
-private fun CapsuleSurface(
+internal fun CapsuleSurface(
     shape: Shape,
     modifier: Modifier = Modifier,
 ) {
@@ -1404,6 +1405,7 @@ internal fun BottomToolbar(
     onStop: () -> Unit,
     onNewTab: () -> Unit,
     onExpandCapsule: () -> Unit,
+    onFindInPage: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     // Clamp rather than trust the caller: both fractions are driven by
@@ -1681,6 +1683,7 @@ internal fun BottomToolbar(
                     onOpenBookmarks = onOpenBookmarks,
                     onReload = onReload,
                     onNewTab = onNewTab,
+                    onFindInPage = onFindInPage,
                 )
             },
             modifier = Modifier
@@ -2853,6 +2856,7 @@ private fun OverflowMenuButton(
     onOpenBookmarks: () -> Unit,
     onReload: () -> Unit,
     onNewTab: () -> Unit,
+    onFindInPage: () -> Unit,
 ) {
     var menuExpanded by remember { mutableStateOf(false) }
     // We hand-roll the anchor positioning rather than rely on
@@ -2958,6 +2962,17 @@ private fun OverflowMenuButton(
                             onClick = {
                                 menuExpanded = false
                                 onReload()
+                            },
+                        )
+                        DropdownMenuItem(
+                            text = { MenuItemLabel("Find in page") },
+                            leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null) },
+                            // Same rule as the bookmark row: nothing to
+                            // search on the home surface.
+                            enabled = state.url.isNotBlank(),
+                            onClick = {
+                                menuExpanded = false
+                                onFindInPage()
                             },
                         )
                         DropdownMenuItem(

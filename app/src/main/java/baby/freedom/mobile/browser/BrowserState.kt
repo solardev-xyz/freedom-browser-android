@@ -117,6 +117,12 @@ class BrowserState(val id: Long) {
     internal val capsuleCollapse = CapsuleCollapseState()
 
     /**
+     * This tab's find-in-page session (#83). Per-tab like Chrome's: the
+     * bar, query and count belong to the tab, not to the window.
+     */
+    val find = FindInPageState()
+
+    /**
      * Whether the page area stops above the bottom chrome for the
      * document on screen (#66). Set by the tab's WebView from its page's
      * bottom-nav detector (see [BottomChromeSlot]); back to overlay on
