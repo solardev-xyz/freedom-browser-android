@@ -477,4 +477,64 @@ class ScrollRevealTest {
         assertFalse(revealDragReleased(MotionEvent.ACTION_POINTER_DOWN, 1, 0))
         assertFalse(revealDragReleased(MotionEvent.ACTION_MOVE, 0, 0))
     }
+
+    @Test
+    fun `only a clamp moving towards the end is bottom overscroll`() {
+        // Pushing past the end of a page (scrollable or not).
+        assertTrue(overscrollPastEnd(deltaY = 12, clampedY = true, canScrollDown = false))
+        // A pull down at the top of a page with no scroll range clamps
+        // with canScrollDown false too: the top edge, not the end.
+        assertFalse(overscrollPastEnd(deltaY = -12, clampedY = true, canScrollDown = false))
+        // No clamp, or room left below, or no vertical delta at all.
+        assertFalse(overscrollPastEnd(deltaY = 12, clampedY = false, canScrollDown = false))
+        assertFalse(overscrollPastEnd(deltaY = 12, clampedY = true, canScrollDown = true))
+        assertFalse(overscrollPastEnd(deltaY = 0, clampedY = true, canScrollDown = false))
+    }
+
+    @Test
+    fun `only a clamp moving towards the top is top overscroll`() {
+        assertTrue(overscrollPastTop(deltaY = -12, clampedY = true, canScrollUp = false))
+        assertFalse(overscrollPastTop(deltaY = 12, clampedY = true, canScrollUp = false))
+        assertFalse(overscrollPastTop(deltaY = -12, clampedY = false, canScrollUp = false))
+        assertFalse(overscrollPastTop(deltaY = -12, clampedY = true, canScrollUp = true))
+    }
+
+    /** What PageWebView forwards for one clamped overscroll on a page with no scroll range. */
+    private fun ScrollRevealSlot.unscrollableOverscroll(deltaY: Int) {
+        if (overscrollPastEnd(deltaY, clampedY = true, canScrollDown = false)) onBottomOverscroll()
+        if (overscrollPastTop(deltaY, clampedY = true, canScrollUp = false)) onTopOverscroll()
+    }
+
+    @Test
+    fun `a pull down at the top of an unscrollable page never arms mid-drag`() {
+        // short.html (AVD log): down at the end (Armed), pull down past
+        // the slop (Tracking), Chromium clamps at the top on every move.
+        val s = ScrollRevealSlot()
+        assertTrue(s.onDown(500f, 1100f, atEnd = true, allowed = true))
+        s.unscrollableOverscroll(-22) // inside the slop: still armed
+        assertEquals(Phase.Armed, s.phase)
+        assertFalse(s.onMove(500f, 1140f, slop))
+        assertEquals(Phase.Tracking, s.phase)
+        s.unscrollableOverscroll(-52)
+        assertEquals(Phase.Idle, s.phase)
+        // The reversal overscrolls the bottom edge for real (dy > 0), but
+        // the gesture is the page's now: no arm, no takeover.
+        assertFalse(s.onMove(500f, 1120f, slop))
+        s.unscrollableOverscroll(53)
+        assertFalse(s.onMove(500f, 800f, slop))
+        assertEquals(Phase.Idle, s.phase)
+        // A fresh push at the end still reveals.
+        assertTrue(s.onDown(500f, 1700f, atEnd = true, allowed = true))
+        s.unscrollableOverscroll(53)
+        assertTrue(s.onMove(500f, 1670f, slop))
+    }
+
+    @Test
+    fun `a top overscroll leaves an at-down arm alone`() {
+        // A jitter down inside the slop before a push on a short page.
+        val s = armed()
+        s.onTopOverscroll()
+        assertEquals(Phase.Armed, s.phase)
+        assertTrue(s.onMove(500f, 1670f, slop))
+    }
 }

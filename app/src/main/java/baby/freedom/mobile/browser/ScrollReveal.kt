@@ -119,6 +119,21 @@ internal class RevealGeneration {
 }
 
 /**
+ * Is a clamped overscroll Chromium just reported past the document's
+ * *bottom* edge? [deltaY] is the unconsumed scroll delta Chromium asked
+ * the view to move by (positive = towards the end). The clamp alone
+ * can't tell: on a page with no scroll range, a pull down at the top
+ * clamps with `canScrollVertically(1)` false just the same — that one
+ * is the top edge, and must not arm a reveal (#144 review).
+ */
+internal fun overscrollPastEnd(deltaY: Int, clampedY: Boolean, canScrollDown: Boolean): Boolean =
+    clampedY && deltaY > 0 && !canScrollDown
+
+/** The other edge: a clamped overscroll moving towards the document's top. */
+internal fun overscrollPastTop(deltaY: Int, clampedY: Boolean, canScrollUp: Boolean): Boolean =
+    clampedY && deltaY < 0 && !canScrollUp
+
+/**
  * The `documentScrollsDown` input to [pullToRefreshArmed] while a page
  * is revealed. A page that could not scroll at all before the reveal
  * gains a little scroll range from it (the WebView got shorter); that
@@ -311,6 +326,22 @@ internal class ScrollRevealSlot {
     }
 
     /**
+     * Chromium reported unconsumed overscroll past the *top* edge. While
+     * [Phase.Tracking] (a drag that went down mid-page, or went down
+     * first from the end), the drag is pulling the page down against
+     * its top — on a page with no scroll range, straight from the
+     * touch down. It isn't heading for the end, so it stays the page's
+     * for the rest of the gesture, as before #138: otherwise its first
+     * move back up would overscroll the (same) bottom edge, arm, and
+     * take over a drag that was a pull down (#144 review). An at-down
+     * [Phase.Armed] slot ignores it: a jitter down inside the slop
+     * before a push mustn't disarm it.
+     */
+    fun onTopOverscroll() {
+        if (phase == Phase.Tracking) dropGesture()
+    }
+
+    /**
      * The finger is at ([x], [y]). Returns true when the reveal takes the
      * gesture over *on this event*.
      *
@@ -322,8 +353,9 @@ internal class ScrollRevealSlot {
      * Armed at the touch down: an upward, mostly vertical move past
      * [slopPx], with the page having let the drag through (overscroll).
      * A move that goes down first disarms — back to [Phase.Tracking]:
-     * the same drag may still reach the end later. One that turns
-     * mostly sideways drops to Idle.
+     * the same drag may still reach the end later (unless it overscrolls
+     * the top, see [onTopOverscroll]). One that turns mostly sideways
+     * drops to Idle.
      *
      * Armed mid-drag: the finger is long past the slop, so the next move
      * up takes over, as long as the drag since it was armed is mostly

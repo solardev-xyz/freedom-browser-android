@@ -1147,6 +1147,10 @@ private fun buildRefreshableWebView(
                 sampleBottomRow(this) { rgb -> revealTint = rgb }
             }
         }
+        // A drag pulling the page down past its top edge (a page with no
+        // scroll range, or one already at the top) isn't going to reach
+        // the end: the gesture is the page's, as before #138.
+        onTopOverscroll = { reveal.onTopOverscroll() }
         setOnTouchListener { _, event ->
             // The reveal owns this gesture (#65): the page follows the
             // finger by translation only, and Chromium sees none of it.
@@ -1745,8 +1749,19 @@ private const val REVEAL_HANDOVER_TIMEOUT_MS = 1_000L
  * protected: Chromium's unconsumed overscroll, and the scroll range.
  */
 internal class PageWebView(context: Context) : WebView(context) {
-    /** Chromium overscrolled past the bottom edge (the page didn't take the drag). */
+    /**
+     * Chromium overscrolled past the bottom edge (the page didn't take
+     * a drag towards the end) — never the top edge, even on a page with
+     * no scroll range, where both clamp alike (see [overscrollPastEnd]).
+     */
     var onBottomOverscroll: () -> Unit = {}
+
+    /** Chromium overscrolled past the top edge (see [overscrollPastTop]). */
+    var onTopOverscroll: () -> Unit = {}
+
+    // The vertical delta of the overScrollBy call in progress (0 outside
+    // one): onOverScrolled only says a clamp happened, not which edge.
+    private var overScrollDeltaY = 0
 
     val verticalRange: Int get() = computeVerticalScrollRange() - computeVerticalScrollExtent()
 
@@ -1761,9 +1776,31 @@ internal class PageWebView(context: Context) : WebView(context) {
         onBeforeDraw?.invoke()
     }
 
+    // Chromium's unconsumed overscroll arrives here (WebView's
+    // PrivateAccess.overScrollBy calls this view's overScrollBy), which
+    // calls onOverScrolled synchronously with the clamped result.
+    override fun overScrollBy(
+        deltaX: Int, deltaY: Int, scrollX: Int, scrollY: Int,
+        scrollRangeX: Int, scrollRangeY: Int, maxOverScrollX: Int, maxOverScrollY: Int,
+        isTouchEvent: Boolean,
+    ): Boolean {
+        overScrollDeltaY = deltaY
+        try {
+            return super.overScrollBy(
+                deltaX, deltaY, scrollX, scrollY, scrollRangeX, scrollRangeY,
+                maxOverScrollX, maxOverScrollY, isTouchEvent,
+            )
+        } finally {
+            overScrollDeltaY = 0
+        }
+    }
+
     override fun onOverScrolled(scrollX: Int, scrollY: Int, clampedX: Boolean, clampedY: Boolean) {
         super.onOverScrolled(scrollX, scrollY, clampedX, clampedY)
-        if (clampedY && !canScrollVertically(1)) onBottomOverscroll()
+        when {
+            overscrollPastEnd(overScrollDeltaY, clampedY, canScrollVertically(1)) -> onBottomOverscroll()
+            overscrollPastTop(overScrollDeltaY, clampedY, canScrollVertically(-1)) -> onTopOverscroll()
+        }
     }
 }
 
