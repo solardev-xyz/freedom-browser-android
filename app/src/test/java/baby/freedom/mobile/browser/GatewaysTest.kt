@@ -400,6 +400,58 @@ class GatewaysTest {
     }
 
     @Test
+    fun `a lookup failing under superseded settings keeps the current settings' failures`() {
+        val realConfig = Gateways.ensRpcConfig
+        var config = EnsRpcConfig(customEndpoints = listOf("https://old.example"))
+        Gateways.ensRpcConfig = { config }
+        val deadline = Gateways.reverifyDeadlineMs
+        val release = java.util.concurrent.CountDownLatch(1)
+        try {
+            withLookup({ name ->
+                if (name == "old.eth") release.await()
+                EnsResult.Error(name, "PROVIDER_ERROR", "down", retryable = true)
+            }) {
+                KnownEnsNames.record("bzz://$ref64", "old.eth")
+                KnownEnsNames.record("bzz://$ref64", "new.eth")
+                Gateways.reverifyDeadlineMs = 50
+                // A lookup under the old settings is stuck on a removed endpoint.
+                assertNull(Gateways.reverifyEnsDocument("old.eth", EnsDocumentPins()))
+
+                // The user switches settings; a lookup under them fails.
+                config = EnsRpcConfig(customEndpoints = listOf("https://new.example"))
+                assertNull(Gateways.reverifyEnsDocument("new.eth", EnsDocumentPins()))
+                var until = System.currentTimeMillis() + 2_000
+                while (Gateways.ensLookupFailureCount() == 0 &&
+                    System.currentTimeMillis() < until
+                ) Thread.sleep(5)
+                assertEquals(1, Gateways.ensLookupFailureCount())
+
+                // The old lookup now fails too: it neither drops the
+                // current failure nor records one of its own.
+                release.countDown()
+                Thread.sleep(200)
+                assertEquals(1, Gateways.ensLookupFailureCount())
+
+                // So the next document for new.eth still skips the wait.
+                val stall = java.util.concurrent.CountDownLatch(1)
+                Gateways.ensLookup = { name ->
+                    stall.await()
+                    EnsResult.Error(name, "PROVIDER_ERROR", "down", retryable = true)
+                }
+                Gateways.reverifyDeadlineMs = 5_000
+                val started = System.currentTimeMillis()
+                assertNull(Gateways.reverifyEnsDocument("new.eth", EnsDocumentPins()))
+                assertTrue(System.currentTimeMillis() - started < 2_000)
+                stall.countDown()
+            }
+        } finally {
+            release.countDown()
+            Gateways.reverifyDeadlineMs = deadline
+            Gateways.ensRpcConfig = realConfig
+        }
+    }
+
+    @Test
     fun `reverifyEnsDocument refuses a name whose content is no longer loadable`() {
         KnownEnsNames.record("bzz://$ref64", "swarm.eth")
         withLookup({ EnsResult.Unsupported(it, "0xe5", "") }) {

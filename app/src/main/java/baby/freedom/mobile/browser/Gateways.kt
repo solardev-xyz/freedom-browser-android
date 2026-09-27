@@ -123,14 +123,29 @@ object Gateways {
     private val lookupFailedAt = ConcurrentHashMap<LookupKey, Long>()
 
     /**
+     * The resolver settings most recently read by [lookupKey] — the
+     * current ones, as far as lookups know. A lookup that finishes under
+     * settings other than these started before a settings change.
+     */
+    @Volatile
+    private var latestSettings: EnsResolver.Settings? = null
+
+    /**
      * Open the failure window for [key]. Also drops entries that can no
      * longer matter — those under other resolver settings (superseded by
-     * a settings change; a lookup is only ever keyed by the current ones)
-     * and those whose window has closed — so the map holds at most the
-     * recent failures under the current settings rather than growing
-     * with every settings change for the life of the process.
+     * a settings change) and those whose window has closed — so the map
+     * holds at most the recent failures under the current settings
+     * rather than growing with every settings change for the life of the
+     * process.
+     *
+     * A lookup that started under settings since superseded records
+     * nothing and prunes nothing: no document will look its entry up
+     * again, and pruning by *its* settings would drop the current
+     * settings' recent failures, making the next document for such a
+     * name wait [reverifyDeadlineMs] again.
      */
     private fun recordLookupFailure(key: LookupKey) {
+        if (key.settings != latestSettings) return
         val now = System.currentTimeMillis()
         val window = reverifyFailureWindowMs
         lookupFailedAt.entries.removeIf { (k, at) ->
@@ -148,6 +163,7 @@ object Gateways {
         } catch (e: Exception) {
             null // the resolver will fail the same way; still de-duplicate by name
         }
+        latestSettings = settings
         return LookupKey(name.lowercase(), settings)
     }
 
