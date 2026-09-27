@@ -435,8 +435,12 @@ class BottomUiDetectorScriptTest {
         assertEquals(0, timers)
         eval("input('keydown', true); input('click', true)")
         assertEquals(3, inputs())
-        // Each says how long ago its event happened, on the page's clock.
-        assertTrue(eval("sent.every(function (s) { return s === '$TOP_DOCUMENT_INPUT 7'; })") as Boolean)
+        // Each says which event it was and how long ago it happened, on
+        // the page's clock.
+        assertEquals(
+            "$TOP_DOCUMENT_INPUT pointerdown 7,$TOP_DOCUMENT_INPUT keydown 7,$TOP_DOCUMENT_INPUT click 7",
+            eval("sent.join(',')").toString(),
+        )
     }
 
     @Test
@@ -446,7 +450,15 @@ class BottomUiDetectorScriptTest {
         eval("Object.defineProperty(Event.prototype, 'timeStamp', { get: function () { return 0; } })")
         eval("input('pointerdown', true)")
         assertEquals(1, inputs())
-        assertEquals(7L, parseTopDocumentInput(eval("sent[sent.length - 1]").toString()))
+        assertEquals(TopDocumentInput(7L, isClick = false), parseTopDocumentInput(eval("sent[sent.length - 1]").toString()))
+    }
+
+    @Test
+    fun `the page can't pass a keydown off as a click`() = page {
+        documentStart()
+        eval("Object.defineProperty(Event.prototype, 'type', { get: function () { return 'click'; } })")
+        eval("input('keydown', true)")
+        assertEquals(TopDocumentInput(7L, isClick = false), parseTopDocumentInput(eval("sent[sent.length - 1]").toString()))
     }
 
     @Test

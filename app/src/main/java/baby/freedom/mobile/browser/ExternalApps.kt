@@ -205,12 +205,29 @@ internal fun externalLinkVerdict(
  */
 internal class UserGestureLatch(private val clock: () -> Long) {
     /** One input: when it began and (so far) ended, on [clock]'s timeline. */
-    private class Input(val id: Int, val start: Long, var end: Long, var untilConfirmed: Boolean) {
+    private class Input(val id: Int, val start: Long, var end: Long, val accessibility: Boolean) {
+        /** An accessibility input whose one click hasn't been heard yet. */
+        var untilConfirmed = accessibility
+
         var inTopDocument = false
 
-        /** Whether the top document's input at [at] can be this input's. */
-        fun covers(at: Long): Boolean =
-            at >= start - EARLY_MS && at <= (if (untilConfirmed) start + CONFIRM_MS else end + LATE_MS)
+        /** [consume] handed this input's id to a navigation. */
+        var handedOut = false
+
+        /**
+         * Whether the top document's input at [at] can be this input's.
+         * An open accessibility input only takes a `click` ([isClick]):
+         * that is the one event Blink's simulated click dispatches, while
+         * a `keydown` or `pointerdown` can be top-document input Android
+         * never recorded (an IME keystroke, a key repeat, a lone modifier).
+         * Once confirmed it takes nothing more: it makes that one click.
+         */
+        fun covers(at: Long, isClick: Boolean): Boolean =
+            at >= start - EARLY_MS && if (accessibility) {
+                untilConfirmed && isClick && at <= start + CONFIRM_MS
+            } else {
+                at <= end + LATE_MS
+            }
     }
 
     private var inputId = 0
@@ -230,9 +247,10 @@ internal class UserGestureLatch(private val clock: () -> Long) {
      * runs it in the renderer, as late as a long task on the page makes
      * it. So such an input covers any confirmation from its start until
      * [CONFIRM_MS] later (the most an offer waits anyway), and closes on
-     * the first one — the one click it makes. A later input whose word
-     * arrives while it is still open matches both and is refused: fail
-     * closed.
+     * the first `click` — the one click it makes. A later input whose
+     * word arrives while it is still open matches both and is refused:
+     * fail closed — unless both are open accessibility inputs (see
+     * [onTopDocumentInput]).
      */
     fun onInputStart(at: Long = clock(), untilConfirmed: Boolean = false) {
         inputId++
@@ -255,11 +273,26 @@ internal class UserGestureLatch(private val clock: () -> Long) {
      * the current one: a renderer busy with an iframe's script can deliver
      * an earlier tap's word after a later tap has begun. Nothing, when it
      * matches no input or more than one. Runs an offer waiting on it.
+     * [isClick]: the DOM event was a `click`, not a `pointerdown` or
+     * `keydown` — the only kind an accessibility input takes.
+     *
+     * One exception to "more than one": a `click` that fits only open
+     * accessibility inputs (a TalkBack user double-tapping again because
+     * a busy page seemed to ignore the first) is the oldest one's — Blink
+     * runs the clicks it simulates in order. Skipping any whose id a
+     * navigation already took ([consume]): that input's click has run
+     * already, before its navigation, and a later click aimed at the top
+     * page mustn't vouch for an earlier one on an iframe. If every
+     * candidate was handed out, nothing: fail closed.
      */
-    fun onTopDocumentInput(ageMs: Long) {
+    fun onTopDocumentInput(ageMs: Long, isClick: Boolean) {
         // Event time plus the message's own (small, positive) transit.
         val at = clock() - ageMs
-        val input = recent.singleOrNull { it.covers(at) } ?: return
+        val candidates = recent.filter { it.covers(at, isClick) }
+        val input = candidates.singleOrNull()
+            ?: candidates.takeIf { c -> c.isNotEmpty() && c.all { it.untilConfirmed } }
+                ?.firstOrNull { !it.handedOut }
+            ?: return
         if (input.untilConfirmed) {
             input.untilConfirmed = false
             if (at > input.end) input.end = at
@@ -282,7 +315,9 @@ internal class UserGestureLatch(private val clock: () -> Long) {
     fun consume(): Int? {
         val id = armedId ?: return null
         armedId = null
-        return id.takeIf { clock() - armedAt <= WINDOW_MS }
+        if (clock() - armedAt > WINDOW_MS) return null
+        recent.firstOrNull { it.id == id }?.handedOut = true
+        return id
     }
 
     /**

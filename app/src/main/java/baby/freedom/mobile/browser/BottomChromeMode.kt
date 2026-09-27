@@ -410,15 +410,25 @@ internal const val CONTEXT_MENU_KEPT = "contextmenu 0"
  */
 internal const val TOP_DOCUMENT_INPUT = "input"
 
-private val TOP_DOCUMENT_INPUT_RE = Regex("^$TOP_DOCUMENT_INPUT (\\d{1,7})$")
+private val TOP_DOCUMENT_INPUT_RE = Regex("^$TOP_DOCUMENT_INPUT (pointerdown|keydown|click) (\\d{1,7})$")
 
 /**
- * The age in ms of the input a [TOP_DOCUMENT_INPUT] message reports
- * (`input <ms>`: how long before the message the DOM event happened), or
- * `null` when [data] isn't one.
+ * One [TOP_DOCUMENT_INPUT] report: the DOM event happened [ageMs] before
+ * the message was sent, and was a `click` ([isClick]) rather than a
+ * `pointerdown` or `keydown`. Only a click can be an accessibility
+ * click's own word ([UserGestureLatch.onTopDocumentInput]).
  */
-internal fun parseTopDocumentInput(data: String?): Long? =
-    TOP_DOCUMENT_INPUT_RE.matchEntire(data ?: return null)?.groupValues?.get(1)?.toLong()
+internal data class TopDocumentInput(val ageMs: Long, val isClick: Boolean)
+
+/**
+ * The input a [TOP_DOCUMENT_INPUT] message reports (`input <type> <ms>`:
+ * which listener heard it, and how long before the message the DOM event
+ * happened), or `null` when [data] isn't one.
+ */
+internal fun parseTopDocumentInput(data: String?): TopDocumentInput? {
+    val m = TOP_DOCUMENT_INPUT_RE.matchEntire(data ?: return null) ?: return null
+    return TopDocumentInput(m.groupValues[2].toLong(), isClick = m.groupValues[1] == "click")
+}
 
 /** What Kotlin sends back through the channel to ask for a fresh, reported probe. */
 internal fun bottomUiProbeRequest(token: String): String = "probe $token"
@@ -450,7 +460,8 @@ internal fun bottomUiProbeRequest(token: String): String = "probe $token"
  * **Input in the top document** (#85): in the main frame, capture
  * listeners for trusted `pointerdown`, `keydown` and `click` post
  * [TOP_DOCUMENT_INPUT] at once (not a task later: it has to reach Kotlin
- * before the navigation the input starts), with the event's age — `now`
+ * before the navigation the input starts), with the listener's event
+ * type (each listener knows its own; `e.type` isn't read) and the event's age — `now`
  * minus its `timeStamp`, both read through `performance.now` and the
  * `Event.prototype` getter saved at document start, so page script can't
  * skew them — which lets Kotlin tell which input it was. A tap or key press aimed at
@@ -551,14 +562,16 @@ internal fun bottomUiDetectorJs(channel: String, debounceMs: Int = BOTTOM_UI_DEB
   if (w.top !== w) return;
   var P = w.performance, pnow = P && P.now && P.now.bind(P), EP = w.Event && w.Event.prototype,
       tsd = EP && Object.getOwnPropertyDescriptor(EP, 'timeStamp'), tsOf = tsd && tsd.get;
-  var said = function (e) {
-    if (!e.isTrusted || !pnow || !tsOf) return;
-    var age = Math.round(pnow() - tsOf.call(e));
-    port.postMessage('$TOP_DOCUMENT_INPUT ' + (age > 0 ? age : 0));
+  var said = function (t) {
+    w.addEventListener(t, function (e) {
+      if (!e.isTrusted || !pnow || !tsOf) return;
+      var age = Math.round(pnow() - tsOf.call(e));
+      port.postMessage('$TOP_DOCUMENT_INPUT ' + t + ' ' + (age > 0 ? age : 0));
+    }, true);
   };
-  w.addEventListener('pointerdown', said, true);
-  w.addEventListener('keydown', said, true);
-  w.addEventListener('click', said, true);
+  said('pointerdown');
+  said('keydown');
+  said('click');
   var T = null, started = false, ASK = /^probe ([0-9a-f]{1,64})$/, SEL = 'a, button, [role="button"], [role="tab"], [role="link"]';
   var gcs = w.getComputedStyle, MO = w.MutationObserver,
       RO = w.ResizeObserver, IO = w.IntersectionObserver, str = JSON.stringify;

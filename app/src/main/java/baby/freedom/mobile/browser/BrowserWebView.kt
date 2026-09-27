@@ -1594,8 +1594,8 @@ private fun buildRefreshableWebView(
                 // Input the top document itself received (#85): only the
                 // main frame's word counts — an iframe's would let it
                 // vouch for a tap on itself ([UserGestureLatch]).
-                parseTopDocumentInput(message.data)?.let { ageMs ->
-                    if (isMainFrame) userGestures.onTopDocumentInput(ageMs)
+                parseTopDocumentInput(message.data)?.let { input ->
+                    if (isMainFrame) userGestures.onTopDocumentInput(input.ageMs, input.isClick)
                     return@WebMessageListener
                 }
                 // The page's say on a long-press (#84): any frame, since

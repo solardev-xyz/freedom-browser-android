@@ -141,9 +141,13 @@ class ExternalAppsTest {
             return down
         }
 
-        /** The top document's word about an event at [eventTime], arriving [transitMs] after the page read it. */
-        fun topDocumentSaw(eventTime: Long, transitMs: Long = 3) {
-            latch.onTopDocumentInput(now - transitMs - eventTime)
+        /**
+         * The top document's word about an event at [eventTime], arriving
+         * [transitMs] after the page read it; a `click` unless [isClick]
+         * says it was a `pointerdown` / `keydown`.
+         */
+        fun topDocumentSaw(eventTime: Long, transitMs: Long = 3, isClick: Boolean = true) {
+            latch.onTopDocumentInput(now - transitMs - eventTime, isClick)
         }
     }
 
@@ -338,6 +342,83 @@ class ExternalAppsTest {
     }
 
     @Test
+    fun `only a click confirms an accessibility click, not a keydown Android never recorded`() {
+        // R6-1: an accessibility click on an iframe's target=_top link,
+        // then an IME keystroke (or a key repeat, or a lone modifier) in
+        // the top document: a trusted keydown with no recorded input.
+        val c = Clock()
+        c.latch.onInputStart(c.now, untilConfirmed = true)
+        c.latch.onInput()
+        var offered = 0
+        assertTrue(c.latch.whenInTopDocument(c.latch.consume()!!) { offered++ })
+        c.now += 400
+        c.topDocumentSaw(c.now - 1, isClick = false)
+        assertEquals(0, offered)
+        c.now += 10
+        c.topDocumentSaw(c.now - 1, isClick = false, transitMs = 0) // nor a pointerdown
+        assertEquals(0, offered)
+    }
+
+    @Test
+    fun `a pointerdown still confirms a tap`() {
+        val c = Clock()
+        val down = c.tap()
+        var offered = 0
+        assertTrue(c.latch.whenInTopDocument(c.latch.consume()!!) { offered++ })
+        c.topDocumentSaw(down, isClick = false)
+        assertEquals(1, offered)
+    }
+
+    @Test
+    fun `a repeated accessibility click on a busy page still gets its prompt`() {
+        // R6-2: a TalkBack double-tap on a busy page seems ignored, so the
+        // user double-taps again 600 ms later. Blink then runs both
+        // clicks; each one's word fits both open inputs. The first
+        // navigation took input 2 (the latest); the oldest open input
+        // takes the first word, so the second word is input 2's.
+        val c = Clock()
+        val t0 = c.now
+        c.latch.onInputStart(t0, untilConfirmed = true)
+        c.latch.onInput()
+        c.now = t0 + 600
+        c.latch.onInputStart(c.now, untilConfirmed = true)
+        c.latch.onInput()
+        c.now = t0 + 800
+        val id = c.latch.consume()!!
+        var offered = 0
+        assertTrue(c.latch.whenInTopDocument(id) { offered++ })
+        c.now = t0 + 820
+        c.topDocumentSaw(t0 + 800)
+        c.now = t0 + 825
+        c.topDocumentSaw(t0 + 805)
+        assertEquals(1, offered)
+        assertNull(c.latch.consume()) // the second navigation: one prompt, not two
+    }
+
+    @Test
+    fun `a later top-document accessibility click can't vouch for an earlier one on an iframe`() {
+        // The oldest-open rule skips an input a navigation already took:
+        // its click ran before that navigation, so a later word isn't it.
+        val c = Clock()
+        c.latch.onInputStart(c.now, untilConfirmed = true) // on an iframe's target=_top link
+        c.latch.onInput()
+        val id = c.latch.consume()!!
+        var offered = 0
+        assertTrue(c.latch.whenInTopDocument(id) { offered++ })
+        c.now += 300
+        c.latch.onInputStart(c.now, untilConfirmed = true) // then on the top page
+        c.latch.onInput()
+        c.now += 20
+        c.topDocumentSaw(c.now - 10)
+        assertEquals(0, offered)
+        assertTrue(c.latch.giveUp(id))
+        // And that word was the second click's.
+        var second = 0
+        assertTrue(c.latch.whenInTopDocument(c.latch.consume()!!) { second++ })
+        assertEquals(1, second)
+    }
+
+    @Test
     fun `a word that fits no input confirms nothing`() {
         val c = Clock()
         val down = c.tap()
@@ -351,15 +432,19 @@ class ExternalAppsTest {
     @Test
     fun `the top document's word alone, with no tap, buys nothing`() {
         val c = Clock()
-        c.latch.onTopDocumentInput(0)
+        c.latch.onTopDocumentInput(0, isClick = true)
         assertNull(c.latch.consume())
     }
 
     @Test
     fun `the top document's input message carries the event's age`() {
-        assertEquals(12L, parseTopDocumentInput("input 12"))
-        assertEquals(0L, parseTopDocumentInput("input 0"))
-        for (bad in listOf("input", "input ", "input -3", "input 1.5", "input 12 ", "xinput 1", "input 12345678", null)) {
+        assertEquals(TopDocumentInput(12L, isClick = true), parseTopDocumentInput("input click 12"))
+        assertEquals(TopDocumentInput(0L, isClick = false), parseTopDocumentInput("input pointerdown 0"))
+        assertEquals(TopDocumentInput(5L, isClick = false), parseTopDocumentInput("input keydown 5"))
+        for (bad in listOf(
+            "input", "input 12", "input click", "input click -3", "input click 1.5", "input click 12 ",
+            "xinput click 1", "input click 12345678", "input keyup 3", "input  click 3", null,
+        )) {
             assertNull(bad, parseTopDocumentInput(bad))
         }
     }
