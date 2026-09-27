@@ -2464,6 +2464,13 @@ private fun AddressField(
             keyboardOptions = KeyboardOptions(
                 capitalization = KeyboardCapitalization.None,
                 autoCorrectEnabled = false,
+                // Always Go, as in Chrome's omnibox — never switched to
+                // Search as the text turns into a search term (#171):
+                // a new action key means restarting input, the IME
+                // hides for a moment, and [imeDismissalEndsEditing]
+                // rightly reads that as the user closing the keyboard
+                // and ends the edit mid-word. The top suggestion row
+                // says what Enter will do instead.
                 imeAction = ImeAction.Go,
             ),
             keyboardActions = KeyboardActions(
