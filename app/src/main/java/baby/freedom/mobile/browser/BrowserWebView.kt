@@ -13,6 +13,7 @@ import android.graphics.ColorFilter
 import android.graphics.PixelFormat
 import android.graphics.Rect
 import android.graphics.drawable.Drawable
+import android.os.Message
 import android.os.SystemClock
 import android.util.Log
 import android.view.PixelCopy
@@ -482,28 +483,40 @@ fun BrowserWebViewHost(
 
     // Create any WebViews that don't yet exist; tear down any that belong
     // to tabs that have been closed.
+    //
+    // A page's own new windows (`target=_blank`, `window.open()`) come
+    // through here too, but synchronously from inside `onCreateWindow`:
+    // Chromium wants the popup's WebView back before that callback
+    // returns, so [attach] builds it right away instead of waiting for
+    // the next composition to notice the new tab.
+    fun attach(tab: BrowserState): WebView {
+        webViews[tab.id]?.let { return it }
+        val (layout, wv) = buildRefreshableWebView(
+            context = context,
+            state = tab,
+            repo = repo,
+            onSubmitUrl = { target, url ->
+                tabs.requestSubmit?.invoke(target, url)
+            },
+            onEnterFullscreen = { view, callback ->
+                tabs.enterFullscreen(tab, view, callback)
+            },
+            onExitFullscreen = { tabs.onFullscreenHidden(tab) },
+            onRecoverNodes = { tabs.requestNodeRecovery?.invoke() },
+            onCreateWindow = { attach(tabs.adoptPopup(opener = tab)) },
+            onCloseWindow = { tabs.closePopup(tab) },
+            // Handed to Chromium by `onCreateWindow`, which needs it
+            // never to have navigated.
+            isPopup = tab.openerId != null,
+        )
+        webViews[tab.id] = wv
+        refreshLayouts[tab.id] = layout
+        frame.addView(layout)
+        return wv
+    }
     run {
         val idsNow = currentIds.toSet()
-        for (tab in tabs.tabs) {
-            if (webViews[tab.id] == null) {
-                val (layout, wv) = buildRefreshableWebView(
-                    context = context,
-                    state = tab,
-                    repo = repo,
-                    onSubmitUrl = { target, url ->
-                        tabs.requestSubmit?.invoke(target, url)
-                    },
-                    onEnterFullscreen = { view, callback ->
-                        tabs.enterFullscreen(tab, view, callback)
-                    },
-                    onExitFullscreen = { tabs.onFullscreenHidden(tab) },
-                    onRecoverNodes = { tabs.requestNodeRecovery?.invoke() },
-                )
-                webViews[tab.id] = wv
-                refreshLayouts[tab.id] = layout
-                frame.addView(layout)
-            }
-        }
+        for (tab in tabs.tabs) attach(tab)
         val toRemove = webViews.keys.filter { it !in idsNow }
         for (id in toRemove) {
             val wv = webViews.remove(id) ?: continue
@@ -616,6 +629,9 @@ private fun buildRefreshableWebView(
     onEnterFullscreen: (View, WebChromeClient.CustomViewCallback?) -> Unit,
     onExitFullscreen: () -> Unit,
     onRecoverNodes: () -> Unit = {},
+    onCreateWindow: () -> WebView,
+    onCloseWindow: () -> Unit,
+    isPopup: Boolean = false,
 ): Pair<SwipeRefreshLayout, WebView> {
     val refreshLayout = SwipeRefreshLayout(context).apply {
         layoutParams = ViewGroup.LayoutParams(
@@ -803,6 +819,14 @@ private fun buildRefreshableWebView(
             // actually requires a tap is still gated by the browser's
             // own per-frame autoplay policy.
             mediaPlaybackRequiresUserGesture = false
+            // `target=_blank` links and `window.open()` get a real
+            // window — a new tab, see `onCreateWindow` below — instead
+            // of silently replacing the page that asked (#82).
+            // `javaScriptCanOpenWindowsAutomatically` stays at its
+            // default `false`, which is Chromium's popup blocker: a
+            // window only opens from a user gesture (a tap on the link
+            // or button), never from a script on its own.
+            setSupportMultipleWindows(true)
         }
 
         // Scroll-to-reveal (#65), the View half; the decisions are in
@@ -1201,8 +1225,10 @@ private fun buildRefreshableWebView(
         }
 
         // Force an initial paint so the WebView's compositor surface
-        // is valid even before the user submits a URL.
-        loadUrl(ABOUT_BLANK)
+        // is valid even before the user submits a URL. Not for a popup:
+        // Chromium rejects (crashes on) a popup WebView that has already
+        // navigated, and loads the popup's own URL into it anyway.
+        if (!isPopup) loadUrl(ABOUT_BLANK)
 
         webViewClient = object : WebViewClient() {
             // A probe the *page* asked for belongs to the page that
@@ -1643,6 +1669,32 @@ private fun buildRefreshableWebView(
 
             override fun onHideCustomView() {
                 onExitFullscreen()
+            }
+
+            // A new window the page asked for (`target=_blank`,
+            // `window.open()`; #82) becomes a tab of its own. The new
+            // tab's WebView goes back to Chromium through the transport,
+            // and Chromium loads the popup's URL into it itself — as a
+            // real popup, so `window.opener` works and an OAuth-style
+            // flow can post its result back to this page. Only gesture-
+            // initiated requests get here at all: see
+            // `setSupportMultipleWindows` above.
+            override fun onCreateWindow(
+                view: WebView?,
+                isDialog: Boolean,
+                isUserGesture: Boolean,
+                resultMsg: Message?,
+            ): Boolean {
+                val transport = resultMsg?.obj as? WebView.WebViewTransport ?: return false
+                transport.webView = onCreateWindow()
+                resultMsg.sendToTarget()
+                return true
+            }
+
+            // `window.close()` from a window this browser opened for a
+            // page (Chromium only lets script close those): drop its tab.
+            override fun onCloseWindow(window: WebView?) {
+                onCloseWindow()
             }
 
             override fun onReceivedIcon(view: WebView?, icon: Bitmap?) {

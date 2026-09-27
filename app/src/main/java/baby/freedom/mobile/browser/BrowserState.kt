@@ -18,6 +18,14 @@ import kotlinx.coroutines.Job
  */
 class BrowserState(val id: Long) {
     /**
+     * The tab whose page opened this one as a new window (`target=_blank`,
+     * `window.open()`; see [TabsState.adoptPopup]), or null for a tab the
+     * user opened. Closing the popup from script returns to it.
+     */
+    var openerId: Long? = null
+        internal set
+
+    /**
      * Active per-tab address-bar rewrite. While set, any actual URL
      * starting with [baseUrl] is shown as `prefix + tail` — used to keep
      * `<name>/path` (or the scheme-constrained `bzz://<name>/path`)
