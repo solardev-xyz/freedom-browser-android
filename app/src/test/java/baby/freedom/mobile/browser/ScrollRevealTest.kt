@@ -41,18 +41,104 @@ class ScrollRevealTest {
     }
 
     @Test
-    fun `a touch that goes down mid-page never arms, so a fling that lands at the end doesn't reveal`() {
+    fun `a fling that lands at the end doesn't reveal`() {
         val s = ScrollRevealSlot()
         assertFalse(s.onDown(500f, 1700f, atEnd = false, allowed = true))
-        // The fling carries the page to its end; Chromium overscrolls.
-        s.onBottomOverscroll()
-        assertFalse(s.onMove(500f, 1400f, slop))
+        assertEquals(Phase.Tracking, s.phase)
+        s.onMove(500f, 1400f, slop)
+        // The finger lifts mid-page; the fling carries the page to its
+        // end and Chromium overscrolls with no finger down.
         s.onRelease(0f, h)
+        assertEquals(Phase.Idle, s.phase)
+        assertFalse(s.onBottomOverscroll())
+        assertFalse(s.onMove(500f, 1300f, slop))
         assertEquals(Phase.Idle, s.phase)
         // The next touch goes down at the end: that one is a push.
         assertTrue(s.onDown(500f, 1700f, atEnd = true, allowed = true))
         s.onBottomOverscroll()
         assertTrue(s.onMove(500f, 1670f, slop))
+    }
+
+    // --- mid-drag arming (#138) ---------------------------------------------
+
+    @Test
+    fun `a drag from mid-page that reaches the end and keeps going takes over`() {
+        val s = ScrollRevealSlot()
+        assertFalse(s.onDown(500f, 1700f, atEnd = false, allowed = true))
+        for (y in 1650 downTo 1200 step 50) assertFalse(s.onMove(500f, y.toFloat(), slop))
+        // The page runs out at y = 1200: Chromium's first unconsumed
+        // bottom overscroll, finger still down. Arms (sample now).
+        assertTrue(s.onBottomOverscroll())
+        assertEquals(Phase.Armed, s.phase)
+        // A second report doesn't re-arm or re-sample.
+        assertFalse(s.onBottomOverscroll())
+        // The next move up takes over — no second slop to cross.
+        assertTrue(s.onMove(500f, 1190f, slop))
+        assertEquals(Phase.Dragging, s.phase)
+        // Anchored where the finger was when the page ran out: the
+        // offset picks up from 0 there, following the finger.
+        assertEquals(rubberBand(10f, h), s.dragOffset(1190f, h), 0.001f)
+        assertEquals(0f, s.dragOffset(1200f, h), 0f)
+        // …and commits like any push.
+        assertEquals(Phase.Committing, s.onRelease(0.5f * h, h))
+    }
+
+    @Test
+    fun `a drag armed mid-page that turns back down goes back to tracking`() {
+        val s = ScrollRevealSlot()
+        s.onDown(500f, 1700f, atEnd = false, allowed = true)
+        s.onMove(500f, 1300f, slop)
+        assertTrue(s.onBottomOverscroll())
+        assertFalse(s.onMove(500f, 1350f, slop))
+        assertEquals(Phase.Tracking, s.phase)
+        // Up again, not at the end yet (no overscroll): the page scrolls.
+        assertFalse(s.onMove(500f, 1320f, slop))
+        // Reaches the end again: arms again, anchored there.
+        assertTrue(s.onBottomOverscroll())
+        assertTrue(s.onMove(500f, 1300f, slop))
+        assertEquals(rubberBand(20f, h), s.dragOffset(1300f, h), 0.001f)
+    }
+
+    @Test
+    fun `a drag from mid-page the page consumes (no overscroll) stays with the page`() {
+        val s = ScrollRevealSlot()
+        s.onDown(500f, 1700f, atEnd = false, allowed = true)
+        for (y in 1650 downTo 900 step 50) assertFalse(s.onMove(500f, y.toFloat(), slop))
+        assertEquals(Phase.Tracking, s.phase)
+        s.onRelease(0f, h)
+        assertEquals(Phase.Idle, s.phase)
+    }
+
+    @Test
+    fun `a drag from mid-page doesn't track when a reveal isn't allowed`() {
+        val s = ScrollRevealSlot()
+        assertFalse(s.onDown(500f, 1700f, atEnd = false, allowed = false))
+        assertEquals(Phase.Idle, s.phase)
+        s.onMove(500f, 1300f, slop)
+        assertFalse(s.onBottomOverscroll())
+        assertFalse(s.onMove(500f, 1200f, slop))
+    }
+
+    @Test
+    fun `a second finger ends the tracking`() {
+        val s = ScrollRevealSlot()
+        s.onDown(500f, 1700f, atEnd = false, allowed = true)
+        // The host reports ACTION_POINTER_DOWN as a cancelled release.
+        s.onRelease(0f, 0f, cancelled = true)
+        assertFalse(s.onBottomOverscroll())
+        assertFalse(s.onMove(500f, 1200f, slop))
+    }
+
+    @Test
+    fun `a push at the end that first went down can still reveal when the drag comes back`() {
+        val s = armed()
+        // Down first: the page scrolls up, away from the end.
+        assertFalse(s.onMove(500f, 1800f, slop))
+        assertEquals(Phase.Tracking, s.phase)
+        // Back up to the end, same finger.
+        s.onMove(500f, 1700f, slop)
+        assertTrue(s.onBottomOverscroll())
+        assertTrue(s.onMove(500f, 1690f, slop))
     }
 
     @Test
@@ -81,15 +167,63 @@ class ScrollRevealTest {
     }
 
     @Test
-    fun `downward or sideways first disarms`() {
+    fun `downward first disarms back to tracking`() {
+        // The push that armed at the down no longer counts (only a fresh
+        // overscroll arms again).
         val down = armed()
         assertFalse(down.onMove(500f, 1730f, slop))
-        assertEquals(Phase.Idle, down.phase)
+        assertEquals(Phase.Tracking, down.phase)
         assertFalse(down.onMove(500f, 1600f, slop))
+    }
 
+    @Test
+    fun `sideways first leaves the gesture to the page, drift and all`() {
+        // Armed at the end; a left swipe with a little upward drift
+        // (#144 review): the drift overscrolls the end, but a sideways
+        // gesture never re-arms, so the page's swipe isn't cancelled.
         val side = armed()
-        assertFalse(side.onMove(560f, 1680f, slop))
+        assertFalse(side.onMove(440f, 1695f, slop))
         assertEquals(Phase.Idle, side.phase)
+        assertFalse(side.onBottomOverscroll())
+        for (x in 400 downTo 200 step 20) {
+            assertFalse(side.onMove(x.toFloat(), 1690f - (400 - x) / 20f, slop))
+            assertFalse(side.onBottomOverscroll())
+        }
+        assertEquals(Phase.Idle, side.phase)
+
+        // The same from mid-page (a carousel near the end).
+        val mid = ScrollRevealSlot()
+        mid.onDown(500f, 1700f, atEnd = false, allowed = true)
+        assertFalse(mid.onMove(440f, 1695f, slop))
+        assertEquals(Phase.Idle, mid.phase)
+        assertFalse(mid.onBottomOverscroll())
+        assertFalse(mid.onMove(420f, 1690f, slop))
+        assertFalse(mid.onMove(400f, 1689f, slop))
+    }
+
+    @Test
+    fun `a drag armed mid-page that turns sideways isn't taken over`() {
+        val s = ScrollRevealSlot()
+        s.onDown(500f, 1700f, atEnd = false, allowed = true)
+        s.onMove(500f, 1300f, slop) // vertical: the page scrolls
+        assertTrue(s.onBottomOverscroll())
+        // Now mostly sideways, drifting up: not a push.
+        assertFalse(s.onMove(510f, 1299.5f, slop))
+        assertEquals(Phase.Armed, s.phase)
+        assertFalse(s.onMove(560f, 1295f, slop))
+        assertEquals(Phase.Idle, s.phase)
+        assertFalse(s.onBottomOverscroll())
+        assertFalse(s.onMove(600f, 1280f, slop))
+    }
+
+    @Test
+    fun `a diagonal but mostly vertical push armed mid-page takes over`() {
+        val s = ScrollRevealSlot()
+        s.onDown(500f, 1700f, atEnd = false, allowed = true)
+        s.onMove(560f, 1300f, slop)
+        assertTrue(s.onBottomOverscroll())
+        assertTrue(s.onMove(565f, 1290f, slop))
+        assertEquals(Phase.Dragging, s.phase)
     }
 
     @Test
@@ -269,7 +403,8 @@ class ScrollRevealTest {
 
     @Test
     fun `reset drops a reveal in any phase`() {
-        for (s in listOf(armed(), dragging(), revealed(), revealed(unscrollable = true))) {
+        val tracking = ScrollRevealSlot().apply { onDown(500f, 1700f, atEnd = false, allowed = true) }
+        for (s in listOf(tracking, armed(), dragging(), revealed(), revealed(unscrollable = true))) {
             s.reset()
             assertEquals(Phase.Idle, s.phase)
             assertFalse(s.revealedFromUnscrollable)
@@ -341,5 +476,65 @@ class ScrollRevealTest {
         assertFalse(revealDragReleased(MotionEvent.ACTION_POINTER_UP, 1, 0))
         assertFalse(revealDragReleased(MotionEvent.ACTION_POINTER_DOWN, 1, 0))
         assertFalse(revealDragReleased(MotionEvent.ACTION_MOVE, 0, 0))
+    }
+
+    @Test
+    fun `only a clamp moving towards the end is bottom overscroll`() {
+        // Pushing past the end of a page (scrollable or not).
+        assertTrue(overscrollPastEnd(deltaY = 12, clampedY = true, canScrollDown = false))
+        // A pull down at the top of a page with no scroll range clamps
+        // with canScrollDown false too: the top edge, not the end.
+        assertFalse(overscrollPastEnd(deltaY = -12, clampedY = true, canScrollDown = false))
+        // No clamp, or room left below, or no vertical delta at all.
+        assertFalse(overscrollPastEnd(deltaY = 12, clampedY = false, canScrollDown = false))
+        assertFalse(overscrollPastEnd(deltaY = 12, clampedY = true, canScrollDown = true))
+        assertFalse(overscrollPastEnd(deltaY = 0, clampedY = true, canScrollDown = false))
+    }
+
+    @Test
+    fun `only a clamp moving towards the top is top overscroll`() {
+        assertTrue(overscrollPastTop(deltaY = -12, clampedY = true, canScrollUp = false))
+        assertFalse(overscrollPastTop(deltaY = 12, clampedY = true, canScrollUp = false))
+        assertFalse(overscrollPastTop(deltaY = -12, clampedY = false, canScrollUp = false))
+        assertFalse(overscrollPastTop(deltaY = -12, clampedY = true, canScrollUp = true))
+    }
+
+    /** What PageWebView forwards for one clamped overscroll on a page with no scroll range. */
+    private fun ScrollRevealSlot.unscrollableOverscroll(deltaY: Int) {
+        if (overscrollPastEnd(deltaY, clampedY = true, canScrollDown = false)) onBottomOverscroll()
+        if (overscrollPastTop(deltaY, clampedY = true, canScrollUp = false)) onTopOverscroll()
+    }
+
+    @Test
+    fun `a pull down at the top of an unscrollable page never arms mid-drag`() {
+        // short.html (AVD log): down at the end (Armed), pull down past
+        // the slop (Tracking), Chromium clamps at the top on every move.
+        val s = ScrollRevealSlot()
+        assertTrue(s.onDown(500f, 1100f, atEnd = true, allowed = true))
+        s.unscrollableOverscroll(-22) // inside the slop: still armed
+        assertEquals(Phase.Armed, s.phase)
+        assertFalse(s.onMove(500f, 1140f, slop))
+        assertEquals(Phase.Tracking, s.phase)
+        s.unscrollableOverscroll(-52)
+        assertEquals(Phase.Idle, s.phase)
+        // The reversal overscrolls the bottom edge for real (dy > 0), but
+        // the gesture is the page's now: no arm, no takeover.
+        assertFalse(s.onMove(500f, 1120f, slop))
+        s.unscrollableOverscroll(53)
+        assertFalse(s.onMove(500f, 800f, slop))
+        assertEquals(Phase.Idle, s.phase)
+        // A fresh push at the end still reveals.
+        assertTrue(s.onDown(500f, 1700f, atEnd = true, allowed = true))
+        s.unscrollableOverscroll(53)
+        assertTrue(s.onMove(500f, 1670f, slop))
+    }
+
+    @Test
+    fun `a top overscroll leaves an at-down arm alone`() {
+        // A jitter down inside the slop before a push on a short page.
+        val s = armed()
+        s.onTopOverscroll()
+        assertEquals(Phase.Armed, s.phase)
+        assertTrue(s.onMove(500f, 1670f, slop))
     }
 }
