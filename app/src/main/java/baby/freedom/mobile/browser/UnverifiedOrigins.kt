@@ -75,6 +75,13 @@ object UnverifiedOrigins {
     private val holds = HashMap<Any, Pair<Set<String>, Long>>()
 
     /**
+     * Requesters (a tab, or `null` for a service worker) already served
+     * the cleanup page on an origin because another tab held it
+     * ([takeClearFor]); emptied whenever [holds] change.
+     */
+    private val clearedWhileHeld = HashSet<Pair<Any?, String>>()
+
+    /**
      * Recorded origins a service worker fetched a document on, with the
      * [DocumentClock] tick of the last such fetch ([noteWorkerDocument]).
      * Only ever recorded origins, so a sweep (which takes them all)
@@ -182,6 +189,7 @@ object UnverifiedOrigins {
         synchronized(lock) {
             val held = holds[holder]?.first.orEmpty()
             holds[holder] = (held + origins) to clock() + HOLD_MS
+            clearedWhileHeld.clear()
         }
     }
 
@@ -202,23 +210,27 @@ object UnverifiedOrigins {
     fun release(holder: Any) {
         synchronized(lock) {
             val (held, _) = holds.remove(holder) ?: return
+            clearedWhileHeld.clear()
             if (toClear.addAll(held)) persist()
         }
     }
 
     /**
      * A service worker fetched a document (typically a frame's) on
-     * [origin], once its answer is in (so an external gateway's has been
-     * [record]ed). Worker fetches reach no tab's `WebViewClient`, so the
+     * [origin], noted once its answer is in (so an external gateway's has
+     * been [record]ed) but at [tick], taken before the fetch started: a
+     * slow fetch of an outgoing document's frame mustn't be placed after
+     * the next document's answer. Worker fetches reach no tab's `WebViewClient`, so the
      * tab host can't tell which tab it's in: a sweep of [origin] treats
      * every tab whose document on screen was answered before this fetch
      * as having it ([takeWorkerDocuments],
      * [TabDocuments.mayHoldWorkerFetchAt]). Only an origin the external
      * gateway served is kept — nothing else is ever swept. Any thread.
      */
-    fun noteWorkerDocument(origin: String) {
-        val tick = DocumentClock.next()
-        synchronized(lock) { if (origin in origins) workerDocuments[origin] = tick }
+    fun noteWorkerDocument(origin: String, tick: Long) {
+        synchronized(lock) {
+            if (origin in origins) workerDocuments[origin] = maxOf(tick, workerDocuments[origin] ?: 0L)
+        }
     }
 
     /**
@@ -239,27 +251,33 @@ object UnverifiedOrigins {
     private const val HOLD_MS = 10_000L
 
     /**
-     * Should the document now being requested on [origin] clear the
-     * origin's site data first? True once per swept origin, and again
-     * while a tab [hold]s it: the interceptor then answers with a
+     * Should the document now being requested on [origin] by [requester]
+     * (the tab, `null` for a service worker) clear the origin's site data
+     * first? True once per swept origin, and again while a tab [hold]s
+     * it: every time for the holder itself (its hold ends at its next
+     * commit), and once per hold for anyone else — a tab that already
+     * released would otherwise be served the page it reloads from over
+     * and over until the other tab commits. The interceptor then answers with a
      * same-origin page that clears it and reloads
      * (`SITE_DATA_CLEANUP_HTML`) — the only way to reach the DOM storage
      * and service workers [wipeWebData] can't.
      */
-    fun takeClearFor(origin: String): Boolean = synchronized(lock) {
+    fun takeClearFor(origin: String, requester: Any? = null): Boolean = synchronized(lock) {
         // An expired hold ends like a released one (see [release]).
         val now = clock()
         val expired = holds.values.filter { (_, until) -> until <= now }
         if (expired.isNotEmpty()) {
             holds.values.removeAll { (_, until) -> until <= now }
             expired.forEach { (held, _) -> toClear.addAll(held) }
+            clearedWhileHeld.clear()
             persist()
         }
         if (toClear.remove(origin)) {
             persist()
             return true
         }
-        holds.values.any { (held, _) -> origin in held }
+        if (holds[requester]?.first?.contains(origin) == true) return true
+        holds.values.any { (held, _) -> origin in held } && clearedWhileHeld.add(requester to origin)
     }
 
     /**
@@ -293,6 +311,7 @@ object UnverifiedOrigins {
             origins.clear()
             toClear.clear()
             holds.clear()
+            clearedWhileHeld.clear()
             workerDocuments.clear()
             current = null
             generation = 0

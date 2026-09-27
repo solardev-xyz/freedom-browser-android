@@ -2141,6 +2141,12 @@ private fun buildRefreshableWebView(
                     onSubmitUrl(state, target)
                     return true
                 }
+                // The WebView follows it: a page a service worker answers
+                // commits with no answer the interceptor saw, and prunes
+                // the tab's origins from here instead (#125, R5-F1).
+                if (request.isForMainFrame && view is PageWebView) {
+                    view.documents.navigationStarted(target)
+                }
                 return false
             }
 
@@ -2174,7 +2180,7 @@ private fun buildRefreshableWebView(
                 }
                 val work = state.gatewayWork.start(generation)
                 val response = try {
-                    interceptVirtualRequest(request, ensPins)
+                    interceptVirtualRequest(request, ensPins, view)
                 } catch (t: Throwable) {
                     state.gatewayWork.finish(work)
                     throw t
@@ -2485,6 +2491,51 @@ internal class PageWebView(context: Context) : WebView(context) {
      * switched away from (#125).
      */
     val documents = TabDocuments()
+
+    // Navigations the app starts, noted before Chromium has them (see
+    // [TabDocuments.navigationStarted]); the page's own go through
+    // `shouldOverrideUrlLoading`.
+    override fun loadUrl(url: String) {
+        documents.navigationStarted(url)
+        super.loadUrl(url)
+    }
+
+    override fun loadUrl(url: String, additionalHttpHeaders: MutableMap<String, String>) {
+        documents.navigationStarted(url)
+        super.loadUrl(url, additionalHttpHeaders)
+    }
+
+    override fun postUrl(url: String, postData: ByteArray) {
+        documents.navigationStarted(url)
+        super.postUrl(url, postData)
+    }
+
+    override fun reload() {
+        url?.let(documents::navigationStarted)
+        super.reload()
+    }
+
+    override fun goBack() {
+        historyStepStarting(-1)
+        super.goBack()
+    }
+
+    override fun goForward() {
+        historyStepStarting(1)
+        super.goForward()
+    }
+
+    override fun goBackOrForward(steps: Int) {
+        historyStepStarting(steps)
+        super.goBackOrForward(steps)
+    }
+
+    private fun historyStepStarting(steps: Int) {
+        val history = copyBackForwardList()
+        val index = history.currentIndex + steps
+        if (index !in 0 until history.size) return
+        history.getItemAtIndex(index)?.url?.let(documents::navigationStarted)
+    }
 
     /** "Search" on the text-selection toolbar, with the selected text (#84). */
     var onSearchSelection: ((String) -> Unit)? = null
@@ -2953,10 +3004,15 @@ private fun syntheticResponse(
  * Handing WebView an answer that renders in place only marks the page
  * delivered, so the subresources that race `onPageStarted` wait for it
  * rather than guess which page they belong to.
+ *
+ * [tab] is the requesting tab's WebView (null for a service worker): a
+ * cleanup page another tab's hold asks for is served to it only once
+ * ([UnverifiedOrigins.takeClearFor]).
  */
 internal fun interceptVirtualRequest(
     request: WebResourceRequest?,
     ensPins: EnsDocumentPins? = null,
+    tab: Any? = null,
 ): WebResourceResponse? {
     val req = request ?: return null
     val url = req.url?.toString() ?: return null
@@ -2964,7 +3020,7 @@ internal fun interceptVirtualRequest(
     // An origin an unverified external IPFS gateway served before the
     // user switched away from it (#125): its next document first clears
     // what that gateway's pages left there, before anything else runs.
-    val response = siteDataCleanupFor(req, url)
+    val response = siteDataCleanupFor(req, url, tab)
         ?: interceptVirtualRequestFor(req, ensPins, incoming)
     if (incoming != null && response != null &&
         rendersInPlace(response.statusCode, response.mimeType, response.responseHeaders)
@@ -3030,14 +3086,14 @@ private val DOWNLOADED_TEXT_TYPES = setOf(
  * intercepted response touches those. Then it reloads the URL in
  * place, which is served normally.
  */
-private fun siteDataCleanupFor(req: WebResourceRequest, url: String): WebResourceResponse? {
+private fun siteDataCleanupFor(req: WebResourceRequest, url: String, tab: Any?): WebResourceResponse? {
     if (!isDocumentRequest(req.isForMainFrame, req.requestHeaders)) return null
     val origin = VirtualOrigin.parseHostOfUrl(url)?.let(VirtualOrigin::originFor) ?: return null
     // At a cold start the origins left to clear are loaded, and swept,
     // just before the endpoint settings land: a restored tab's first
     // document must not get ahead of that.
     Gateways.awaitExternalEndpointsBlocking()
-    if (!UnverifiedOrigins.takeClearFor(origin)) return null
+    if (!UnverifiedOrigins.takeClearFor(origin, tab)) return null
     return WebResourceResponse(
         "text/html", "utf-8", 200, "OK",
         // `Vary: *`: a service worker's Cache Storage won't keep it.

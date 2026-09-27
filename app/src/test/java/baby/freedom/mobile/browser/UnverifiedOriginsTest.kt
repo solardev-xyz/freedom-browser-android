@@ -133,16 +133,73 @@ class UnverifiedOriginsTest {
     }
 
     @Test
+    fun `a tab that released is served another tab's hold only once (R5-F2)`() {
+        val tabA = Any()
+        val tabB = Any()
+        UnverifiedOrigins.onSweep = { swept ->
+            UnverifiedOrigins.hold(tabA, swept)
+            UnverifiedOrigins.hold(tabB, swept)
+        }
+        UnverifiedOrigins.sweep("https://gw.example") {}
+        UnverifiedOrigins.record("https://gw.example", a)
+        UnverifiedOrigins.sweep("") {}
+
+        // A's reload: the one-shot clear, and again while A holds it.
+        assertTrue(UnverifiedOrigins.takeClearFor(a, tabA))
+        assertTrue(UnverifiedOrigins.takeClearFor(a, tabA))
+        UnverifiedOrigins.release(tabA)
+        // Released: once more for B's hold (plus the re-queued clear),
+        // then A's cleanup page's reload is served normally.
+        assertTrue(UnverifiedOrigins.takeClearFor(a, tabA))
+        assertTrue(UnverifiedOrigins.takeClearFor(a, tabA))
+        assertFalse(UnverifiedOrigins.takeClearFor(a, tabA))
+        assertFalse(UnverifiedOrigins.takeClearFor(a, tabA))
+        // The holder itself is served it every time; a worker once.
+        assertTrue(UnverifiedOrigins.takeClearFor(a, tabB))
+        assertTrue(UnverifiedOrigins.takeClearFor(a, tabB))
+        assertTrue(UnverifiedOrigins.takeClearFor(a))
+        assertFalse(UnverifiedOrigins.takeClearFor(a))
+        // B commits: its stale frame's writes get cleared on the next visit.
+        UnverifiedOrigins.release(tabB)
+        assertTrue(UnverifiedOrigins.takeClearFor(a, tabA))
+        assertFalse(UnverifiedOrigins.takeClearFor(a, tabA))
+    }
+
+    @Test
+    fun `a worker fetch is placed by when it started, not when it was answered (R5-F3)`() {
+        UnverifiedOrigins.sweep("https://gw.example") {}
+        UnverifiedOrigins.record("https://gw.example", a)
+        val tab = TabDocuments()
+        // The outgoing document's frame fetch starts, then the user
+        // navigates and the new document commits before the fetch is in.
+        val started = DocumentClock.next()
+        tab.mainFrameAnswered("https://example.org/")
+        tab.committed("https://example.org/", null)
+        UnverifiedOrigins.noteWorkerDocument(a, started)
+        // An older fetch finishing later doesn't move the tick back.
+        val later = DocumentClock.next()
+        UnverifiedOrigins.noteWorkerDocument(a, later)
+        UnverifiedOrigins.noteWorkerDocument(a, started)
+        val anyTab = UnverifiedOrigins.takeWorkerDocuments(setOf(a))
+        assertEquals(later, anyTab.getValue(a))
+        assertTrue(tab.mayHoldWorkerFetchAt(later))
+
+        UnverifiedOrigins.record("https://gw.example", a)
+        UnverifiedOrigins.noteWorkerDocument(a, started)
+        assertFalse(tab.mayHoldWorkerFetchAt(UnverifiedOrigins.takeWorkerDocuments(setOf(a)).getValue(a)))
+    }
+
+    @Test
     fun `frame documents a service worker fetched count for every tab not navigated since`() {
         UnverifiedOrigins.sweep("https://gw.example") {}
         // An origin the external gateway never served isn't kept at all.
-        UnverifiedOrigins.noteWorkerDocument(b)
+        UnverifiedOrigins.noteWorkerDocument(b, DocumentClock.next())
         assertTrue(UnverifiedOrigins.workerDocumentOrigins().isEmpty())
 
         val stayed = TabDocuments()
         val navigated = TabDocuments()
         UnverifiedOrigins.record("https://gw.example", a)
-        UnverifiedOrigins.noteWorkerDocument(a)
+        UnverifiedOrigins.noteWorkerDocument(a, DocumentClock.next())
         // This tab has moved to a new document since the worker's fetch.
         navigated.mainFrameAnswered("https://example.org/")
         navigated.committed("https://example.org/", null)

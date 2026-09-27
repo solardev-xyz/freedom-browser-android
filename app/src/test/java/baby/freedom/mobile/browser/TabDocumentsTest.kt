@@ -91,4 +91,48 @@ class TabDocumentsTest {
         tab.committed("https://b.example/", null)
         assertFalse(tab.mayHoldWorkerFetchAt(fetched))
     }
+
+    @Test
+    fun `a page a service worker answered prunes what was requested before its navigation started (R5-F1)`() {
+        val tab = TabDocuments()
+        tab.mainFrameAnswered("$ipfs/")
+        tab.committed("$ipfs/", ipfs)
+        tab.requested(frame)
+        // An answer for a load that never committed is still queued.
+        tab.mainFrameAnswered("https://stale.example/")
+        // The user types a URL whose page a service worker answers: no
+        // answer reaches the interceptor, only the start was seen.
+        tab.navigationStarted("HTTP://LocalHost:8700/pwa#top")
+        // The outgoing document requests one more frame; kept, in doubt.
+        tab.requested(other)
+        tab.committed("http://localhost:8700/pwa", null)
+        assertEquals(setOf(other), tab.origins())
+        assertEquals(
+            emptySet<String>(),
+            sweptOrigins(setOf(ipfs, frame), tab.origins(), "http://localhost:8700/pwa"),
+        )
+        // The worker's fetch of an old frame predates the new document.
+        assertFalse(tab.mayHoldWorkerFetchAt(tab.committedAt - 1))
+    }
+
+    @Test
+    fun `an answer for the committed URL wins over the start of its navigation`() {
+        val tab = TabDocuments()
+        tab.navigationStarted("https://a.example/")
+        tab.requested(frame)
+        tab.mainFrameAnswered("https://a.example/")
+        tab.requested(other)
+        tab.committed("https://a.example/", null)
+        assertEquals(setOf(other), tab.origins())
+        // Both are used up: a later commit with neither prunes nothing.
+        tab.committed("https://a.example/", null)
+        assertEquals(setOf(other), tab.origins())
+    }
+
+    @Test
+    fun `document keys match a started URL to its commit`() {
+        assertEquals("http://localhost:8700/", documentKey("HTTP://LocalHost:8700"))
+        assertEquals("https://a.example/p?q=%20", documentKey("https://a.example/p?q=%20#f"))
+        assertEquals("about:blank", documentKey("about:blank"))
+    }
 }
