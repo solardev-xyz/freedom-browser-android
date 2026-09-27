@@ -137,7 +137,9 @@ object IpfsProgress {
      * running in the node — is handled by [carried] (see [LoadMeter]):
      * the growth that happened while the old load was still busy in the
      * node is subtracted, so the line may under-report a phase
-     * for that stretch but never shows the old load's.
+     * for that stretch. Work the old load's requests no longer show as
+     * busy (a gateway still fetching ahead of an idle body) isn't
+     * subtracted, and can show through (see [LoadMeter]).
      */
     fun fromCounters(baseline: Counters, now: Counters, carried: Counters? = null): String {
         val d = (now - baseline).minusClamped(carried)
@@ -227,7 +229,11 @@ object IpfsProgress {
      * requests have all closed or gone idle (a paused `<video>`'s range
      * body, R4-F2), growth counts again — so a link tapped while the
      * page is still loading advances as soon as the old page's requests
-     * are done, instead of being masked for the whole load.
+     * are done, instead of being masked for the whole load. The cost:
+     * if the gateway keeps fetching blocks ahead of an idle body's
+     * reader (or, as above, after the WebView went elsewhere), that
+     * growth is counted as this load's, so the line can show a
+     * fetching phase that isn't its own.
      *
      * The snapshot is node-wide too, and an old load's request stays in
      * its `active` list for as long as the request is open, idle or not
@@ -410,8 +416,13 @@ internal class GatewayWork(
      * Some load older than [generation] is busy in the node: a request
      * still waiting for its answer, or one whose body is being read or
      * was read within [IDLE_MS]. A body Chromium stopped pulling (a
-     * paused `<video>`'s open range request, say) holds the node to no
-     * more than a pipe's worth of work, so it doesn't count (R4-F2).
+     * paused `<video>`'s open range request, say) doesn't count
+     * (R4-F2), on the assumption that the gateway stops once its pipe
+     * to us is full. That holds only if it doesn't fetch DAG blocks
+     * ahead of the reader: if it does, the idle body keeps moving the
+     * block counters and that growth is no longer set aside — the same
+     * limit as the node carrying on after the WebView went elsewhere
+     * (see [IpfsProgress.LoadMeter]).
      */
     fun activeBefore(generation: Int): Boolean = synchronized(lock) {
         val now = dropStale(now = clockMs())
