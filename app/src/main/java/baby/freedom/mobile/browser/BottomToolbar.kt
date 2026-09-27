@@ -42,6 +42,7 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Menu
+import androidx.compose.material.icons.filled.Print
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Star
@@ -1403,6 +1404,7 @@ internal fun BottomToolbar(
     onReload: () -> Unit,
     onStop: () -> Unit,
     onNewTab: () -> Unit,
+    onPrint: () -> Unit,
     onExpandCapsule: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -1681,6 +1683,7 @@ internal fun BottomToolbar(
                     onOpenBookmarks = onOpenBookmarks,
                     onReload = onReload,
                     onNewTab = onNewTab,
+                    onPrint = onPrint,
                 )
             },
             modifier = Modifier
@@ -2853,6 +2856,7 @@ private fun OverflowMenuButton(
     onOpenBookmarks: () -> Unit,
     onReload: () -> Unit,
     onNewTab: () -> Unit,
+    onPrint: () -> Unit,
 ) {
     var menuExpanded by remember { mutableStateOf(false) }
     // We hand-roll the anchor positioning rather than rely on
@@ -2958,6 +2962,18 @@ private fun OverflowMenuButton(
                             onClick = {
                                 menuExpanded = false
                                 onReload()
+                            },
+                        )
+                        // Print or save as PDF (#89). Off on the home tab,
+                        // which is Compose rather than a page: there is no
+                        // document behind it to print.
+                        DropdownMenuItem(
+                            text = { MenuItemLabel("Print") },
+                            leadingIcon = { Icon(Icons.Filled.Print, contentDescription = null) },
+                            enabled = state.url.isNotBlank(),
+                            onClick = {
+                                menuExpanded = false
+                                onPrint()
                             },
                         )
                         DropdownMenuItem(

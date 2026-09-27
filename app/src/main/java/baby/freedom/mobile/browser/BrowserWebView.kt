@@ -568,6 +568,11 @@ fun BrowserWebViewHost(
         // also clears the counter itself so the capsule's edge trace
         // goes out on the same frame as the tap.
         tabs.stopLoading = { tab -> webViews[tab.id]?.stopLoading() }
+        tabs.printPage = { tab ->
+            webViews[tab.id]?.let { wv ->
+                printWebView(wv, printJobName(tab.title, tab.addressBarText, tab.url))
+            }
+        }
         tabs.clearWebViewData = {
             // Globally-scoped stores: cookies and DOM storage / IndexedDB /
             // WebSQL are shared across every WebView in the process, so
@@ -592,6 +597,7 @@ fun BrowserWebViewHost(
             tabs.captureActiveThumbnail = null
             tabs.clearWebViewData = null
             tabs.stopLoading = null
+            tabs.printPage = null
         }
     }
 

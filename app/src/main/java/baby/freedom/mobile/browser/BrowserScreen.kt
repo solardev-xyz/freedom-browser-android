@@ -1270,6 +1270,7 @@ fun BrowserScreen(
                         val fresh = tabs.newTab()
                         submit(fresh, tabs.homepageUrl)
                     },
+                    onPrint = { tabs.printPage?.invoke(state) },
                     modifier = Modifier
                         .widthIn(max = CHROME_MAX_WIDTH)
                         .fillMaxWidth(),
