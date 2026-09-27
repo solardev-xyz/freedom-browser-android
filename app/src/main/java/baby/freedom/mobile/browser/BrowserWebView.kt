@@ -15,6 +15,8 @@ import android.graphics.Rect
 import android.graphics.drawable.Drawable
 import android.net.Uri
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.os.Message
 import android.os.SystemClock
 import android.util.Log
@@ -733,6 +735,7 @@ fun BrowserWebViewHost(
             // its request is denied along with the page.
             sitePermissions.onTabClosed(id)
             UnverifiedOrigins.release(wv)
+            (wv as? PageWebView)?.sweptReload?.committed()
             wv.stopLoading()
             wv.destroy()
         }
@@ -821,7 +824,9 @@ fun BrowserWebViewHost(
         // An external IPFS gateway was switched away from (#125): a tab
         // still showing what it served would keep running it, unwarned,
         // and could write to the origin again after its one-shot cleanup.
-        // Reload those tabs, and hold the origins for cleanup until each
+        // Reload those tabs — falling back to a navigation that can't be
+        // refused if the reload doesn't commit, a POST result's say
+        // ([SweptReload]) — and hold the origins for cleanup until each
         // has committed its next document.
         UnverifiedOrigins.onSweep = { swept ->
             // Frame documents a service worker fetched belong to no known
@@ -832,7 +837,7 @@ fun BrowserWebViewHost(
                 val stale = sweptDocuments(wv, swept, anyTab)
                 if (stale.isEmpty()) continue
                 UnverifiedOrigins.hold(wv, stale)
-                wv.reload()
+                if (wv is PageWebView) wv.sweptReload.swept(wv.url) else wv.reload()
             }
         }
         tabs.printPage = { tab ->
@@ -903,7 +908,8 @@ fun BrowserWebViewHost(
         onDispose {
             for (wv in webViews.values) {
                 UnverifiedOrigins.release(wv)
-                    wv.stopLoading()
+                (wv as? PageWebView)?.sweptReload?.committed()
+                wv.stopLoading()
                 wv.destroy()
             }
             webViews.clear()
@@ -1953,6 +1959,18 @@ private fun buildRefreshableWebView(
                 }
             }
 
+            // Reloading a page reached by POST asks here; the answer is
+            // always "don't resend" (WebView's default: resending would
+            // repeat the form's side effect). But a reload a sweep asked
+            // for must still get rid of the stale document, so that one
+            // moves straight on to a GET of the same address (#125,
+            // R6-F1, [SweptReload]) — posted, not run inside WebView's
+            // own callback.
+            override fun onFormResubmission(view: WebView?, dontResend: Message?, resend: Message?) {
+                dontResend?.sendToTarget()
+                if (view is PageWebView) view.post { view.sweptReload.refused() }
+            }
+
             override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
                 // The pending navigation committed; it's no download.
                 pendingNavigationUrls.clear()
@@ -1965,6 +1983,7 @@ private fun buildRefreshableWebView(
                 // since this document's answer, which may already include
                 // its frames (#125, [TabDocuments.committed]).
                 if (view is PageWebView) {
+                    view.sweptReload.committed()
                     UnverifiedOrigins.release(view)
                     view.documents.committed(
                         url,
@@ -2829,6 +2848,24 @@ internal class PageWebView(context: Context) : WebView(context) {
      * switched away from (#125).
      */
     val documents = TabDocuments()
+
+    /**
+     * Gets the tab off a document a sweep left stale — a reload, then a
+     * GET of the same address, then `about:blank`, until one commits
+     * (#125, R6-F1; see [SweptReload]).
+     */
+    val sweptReload: SweptReload = SweptReload(
+        navigate = { step ->
+            when (step) {
+                SweptReload.Step.RELOAD -> reload()
+                SweptReload.Step.GET -> loadUrl(sweptReload.address ?: ABOUT_BLANK)
+                SweptReload.Step.BLANK -> loadUrl(ABOUT_BLANK)
+            }
+        },
+        schedule = { delayMs, action -> mainHandler.postDelayed(action, delayMs) },
+    )
+
+    private val mainHandler = Handler(Looper.getMainLooper())
 
     /**
      * The user's taps, key presses and accessibility clicks on this

@@ -29,7 +29,10 @@ import android.webkit.WebStorage
  * origins to [onSweep] (the tab host), which reloads every tab that
  * showed one (in any frame; frame documents a service worker fetched
  * count for every tab not navigated since, [noteWorkerDocument]) and [hold]s those origins
- * until each such tab has committed its next document: until then
+ * until each such tab has committed its next document — however long
+ * that takes: a reload that doesn't navigate (a POST result's, which
+ * WebView won't resend) is followed by one that can't be refused
+ * ([SweptReload]), and the hold ends only at that commit. Until then
  * every document requested there is the cleanup page again
  * ([takeClearFor]), and once it has, the next one is again
  * ([release]), so storage a stale document wrote before it went is
@@ -71,8 +74,8 @@ object UnverifiedOrigins {
     /** Bumped whenever [current] changes: a [record] token from an earlier one is stale. */
     private var generation = 0L
 
-    /** Origins held for cleanup, by holder, with their expiry ([hold]). */
-    private val holds = HashMap<Any, Pair<Set<String>, Long>>()
+    /** Origins held for cleanup, by holder ([hold]). */
+    private val holds = HashMap<Any, Set<String>>()
 
     /**
      * Requesters (a tab, or `null` for a service worker) already served
@@ -96,10 +99,6 @@ object UnverifiedOrigins {
      */
     @Volatile
     var onSweep: ((Set<String>) -> Unit)? = null
-
-    /** Monotonic clock for [hold] expiry; a seam for tests. */
-    @Volatile
-    internal var clock: () -> Long = { System.nanoTime() / 1_000_000 }
 
     /** Load the persisted list (disk I/O). Call before the first [sweep]; idempotent. */
     fun init(context: Context) {
@@ -176,9 +175,14 @@ object UnverifiedOrigins {
     /**
      * [holder] (a tab) still has a document on [origins] that was
      * served before a [sweep]: until [release] (its next document
-     * committed) or [HOLD_MS] passes, every document requested on them
-     * is the cleanup page again, so whatever the stale document writes
-     * meanwhile is cleared after it's gone.
+     * committed), every document requested on them is the cleanup page
+     * again, so whatever the stale document writes meanwhile is cleared
+     * after it's gone.
+     *
+     * No timeout: a hold that ran out while the stale document still
+     * lived would queue its one cleanup and leave the document to write
+     * after it (R6-F1). The tab host guarantees the commit instead
+     * ([SweptReload] falls back to a navigation that can't be refused).
      *
      * Adds to a hold [holder] already has (two sweeps in a row, say
      * external A → external B → embedded, before the tab commits): the
@@ -187,8 +191,7 @@ object UnverifiedOrigins {
     fun hold(holder: Any, origins: Set<String>) {
         if (origins.isEmpty()) return
         synchronized(lock) {
-            val held = holds[holder]?.first.orEmpty()
-            holds[holder] = (held + origins) to clock() + HOLD_MS
+            holds[holder] = holds[holder].orEmpty() + origins
             clearedWhileHeld.clear()
         }
     }
@@ -209,7 +212,7 @@ object UnverifiedOrigins {
      */
     fun release(holder: Any) {
         synchronized(lock) {
-            val (held, _) = holds.remove(holder) ?: return
+            val held = holds.remove(holder) ?: return
             clearedWhileHeld.clear()
             if (toClear.addAll(held)) persist()
         }
@@ -247,9 +250,6 @@ object UnverifiedOrigins {
     /** Origins noted by [noteWorkerDocument] and not yet taken (tests). */
     internal fun workerDocumentOrigins(): Set<String> = synchronized(lock) { workerDocuments.keys.toSet() }
 
-    /** A bound on [hold], for a tab whose reload never commits. */
-    private const val HOLD_MS = 10_000L
-
     /**
      * Should the document now being requested on [origin] by [requester]
      * (the tab, `null` for a service worker) clear the origin's site data
@@ -263,21 +263,12 @@ object UnverifiedOrigins {
      * and service workers [wipeWebData] can't.
      */
     fun takeClearFor(origin: String, requester: Any? = null): Boolean = synchronized(lock) {
-        // An expired hold ends like a released one (see [release]).
-        val now = clock()
-        val expired = holds.values.filter { (_, until) -> until <= now }
-        if (expired.isNotEmpty()) {
-            holds.values.removeAll { (_, until) -> until <= now }
-            expired.forEach { (held, _) -> toClear.addAll(held) }
-            clearedWhileHeld.clear()
-            persist()
-        }
         if (toClear.remove(origin)) {
             persist()
             return true
         }
-        if (holds[requester]?.first?.contains(origin) == true) return true
-        holds.values.any { (held, _) -> origin in held } && clearedWhileHeld.add(requester to origin)
+        if (holds[requester]?.contains(origin) == true) return true
+        holds.values.any { origin in it } && clearedWhileHeld.add(requester to origin)
     }
 
     /**
@@ -318,6 +309,9 @@ object UnverifiedOrigins {
             persist()
         }
     }
+
+    /** Is [holder] holding any origin (tests)? */
+    internal fun isHeld(holder: Any): Boolean = synchronized(lock) { holder in holds }
 
     /** Origins whose next document clears their site data (tests). */
     internal fun pendingClears(): Set<String> = synchronized(lock) { toClear.toSet() }

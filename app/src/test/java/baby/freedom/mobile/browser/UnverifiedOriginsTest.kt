@@ -14,7 +14,6 @@ class UnverifiedOriginsTest {
     fun tearDown() {
         UnverifiedOrigins.reset()
         UnverifiedOrigins.onSweep = null
-        UnverifiedOrigins.clock = { System.nanoTime() / 1_000_000 }
     }
 
     private val a = "https://bafya.ipfs.freedom.baby"
@@ -80,8 +79,6 @@ class UnverifiedOriginsTest {
 
     @Test
     fun `a sweep tells the tab host, which holds origins until the stale tab commits`() {
-        var now = 0L
-        UnverifiedOrigins.clock = { now }
         val tab = Any()
         UnverifiedOrigins.onSweep = { swept -> UnverifiedOrigins.hold(tab, swept) }
         UnverifiedOrigins.sweep("https://gw.example") {}
@@ -100,13 +97,14 @@ class UnverifiedOriginsTest {
         UnverifiedOrigins.release(tab)
         assertFalse(UnverifiedOrigins.takeClearFor(a))
 
-        // A tab whose reload never commits doesn't hold the origin forever;
-        // its hold ends like a release.
+        // A hold has no timeout: however long the stale document takes
+        // to go, its origin isn't handed back to the one-shot clear while
+        // it may still write there (R6-F1) — the tab host makes sure it
+        // goes ([SweptReload]).
         UnverifiedOrigins.hold(tab, setOf(a))
-        assertTrue(UnverifiedOrigins.takeClearFor(a))
-        now += 10_000
-        assertTrue(UnverifiedOrigins.takeClearFor(a))
-        assertFalse(UnverifiedOrigins.takeClearFor(a))
+        assertTrue(UnverifiedOrigins.takeClearFor(a, tab))
+        assertTrue(UnverifiedOrigins.takeClearFor(a, tab))
+        assertEquals(emptySet<String>(), UnverifiedOrigins.pendingClears())
     }
 
     @Test
