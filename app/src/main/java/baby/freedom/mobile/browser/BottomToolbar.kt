@@ -3074,8 +3074,9 @@ private fun OverflowMenuButton(
  * (home, an error page — nothing to zoom) disables the whole row.
  *
  * The level is always in the row's text, never only in a tooltip or a
- * content description, and sits in a fixed-width slot so stepping from
- * 90% to 100% doesn't nudge the buttons under the user's finger.
+ * content description, and sits in a slot with a minimum width so stepping
+ * from 90% to 100% doesn't nudge the buttons under the user's finger; the
+ * slot grows past that floor at large font scales rather than clip.
  */
 @Composable
 private fun ZoomMenuRow(level: Int?, onZoom: (ZoomAction) -> Unit) {
@@ -3122,8 +3123,11 @@ private fun ZoomMenuRow(level: Int?, onZoom: (ZoomAction) -> Unit) {
                     .let { if (enabled) it else it.copy(alpha = disabledAlpha) },
             ),
             contentPadding = PaddingValues(horizontal = 4.dp),
+            // A floor, not a fixed width: 64dp fits "100%" at default font
+            // size so stepping 90% -> 100% doesn't move the buttons, but at
+            // large font scales the slot must grow or the '%' is clipped.
             modifier = Modifier
-                .width(64.dp)
+                .widthIn(min = 64.dp)
                 .semantics {
                     contentDescription = "Zoom $shown%" +
                         if (enabled && shown != PageZoomLevels.DEFAULT) ", tap to reset to 100%" else ""
@@ -3132,8 +3136,8 @@ private fun ZoomMenuRow(level: Int?, onZoom: (ZoomAction) -> Unit) {
             Text(
                 text = "$shown%",
                 maxLines = 1,
+                softWrap = false,
                 textAlign = TextAlign.Center,
-                modifier = Modifier.fillMaxWidth(),
             )
         }
         IconButton(
