@@ -824,6 +824,10 @@ fun BrowserScreen(
         // lifts a download block a declined offer left on it
         // ([DownloadOffers]); a page's own navigation doesn't.
         if (source == SubmitSource.User) downloads.allowOffers(target.id)
+        // And the load it starts is theirs: its redirects may end in an
+        // app link without a tap on a page (#173). A page's submit
+        // takes that back from an earlier one of the user's.
+        target.userNamedLoad = source == SubmitSource.User
 
         // Any new submit supersedes a probe that was still in flight on
         // this tab — otherwise switching URL mid-probe would let the

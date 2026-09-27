@@ -290,6 +290,19 @@ class BrowserState(val id: Long, val private: Boolean = false) {
         internal set
 
     /**
+     * The user named the load this tab is about to hand its WebView — an
+     * address they typed or picked (`SubmitSource.User`), not one a page
+     * asked for. Its WebView takes it, once, with that load
+     * ([takeUserNamedLoad]): the load's server redirects may then end in
+     * a link to another app without a tap on any page (#173, see
+     * [externalLinkVerdict]). Main thread; not UI state.
+     */
+    internal var userNamedLoad = false
+
+    /** [userNamedLoad], cleared: one load's worth. */
+    internal fun takeUserNamedLoad(): Boolean = userNamedLoad.also { userNamedLoad = false }
+
+    /**
      * The site-permission prompt this tab is waiting on (#81), or null.
      * Owned by [SitePermissionBroker]; [BrowserScreen] shows it while
      * this tab is the active one, so a background tab can never put a

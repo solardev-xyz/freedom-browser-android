@@ -32,6 +32,17 @@ import java.net.URISyntaxException
  *    prompt — on load, from a timer, from an embedded frame (not even
  *    by navigating the top frame, `target=_top`), or turn one tap into
  *    a burst of launches.
+ *    One exception: the server-redirect chain of a load the *user*
+ *    named — an address typed or pasted into the bar, a bookmark, "Open
+ *    in new tab" — may end in an app link with no tap on any page
+ *    ([userNamedRedirect]). There is no page to have tapped: the user's
+ *    own submit is the gesture, good for the one app link that ends
+ *    that navigation. A Google Meet link is this case (#173):
+ *    `meet.google.com/<code>` answers Android with a redirect to
+ *    `meet.app.goo.gl`, which answers with an `intent:` for the Meet
+ *    app via Play services, and refusing it left the tab blank.
+ *    Chrome, likewise, launches an app from the redirect of a typed
+ *    URL.
  * 3. The site-permission prompt (#81), keyed by origin + scheme
  *    ([ExternalScheme], stored as `external:<scheme>` like desktop), so
  *    allowing `magnet:` for a site never allows `sms:` too. Remembered
@@ -146,20 +157,31 @@ internal enum class ExternalLinkVerdict {
 
     /** Ask the site-permission broker (prompt, or a remembered answer). */
     Ask,
+
+    /**
+     * Ask, for the redirect chain of a load the user named: no page tap
+     * to consume or confirm, and the site asking is the one the user
+     * named ([userNamedRedirect]).
+     */
+    AskUserNamed,
 }
 
 /**
  * Applies the policy above to a navigation. [consumeGesture] is only
  * called — and so the tap only used up — once everything else passes.
+ * [userNamedRedirect]: a main-frame redirect hop of a load the user
+ * named themselves, whose chain hasn't ended in an app link yet.
  */
 internal fun externalLinkVerdict(
     url: String?,
     isForMainFrame: Boolean,
     hasGesture: Boolean,
+    userNamedRedirect: Boolean = false,
     consumeGesture: () -> Boolean,
 ): ExternalLinkVerdict {
     val scheme = externalLinkScheme(url) ?: return ExternalLinkVerdict.NotExternal
     if (!isExternalSchemeAllowed(scheme)) return ExternalLinkVerdict.Refuse
+    if (isForMainFrame && userNamedRedirect) return ExternalLinkVerdict.AskUserNamed
     if (!isForMainFrame || !hasGesture) return ExternalLinkVerdict.Refuse
     return if (consumeGesture()) ExternalLinkVerdict.Ask else ExternalLinkVerdict.Refuse
 }

@@ -1927,11 +1927,24 @@ private fun buildRefreshableWebView(
         // detoured to the submit flow, or turned into a download), and
         // when the browser starts a load of its own over it.
         var navigationHadGesture = false
+        // The URL of the main-frame navigation in flight when it is a
+        // load the user named ([BrowserState.userNamedLoad]), else null:
+        // its redirect chain may end in an app link with no tap on a
+        // page, asked for that URL's site (#173 — a Meet link redirects
+        // to the Meet app's `intent:`). Taken from the tab by the load
+        // itself, and dropped wherever [navigationHadGesture] is.
+        var navigationUserNamed: String? = null
         // A load the browser starts itself (typed URL, reload, back /
         // forward) replaces whatever navigation was in flight without a
         // first hop through shouldOverrideUrlLoading: the replaced
         // navigation's gesture mustn't carry over to its redirects (#85).
-        this.onBrowserInitiatedLoad = { navigationHadGesture = false }
+        this.onBrowserInitiatedLoad = { url ->
+            navigationHadGesture = false
+            // Taken by every load, so a reload or Back doesn't leave it
+            // for a later one.
+            val named = state.takeUserNamedLoad()
+            navigationUserNamed = url?.takeIf { named }
+        }
 
         // Whether this WebView has started a document yet. A popup
         // (`target=_blank`, `window.open()`) whose very first navigation
@@ -1976,6 +1989,7 @@ private fun buildRefreshableWebView(
                 pendingNavigationUrls.clear()
                 // Nor does its gesture carry over to the next load.
                 navigationHadGesture = false
+                navigationUserNamed = null
                 // The page on screen stays: its open requests are this
                 // load's, whatever the answer's headers suggested.
                 state.mainFrameKeptPage()
@@ -2069,6 +2083,7 @@ private fun buildRefreshableWebView(
                 // The pending navigation committed; it's no download.
                 pendingNavigationUrls.clear()
                 navigationHadGesture = false
+                navigationUserNamed = null
                 documentStartedOnce = true
                 // The previous document, and its frames, are gone: what a
                 // sweep held for them is cleared once more, now that they
@@ -2479,6 +2494,8 @@ private fun buildRefreshableWebView(
                 // frame + user gesture only, then per-site consent.
                 if (request.isForMainFrame && !request.isRedirect) {
                     navigationHadGesture = request.hasGesture()
+                    // The page's own navigation, not the user's load.
+                    navigationUserNamed = null
                 }
                 // A popup's very first navigation: an app link there is
                 // its opener's, and the popup was opened for it alone.
@@ -2491,15 +2508,21 @@ private fun buildRefreshableWebView(
                     isForMainFrame = request.isForMainFrame,
                     hasGesture = request.hasGesture() ||
                         (request.isRedirect && request.isForMainFrame && navigationHadGesture),
+                    userNamedRedirect = request.isRedirect && navigationUserNamed != null,
                     consumeGesture = {
                         gesture = askingView?.userGestures?.consume()
                         gesture != null
                     },
                 )
+                // Read before the verdict's bookkeeping drops it.
+                val userNamedUrl = navigationUserNamed
                 if (verdict != ExternalLinkVerdict.NotExternal) {
                     // Cancelled here, so it never reaches onPageStarted:
                     // its gesture mustn't carry over to the next load.
-                    if (request.isForMainFrame) navigationHadGesture = false
+                    if (request.isForMainFrame) {
+                        navigationHadGesture = false
+                        navigationUserNamed = null
+                    }
                     // A redirect hop cancelled here ends a navigation whose
                     // first hop was already answered as a new document
                     // (#94): none commits, so the page on screen stays and
@@ -2523,7 +2546,21 @@ private fun buildRefreshableWebView(
                     val offer = askingView?.let { page -> { offerExternalLink(page, pageUrl, offerTab, target) } }
                     val waiting = verdict == ExternalLinkVerdict.Ask && input != null && latch != null &&
                         offer != null && latch.whenInTopDocument(input, offer)
-                    if (waiting) {
+                    if (verdict == ExternalLinkVerdict.AskUserNamed && askingView != null) {
+                        // The load ends here, in another app or nowhere:
+                        // the tab goes back to what it shows — the page
+                        // before, or Home when there was none — instead
+                        // of a blank page under the named address (#173).
+                        // Not by loading Home: a new document would
+                        // withdraw the prompt below.
+                        state.stopProgress()
+                        state.addressBarText = state.url
+                        state.canGoBack = askingView.canGoBack()
+                        // The user's own submit was the gesture, and the
+                        // site asking is the one they named — not the
+                        // page on screen, which didn't ask (#173).
+                        offerExternalLink(askingView, userNamedUrl, state, target)
+                    } else if (waiting) {
                         askingView.postDelayed({
                             if (latch.giveUp(input, offer)) {
                                 Log.i(LOG_TAG, "external link refused: ${externalUrlForLog(target)}")
@@ -2566,6 +2603,7 @@ private fun buildRefreshableWebView(
                 }
                 if (detoured) {
                     navigationHadGesture = false
+                    navigationUserNamed = null
                     onSubmitUrl(state, target)
                     return true
                 }
@@ -3064,14 +3102,17 @@ internal class PageWebView(context: Context) : WebView(context) {
      * A load this app starts on the WebView (not the page): a typed URL,
      * a reload, back / forward, a retry. Its first hop never reaches
      * `shouldOverrideUrlLoading`, so the client hears of it here (#85).
+     * `url`: the URL loaded (`loadUrl`, `postUrl`) — the only kind of
+     * load that can be one the user named (#173) — or `null` for a
+     * reload, a history step or inline data.
      */
-    var onBrowserInitiatedLoad: () -> Unit = {}
+    var onBrowserInitiatedLoad: (url: String?) -> Unit = {}
 
-    private fun browserInitiatedLoad() {
+    private fun browserInitiatedLoad(url: String? = null) {
         // Any load but a sweep's own step supersedes its reload: a later
         // resubmission prompt is that load's, not the sweep's (R1-F1).
         sweptReload.navigationStarted()
-        onBrowserInitiatedLoad()
+        onBrowserInitiatedLoad(url)
     }
 
     // Navigations the app starts, noted before Chromium has them (see
@@ -3079,19 +3120,19 @@ internal class PageWebView(context: Context) : WebView(context) {
     // `shouldOverrideUrlLoading`.
     override fun loadUrl(url: String) {
         documents.navigationStarted(url)
-        browserInitiatedLoad()
+        browserInitiatedLoad(url)
         super.loadUrl(url)
     }
 
     override fun loadUrl(url: String, additionalHttpHeaders: MutableMap<String, String>) {
         documents.navigationStarted(url)
-        browserInitiatedLoad()
+        browserInitiatedLoad(url)
         super.loadUrl(url, additionalHttpHeaders)
     }
 
     override fun postUrl(url: String, postData: ByteArray) {
         documents.navigationStarted(url)
-        browserInitiatedLoad()
+        browserInitiatedLoad(url)
         super.postUrl(url, postData)
     }
 

@@ -84,10 +84,33 @@ class ExternalAppsTest {
         main: Boolean = true,
         gesture: Boolean = true,
         tapped: Boolean = true,
+        userNamedRedirect: Boolean = false,
     ): Pair<ExternalLinkVerdict, Boolean> {
         var consumed = false
-        val v = externalLinkVerdict(url, main, gesture) { consumed = true; tapped }
+        val v = externalLinkVerdict(url, main, gesture, userNamedRedirect) { consumed = true; tapped }
         return v to consumed
+    }
+
+    // #173: meet.google.com → meet.app.goo.gl → this, on a typed URL.
+    private val meetIntent = "intent://meet.app.goo.gl/?link=https://meet.google.com/abc-defg-hij" +
+        "#Intent;package=com.google.android.gms;action=com.google.firebase.dynamiclinks.VIEW_DYNAMIC_LINK;" +
+        "scheme=https;S.browser_fallback_url=https://play.google.com/store/apps/details%3Fid%3Dx;end;"
+
+    @Test
+    fun `the redirect of a load the user named may ask without a page tap`() {
+        assertEquals(
+            ExternalLinkVerdict.AskUserNamed to false,
+            verdict(meetIntent, gesture = false, tapped = false, userNamedRedirect = true),
+        )
+        // Without it, the same typed load is refused, as before (#173's blank page).
+        assertEquals(ExternalLinkVerdict.Refuse to false, verdict(meetIntent, gesture = false))
+    }
+
+    @Test
+    fun `a user-named redirect opens nothing from a subframe or in a blocked scheme`() {
+        assertEquals(ExternalLinkVerdict.Refuse to false, verdict(meetIntent, main = false, gesture = false, userNamedRedirect = true))
+        assertEquals(ExternalLinkVerdict.Refuse to false, verdict("content://x/y", userNamedRedirect = true))
+        assertEquals(ExternalLinkVerdict.NotExternal to false, verdict("https://meet.google.com/x", userNamedRedirect = true))
     }
 
     @Test
