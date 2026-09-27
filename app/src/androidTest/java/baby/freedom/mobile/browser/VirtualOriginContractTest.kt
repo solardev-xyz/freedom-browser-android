@@ -322,6 +322,53 @@ class VirtualOriginContractTest {
     }
 
     @Test
+    fun aNavigationStoppedDuringItsReCheckKeepsThePagesRoot() {
+        val ensUrl = VirtualOrigin.toVirtualUrl("ens://testdapp.eth")!!
+        testdappContent = FixtureGateway.REF_A
+        harness.load(ensUrl)
+        harness.awaitJsTrue("window.results && window.results.loaded === true")
+        assertEquals("bzz://${FixtureGateway.REF_A}", harness.ensPins.uriFor("testdapp.eth"))
+
+        // The name moves and the lookup is slow; the page navigates and
+        // the user hits Stop while the re-check is still running. The
+        // interceptor later hands WebView B's document, but the
+        // navigation is gone: A stays on screen and keeps A's root.
+        testdappContent = FixtureGateway.REF_B
+        val real = Gateways.ensLookup
+        val answered = java.util.concurrent.CountDownLatch(1)
+        Gateways.ensLookup = { name ->
+            Thread.sleep(2_000)
+            real(name).also { answered.countDown() }
+        }
+        try {
+            harness.js("location.href = 'index.html?next=1'")
+            Thread.sleep(300)
+            InstrumentationRegistry.getInstrumentation().runOnMainSync {
+                harness.webView.stopLoading()
+            }
+            assertTrue("the re-check ran", answered.await(10, java.util.concurrent.TimeUnit.SECONDS))
+            Thread.sleep(1_000)
+        } finally {
+            Gateways.ensLookup = real
+        }
+        assertEquals("\"$ensUrl\"", harness.js("location.href"))
+        assertEquals("\"VERSION_A\"", harness.js("document.getElementById('version').textContent"))
+        assertEquals("bzz://${FixtureGateway.REF_A}", harness.ensPins.uriFor("testdapp.eth"))
+        harness.js(
+            "fetch('index.html').then(r => r.text())" +
+                ".then(t => { window.__xhr = t.includes('VERSION_B') ? 'B' : 'A' })",
+        )
+        harness.awaitJsTrue("window.__xhr !== undefined")
+        assertEquals("\"A\"", harness.js("window.__xhr"))
+
+        // A navigation that does commit moves the page on.
+        harness.load(ensUrl)
+        harness.awaitJsTrue("window.results && window.results.loaded === true")
+        assertEquals("\"VERSION_B\"", harness.js("document.getElementById('version').textContent"))
+        assertEquals("bzz://${FixtureGateway.REF_B}", harness.ensPins.uriFor("testdapp.eth"))
+    }
+
+    @Test
     fun backWithTheRpcStalledServesTheLastAnswerWithinTheDeadline() {
         val ensUrl = VirtualOrigin.toVirtualUrl("ens://testdapp.eth")!!
         testdappContent = FixtureGateway.REF_A

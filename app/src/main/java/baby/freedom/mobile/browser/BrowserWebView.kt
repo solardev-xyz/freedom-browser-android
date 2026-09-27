@@ -1360,8 +1360,8 @@ private fun buildRefreshableWebView(
 
             override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
                 // The main-frame document committed: its ENS pins are now
-                // the page on screen's, if the interceptor hadn't already
-                // promoted them (#99, [EnsDocumentPins]).
+                // the page on screen's, and subresources held waiting on
+                // the commit go ahead (#99, [EnsDocumentPins]).
                 ensPins.documentStarted(url)
                 // A new document arrives with the chrome whole, however
                 // far the previous one was scrolled…
@@ -2161,8 +2161,10 @@ private fun syntheticResponse(
  * which belong to no tab): the ENS roots its documents were served from.
  * A main-frame request — any URL, not only a virtual one — starts the
  * incoming page's pins; they replace the page on screen's only when the
- * new document commits (#99, see [EnsDocumentPins]): here, when the
- * answer is one WebView renders in place, else from `onPageStarted`.
+ * new document commits, from `onPageStarted` (#99, see [EnsDocumentPins]).
+ * Handing WebView an answer that renders in place only marks the page
+ * delivered, so the subresources that race `onPageStarted` wait for it
+ * rather than guess which page they belong to.
  */
 internal fun interceptVirtualRequest(
     request: WebResourceRequest?,
@@ -2175,7 +2177,7 @@ internal fun interceptVirtualRequest(
     if (incoming != null && response != null &&
         rendersInPlace(response.statusCode, response.mimeType, response.responseHeaders)
     ) {
-        ensPins?.commit(incoming)
+        ensPins?.delivered(incoming)
     }
     return response
 }
@@ -2183,9 +2185,13 @@ internal fun interceptVirtualRequest(
 /**
  * Will WebView commit a main-frame response as the tab's new document,
  * rather than hand it to a download (or drop it: 204/205, a redirect)?
- * Conservative: a type not listed here waits for `onPageStarted` to
- * promote its pins instead, which is late for the first subresources
- * but never wrong for a navigation that doesn't commit.
+ * Every type WebView renders itself: markup (HTML, XHTML, SVG, XML — any
+ * `+xml`), text (any `text/` type: plain, CSS, JS shown as source…), JSON,
+ * images, audio and video (the media document). Anything else goes to
+ * the download listener. A type missing here would leave the
+ * subresources that race `onPageStarted` on the previous page's pins; a
+ * type listed that doesn't render costs the page on screen's
+ * subresources [EnsDocumentPins.pageFor]'s bounded wait.
  */
 internal fun rendersInPlace(
     status: Int,
@@ -2197,8 +2203,30 @@ internal fun rendersInPlace(
         ?.firstOrNull { it.key.equals("Content-Disposition", ignoreCase = true) }?.value
     if (disposition?.trim()?.lowercase()?.startsWith("attachment") == true) return false
     val mime = mimeType?.substringBefore(';')?.trim()?.lowercase() ?: return false
-    return mime == "text/html" || mime == "application/xhtml+xml" || mime == "text/plain"
+    if (mime in DOWNLOADED_TEXT_TYPES) return false
+    return mime.startsWith("text/") ||
+        mime.startsWith("image/") ||
+        mime.startsWith("audio/") ||
+        mime.startsWith("video/") ||
+        mime == "application/xml" ||
+        mime.endsWith("+xml") ||
+        mime == "application/json" ||
+        mime.endsWith("+json") ||
+        mime == "application/javascript"
 }
+
+/**
+ * `text/` types Chromium hands to a download instead of rendering
+ * (its `IsUnsupportedTextMimeType` list, the common ones).
+ */
+private val DOWNLOADED_TEXT_TYPES = setOf(
+    "text/csv", "text/x-csv", "text/comma-separated-values",
+    "text/tab-separated-values", "text/tsv",
+    "text/calendar", "text/x-calendar", "text/vcalendar", "text/x-vcalendar",
+    "text/vcard", "text/x-vcard", "text/x-vcf", "text/directory",
+    "text/rtf", "text/ldif", "text/qif", "text/x-qif", "text/ofx",
+    "text/vnd.sun.j2me.app-descriptor",
+)
 
 private fun interceptVirtualRequestFor(
     req: WebResourceRequest,
@@ -2259,16 +2287,20 @@ private fun interceptVirtualRequestFor(
     // `text/html`: that is part of the page, and re-pinning the name
     // would move the rest of the page's subresources to a newer root
     // under its old HTML.
+    //
+    // Anything but the main frame belongs to the page on screen — once
+    // it is known which page that is ([EnsDocumentPins.pageFor]).
+    val page = incoming ?: (root as? ContentRoot.Ens)?.let { ensPins?.pageFor(it.name) }
     if (root is ContentRoot.Ens &&
         isDocumentRequest(req.isForMainFrame, req.requestHeaders) &&
-        (req.isForMainFrame || ensPins?.uriFor(root.name) == null)
+        (req.isForMainFrame || page?.uriFor(root.name) == null)
     ) {
-        Gateways.reverifyEnsDocument(root.name, ensPins, incoming)?.let { code ->
+        Gateways.reverifyEnsDocument(root.name, ensPins, page)?.let { code ->
             return nameResolutionRefusal(root.name, code)
         }
     }
 
-    val target = Gateways.gatewayUrlFor(root, pathAndQuery, ensPins, incoming)
+    val target = Gateways.gatewayUrlFor(root, pathAndQuery, page = page)
         ?: return syntheticResponse(
             502, "Bad Gateway",
             "No local gateway can serve this content root " +

@@ -12,6 +12,9 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeoutOrNull
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.locks.ReentrantLock
+import kotlin.concurrent.withLock
 
 /**
  * Process-wide holder + router for the local content gateways.
@@ -295,7 +298,8 @@ object Gateways {
      * A main-frame document passes its incoming [page]
      * ([EnsDocumentPins.beginNavigation]); the answer is pinned there, and
      * reaches the page on screen only once that document commits. An
-     * iframe (no [page]) pins the page on screen.
+     * iframe passes the page on screen ([EnsDocumentPins.pageFor]); with
+     * no [page] the answer pins whatever page is current.
      *
      * Returns `null` when the document may be served (its root is now
      * pinned), or the [ErrorPage] code for the refusal. A refusal that
@@ -365,13 +369,22 @@ object Gateways {
  *   a different version. Read by [Gateways.gatewayUrlFor].
  * - **the incoming page's** ([Page] from [beginNavigation]): what the
  *   main-frame request now in flight was checked against. It replaces
- *   the current page's only once that document *commits* — [commit]
- *   when the interceptor hands WebView a response that renders in place,
- *   [documentStarted] from `onPageStarted` otherwise. A navigation that
- *   never commits (a download link, Stop, a 204) leaves the page on
- *   screen where it is and so must leave its pins alone too.
+ *   the current page's only once that document *commits*, which WebView
+ *   reports in `onPageStarted` ([documentStarted]). A navigation that
+ *   never commits (a download link, Stop, `window.stop()`, a 204) leaves
+ *   the page on screen where it is and so must leave its pins alone too.
  * - **the tab's last answer** per name, kept across pages: what a
  *   re-check whose lookup failed falls back on.
+ *
+ * Between the interceptor handing WebView a document that renders in
+ * place ([delivered]) and `onPageStarted`, a subresource request can't
+ * say which document it belongs to: the new one may already have
+ * committed and be parsing, or the navigation may have been cancelled
+ * and the request is the old page's. When the two pages disagree on the
+ * name, [pageFor] holds the request until the answer is known — the
+ * commit (`onPageStarted`), or [commitWaitMs] passing without one, which
+ * means the navigation didn't commit (Stop / `window.stop()` give no
+ * other signal) and the request is the old page's.
  *
  * Written by [Gateways.reverifyEnsDocument]. Owned by the tab's WebView
  * client; the interceptor runs on WebView's IO threads and
@@ -383,8 +396,14 @@ class EnsDocumentPins {
     class Page internal constructor(internal val url: String?) {
         internal val pins = ConcurrentHashMap<String, String>()
 
+        /** When the interceptor handed WebView this page's document; 0 = not yet. */
+        internal var deliveredAt = 0L
+
         fun uriFor(name: String): String? = pins[name.lowercase()]
     }
+
+    private val lock = ReentrantLock()
+    private val swapped = lock.newCondition()
 
     @Volatile
     private var current = Page(null)
@@ -403,6 +422,31 @@ class EnsDocumentPins {
     /** The root the current page's documents on [name] were served from. */
     fun uriFor(name: String): String? = current.uriFor(name)
 
+    /**
+     * The page a subresource (or iframe) request on [name] belongs to:
+     * the page on screen, once it is known which page that is. If a
+     * delivered navigation that pins [name] differently is waiting on its
+     * commit, wait for `onPageStarted` — at most until [commitWaitMs]
+     * after delivery, after which it didn't commit and the page on screen
+     * is still the old one. Never call on the main thread.
+     */
+    fun pageFor(name: String): Page {
+        val key = name.lowercase()
+        lock.withLock {
+            while (true) {
+                val incoming = pending
+                if (incoming == null || incoming.deliveredAt == 0L ||
+                    incoming.pins[key] == current.pins[key]
+                ) {
+                    return current
+                }
+                val left = incoming.deliveredAt + commitWaitMs - System.currentTimeMillis()
+                if (left <= 0) return current
+                swapped.await(left, TimeUnit.MILLISECONDS)
+            }
+        }
+    }
+
     /** The last answer this tab had for [name], on any page. */
     fun lastAnswerFor(name: String): String? = last[name.lowercase()]
 
@@ -418,15 +462,22 @@ class EnsDocumentPins {
      * The main frame requests [url]: start the incoming page's pins. The
      * page on screen keeps its own until this one commits.
      */
-    @Synchronized
-    fun beginNavigation(url: String): Page = Page(url.substringBefore('#')).also { pending = it }
+    fun beginNavigation(url: String): Page = lock.withLock {
+        Page(url.substringBefore('#')).also {
+            pending = it
+            swapped.signalAll()
+        }
+    }
 
-    /** [page]'s document is committing: it is now the page on screen. */
-    @Synchronized
-    fun commit(page: Page) {
-        if (pending === page) {
-            current = page
-            pending = null
+    /**
+     * The interceptor handed WebView [page]'s document, one that renders
+     * in place: it commits next — unless the navigation was cancelled
+     * meanwhile. Not a commit: the page on screen keeps its pins until
+     * [documentStarted] says so (see [pageFor]).
+     */
+    fun delivered(page: Page) {
+        lock.withLock {
+            if (pending === page) page.deliveredAt = System.currentTimeMillis()
         }
     }
 
@@ -436,16 +487,29 @@ class EnsDocumentPins {
      * went through the interceptor (bfcache, `data:`) starts with no pins
      * rather than inheriting the previous page's.
      */
-    @Synchronized
     fun documentStarted(url: String?) {
-        val key = url?.substringBefore('#')
-        val incoming = pending
-        when {
-            incoming != null && incoming.url == key -> {
-                current = incoming
-                pending = null
+        lock.withLock {
+            val key = url?.substringBefore('#')
+            val incoming = pending
+            when {
+                incoming != null && incoming.url == key -> {
+                    current = incoming
+                    pending = null
+                }
+                current.url != key -> current = Page(key)
             }
-            current.url != key -> current = Page(key)
+            swapped.signalAll()
         }
+    }
+
+    companion object {
+        /**
+         * How long after its document was handed over a navigation has to
+         * commit before [pageFor] takes it as cancelled. A commit follows
+         * the hand-over within milliseconds; this only bounds how long an
+         * old page's subresources wait after a Stop.
+         */
+        @Volatile
+        internal var commitWaitMs = 2_000L
     }
 }

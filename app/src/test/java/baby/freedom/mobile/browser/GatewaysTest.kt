@@ -227,7 +227,8 @@ class GatewaysTest {
     fun `a new page drops the page's pins but keeps the tab's last answer`() {
         val pins = EnsDocumentPins()
         pins.pin("swarm.eth", "bzz://$otherRef")
-        pins.commit(pins.beginNavigation("https://other.example/"))
+        pins.beginNavigation("https://other.example/")
+        pins.documentStarted("https://other.example/")
         assertNull(pins.uriFor("swarm.eth"))
         assertEquals("bzz://$otherRef", pins.lastAnswerFor("swarm.eth"))
         // …which a failed lookup on the next page still falls back on.
@@ -298,7 +299,8 @@ class GatewaysTest {
             val root = ContentRoot.Ens("swarm.eth")
             val first = pins.beginNavigation("https://swarm.eth.ens.freedom.baby/")
             assertNull(Gateways.reverifyEnsDocument("swarm.eth", pins, first))
-            pins.commit(first)
+            pins.delivered(first)
+            pins.documentStarted("https://swarm.eth.ens.freedom.baby/")
             // The name moves; the page follows a link that never commits
             // (a download): its re-check pins the incoming page only.
             current = otherRef
@@ -318,7 +320,7 @@ class GatewaysTest {
             // …and a later navigation that does commit replaces it.
             val next = pins.beginNavigation("https://swarm.eth.ens.freedom.baby/b.html")
             assertNull(Gateways.reverifyEnsDocument("swarm.eth", pins, next))
-            pins.commit(download) // superseded: ignored
+            pins.delivered(download) // superseded: ignored
             assertEquals("bzz://$ref64", pins.uriFor("swarm.eth"))
             pins.documentStarted("https://swarm.eth.ens.freedom.baby/b.html#top")
             assertEquals("bzz://$otherRef", pins.uriFor("swarm.eth"))
@@ -326,6 +328,77 @@ class GatewaysTest {
             pins.documentStarted("data:text/html,x")
             assertNull(pins.uriFor("swarm.eth"))
         }
+    }
+
+    @Test
+    fun `a delivered navigation that never commits leaves subresources on the page on screen`() {
+        val pins = EnsDocumentPins()
+        val wait = EnsDocumentPins.commitWaitMs
+        EnsDocumentPins.commitWaitMs = 300
+        try {
+            pins.pin("swarm.eth", "bzz://$ref64")
+            // The name moved; the navigation's response went to WebView,
+            // then Stop / window.stop() cancelled it: no onPageStarted.
+            val next = pins.beginNavigation("https://swarm.eth.ens.freedom.baby/?next=1")
+            pins.pin("swarm.eth", "bzz://$otherRef", next)
+            pins.delivered(next)
+            assertEquals("bzz://$ref64", pins.uriFor("swarm.eth"))
+            val t = System.currentTimeMillis()
+            val page = pins.pageFor("swarm.eth")
+            assertTrue(System.currentTimeMillis() - t >= 250)
+            assertEquals(
+                "http://127.0.0.1:1633/bzz/$ref64/chunk.js",
+                Gateways.gatewayUrlFor(ContentRoot.Ens("swarm.eth"), "/chunk.js", page = page),
+            )
+            // Once it is known not to have committed, nothing waits again.
+            val t2 = System.currentTimeMillis()
+            assertEquals("bzz://$ref64", pins.pageFor("swarm.eth").uriFor("swarm.eth"))
+            assertTrue(System.currentTimeMillis() - t2 < 100)
+        } finally {
+            EnsDocumentPins.commitWaitMs = wait
+        }
+    }
+
+    @Test
+    fun `a subresource racing the commit waits for it and gets the new page`() {
+        val pins = EnsDocumentPins()
+        val wait = EnsDocumentPins.commitWaitMs
+        EnsDocumentPins.commitWaitMs = 10_000
+        try {
+            pins.pin("swarm.eth", "bzz://$ref64")
+            // A name the pages agree on never waits.
+            pins.pin("other.eth", "bzz://$ref64")
+            val next = pins.beginNavigation("https://swarm.eth.ens.freedom.baby/b.html")
+            pins.pin("swarm.eth", "bzz://$otherRef", next)
+            pins.pin("other.eth", "bzz://$ref64", next)
+            pins.delivered(next)
+            val t0 = System.currentTimeMillis()
+            assertEquals("bzz://$ref64", pins.pageFor("other.eth").uriFor("other.eth"))
+            assertTrue(System.currentTimeMillis() - t0 < 100)
+
+            val got = java.util.concurrent.atomic.AtomicReference<String?>()
+            val io = Thread { got.set(pins.pageFor("swarm.eth").uriFor("swarm.eth")) }
+            val t = System.currentTimeMillis()
+            io.start()
+            Thread.sleep(150)
+            pins.documentStarted("https://swarm.eth.ens.freedom.baby/b.html")
+            io.join(5_000)
+            assertEquals("bzz://$otherRef", got.get())
+            assertTrue(System.currentTimeMillis() - t < 5_000)
+        } finally {
+            EnsDocumentPins.commitWaitMs = wait
+        }
+    }
+
+    @Test
+    fun `an undelivered navigation never holds a subresource`() {
+        val pins = EnsDocumentPins()
+        pins.pin("swarm.eth", "bzz://$ref64")
+        val next = pins.beginNavigation("https://swarm.eth.ens.freedom.baby/file.bin")
+        pins.pin("swarm.eth", "bzz://$otherRef", next)
+        val t = System.currentTimeMillis()
+        assertEquals("bzz://$ref64", pins.pageFor("swarm.eth").uriFor("swarm.eth"))
+        assertTrue(System.currentTimeMillis() - t < 100)
     }
 
     @Test

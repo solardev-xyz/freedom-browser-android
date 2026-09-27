@@ -86,8 +86,17 @@ class NameResolutionErrorTest {
     }
 
     @Test
-    fun `only a response WebView renders in place commits a navigation's pins`() {
+    fun `only a response WebView renders in place marks a navigation delivered`() {
         assertTrue(rendersInPlace(200, "text/html", emptyMap()))
+        assertTrue(rendersInPlace(200, "image/svg+xml", emptyMap()))
+        assertTrue(rendersInPlace(200, "application/xml", emptyMap()))
+        assertTrue(rendersInPlace(200, "text/xml; charset=utf-8", emptyMap()))
+        assertTrue(rendersInPlace(200, "application/json", emptyMap()))
+        assertTrue(rendersInPlace(200, "text/plain", emptyMap()))
+        assertTrue(rendersInPlace(200, "image/png", emptyMap()))
+        assertTrue(rendersInPlace(200, "video/mp4", emptyMap()))
+        assertFalse(rendersInPlace(200, "text/csv", emptyMap()))
+        assertFalse(rendersInPlace(200, "application/zip", emptyMap()))
         assertTrue(rendersInPlace(404, "text/html", mapOf("X-Name-Resolution-Error" to "ens_not_found")))
         assertTrue(rendersInPlace(200, "application/xhtml+xml", null))
         assertFalse(rendersInPlace(200, "application/octet-stream", emptyMap()))
