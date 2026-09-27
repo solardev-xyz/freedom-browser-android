@@ -165,6 +165,19 @@ internal fun externalLinkVerdict(
 }
 
 /**
+ * Whether cancelling an app link ends a navigation whose earlier hop was
+ * already answered as the tab's next document (#94): a main-frame
+ * redirect hop. Nothing commits after it, so the page on screen stays
+ * that load's ([BrowserState.mainFrameKeptPage]). A first hop was never
+ * answered, and a popup's first navigation closes its tab.
+ */
+internal fun externalLinkKeepsPage(
+    isForMainFrame: Boolean,
+    isRedirect: Boolean,
+    popupFirstNavigation: Boolean,
+): Boolean = isForMainFrame && isRedirect && !popupFirstNavigation
+
+/**
  * The tab's own record of user input, standing in for the "one tap buys
  * one launch" half of Chromium's user activation. WebView's
  * `WebResourceRequest.hasGesture()` says a navigation was started with
@@ -205,7 +218,14 @@ internal fun externalLinkVerdict(
  */
 internal class UserGestureLatch(private val clock: () -> Long) {
     /** One input: when it began and (so far) ended, on [clock]'s timeline. */
-    private class Input(val id: Int, val start: Long, var end: Long, val accessibility: Boolean) {
+    private class Input(
+        val id: Int,
+        val start: Long,
+        var end: Long,
+        val accessibility: Boolean,
+        /** An accessibility input that began while an earlier one was still open. */
+        val repeatsAccessibility: Boolean,
+    ) {
         /** An accessibility input whose one click hasn't been heard yet. */
         var untilConfirmed = accessibility
 
@@ -254,7 +274,8 @@ internal class UserGestureLatch(private val clock: () -> Long) {
      */
     fun onInputStart(at: Long = clock(), untilConfirmed: Boolean = false) {
         inputId++
-        recent.addLast(Input(inputId, at, at, untilConfirmed))
+        val repeats = untilConfirmed && recent.any { it.untilConfirmed }
+        recent.addLast(Input(inputId, at, at, untilConfirmed, repeats))
         val stale = clock() - WINDOW_MS - CONFIRM_MS
         while (recent.isNotEmpty() && (recent.size > MAX_RECENT || recent.first().end < stale)) recent.removeFirst()
     }
@@ -313,7 +334,7 @@ internal class UserGestureLatch(private val clock: () -> Long) {
      * [whenInTopDocument]'s question.
      */
     fun consume(): Int? {
-        val id = armedId ?: return null
+        val id = armedId ?: return repeatedAccessibilityInput()
         armedId = null
         if (clock() - armedAt > WINDOW_MS) return null
         recent.firstOrNull { it.id == id }?.handedOut = true
@@ -321,9 +342,31 @@ internal class UserGestureLatch(private val clock: () -> Long) {
     }
 
     /**
+     * A second navigation of a repeated accessibility activation: the
+     * user activated link A, the busy page seemed to ignore it, and they
+     * activated link B. Blink runs both clicks in order, so the first
+     * navigation (A's) took the latch — and with it the *latest* input,
+     * B's — and this one (B's) finds it used. Nothing here says which
+     * click made which navigation, so B's navigation takes over the
+     * offer still waiting on that input ([whenInTopDocument] replaces
+     * it): the one prompt is for the link the user activated last, and
+     * still only once the top document confirms that input. Only while
+     * that input is the latest, still open, and began while an earlier
+     * accessibility input was open — a single activation's script burst
+     * still gets one launch, the first. Null otherwise.
+     */
+    private fun repeatedAccessibilityInput(): Int? {
+        val input = recent.lastOrNull()?.takeIf { it.id == inputId } ?: return null
+        return input.id.takeIf {
+            input.repeatsAccessibility && input.untilConfirmed && input.handedOut && it in waiting
+        }
+    }
+
+    /**
      * Runs [offer] once the top document confirms input [id] was its own:
      * now, if it already has, or when its message arrives, even after
-     * later input. False when it never can (the input is no longer on
+     * later input. Replaces an offer already waiting on [id] (see
+     * [repeatedAccessibilityInput]). False when it never can (the input is no longer on
      * record), so the link is refused now. A caller that gets true calls
      * [giveUp] after [CONFIRM_MS].
      */
@@ -339,9 +382,16 @@ internal class UserGestureLatch(private val clock: () -> Long) {
 
     /**
      * The top document never confirmed input [id]: the offer waiting on
-     * it is refused. True when there was one still waiting.
+     * it is refused. True when there was one still waiting — [offer]
+     * itself, when given: one a later navigation took over has its own
+     * deadline.
      */
-    fun giveUp(id: Int): Boolean = waiting.remove(id) != null
+    fun giveUp(id: Int, offer: (() -> Unit)? = null): Boolean {
+        val current = waiting[id] ?: return false
+        if (offer != null && current !== offer) return false
+        waiting.remove(id)
+        return true
+    }
 
     companion object {
         const val WINDOW_MS = 5_000L

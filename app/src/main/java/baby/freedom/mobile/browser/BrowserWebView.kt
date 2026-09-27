@@ -1721,7 +1721,7 @@ private fun buildRefreshableWebView(
                 navigationHadGesture = false
                 // The page on screen stays: its open requests are this
                 // load's, whatever the answer's headers suggested.
-                state.mainFrameBecameDownload()
+                state.mainFrameKeptPage()
             }
             // A main-frame navigation that turned out to be a file never
             // commits: no onPageStarted, no final progress callback. Left
@@ -2171,6 +2171,17 @@ private fun buildRefreshableWebView(
                     // Cancelled here, so it never reaches onPageStarted:
                     // its gesture mustn't carry over to the next load.
                     if (request.isForMainFrame) navigationHadGesture = false
+                    // A redirect hop cancelled here ends a navigation whose
+                    // first hop was already answered as a new document
+                    // (#94): none commits, so the page on screen stays and
+                    // its open requests are this load's — as for a
+                    // navigation that became a download. Its URLs go too.
+                    // A first hop was never answered: whatever navigation
+                    // is pending keeps its own bookkeeping.
+                    if (externalLinkKeepsPage(request.isForMainFrame, request.isRedirect, popupFirstNavigation)) {
+                        pendingNavigationUrls.clear()
+                        state.mainFrameKeptPage()
+                    }
                     val input = gesture
                     val latch = askingView?.userGestures
                     // The tap has to have been the top document's, not an
@@ -2180,13 +2191,12 @@ private fun buildRefreshableWebView(
                     // the one on screen now, whatever commits meanwhile.
                     val pageUrl = askingView?.url
                     val offerTab = opener?.first ?: state
+                    val offer = askingView?.let { page -> { offerExternalLink(page, pageUrl, offerTab, target) } }
                     val waiting = verdict == ExternalLinkVerdict.Ask && input != null && latch != null &&
-                        latch.whenInTopDocument(input) {
-                            offerExternalLink(askingView, pageUrl, offerTab, target)
-                        }
+                        offer != null && latch.whenInTopDocument(input, offer)
                     if (waiting) {
                         askingView.postDelayed({
-                            if (latch.giveUp(input)) {
+                            if (latch.giveUp(input, offer)) {
                                 Log.i(LOG_TAG, "external link refused: ${externalUrlForLog(target)}")
                             }
                         }, UserGestureLatch.CONFIRM_MS)
@@ -3818,7 +3828,7 @@ internal fun mainFrameNoteApplies(requestGeneration: Int, currentGeneration: Int
  * A best guess from the headers only: Chromium also downloads any other
  * type it can't render (an inline `application/zip`, say), which this
  * counts as replacing. The download listener corrects that once the
- * answer reaches it ([BrowserState.mainFrameBecameDownload]).
+ * answer reaches it ([BrowserState.mainFrameKeptPage]).
  */
 internal fun mainFrameAnswerReplacesDocument(response: WebResourceResponse?): Boolean =
     response == null || mainFrameAnswerReplacesDocument(

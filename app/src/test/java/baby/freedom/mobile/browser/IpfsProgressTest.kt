@@ -488,7 +488,25 @@ class IpfsProgressTest {
         tab.mainFrameAnswered(tab.mainFrameRequested(), replacesDocument = true)
         assertTrue(tab.gatewayWork.activeBefore(tab.loadGeneration))
         // …until the download listener gets it and the page stays.
-        tab.mainFrameBecameDownload()
+        tab.mainFrameKeptPage()
+        assertFalse(tab.gatewayWork.activeBefore(tab.loadGeneration))
+        tab.gatewayWork.finish(image)
+    }
+
+    @Test
+    fun `a redirect hop cancelled as an app link adopts the page (PR 160 R1-F1)`() {
+        val tab = BrowserState(id = 1)
+        tab.beginLoad(inWebView = true)
+        tab.mainFrameAnswered(tab.mainFrameRequested(), replacesDocument = true)
+        tab.documentCommitted()
+        val image = tab.gatewayWork.start(tab.documentGeneration)
+        // A tapped link: its first hop's 302 goes out as a new document…
+        tab.beginLoad(inWebView = true)
+        tab.mainFrameAnswered(tab.mainFrameRequested(), replacesDocument = true)
+        assertTrue(tab.gatewayWork.activeBefore(tab.loadGeneration))
+        // …and the next hop, zoomus:, is cancelled: nothing commits.
+        assertTrue(externalLinkKeepsPage(isForMainFrame = true, isRedirect = true, popupFirstNavigation = false))
+        tab.mainFrameKeptPage()
         assertFalse(tab.gatewayWork.activeBefore(tab.loadGeneration))
         tab.gatewayWork.finish(image)
     }
@@ -504,7 +522,7 @@ class IpfsProgressTest {
         // Committed before the old page's image was cancelled.
         tab.documentCommitted()
         val stale = tab.gatewayWork.start(1)
-        tab.mainFrameBecameDownload()
+        tab.mainFrameKeptPage()
         assertTrue(tab.gatewayWork.activeBefore(tab.loadGeneration))
         tab.gatewayWork.finish(stale)
     }

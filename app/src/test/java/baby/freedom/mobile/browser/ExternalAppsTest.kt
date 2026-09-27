@@ -392,7 +392,83 @@ class ExternalAppsTest {
         c.now = t0 + 825
         c.topDocumentSaw(t0 + 805)
         assertEquals(1, offered)
-        assertNull(c.latch.consume()) // the second navigation: one prompt, not two
+        assertNull(c.latch.consume()) // a third navigation: nothing waits, nothing to take over
+    }
+
+    @Test
+    fun `a repeated accessibility activation of another link prompts for the later link (R1-F2)`() {
+        // TalkBack on a busy page: tel:A, then tel:B. Navigation A takes
+        // the latch (input 2); navigation B takes over the offer waiting
+        // on input 2, which the second click's word then confirms.
+        val c = Clock()
+        val t0 = c.now
+        c.latch.onInputStart(t0, untilConfirmed = true)
+        c.latch.onInput()
+        c.now = t0 + 600
+        c.latch.onInputStart(c.now, untilConfirmed = true)
+        c.latch.onInput()
+        c.now = t0 + 800
+        val offered = mutableListOf<String>()
+        val a = { offered += "A"; Unit }
+        val idA = c.latch.consume()!!
+        assertTrue(c.latch.whenInTopDocument(idA, a))
+        c.now = t0 + 820
+        c.topDocumentSaw(t0 + 800) // click 1's word: input 1
+        c.now = t0 + 830
+        val b = { offered += "B"; Unit }
+        val idB = c.latch.consume()!!
+        assertEquals(idA, idB)
+        assertTrue(c.latch.whenInTopDocument(idB, b))
+        // A's deadline no longer refuses the offer B took over.
+        assertFalse(c.latch.giveUp(idA, a))
+        c.now = t0 + 840
+        c.topDocumentSaw(t0 + 832) // click 2's word: input 2
+        assertEquals(listOf("B"), offered)
+        assertFalse(c.latch.giveUp(idB, b))
+    }
+
+    @Test
+    fun `a single accessibility activation's script burst still gets one launch`() {
+        val c = Clock()
+        c.latch.onInputStart(c.now, untilConfirmed = true)
+        c.latch.onInput()
+        val id = c.latch.consume()!!
+        assertTrue(c.latch.whenInTopDocument(id) {})
+        assertNull(c.latch.consume()) // location = 'sms:…' right after: no take-over
+    }
+
+    @Test
+    fun `a take-over can't make an iframe's repeated accessibility link the top page's`() {
+        // Link A on the top page (word, navigation), then link B on an
+        // iframe's target=_top (navigation only). B takes over the offer
+        // on input 2, which no top-document word ever confirms.
+        val c = Clock()
+        val t0 = c.now
+        c.latch.onInputStart(t0, untilConfirmed = true)
+        c.latch.onInput()
+        c.now = t0 + 600
+        c.latch.onInputStart(c.now, untilConfirmed = true)
+        c.latch.onInput()
+        c.now = t0 + 800
+        var offered = 0
+        val id = c.latch.consume()!!
+        assertTrue(c.latch.whenInTopDocument(id) { offered++ })
+        c.now = t0 + 820
+        c.topDocumentSaw(t0 + 800)
+        c.now = t0 + 830
+        val b = { offered++; Unit }
+        assertTrue(c.latch.whenInTopDocument(c.latch.consume()!!, b))
+        assertEquals(0, offered)
+        assertTrue(c.latch.giveUp(id, b))
+        assertEquals(0, offered)
+    }
+
+    @Test
+    fun `only a redirect hop of a tab's own main-frame navigation keeps the page when cancelled`() {
+        assertTrue(externalLinkKeepsPage(isForMainFrame = true, isRedirect = true, popupFirstNavigation = false))
+        assertFalse(externalLinkKeepsPage(isForMainFrame = true, isRedirect = false, popupFirstNavigation = false))
+        assertFalse(externalLinkKeepsPage(isForMainFrame = false, isRedirect = true, popupFirstNavigation = false))
+        assertFalse(externalLinkKeepsPage(isForMainFrame = true, isRedirect = true, popupFirstNavigation = true))
     }
 
     @Test
