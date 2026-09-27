@@ -1,6 +1,14 @@
 package baby.freedom.mobile.browser
 
+import android.content.Context
 import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.snapshotFlow
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -66,10 +74,14 @@ import baby.freedom.mobile.data.BrowsingRepository
 import baby.freedom.mobile.data.NodeSettings
 import baby.freedom.swarm.IpfsInfo
 import baby.freedom.swarm.IpfsStatus
+import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.launch
 
 /**
- * Full-screen settings page. Top to bottom:
+ * Full-screen settings page. A search field pinned under the title
+ * filters every section below by label and description (#93, see
+ * [visibleSettingsRows]); Back clears a query before it closes the
+ * page. Top to bottom:
  *
  *  0. **Search** — the address bar's search engine: the desktop set
  *     ([SearchEngines.BUILT_IN]) or a custom template (#87).
@@ -99,6 +111,11 @@ fun SettingsScreen(
     onDismiss: () -> Unit,
 ) {
     BackHandler(onBack = onDismiss)
+    // Settings search (#93). Registered after the dismiss handler so it
+    // wins while there's a query: Back clears the filter first and puts
+    // the whole page back, like Esc in the desktop browser's field.
+    var query by rememberSaveable { mutableStateOf("") }
+    BackHandler(enabled = query.isNotEmpty()) { query = "" }
 
     val history by remember { repo.history }.collectAsState(initial = emptyList())
     val bookmarks by remember { repo.bookmarks }.collectAsState(initial = emptyList())
@@ -120,55 +137,104 @@ fun SettingsScreen(
         .collectAsState(initial = emptyList())
 
     val scope = rememberCoroutineScope()
+    val appVersion = remember(context) { appVersionLabel(context) }
+
+    // Each section's rows for the current query; an empty set hides the
+    // section. The index is what the page shows right now (see
+    // [SettingsRow]) — IPFS only while advanced options reveal it.
+    val searchRows = visibleSettingsRows(
+        query, SECTION_SEARCH, searchSectionRows(searchEngine, customSearchTemplate),
+    )
+    val browsingRows = visibleSettingsRows(
+        query, SECTION_BROWSING, browsingDataRows(history.size, bookmarks.size),
+    )
+    val permissionRows = visibleSettingsRows(
+        query, SECTION_PERMISSIONS, sitePermissionRows(permissionEntries),
+    )
+    val aboutRows = visibleSettingsRows(
+        query, SECTION_ABOUT, aboutRows(appVersion, context.packageName),
+    )
+    val otherRows = visibleSettingsRows(query, SECTION_OTHER, otherRows())
+    val ipfsRows = if (showIpfsUi) {
+        visibleSettingsRows(query, SECTION_IPFS, ipfsRows(ipfsInfo))
+    } else emptySet()
+    val nothingMatches = listOf(
+        searchRows, browsingRows, permissionRows, aboutRows, otherRows, ipfsRows,
+    ).all { it.isEmpty() }
+
+    // A new query starts the results from the top, so the first match
+    // isn't left scrolled off above the viewport.
+    val listState = rememberLazyListState()
+    LaunchedEffect(listState) {
+        snapshotFlow { query }.drop(1).collect { listState.scrollToItem(0) }
+    }
 
     FullScreenScaffold(
         title = "Settings",
         onDismiss = onDismiss,
     ) {
-        LazyColumn(
-            verticalArrangement = Arrangement.spacedBy(12.dp),
-            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
-            modifier = Modifier.fillMaxSize(),
-        ) {
-            item("search") {
-                SearchSection(
-                    engineId = searchEngine,
-                    customTemplate = customSearchTemplate,
-                    onClick = { pickSearchEngine = true },
-                )
-            }
-            item("browsing") {
-                BrowsingDataSection(
-                    historyCount = history.size,
-                    bookmarkCount = bookmarks.size,
-                    onClearHistoryRequested = { confirmClearHistory = true },
-                    onClearBookmarksRequested = { confirmClearBookmarks = true },
-                    onClearSiteDataRequested = { confirmClearSiteData = true },
-                )
-            }
-            item("permissions") {
-                SitePermissionsSection(
-                    entries = permissionEntries,
-                    onRevoke = sitePermissions::revoke,
-                )
-            }
-            item("about") {
-                AboutSection()
-            }
-            item("other") {
-                OtherSection(
-                    showIpfsUi = showIpfsUi,
-                    onToggleShowIpfsUi = { enabled ->
-                        scope.launch { settings.setShowIpfsUi(enabled) }
-                    },
-                )
-            }
-            if (showIpfsUi) {
-                item("ipfs") {
+        Column(modifier = Modifier.fillMaxSize()) {
+            SettingsSearchField(
+                query = query,
+                onQueryChange = { query = it },
+            )
+            LazyColumn(
+                state = listState,
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
+                modifier = Modifier.fillMaxSize(),
+            ) {
+                if (searchRows.isNotEmpty()) item("search") {
+                    SearchSection(
+                        engineId = searchEngine,
+                        customTemplate = customSearchTemplate,
+                        onClick = { pickSearchEngine = true },
+                    )
+                }
+                if (browsingRows.isNotEmpty()) item("browsing") {
+                    BrowsingDataSection(
+                        visible = browsingRows,
+                        historyCount = history.size,
+                        bookmarkCount = bookmarks.size,
+                        onClearHistoryRequested = { confirmClearHistory = true },
+                        onClearBookmarksRequested = { confirmClearBookmarks = true },
+                        onClearSiteDataRequested = { confirmClearSiteData = true },
+                    )
+                }
+                if (permissionRows.isNotEmpty()) item("permissions") {
+                    SitePermissionsSection(
+                        visible = permissionRows,
+                        entries = permissionEntries,
+                        onRevoke = sitePermissions::revoke,
+                    )
+                }
+                if (aboutRows.isNotEmpty()) item("about") {
+                    AboutSection(visible = aboutRows, version = appVersion)
+                }
+                if (otherRows.isNotEmpty()) item("other") {
+                    OtherSection(
+                        showIpfsUi = showIpfsUi,
+                        onToggleShowIpfsUi = { enabled ->
+                            scope.launch { settings.setShowIpfsUi(enabled) }
+                        },
+                    )
+                }
+                if (ipfsRows.isNotEmpty()) item("ipfs") {
                     IpfsSection(
+                        visible = ipfsRows,
                         settings = settings,
                         ipfsInfo = ipfsInfo,
                         onIpfsToggle = onIpfsToggle,
+                    )
+                }
+                if (nothingMatches) item("no-match") {
+                    Text(
+                        "No settings match \u201c${query.trim()}\u201d",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 8.dp, vertical = 24.dp),
                     )
                 }
             }
@@ -228,24 +294,85 @@ fun SettingsScreen(
     }
 }
 
+private const val SECTION_SEARCH = "Search"
+private const val SECTION_BROWSING = "Browsing data"
+private const val SECTION_PERMISSIONS = "Site permissions"
+private const val SECTION_ABOUT = "About"
+private const val SECTION_OTHER = "Other"
+private const val SECTION_IPFS = "IPFS"
+
+/**
+ * The filter field above the sections (#93). Pinned under the title
+ * bar rather than scrolled with the list, so the query stays in view
+ * while reading the results; × clears it.
+ */
+@Composable
+private fun SettingsSearchField(
+    query: String,
+    onQueryChange: (String) -> Unit,
+) {
+    val focusManager = LocalFocusManager.current
+    OutlinedTextField(
+        value = query,
+        onValueChange = onQueryChange,
+        placeholder = { Text("Search settings") },
+        leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null) },
+        trailingIcon = if (query.isNotEmpty()) {
+            {
+                IconButton(onClick = { onQueryChange("") }) {
+                    Icon(Icons.Filled.Close, contentDescription = "Clear search")
+                }
+            }
+        } else null,
+        singleLine = true,
+        shape = MaterialTheme.shapes.extraLarge,
+        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+        keyboardActions = KeyboardActions(onSearch = { focusManager.clearFocus() }),
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 4.dp),
+    )
+}
+
+private const val ROW_SEARCH_ENGINE = "Search engine"
+
+/**
+ * The engine row, findable by the engine in use and by the name of
+ * any engine it can be switched to ("google" → the Search engine row).
+ */
+private fun searchSectionRows(engineId: String, customTemplate: String) = listOf(
+    settingsRow(
+        "engine",
+        ROW_SEARCH_ENGINE,
+        SearchEngines.labelFor(engineId, customTemplate),
+        customSearchTemplateLine(engineId, customTemplate),
+        *SearchEngines.BUILT_IN.map { it.label }.toTypedArray(),
+    ),
+)
+
+/** The custom template, shown under the engine row while it's in use. */
+private fun customSearchTemplateLine(engineId: String, customTemplate: String): String? =
+    // A `custom` id without a usable template searches with the default
+    // ([SearchEngines.effectiveId]) — say so rather than claim "Custom".
+    customTemplate.takeIf {
+        SearchEngines.effectiveId(engineId, customTemplate) == SearchEngines.CUSTOM_ID
+    }
+
 @Composable
 private fun SearchSection(
     engineId: String,
     customTemplate: String,
     onClick: () -> Unit,
 ) {
-    // A `custom` id without a usable template searches with the default
-    // ([SearchEngines.effectiveId]) — say so rather than claim "Custom".
-    val isCustom = SearchEngines.effectiveId(engineId, customTemplate) == SearchEngines.CUSTOM_ID
-    SectionCard(title = "Search") {
+    SectionCard(title = SECTION_SEARCH) {
         PageRow(
-            title = "Search engine",
+            title = ROW_SEARCH_ENGINE,
             subtitle = SearchEngines.labelFor(engineId, customTemplate),
             style = PageRowStyle.Inset,
             leadingIcon = Icons.Filled.Search,
             // The whole template, wrapped — never cut, so it's readable
             // on the narrowest screen.
-            thirdLine = if (isCustom) customTemplate else null,
+            thirdLine = customSearchTemplateLine(engineId, customTemplate),
             onClick = onClick,
         )
     }
@@ -362,35 +489,51 @@ private fun EngineRadioRow(
     }
 }
 
+private const val ROW_CLEAR_HISTORY = "Clear history"
+private const val ROW_CLEAR_BOOKMARKS = "Clear bookmarks"
+private const val ROW_CLEAR_SITE_DATA = "Clear cookies & site data"
+private const val ROW_CLEAR_SITE_DATA_SUBTITLE = "Cookies, DOM storage, cache, and form data"
+
+private fun historySubtitle(count: Int) =
+    if (count == 0) "Nothing to clear" else "$count visit${if (count == 1) "" else "s"}"
+
+private fun bookmarksSubtitle(count: Int) =
+    if (count == 0) "Nothing to clear" else "$count bookmark${if (count == 1) "" else "s"}"
+
+private fun browsingDataRows(historyCount: Int, bookmarkCount: Int) = listOf(
+    settingsRow("history", ROW_CLEAR_HISTORY, historySubtitle(historyCount)),
+    settingsRow("bookmarks", ROW_CLEAR_BOOKMARKS, bookmarksSubtitle(bookmarkCount)),
+    settingsRow("site-data", ROW_CLEAR_SITE_DATA, ROW_CLEAR_SITE_DATA_SUBTITLE),
+)
+
 @Composable
 private fun BrowsingDataSection(
+    visible: Set<Any>,
     historyCount: Int,
     bookmarkCount: Int,
     onClearHistoryRequested: () -> Unit,
     onClearBookmarksRequested: () -> Unit,
     onClearSiteDataRequested: () -> Unit,
 ) {
-    SectionCard(title = "Browsing data") {
-        ActionRow(
+    SectionCard(title = SECTION_BROWSING) {
+        if ("history" in visible) ActionRow(
             icon = Icons.Filled.History,
-            title = "Clear history",
-            subtitle = if (historyCount == 0) "Nothing to clear"
-            else "$historyCount visit${if (historyCount == 1) "" else "s"}",
+            title = ROW_CLEAR_HISTORY,
+            subtitle = historySubtitle(historyCount),
             enabled = historyCount > 0,
             onClick = onClearHistoryRequested,
         )
-        ActionRow(
+        if ("bookmarks" in visible) ActionRow(
             icon = Icons.Filled.Star,
-            title = "Clear bookmarks",
-            subtitle = if (bookmarkCount == 0) "Nothing to clear"
-            else "$bookmarkCount bookmark${if (bookmarkCount == 1) "" else "s"}",
+            title = ROW_CLEAR_BOOKMARKS,
+            subtitle = bookmarksSubtitle(bookmarkCount),
             enabled = bookmarkCount > 0,
             onClick = onClearBookmarksRequested,
         )
-        ActionRow(
+        if ("site-data" in visible) ActionRow(
             icon = Icons.Filled.Cookie,
-            title = "Clear cookies & site data",
-            subtitle = "Cookies, DOM storage, cache, and form data",
+            title = ROW_CLEAR_SITE_DATA,
+            subtitle = ROW_CLEAR_SITE_DATA_SUBTITLE,
             enabled = true,
             onClick = onClearSiteDataRequested,
         )
@@ -405,21 +548,43 @@ private fun BrowsingDataSection(
  * too, so a Block or a dismissal embargo made this run can be lifted
  * without restarting the app.
  */
+private const val PERMISSIONS_EMPTY =
+    "Sites you allow or block from using your camera, microphone or location appear here."
+
+/** One row per decision, keyed by the entry; the explainer while there are none. */
+private fun sitePermissionRows(entries: List<SitePermissionEntry>) =
+    if (entries.isEmpty()) {
+        listOf(settingsRow("empty", PERMISSIONS_EMPTY))
+    } else {
+        entries.map { entry ->
+            settingsRow(
+                entry,
+                permissionOriginDisplay(entry.origin),
+                sitePermissionDetail(entry),
+            )
+        }
+    }
+
+private fun sitePermissionDetail(entry: SitePermissionEntry) =
+    "${entry.permission.label} · ${sitePermissionStateLabel(entry)}"
+
 @Composable
 private fun SitePermissionsSection(
+    visible: Set<Any>,
     entries: List<SitePermissionEntry>,
     onRevoke: (SitePermissionEntry) -> Unit,
 ) {
-    SectionCard(title = "Site permissions") {
-        if (entries.isEmpty()) {
+    SectionCard(title = SECTION_PERMISSIONS) {
+        if (entries.isEmpty() && "empty" in visible) {
             Text(
-                "Sites you allow or block from using your camera, microphone or location appear here.",
+                PERMISSIONS_EMPTY,
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
             )
         }
         for (entry in entries) {
+            if (entry !in visible) continue
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -442,7 +607,7 @@ private fun SitePermissionsSection(
                         fontWeight = FontWeight.Medium,
                     )
                     Text(
-                        "${entry.permission.label} · ${sitePermissionStateLabel(entry)}",
+                        sitePermissionDetail(entry),
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -470,23 +635,37 @@ internal fun sitePermissionStateLabel(entry: SitePermissionEntry): String {
     }
 }
 
-@Composable
-private fun AboutSection() {
-    val context = LocalContext.current
-    val info = remember(context) {
-        runCatching {
-            context.packageManager.getPackageInfo(context.packageName, 0)
-        }.getOrNull()
-    }
+/** "1.2.3 (build 45)", as the About card shows it. */
+private fun appVersionLabel(context: Context): String {
+    val info = runCatching {
+        context.packageManager.getPackageInfo(context.packageName, 0)
+    }.getOrNull()
     val versionName = info?.versionName ?: "unknown"
     @Suppress("DEPRECATION")
     val versionCode = info?.let {
         if (android.os.Build.VERSION.SDK_INT >= 28) it.longVersionCode
         else it.versionCode.toLong()
     } ?: 0L
+    return "$versionName (build $versionCode)"
+}
 
-    SectionCard(title = "About") {
-        Row(
+private const val ABOUT_NAME = "Freedom"
+private const val ABOUT_TAGLINE = "Swarm-native browser for Android"
+private const val ABOUT_BLURB =
+    "Loads regular https:// sites plus decentralised content via bzz:// hashes and ENS names (vitalik.eth), served through embedded nodes."
+
+private fun aboutRows(version: String, packageName: String) = listOf(
+    settingsRow("app", ABOUT_NAME, ABOUT_TAGLINE),
+    settingsRow("version", "Version", version),
+    settingsRow("package", "Package", packageName),
+    settingsRow("blurb", ABOUT_BLURB),
+)
+
+@Composable
+private fun AboutSection(visible: Set<Any>, version: String) {
+    val context = LocalContext.current
+    SectionCard(title = SECTION_ABOUT) {
+        if ("app" in visible) Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
         ) {
@@ -498,32 +677,40 @@ private fun AboutSection() {
             )
             Spacer(Modifier.width(12.dp))
             Column(modifier = Modifier.weight(1f)) {
-                Text("Freedom", fontWeight = FontWeight.SemiBold)
+                Text(ABOUT_NAME, fontWeight = FontWeight.SemiBold)
                 Text(
-                    "Swarm-native browser for Android",
+                    ABOUT_TAGLINE,
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
         }
-        Spacer(Modifier.height(8.dp))
-        DetailRow("Version", "$versionName (build $versionCode)")
-        DetailRow("Package", context.packageName, mono = true)
-        Spacer(Modifier.height(8.dp))
-        Text(
-            "Loads regular https:// sites plus decentralised content via bzz:// hashes and ENS names (vitalik.eth), served through embedded nodes.",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
+        if ("app" in visible && visible.size > 1) Spacer(Modifier.height(8.dp))
+        if ("version" in visible) DetailRow("Version", version)
+        if ("package" in visible) DetailRow("Package", context.packageName, mono = true)
+        if ("blurb" in visible) {
+            // Spaced off only when something sits above it.
+            if (visible.size > 1) Spacer(Modifier.height(8.dp))
+            Text(
+                ABOUT_BLURB,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
     }
 }
+
+private const val ROW_ADVANCED = "Show advanced options"
+private const val ROW_ADVANCED_SUBTITLE = "Experimental protocol settings"
+
+private fun otherRows() = listOf(settingsRow("advanced", ROW_ADVANCED, ROW_ADVANCED_SUBTITLE))
 
 @Composable
 private fun OtherSection(
     showIpfsUi: Boolean,
     onToggleShowIpfsUi: (Boolean) -> Unit,
 ) {
-    SectionCard(title = "Other") {
+    SectionCard(title = SECTION_OTHER) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -537,9 +724,9 @@ private fun OtherSection(
             )
             Spacer(Modifier.width(12.dp))
             Column(modifier = Modifier.weight(1f)) {
-                Text("Show advanced options", fontWeight = FontWeight.Medium)
+                Text(ROW_ADVANCED, fontWeight = FontWeight.Medium)
                 Text(
-                    "Experimental protocol settings",
+                    ROW_ADVANCED_SUBTITLE,
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -561,8 +748,41 @@ private fun OtherSection(
 // toggle is always off at cold launch. Flipping it on calls
 // [onIpfsToggle] which routes through `MainActivity` → `NodeService`
 // to start/stop the IPFS node live.
+private const val ROW_ROUTING_MODE = "Routing mode"
+private const val ROW_ROUTING_MODE_SUBTITLE = "Content discovery strategy"
+private const val ROUTING_MODE_HELPER =
+    "Routing mode applies the next time IPFS starts — toggle IPFS off and on to re-init."
+
+/**
+ * The IPFS switch with the node's details under it (one row: they
+ * describe the switch), and the routing-mode picker with every mode it
+ * offers and its helper line.
+ */
+private fun ipfsRows(info: IpfsInfo) = listOf(
+    settingsRow(
+        "status",
+        "IPFS",
+        ipfsStatusTriple(info).label,
+        // The details [IpfsSection] lists under the switch.
+        *(if (info.gatewayUrl.isNotBlank()) arrayOf(
+            "Blocks fetched",
+            "Gateway", info.gatewayUrl,
+            "Client", info.clientVersion.takeIf { it.isNotBlank() }?.let { "freedom-ipfs/$it" },
+        ) else emptyArray()),
+        *(if (!info.errorMessage.isNullOrBlank()) arrayOf("Error", info.errorMessage) else emptyArray()),
+    ),
+    settingsRow(
+        "routing",
+        ROW_ROUTING_MODE,
+        ROW_ROUTING_MODE_SUBTITLE,
+        ROUTING_MODE_HELPER,
+        *NodeSettings.IPFS_ROUTING_MODES.toTypedArray(),
+    ),
+)
+
 @Composable
 private fun IpfsSection(
+    visible: Set<Any>,
     settings: NodeSettings,
     ipfsInfo: IpfsInfo,
     onIpfsToggle: (Boolean) -> Unit,
@@ -574,60 +794,63 @@ private fun IpfsSection(
     val triple = ipfsStatusTriple(ipfsInfo)
     val isOn = ipfsInfo.status != IpfsStatus.Stopped
 
-    SectionCard(title = "IPFS") {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(vertical = 4.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Icon(triple.icon, contentDescription = null, tint = triple.color)
-            Spacer(Modifier.width(12.dp))
-            Column(modifier = Modifier.weight(1f)) {
-                Text("IPFS", fontWeight = FontWeight.Medium)
-                Text(
-                    triple.label,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+    SectionCard(title = SECTION_IPFS) {
+        if ("status" in visible) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(triple.icon, contentDescription = null, tint = triple.color)
+                Spacer(Modifier.width(12.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("IPFS", fontWeight = FontWeight.Medium)
+                    Text(
+                        triple.label,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Switch(
+                    checked = isOn,
+                    onCheckedChange = onIpfsToggle,
                 )
             }
-            Switch(
-                checked = isOn,
-                onCheckedChange = onIpfsToggle,
-            )
-        }
 
-        if (ipfsInfo.gatewayUrl.isNotBlank()) {
-            Spacer(Modifier.height(8.dp))
-            // connectedPeers carries verified blocks fetched — the
-            // reader has no peer set (see swarmnode IpfsNode).
-            DetailRow("Blocks fetched", ipfsInfo.connectedPeers.toString())
-            DetailRow("Gateway", ipfsInfo.gatewayUrl, mono = true)
-            if (ipfsInfo.clientVersion.isNotBlank()) {
-                DetailRow("Client", "freedom-ipfs/${ipfsInfo.clientVersion}", mono = true)
+            if (ipfsInfo.gatewayUrl.isNotBlank()) {
+                Spacer(Modifier.height(8.dp))
+                // connectedPeers carries verified blocks fetched — the
+                // reader has no peer set (see swarmnode IpfsNode).
+                DetailRow("Blocks fetched", ipfsInfo.connectedPeers.toString())
+                DetailRow("Gateway", ipfsInfo.gatewayUrl, mono = true)
+                if (ipfsInfo.clientVersion.isNotBlank()) {
+                    DetailRow("Client", "freedom-ipfs/${ipfsInfo.clientVersion}", mono = true)
+                }
+            }
+            val err = ipfsInfo.errorMessage
+            if (!err.isNullOrBlank()) {
+                Spacer(Modifier.height(8.dp))
+                DetailRow("Error", err, singleLine = false)
             }
         }
-        val err = ipfsInfo.errorMessage
-        if (!err.isNullOrBlank()) {
+
+        if ("routing" in visible) {
+            if ("status" in visible) Spacer(Modifier.height(12.dp))
+            RoutingModePicker(
+                selected = routingMode,
+                onSelect = { mode ->
+                    scope.launch { settings.setIpfsRoutingMode(mode) }
+                },
+            )
+
             Spacer(Modifier.height(8.dp))
-            DetailRow("Error", err, singleLine = false)
+            Text(
+                ROUTING_MODE_HELPER,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+            )
         }
-
-        Spacer(Modifier.height(12.dp))
-        RoutingModePicker(
-            selected = routingMode,
-            onSelect = { mode ->
-                scope.launch { settings.setIpfsRoutingMode(mode) }
-            },
-        )
-
-        Spacer(Modifier.height(8.dp))
-        Text(
-            "Routing mode applies the next time IPFS " +
-                "starts — toggle IPFS off and on to re-init.",
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
-        )
     }
 }
 
@@ -644,9 +867,9 @@ private fun RoutingModePicker(
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Column(modifier = Modifier.weight(1f)) {
-            Text("Routing mode", fontWeight = FontWeight.Medium)
+            Text(ROW_ROUTING_MODE, fontWeight = FontWeight.Medium)
             Text(
-                "Content discovery strategy",
+                ROW_ROUTING_MODE_SUBTITLE,
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
