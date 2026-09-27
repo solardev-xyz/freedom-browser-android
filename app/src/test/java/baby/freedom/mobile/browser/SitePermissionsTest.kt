@@ -223,7 +223,7 @@ class SitePermissionsTest {
         val o = "https://example.com"
         val cam = SitePermission.CAMERA
         val session = PermissionSession()
-        var stored = emptyMap<SitePermission, PermissionDecision>()
+        var stored = emptyMap<SiteCapability, PermissionDecision>()
         val wait = async(start = CoroutineStart.UNDISPATCHED) {
             awaitPromptSuperseded(o, listOf(cam), session) { stored }
         }
