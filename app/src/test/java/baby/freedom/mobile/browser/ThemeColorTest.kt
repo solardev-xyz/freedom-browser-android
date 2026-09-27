@@ -208,4 +208,15 @@ class ThemeColorTest {
         assertFalse(slot.accept(stale))
         assertNull(slot.beginRead())
     }
+
+    @Test
+    fun `a written blank page reads once per burst of frames, and frames after a read read again`() {
+        val reads = BlankPageReads()
+        assertTrue(reads.drawn())      // first frame: schedule a read
+        assertFalse(reads.drawn())     // frames before it runs are covered by it
+        assertFalse(reads.drawn())
+        reads.fired()                  // it runs (whether or not it ever answers)…
+        assertTrue(reads.drawn())      // …and a later frame schedules the next
+        assertFalse(reads.drawn())
+    }
 }

@@ -986,6 +986,24 @@ private fun buildRefreshableWebView(
         }
     }
 
+    // A popup's blank document is the page's own while [BrowserState.blankIsPage]
+    // holds, and its opener can write a whole page into it
+    // (`window.open('')` + `document.write`) — which gets no navigation
+    // callback at all, not even `onPageCommitVisible` (verified on the
+    // AVD), and no detector either (#92). So while that document is the
+    // one on screen, the frames it draws ask for a read, at most one per
+    // [BLANK_PAGE_READ_MS] ([BlankPageReads]).
+    val blankPageReads = BlankPageReads()
+
+    fun onBlankPageDrawn(view: WebView) {
+        if (!state.blankIsPage || state.url != ABOUT_BLANK) return
+        if (!blankPageReads.drawn()) return
+        view.postDelayed({
+            blankPageReads.fired()
+            if (state.blankIsPage && state.url == ABOUT_BLANK) readThemeColor(view, onScreen = true)
+        }, BLANK_PAGE_READ_MS)
+    }
+
     // Reserved mode (#66): does the document on screen have its own
     // bottom navigation the capsule would cover? [BottomChromeSlot] holds
     // the per-document token and the hysteresis; the page side is the
@@ -1557,16 +1575,29 @@ private fun buildRefreshableWebView(
         // scroll range, or one already at the top) isn't going to reach
         // the end: the gesture is the page's, as before #138.
         onTopOverscroll = { reveal.onTopOverscroll() }
-        // A live light/dark switch re-renders the page under its other
-        // `prefers-color-scheme`, and its theme colour may be one of a
-        // light/dark pair (#92). Read it again once a frame drawn after
-        // the switch is on screen: asked any earlier, `matchMedia` can
-        // still answer for the old scheme. Every tab's WebView stays
-        // attached to the one frame (a background tab is only hidden),
-        // so a background tab hears the switch and re-reads too.
-        onNightModeChanged = {
-            postVisualStateCallback(0, object : WebView.VisualStateCallback() {
-                override fun onComplete(requestId: Long) = readThemeColor(this@apply)
+        // A popup's written blank page tells us of itself only by drawing (#92).
+        onDrawn = { onBlankPageDrawn(this) }
+        // A `theme-color`'s `media` can ask about anything the page is
+        // rendered under: the colour scheme (a light/dark pair), but just
+        // as well the orientation, the width or the resolution (#92). The
+        // Activity handles those configuration changes itself, so no
+        // navigation follows a live light/dark switch, a rotation, a
+        // split-screen resize or a fold: read again once a frame drawn
+        // under the new environment is on screen — asked any earlier,
+        // `matchMedia` can still answer for the old one. Every tab's
+        // WebView stays attached to the one frame (a background tab is
+        // only hidden), so a background tab hears the change and
+        // re-reads too. A burst (a rotation is a configuration change
+        // and a resize) reads once, for its last change: each change asks
+        // for a frame, and only the latest ask's frame reads. (Not a
+        // "pending" flag — a hidden tab's frame may never come, and a
+        // stuck flag would silence it for good.)
+        var mediaChange = 0L
+        onMediaEnvironmentChanged = {
+            postVisualStateCallback(++mediaChange, object : WebView.VisualStateCallback() {
+                override fun onComplete(requestId: Long) {
+                    if (requestId == mediaChange) readThemeColor(this@apply)
+                }
             })
         }
         setOnTouchListener { _, event ->
@@ -1853,7 +1884,9 @@ private fun buildRefreshableWebView(
                     }
                     state.title = ""
                     state.progress = -1
-                    state.themeColorArgb = null
+                    // No page colour behind Home (#92). A popup's own
+                    // blank page keeps the old one until it draws.
+                    if (!state.blankIsPage) state.themeColorArgb = null
                     lastLoadedDisplayUrl = null
                     visitGate.startNavigation()
                     // Home is a navigation like any other: a page that
@@ -1925,10 +1958,13 @@ private fun buildRefreshableWebView(
                     // The bottom-nav detector starts here, once (#66).
                     installBottomUiDetector()
                 }
+                // …and its `<head>` is in: the theme colour is readable
+                // (#92) — a popup's blank page's too, which is a page.
+                if (url != ABOUT_BLANK || state.blankIsPage) {
+                    themeColor.painted()
+                    readThemeColor(view)
+                }
                 if (url == ABOUT_BLANK) return
-                // …and its `<head>` is in: the theme colour is readable (#92).
-                themeColor.painted()
-                readThemeColor(view)
                 visitGate.commit()
                 // A finish that beat this paint left its visit parked;
                 // this is the moment it becomes real. Anything parked
@@ -1984,8 +2020,14 @@ private fun buildRefreshableWebView(
                     state.progress = -1
                     // …and no site to zoom as (#88), for the same reason.
                     state.zoomSite = null
-                    // …and no page colour behind the status bar (#92).
-                    state.themeColorArgb = null
+                    // …and no page colour behind the status bar (#92) —
+                    // unless the blank document is a popup's page, whose
+                    // colour is its own.
+                    if (state.blankIsPage) {
+                        readThemeColor(view, onScreen = true)
+                    } else {
+                        state.themeColorArgb = null
+                    }
                     // …and drop the park for the same reason as the
                     // `onPageStarted` branch: home has the screen now, so
                     // a page that finished but had not painted by the
@@ -2519,20 +2561,28 @@ internal class PageWebView(context: Context) : WebView(context) {
     var onTopOverscroll: () -> Unit = {}
 
     /**
-     * The system flipped between light and dark while this WebView was
-     * attached. The manifest keeps `uiMode` in `configChanges`, so this
-     * is the only word of it the page's owner gets.
+     * Something a media query can ask about changed while this WebView
+     * was attached: the configuration (light/dark, orientation, screen
+     * size, density, …) or the view's own size. The manifest keeps all
+     * of those in `configChanges`, so no Activity restart (and no
+     * reload) follows one, and this is the only word of it the page's
+     * owner gets. May fire more than once for one change.
      */
-    var onNightModeChanged: () -> Unit = {}
-    private var nightMode = context.resources.configuration.uiMode and
-        android.content.res.Configuration.UI_MODE_NIGHT_MASK
+    var onMediaEnvironmentChanged: () -> Unit = {}
+    private var lastConfiguration = android.content.res.Configuration(context.resources.configuration)
 
     override fun onConfigurationChanged(newConfig: android.content.res.Configuration?) {
         super.onConfigurationChanged(newConfig)
-        val night = (newConfig ?: return).uiMode and android.content.res.Configuration.UI_MODE_NIGHT_MASK
-        if (night == nightMode) return
-        nightMode = night
-        onNightModeChanged()
+        newConfig ?: return
+        val changed = lastConfiguration.diff(newConfig)
+        lastConfiguration = android.content.res.Configuration(newConfig)
+        if (changed != 0) onMediaEnvironmentChanged()
+    }
+
+    override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
+        super.onSizeChanged(w, h, oldw, oldh)
+        // The first layout is no change: the first paint reads anyway.
+        if (oldw != 0 && oldh != 0) onMediaEnvironmentChanged()
     }
 
     // The vertical delta of the overScrollBy call in progress (0 outside
@@ -2546,6 +2596,14 @@ internal class PageWebView(context: Context) : WebView(context) {
 
     /** Called at the start of each draw of this view, before Chromium's frame is recorded. */
     var onBeforeDraw: (() -> Unit)? = null
+
+    /** Called after each draw of this view: Chromium has a new frame for it. */
+    var onDrawn: () -> Unit = {}
+
+    override fun onDraw(canvas: Canvas) {
+        super.onDraw(canvas)
+        onDrawn()
+    }
 
     override fun computeScroll() {
         super.computeScroll()

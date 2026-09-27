@@ -170,3 +170,34 @@ internal class ThemeColorSlot {
     /** May the answer to the read stamped [token] land? */
     fun accept(token: Int): Boolean = token == generation
 }
+
+/** How long a popup's written blank page's frames wait for their theme-colour read. */
+internal const val BLANK_PAGE_READ_MS = 250L
+
+/**
+ * Paces the theme-colour reads of a popup's blank page, which its opener
+ * writes into without any navigation callback, so a drawn frame is the
+ * only sign it changed (see `onBlankPageDrawn`). A frame schedules a read
+ * [BLANK_PAGE_READ_MS] out unless one is already scheduled, which then
+ * covers it; frames after the read went schedule the next. So the last
+ * change is always read, a static page stops asking, and a read that
+ * never answers (one sent before the popup's first document can run
+ * script) holds nothing up.
+ *
+ * Single-threaded: draws and posted reads are all on the UI thread.
+ */
+internal class BlankPageReads {
+    private var scheduled = false
+
+    /** A frame was drawn. `true`: schedule a read, and call [fired] when it runs. */
+    fun drawn(): Boolean {
+        if (scheduled) return false
+        scheduled = true
+        return true
+    }
+
+    /** The scheduled read is running: frames from now on need another. */
+    fun fired() {
+        scheduled = false
+    }
+}

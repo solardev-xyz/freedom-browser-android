@@ -570,7 +570,7 @@ internal fun bottomUiDetectorJs(channel: String, debounceMs: Int = BOTTOM_UI_DEB
     } catch (e) { return null; }
   }
   function themeColor() {
-    var ms = d.querySelectorAll('meta[name="theme-color"]');
+    var ms = d.querySelectorAll('meta[name="theme-color" i]');
     for (var i = 0; i < ms.length; i++) {
       var q = ms[i].getAttribute('media');
       if (q && !(w.matchMedia && w.matchMedia(q).matches)) continue;

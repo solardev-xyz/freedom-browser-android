@@ -41,7 +41,7 @@ class BottomUiDetectorScriptTest {
           compatMode: 'CSS1Compat', documentElement: html, body: body,
           scrollingElement: { get scrollHeight() { return scrollHeight; } },
           elementFromPoint: function (x, y) { this.lastProbe = [x, y]; return hit; },
-          querySelectorAll: function (sel) { return sel === 'meta[name="theme-color"]' ? metas : []; },
+          querySelectorAll: function (sel) { return sel === 'meta[name="theme-color" i]' ? metas : []; },
           createElement: function (t) {
             return { getContext: function () {
               var v = '#000000';
