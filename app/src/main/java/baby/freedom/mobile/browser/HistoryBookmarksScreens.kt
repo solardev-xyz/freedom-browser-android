@@ -163,7 +163,7 @@ private fun EntryRow(
 }
 
 @Composable
-private fun EmptyState(
+internal fun EmptyState(
     icon: ImageVector,
     title: String,
     hint: String,

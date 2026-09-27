@@ -40,20 +40,17 @@ object KnownEnsNames {
     fun record(uri: String, name: String) {
         val lowerName = name.lowercase()
         nameToUri[lowerName] = uri
-        bzzRegex.find(uri)?.let {
-            hashToName[it.groupValues[1].lowercase()] = lowerName
-            nameToProtocol[lowerName] = "bzz"
-            return
-        }
-        ipfsRegex.find(uri)?.let {
-            hashToName[it.groupValues[1]] = lowerName
-            nameToProtocol[lowerName] = "ipfs"
-            return
-        }
-        ipnsRegex.find(uri)?.let {
-            hashToName[it.groupValues[1]] = lowerName
-            nameToProtocol[lowerName] = "ipns"
-        }
+        val (hash, protocol) = rootOf(uri) ?: return
+        hashToName[hash] = lowerName
+        nameToProtocol[lowerName] = protocol
+    }
+
+    /** `(hash-to-name key, protocol)` of a `bzz|ipfs|ipns` [uri]. */
+    private fun rootOf(uri: String): Pair<String, String>? {
+        bzzRegex.find(uri)?.let { return it.groupValues[1].lowercase() to "bzz" }
+        ipfsRegex.find(uri)?.let { return it.groupValues[1] to "ipfs" }
+        ipnsRegex.find(uri)?.let { return it.groupValues[1] to "ipns" }
+        return null
     }
 
     /**
@@ -79,6 +76,27 @@ object KnownEnsNames {
     fun forget(hashOrCid: String) {
         hashToName.remove(hashOrCid)
         hashToName.remove(hashOrCid.lowercase())
+    }
+
+    /**
+     * [name] answered that it points at no loadable content any more
+     * (#99): drop what it used to resolve to — its URI, its protocol,
+     * and the hash-to-name mapping of that old root — so the address bar
+     * stops describing content the name no longer points at. A root that
+     * another name still resolves to keeps a mapping, to that name.
+     */
+    @Synchronized
+    fun forgetName(name: String) {
+        val lowerName = name.lowercase()
+        nameToProtocol.remove(lowerName)
+        nameToUri.remove(lowerName)
+        val stillNamed = nameToUri.entries.mapNotNull { (other, uri) ->
+            rootOf(uri)?.let { it.first to other }
+        }.toMap()
+        for (hash in hashToName.filterValues { it == lowerName }.keys) {
+            val other = stillNamed[hash]
+            if (other != null) hashToName[hash] = other else hashToName.remove(hash, lowerName)
+        }
     }
 
     /** Tests only. */

@@ -9,8 +9,10 @@ package baby.freedom.mobile.ens
  *   - `ens://vitalik.eth` (compatibility alias, normalized away on display)
  *   - `ens://VITALIK.eth/docs?q=1`
  *   - `foo.box/path`
+ *   - `alice.wei` (WNS) and `name.gwei` (GNS) — see [NameSystem]
  *
- * Returns `null` for anything that doesn't end in `.eth` or `.box`.
+ * Returns `null` for anything that doesn't end in one of
+ * [NameSystem.navigableSuffixes] (`.eth`, `.box`, `.wei`, `.gwei`).
  *
  * [parseConstrained] handles the scheme-constrained forms
  * (`bzz://name.eth`, `ipfs://name.eth`, `ipns://name.eth`): the name is
@@ -41,7 +43,7 @@ object EnsInput {
         val suffix = match.groupValues[2]
 
         val lower = name.lowercase()
-        if (!lower.endsWith(".eth") && !lower.endsWith(".box")) return null
+        if (NameSystem.navigableSuffixes.none { lower.endsWith(it) }) return null
 
         return Parsed(name = lower, suffix = suffix)
     }
@@ -54,7 +56,7 @@ object EnsInput {
      * → the ENS name plus the protocol the scheme demands. Raw content
      * ids under those schemes (`bzz://<hex>`, `ipfs://<cid>`, DNSLink
      * hosts like `ipns://ipfs.tech`) return `null` because they don't
-     * end in `.eth`/`.box` — they stay on the direct gateway path.
+     * end in a name suffix — they stay on the direct gateway path.
      */
     fun parseConstrained(raw: String?): Constrained? {
         val value = (raw ?: "").trim()

@@ -25,8 +25,6 @@ import java.util.concurrent.atomic.AtomicLong
 class TabsState(
     private val homepage: String,
 ) {
-    private val idSeq = AtomicLong(0L)
-
     val tabs: MutableList<BrowserState> = mutableStateListOf<BrowserState>().apply {
         add(newBlankTab())
     }
@@ -120,6 +118,15 @@ class TabsState(
         get() = closedTabs.isNotEmpty()
 
     /**
+     * Hook installed by the [BrowserWebViewHost] so the find bar can drive
+     * the given tab's `findAllAsync` / `findNext` / `clearMatches`. Like
+     * [stopLoading], only the host knows which physical WebView backs a
+     * tab. `null` before the host has composed, or after it disposes.
+     */
+    @Volatile
+    var find: ((BrowserState, FindAction) -> Unit)? = null
+
+    /**
      * Hook installed by [BrowserScreen] so the WebView layer can bounce
      * `bzz://` / `ens://` navigations (in-page link clicks, error-page
      * "Try Again" button) back through the screen's probe-gated submit
@@ -143,6 +150,34 @@ class TabsState(
      */
     @Volatile
     var requestNodeRecovery: (() -> Unit)? = null
+
+    /**
+     * Hook installed by [BrowserScreen]: open a URL in a new tab through
+     * the screen's submit flow — in the background (with a snackbar to
+     * switch to it) or in front. Used by the page context menu and the
+     * text-selection "Search" (#84). `null` before the screen has
+     * composed.
+     */
+    @Volatile
+    var requestOpenInNewTab: ((url: String, background: Boolean) -> Unit)? = null
+
+    /**
+     * Hook installed by [BrowserScreen]: search [query] with the engine
+     * chosen in Settings, in a new tab in front — the text-selection
+     * toolbar's "Search" (#84). The screen owns the engine setting, so
+     * the URL is built there ([UrlParser.searchUrl]). `null` before the
+     * screen has composed.
+     */
+    @Volatile
+    var requestSearchInNewTab: ((query: String) -> Unit)? = null
+
+    /**
+     * The link / image menu currently raised over a page, set by
+     * [BrowserWebViewHost] on a long-press and drawn by [BrowserScreen]
+     * (which also drops it the moment it goes stale — see
+     * [PageContextMenuRequest]). `null` when no menu is up.
+     */
+    internal var pageContextMenu: PageContextMenuRequest? by mutableStateOf(null)
 
     /**
      * An HTML5 fullscreen session (`element.requestFullscreen()`) in
@@ -207,14 +242,72 @@ class TabsState(
      * Open a new tab. If [url] is null (typical "+" button) the tab starts
      * blank and the caller is expected to load the homepage once the node
      * is running; otherwise [url] is submitted immediately (typical
-     * "open link in new tab" flow).
+     * "open link in new tab" flow). With [activate] false the tab opens
+     * behind the current one, which stays on screen.
      */
-    fun newTab(url: String? = null): BrowserState {
+    fun newTab(url: String? = null, activate: Boolean = true): BrowserState {
         val tab = newBlankTab()
         tabs.add(tab)
-        activeIndex = tabs.lastIndex
+        if (activate) activeIndex = tabs.lastIndex
         if (url != null) tab.loadUrl(url)
         return tab
+    }
+
+    /**
+     * Adopt a window the page in [opener] asked for — a `target=_blank`
+     * link or `window.open()` (WebView's `onCreateWindow`) — as a new
+     * tab, placed right after its opener and made active. The caller
+     * hands the tab's WebView back to Chromium, which then loads the
+     * popup's URL into it itself: nothing is scheduled here, and the
+     * `window.opener` link to the page that asked stays intact (OAuth-
+     * style popups post their result back through it).
+     */
+    fun adoptPopup(opener: BrowserState): BrowserState {
+        val tab = newBlankTab()
+        tab.openerId = opener.id
+        // Its blank document is the page's until something commits: not
+        // the home overlay (see [BrowserState.blankIsPage]).
+        tab.blankIsPage = true
+        tab.showBlankPage()
+        val openerIndex = tabs.indexOfFirst { it.id == opener.id }
+        val at = if (openerIndex < 0) tabs.size else openerIndex + 1
+        captureActiveThumbnail?.invoke()
+        // Fullscreen belongs to the active tab only (see [fullscreen]):
+        // a player's own `_blank` link must not leave the opener's
+        // session covering the popup that is now on screen.
+        exitFullscreen()
+        tabs.add(at, tab)
+        activeIndex = at
+        return tab
+    }
+
+    /**
+     * The page in [tab] closed its own window (`window.close()`,
+     * WebView's `onCloseWindow`) — typically an OAuth popup that has
+     * posted its result to its opener. The tab goes away; if it was the
+     * one on screen, the user lands back on the opener when that is
+     * still open, and a background popup closing leaves the active tab
+     * where it is.
+     *
+     * Only a window a page opened can be closed this way. Chromium also
+     * honours `window.close()` in a tab whose session history has a
+     * single entry (e.g. right after "Clear cookies & site data" clears
+     * every tab's history), which would let any page's script silently
+     * close a tab the user opened — so a tab with no opener ignores it.
+     */
+    fun closePopup(tab: BrowserState) {
+        if (tab.openerId == null) return
+        val index = tabs.indexOfFirst { it.id == tab.id }
+        if (index < 0) return
+        val wasActive = index == activeIndex
+        val previouslyActive = active
+        // The page closed it, not the user: nothing to undo (and a
+        // finished OAuth popup brought back would have lost the
+        // `window.opener` it was for).
+        closeTab(index, remember = false)
+        val back = if (wasActive) tab.openerId else previouslyActive.id
+        val target = tabs.indexOfFirst { it.id == back }
+        if (target >= 0) activeIndex = target
     }
 
     fun switchTo(index: Int) {
@@ -223,14 +316,19 @@ class TabsState(
         activeIndex = index
     }
 
-    fun closeTab(index: Int) {
+    /**
+     * Close the tab at [index]. With [remember] (the user closing it)
+     * the tab goes onto the reopen stack ([reopenClosedTab]); a window
+     * the page closed itself ([closePopup]) doesn't.
+     */
+    fun closeTab(index: Int, remember: Boolean = true) {
         if (index !in tabs.indices) return
         // Let the WebView wind its fullscreen session down before the
         // host destroys it (see [BrowserWebViewHost]).
         if (fullscreen?.tabId == tabs[index].id) exitFullscreen()
         // The list is never empty: the last tab is replaced by a blank one.
         val placeholder = if (tabs.size == 1) newBlankTab() else null
-        rememberClosed(index, placeholder?.id)
+        if (remember) rememberClosed(index, placeholder?.id)
         tabs.removeAt(index)
         if (placeholder != null) {
             tabs.add(placeholder)
@@ -252,13 +350,19 @@ class TabsState(
      */
     private fun rememberClosed(index: Int, placeholderId: Long?) {
         val tab = tabs[index]
-        if (tab.isHome && !tab.canGoBack && !tab.canGoForward) return
+        // A popup nothing has committed in yet shows its `about:blank`
+        // as a page (see [BrowserState.blankIsPage]); that's the blank
+        // home entry to the reopened tab, which isn't a popup.
+        val popupBlank = tab.blankIsPage && tab.url == ABOUT_BLANK
+        val url = if (popupBlank) "" else tab.url
+        val address = if (popupBlank && tab.addressBarText == ABOUT_BLANK) "" else tab.addressBarText
+        if (url.isBlank() && address.isBlank() && !tab.canGoBack && !tab.canGoForward) return
         closedTabs.add(
             ClosedTab(
                 index = index,
-                url = tab.url,
+                url = url,
                 title = tab.title,
-                addressBarText = tab.addressBarText,
+                addressBarText = address,
                 override = tab.override,
                 thumbnail = tab.thumbnail,
                 webViewState = saveWebViewState?.invoke(tab),
@@ -351,5 +455,12 @@ class TabsState(
     companion object {
         /** How many closed tabs [reopenClosedTab] can walk back through. */
         const val MAX_CLOSED_TABS = 20
+
+        /**
+         * Process-wide, not per [TabsState]: the process-scoped
+         * [DownloadManager] keys pending download offers by tab id, and
+         * a rebuilt screen's new tabs mustn't inherit the old ones'.
+         */
+        private val idSeq = AtomicLong(0L)
     }
 }

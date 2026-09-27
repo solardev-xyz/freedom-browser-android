@@ -266,4 +266,46 @@ class TabsStateTest {
         tabs.forgetClosedTabs()
         assertFalse(tabs.canReopenClosedTab)
     }
+
+    @Test
+    fun `a popup the page closes itself is not offered for reopen`() {
+        val tabs = threeTabs()
+        val popup = tabs.adoptPopup(tabs.active)
+        popup.visit("login")
+        tabs.closePopup(popup)
+        assertFalse(tabs.canReopenClosedTab)
+    }
+
+    @Test
+    fun `a popup the user closes reopens as an ordinary tab`() {
+        val tabs = threeTabs()
+        val popup = tabs.adoptPopup(tabs.active)
+        popup.visit("login")
+        tabs.closeTab(tabs.tabs.indexOf(popup))
+        val reopened = tabs.reopenClosedTab()!!
+        assertEquals("https://login.example/", reopened.url)
+        assertNull(reopened.openerId)
+        assertSame(reopened, tabs.tabs[1])
+    }
+
+    @Test
+    fun `a popup nothing has loaded into yet is skipped like an empty tab`() {
+        val tabs = threeTabs()
+        val popup = tabs.adoptPopup(tabs.active)
+        tabs.closeTab(tabs.tabs.indexOf(popup))
+        assertFalse(tabs.canReopenClosedTab)
+    }
+
+    @Test
+    fun `a popup closed before its page committed comes back loading that address`() {
+        val tabs = threeTabs()
+        val popup = tabs.adoptPopup(tabs.active)
+        popup.addressBarText = "https://login.example/"
+        tabs.closeTab(tabs.tabs.indexOf(popup))
+        val reopened = tabs.reopenClosedTab()!!
+        assertEquals("", reopened.url)
+        val restore = reopened.pendingRestore!!
+        assertEquals("https://login.example/", restore.resubmitUrl)
+        assertEquals("https://login.example/", restore.fallbackUrl)
+    }
 }

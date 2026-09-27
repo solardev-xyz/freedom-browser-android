@@ -167,7 +167,9 @@ function request(server, options) {
   const { port } = server.address();
   return new Promise((resolve, reject) => {
     const req = http.request({ port, host: '127.0.0.1', ...options }, (res) => {
-      res.resume();
+      res.body = '';
+      res.setEncoding('utf8');
+      res.on('data', (chunk) => (res.body += chunk));
       res.on('end', () => resolve(res));
     });
     req.on('error', reject);
@@ -196,6 +198,16 @@ async function httpTests() {
     test('http: honors X-Forwarded-Host (and strips the port)', () => {
       assert.equal(res.statusCode, 301);
       assert.equal(res.headers.location, v.redirect);
+    });
+
+    // A WNS/GNS name decodes but has no public gateway: 404 with the
+    // display name, never a 301 to a `<name>.wei.limo` that won't resolve.
+    const wns = vectors.ens.find((e) => e.redirect === null);
+    res = await request(server, { path: wns.path, headers: { Host: wns.host } });
+    test('http: WNS/GNS name 404s with its display name, no redirect', () => {
+      assert.equal(res.statusCode, 404);
+      assert.equal(res.headers.location, undefined);
+      assert.ok(res.body.startsWith(wns.display), res.body);
     });
 
     res = await request(server, { path: '/', headers: { Host: 'example.com' } });

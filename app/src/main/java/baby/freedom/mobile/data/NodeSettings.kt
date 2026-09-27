@@ -7,12 +7,13 @@ import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import baby.freedom.mobile.browser.SearchEngines
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 
 /**
  * Persistent toggles the user controls from the node details panel and
- * the hidden "Other" section of the settings screen.
+ * the settings screen (search engine, and the hidden "Other" section).
  *
  * Backed by a single [DataStore] under `freedom_node_settings` living
  * in the app's files directory. Flows surface the current value; the
@@ -27,6 +28,15 @@ import kotlinx.coroutines.flow.map
  * `ipfs_low_power` and `ipfs_routing_mode` are read at `:node` process
  * startup and re-applied on the next restart — there is no live
  * reconfig path on the freedom-ipfs wrapper.
+ *
+ * ## Search keys
+ *
+ * `search_engine` is a built-in id from
+ * [baby.freedom.mobile.browser.SearchEngines.BUILT_IN] or `custom`;
+ * `search_custom_template` holds the custom template, stored only once
+ * it has passed [baby.freedom.mobile.browser.SearchEngines.normalizeTemplate].
+ * [searchTemplate] resolves the pair to the template the address bar
+ * searches with.
  *
  * There is no persistent "run IPFS" flag by design. The IPFS node is
  * always off at cold launch (demo-surprise requirement) and driven
@@ -93,11 +103,54 @@ class NodeSettings private constructor(
         store.edit { it[Keys.IPFS_ROUTING_MODE] = mode }
     }
 
+    /** Selected search engine id. Default DuckDuckGo, as on desktop. */
+    val searchEngine: Flow<String> = store.data.map { prefs ->
+        prefs[Keys.SEARCH_ENGINE] ?: SearchEngines.DEFAULT_ID
+    }
+
+    /** The saved custom template, or `""` if none has been saved. */
+    val customSearchTemplate: Flow<String> = store.data.map { prefs ->
+        prefs[Keys.SEARCH_CUSTOM_TEMPLATE] ?: ""
+    }
+
+    /**
+     * The template address-bar searches use: the selected engine's, or
+     * the default's for an unknown id / a `custom` selection without a
+     * valid saved template.
+     */
+    val searchTemplate: Flow<String> = store.data.map { prefs ->
+        SearchEngines.templateFor(
+            prefs[Keys.SEARCH_ENGINE],
+            prefs[Keys.SEARCH_CUSTOM_TEMPLATE],
+        )
+    }
+
+    /** Select a built-in engine; the saved custom template is kept. */
+    suspend fun setSearchEngine(id: String) {
+        require(SearchEngines.BUILT_IN.any { it.id == id }) { "unknown engine $id" }
+        store.edit { it[Keys.SEARCH_ENGINE] = id }
+    }
+
+    /**
+     * Validate [template] and, if valid, save it and select `custom` in
+     * one write. Returns `false` (and changes nothing) if it's invalid.
+     */
+    suspend fun setCustomSearchTemplate(template: String): Boolean {
+        val normalized = SearchEngines.normalizeTemplate(template) ?: return false
+        store.edit {
+            it[Keys.SEARCH_CUSTOM_TEMPLATE] = normalized
+            it[Keys.SEARCH_ENGINE] = SearchEngines.CUSTOM_ID
+        }
+        return true
+    }
+
     private object Keys {
         val RUN_NODE_ENABLED = booleanPreferencesKey("run_node_enabled")
         val SHOW_IPFS_UI = booleanPreferencesKey("show_ipfs_ui")
         val IPFS_LOW_POWER = booleanPreferencesKey("ipfs_low_power")
         val IPFS_ROUTING_MODE = stringPreferencesKey("ipfs_routing_mode")
+        val SEARCH_ENGINE = stringPreferencesKey("search_engine")
+        val SEARCH_CUSTOM_TEMPLATE = stringPreferencesKey("search_custom_template")
     }
 
     companion object {

@@ -14,8 +14,13 @@ import android.graphics.PixelFormat
 import android.graphics.Rect
 import android.graphics.drawable.Drawable
 import android.os.Bundle
+import android.net.Uri
+import android.os.Message
 import android.os.SystemClock
 import android.util.Log
+import android.view.ActionMode
+import android.view.Menu
+import android.view.MenuItem
 import android.view.PixelCopy
 import android.view.MotionEvent
 import android.view.View
@@ -24,6 +29,9 @@ import android.view.ViewGroup
 import android.view.animation.DecelerateInterpolator
 import android.webkit.CookieManager
 import android.webkit.MimeTypeMap
+import android.webkit.GeolocationPermissions
+import android.webkit.PermissionRequest
+import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
@@ -75,7 +83,128 @@ private const val LOG_TAG = "BrowserWebView"
 private val HEADERS_TO_STRIP = setOf(
     "transfer-encoding", "content-encoding", "connection", "keep-alive",
     "set-cookie", "set-cookie2",
+    // Ours alone to set: a gateway response carrying it would pass for
+    // our own in-place refusal and keep the real error page away (see
+    // [nameResolutionErrorIn]).
+    NAME_RESOLUTION_ERROR_HEADER.lowercase(),
 )
+
+/**
+ * Header on the interceptor's refusal of a `<name>.ens.…` document whose
+ * name no longer resolves to loadable content (#99). Carries the
+ * [ErrorPage] code, and tells `onReceivedHttpError` that the response
+ * already *is* the error page (see [nameResolutionRefusal]).
+ */
+internal const val NAME_RESOLUTION_ERROR_HEADER = "X-Name-Resolution-Error"
+
+/**
+ * The [ErrorPage] code in a main-frame HTTP error's headers if the
+ * interceptor refused the document itself, else `null`.
+ */
+internal fun nameResolutionErrorIn(headers: Map<String, String>?): String? =
+    headers?.entries
+        ?.firstOrNull { it.key.equals(NAME_RESOLUTION_ERROR_HEADER, ignoreCase = true) }
+        ?.value
+
+/** Status for the interceptor's refusal of an ENS document. */
+internal fun statusForNameResolutionError(code: String): Int =
+    if (code == "ens_lookup_failed") 502 else 404
+
+/**
+ * "The main-frame document the interceptor last served for this tab was
+ * a name refusal" (#99), keyed by its URL. The refusal is served on the
+ * name's real URL, not on an [ErrorPage] URL, so the
+ * `ErrorPage.isErrorPage` guards that keep error pages out of history
+ * can't see it; the tab's client asks this instead. Written from
+ * `shouldInterceptRequest` (IO thread) for every main-frame request —
+ * which WebView makes before the document commits — and read on the
+ * main thread from `onPageFinished`.
+ */
+internal class NameRefusalSlot {
+    @Volatile
+    private var refusedUrl: String? = null
+
+    fun onMainFrameResponse(url: String, refusalCode: String?) {
+        refusedUrl = if (refusalCode != null) url.substringBefore('#') else null
+    }
+
+    fun isRefused(url: String?): Boolean =
+        url != null && url.substringBefore('#') == refusedUrl
+}
+
+/**
+ * Is [req] a document load — the top-level page, or an iframe — as
+ * opposed to a subresource of one? The name re-check (#99) keys on this.
+ * `isForMainFrame` alone misses iframes, and navigations a service
+ * worker forwards to the network (which WebView hands over as
+ * not-main-frame). A navigation the SW answers from its own cache never
+ * reaches us, and so isn't re-checked. Chromium
+ * marks a navigation's own request with `Sec-Fetch-Dest` and an
+ * `Accept` that leads with `text/html`; subresources (`fetch`, XHR,
+ * scripts, styles, images) never lead with it by default.
+ */
+internal fun isDocumentRequest(
+    isForMainFrame: Boolean,
+    headers: Map<String, String>?,
+): Boolean {
+    if (isForMainFrame) return true
+    fun header(name: String) =
+        headers?.entries?.firstOrNull { it.key.equals(name, ignoreCase = true) }?.value
+    header("Sec-Fetch-Dest")?.trim()?.lowercase()?.let {
+        return it == "document" || it == "iframe" || it == "frame"
+    }
+    return header("Accept")?.trim()?.lowercase()?.startsWith("text/html") == true
+}
+
+/**
+ * The interceptor's answer to an ENS document it refuses: the error
+ * page itself, served *as* the history entry's document rather than
+ * via a `loadUrl(ErrorPage.url(…))` afterwards (#99). That navigation
+ * would push a new entry and so truncate forward history — a refused
+ * Back would delete the page the user just came from, and Back from
+ * the error page would only land on the refused entry again. Served in
+ * place, Back and Forward move past it as usual and Reload re-checks
+ * the name. No script: the document is on the name's origin.
+ */
+internal fun nameResolutionRefusal(name: String, code: String): WebResourceResponse {
+    val (title, description) = when (code) {
+        "ens_not_found" -> "No content for this ENS name" to
+            "This ENS name doesn't point at any content any more. The owner may " +
+            "have removed its <code>contenthash</code> record, or the name has no resolver."
+        "ens_unsupported_codec" -> "Unsupported content format" to
+            "This ENS name now resolves to a content format Freedom Browser " +
+            "cannot load yet on mobile."
+        else -> "ENS lookup failed" to
+            "Couldn't reach an Ethereum RPC endpoint to resolve this name. " +
+            "Check your connection and try again."
+    }
+    val safeName = name.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    val html = """<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'">
+<title>$title</title><style>
+html,body{margin:0;min-height:100%}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
+background:#141414;color:#f5f5f5;padding:32px 20px;box-sizing:border-box;text-align:center}
+.c{max-width:560px;margin:0 auto}
+h1{font-size:22px;margin:24px 0 12px;color:#ff5e5e}
+p{line-height:1.55;margin:0 0 20px;color:#ccc;font-size:15px}
+.d{background:#1a1a1a;padding:14px 16px;border-radius:8px;font-family:ui-monospace,Menlo,monospace;
+font-size:13px;color:#ff8a8a;margin:0 0 24px;word-break:break-all;white-space:pre-wrap;text-align:left}
+a{display:inline-block;padding:12px 22px;background:#2c2c2c;color:#fff;border:1px solid #444;
+border-radius:8px;font-size:15px;text-decoration:none}
+@media (prefers-color-scheme:light){body{background:#fff;color:#24292f}h1{color:#cf222e}
+p{color:#57606a}.d{background:#f6f8fa;color:#cf222e}a{background:#f6f8fa;border-color:#d0d7de;color:#24292f}}
+</style></head><body><div class="c"><h1>$title</h1><p>$description</p>
+<div class="d">ens://$safeName
+
+$code</div><a href="">Try again</a></div></body></html>"""
+    return WebResourceResponse(
+        "text/html", "utf-8", statusForNameResolutionError(code), "Name Resolution Failed",
+        mapOf(NAME_RESOLUTION_ERROR_HEADER to code, "Cache-Control" to "no-store"),
+        ByteArrayInputStream(html.toByteArray(Charsets.UTF_8)),
+    )
+}
 
 // Request headers we never forward upstream — either managed by
 // `HttpURLConnection` itself or carrying state tied to the WebView's
@@ -431,6 +560,8 @@ fun BrowserWebViewHost(
 ) {
     val context = LocalContext.current
     val repo = remember(context) { BrowsingRepository.get(context) }
+    val sitePermissions = remember(context) { SitePermissionBroker.get(context) }
+    val fileChooser = rememberFileChooser()
 
     // Enable Chrome DevTools inspection for debug builds so we can
     // diagnose broken subresources on Swarm-hosted pages. Cheap no-op
@@ -483,69 +614,103 @@ fun BrowserWebViewHost(
 
     // Create any WebViews that don't yet exist; tear down any that belong
     // to tabs that have been closed.
+    //
+    // A page's own new windows (`target=_blank`, `window.open()`) come
+    // through here too, but synchronously from inside `onCreateWindow`:
+    // Chromium wants the popup's WebView back before that callback
+    // returns, so [attach] builds it right away instead of waiting for
+    // the next composition to notice the new tab.
+    fun attach(tab: BrowserState): WebView {
+        webViews[tab.id]?.let { return it }
+        val (layout, wv) = buildRefreshableWebView(
+            context = context,
+            state = tab,
+            repo = repo,
+            sitePermissions = sitePermissions,
+            onSubmitUrl = { target, url ->
+                tabs.requestSubmit?.invoke(target, url)
+            },
+            onEnterFullscreen = { view, callback ->
+                tabs.enterFullscreen(tab, view, callback)
+            },
+            onExitFullscreen = { tabs.onFullscreenHidden(tab) },
+            onRecoverNodes = { tabs.requestNodeRecovery?.invoke() },
+            onCreateWindow = { attach(tabs.adoptPopup(opener = tab)) },
+            onCloseWindow = { tabs.closePopup(tab) },
+            // Handed to Chromium by `onCreateWindow`, which needs it
+            // never to have navigated.
+            isPopup = tab.openerId != null,
+            // A reopened tab: its WebView's first navigation must be
+            // the host's `restoreState` (see the creation loop below).
+            restoring = tab.pendingRestore != null,
+            fileChooser = fileChooser,
+            // Only the tab on screen raises a menu, and only over a
+            // real page (the home overlay covers `about:blank`).
+            // Pinned at the press to the document pressed on; see
+            // [PageContextMenuPin].
+            onContextMenuPress = {
+                if (tab === tabs.active && tab.url.isNotEmpty()) {
+                    PageContextMenuPin(tab.id, tab.url, tab.navCounter)
+                } else {
+                    null
+                }
+            },
+            onContextMenu = { pin, target -> tabs.pageContextMenu = pin.request(target) },
+            onSearchSelection = { query -> tabs.requestSearchInNewTab?.invoke(query) },
+        )
+        webViews[tab.id] = wv
+        refreshLayouts[tab.id] = layout
+        frame.addView(layout)
+        return wv
+    }
     run {
         val idsNow = currentIds.toSet()
         for (tab in tabs.tabs) {
-            if (webViews[tab.id] == null) {
-                val (layout, wv) = buildRefreshableWebView(
-                    context = context,
-                    state = tab,
-                    repo = repo,
-                    onSubmitUrl = { target, url ->
-                        tabs.requestSubmit?.invoke(target, url)
-                    },
-                    onEnterFullscreen = { view, callback ->
-                        tabs.enterFullscreen(tab, view, callback)
-                    },
-                    onExitFullscreen = { tabs.onFullscreenHidden(tab) },
-                    onRecoverNodes = { tabs.requestNodeRecovery?.invoke() },
-                    restoring = tab.pendingRestore != null,
-                )
-                webViews[tab.id] = wv
-                refreshLayouts[tab.id] = layout
-                frame.addView(layout)
-                // A reopened tab (see [TabsState.reopenClosedTab]): put
-                // the closed WebView's back/forward list back and load
-                // its current entry. If the saved state is missing or
-                // WebView won't take it, give the WebView the initial
-                // blank paint it skipped and submit the page's address
-                // instead — the page comes back, its history doesn't.
-                tab.pendingRestore?.let { restore ->
-                    tab.pendingRestore = null
-                    val restored = restore.webViewState?.let { wv.restoreState(it) } != null
-                    if (restored) {
-                        tab.canGoBack = wv.canGoBack()
-                        tab.canGoForward = wv.canGoForward()
-                    } else {
-                        wv.loadUrl(ABOUT_BLANK)
-                    }
-                    // Closed before its page committed, the restored
-                    // list ends on the blank entry; without a restore
-                    // the WebView is on it too. Either way the address
-                    // goes back (and is submitted, unless the user had
-                    // stopped that load) once that entry has finished —
-                    // any earlier and the blank entry's `onPageFinished`
-                    // wipes the tab's address after the submit, and the
-                    // tab loads behind the home overlay. Only armed if
-                    // the WebView really is on the blank entry: a
-                    // restored list that ends on a real page never
-                    // finishes a blank load to consume it.
-                    tab.afterBlank = restore.afterBlank(
-                        restored = restored,
-                        currentEntryUrl = if (restored) {
-                            wv.copyBackForwardList().currentItem?.url
-                        } else {
-                            ABOUT_BLANK
-                        },
-                    )
-                }
+            if (webViews[tab.id] != null) continue
+            // A reopened tab (see [TabsState.reopenClosedTab]): put the
+            // closed WebView's back/forward list back and load its
+            // current entry. If the saved state is missing or WebView
+            // won't take it, give the WebView the initial blank paint it
+            // skipped and submit the page's address instead — the page
+            // comes back, its history doesn't.
+            val restore = tab.pendingRestore
+            val wv = attach(tab)
+            if (restore == null) continue
+            tab.pendingRestore = null
+            val restored = restore.webViewState?.let { wv.restoreState(it) } != null
+            if (restored) {
+                tab.canGoBack = wv.canGoBack()
+                tab.canGoForward = wv.canGoForward()
+            } else {
+                wv.loadUrl(ABOUT_BLANK)
             }
+            // Closed before its page committed, the restored list ends
+            // on the blank entry; without a restore the WebView is on it
+            // too. Either way the address goes back (and is submitted,
+            // unless the user had stopped that load) once that entry
+            // has finished — any earlier and the blank entry's
+            // `onPageFinished` wipes the tab's address after the submit,
+            // and the tab loads behind the home overlay. Only armed if
+            // the WebView really is on the blank entry: a restored list
+            // that ends on a real page never finishes a blank load to
+            // consume it.
+            tab.afterBlank = restore.afterBlank(
+                restored = restored,
+                currentEntryUrl = if (restored) {
+                    wv.copyBackForwardList().currentItem?.url
+                } else {
+                    ABOUT_BLANK
+                },
+            )
         }
         val toRemove = webViews.keys.filter { it !in idsNow }
         for (id in toRemove) {
             val wv = webViews.remove(id) ?: continue
             val layout = refreshLayouts.remove(id)
             if (layout != null) frame.removeView(layout)
+            // Take down any permission prompt the tab still had up;
+            // its request is denied along with the page.
+            sitePermissions.onTabClosed(id)
             wv.stopLoading()
             wv.destroy()
         }
@@ -610,6 +775,24 @@ fun BrowserWebViewHost(
                 Bundle().takeIf { runCatching { wv.saveState(it) }.getOrNull() != null }
             }
         }
+        // Find in page (#83). Results come back through the WebView's
+        // FindListener into the tab's [FindInPageState] (see
+        // [buildRefreshableWebView]).
+        tabs.find = { tab, action ->
+            val wv = webViews[tab.id]
+            when (action) {
+                is FindAction.Search -> {
+                    tab.find.startSearch(action.text)
+                    if (action.text.isEmpty()) wv?.clearMatches()
+                    else wv?.findAllAsync(action.text)
+                }
+                is FindAction.Step -> wv?.findNext(action.forward)
+                FindAction.Clear -> {
+                    tab.find.close()
+                    wv?.clearMatches()
+                }
+            }
+        }
         tabs.clearWebViewData = {
             // Globally-scoped stores: cookies and DOM storage / IndexedDB /
             // WebSQL are shared across every WebView in the process, so
@@ -629,12 +812,16 @@ fun BrowserWebViewHost(
                 runCatching { wv.clearFormData() }
                 runCatching { wv.clearHistory() }
             }
+            // Camera captures handed to pages live in our own cache/uploads
+            // (served by our FileProvider), outside Chromium's cache dir.
+            runCatching { fileChooser.clearCaptures() }
         }
         onDispose {
             tabs.captureActiveThumbnail = null
             tabs.clearWebViewData = null
             tabs.stopLoading = null
             tabs.saveWebViewState = null
+            tabs.find = null
         }
     }
 
@@ -655,11 +842,19 @@ private fun buildRefreshableWebView(
     context: Context,
     state: BrowserState,
     repo: BrowsingRepository,
+    sitePermissions: SitePermissionBroker,
     onSubmitUrl: (BrowserState, String) -> Unit,
     onEnterFullscreen: (View, WebChromeClient.CustomViewCallback?) -> Unit,
     onExitFullscreen: () -> Unit,
     onRecoverNodes: () -> Unit = {},
     restoring: Boolean = false,
+    fileChooser: FileChooser? = null,
+    onCreateWindow: () -> WebView,
+    onCloseWindow: () -> Unit,
+    isPopup: Boolean = false,
+    onContextMenuPress: () -> PageContextMenuPin? = { null },
+    onContextMenu: (PageContextMenuPin, PageContextTarget) -> Unit = { _, _ -> },
+    onSearchSelection: (String) -> Unit = {},
 ): Pair<SwipeRefreshLayout, WebView> {
     val refreshLayout = SwipeRefreshLayout(context).apply {
         layoutParams = ViewGroup.LayoutParams(
@@ -675,6 +870,14 @@ private fun buildRefreshableWebView(
     // we still want to attribute the icon to the page it actually
     // belongs to.
     var lastLoadedDisplayUrl: String? = null
+
+    // The ENS roots this tab's documents were served from, so their
+    // subresources don't follow another tab's newer answer (#99).
+    val ensPins = EnsDocumentPins()
+
+    // Is the document on screen the interceptor's in-place refusal of an
+    // ENS name? Kept out of history like any other error page (#99).
+    val nameRefusal = NameRefusalSlot()
 
     // "The document on screen has painted, and has not been written to
     // history yet." Commits in `onPageCommitVisible`, resets in
@@ -721,21 +924,46 @@ private fun buildRefreshableWebView(
     // Reserved mode (#66): does the document on screen have its own
     // bottom navigation the capsule would cover? [BottomChromeSlot] holds
     // the per-document token and the hysteresis; the page side is the
-    // detector from [bottomUiDetectorJs], installed once per document at
-    // first paint and otherwise woken only by events.
+    // detector from [bottomUiDetectorJs], a document-start script that
+    // starts once per document at first paint and is otherwise woken only
+    // by events. Both platform features or neither: without the
+    // document-start script the channel object would sit on every page's
+    // `window` for any script to find (#69).
     val bottomChrome = BottomChromeSlot()
-    val bottomUiSupported = WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER)
+    val bottomUiSupported = WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER) &&
+        WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)
 
-    // The channel back into the current document's detector, from its
-    // last valid report. Null until it has reported; dropped on every
-    // new document.
-    var bottomUiReply: JavaScriptReplyProxy? = null
+    // The channels back into main-frame detectors: candidates from their
+    // [BOTTOM_UI_READY] (posted at document start), and the current
+    // document's own once a valid report proves it. A ready can't say
+    // which document sent it, so it only counts once a report does
+    // ([BottomUiChannels]).
+    val bottomUiChannels = BottomUiChannels<JavaScriptReplyProxy>()
 
-    /** Install the detector in the document on screen, once. */
-    fun installBottomUiDetector(view: WebView) {
+    // Page context menu (#84): the long-press waiting on the page's
+    // `contextmenu` verdict, which the detector's document-start script
+    // reports on the same hidden channel as the bottom-UI reports (see
+    // [bottomUiDetectorJs]). Without that channel the page's say can't
+    // be heard, so there is no menu and every long-press stays
+    // Chromium's.
+    val contextMenuSupported = bottomUiSupported
+    var contextMenuPress: PageContextMenuPress? = null
+
+    /** Send the current document's token to [targets]: the detector's start, or a fresh probe. */
+    fun postBottomUiProbe(targets: List<JavaScriptReplyProxy> = bottomUiChannels.targets) {
+        val token = bottomChrome.token ?: return
+        val request = bottomUiProbeRequest(token)
+        for (reply in targets) runCatching { reply.postMessage(request) }
+    }
+
+    /**
+     * Start the detector in the document on screen, once. If its ready
+     * hasn't arrived yet, the ready starts it instead (see the listener).
+     */
+    fun installBottomUiDetector() {
         if (!bottomUiSupported) return
-        val token = bottomChrome.install() ?: return
-        view.evaluateJavascript(bottomUiDetectorJs(token), null)
+        bottomChrome.install() ?: return
+        postBottomUiProbe()
     }
 
     /**
@@ -748,21 +976,19 @@ private fun buildRefreshableWebView(
      * [installIfUnpainted] lets load-finished install it for a document
      * that never reports a first paint. A cross-document commit also
      * fires `doUpdateVisitedHistory`, *before* first paint; that one
-     * must not install, or the detector would land in a document that
-     * may have no `<body>` yet.
+     * must not install: the detector is already in the document (a
+     * document-start script) and must not start before first paint.
      *
-     * An installed detector that hasn't reported yet (no `<body>` at
-     * install) gives Kotlin no reply channel; it owes its report and
-     * sends it on its next probe (see [bottomUiDetectorJs]).
+     * A detector asked while it has no `<body>` to probe owes its
+     * report and sends it on its next probe (see [bottomUiDetectorJs]).
      */
-    fun requestBottomUiProbe(view: WebView, installIfUnpainted: Boolean = false) {
+    fun requestBottomUiProbe(installIfUnpainted: Boolean = false) {
         if (!bottomUiSupported) return
         if (!bottomChrome.installed) {
-            if (installIfUnpainted) installBottomUiDetector(view)
+            if (installIfUnpainted) installBottomUiDetector()
             return
         }
-        val token = bottomChrome.token ?: return
-        runCatching { bottomUiReply?.postMessage(bottomUiProbeRequest(token)) }
+        postBottomUiProbe()
     }
 
     // Scroll-to-reveal (#65): a push past the end of an overlay page
@@ -822,6 +1048,12 @@ private fun buildRefreshableWebView(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.MATCH_PARENT,
         )
+        // Find-in-page counts (#83), interim ones included so a long
+        // page's count converges visibly. Reports for a session that has
+        // since ended are dropped by [FindInPageState.onResult].
+        setFindListener { activeMatchOrdinal, numberOfMatches, isDoneCounting ->
+            state.find.onResult(findResultFrom(activeMatchOrdinal, numberOfMatches, isDoneCounting))
+        }
 
         // Use a white WebView background (the browser default) so that
         // pages without their own styling — most notably Chromium's
@@ -847,6 +1079,71 @@ private fun buildRefreshableWebView(
             // actually requires a tap is still gated by the browser's
             // own per-frame autoplay policy.
             mediaPlaybackRequiresUserGesture = false
+            // The Geolocation API reaches onGeolocationPermissionsShowPrompt
+            // (and so the site-permission prompt, #81) only while this is
+            // on. It is WebView's default; spelled out because the prompt
+            // depends on it.
+            setGeolocationEnabled(true)
+            // The selection toolbar's search is ours ("Search", added in
+            // [PageWebView.startActionMode]): it uses the engine chosen
+            // in Settings, in a new tab. Chromium's "Web search" would hand the
+            // text to whichever app answers ACTION_WEB_SEARCH instead.
+            disabledActionModeMenuItems = android.webkit.WebSettings.MENU_ITEM_WEB_SEARCH
+            // `target=_blank` links and `window.open()` get a real
+            // window — a new tab, see `onCreateWindow` below — instead
+            // of silently replacing the page that asked (#82).
+            // `javaScriptCanOpenWindowsAutomatically` stays at its
+            // default `false`, which is Chromium's popup blocker: a
+            // window only opens from a user gesture (a tap on the link
+            // or button), never from a script on its own.
+            setSupportMultipleWindows(true)
+        }
+
+        this.onSearchSelection = onSearchSelection
+
+        // Long-press on a link or an image raises the page context menu
+        // (#84) — but only once the page has had its DOM `contextmenu`
+        // event and let it through ([PageContextMenuPress]). The press
+        // itself is never taken: Chromium calls this listener *before*
+        // it hands the long-press to the page, so returning `true` here
+        // would keep the event from the page altogether (no
+        // preventDefault, no site long-press UI).
+        // Anything that isn't a link or image stays wholly Chromium's: a
+        // long-press on text starts a selection, whose toolbar carries
+        // the selection actions.
+        //
+        // The hit test is answered synchronously; the link's own address
+        // and text (for an image inside a link, the hit test only
+        // reports the image) come from `requestFocusNodeHref`, which
+        // answers through a Message, and the page's verdict comes
+        // through the bottom-UI channel, from the `contextmenu` listener
+        // the detector's document-start script adds in every frame
+        // ([bottomUiDetectorJs], registered below). The menu opens when
+        // both have landed.
+        setOnLongClickListener {
+            if (!contextMenuSupported) return@setOnLongClickListener false
+            val hit = hitTestResult
+            val type = hit.type
+            val extra = hit.extra
+            // Only a press certain to have a target once the href lands.
+            // An image inside a link is certain when the image itself is
+            // fetchable; a `blob:` image inside a link hangs on the link,
+            // which may yet resolve to nothing (`javascript:`), so that
+            // case gets no menu.
+            if (!pageContextMenuIsCertain(type, extra)) return@setOnLongClickListener false
+            // Which document this press is on is read now, not when the
+            // answers land: a navigation committing in between must
+            // leave the menu stale, not re-pin it to the new page.
+            val pin = onContextMenuPress() ?: return@setOnLongClickListener false
+            val press = PageContextMenuPress(pin, type, extra, SystemClock.uptimeMillis())
+            contextMenuPress = press
+            val reply = android.os.Handler(android.os.Looper.getMainLooper()) { msg ->
+                press.onHref(msg.data.getString("url"), msg.data.getString("title"))
+                    ?.let { onContextMenu(press.pin, it) }
+                true
+            }
+            requestFocusNodeHref(reply.obtainMessage())
+            false
         }
 
         // Scroll-to-reveal (#65), the View half; the decisions are in
@@ -1182,7 +1479,19 @@ private fun buildRefreshableWebView(
         // move that starts it to the finger lifting.
         val touchSlopPx = ViewConfiguration.get(context).scaledTouchSlop
         var touchDownY = 0f
-        onBottomOverscroll = { reveal.onBottomOverscroll() }
+        onBottomOverscroll = {
+            // A drag that went down mid-page just reached the end with
+            // the finger still down (#138): armed, and the page's bottom
+            // row is on screen now to take the strip's colour from.
+            if (reveal.onBottomOverscroll()) {
+                revealTint = null
+                sampleBottomRow(this) { rgb -> revealTint = rgb }
+            }
+        }
+        // A drag pulling the page down past its top edge (a page with no
+        // scroll range, or one already at the top) isn't going to reach
+        // the end: the gesture is the page's, as before #138.
+        onTopOverscroll = { reveal.onTopOverscroll() }
         setOnTouchListener { _, event ->
             // The reveal owns this gesture (#65): the page follows the
             // finger by translation only, and Chromium sees none of it.
@@ -1216,18 +1525,36 @@ private fun buildRefreshableWebView(
             false
         }
 
-        // The detector's reports (#66). A message is taken only from an
+        // The detector's messages (#66). A message is taken only from an
         // http(s) origin (see [BOTTOM_UI_ORIGIN_RULES] for why the rule
-        // itself can't say that), only from the main frame, only in the
-        // exact shape [parseBottomUiMessage] allows and only with the
-        // current document's token.
+        // itself can't say that), only from the main frame, and is either
+        // the detector's ready or a report in the exact shape
+        // [parseBottomUiMessage] allows with the current document's token.
         if (bottomUiSupported) {
             val listener = WebViewCompat.WebMessageListener { view, message, sourceOrigin, isMainFrame, replyProxy ->
                 if (sourceOrigin.scheme != "https" && sourceOrigin.scheme != "http") return@WebMessageListener
                 if (message.type != WebMessageCompat.TYPE_STRING) return@WebMessageListener
+                // The page's say on a long-press (#84): any frame, since
+                // the press may land in an iframe. It can only ever open
+                // a menu for a press the user actually made.
+                parseContextMenuVerdict(message.data)?.let { allowed ->
+                    contextMenuPress?.onPageVerdict(allowed, SystemClock.uptimeMillis())
+                        ?.let { target -> contextMenuPress?.let { onContextMenu(it.pin, target) } }
+                    return@WebMessageListener
+                }
+                if (message.data == BOTTOM_UI_READY) {
+                    // A main-frame detector at document start, from the
+                    // document on screen or one still on its way in. It
+                    // is started now only if it can be the painted
+                    // document's own late ready (see [BottomUiChannels]);
+                    // otherwise it waits for its document's first paint.
+                    if (!isMainFrame) return@WebMessageListener
+                    postBottomUiProbe(bottomUiChannels.onReady(replyProxy, bottomChrome.installed))
+                    return@WebMessageListener
+                }
                 val report = parseBottomUiMessage(message.data, isMainFrame, bottomChrome.token)
                     ?: return@WebMessageListener
-                bottomUiReply = replyProxy
+                bottomUiChannels.onReport(replyProxy)
                 val verdict = bottomChrome.accept(report, SystemClock.uptimeMillis())
                 if (verdict.changed) applyBottomChrome()
                 val confirmIn = verdict.confirmInMs
@@ -1237,20 +1564,93 @@ private fun buildRefreshableWebView(
                     // new document in the meantime cancels it.
                     val token = bottomChrome.token
                     view.postDelayed({
-                        if (bottomChrome.token == token) requestBottomUiProbe(view)
+                        if (bottomChrome.token == token) requestBottomUiProbe()
                     }, confirmIn)
                 }
             }
-            WebViewCompat.addWebMessageListener(this, BOTTOM_UI_CHANNEL, BOTTOM_UI_ORIGIN_RULES, listener)
+            // A fresh channel name per WebView, and the script that takes
+            // the channel object back off every frame's `window` before
+            // the page runs (#69). Registered before the first load.
+            val channel = newBottomUiChannelName()
+            WebViewCompat.addWebMessageListener(this, channel, BOTTOM_UI_ORIGIN_RULES, listener)
+            WebViewCompat.addDocumentStartJavaScript(this, bottomUiDetectorJs(channel), BOTTOM_UI_ORIGIN_RULES)
         }
 
         // Force an initial paint so the WebView's compositor surface
-        // is valid even before the user submits a URL. Not for a tab
-        // being restored: `restoreState` has to be the WebView's first
-        // navigation, and the blank load still pending here would win
-        // over the restored entry (seen on the AVD — the reopened tab
-        // came back on the home overlay).
-        if (!restoring) loadUrl(ABOUT_BLANK)
+        // is valid even before the user submits a URL. Not for a popup:
+        // Chromium rejects (crashes on) a popup WebView that has already
+        // navigated, and loads the popup's own URL into it anyway. Nor
+        // for a tab being restored: `restoreState` has to be the
+        // WebView's first navigation, and the blank load still pending
+        // here would win over the restored entry (seen on the AVD — the
+        // reopened tab came back on the home overlay).
+        if (!isPopup && !restoring) loadUrl(ABOUT_BLANK)
+
+        // Downloads (#79): anything Chromium decides not to render — a
+        // `Content-Disposition: attachment`, a non-renderable type, a
+        // `<a download>` — lands here, dweb origins and `data:` URIs
+        // included. [DownloadManager] does the fetching; WebView itself
+        // saves nothing.
+        // Main-frame request URLs since the last commit (the pending
+        // navigation's own URL and every redirect hop). Filled from
+        // shouldInterceptRequest (a WebView IO thread) and
+        // shouldOverrideUrlLoading, emptied by onPageStarted.
+        val pendingNavigationUrls = java.util.Collections.synchronizedSet(LinkedHashSet<String>())
+
+        setDownloadListener { url, userAgent, contentDisposition, mimeType, contentLength ->
+            // A download that is the response of a main-frame navigation
+            // since the last commit (the typed URL or a redirect hop).
+            // That navigation is over either way — it *became* the
+            // download — so its URLs go, and can't make a later download
+            // of the same URL look like a navigation's (a link that
+            // turned into a download leaves the tab committed, so
+            // nothing else would clear them).
+            val wasPending = pendingNavigationUrls.remove(url)
+            if (wasPending) pendingNavigationUrls.clear()
+            // A main-frame navigation that turned out to be a file never
+            // commits: no onPageStarted, no final progress callback. Left
+            // alone, the capsule keeps the typed address, the progress
+            // trace and Stop over the previous page for good. That load
+            // is over, so clear the busy chrome the way Stop does and
+            // put the label back on the page that is actually on
+            // screen. Unlike Stop, a blank committed address wins too
+            // (the download started from home): the request was served,
+            // so there's nothing left to keep the typed address for, and
+            // home comes back instead of a blank page under a label for
+            // a file.
+            //
+            // Only a download *of* that navigation, though: one the
+            // committed page starts meanwhile (a "your download begins in
+            // 5 s" timer) has a URL the pending navigation never
+            // requested, and leaves it loading.
+            val endsTypedNavigation = downloadEndsPendingNavigation(
+                committedUrl = state.url,
+                addressBarText = state.addressBarText,
+                resolving = state.resolving,
+                // A typed `data:` URL is never seen by the request
+                // hooks; it is the address itself.
+                downloadIsNavigationResponse = wasPending || url == state.addressBarText,
+            )
+            DownloadManager.get(context).start(
+                tabId = state.id,
+                url = url,
+                userAgent = userAgent,
+                contentDisposition = contentDisposition,
+                mimeType = mimeType,
+                contentLength = contentLength,
+                // An address the user submitted has no referrer — the
+                // page on screen had nothing to do with it. Anything else
+                // a page asked for, even with no URL to show ("" — the
+                // prompt then says "a page"): null would pass it off as
+                // the user's own request, which a declined tab still
+                // lets through.
+                pageUrl = if (endsTypedNavigation) null else (this.url ?: ""),
+            )
+            if (endsTypedNavigation) {
+                state.stopProgress()
+                state.addressBarText = state.url
+            }
+        }
 
         webViewClient = object : WebViewClient() {
             // A probe the *page* asked for belongs to the page that
@@ -1278,6 +1678,18 @@ private fun buildRefreshableWebView(
             }
 
             override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
+                // The pending navigation committed; it's no download.
+                pendingNavigationUrls.clear()
+                // The main-frame document committed: its ENS pins are now
+                // the page on screen's, and subresources held waiting on
+                // the commit go ahead (#99, [EnsDocumentPins]).
+                ensPins.documentStarted(url)
+                // A new document ends the tab's find session (#83): the
+                // bar closes and the highlights go, even for a page
+                // restored from the back/forward cache with the ones it
+                // was cached with.
+                view?.clearMatches()
+                state.find.onDocumentCommitted()
                 // A new document arrives with the chrome whole, however
                 // far the previous one was scrolled…
                 state.capsuleCollapse.expand()
@@ -1294,8 +1706,12 @@ private fun buildRefreshableWebView(
                 // from the outgoing document carries its old token and
                 // is dropped.
                 bottomChrome.startDocument()
-                bottomUiReply = null
+                bottomUiChannels.startDocument()
                 state.bottomChromeMode = BottomChromeMode.Overlay
+                // …and with no permission prompt from the outgoing
+                // document left standing: its requests are denied and
+                // a late answer can't land on this one (#81).
+                sitePermissions.onDocumentStarted(state)
                 // …and with the progress latch open again: whatever the
                 // last Stop aborted, this document is a load of its own
                 // and its percentages are worth drawing (#41).
@@ -1312,9 +1728,18 @@ private fun buildRefreshableWebView(
                     // want the same end state: a home-looking tab
                     // (empty url/title/address bar) so the Compose
                     // HomeScreen overlay takes over.
-                    state.url = ""
+                    //
+                    // Except in a popup whose opener hasn't navigated
+                    // it yet: there the blank document is the page's
+                    // own (`window.open('')` + `document.write`), and
+                    // it stays a page (see [BrowserState.blankIsPage]).
+                    if (state.blankIsPage) {
+                        state.showBlankPage()
+                    } else {
+                        state.url = ""
+                        state.addressBarText = ""
+                    }
                     state.title = ""
-                    state.addressBarText = ""
                     state.progress = -1
                     lastLoadedDisplayUrl = null
                     visitGate.startNavigation()
@@ -1329,6 +1754,9 @@ private fun buildRefreshableWebView(
                     return
                 }
                 visitGate.startNavigation()
+                // A real document: a popup's blank start is over, and
+                // `about:blank` in this tab is the home sentinel again.
+                state.blankIsPage = false
                 // Whatever is parked belongs to the document this one is
                 // replacing, and it never painted (a paint is what would
                 // have flushed it). Dropping it here is what keeps the
@@ -1381,8 +1809,8 @@ private fun buildRefreshableWebView(
                 // can answer, and pages are touchable from here on.
                 probeRootPanStyles(view)
                 if (view != null && bottomUiApplies(url)) {
-                    // The bottom-nav detector goes in here, once (#66).
-                    installBottomUiDetector(view)
+                    // The bottom-nav detector starts here, once (#66).
+                    installBottomUiDetector()
                 }
                 if (url == ABOUT_BLANK) return
                 visitGate.commit()
@@ -1411,7 +1839,7 @@ private fun buildRefreshableWebView(
                     // A late-mounting nav: probe again now the load is
                     // done (or install, if first paint didn't) (#66).
                     if (finishedLoadIsCurrent(url, view.url)) {
-                        requestBottomUiProbe(view, installIfUnpainted = true)
+                        requestBottomUiProbe(installIfUnpainted = true)
                     }
                 }
                 if (url != null && !ErrorPage.isErrorPage(url) && url != ABOUT_BLANK) {
@@ -1427,9 +1855,14 @@ private fun buildRefreshableWebView(
                     // overlay would stay hidden, showing a blank
                     // WebView instead.
                     refreshLayout.isRefreshing = false
-                    state.url = ""
+                    // …with the same popup exception (see above).
+                    if (state.blankIsPage) {
+                        state.showBlankPage()
+                    } else {
+                        state.url = ""
+                        state.addressBarText = ""
+                    }
                     state.title = ""
-                    state.addressBarText = ""
                     state.canGoBack = view?.canGoBack() == true
                     state.canGoForward = view?.canGoForward() == true
                     state.progress = -1
@@ -1507,7 +1940,9 @@ private fun buildRefreshableWebView(
                 // the address bar (displayFor returns "") and shouldn't
                 // clutter the history either. The error page is also
                 // deliberately kept out of history — it's a transient
-                // state, not a destination the user meant to visit.
+                // state, not a destination the user meant to visit —
+                // and so is the in-place refusal of an ENS name, which
+                // sits on the name's own URL (#99, [NameRefusalSlot]).
                 //
                 // The gate's commit half is only reset by `onPageStarted`,
                 // which an aborted load never gets — so on its synthetic
@@ -1532,6 +1967,7 @@ private fun buildRefreshableWebView(
                 // [CommittedVisitGate]).
                 if (display.isNotBlank() &&
                     !ErrorPage.isErrorPage(url) &&
+                    !nameRefusal.isRefused(url) &&
                     isCurrent
                 ) {
                     if (visitGate.isCommitted) {
@@ -1561,7 +1997,7 @@ private fun buildRefreshableWebView(
             // and this doesn't install it (see [requestBottomUiProbe]).
             override fun doUpdateVisitedHistory(view: WebView?, url: String?, isReload: Boolean) {
                 if (view == null || !bottomUiApplies(url)) return
-                requestBottomUiProbe(view)
+                requestBottomUiProbe()
             }
 
             override fun shouldOverrideUrlLoading(
@@ -1569,6 +2005,10 @@ private fun buildRefreshableWebView(
                 request: WebResourceRequest?,
             ): Boolean {
                 val target = request?.url?.toString() ?: return false
+                // Redirect hops of a main-frame navigation come through
+                // here — the download a navigation turns into has the
+                // final hop's URL.
+                if (request.isForMainFrame) pendingNavigationUrls.add(target)
                 // Route bzz:// and ens:// through the screen's submit flow
                 // so in-page clicks + error-page "Try Again" go through
                 // the same GatewayProbe gate the top address bar uses.
@@ -1596,7 +2036,19 @@ private fun buildRefreshableWebView(
             override fun shouldInterceptRequest(
                 view: WebView?,
                 request: WebResourceRequest?,
-            ): WebResourceResponse? = interceptVirtualRequest(request)
+            ): WebResourceResponse? {
+                if (request?.isForMainFrame == true) {
+                    request.url?.toString()?.let(pendingNavigationUrls::add)
+                }
+                val response = interceptVirtualRequest(request, ensPins)
+                if (request?.isForMainFrame == true) {
+                    nameRefusal.onMainFrameResponse(
+                        request.url.toString(),
+                        response?.let { nameResolutionErrorIn(it.responseHeaders) },
+                    )
+                }
+                return response
+            }
 
             override fun onReceivedError(
                 view: WebView?,
@@ -1648,6 +2100,13 @@ private fun buildRefreshableWebView(
                 // synthesized 502 is the interceptor telling us the
                 // gateway socket itself is gone (node not running).
                 val display = displayFor(failed, state).ifBlank { failed }
+                // The interceptor's refusal of an ENS document (#99) is
+                // already the error page, served in place — loading
+                // ErrorPage on top would truncate forward history.
+                if (nameResolutionErrorIn(errorResponse?.responseHeaders) != null) {
+                    Log.i(LOG_TAG, "main-frame HTTP $status for $failed → name refused in place")
+                    return
+                }
                 val errorCode =
                     if (status == 502) "ERR_CONNECTION_REFUSED"
                     else "swarm_content_not_found"
@@ -1708,6 +2167,71 @@ private fun buildRefreshableWebView(
 
             override fun onHideCustomView() {
                 onExitFullscreen()
+            }
+
+            // Site permissions (#81): camera / microphone through
+            // `onPermissionRequest`, location through the geolocation
+            // prompt. Both go to [SitePermissionBroker], which asks the
+            // user per site and only then asks Android for the app's
+            // runtime permission. Without these overrides WebView
+            // denies every request outright.
+            override fun onPermissionRequest(request: PermissionRequest?) {
+                request ?: return
+                sitePermissions.onMediaRequest(state, request)
+            }
+
+            override fun onPermissionRequestCanceled(request: PermissionRequest?) {
+                request ?: return
+                sitePermissions.onMediaRequestCanceled(state, request)
+            }
+
+            override fun onGeolocationPermissionsShowPrompt(
+                origin: String?,
+                callback: GeolocationPermissions.Callback?,
+            ) {
+                sitePermissions.onGeolocationRequest(state, origin, callback)
+            }
+
+            override fun onGeolocationPermissionsHidePrompt() {
+                sitePermissions.onGeolocationHidden(state)
+            }
+
+            // `<input type=file>` (#80) — see [FileChooser].
+            override fun onShowFileChooser(
+                webView: WebView?,
+                filePathCallback: ValueCallback<Array<Uri>>?,
+                fileChooserParams: FileChooserParams?,
+            ): Boolean {
+                if (filePathCallback == null || fileChooserParams == null) return false
+                return fileChooser?.show(filePathCallback, fileChooserParams) ?: false
+            }
+
+            // A new window the page asked for (`target=_blank`,
+            // `window.open()`; #82) becomes a tab of its own. The new
+            // tab's WebView goes back to Chromium through the transport,
+            // and Chromium loads the popup's URL into it itself — as a
+            // real popup, so `window.opener` works and an OAuth-style
+            // flow can post its result back to this page. Only gesture-
+            // initiated requests get here at all: see
+            // `setSupportMultipleWindows` above.
+            override fun onCreateWindow(
+                view: WebView?,
+                isDialog: Boolean,
+                isUserGesture: Boolean,
+                resultMsg: Message?,
+            ): Boolean {
+                val transport = resultMsg?.obj as? WebView.WebViewTransport ?: return false
+                transport.webView = onCreateWindow()
+                resultMsg.sendToTarget()
+                return true
+            }
+
+            // `window.close()` from script. Chromium doesn't only allow
+            // this for windows a page opened — it also honours it in a
+            // tab with a single history entry — so the real gate is
+            // `TabsState.closePopup`, which ignores tabs with no opener.
+            override fun onCloseWindow(window: WebView?) {
+                onCloseWindow()
             }
 
             override fun onReceivedIcon(view: WebView?, icon: Bitmap?) {
@@ -1802,8 +2326,34 @@ private const val REVEAL_HANDOVER_TIMEOUT_MS = 1_000L
  * protected: Chromium's unconsumed overscroll, and the scroll range.
  */
 internal class PageWebView(context: Context) : WebView(context) {
-    /** Chromium overscrolled past the bottom edge (the page didn't take the drag). */
+    /** "Search" on the text-selection toolbar, with the selected text (#84). */
+    var onSearchSelection: ((String) -> Unit)? = null
+
+    /**
+     * Chromium raises its text-selection toolbar through here; the
+     * callback is wrapped to add the "Search" item (see
+     * [SearchSelectionCallback]). Every other action mode — and every
+     * other item on this one — is Chromium's, untouched.
+     */
+    override fun startActionMode(callback: ActionMode.Callback?, type: Int): ActionMode? {
+        val search = onSearchSelection
+        if (callback == null || search == null) return super.startActionMode(callback, type)
+        return super.startActionMode(SearchSelectionCallback(callback, this, search), type)
+    }
+
+    /**
+     * Chromium overscrolled past the bottom edge (the page didn't take
+     * a drag towards the end) — never the top edge, even on a page with
+     * no scroll range, where both clamp alike (see [overscrollPastEnd]).
+     */
     var onBottomOverscroll: () -> Unit = {}
+
+    /** Chromium overscrolled past the top edge (see [overscrollPastTop]). */
+    var onTopOverscroll: () -> Unit = {}
+
+    // The vertical delta of the overScrollBy call in progress (0 outside
+    // one): onOverScrolled only says a clamp happened, not which edge.
+    private var overScrollDeltaY = 0
 
     val verticalRange: Int get() = computeVerticalScrollRange() - computeVerticalScrollExtent()
 
@@ -1818,11 +2368,176 @@ internal class PageWebView(context: Context) : WebView(context) {
         onBeforeDraw?.invoke()
     }
 
+    // Chromium's unconsumed overscroll arrives here (WebView's
+    // PrivateAccess.overScrollBy calls this view's overScrollBy), which
+    // calls onOverScrolled synchronously with the clamped result.
+    override fun overScrollBy(
+        deltaX: Int, deltaY: Int, scrollX: Int, scrollY: Int,
+        scrollRangeX: Int, scrollRangeY: Int, maxOverScrollX: Int, maxOverScrollY: Int,
+        isTouchEvent: Boolean,
+    ): Boolean {
+        overScrollDeltaY = deltaY
+        try {
+            return super.overScrollBy(
+                deltaX, deltaY, scrollX, scrollY, scrollRangeX, scrollRangeY,
+                maxOverScrollX, maxOverScrollY, isTouchEvent,
+            )
+        } finally {
+            overScrollDeltaY = 0
+        }
+    }
+
     override fun onOverScrolled(scrollX: Int, scrollY: Int, clampedX: Boolean, clampedY: Boolean) {
         super.onOverScrolled(scrollX, scrollY, clampedX, clampedY)
-        if (clampedY && !canScrollVertically(1)) onBottomOverscroll()
+        when {
+            overscrollPastEnd(overScrollDeltaY, clampedY, canScrollVertically(1)) -> onBottomOverscroll()
+            overscrollPastTop(overScrollDeltaY, clampedY, canScrollVertically(-1)) -> onTopOverscroll()
+        }
     }
 }
+
+/**
+ * Chromium's selection-toolbar callback plus one item, "Search", which
+ * searches the selection with the browser's engine in a new tab.
+ *
+ * The item is only on the toolbar while there is something to search:
+ * the same toolbar also comes up for a bare caret in a text field
+ * (Paste only) and for a selection inside a password field, and
+ * Chromium's own items can't tell us which — their ids are WebView-
+ * package resources, not a stable API. So the page is asked instead
+ * ([SELECTION_TEXT_SCRIPT], which reads a password field as empty),
+ * and a probe whose answer flips "is there a selection" invalidates
+ * the toolbar so prepare adds or drops the item.
+ *
+ * That script runs in the page's own JS world, where a page that wraps
+ * `getSelection` / `activeElement` can count the calls — so the page
+ * is asked as rarely as the answer can change: on create, and on a
+ * prepare only when Chromium's own items differ from the last probe's
+ * ([SelectionProbeGate]). A caret becoming a selection, or a selection
+ * moving into a password field, swaps Chromium's items (Paste only ↔
+ * Copy / Share / Select all; Copy dropped for a password), so those
+ * still re-probe; dragging the handles or our own invalidate doesn't.
+ *
+ * Syncing happens on prepare as well as create because Chromium rebuilds
+ * its menu on prepare, clearing whatever else was on it. On click the
+ * selection is read afresh (the user may have dragged the handles since
+ * the last probe) and *before* the toolbar is finished, since finishing
+ * it clears the selection.
+ *
+ * It is a [ActionMode.Callback2] because Chromium's is: the floating
+ * toolbar asks it where the selection is ([onGetContentRect]), and a
+ * plain Callback would park the toolbar at the top of the view.
+ */
+private class SearchSelectionCallback(
+    private val delegate: ActionMode.Callback,
+    private val view: WebView,
+    private val onSearch: (String) -> Unit,
+) : ActionMode.Callback2() {
+    /** The last probe's answer: is there a selection worth searching? */
+    private var searchable = false
+    private var destroyed = false
+    private val gate = SelectionProbeGate()
+
+    override fun onCreateActionMode(mode: ActionMode, menu: Menu): Boolean {
+        val created = delegate.onCreateActionMode(mode, menu)
+        if (created && gate.shouldProbe(chromiumItems(menu))) probe(mode)
+        return created
+    }
+
+    override fun onPrepareActionMode(mode: ActionMode, menu: Menu): Boolean {
+        val changed = delegate.onPrepareActionMode(mode, menu)
+        // Read Chromium's items before ours is synced in: the
+        // signature must not change just because "Search" came or went.
+        val items = chromiumItems(menu)
+        val synced = syncSearchItem(menu)
+        if (gate.shouldProbe(items)) probe(mode)
+        return changed || synced
+    }
+
+    /** Chromium's own items on [menu], by id, in order; "Search" left out. */
+    private fun chromiumItems(menu: Menu): List<Int> =
+        (0 until menu.size()).map { menu.getItem(it).itemId }.filter { it != SEARCH_SELECTION_ITEM_ID }
+
+    override fun onActionItemClicked(mode: ActionMode, item: MenuItem): Boolean {
+        if (item.itemId != SEARCH_SELECTION_ITEM_ID) return delegate.onActionItemClicked(mode, item)
+        view.evaluateJavascript(SELECTION_TEXT_SCRIPT) { json ->
+            mode.finish()
+            searchSelectionQuery(decodeJsString(json))?.let(onSearch)
+        }
+        return true
+    }
+
+    override fun onDestroyActionMode(mode: ActionMode) {
+        destroyed = true
+        delegate.onDestroyActionMode(mode)
+    }
+
+    override fun onGetContentRect(mode: ActionMode, view: View, outRect: Rect) {
+        if (delegate is ActionMode.Callback2) {
+            delegate.onGetContentRect(mode, view, outRect)
+        } else {
+            super.onGetContentRect(mode, view, outRect)
+        }
+    }
+
+    private fun probe(mode: ActionMode) {
+        view.evaluateJavascript(SELECTION_TEXT_SCRIPT) { json ->
+            if (destroyed) return@evaluateJavascript
+            val now = searchSelectionQuery(decodeJsString(json)) != null
+            if (now != searchable) {
+                searchable = now
+                mode.invalidate()
+            }
+        }
+    }
+
+    /** Adds or removes "Search" to match [searchable]; `true` if the menu changed. */
+    private fun syncSearchItem(menu: Menu): Boolean {
+        val present = menu.findItem(SEARCH_SELECTION_ITEM_ID) != null
+        if (searchable == present) return false
+        if (searchable) {
+            menu.add(Menu.NONE, SEARCH_SELECTION_ITEM_ID, SEARCH_SELECTION_ITEM_ORDER, "Search")
+                .setShowAsAction(MenuItem.SHOW_AS_ACTION_IF_ROOM)
+        } else {
+            menu.removeItem(SEARCH_SELECTION_ITEM_ID)
+        }
+        return true
+    }
+}
+
+/**
+ * When [SearchSelectionCallback] asks the page for its selection: the
+ * first time, and afterwards only when Chromium's items (their ids, in
+ * order) differ from the last time it asked — the page's answer can
+ * only flip with a change Chromium's menu reflects too.
+ */
+internal class SelectionProbeGate {
+    private var last: List<Int>? = null
+
+    fun shouldProbe(items: List<Int>): Boolean {
+        if (items == last) return false
+        last = items
+        return true
+    }
+}
+
+/** An `evaluateJavascript` result (a JSON value) as a string, or `null`. */
+private fun decodeJsString(json: String?): String? =
+    runCatching { org.json.JSONTokener(json ?: return null).nextValue() as? String }.getOrNull()
+
+/** Outside the resource-id range Chromium's own items use. */
+private const val SEARCH_SELECTION_ITEM_ID = 0x5EA4C4
+
+/**
+ * Where "Search" sits among Chromium's items. Chromium's default group
+ * numbers its items from 1 (Copy 1, Share 2, Select all 3 on a page
+ * selection; Cut / Copy / Paste / Select all in a field) and "Read
+ * aloud" and the text-processing apps come after, in another group. At
+ * 2 the item lands just after Select all and ahead of those, which
+ * keeps it on the visible bar rather than in the overflow in both
+ * cases (checked on the API 36 AVD).
+ */
+private const val SEARCH_SELECTION_ITEM_ORDER = 2
 
 private fun Context.findActivity(): Activity? {
     var c: Context? = this
@@ -2069,11 +2784,83 @@ private fun syntheticResponse(
  * into [ErrorPage] instead of hanging; non-GET/HEAD methods get a 405
  * (WebView interception can't carry request bodies — writes go to the
  * node API origin directly).
+ *
+ * [ensPins] is the requesting tab's (null for service-worker fetches,
+ * which belong to no tab): the ENS roots its documents were served from.
+ * A main-frame request — any URL, not only a virtual one — starts the
+ * incoming page's pins; they replace the page on screen's only when the
+ * new document commits, from `onPageStarted` (#99, see [EnsDocumentPins]).
+ * Handing WebView an answer that renders in place only marks the page
+ * delivered, so the subresources that race `onPageStarted` wait for it
+ * rather than guess which page they belong to.
  */
 internal fun interceptVirtualRequest(
     request: WebResourceRequest?,
+    ensPins: EnsDocumentPins? = null,
 ): WebResourceResponse? {
     val req = request ?: return null
+    val url = req.url?.toString() ?: return null
+    val incoming = if (req.isForMainFrame) ensPins?.beginNavigation(url) else null
+    val response = interceptVirtualRequestFor(req, ensPins, incoming)
+    if (incoming != null && response != null &&
+        rendersInPlace(response.statusCode, response.mimeType, response.responseHeaders)
+    ) {
+        ensPins?.delivered(incoming)
+    }
+    return response
+}
+
+/**
+ * Will WebView commit a main-frame response as the tab's new document,
+ * rather than hand it to a download (or drop it: 204/205, a redirect)?
+ * Every type WebView renders itself: markup (HTML, XHTML, SVG, XML — any
+ * `+xml`), text (any `text/` type: plain, CSS, JS shown as source…), JSON,
+ * images, audio and video (the media document). Anything else goes to
+ * the download listener. A type missing here would leave the
+ * subresources that race `onPageStarted` on the previous page's pins; a
+ * type listed that doesn't render costs the page on screen's
+ * subresources [EnsDocumentPins.pageFor]'s bounded wait.
+ */
+internal fun rendersInPlace(
+    status: Int,
+    mimeType: String?,
+    headers: Map<String, String>?,
+): Boolean {
+    if (status == 204 || status == 205 || status in 300..399) return false
+    val disposition = headers?.entries
+        ?.firstOrNull { it.key.equals("Content-Disposition", ignoreCase = true) }?.value
+    if (disposition?.trim()?.lowercase()?.startsWith("attachment") == true) return false
+    val mime = mimeType?.substringBefore(';')?.trim()?.lowercase() ?: return false
+    if (mime in DOWNLOADED_TEXT_TYPES) return false
+    return mime.startsWith("text/") ||
+        mime.startsWith("image/") ||
+        mime.startsWith("audio/") ||
+        mime.startsWith("video/") ||
+        mime == "application/xml" ||
+        mime.endsWith("+xml") ||
+        mime == "application/json" ||
+        mime.endsWith("+json") ||
+        mime == "application/javascript"
+}
+
+/**
+ * `text/` types Chromium hands to a download instead of rendering
+ * (its `IsUnsupportedTextMimeType` list, the common ones).
+ */
+private val DOWNLOADED_TEXT_TYPES = setOf(
+    "text/csv", "text/x-csv", "text/comma-separated-values",
+    "text/tab-separated-values", "text/tsv",
+    "text/calendar", "text/x-calendar", "text/vcalendar", "text/x-vcalendar",
+    "text/vcard", "text/x-vcard", "text/x-vcf", "text/directory",
+    "text/rtf", "text/ldif", "text/qif", "text/x-qif", "text/ofx",
+    "text/vnd.sun.j2me.app-descriptor",
+)
+
+private fun interceptVirtualRequestFor(
+    req: WebResourceRequest,
+    ensPins: EnsDocumentPins?,
+    incoming: EnsDocumentPins.Page?,
+): WebResourceResponse? {
     val uri = req.url ?: return null
     val url = uri.toString()
 
@@ -2120,7 +2907,28 @@ internal fun interceptVirtualRequest(
         )
     }
 
-    val target = Gateways.gatewayUrlFor(root, pathAndQuery)
+    // A document on a name-derived origin re-checks the name first —
+    // Back / Forward included, which restore the history entry without
+    // going through submit (#99, see [Gateways.reverifyEnsDocument]).
+    // Except a non-main-frame document on a name the page on screen is
+    // already pinned to — a same-name iframe, a pjax `fetch` asking for
+    // `text/html`: that is part of the page, and re-pinning the name
+    // would move the rest of the page's subresources to a newer root
+    // under its old HTML.
+    //
+    // Anything but the main frame belongs to the page on screen — once
+    // it is known which page that is ([EnsDocumentPins.pageFor]).
+    val page = incoming ?: (root as? ContentRoot.Ens)?.let { ensPins?.pageFor(it.name) }
+    if (root is ContentRoot.Ens &&
+        isDocumentRequest(req.isForMainFrame, req.requestHeaders) &&
+        (req.isForMainFrame || page?.uriFor(root.name) == null)
+    ) {
+        Gateways.reverifyEnsDocument(root.name, ensPins, page)?.let { code ->
+            return nameResolutionRefusal(root.name, code)
+        }
+    }
+
+    val target = Gateways.gatewayUrlFor(root, pathAndQuery, page = page)
         ?: return syntheticResponse(
             502, "Bad Gateway",
             "No local gateway can serve this content root " +
@@ -2442,6 +3250,33 @@ private fun fetchOnce(
         FetchAttempt.Unreachable
     }
 }
+
+/**
+ * Does a download that just started end the tab's pending navigation?
+ *
+ * Yes when the tab is showing an address that never committed
+ * ([addressBarText] ahead of [committedUrl] — after a commit
+ * `onPageStarted` writes the same string into both) and the load has
+ * been handed to the WebView ([resolving] is the ENS / gateway phase in
+ * front of it, which can't have produced a download yet). Chromium runs
+ * one main-frame navigation at a time, so a download arriving then is
+ * that navigation's response. A download from a committed page — an
+ * `<a download>`, an attachment link — leaves the tab alone.
+ *
+ * And only when the download *is* that navigation's response
+ * ([downloadIsNavigationResponse]: its URL is one the main frame
+ * requested since the last commit — the typed URL or a redirect hop).
+ * The committed page can start a download of its own while the typed
+ * address is still loading; that one mustn't take the progress trace
+ * and Stop away from a navigation that's still in flight.
+ */
+internal fun downloadEndsPendingNavigation(
+    committedUrl: String,
+    addressBarText: String,
+    resolving: Boolean,
+    downloadIsNavigationResponse: Boolean,
+): Boolean = downloadIsNavigationResponse && !resolving &&
+    addressBarText.isNotBlank() && addressBarText != committedUrl
 
 internal fun isLocalGatewayUrl(url: String): Boolean = Gateways.isLocalGateway(url)
 
