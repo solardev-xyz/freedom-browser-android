@@ -107,6 +107,26 @@ internal class FileChooser(private val context: Context) {
         kind: CaptureKind,
     ): Boolean {
         val file = newCaptureFile(kind) ?: return false
+        try {
+            return launchCaptureInto(launcher, callback, kind, file)
+        } catch (e: Exception) {
+            // Whatever the failure (no camera app, a camera that throws
+            // SecurityException, a FileProvider mismatch), don't leave
+            // the empty placeholder or a stale request behind; show()
+            // falls back to the picker.
+            if (pending?.captureFile == file) pending = null
+            file.delete()
+            if (e is ActivityNotFoundException) return false
+            throw e
+        }
+    }
+
+    private fun launchCaptureInto(
+        launcher: ActivityResultLauncher<Intent>,
+        callback: ValueCallback<Array<Uri>>,
+        kind: CaptureKind,
+        file: File,
+    ): Boolean {
         val uri = FileProvider.getUriForFile(context, authority(context), file)
         val action = when (kind) {
             CaptureKind.IMAGE -> MediaStore.ACTION_IMAGE_CAPTURE
@@ -120,14 +140,8 @@ internal class FileChooser(private val context: Context) {
         // The grant flags only reach the camera app through ClipData.
         intent.clipData = ClipData.newRawUri(null, uri)
         pending = Pending(callback, multiple = false, captureFile = file, captureUri = uri)
-        return try {
-            launcher.launch(intent)
-            true
-        } catch (e: ActivityNotFoundException) {
-            pending = null
-            file.delete()
-            false
-        }
+        launcher.launch(intent)
+        return true
     }
 
     /** Result of whichever activity [show] started. */
@@ -141,13 +155,38 @@ internal class FileChooser(private val context: Context) {
             val clip = data?.clipData
             val clipUris = if (clip == null) emptyList()
             else (0 until clip.itemCount).mapNotNull { clip.getItemAt(it).uri }
-            pickedUris(clipUris, data?.data, p.multiple) { it.scheme }
+            pickedUris(clipUris, data?.data, p.multiple, ::isUploadable)
                 .takeIf { it.isNotEmpty() }
                 ?.toTypedArray()
         } else {
             null
         }
-        p.callback.onReceiveValue(uris)
+        // The requesting tab may have been closed (its WebView destroyed)
+        // while the activity was open.
+        runCatching { p.callback.onReceiveValue(uris) }
+            .onFailure { Log.w(LOG_TAG, "file chooser callback failed", it) }
+    }
+
+    /**
+     * Whether a URI handed back by another app may be read and uploaded
+     * with the browser's identity: see [isUploadableUri].
+     */
+    private fun isUploadable(uri: Uri): Boolean =
+        isUploadableUri(uri.scheme, uri.authority, ::isOwnAuthority)
+
+    /**
+     * True for an authority served by one of the browser's own content
+     * providers — our [FileProvider] (earlier captures in cache/uploads)
+     * or any provider a library merged into the manifest. WebView reads
+     * those as the browser, so accepting one would let a picker or
+     * camera app make us upload our own private data.
+     */
+    private fun isOwnAuthority(authority: String): Boolean {
+        if (authority.equals(authority(context), ignoreCase = true)) return true
+        val info = runCatching {
+            context.packageManager.resolveContentProvider(authority, 0)
+        }.getOrNull()
+        return info?.packageName == context.packageName
     }
 
     private fun captureResult(p: Pending, result: ActivityResult): Array<Uri>? {
@@ -158,7 +197,7 @@ internal class FileChooser(private val context: Context) {
             // and hand back their own content URI instead.
             val returned = result.data?.data
             file.delete()
-            if (returned != null && returned.scheme == "content") return arrayOf(returned)
+            if (returned != null && isUploadable(returned)) return arrayOf(returned)
             return null
         }
         file.delete()
@@ -235,8 +274,10 @@ internal enum class CaptureKind { IMAGE, VIDEO }
  * MIME types for an `accept` attribute, as WebView hands it over in
  * [FileChooserParams.getAcceptTypes] (the attribute split on commas —
  * entries may carry whitespace, be empty, or be file extensions like
- * `.pdf`). Extensions are mapped through [extensionToMime]; unknown
- * ones are dropped. An empty result means "anything".
+ * `.pdf`). Extensions are mapped through [extensionToMime]; if any
+ * can't be mapped (e.g. `.gpx`), the result widens to "anything" —
+ * filtering to only the mappable types would hide files the page
+ * explicitly accepts. An empty result means "anything".
  */
 internal fun mimeTypesForAccept(
     acceptTypes: Array<String>?,
@@ -248,7 +289,8 @@ internal fun mimeTypesForAccept(
         val entry = raw.trim().lowercase()
         when {
             entry.isEmpty() -> Unit
-            entry.startsWith('.') -> extensionToMime(entry.substring(1))?.let { out += it }
+            entry.startsWith('.') ->
+                out += extensionToMime(entry.substring(1)) ?: return emptyList()
             entry.contains('/') -> out += entry
         }
     }
@@ -285,19 +327,39 @@ internal fun pickerIntent(mimeTypes: List<String>, multiple: Boolean): Intent =
 
 /**
  * The files a picker result selects: every [clip] item when several
- * came back (multi-select), else [data]. Only `content:` URIs are
- * passed on — a third-party picker answering with `file:///data/…`
- * would otherwise have the browser upload its own private files. A
- * single-file input takes the first pick only.
+ * came back (multi-select), else [data]. Only URIs passing
+ * [uploadable] (see [isUploadableUri]) are passed on. A single-file
+ * input takes the first pick only.
  */
 internal fun <T : Any> pickedUris(
     clip: List<T>,
     data: T?,
     multiple: Boolean,
-    scheme: (T) -> String?,
+    uploadable: (T) -> Boolean,
 ): List<T> {
     val all = clip.ifEmpty { listOfNotNull(data) }
-        .filter { scheme(it).equals("content", ignoreCase = true) }
+        .filter(uploadable)
         .distinct()
     return if (multiple) all else all.take(1)
+}
+
+/**
+ * Whether a URI another app (picker or camera) handed back may be
+ * uploaded. WebView reads it with the browser's identity, so it must
+ * be a `content:` URI ([scheme]) served by *someone else's* provider:
+ * `file:///data/…` or `content://<our own provider>/…` (e.g. an earlier
+ * capture still in cache/uploads, uploaded to a different site) would
+ * have the browser upload its own private files. [encodedAuthority]
+ * may carry a `userId@` prefix, which ContentResolver strips before
+ * resolving the provider, so it is stripped here too.
+ */
+internal fun isUploadableUri(
+    scheme: String?,
+    authority: String?,
+    isOwnAuthority: (String) -> Boolean,
+): Boolean {
+    if (!scheme.equals("content", ignoreCase = true)) return false
+    val bare = authority?.substringAfterLast('@')
+    if (bare.isNullOrEmpty()) return false
+    return !isOwnAuthority(bare)
 }
