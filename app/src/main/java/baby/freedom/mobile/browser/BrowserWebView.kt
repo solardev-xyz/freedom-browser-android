@@ -35,6 +35,8 @@ import android.webkit.MimeTypeMap
 import android.webkit.GeolocationPermissions
 import android.webkit.PermissionRequest
 import android.webkit.ValueCallback
+import android.webkit.JsPromptResult
+import android.webkit.JsResult
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
@@ -2437,6 +2439,31 @@ private fun buildRefreshableWebView(
             override fun onReceivedTitle(view: WebView?, title: String?) {
                 state.title = sanitizeTitle(title, view?.url)
             }
+
+            // JavaScript dialogs from a private tab (#86) go in a secure
+            // window of our own ([showPrivateJsDialog]); a normal tab's
+            // keep WebView's default dialog (false).
+            override fun onJsAlert(view: WebView?, url: String?, message: String?, result: JsResult?): Boolean =
+                state.private && result != null &&
+                    showPrivateJsDialog(context, JsDialogKind.ALERT, url, message, null, result)
+
+            override fun onJsConfirm(view: WebView?, url: String?, message: String?, result: JsResult?): Boolean =
+                state.private && result != null &&
+                    showPrivateJsDialog(context, JsDialogKind.CONFIRM, url, message, null, result)
+
+            override fun onJsPrompt(
+                view: WebView?,
+                url: String?,
+                message: String?,
+                defaultValue: String?,
+                result: JsPromptResult?,
+            ): Boolean =
+                state.private && result != null &&
+                    showPrivateJsDialog(context, JsDialogKind.PROMPT, url, message, defaultValue, result)
+
+            override fun onJsBeforeUnload(view: WebView?, url: String?, message: String?, result: JsResult?): Boolean =
+                state.private && result != null &&
+                    showPrivateJsDialog(context, JsDialogKind.BEFORE_UNLOAD, url, message, null, result)
 
             // HTML5 fullscreen (`element.requestFullscreen()`, and the
             // native `<video>` fullscreen button). Without these two

@@ -488,9 +488,23 @@ fun BrowserScreen(
     // open, and a Long snackbar would sit over the bottom row's Retry
     // and × for ten seconds.
     val downloadNotices = remember { DownloadNotices() }
+    // Is anything from a private session (#86) on screen? A private
+    // download's notice (negative id) names its file, so it's only shown
+    // while that's the case, and withdrawn when the screen goes back to
+    // normal content — before [PrivateScreenGuard] drops FLAG_SECURE.
+    val privateOnScreen = privateContentOnScreen(
+        activePrivate = tabs.active.private,
+        anyPrivate = tabs.tabs.any { it.private },
+        switcherShown = showTabSwitcher,
+        downloadsShown = showDownloads,
+    )
+    val privateOnScreenNow by rememberUpdatedState(privateOnScreen)
+    LaunchedEffect(privateOnScreen) {
+        if (!privateOnScreen) downloadNotices.cancelPrivate()
+    }
     LaunchedEffect(downloads) {
         downloads.events.collect { event ->
-            if (showDownloads) {
+            if (showDownloads || (event.id < 0 && !privateOnScreenNow)) {
                 downloadNotices.supersedeStart(event.id)
                 return@collect
             }
@@ -540,15 +554,10 @@ fun BrowserScreen(
     }
 
     val state = tabs.active
-    // Private pages stay out of the Recents snapshot and screenshots (#86).
-    PrivateScreenGuard(
-        privateContentOnScreen(
-            activePrivate = state.private,
-            anyPrivate = tabs.tabs.any { it.private },
-            switcherShown = showTabSwitcher,
-            downloadsShown = showDownloads,
-        ),
-    )
+    // Private pages stay out of the Recents snapshot and screenshots
+    // (#86) — and so does a private download's notice (it names the
+    // file) until it has left the screen.
+    PrivateScreenGuard(privateOnScreen || downloadNotices.privateShowing)
     val isBookmarked by repo.isBookmarked(state.url).collectAsState(initial = false)
 
     // IPFS load progress (#94): while the active tab is busy on content

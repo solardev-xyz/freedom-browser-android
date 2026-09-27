@@ -201,4 +201,39 @@ class DownloadNoticesTest {
         yield()
         assertNull(host.currentSnackbarData)
     }
+
+    @Test
+    fun `cancelPrivate withdraws only private download notices and privateShowing follows them`() = runBlocking {
+        val host = SnackbarHostState()
+        val notices = DownloadNotices()
+        assertFalse(notices.privateShowing)
+        val normal = notices.show(this, 1) { host.showSnackbar("Downloaded a") }
+        val private = notices.show(this, -1) { host.showSnackbar("Downloaded secret") }
+        yield()
+        assertTrue(notices.privateShowing)
+
+        notices.cancelPrivate()
+        // Still up until the cancelled notice has actually left the host.
+        assertTrue(notices.privateShowing)
+        yield()
+        assertTrue(private.isCancelled)
+        assertFalse(notices.privateShowing)
+        assertFalse(normal.isCancelled)
+        assertEquals("Downloaded a", host.currentSnackbarData?.visuals?.message)
+        host.currentSnackbarData!!.dismiss()
+        normal.join()
+    }
+
+    @Test
+    fun `a private notice on screen is withdrawn by cancelPrivate`() = runBlocking {
+        val host = SnackbarHostState()
+        val notices = DownloadNotices()
+        notices.show(this, -2) { host.showSnackbar("Downloaded secret") }
+        yield()
+        assertEquals("Downloaded secret", host.currentSnackbarData?.visuals?.message)
+        notices.cancelPrivate()
+        yield()
+        assertNull(host.currentSnackbarData)
+        assertFalse(notices.privateShowing)
+    }
 }
