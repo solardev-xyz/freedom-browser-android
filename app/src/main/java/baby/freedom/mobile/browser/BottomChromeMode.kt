@@ -344,11 +344,21 @@ internal class BottomUiChannels<P : Any>(private val maxCandidates: Int = 4) {
     val targets: List<P> get() = proved?.let(::listOf) ?: candidates.toList()
 
     /**
+     * Has any main-frame ready come in since the current document
+     * started? If not, the current document has no detector of its own
+     * so far (a sandboxed, opaque-origin document never gets one), and
+     * nothing sent to [targets] can be answered by it.
+     */
+    var readySinceStart: Boolean = false
+        private set
+
+    /**
      * A main-frame ready through [channel]. Returns the channels to send the
      * current document's start to now, if [installed]: this one when the
      * current document's channel is still unproved, nothing otherwise.
      */
     fun onReady(channel: P, installed: Boolean): List<P> {
+        readySinceStart = true
         candidates.remove(channel)
         candidates.addLast(channel)
         while (candidates.size > maxCandidates) candidates.removeFirst()
@@ -364,6 +374,7 @@ internal class BottomUiChannels<P : Any>(private val maxCandidates: Int = 4) {
     /** A new main-frame document: the proved channel was the old one's. Candidates stay. */
     fun startDocument() {
         proved = null
+        readySinceStart = false
     }
 }
 

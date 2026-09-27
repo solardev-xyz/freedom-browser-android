@@ -1,7 +1,9 @@
 package baby.freedom.mobile.browser
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -135,5 +137,22 @@ class BottomUiChannelsTest {
         // A repeat doesn't duplicate.
         channels.onReady("b", installed = false)
         assertEquals(listOf("c", "b"), channels.targets)
+    }
+
+    @Test
+    fun `a document with no ready of its own is known to have no detector`() {
+        // #92 R4-F1: page A's detector readies and reports; page B (a CSP
+        // sandbox, opaque origin) never runs one. B's theme-colour reads
+        // must not be sent to A's stale candidate channel.
+        val channels = BottomUiChannels<String>()
+        channels.onReady("A", installed = false)
+        channels.onReport("A")
+        assertTrue(channels.readySinceStart)
+        channels.startDocument()
+        assertFalse(channels.readySinceStart)
+        assertNull(channels.proved)
+        // A ready after B started is (possibly) B's own.
+        channels.onReady("B", installed = true)
+        assertTrue(channels.readySinceStart)
     }
 }

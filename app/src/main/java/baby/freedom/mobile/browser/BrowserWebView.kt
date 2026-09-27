@@ -1006,12 +1006,19 @@ private fun buildRefreshableWebView(
     /**
      * Does the document at [url] answer theme-colour asks itself? Only
      * where its detector is running and heard: http(s) (the only origins
-     * the listener takes), past the detector's start.
+     * the listener takes), past the detector's start, and with the
+     * document's own detector heard from — its channel proved by a
+     * report, or (unless [requireProved]) at least a ready since the
+     * document started, whose start carries the ask again. A document
+     * whose detector never runs (a CSP `sandbox` one: opaque origin, no
+     * channel) would never answer, and the previous page's tint would
+     * stay on screen, so it is read with [THEME_COLOR_JS] instead.
      */
-    fun themeColorFromDetector(url: String?): Boolean {
+    fun themeColorFromDetector(url: String?, requireProved: Boolean = false): Boolean {
         if (!bottomUiSupported || !bottomChrome.installed || !bottomUiApplies(url)) return false
         val u = url!!.lowercase()
-        return u.startsWith("https://") || u.startsWith("http://")
+        if (!u.startsWith("https://") && !u.startsWith("http://")) return false
+        return bottomUiChannels.proved != null || (!requireProved && bottomUiChannels.readySinceStart)
     }
 
     /** Ask the current document's detector for its theme colour (#92). */
@@ -1037,12 +1044,20 @@ private fun buildRefreshableWebView(
      * reads with functions it saved at document start, so the page
      * can't see the read, and its answer is tagged with the document's
      * token. Anything else falls back to [THEME_COLOR_JS], which the
-     * page can see; [onAnswer] hears only such an answer.
+     * page can see; [onAnswer] hears only such an answer. [requireProved]
+     * (the load-finished read, the last one a load is sure to get) asks
+     * the detector only once its channel is proved, so a document whose
+     * detector never reported still gets read.
      */
-    fun readThemeColor(view: WebView?, onScreen: Boolean = false, onAnswer: ((Int?) -> Unit)? = null) {
+    fun readThemeColor(
+        view: WebView?,
+        onScreen: Boolean = false,
+        requireProved: Boolean = false,
+        onAnswer: ((Int?) -> Unit)? = null,
+    ) {
         view ?: return
         val token = themeColor.beginRead(onScreen) ?: return
-        if (themeColorFromDetector(view.url)) {
+        if (themeColorFromDetector(view.url, requireProved)) {
             // The detector's answer lands through the painted gate;
             // `onScreen` vouches for this document the same way.
             if (onScreen) themeColor.painted()
@@ -2143,8 +2158,10 @@ private fun buildRefreshableWebView(
                     state.addressBarText = uiDisplay
                     // A theme colour a script set after first paint (#92).
                     // A current finish is the document on screen even if
-                    // it never reported a paint.
-                    readThemeColor(view, onScreen = true)
+                    // it never reported a paint. Through the detector only
+                    // if it has reported: this is the read that catches a
+                    // document whose detector never runs.
+                    readThemeColor(view, onScreen = true, requireProved = true)
                 }
                 state.canGoBack = view?.canGoBack() == true
                 state.canGoForward = view?.canGoForward() == true
