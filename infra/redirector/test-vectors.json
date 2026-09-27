@@ -153,6 +153,24 @@
       "path": "/",
       "display": "foo-bar.swarm.eth",
       "redirect": "https://foo-bar.swarm.eth.limo/"
+    },
+    {
+      "name": "WNS .wei name — decodes, but eth.limo doesn't serve it, so no redirect",
+      "ensName": "meinhard.wei",
+      "label": "meinhard-wei",
+      "host": "meinhard-wei.ens.freedom.baby",
+      "path": "/",
+      "display": "meinhard.wei",
+      "redirect": null
+    },
+    {
+      "name": "GNS .gwei name — decodes, no public gateway",
+      "ensName": "alice.gwei",
+      "label": "alice-gwei",
+      "host": "alice-gwei.ens.freedom.baby",
+      "path": "/docs",
+      "display": "alice.gwei/docs",
+      "redirect": null
     }
   ],
 

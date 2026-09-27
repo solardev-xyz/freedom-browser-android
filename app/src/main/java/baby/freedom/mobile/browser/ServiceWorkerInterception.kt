@@ -19,6 +19,13 @@ import androidx.webkit.WebViewFeature
  * not by tab, and requests for ordinary https origins return `null`
  * (pass-through) exactly like the per-WebView client does.
  *
+ * Belonging to no tab, SW fetches carry no [EnsDocumentPins]: an ENS
+ * subresource a SW fetches is served from the session registry (the
+ * name's latest answer), not from the root the controlled page was
+ * served from, and a navigation the SW answers from Cache Storage never
+ * reaches the interceptor, so the #99 name re-check doesn't run for it.
+ * See `docs/dapp-compatibility.md`.
+ *
  * Degradation on WebViews without `SERVICE_WORKER_SHOULD_INTERCEPT_REQUEST`:
  * we install nothing, and service workers on virtual origins are
  * unsupported — documented in `docs/dapp-compatibility.md` so
