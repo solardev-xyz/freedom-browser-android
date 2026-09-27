@@ -123,6 +123,14 @@ class AddressLabelTest {
     }
 
     @Test
+    fun `wns and gns names are shown whole like ens names`() {
+        assertEquals("meinhard.wei", AddressLabel.resting("meinhard.wei/docs"))
+        assertEquals("apoorv.gwei", AddressLabel.resting("ipfs://apoorv.gwei/x"))
+        assertEquals("sub.meinhard.wei", AddressLabel.resting("sub.meinhard.wei"))
+        assertEquals("sub.apoorv.gwei", AddressLabel.resting("ens://sub.apoorv.gwei/p"))
+    }
+
+    @Test
     fun `content hashes show the scheme and an elided id`() {
         val hash = "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90"
         assertEquals("bzz://a1b2c3…8f90", AddressLabel.resting("bzz://$hash/index.html"))

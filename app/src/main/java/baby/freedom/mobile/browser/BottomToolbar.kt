@@ -45,6 +45,7 @@ import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Menu
+import androidx.compose.material.icons.filled.Print
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Remove
 import androidx.compose.material.icons.filled.Search
@@ -1415,6 +1416,7 @@ internal fun BottomToolbar(
     onReload: () -> Unit,
     onStop: () -> Unit,
     onNewTab: () -> Unit,
+    onPrint: () -> Unit,
     onExpandCapsule: () -> Unit,
     onFindInPage: () -> Unit,
     zoomLevel: Int?,
@@ -1694,6 +1696,7 @@ internal fun BottomToolbar(
                     onFindInPage = onFindInPage,
                     zoomLevel = zoomLevel,
                     onZoom = onZoom,
+                    onPrint = onPrint,
                 )
             },
             modifier = Modifier
@@ -2891,6 +2894,7 @@ private fun OverflowMenuButton(
     onFindInPage: () -> Unit,
     zoomLevel: Int?,
     onZoom: (ZoomAction) -> Unit,
+    onPrint: () -> Unit,
 ) {
     var menuExpanded by remember { mutableStateOf(false) }
     // We hand-roll the anchor positioning rather than rely on
@@ -3013,6 +3017,18 @@ private fun OverflowMenuButton(
                         // menu stays open across presses so the user
                         // can watch the page settle between steps.
                         ZoomMenuRow(level = zoomLevel, onZoom = onZoom)
+                        // Print or save as PDF (#89). Same rule as Find
+                        // in page: the home tab is Compose rather than a
+                        // page, so there is no document behind it to print.
+                        DropdownMenuItem(
+                            text = { MenuItemLabel("Print") },
+                            leadingIcon = { Icon(Icons.Filled.Print, contentDescription = null) },
+                            enabled = state.url.isNotBlank(),
+                            onClick = {
+                                menuExpanded = false
+                                onPrint()
+                            },
+                        )
                         DropdownMenuItem(
                             text = { MenuItemLabel("History") },
                             leadingIcon = { Icon(Icons.Filled.History, contentDescription = null) },

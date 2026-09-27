@@ -13,6 +13,7 @@ import android.graphics.ColorFilter
 import android.graphics.PixelFormat
 import android.graphics.Rect
 import android.graphics.drawable.Drawable
+import android.os.Bundle
 import android.net.Uri
 import android.os.Message
 import android.os.SystemClock
@@ -63,9 +64,12 @@ import androidx.webkit.WebViewFeature
 import baby.freedom.mobile.data.BrowsingRepository
 import kotlinx.coroutines.flow.collectLatest
 import java.io.ByteArrayInputStream
+import java.io.FilterInputStream
+import java.io.InputStream
 import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.abs
 import kotlin.math.roundToInt
 
@@ -638,11 +642,19 @@ fun BrowserWebViewHost(
             },
             onExitFullscreen = { tabs.onFullscreenHidden(tab) },
             onRecoverNodes = { tabs.requestNodeRecovery?.invoke() },
-            onCreateWindow = { attach(tabs.adoptPopup(opener = tab)) },
+            // The popup's first navigation is Chromium's own, already
+            // under way in its WebView: a load of its own for the IPFS
+            // phase line (#94), like a link the WebView follows.
+            onCreateWindow = {
+                attach(tabs.adoptPopup(opener = tab).also { it.beginLoad(inWebView = true) })
+            },
             onCloseWindow = { tabs.closePopup(tab) },
             // Handed to Chromium by `onCreateWindow`, which needs it
             // never to have navigated.
             isPopup = tab.openerId != null,
+            // A reopened tab: its WebView's first navigation must be
+            // the host's `restoreState` (see the creation loop below).
+            restoring = tab.pendingRestore != null,
             fileChooser = fileChooser,
             // Only the tab on screen raises a menu, and only over a
             // real page (the home overlay covers `about:blank`).
@@ -665,7 +677,44 @@ fun BrowserWebViewHost(
     }
     run {
         val idsNow = currentIds.toSet()
-        for (tab in tabs.tabs) attach(tab)
+        for (tab in tabs.tabs) {
+            if (webViews[tab.id] != null) continue
+            // A reopened tab (see [TabsState.reopenClosedTab]): put the
+            // closed WebView's back/forward list back and load its
+            // current entry. If the saved state is missing or WebView
+            // won't take it, give the WebView the initial blank paint it
+            // skipped and submit the page's address instead — the page
+            // comes back, its history doesn't.
+            val restore = tab.pendingRestore
+            val wv = attach(tab)
+            if (restore == null) continue
+            tab.pendingRestore = null
+            val restored = restore.webViewState?.let { wv.restoreState(it) } != null
+            if (restored) {
+                tab.canGoBack = wv.canGoBack()
+                tab.canGoForward = wv.canGoForward()
+            } else {
+                wv.loadUrl(ABOUT_BLANK)
+            }
+            // Closed before its page committed, the restored list ends
+            // on the blank entry; without a restore the WebView is on it
+            // too. Either way the address goes back (and is submitted,
+            // unless the user had stopped that load) once that entry
+            // has finished — any earlier and the blank entry's
+            // `onPageFinished` wipes the tab's address after the submit,
+            // and the tab loads behind the home overlay. Only armed if
+            // the WebView really is on the blank entry: a restored list
+            // that ends on a real page never finishes a blank load to
+            // consume it.
+            tab.afterBlank = restore.afterBlank(
+                restored = restored,
+                currentEntryUrl = if (restored) {
+                    wv.copyBackForwardList().currentItem?.url
+                } else {
+                    ABOUT_BLANK
+                },
+            )
+        }
         val toRemove = webViews.keys.filter { it !in idsNow }
         for (id in toRemove) {
             val wv = webViews.remove(id) ?: continue
@@ -706,6 +755,9 @@ fun BrowserWebViewHost(
                             // on after navigateHome() has already cleared
                             // it to -1.
                             wv.stopLoading()
+                            // From here the WebView is on this load, not
+                            // the one it was showing (#94).
+                            tab.handLoadToWebView()
                             wv.loadUrl(pending)
                         }
                     }
@@ -733,6 +785,11 @@ fun BrowserWebViewHost(
         // also clears the counter itself so the capsule's edge trace
         // goes out on the same frame as the tap.
         tabs.stopLoading = { tab -> webViews[tab.id]?.stopLoading() }
+        tabs.saveWebViewState = { tab ->
+            webViews[tab.id]?.let { wv ->
+                Bundle().takeIf { runCatching { wv.saveState(it) }.getOrNull() != null }
+            }
+        }
         // Find in page (#83). Results come back through the WebView's
         // FindListener into the tab's [FindInPageState] (see
         // [buildRefreshableWebView]).
@@ -749,6 +806,11 @@ fun BrowserWebViewHost(
                     tab.find.close()
                     wv?.clearMatches()
                 }
+            }
+        }
+        tabs.printPage = { tab ->
+            webViews[tab.id]?.let { wv ->
+                printWebView(wv, printJobName(tab.title, tab.addressBarText, tab.url))
             }
         }
         tabs.clearWebViewData = {
@@ -780,7 +842,9 @@ fun BrowserWebViewHost(
             tabs.captureActiveThumbnail = null
             tabs.clearWebViewData = null
             tabs.stopLoading = null
+            tabs.saveWebViewState = null
             tabs.find = null
+            tabs.printPage = null
         }
     }
 
@@ -830,6 +894,7 @@ private fun buildRefreshableWebView(
     onEnterFullscreen: (View, WebChromeClient.CustomViewCallback?) -> Unit,
     onExitFullscreen: () -> Unit,
     onRecoverNodes: () -> Unit = {},
+    restoring: Boolean = false,
     fileChooser: FileChooser? = null,
     onCreateWindow: () -> WebView,
     onCloseWindow: () -> Unit,
@@ -1561,8 +1626,12 @@ private fun buildRefreshableWebView(
         // Force an initial paint so the WebView's compositor surface
         // is valid even before the user submits a URL. Not for a popup:
         // Chromium rejects (crashes on) a popup WebView that has already
-        // navigated, and loads the popup's own URL into it anyway.
-        if (!isPopup) loadUrl(ABOUT_BLANK)
+        // navigated, and loads the popup's own URL into it anyway. Nor
+        // for a tab being restored: `restoreState` has to be the
+        // WebView's first navigation, and the blank load still pending
+        // here would win over the restored entry (seen on the AVD — the
+        // reopened tab came back on the home overlay).
+        if (!isPopup && !restoring) loadUrl(ABOUT_BLANK)
 
         // Downloads (#79): anything Chromium decides not to render — a
         // `Content-Disposition: attachment`, a non-renderable type, a
@@ -1584,7 +1653,12 @@ private fun buildRefreshableWebView(
             // turned into a download leaves the tab committed, so
             // nothing else would clear them).
             val wasPending = pendingNavigationUrls.remove(url)
-            if (wasPending) pendingNavigationUrls.clear()
+            if (wasPending) {
+                pendingNavigationUrls.clear()
+                // The page on screen stays: its open requests are this
+                // load's, whatever the answer's headers suggested.
+                state.mainFrameBecameDownload()
+            }
             // A main-frame navigation that turned out to be a file never
             // commits: no onPageStarted, no final progress callback. Left
             // alone, the capsule keeps the typed address, the progress
@@ -1658,6 +1732,7 @@ private fun buildRefreshableWebView(
             override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
                 // The pending navigation committed; it's no download.
                 pendingNavigationUrls.clear()
+                state.documentCommitted()
                 // The main-frame document committed: its ENS pins are now
                 // the page on screen's, and subresources held waiting on
                 // the commit go ahead (#99, [EnsDocumentPins]).
@@ -1711,6 +1786,10 @@ private fun buildRefreshableWebView(
                 // entry ends a page's probe exactly like any other
                 // document does (see [cancelProbeSupersededBy]).
                 cancelProbeSupersededBy(url)
+                // …and IPFS or not by what actually committed — a link,
+                // back/forward, or a redirect can land somewhere the
+                // submit that started this load didn't name (#94).
+                if (url != null) state.ipfsLoad = ipfsLoadFor(url, state.ipfsLoad)
                 if (url == ABOUT_BLANK) {
                     // `about:blank` is our home sentinel — either the
                     // WebView's forced initial paint, a user-initiated
@@ -1874,8 +1953,25 @@ private fun buildRefreshableWebView(
                     // the hijack #54 is about (see
                     // [cancelProbeSupersededBy]).
                     cancelProbeSupersededBy(url)
+                    // A reopened tab waiting on this blank entry to
+                    // put its address back (see [BrowserState.afterBlank]).
+                    // The hook submits as the renderer, which leaves the
+                    // address bar as it is until the page commits — so
+                    // put the address the user had there back first, or
+                    // the tab loads behind the home overlay. A load the
+                    // user had stopped only gets its address back, and
+                    // the Stop latch so the bar offers Reload.
+                    state.afterBlank?.let {
+                        state.afterBlank = null
+                        state.addressBarText = it.address
+                        if (it.submit) onSubmitUrl(state, it.address) else state.stopProgress()
+                    }
                     return
                 }
+                // The first page to finish after a restore consumes the
+                // pending blank-entry address too, even though it isn't
+                // the blank entry: it can't apply to a later Home.
+                state.afterBlank = null
                 // Dismiss the pull-to-refresh spinner once the page has
                 // finished loading (or errored out). Happens regardless
                 // of whether the load was user-initiated reload or not.
@@ -1972,6 +2068,9 @@ private fun buildRefreshableWebView(
             // before first paint; the detector isn't installed yet then,
             // and this doesn't install it (see [requestBottomUiProbe]).
             override fun doUpdateVisitedHistory(view: WebView?, url: String?, isReload: Boolean) {
+                // A same-document step keeps the page on screen as the
+                // load's document for the IPFS phase line (#94, R3-F2).
+                state.historyUpdated(isHome = url == ABOUT_BLANK)
                 if (view == null || !bottomUiApplies(url)) return
                 requestBottomUiProbe()
             }
@@ -2001,6 +2100,9 @@ private fun buildRefreshableWebView(
                 // [navigationOpensStopLatch]).
                 if (navigationOpensStopLatch(request.isForMainFrame, detoured)) {
                     state.loadAborted = false
+                    // A link the WebView follows itself is a new load
+                    // (a detoured one gets this from the submit, #94).
+                    state.beginLoad(inWebView = true)
                 }
                 if (detoured) {
                     onSubmitUrl(state, target)
@@ -2013,17 +2115,46 @@ private fun buildRefreshableWebView(
                 view: WebView?,
                 request: WebResourceRequest?,
             ): WebResourceResponse? {
-                if (request?.isForMainFrame == true) {
-                    request.url?.toString()?.let(pendingNavigationUrls::add)
+                val mainFrame = request?.isForMainFrame == true
+                if (mainFrame) {
+                    request!!.url?.toString()?.let(pendingNavigationUrls::add)
                 }
-                val response = interceptVirtualRequest(request, ensPins)
-                if (request?.isForMainFrame == true) {
+                // Tagged with the load it belongs to, and open until
+                // Chromium closes the body, so the IPFS phase line can
+                // tell while a superseded load is still fetching (#94,
+                // see [GatewayWork]). A main-frame request is the
+                // navigation the WebView was handed; a subresource is
+                // the document's whose main-frame answer went out last
+                // (see [BrowserState.documentGeneration]).
+                val generation = if (mainFrame) {
+                    state.mainFrameRequested().also {
+                        noteMainFrameContentLoad(view, state, it, request!!.url.toString())
+                    }
+                } else {
+                    state.documentGeneration
+                }
+                val work = state.gatewayWork.start(generation)
+                val response = try {
+                    interceptVirtualRequest(request, ensPins)
+                } catch (t: Throwable) {
+                    state.gatewayWork.finish(work)
+                    throw t
+                }
+                // Before Chromium has the answer, so none of the new
+                // document's own requests can be filed under the load
+                // before it (R3-F1).
+                if (mainFrame) {
                     nameRefusal.onMainFrameResponse(
-                        request.url.toString(),
+                        request!!.url.toString(),
                         response?.let { nameResolutionErrorIn(it.responseHeaders) },
                     )
+                    state.mainFrameAnswered(generation, mainFrameAnswerReplacesDocument(response))
                 }
-                return response
+                state.gatewayWork.answered(work)
+                return trackedUntilClosed(
+                    response,
+                    onReading = { started -> state.gatewayWork.reading(work, started) },
+                ) { state.gatewayWork.finish(work) }
             }
 
             override fun onReceivedError(
@@ -2243,6 +2374,8 @@ private fun buildRefreshableWebView(
         // going through [BrowserState.loadUrl], so it has to open the
         // Stop latch itself (#41).
         state.loadAborted = false
+        // …and is a new load of its own for the IPFS phase line (#94).
+        state.beginLoad(inWebView = true)
         webView.reload()
     }
     // Who owns a downward drag — the refresh spinner or the page.
@@ -3358,4 +3491,137 @@ internal fun sanitizeTitle(rawTitle: String?, actualUrl: String?): String {
     return if (title == url || title == stripped ||
         stripped.startsWith(title) || title.startsWith(stripped)
     ) "" else title
+}
+
+/**
+ * Re-derive [BrowserState.ipfsLoad] for a main-frame request to a
+ * virtual dweb origin, before the (possibly slow) gateway fetch starts
+ * (#94). Runs on the interceptor's thread.
+ *
+ * The submit flow resolves and records every ENS name it navigates to,
+ * but a reload of a restored tab (the session-only [KnownEnsNames] is
+ * empty after a process restart), back/forward, or an in-page link to
+ * another name reach the WebView unresolved — [ipfsLoadFor] can't know
+ * yet whether they lead to IPFS. Resolve the name here (the same lookup
+ * [interceptVirtualRequest] is about to do, which then hits the registry)
+ * so the phase line shows for the fetch itself, not only after commit.
+ *
+ * The request belongs to the navigation [generation] the WebView was last handed
+ * ([BrowserState.webViewGeneration]), which is not necessarily the tab's
+ * current one: a submit still in its probe phase has already started a
+ * new load while the WebView is still fetching the old. The write is
+ * posted to the main thread and applied only if that navigation is still
+ * the tab's current load (see [mainFrameNoteApplies]).
+ */
+private fun noteMainFrameContentLoad(
+    view: WebView?,
+    state: BrowserState,
+    generation: Int,
+    url: String,
+) {
+    val root = VirtualOrigin.parseHostOfUrl(url) ?: return
+    if (root is ContentRoot.Ens) Gateways.resolveEnsRoot(root.name)
+    view?.post {
+        if (mainFrameNoteApplies(generation, state.loadGeneration)) {
+            state.ipfsLoad = ipfsLoadFor(url, state.ipfsLoad)
+        }
+    }
+}
+
+/**
+ * Whether a main-frame request made for the WebView's navigation
+ * [requestGeneration] may set the flag of the tab's load
+ * [currentGeneration]: only when they are the same load.
+ */
+internal fun mainFrameNoteApplies(requestGeneration: Int, currentGeneration: Int): Boolean =
+    requestGeneration == currentGeneration
+
+/**
+ * Whether Chromium turns the main-frame answer [response] into a new
+ * document. A 204 / 205, an attachment, or an opaque binary body ends
+ * the navigation instead, leaving the page on screen: a 204 / 205 is
+ * simply dropped, and an attachment or binary body is handed to the
+ * download listener (#79), which saves it through DownloadManager
+ * rather than rendering it. `null` — Chromium fetches it itself — is
+ * assumed to (#94, R3-F2).
+ *
+ * A best guess from the headers only: Chromium also downloads any other
+ * type it can't render (an inline `application/zip`, say), which this
+ * counts as replacing. The download listener corrects that once the
+ * answer reaches it ([BrowserState.mainFrameBecameDownload]).
+ */
+internal fun mainFrameAnswerReplacesDocument(response: WebResourceResponse?): Boolean =
+    response == null || mainFrameAnswerReplacesDocument(
+        response.statusCode,
+        response.responseHeaders,
+        response.mimeType,
+    )
+
+/** [mainFrameAnswerReplacesDocument] on the answer's parts. */
+internal fun mainFrameAnswerReplacesDocument(
+    status: Int,
+    headers: Map<String, String>?,
+    mimeType: String?,
+): Boolean {
+    if (status == 204 || status == 205) return false
+    val disposition = headers
+        ?.entries
+        ?.firstOrNull { it.key.equals("Content-Disposition", ignoreCase = true) }
+        ?.value
+    if (disposition != null && disposition.trim().lowercase().startsWith("attachment")) return false
+    return mimeType?.lowercase() != "application/octet-stream"
+}
+
+/**
+ * [response], with [onDone] run once its body is closed — or at once
+ * when there is no body to wait for — and [onReading] told when each
+ * read of the body starts (`true`) and returns (`false`).
+ */
+internal fun trackedUntilClosed(
+    response: WebResourceResponse?,
+    onReading: (Boolean) -> Unit = {},
+    onDone: () -> Unit,
+): WebResourceResponse? {
+    val body = response?.data
+    if (body == null) {
+        onDone()
+        return response
+    }
+    response.data = CloseNotifyingInputStream(body, onReading, onDone)
+    return response
+}
+
+/**
+ * Runs [onClose] once, the first time the stream is closed, and
+ * [onReading] around every read / skip (see [GatewayWork.activeBefore]).
+ */
+internal class CloseNotifyingInputStream(
+    inner: InputStream,
+    private val onReading: (Boolean) -> Unit = {},
+    private val onClose: () -> Unit,
+) : FilterInputStream(inner) {
+    private val closed = AtomicBoolean(false)
+
+    private inline fun <T> tracked(block: () -> T): T {
+        onReading(true)
+        try {
+            return block()
+        } finally {
+            onReading(false)
+        }
+    }
+
+    override fun read(): Int = tracked { super.read() }
+
+    override fun read(b: ByteArray, off: Int, len: Int): Int = tracked { super.read(b, off, len) }
+
+    override fun skip(n: Long): Long = tracked { super.skip(n) }
+
+    override fun close() {
+        try {
+            super.close()
+        } finally {
+            if (closed.compareAndSet(false, true)) onClose()
+        }
+    }
 }

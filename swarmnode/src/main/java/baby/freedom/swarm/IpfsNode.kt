@@ -64,7 +64,17 @@ class IpfsNode(
     )
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    @Volatile
     private var handle: Long = 0L
+
+    /**
+     * Guards [handle] for the binder-thread polls ([progressSnapshotJson],
+     * [diagnostics]): a poll holds it for its whole native call, and
+     * [releaseHandle] takes it only to swap the handle to 0 — so a poll
+     * never reads a handle that is being freed, and never waits on the
+     * (slow) gateway shutdown either.
+     */
+    private val handleLock = Any()
     private var statsPoller: Job? = null
 
     private val _state = MutableStateFlow(IpfsInfo())
@@ -155,9 +165,48 @@ class IpfsNode(
         }
     }
 
-    private fun releaseHandle() {
+    /**
+     * The node's live retrieval-progress snapshot (JSON, see
+     * [FreedomIpfsNative.progressSnapshotJson]), or null while the node
+     * isn't running. Blocking but cheap — a mutex-guarded copy of an
+     * in-memory ring, and [releaseHandle] never holds [handleLock] across
+     * the node's shutdown — so the browser can poll it a few times a
+     * second while an `ipfs://` / `ipns://` page loads.
+     */
+    fun progressSnapshotJson(): String? = synchronized(handleLock) {
         val node = handle
-        handle = 0L
+        if (node == 0L || _state.value.status != IpfsStatus.Running) return null
+        runCatching { FreedomIpfsNative.progressSnapshotJson(node) }
+            .onFailure { Log.w(TAG, "progressSnapshotJson threw", it) }
+            .getOrNull()
+            ?.toString(Charsets.UTF_8)
+    }
+
+    /**
+     * The node's cumulative retrieval / routing counters
+     * ([FreedomIpfsNative.diagnostics], `long[11]`), or null while the
+     * node isn't running. Unlike [progressSnapshotJson] these are plain
+     * atomics inside the node, so they tick regardless of which tracing
+     * subscriber the process ended up with.
+     */
+    fun diagnostics(): LongArray? = synchronized(handleLock) {
+        val node = handle
+        if (node == 0L || _state.value.status != IpfsStatus.Running) return null
+        runCatching { FreedomIpfsNative.diagnostics(node) }
+            .onFailure { Log.w(TAG, "diagnostics threw", it) }
+            .getOrNull()
+    }
+
+    private fun releaseHandle() {
+        // Swap under the lock, free outside it: once the swap is done no
+        // poll can pick the old handle up (and any poll that had it has
+        // finished, since it held the lock), so the slow stopGateway +
+        // nodeFree needn't block the binder threads.
+        val node = synchronized(handleLock) {
+            val old = handle
+            handle = 0L
+            old
+        }
         if (node != 0L) {
             runCatching { FreedomIpfsNative.stopGateway(node) }
                 .onFailure { Log.w(TAG, "stopGateway threw", it) }

@@ -12,6 +12,25 @@ import baby.freedom.mobile.node.INodeCallback;
 interface INodeService {
     NodeInfo getState();
     IpfsInfo getIpfsState();
+    /**
+     * The IPFS node's retrieval-progress snapshot (freedom-ipfs
+     * `progress_snapshot_json`: `{"active":[…],"events":[…]}`), or
+     * null while the node isn't running. Polled by the UI a few times
+     * a second while an `ipfs://` / `ipns://` page loads, to show which
+     * phase the fetch is in (resolving, finding providers, fetching…).
+     */
+    @nullable String getIpfsProgress();
+
+    /**
+     * The IPFS node's cumulative retrieval / routing counters
+     * (freedom-ipfs `FreedomIpfsDiagnostics` as `long[11]`: block
+     * count, total bytes, cache hits, HTTP-provider blocks, Bitswap
+     * blocks, delegated lookups / results / errors, DHT lookups /
+     * results / errors), or null while the node isn't running. The UI
+     * reads phases off their deltas when the snapshot above is empty.
+     */
+    @nullable long[] getIpfsCounters();
+
     void registerCallback(INodeCallback cb);
     void unregisterCallback(INodeCallback cb);
 
