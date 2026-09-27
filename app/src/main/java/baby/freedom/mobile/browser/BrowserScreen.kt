@@ -44,7 +44,9 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Snackbar
 import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarDuration
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.SnackbarResult
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -416,6 +418,7 @@ fun BrowserScreen(
     var showTabSwitcher by rememberSaveable { mutableStateOf(false) }
     var showHistory by rememberSaveable { mutableStateOf(false) }
     var showBookmarks by rememberSaveable { mutableStateOf(false) }
+    var showDownloads by rememberSaveable { mutableStateOf(false) }
     // Intentionally NOT `rememberSaveable`: rotation and the other
     // declared `configChanges` don't recreate the Activity (see the
     // manifest), but process death or an undeclared config change still
@@ -438,6 +441,70 @@ fun BrowserScreen(
     // text lives here until it is submitted.
     var addressQuery by remember { mutableStateOf("") }
     val snackbarHostState = remember { SnackbarHostState() }
+    // Any full-screen panel over the browser (they're all opaque).
+    val overlayShown = showSettings || showNode || showTabSwitcher ||
+        showHistory || showBookmarks || showDownloads
+    val downloads = remember(context) { DownloadManager.get(context) }
+
+    // Download notices (#79): the start, and the end with an action —
+    // Open for a finished file, the Downloads list for a failed one.
+    // Collected for the screen's lifetime, so a download that finishes
+    // while another panel (Settings, History…) is up still reports.
+    // Not while the Downloads list itself is up, though: the list shows
+    // the same start and end live, "Details" would open what's already
+    // open, and a Long snackbar would sit over the bottom row's Retry
+    // and × for ten seconds.
+    val downloadNotices = remember { DownloadNotices() }
+    LaunchedEffect(downloads) {
+        downloads.events.collect { event ->
+            if (showDownloads) {
+                downloadNotices.supersedeStart(event.id)
+                return@collect
+            }
+            when (event) {
+                is DownloadEvent.Started -> downloadNotices.show(this, event.id, start = true) {
+                    snackbarHostState.showSnackbar(
+                        "Downloading ${event.fileName}",
+                        duration = SnackbarDuration.Short,
+                    )
+                }
+                is DownloadEvent.Completed -> {
+                    downloadNotices.supersedeStart(event.id)
+                    downloadNotices.show(this, event.id) {
+                        val result = snackbarHostState.showSnackbar(
+                            "Downloaded ${event.fileName}",
+                            actionLabel = "Open",
+                            duration = SnackbarDuration.Long,
+                        )
+                        if (result == SnackbarResult.ActionPerformed) {
+                            downloads.entry(event.id)?.let { entry ->
+                                downloads.open(context, entry)?.let { snackbarHostState.showSnackbar(it) }
+                            }
+                        }
+                    }
+                }
+                is DownloadEvent.Failed -> {
+                    downloadNotices.supersedeStart(event.id)
+                    downloadNotices.show(this, event.id) {
+                        val result = snackbarHostState.showSnackbar(
+                            "Download failed: ${event.reason}",
+                            actionLabel = "Details",
+                            duration = SnackbarDuration.Long,
+                        )
+                        if (result == SnackbarResult.ActionPerformed) showDownloads = true
+                    }
+                }
+            }
+        }
+    }
+
+    // …and when the list opens, every download notice goes — the one
+    // on screen and those queued behind it: the list has the same news,
+    // they'd cover its bottom row, and they'd hold up the list's own
+    // messages. Other snackbars aren't download news and stay.
+    LaunchedEffect(showDownloads) {
+        if (showDownloads) downloadNotices.cancelAll()
+    }
 
     val state = tabs.active
     val isBookmarked by repo.isBookmarked(state.url).collectAsState(initial = false)
@@ -609,6 +676,11 @@ fun BrowserScreen(
             focusManager.clearFocus()
             addressBarEdited = false
         }
+
+        // The user navigating the tab themselves (an address, a reload)
+        // lifts a download block a declined offer left on it
+        // ([DownloadOffers]); a page's own navigation doesn't.
+        if (source == SubmitSource.User) downloads.allowOffers(target.id)
 
         // Any new submit supersedes a probe that was still in flight on
         // this tab — otherwise switching URL mid-probe would let the
@@ -825,6 +897,7 @@ fun BrowserScreen(
         showTabSwitcher = false
         showHistory = false
         showBookmarks = false
+        showDownloads = false
         submit(tabs.newTab(), url)
         onDeepLinkHandled()
     }
@@ -1276,6 +1349,7 @@ fun BrowserScreen(
                     onOpenTabs = { showTabSwitcher = true },
                     onOpenHistory = { showHistory = true },
                     onOpenBookmarks = { showBookmarks = true },
+                    onOpenDownloads = { showDownloads = true },
                     onReload = {
                         val url = state.url.ifBlank { state.addressBarText }
                         if (url.isNotBlank()) submit(state, url)
@@ -1316,13 +1390,18 @@ fun BrowserScreen(
         // tracking the capsule's *slot* rather than its drawn height, so
         // they follow the editing morph as the bar inflates but sit
         // perfectly still when it compacts on scroll.
-        SnackbarHost(
-            hostState = snackbarHostState,
-            modifier = Modifier
-                .align(Alignment.BottomCenter)
-                .windowInsetsPadding(chromeInsets)
-                .padding(bottom = capsuleSlot + CapsuleBottomMargin),
-        ) { data -> Snackbar(snackbarData = data) }
+        // …unless a full-screen panel is up: it's opaque and composed
+        // after this Box, so a host here would draw every snackbar under
+        // it. The host then moves above the panels (see below).
+        if (!overlayShown) {
+            SnackbarHost(
+                hostState = snackbarHostState,
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .windowInsetsPadding(chromeInsets)
+                    .padding(bottom = capsuleSlot + CapsuleBottomMargin),
+            ) { data -> Snackbar(snackbarData = data) }
+        }
     }
 
     if (showSettings) {
@@ -1378,6 +1457,83 @@ fun BrowserScreen(
                 submit(state, url)
             },
         )
+    }
+
+    // Nothing a page asks to download is saved without a yes here: the
+    // listener fires for script-driven downloads too, with no tap.
+    // Only the tab in view asks — a background tab's offers wait until
+    // the user switches to it — and a no blocks that tab's pages from
+    // asking again until the user navigates it ([DownloadOffers]), so a
+    // page firing downloads in a loop can't hold the browser behind
+    // this modal prompt.
+    val downloadOffers by downloads.offers.collectAsState()
+    val droppedOffers by downloads.droppedOffers.collectAsState()
+    val activeTabId = tabs.active.id
+    val tabOffers = downloadOffers.filter { it.tabId == activeTabId }
+    tabOffers.firstOrNull()?.let { offer ->
+        DownloadOfferDialog(
+            offer = offer,
+            othersWaiting = tabOffers.size - 1,
+            dropped = droppedOffers[activeTabId] ?: 0,
+            onAccept = { downloads.accept(offer.key) },
+            onDecline = { downloads.decline(offer.key) },
+            onDeclineAll = { downloads.declineAll(activeTabId) },
+        )
+    }
+    // A background tab that has filled its own queue and is still
+    // asking is invisible from here (its prompt waits until it's in
+    // view), so say so once per episode instead of dropping silently.
+    // The active tab needs no snackbar: its prompt carries the note.
+    // It's a download notice, so opening the Downloads list withdraws
+    // it and none is shown while the list is up (a tab that starts
+    // dropping then, or whose notice the list withdrew, is announced
+    // once it closes — the list itself doesn't show drops). Launched in the
+    // screen's [scope], not this effect's, so another tab starting to
+    // drop (which restarts the effect) can't cancel it.
+    LaunchedEffect(droppedOffers.keys, showDownloads) {
+        if (showDownloads) return@LaunchedEffect
+        downloadNotices.announceDrops(scope, droppedOffers.keys, tabs.active.id) { tabId ->
+            val result = snackbarHostState.showSnackbar(
+                "A background tab is asking for more downloads than can wait; extras are dropped",
+                actionLabel = "Show",
+                duration = SnackbarDuration.Long,
+            )
+            if (result == SnackbarResult.ActionPerformed) {
+                val index = tabs.tabs.indexOfFirst { it.id == tabId }
+                if (index >= 0) tabs.switchTo(index)
+            }
+        }
+    }
+    // A closed tab's offers (and block) go with it.
+    val openTabIds = tabs.tabs.map { it.id }.toSet()
+    LaunchedEffect(openTabIds) { downloads.retainOfferTabs(openTabIds) }
+
+    if (showDownloads) {
+        DownloadsScreen(
+            downloads = downloads,
+            onDismiss = { showDownloads = false },
+            onOpen = { entry ->
+                scope.launch {
+                    downloads.open(context, entry)?.let { snackbarHostState.showSnackbar(it) }
+                }
+            },
+        )
+    }
+
+    // Snackbars over a full-screen panel (Downloads' open() failures
+    // and retry outcomes, a download finishing while Settings is up):
+    // composed after the panels so they're drawn on top, at the bottom
+    // edge clear of the navigation bar. The Box doesn't take touches.
+    if (overlayShown) {
+        Box(modifier = Modifier.fillMaxSize()) {
+            SnackbarHost(
+                hostState = snackbarHostState,
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .windowInsetsPadding(WindowInsets.systemBars)
+                    .padding(bottom = 8.dp),
+            ) { data -> Snackbar(snackbarData = data) }
+        }
     }
 
     // HTML5 fullscreen. Last, so it paints over every overlay above.
