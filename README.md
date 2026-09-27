@@ -129,6 +129,17 @@ Freedom handles this in two layers:
 
 Unlike the Electron-based desktop port, Android WebView does not allow registering a custom `bzz:` scheme as a first-class origin (there is no `session.protocol.handle` equivalent). So the WebView loads the gateway URL directly (`http://127.0.0.1:1633/bzz/<hash>/…`) and `BrowserState.currentBzzRoot` tracks the active root so the interceptor can rewrite absolute-root paths at request time.
 
+## Ad and tracker blocking
+
+Settings → **Ad blocking** switches four filter-list categories, as on desktop and iOS: **ads** (EasyList) and **trackers** (EasyPrivacy) on by default, **cookie notices** (Fanboy's Cookiemonster) and **other annoyances** (Fanboy's Annoyances) opt-in. The page menu's **Block ads on this site** switch allowlists the current site (and its subdomains) and reloads it; Settings lists the allowlist, and adds and removes sites. A private tab's allowlisting lasts for the private session only.
+
+- **Lists** ship in `app/src/main/assets/adblock/`, unmodified; refresh them with `python3 infra/adblock/vendor-lists.py` before a release. There is no over-the-air update channel on Android yet.
+- **Engine** (`AdblockEngine.kt`): Adblock Plus syntax compiled on the device off the main thread at startup (~0.5 s for the default lists in a release build); requests go through unfiltered until it is ready. `||host^` rules sit in a hash set, other patterns in a token index, so a lookup costs microseconds.
+- **Requests** are blocked in `shouldInterceptRequest` with an empty `403` — never a main-frame navigation, the local node gateways, or a virtual dweb origin. Service-worker fetches aren't filtered (they reach no tab's interceptor).
+- **Cosmetic filtering** (`AdblockCosmetic.kt`): a document-start script asks for its frame's element-hiding CSS over a message channel and reports the class and id names it sees, so generic rules are sent only for names a page actually uses. The CSS is applied as constructed stylesheets (not subject to the page's CSP). Procedural selectors, scriptlets and `$redirect` / `$csp` / `$removeparam` filters are not supported, and filters using them are skipped.
+
+Filter list data is © the list authors, dual-licensed GPLv3+ / CC BY-SA 3.0+, and redistributed under CC BY-SA (see `app/src/main/assets/adblock/README.md`).
+
 ## Project layout
 
 ```

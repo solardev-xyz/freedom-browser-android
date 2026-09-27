@@ -1446,6 +1446,14 @@ fun BrowserScreen(
         // asks for and strictly better at "no layout shifts" — an
         // overlay on fixed geometry can't move anything, whereas the
         // strip's reserved slot was 14 dp of permanently dead band.
+        // The page menu's per-site ad-blocking switch (#126): the site
+        // the tab is on, and whether blocking is on there — re-read
+        // whenever the allowlist or the engine changes.
+        val adblockRevision by Adblock.revision.collectAsState()
+        val adblockSite = adblockSiteFor(state.url)
+        val adblockBlocking = remember(adblockRevision, adblockSite, state.private) {
+            adblockSite != null && !Adblock.isAllowlisted(adblockSite, state.private)
+        }
         Box(modifier = Modifier.align(Alignment.BottomCenter)) {
             // Tap-to-dismiss catcher for the whole chrome band — the
             // capsule's own gutters, the side margins and the padding
@@ -1603,6 +1611,16 @@ fun BrowserScreen(
                         ?.let { pageZoom.levelFor(it, state.private) },
                     onZoom = { action -> state.zoomSite?.let { pageZoom.apply(it, action, state.private) } },
                     onPrint = { tabs.printPage?.invoke(state) },
+                    adblockSite = adblockSite,
+                    adblockBlocking = adblockBlocking,
+                    onToggleAdblock = {
+                        val site = adblockSite ?: return@BottomToolbar
+                        Adblock.setAllowlisted(context, site, allowed = adblockBlocking, private = state.private)
+                        // Already-loaded ads (or already-blocked content)
+                        // only change with the next load of the page.
+                        val url = state.url.ifBlank { state.addressBarText }
+                        if (url.isNotBlank()) submit(state, url)
+                    },
                     modifier = Modifier
                         .widthIn(max = CHROME_MAX_WIDTH)
                         .fillMaxWidth(),

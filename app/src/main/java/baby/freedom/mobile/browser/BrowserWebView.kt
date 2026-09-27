@@ -77,6 +77,7 @@ import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.math.abs
 import kotlin.math.roundToInt
 
@@ -636,6 +637,7 @@ fun BrowserWebViewHost(
     fun endPrivateSession() {
         PrivateProfile.discard()
         sitePermissions.onPrivateSessionEnded()
+        Adblock.onPrivateSessionEnded()
         pageZoom.clearPrivate()
         DownloadManager.get(context).endPrivateSession()
     }
@@ -1897,6 +1899,15 @@ private fun buildRefreshableWebView(
             WebViewCompat.addDocumentStartJavaScript(this, bottomUiDetectorJs(channel), BOTTOM_UI_ORIGIN_RULES)
         }
 
+        // Ad blocking (#126): the tab's top-level document, as the
+        // request interceptor (a WebView IO thread) last saw its
+        // main-frame request and onPageStarted last saw it commit — the
+        // page the network filters' `third-party` / `domain=` options
+        // and the allowlist are judged against. The cosmetic channel
+        // reads it on the main thread.
+        val adblockPage = AtomicReference<String?>(null)
+        AdblockCosmetic.install(this, state.private) { adblockPage.get() }
+
         // Force an initial paint so the WebView's compositor surface
         // is valid even before the user submits a URL. Not for a popup:
         // Chromium rejects (crashes on) a popup WebView that has already
@@ -2066,6 +2077,8 @@ private fun buildRefreshableWebView(
             }
 
             override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
+                // A page back from the back/forward cache made no request.
+                url?.let(adblockPage::set)
                 // The pending navigation committed; it's no download.
                 pendingNavigationUrls.clear()
                 navigationHadGesture = false
@@ -2584,7 +2597,10 @@ private fun buildRefreshableWebView(
             ): WebResourceResponse? {
                 val mainFrame = request?.isForMainFrame == true
                 if (mainFrame) {
-                    request!!.url?.toString()?.let(pendingNavigationUrls::add)
+                    request!!.url?.toString()?.let {
+                        pendingNavigationUrls.add(it)
+                        adblockPage.set(it)
+                    }
                 }
                 // Tagged with the load it belongs to, and open until
                 // Chromium closes the body, so the IPFS phase line can
@@ -2605,6 +2621,18 @@ private fun buildRefreshableWebView(
                 ) {
                     request.url?.toString()?.let(VirtualOrigin::parseHostOfUrl)
                         ?.let(VirtualOrigin::originFor)?.let(view.documents::requested)
+                }
+                // Ad and tracker blocking (#126): a subresource the
+                // enabled filter lists name, unless the page's site is
+                // allowlisted. Never a navigation, a local gateway or a
+                // virtual origin (see [Adblock.shouldBlock]).
+                if (!mainFrame && request != null) {
+                    val url = request.url?.toString()
+                    if (url != null &&
+                        Adblock.shouldBlock(url, request.requestHeaders, adblockPage.get(), state.private)
+                    ) {
+                        return Adblock.blockedResponse()
+                    }
                 }
                 val work = state.gatewayWork.start(generation)
                 val response = try {

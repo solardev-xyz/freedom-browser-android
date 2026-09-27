@@ -37,7 +37,10 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.LocationOn
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Videocam
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Cookie
+import androidx.compose.material.icons.filled.Public
+import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.filled.DeleteForever
 import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.History
@@ -88,6 +91,8 @@ import kotlinx.coroutines.launch
  *
  *  0. **Search** — the address bar's search engine: the desktop set
  *     ([SearchEngines.BUILT_IN]) or a custom template (#87).
+ *  ½. **Ad blocking** — the filter-list categories and the sites ad
+ *     blocking is off for (#126, [Adblock]).
  *  1. **Browsing data** — wipe history, bookmarks, and WebView cookies /
  *     site storage / per-tab caches. Each action is guarded by a
  *     confirmation dialog.
@@ -140,6 +145,11 @@ fun SettingsScreen(
     val externalSwarm by settings.externalSwarmEndpoint.collectAsState(initial = "")
     val externalIpfs by settings.externalIpfsGateway.collectAsState(initial = "")
     var editEndpoint by remember { mutableStateOf<NodeEndpoint?>(null) }
+    val adblockCategories by settings.adblockCategories
+        .collectAsState(initial = AdblockCategory.entries.filterTo(LinkedHashSet()) { it.enabledByDefault })
+    val adblockAllowlist by settings.adblockAllowlist.collectAsState(initial = emptyList())
+    val adblockStatus by Adblock.status.collectAsState()
+    var addAllowlistSite by remember { mutableStateOf(false) }
 
     var confirmClearHistory by remember { mutableStateOf(false) }
     var confirmClearBookmarks by remember { mutableStateOf(false) }
@@ -158,6 +168,9 @@ fun SettingsScreen(
     val searchRows = visibleSettingsRows(
         query, SECTION_SEARCH, searchSectionRows(searchEngine, customSearchTemplate),
     )
+    val adblockRows = visibleSettingsRows(
+        query, SECTION_ADBLOCK, adblockSectionRows(adblockCategories, adblockAllowlist),
+    )
     val browsingRows = visibleSettingsRows(
         query, SECTION_BROWSING, browsingDataRows(history.size, bookmarks.size),
     )
@@ -175,7 +188,7 @@ fun SettingsScreen(
         visibleSettingsRows(query, SECTION_IPFS, ipfsRows(ipfsInfo))
     } else emptySet()
     val nothingMatches = listOf(
-        searchRows, browsingRows, permissionRows, nodeRows, aboutRows, otherRows, ipfsRows,
+        searchRows, adblockRows, browsingRows, permissionRows, nodeRows, aboutRows, otherRows, ipfsRows,
     ).all { it.isEmpty() }
 
     // A new query starts the results from the top, so the first match
@@ -205,6 +218,21 @@ fun SettingsScreen(
                         engineId = searchEngine,
                         customTemplate = customSearchTemplate,
                         onClick = { pickSearchEngine = true },
+                    )
+                }
+                if (adblockRows.isNotEmpty()) item("adblock") {
+                    AdblockSection(
+                        visible = adblockRows,
+                        enabled = adblockCategories,
+                        allowlist = adblockAllowlist,
+                        status = adblockStatus,
+                        onToggle = { category, on ->
+                            scope.launch { settings.setAdblockCategory(category, on) }
+                        },
+                        onRemoveSite = { site ->
+                            Adblock.removeAllowlisted(context, site)
+                        },
+                        onAddSite = { addAllowlistSite = true },
                     )
                 }
                 if (browsingRows.isNotEmpty()) item("browsing") {
@@ -294,6 +322,15 @@ fun SettingsScreen(
             onDismiss = { editEndpoint = null },
         )
     }
+    if (addAllowlistSite) {
+        AllowlistSiteDialog(
+            onAdd = { site ->
+                Adblock.setAllowlisted(context, site, allowed = true, private = false)
+                addAllowlistSite = false
+            },
+            onDismiss = { addAllowlistSite = false },
+        )
+    }
     if (confirmClearHistory) {
         ConfirmDialog(
             title = "Clear history?",
@@ -334,6 +371,7 @@ fun SettingsScreen(
 }
 
 private const val SECTION_SEARCH = "Search"
+private const val SECTION_ADBLOCK = "Ad blocking"
 private const val SECTION_BROWSING = "Browsing data"
 private const val SECTION_PERMISSIONS = "Site permissions"
 private const val SECTION_NODES = "Nodes"
@@ -740,6 +778,155 @@ private fun endpointHint(rejection: ExternalEndpoints.Rejection): String = when 
     ExternalEndpoints.Rejection.SCHEME -> "Needs http:// or https://"
     ExternalEndpoints.Rejection.QUERY_OR_FRAGMENT -> "Remove the ? or # part"
     ExternalEndpoints.Rejection.CREDENTIALS -> "Remove the user name or password before the host"
+}
+
+private const val ADBLOCK_ALLOWLIST_EMPTY =
+    "Sites you allow ads on — from the page menu, or with Add site — appear here. Blocking is off for them and their subdomains."
+private const val ADBLOCK_ADD_SITE = "Add site"
+private const val ADBLOCK_ADD_SITE_SUBTITLE = "Turn ad blocking off for a site"
+private const val ADBLOCK_CREDITS =
+    "Filter lists: EasyList, EasyPrivacy and Fanboy's lists (easylist.to), © their authors, used under CC BY-SA 3.0. Changes apply to pages as they next load."
+
+/** The line under a category: its list, and while it's on, how the engine is doing. */
+internal fun adblockCategorySubtitle(category: AdblockCategory, on: Boolean, status: AdblockStatus): String =
+    if (on && status.loading) "${category.listName} · loading…" else category.listName
+
+private fun adblockSectionRows(enabled: Set<AdblockCategory>, allowlist: List<String>) = buildList {
+    for (category in AdblockCategory.entries) {
+        add(settingsRow(category, category.title, category.listName, if (category in enabled) "On" else "Off"))
+    }
+    add(settingsRow("allowlist-add", ADBLOCK_ADD_SITE, ADBLOCK_ADD_SITE_SUBTITLE, "allowlist", "allowed sites"))
+    if (allowlist.isEmpty()) {
+        add(settingsRow("allowlist-empty", ADBLOCK_ALLOWLIST_EMPTY))
+    } else {
+        for (site in allowlist) add(settingsRow("site:$site", site, "Ads allowed", "allowlist"))
+    }
+    add(settingsRow("credits", ADBLOCK_CREDITS))
+}
+
+/**
+ * Ad blocking (#126): a switch per filter-list category, the sites
+ * blocking is off for (each removable, and "Add site" for one typed in),
+ * and the lists' attribution. Every string is shown whole and wraps —
+ * a site's name is never cut.
+ */
+@Composable
+private fun AdblockSection(
+    visible: Set<Any>,
+    enabled: Set<AdblockCategory>,
+    allowlist: List<String>,
+    status: AdblockStatus,
+    onToggle: (AdblockCategory, Boolean) -> Unit,
+    onRemoveSite: (String) -> Unit,
+    onAddSite: () -> Unit,
+) {
+    SectionCard(title = SECTION_ADBLOCK) {
+        for (category in AdblockCategory.entries) {
+            if (category !in visible) continue
+            val on = category in enabled
+            PageRow(
+                title = category.title,
+                subtitle = adblockCategorySubtitle(category, on, status),
+                style = PageRowStyle.Inset,
+                leadingIcon = Icons.Filled.Shield,
+                onClick = { onToggle(category, !on) },
+                trailing = {
+                    Switch(checked = on, onCheckedChange = { onToggle(category, it) })
+                },
+            )
+        }
+        if ("allowlist-add" in visible) PageRow(
+            title = ADBLOCK_ADD_SITE,
+            subtitle = ADBLOCK_ADD_SITE_SUBTITLE,
+            style = PageRowStyle.Inset,
+            leadingIcon = Icons.Filled.Add,
+            onClick = onAddSite,
+        )
+        if (allowlist.isEmpty() && "allowlist-empty" in visible) {
+            Text(
+                ADBLOCK_ALLOWLIST_EMPTY,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+            )
+        }
+        for (site in allowlist) {
+            if ("site:$site" !in visible) continue
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(start = 12.dp, top = 2.dp, bottom = 2.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(
+                    Icons.Filled.Public,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onSurface,
+                )
+                Spacer(Modifier.width(12.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(site, fontWeight = FontWeight.Medium)
+                    Text(
+                        "Ads allowed",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                IconButton(onClick = { onRemoveSite(site) }) {
+                    Icon(
+                        Icons.Filled.Close,
+                        contentDescription = "Block ads on $site again",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+        }
+        if ("credits" in visible) {
+            Text(
+                ADBLOCK_CREDITS,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+            )
+        }
+    }
+}
+
+/** A host or URL to allow ads on; Add stays disabled until it is one ([normalizeAllowlistHost]). */
+@Composable
+private fun AllowlistSiteDialog(onAdd: (String) -> Unit, onDismiss: () -> Unit) {
+    var draft by remember { mutableStateOf("") }
+    val host = normalizeAllowlistHost(draft)
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Allow ads on a site") },
+        text = {
+            NoSuggestionsTextInput {
+                OutlinedTextField(
+                    value = draft,
+                    onValueChange = { draft = it },
+                    label = { Text("Site") },
+                    placeholder = { Text("example.com") },
+                    isError = draft.isNotBlank() && host == null,
+                    supportingText = {
+                        Text(
+                            if (draft.isNotBlank() && host == null) "Not a site: e.g. example.com"
+                            else "Its subdomains are included.",
+                        )
+                    },
+                    singleLine = true,
+                    keyboardOptions = urlKeyboardOptions(),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = { host?.let(onAdd) }, enabled = host != null) { Text("Add") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Cancel") }
+        },
+    )
 }
 
 private const val ROW_CLEAR_HISTORY = "Clear history"

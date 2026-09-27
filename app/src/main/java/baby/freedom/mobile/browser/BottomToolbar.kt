@@ -45,6 +45,7 @@ import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Print
+import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Remove
 import androidx.compose.material.icons.filled.Search
@@ -62,6 +63,7 @@ import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -78,6 +80,7 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.drawWithCache
+import androidx.compose.ui.draw.scale
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
@@ -105,11 +108,15 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.isTraversalGroup
+import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.toggleableState
 import androidx.compose.ui.semantics.traversalIndex
+import androidx.compose.ui.state.ToggleableState
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
@@ -1415,6 +1422,11 @@ internal fun BottomToolbar(
     onStop: () -> Unit,
     onNewTab: () -> Unit,
     onPrint: () -> Unit,
+    /** The site the page menu's ad-blocking switch is for (#126), or null to leave it out. */
+    adblockSite: String? = null,
+    /** Whether ads are blocked on [adblockSite] (it isn't allowlisted). */
+    adblockBlocking: Boolean = false,
+    onToggleAdblock: () -> Unit = {},
     /** "New private tab" (#86); null where private tabs can't run, and the menu doesn't offer it. */
     onNewPrivateTab: (() -> Unit)? = null,
     onExpandCapsule: () -> Unit,
@@ -1698,6 +1710,9 @@ internal fun BottomToolbar(
                     zoomLevel = zoomLevel,
                     onZoom = onZoom,
                     onPrint = onPrint,
+                    adblockSite = adblockSite,
+                    adblockBlocking = adblockBlocking,
+                    onToggleAdblock = onToggleAdblock,
                 )
             },
             modifier = Modifier
@@ -2908,6 +2923,9 @@ private fun OverflowMenuButton(
     zoomLevel: Int?,
     onZoom: (ZoomAction) -> Unit,
     onPrint: () -> Unit,
+    adblockSite: String?,
+    adblockBlocking: Boolean,
+    onToggleAdblock: () -> Unit,
 ) {
     var menuExpanded by remember { mutableStateOf(false) }
     // We hand-roll the anchor positioning rather than rely on
@@ -3052,6 +3070,31 @@ private fun OverflowMenuButton(
                                 onPrint()
                             },
                         )
+                        // Ad blocking on this site (#126): the switch shows
+                        // the site's state; a tap allowlists it (or lifts
+                        // that) and reloads the page. Only on a web page.
+                        if (adblockSite != null) {
+                            DropdownMenuItem(
+                                text = { MenuItemLabel("Block ads on this site") },
+                                leadingIcon = { Icon(Icons.Filled.Shield, contentDescription = null) },
+                                trailingIcon = {
+                                    Switch(
+                                        checked = adblockBlocking,
+                                        onCheckedChange = null,
+                                        modifier = Modifier.scale(0.8f),
+                                    )
+                                },
+                                onClick = {
+                                    menuExpanded = false
+                                    onToggleAdblock()
+                                },
+                                // Read out as the switch it looks like.
+                                modifier = Modifier.semantics {
+                                    role = Role.Switch
+                                    toggleableState = ToggleableState(adblockBlocking)
+                                },
+                            )
+                        }
                         DropdownMenuItem(
                             text = { MenuItemLabel("History") },
                             leadingIcon = { Icon(Icons.Filled.History, contentDescription = null) },
