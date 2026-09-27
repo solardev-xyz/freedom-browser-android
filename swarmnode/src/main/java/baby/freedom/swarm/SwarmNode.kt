@@ -1,6 +1,7 @@
 package baby.freedom.swarm
 
 import android.util.Log
+import java.io.File
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -63,7 +64,11 @@ class SwarmNode(
         scope.launch {
             try {
                 val h = withContext(Dispatchers.IO) {
-                    val h = AntNative.init(config.dataDir + "/ant")
+                    val antDir = config.dataDir + "/ant"
+                    // Give a fresh install dialable bootnodes even if
+                    // ant's own port-53 dnsaddr lookup is blocked.
+                    BootnodeSeeder.seedIfEmpty(File(antDir))
+                    val h = AntNative.init(antDir)
                     try {
                         AntNative.startGateway(
                             handle = h,
