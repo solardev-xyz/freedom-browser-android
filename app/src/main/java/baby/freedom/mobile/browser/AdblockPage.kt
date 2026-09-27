@@ -6,11 +6,20 @@ package baby.freedom.mobile.browser
  * exceptions, `third-party` and `domain=` are about.
  *
  * That is the committed document ([committed], `onPageStarted`) — except
- * in the short window between a main-frame answer that will replace it
- * going out ([answered], interceptor thread) and that commit reaching
- * the UI thread: Chromium starts the incoming document's subresource
- * fetches as soon as it has the answer, before the posted
+ * in the short window between the browser's own main-frame answer that
+ * will replace it going out ([answered], interceptor thread) and that
+ * commit reaching the UI thread: Chromium starts the incoming document's
+ * subresource fetches as soon as it has the answer, before the posted
  * `onPageStarted` runs, so those are judged against the incoming page.
+ *
+ * Only an answer in hand opens that window. A navigation the WebView
+ * fetches from the network itself (the interceptor answers null) has no
+ * answer yet when it's asked — the page on screen stays up, and keeps
+ * making requests, for the destination's whole time to first byte — so
+ * it changes nothing here until it commits (R2-F1). Its own first
+ * subresources can reach the interceptor just before the posted
+ * `onPageStarted` and are judged against the page before it; WebView
+ * reports nothing earlier about a network commit.
  *
  * A navigation that never commits — it became a download, a 204, a hop
  * cancelled as a link to another app, a Stop — leaves the page on screen
@@ -32,10 +41,13 @@ internal class AdblockPage {
     /**
      * The main-frame answer for [url] is going to Chromium.
      * [replacesDocument] false (a 204, an attachment): nothing commits.
+     * [fetchedByWebView] (the interceptor answered null): the answer
+     * itself is still to come from the network, and the page on screen
+     * stays the page until it commits.
      */
     @Synchronized
-    fun answered(url: String, replacesDocument: Boolean) {
-        if (replacesDocument) incoming = url
+    fun answered(url: String, replacesDocument: Boolean, fetchedByWebView: Boolean = false) {
+        if (replacesDocument && !fetchedByWebView) incoming = url
     }
 
     /** A redirect hop of the pending navigation, to [url]. */

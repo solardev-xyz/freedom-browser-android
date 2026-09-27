@@ -20,6 +20,17 @@ class AdblockPageTest {
     }
 
     @Test
+    fun `a navigation the WebView fetches itself leaves the page on screen until it commits`() {
+        val p = onA()
+        p.answered(b, replacesDocument = true, fetchedByWebView = true)
+        assertEquals(a, p.current())
+        p.redirected("https://elsewhere.example/")
+        assertEquals(a, p.current())
+        p.committed("https://elsewhere.example/")
+        assertEquals("https://elsewhere.example/", p.current())
+    }
+
+    @Test
     fun `an answer that replaces nothing leaves the page on screen`() {
         val p = onA()
         p.answered("http://127.0.0.1:8711/file.zip", replacesDocument = false)

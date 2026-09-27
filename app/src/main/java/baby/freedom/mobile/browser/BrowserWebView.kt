@@ -1901,8 +1901,9 @@ private fun buildRefreshableWebView(
         // Ad blocking (#126): the tab's top-level document — the page
         // the network filters' `third-party` / `domain=` options and the
         // allowlist are judged against. The committed one, or one whose
-        // answer just went out and is about to commit; never one a
-        // navigation that didn't commit was headed for (see [AdblockPage]).
+        // answer the browser itself just handed over and is about to
+        // commit; never one a navigation still waiting on the network, or
+        // one that didn't commit, was headed for (see [AdblockPage]).
         // The cosmetic channel reads it on the main thread.
         val adblockPage = AdblockPage()
         AdblockCosmetic.install(this, state.private) { adblockPage.current() }
@@ -2660,7 +2661,11 @@ private fun buildRefreshableWebView(
                     )
                     val replaces = mainFrameAnswerReplacesDocument(response)
                     state.mainFrameAnswered(generation, replaces)
-                    adblockPage.answered(request!!.url.toString(), replaces)
+                    adblockPage.answered(
+                        request!!.url.toString(),
+                        replaces,
+                        fetchedByWebView = response == null,
+                    )
                     if (replaces && view is PageWebView) {
                         view.documents.mainFrameAnswered(request!!.url.toString())
                     }
