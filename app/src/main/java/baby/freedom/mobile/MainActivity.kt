@@ -152,6 +152,8 @@ class MainActivity : ComponentActivity() {
                         deepLinkUrl = deepLink,
                         onDeepLinkHandled = { deepLinkFlow.value = null },
                         onRecoverNodes = ::onRecoverNodes,
+                        ipfsProgressSnapshot = ::ipfsProgressSnapshot,
+                        ipfsCounters = ::ipfsCounters,
                     )
                 }
             }
@@ -268,6 +270,19 @@ class MainActivity : ComponentActivity() {
     private fun onEnsureIpfsStarted() {
         runCatching { binder?.ensureIpfsStarted() }
     }
+
+    /**
+     * The `:node` IPFS node's retrieval-progress snapshot (JSON), for
+     * the chrome's IPFS phase line (#94). Null while unbound or while
+     * the node isn't running. A blocking binder call — the caller polls
+     * it from `Dispatchers.IO`.
+     */
+    private fun ipfsProgressSnapshot(): String? =
+        runCatching { binder?.ipfsProgress }.getOrNull()
+
+    /** The IPFS node's retrieval / routing counters, same terms as above. */
+    private fun ipfsCounters(): LongArray? =
+        runCatching { binder?.ipfsCounters }.getOrNull()
 
     /**
      * Handle the user flipping the "IPFS" toggle in Settings. Starts

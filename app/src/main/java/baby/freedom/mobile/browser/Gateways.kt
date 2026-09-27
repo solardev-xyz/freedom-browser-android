@@ -248,7 +248,7 @@ object Gateways {
      * uses the resolver's own TTL cache after the first call. Blocking
      * is fine — the interceptor never runs on the UI thread.
      */
-    private fun resolveEnsRoot(name: String): ContentRoot? {
+    internal fun resolveEnsRoot(name: String): ContentRoot? {
         KnownEnsNames.uriFor(name)?.let { uri ->
             VirtualOrigin.parseContentUrl(uri)?.let { return it.first }
         }

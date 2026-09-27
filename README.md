@@ -107,7 +107,12 @@ curl http://127.0.0.1:1633/status      # beeMode=ultra-light, ...
 
 ### DHT bootstrap
 
-Swarm's default bootnode is `/dnsaddr/mainnet.ethswarm.org`, which requires multi-step TXT-record resolution — something mobile DNS stacks routinely fumble (the old bee-lite integration needed hard-coded pre-resolved multiaddrs for exactly this reason). ant's dnsaddr resolver walks the whole TXT tree itself and appends Cloudflare's `1.1.1.1` as a fallback nameserver whenever the system resolver config is unreadable — which is always the case on Android — so bootstrap works out of the box on the emulator, no pre-resolved bootnode list required.
+Swarm's default bootnode is `/dnsaddr/mainnet.ethswarm.org`, which requires multi-step TXT-record resolution — something mobile DNS stacks routinely fumble (the old bee-lite integration needed hard-coded pre-resolved multiaddrs for exactly this reason). ant's dnsaddr resolver walks the whole TXT tree itself, over plain DNS. On Android it can't read the system resolver config, so every lookup goes to Cloudflare's `1.1.1.1:53`. That works on the emulator and most networks, but a network that blocks or hijacks outbound port 53 leaves a fresh install with zero peers. `ant_init` takes no bootnode list, so `BootnodeSeeder` (in `swarmnode`) covers that case through ant's peerstore instead. Before `ant_init`, if `<dataDir>/ant/peers.json` is missing or empty, it:
+
+1. walks the same TXT tree over DNS-over-HTTPS (`https://1.1.1.1/dns-query`, an IP literal, so it needs no DNS; 3 s total, 2 s per query), as freedom-browser-ios did before it moved to ant;
+2. otherwise falls back to the shipped `FALLBACK_BOOTNODES` (the plain-TCP leaves of every regional record, captured with `dig`);
+
+and writes the result as ant's peerstore snapshot. ant warm-dials those entries before its own DNS bootstrap, and replaces them with real peers on its next flush. Once `peers.json` has entries (every launch after the first successful one), nothing is fetched and startup isn't delayed.
 
 ## Swarm content retrieval
 
