@@ -28,8 +28,10 @@ import org.json.JSONTokener
  *
  *  1. **Anchor.** Ask up to three RPC providers for chain id (must be
  *     mainnet) and head level. A provider whose head block is more than
- *     [STALE_HEAD_AGE_MS] old is *stuck*, not disagreeing: it sits out
- *     the round entirely (see [resolveUncached]). Of the rest,
+ *     [STALE_HEAD_AGE_MS] behind the newest head time a strict majority
+ *     of providers reports is *stuck*, not disagreeing: it sits out the
+ *     round entirely (see [resolveUncached]). Neither the device clock
+ *     nor any one provider's timestamp decides that. Of the rest,
  *     drop heads more than [MAX_HEAD_LAG_BLOCKS] from the median, then
  *     have each remaining provider name the hash
  *     of one shared block [ANCHOR_DEPTH] below the lowest head. Every
@@ -152,53 +154,45 @@ class TezosDomainsResolver internal constructor(
 
         // A provider whose head is hours old is a stuck node, not a
         // provider that disagrees about the chain: comparing its head with
-        // a live one leaves no majority, and the median of two is the
-        // stale one — so it would push the *healthy* provider out and the
-        // name would be refused. Stuck is judged by the block's own
-        // timestamp against the device clock, which a lying provider
-        // can't make an honest, live one fail. Unless the clock is
-        // plainly wrong, and then age is measured from the newest head
-        // instead, so a clearly-behind provider still sits out:
-        //  - every head looks stale: the clock is fast, or every reachable
-        //    provider is stuck (the newest is then only *less* stuck —
-        //    no telling which, but it's still the best answer there is);
-        //  - a head is further in the future than a live chain can be
-        //    (Tezos nodes don't take blocks from the future): the clock
-        //    is slow — or that provider is lying. A liar can claim any
-        //    timestamp, so the newest head may only set aside strictly
-        //    fewer heads than it keeps: two honest heads outvote one from
-        //    the future, and one against one stays judged by the clock —
-        //    a slow clock and a stuck provider look exactly like a live
-        //    provider and a liar, so the round refuses rather than
-        //    picking a side.
+        // live ones leaves no majority, and a median can land on the stale
+        // one — so it would push the *healthy* providers out and the name
+        // would be refused. But a head's timestamp is the provider's own
+        // claim, so no single one may decide who is stuck: age is measured
+        // from the newest time a strict majority of the reachable providers
+        // report (the lowest of that majority's heads). A liar can then
+        // only set itself aside — claiming a head from the future can't
+        // raise the reference past an honest majority, and one against one
+        // the reference is the older head, so nothing is set aside and a
+        // disagreement between the two stays a Conflict.
+        // The device clock is never the reference: it is off by hours on
+        // phones often enough (no NTP, set by hand), and then it would be
+        // the lone "vote" that sets honest providers aside. It is only a
+        // sanity check, logged when the providers' consensus disagrees
+        // with it — and then the consensus is trusted.
         // A stuck provider takes no further part: it can't vouch for the
         // chain after it stalled (see the class doc, step 4).
-        val clock = now()
-        fun stuckBy(reference: Long) =
-            reachable.partition { it.timestamp != null && it.timestamp < reference - STALE_HEAD_AGE_MS }
-        val newest = reachable.mapNotNull { it.timestamp }.maxOrNull()
-        var ageFrom = clock
-        var (stale, allHeads) = stuckBy(clock)
-        if (newest != null && (allHeads.isEmpty() || newest > clock + STALE_HEAD_AGE_MS)) {
-            val (s, c) = stuckBy(newest)
-            if (allHeads.isEmpty() || s.size < c.size) {
-                ageFrom = newest
-                stale = s
-                allHeads = c
+        val reference = consensusHeadTime(reachable)
+        val (stale, allHeads) = reachable.partition {
+            reference != null && it.timestamp != null && it.timestamp < reference - STALE_HEAD_AGE_MS
+        }
+        if (reference != null) {
+            val skew = now() - reference
+            if (kotlin.math.abs(skew) > STALE_HEAD_AGE_MS) {
+                Log.w(TAG, "device clock is ${skew / 60_000} min off the providers' chain head; trusting the providers")
             }
         }
         for (h in stale) {
-            Log.w(TAG, "setting aside ${h.endpoint}: head ${h.level} is ${(ageFrom - h.timestamp!!) / 60_000} min old")
+            Log.w(TAG, "setting aside ${h.endpoint}: head ${h.level} is ${(reference!! - h.timestamp!!) / 60_000} min behind")
         }
 
         // Median-referenced outlier rejection: tolerates one provider far
         // behind (which would drag the anchor to before the registry) or
         // far ahead (lying) without letting it move the shared anchor.
         val sorted = allHeads.map { it.level }.sorted()
-        val reference = sorted[(sorted.size - 1) / 2]
-        val heads = allHeads.filter { kotlin.math.abs(it.level - reference) <= MAX_HEAD_LAG_BLOCKS }
+        val median = sorted[(sorted.size - 1) / 2]
+        val heads = allHeads.filter { kotlin.math.abs(it.level - median) <= MAX_HEAD_LAG_BLOCKS }
         for (h in allHeads - heads.toSet()) {
-            Log.w(TAG, "excluding ${h.endpoint}: head ${h.level} deviates from median $reference")
+            Log.w(TAG, "excluding ${h.endpoint}: head ${h.level} deviates from median $median")
         }
         // A median only survives a minority of liars. Two reachable
         // providers that disagree leave no majority — the median of two is
@@ -252,6 +246,17 @@ class TezosDomainsResolver internal constructor(
             resultCache[name] = Timed(answer, now() + cacheDuration(answer))
         }
         return answer
+    }
+
+    /**
+     * The newest head time a strict majority of [reachable] vouch for: the
+     * k-th newest timestamp, k = ⌊n/2⌋ + 1 — so it is never later than
+     * the head of every member of some majority. `null` when fewer than k
+     * heads carry a timestamp (then nobody is judged stuck).
+     */
+    private fun consensusHeadTime(reachable: List<Head>): Long? {
+        val times = reachable.mapNotNull { it.timestamp }.sortedDescending()
+        return times.getOrNull(reachable.size / 2)
     }
 
     /** `Promise.allSettled` + keep the fulfilled: one bad provider never fails the round. */
@@ -433,9 +438,9 @@ class TezosDomainsResolver internal constructor(
         internal const val MAX_HEAD_LAG_BLOCKS = 60L
 
         /**
-         * A head block older than this is a stuck node (mainnet makes a
-         * block every few seconds). Generous, so a device clock a few
-         * minutes off doesn't turn live providers into stuck ones.
+         * A head block this far behind the providers' consensus head time
+         * is a stuck node (mainnet makes a block every few seconds).
+         * Generous, so providers a few minutes apart are all live.
          */
         internal const val STALE_HEAD_AGE_MS = 15L * 60_000
         internal const val DEFAULT_TTL_MS = 5L * 60_000
