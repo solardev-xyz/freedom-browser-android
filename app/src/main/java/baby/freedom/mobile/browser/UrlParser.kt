@@ -20,11 +20,25 @@ object UrlParser {
         val trimmed = input.trim()
         if (trimmed.isEmpty()) return "about:blank"
         if (schemeRegex.containsMatchIn(trimmed)) return trimmed
-        if (bareHostRegex.matches(trimmed) || ipPortRegex.matches(trimmed)) {
-            return "https://$trimmed"
-        }
+        if (isBareHost(trimmed)) return "https://$trimmed"
         return searchUrl(trimmed, searchTemplate)
     }
+
+    /**
+     * Whether [toUrl] would turn [input] into a web search rather than an
+     * address — what the address bar's top suggestion row
+     * ([AddressInput]) predicts Enter will do. Blank input is
+     * neither (it loads `about:blank`), so `false`.
+     */
+    fun isSearch(input: String): Boolean {
+        val trimmed = input.trim()
+        return trimmed.isNotEmpty() &&
+            !schemeRegex.containsMatchIn(trimmed) &&
+            !isBareHost(trimmed)
+    }
+
+    private fun isBareHost(trimmed: String): Boolean =
+        bareHostRegex.matches(trimmed) || ipPortRegex.matches(trimmed)
 
     /**
      * The web search for [query] on [searchTemplate] — the engine chosen

@@ -49,6 +49,7 @@ import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.dp
 import baby.freedom.mobile.data.NodeSettings
+import baby.freedom.mobile.ens.EnsQuorum
 import baby.freedom.mobile.ens.EnsRpcConfig
 import baby.freedom.mobile.ens.KeyedRpcProvider
 import baby.freedom.mobile.ens.RpcEndpointCheck
@@ -60,7 +61,7 @@ import kotlinx.coroutines.withContext
 /*
  * Settings → Name resolution and → RPC providers (#102): the desktop
  * browser's pages of the same names, cut to what the Android resolver
- * does today — one RPC endpoint at a time, in the order below. Every
+ * does: the RPC quorum (#96) over the endpoints below, in their order. Every
  * edit goes to [NodeSettings.ensRpcConfig], which the resolver reads
  * for each lookup, so it applies to the next name without a restart.
  */
@@ -69,22 +70,36 @@ internal const val SECTION_ENS = "Name resolution"
 internal const val SECTION_RPC = "RPC providers"
 
 private const val ENS_ABOUT =
-    "How ENS (.eth), WNS (.wei) and GNS (.gwei) names are resolved. Each answer comes from a single RPC endpoint and isn't cross-checked, so an endpoint you run or trust gives the most trustworthy answers."
+    "How ENS (.eth), WNS (.wei) and GNS (.gwei) names are resolved. Every answer is cross-checked: it's only trusted when at least two RPC endpoints return exactly the same one. An answer only one endpoint gave is shown to you before anything loads."
 private const val ROW_ORDER = "Resolution order"
 private const val ORDER_HELP =
-    "Tried top to bottom until one answers. One that fails moves to the end for 10 minutes. Change it under RPC providers."
+    "The first three that answer read each name; the rest are asked when those can't agree or don't answer. Change it under RPC providers."
 private const val ROW_CCIP = "Off-chain lookups (CCIP-Read)"
 private const val CCIP_HELP =
     "Some names (base.eth and cb.id subnames, NameStone names) are answered by a gateway their resolver names. The gateway sees the name you look up. Off: those names don't resolve."
 
 private const val SUB_CUSTOM = "Your endpoints"
-private const val CUSTOM_HELP = "Tried first, in this order. An Ethereum mainnet JSON-RPC URL."
+private const val CUSTOM_HELP = "First in the resolution order, as listed here. An Ethereum mainnet JSON-RPC URL."
 private const val ROW_ADD_ENDPOINT = "Add endpoint"
 private const val SUB_KEYED = "Keyed providers"
-private const val KEYED_HELP = "Tried after your endpoints, with your own API key."
+private const val KEYED_HELP = "Next in the resolution order, with your own API key."
 private const val SUB_PUBLIC = "Public endpoints"
-private const val PUBLIC_HELP = "Tried last. Switch off any you'd rather not send lookups to."
+private const val PUBLIC_HELP = "Last in the resolution order. Switch off any you'd rather not send lookups to."
 private const val LAST_ENDPOINT_HELP = "At least one endpoint has to stay on."
+
+/**
+ * The warning under the lists when the quorum (#96) can't run: fewer
+ * than [EnsQuorum.MIN_PROVIDERS] endpoints enabled leaves every answer
+ * one server's word, which the browser then asks about each time.
+ * `null` when there are enough.
+ */
+internal fun tooFewEndpointsHint(enabled: Int): String? = when {
+    enabled >= EnsQuorum.MIN_PROVIDERS -> null
+    enabled == 1 ->
+        "Only one endpoint is on, so answers can't be cross-checked: you'll be asked before each name loads. Turn on ${EnsQuorum.MIN_PROVIDERS} or more to cross-check."
+    else ->
+        "Only $enabled endpoints are on. Cross-checking needs ${EnsQuorum.MIN_PROVIDERS} (to agree on a block), so answers aren't cross-checked: you'll be asked before each name loads."
+}
 
 /** "Ordered" line for [EnsRpcConfig.Source]: never shows an API key. */
 private fun sourceLine(source: EnsRpcConfig.Source): String = when (source.kind) {
@@ -98,6 +113,7 @@ internal fun ensSectionRows(config: EnsRpcConfig) = listOf(
         "order",
         ROW_ORDER,
         ORDER_HELP,
+        tooFewEndpointsHint(config.sources.size),
         *config.sources.map(::sourceLine).toTypedArray(),
     ),
     settingsRow("ccip", ROW_CCIP, if (config.ccipRead) "On" else "Off", CCIP_HELP, "EIP-3668"),
@@ -158,6 +174,10 @@ internal fun NameResolutionSection(
                         style = MaterialTheme.typography.bodySmall,
                     )
                 }
+            }
+            tooFewEndpointsHint(config.sources.size)?.let {
+                Spacer(Modifier.height(6.dp))
+                WarningText(it)
             }
         }
         if ("ccip" in visible) {
@@ -303,6 +323,10 @@ internal fun RpcProvidersSection(
                     )
                 }
             }
+            tooFewEndpointsHint(config.sources.size)?.let {
+                Spacer(Modifier.height(6.dp))
+                WarningText(it)
+            }
         }
     }
 
@@ -356,6 +380,15 @@ internal fun RpcProvidersSection(
 /** A dialog's "that wasn't saved" line; the dialog stays open under it. */
 @Composable
 private fun SaveErrorText(text: String) {
+    Text(
+        text,
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.error,
+    )
+}
+
+@Composable
+private fun WarningText(text: String) {
     Text(
         text,
         style = MaterialTheme.typography.bodySmall,

@@ -30,7 +30,6 @@ import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
 import androidx.compose.ui.semantics.Role
-import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.CheckCircle
@@ -484,26 +483,25 @@ private fun SearchEngineDialog(
                     onClick = { customSelected = true },
                 )
                 if (customSelected) {
-                    OutlinedTextField(
-                        value = draft,
-                        onValueChange = { draft = it },
-                        label = { Text("Search URL") },
-                        placeholder = { Text("https://example.com/search?q={searchTerms}") },
-                        isError = draft.isNotBlank() && normalized == null,
-                        supportingText = {
-                            Text(
-                                validation.rejection
-                                    ?.takeIf { draft.isNotBlank() }
-                                    ?.let(::templateHint)
-                                    ?: "Your search replaces {searchTerms} (or %s)",
-                            )
-                        },
-                        keyboardOptions = KeyboardOptions(
-                            keyboardType = KeyboardType.Uri,
-                            autoCorrectEnabled = false,
-                        ),
-                        modifier = Modifier.fillMaxWidth(),
-                    )
+                    NoSuggestionsTextInput {
+                        OutlinedTextField(
+                            value = draft,
+                            onValueChange = { draft = it },
+                            label = { Text("Search URL") },
+                            placeholder = { Text("https://example.com/search?q={searchTerms}") },
+                            isError = draft.isNotBlank() && normalized == null,
+                            supportingText = {
+                                Text(
+                                    validation.rejection
+                                        ?.takeIf { draft.isNotBlank() }
+                                        ?.let(::templateHint)
+                                        ?: "Your search replaces {searchTerms} (or %s)",
+                                )
+                            },
+                            keyboardOptions = urlKeyboardOptions(),
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                    }
                 }
             }
         },
@@ -715,27 +713,26 @@ private fun EndpointDialog(
                     onClick = { externalSelected = true },
                 )
                 if (externalSelected) {
-                    OutlinedTextField(
-                        value = draft,
-                        onValueChange = { draft = it },
-                        label = { Text("URL") },
-                        placeholder = { Text(endpoint.placeholder) },
-                        isError = draft.isNotBlank() && normalized == null,
-                        supportingText = {
-                            Text(
-                                validation.rejection
-                                    ?.takeIf { draft.isNotBlank() }
-                                    ?.let(::endpointHint)
-                                    ?: endpoint.helper,
-                            )
-                        },
-                        singleLine = true,
-                        keyboardOptions = KeyboardOptions(
-                            keyboardType = KeyboardType.Uri,
-                            autoCorrectEnabled = false,
-                        ),
-                        modifier = Modifier.fillMaxWidth(),
-                    )
+                    NoSuggestionsTextInput {
+                        OutlinedTextField(
+                            value = draft,
+                            onValueChange = { draft = it },
+                            label = { Text("URL") },
+                            placeholder = { Text(endpoint.placeholder) },
+                            isError = draft.isNotBlank() && normalized == null,
+                            supportingText = {
+                                Text(
+                                    validation.rejection
+                                        ?.takeIf { draft.isNotBlank() }
+                                        ?.let(::endpointHint)
+                                        ?: endpoint.helper,
+                                )
+                            },
+                            singleLine = true,
+                            keyboardOptions = urlKeyboardOptions(),
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                    }
                     endpoint.warning?.let {
                         Spacer(Modifier.height(8.dp))
                         UnverifiedWarning(it)

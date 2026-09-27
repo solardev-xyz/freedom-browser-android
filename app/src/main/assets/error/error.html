@@ -68,6 +68,26 @@
       button:active {
         background: #3a3a3a;
       }
+      .buttons {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 12px;
+        justify-content: center;
+      }
+      /* Not cross-checked (#96): a caution, not a failure. */
+      body.warn h1 {
+        color: #f0a030;
+      }
+      body.warn .error-details {
+        color: #f5c270;
+      }
+      #continue-btn {
+        background: #8a5a00;
+        border-color: #b07400;
+      }
+      #continue-btn:active {
+        background: #a06a00;
+      }
       .nodes-icon {
         display: inline-block;
         width: 1.2em;
@@ -99,6 +119,17 @@
         button:active {
           background: #e8eaed;
         }
+        body.warn h1 {
+          color: #9a6700;
+        }
+        body.warn .error-details {
+          color: #7d4e00;
+        }
+        #continue-btn {
+          background: #9a6700;
+          border-color: #7d4e00;
+          color: #fff;
+        }
       }
     </style>
   </head>
@@ -110,7 +141,10 @@
         invalid, the content may no longer exist, or no peers are serving it.
       </p>
       <div id="details" class="error-details"></div>
-      <button id="retry-btn">Try Again</button>
+      <div class="buttons">
+        <button id="continue-btn" hidden>Continue once</button>
+        <button id="retry-btn">Try Again</button>
+      </div>
     </div>
 
     <script>
@@ -155,6 +189,7 @@
       const explicitProtocol = params.get('protocol');
       const retryUrl = params.get('retry') || url;
       const detail = params.get('detail');
+      const continueUrl = params.get('continue');
       const protocolUrl = toProtocolUrl(url);
       const protocol = explicitProtocol || detectProtocol(url);
 
@@ -197,6 +232,21 @@
           titleEl.textContent = 'Unsupported content format';
           descriptionEl.innerHTML =
             'This ' + nameLabel + ' name resolves to a content format Freedom Browser cannot load yet on mobile.';
+        } else if (error === 'ens_unverified') {
+          // #96: only one RPC server's word for where the name leads.
+          document.body.classList.add('warn');
+          titleEl.textContent = 'Not cross-checked';
+          descriptionEl.innerHTML =
+            'Only one Ethereum RPC server answered for this ' + nameLabel + ' name, so ' +
+            "Freedom couldn't check its answer against another server. The address " +
+            'below may be right, but a single misbehaving server could have picked it.';
+        } else if (error === 'ens_conflict') {
+          // #96: the servers asked gave different answers.
+          titleEl.textContent = 'RPC servers disagreed';
+          descriptionEl.innerHTML =
+            'The Ethereum RPC servers Freedom asked gave different answers for this ' +
+            nameLabel + ' name. At least one of them is wrong &mdash; or lying &mdash; so ' +
+            'nothing was loaded. Try again in a moment.';
         } else if (error === 'ens_lookup_failed') {
           titleEl.textContent = nameLabel + ' lookup failed';
           if (detail === 'CCIP_DISABLED') {
@@ -245,6 +295,14 @@
       }
 
       displayError();
+
+      if (continueUrl) {
+        const continueBtn = document.getElementById('continue-btn');
+        continueBtn.hidden = false;
+        continueBtn.onclick = () => {
+          window.location.href = continueUrl;
+        };
+      }
 
       document.getElementById('retry-btn').onclick = () => {
         if (retryUrl) {

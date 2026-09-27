@@ -17,13 +17,7 @@ import androidx.compose.animation.Animatable
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.awaitEachGesture
-import androidx.compose.foundation.gestures.awaitFirstDown
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.union
@@ -48,12 +42,9 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.layout.windowInsetsTopHeight
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Bookmark
-import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Snackbar
 import androidx.compose.material3.SnackbarHost
@@ -77,26 +68,17 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.input.pointer.PointerEventPass
-import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
-import androidx.compose.ui.text.AnnotatedString
-import androidx.compose.ui.text.SpanStyle
-import androidx.compose.ui.text.buildAnnotatedString
-import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.lerp
 import baby.freedom.mobile.data.BrowsingRepository
 import baby.freedom.mobile.ui.PrivateTheme
 import baby.freedom.mobile.data.NodeSettings
-import baby.freedom.mobile.data.UrlSuggestion
 import baby.freedom.mobile.ens.EnsInput
 import baby.freedom.mobile.ens.EnsResult
 import baby.freedom.swarm.IpfsInfo
@@ -793,7 +775,21 @@ fun BrowserScreen(
         target: BrowserState,
         raw: String,
         source: SubmitSource = SubmitSource.User,
+        // An unverified ENS answer the user chose to load (#96): let
+        // through if the resolver still gives exactly this one.
+        approvedUri: String? = null,
     ) {
+        // "Continue once" on the tab's not-cross-checked warning (#96):
+        // the one navigation it was shown for, again, with its answer
+        // let through. Its token is the tab's own, so a page can't
+        // fake one ([EnsGate]); anything else is dropped here.
+        EnsGate.continueToken(raw)?.let { token ->
+            val gate = target.ensGate?.takeIf { it.token == token } ?: return
+            target.ensGate = null
+            submit(target, gate.retryUrl, SubmitSource.User, approvedUri = gate.uri)
+            return
+        }
+
         // A page submitting on top of a navigation the *user* asked for
         // is ignored outright: it may neither cancel their probe nor
         // start one of its own on the same tab (#35, see
@@ -870,7 +866,12 @@ fun BrowserScreen(
             // [gateGatewayNavigation]) — the resolve itself is ENS's.
             target.ipfsLoad = false
 
-            fun ensError(errorCode: String, detail: String, retryUrl: String = retryDisplay) {
+            fun ensError(
+                errorCode: String,
+                detail: String,
+                retryUrl: String = retryDisplay,
+                continueUrl: String? = null,
+            ) {
                 target.clearEnsOverride()
                 target.loadUrl(
                     ErrorPage.url(
@@ -879,6 +880,7 @@ fun BrowserScreen(
                         protocol = "ens",
                         retryUrl = retryUrl,
                         detail = detail,
+                        continueUrl = continueUrl,
                     ),
                 )
             }
@@ -896,6 +898,18 @@ fun BrowserScreen(
                     // itself; this is the tab's own last word on it.
                     ensureActive()
                     when (result) {
+                        // Only one RPC server's word for it (#96): ask
+                        // first. The user's "Continue once" comes back
+                        // here with this very answer approved.
+                        is EnsResult.Ok if !result.trust.verified && result.uri != approvedUri -> {
+                            val gate = EnsGate.create(name, result.uri, retryDisplay)
+                            target.ensGate = gate
+                            ensError(
+                                errorCode = "ens_unverified",
+                                detail = EnsGate.unverifiedDetail(result),
+                                continueUrl = EnsGate.continueUrl(gate),
+                            )
+                        }
                         is EnsResult.Ok -> {
                             // Remember hash/cid → name for the whole session
                             // (cross-tab address-bar preservation). Safe for
@@ -935,12 +949,23 @@ fun BrowserScreen(
                                 )
                             }
                         }
+                        // Nothing to load either way, but say when it's
+                        // only one server's word for it (#96).
                         is EnsResult.NotFound ->
-                            ensError("ens_not_found", detail = result.reason)
+                            ensError(
+                                "ens_not_found",
+                                detail = EnsGate.withTrustNote(result.reason, result.trust),
+                            )
                         is EnsResult.Unsupported ->
-                            ensError("ens_unsupported_codec", detail = "codec ${result.codec}")
+                            ensError(
+                                "ens_unsupported_codec",
+                                detail = EnsGate.withTrustNote("codec ${result.codec}", result.trust),
+                            )
                         is EnsResult.Error ->
                             ensError("ens_lookup_failed", detail = result.reason)
+                        // RPC servers disagreed (#96): nothing to load.
+                        is EnsResult.Conflict ->
+                            ensError("ens_conflict", detail = EnsGate.conflictDetail(result))
                     }
                 } finally {
                     target.resolving = false
@@ -1333,16 +1358,7 @@ fun BrowserScreen(
     // Applied to every band of the screen that isn't the pill itself:
     // the page area, the progress strip, and the chrome background
     // around the pill (side gutters + the padding under it).
-    val dismissKeyboardOnTap = Modifier.pointerInput(Unit) {
-        awaitEachGesture {
-            awaitFirstDown(
-                requireUnconsumed = false,
-                pass = PointerEventPass.Initial,
-            )
-            focusManager.clearFocus()
-            keyboard?.hide()
-        }
-    }
+    val dismissKeyboardOnTap = Modifier.endEditOnPress(focusManager, keyboard)
 
     Box(
         modifier = Modifier
@@ -1387,13 +1403,29 @@ fun BrowserScreen(
         // When the address bar is focused we overlay the suggestions
         // panel on top of it rather than unmounting the WebView — that
         // keeps the underlying page alive (scroll position, JS timers,
-        // media) across focus changes.
-        Box(
+        // media) across focus changes. The suggestions are the page layer's sibling, outside
+        // [dismissKeyboardOnTap] — inside it, a press on a row cleared
+        // focus and unmounted the panel before the click landed (#170,
+        // see [PageWithSuggestions]).
+        val suggestionsShown = addressFocused && addressBarEdited && addressQuery.isNotEmpty()
+        PageWithSuggestions(
+            dismissKeyboardOnTap = dismissKeyboardOnTap,
             modifier = Modifier
                 .fillMaxSize()
                 .windowInsetsPadding(contentInsets)
-                .padding(bottom = contentBottomReserve)
-                .then(dismissKeyboardOnTap),
+                .padding(bottom = contentBottomReserve),
+            suggestions = if (!suggestionsShown) null else {
+                {
+                    SuggestionsPanel(
+                        repo = repo,
+                        query = addressQuery,
+                        searchTemplate = searchTemplate,
+                        onPick = { submit(state, it) },
+                        bottomContentPadding = capsuleOverlap,
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                }
+            },
         ) {
             BrowserWebViewHost(
                 tabs = tabs,
@@ -1424,15 +1456,6 @@ fun BrowserScreen(
                 HomeScreen(
                     repo = repo,
                     onOpen = { submit(state, it) },
-                    bottomContentPadding = capsuleOverlap,
-                    modifier = Modifier.fillMaxSize(),
-                )
-            }
-            if (addressFocused && addressBarEdited && addressQuery.isNotEmpty()) {
-                SuggestionsPanel(
-                    repo = repo,
-                    query = addressQuery,
-                    onPick = { submit(state, it) },
                     bottomContentPadding = capsuleOverlap,
                     modifier = Modifier.fillMaxSize(),
                 )
@@ -1933,150 +1956,6 @@ fun BrowserScreen(
             session = session,
             onExit = { tabs.exitFullscreen() },
         )
-    }
-}
-
-/**
- * Opaque panel that overlays the WebView while the address bar is
- * focused, showing bookmarks + recent history that match what the user
- * has typed so far. The list is reversed so the best match sits right
- * above the (bottom) address bar and the thumb, with weaker matches
- * stacking upwards. Picking a row dispatches the canonical URL back to
- * the browser's `submit` path, which hides the keyboard and clears
- * focus (and therefore dismisses this panel).
- */
-@Composable
-private fun SuggestionsPanel(
-    repo: BrowsingRepository,
-    query: String,
-    onPick: (String) -> Unit,
-    bottomContentPadding: Dp,
-    modifier: Modifier = Modifier,
-) {
-    // Re-subscribe when the query changes; Room's Flow keeps emitting
-    // fresh results if the underlying tables change too.
-    val suggestionsFlow = remember(repo, query) { repo.suggestions(query) }
-    val suggestions by suggestionsFlow.collectAsState(initial = emptyList())
-
-    Box(
-        modifier = modifier.background(MaterialTheme.colorScheme.background),
-    ) {
-        if (suggestions.isEmpty()) {
-            Text(
-                text = if (query.isBlank()) "No history or bookmarks yet"
-                else "No matches for \"$query\"",
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                style = MaterialTheme.typography.bodyMedium,
-                modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .padding(
-                        bottom = 32.dp + bottomContentPadding,
-                        start = 16.dp,
-                        end = 16.dp,
-                    ),
-            )
-        } else {
-            LazyColumn(
-                modifier = Modifier.fillMaxSize(),
-                reverseLayout = true,
-                // The capsule floats over this panel — keep the
-                // best-match row (which sits at the bottom, nearest the
-                // thumb) clear of it.
-                contentPadding = PaddingValues(
-                    top = 8.dp,
-                    bottom = 8.dp + bottomContentPadding,
-                ),
-            ) {
-                items(
-                    items = suggestions,
-                    key = { s -> s.source.name + "|" + s.url },
-                ) { s ->
-                    SuggestionRow(
-                        suggestion = s,
-                        highlight = query.trim(),
-                        onClick = { onPick(s.url) },
-                    )
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun SuggestionRow(
-    suggestion: UrlSuggestion,
-    highlight: String,
-    onClick: () -> Unit,
-) {
-    val icon = when (suggestion.source) {
-        UrlSuggestion.Source.BOOKMARK -> Icons.Filled.Bookmark
-        UrlSuggestion.Source.HISTORY -> Icons.Filled.History
-    }
-    val displayTitle = suggestion.title.ifBlank { suggestion.url }
-
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 8.dp)
-            .clip(MaterialTheme.shapes.medium)
-            .clickable(onClick = onClick)
-            .padding(horizontal = 16.dp, vertical = 10.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Icon(
-            imageVector = icon,
-            contentDescription = when (suggestion.source) {
-                UrlSuggestion.Source.BOOKMARK -> "Bookmark"
-                UrlSuggestion.Source.HISTORY -> "History"
-            },
-            tint = when (suggestion.source) {
-                UrlSuggestion.Source.BOOKMARK -> MaterialTheme.colorScheme.primary
-                UrlSuggestion.Source.HISTORY -> MaterialTheme.colorScheme.onSurfaceVariant
-            },
-            modifier = Modifier.size(18.dp),
-        )
-        Spacer(Modifier.width(12.dp))
-        Column(modifier = Modifier.weight(1f)) {
-            Text(
-                text = highlightedText(displayTitle, highlight),
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                fontWeight = FontWeight.Medium,
-                color = MaterialTheme.colorScheme.onSurface,
-            )
-            Text(
-                text = highlightedText(suggestion.url, highlight),
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
-    }
-}
-
-/**
- * Bold every case-insensitive occurrence of [needle] inside [text].
- * Returns a plain [androidx.compose.ui.text.AnnotatedString] we can
- * drop straight into a [Text] composable.
- */
-private fun highlightedText(text: String, needle: String): AnnotatedString {
-    if (needle.isEmpty()) return AnnotatedString(text)
-    return buildAnnotatedString {
-        append(text)
-        val haystack = text.lowercase()
-        val q = needle.lowercase()
-        var i = 0
-        while (i <= haystack.length - q.length) {
-            val found = haystack.indexOf(q, i)
-            if (found < 0) break
-            addStyle(
-                SpanStyle(fontWeight = FontWeight.Bold),
-                found,
-                found + q.length,
-            )
-            i = found + q.length
-        }
     }
 }
 

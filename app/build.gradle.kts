@@ -14,8 +14,8 @@ android {
         applicationId = "baby.freedom.mobile"
         minSdk = 30
         targetSdk = 37
-        versionCode = 23
-        versionName = "0.6.6"
+        versionCode = 24
+        versionName = "0.6.7"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
@@ -149,6 +149,10 @@ dependencies {
     testImplementation("com.ibm.icu:icu4j:77.1")
 
     androidTestImplementation("androidx.test:runner:1.6.2")
+    // Compose UI tests (the address-bar suggestion tap, #170).
+    androidTestImplementation(composeBom)
+    androidTestImplementation("androidx.compose.ui:ui-test-junit4")
+    debugImplementation("androidx.compose.ui:ui-test-manifest")
     androidTestImplementation("androidx.test:rules:1.6.1")
     androidTestImplementation("androidx.test.ext:junit:1.2.1")
     // Fixture gateway: the verification suite serves the test dapp from
