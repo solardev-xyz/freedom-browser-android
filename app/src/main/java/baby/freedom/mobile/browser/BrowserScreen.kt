@@ -427,6 +427,7 @@ fun BrowserScreen(
     val ensResolver = Gateways.ensResolver
     val gatewayProbe = remember { GatewayProbe() }
     val context = LocalContext.current
+    val pageZoom = remember(context) { PageZoom.get(context) }
     val repo = remember(context) { BrowsingRepository.get(context) }
     // The search engine chosen in Settings (#87). Read at submit time
     // through the State, so a change in Settings applies to the next
@@ -1522,6 +1523,13 @@ fun BrowserScreen(
                         submit(fresh, tabs.homepageUrl)
                     },
                     onFindInPage = { state.find.show() },
+                    // Same rule as Find in page: nothing to zoom on the
+                    // home surface — nor on a document that isn't a
+                    // site (an error page), which has no zoomSite.
+                    zoomLevel = state.zoomSite
+                        ?.takeIf { state.url.isNotBlank() }
+                        ?.let(pageZoom::levelFor),
+                    onZoom = { action -> state.zoomSite?.let { pageZoom.apply(it, action) } },
                     onPrint = { tabs.printPage?.invoke(state) },
                     modifier = Modifier
                         .widthIn(max = CHROME_MAX_WIDTH)

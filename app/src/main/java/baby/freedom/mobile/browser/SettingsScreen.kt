@@ -285,7 +285,7 @@ fun SettingsScreen(
     if (confirmClearSiteData) {
         ConfirmDialog(
             title = "Clear cookies and site data?",
-            message = "Signs you out of most sites and wipes cached page data, cookies, and form autofill from every open tab.",
+            message = "Signs you out of most sites and wipes cached page data, cookies, form autofill and remembered page zoom levels from every open tab.",
             confirmLabel = "Clear site data",
             onConfirm = {
                 onClearWebViewData()
@@ -494,7 +494,7 @@ private fun EngineRadioRow(
 private const val ROW_CLEAR_HISTORY = "Clear history"
 private const val ROW_CLEAR_BOOKMARKS = "Clear bookmarks"
 private const val ROW_CLEAR_SITE_DATA = "Clear cookies & site data"
-private const val ROW_CLEAR_SITE_DATA_SUBTITLE = "Cookies, DOM storage, cache, and form data"
+private const val ROW_CLEAR_SITE_DATA_SUBTITLE = "Cookies, DOM storage, cache, form data, and zoom levels"
 
 private fun historySubtitle(count: Int) =
     if (count == 0) "Nothing to clear" else "$count visit${if (count == 1) "" else "s"}"
