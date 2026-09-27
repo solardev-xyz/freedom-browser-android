@@ -416,7 +416,7 @@ fun BrowserScreen(
     onIpfsToggle: (Boolean) -> Unit,
     initialUrl: String = HOME_URL,
     deepLinkUrl: String? = null,
-    onDeepLinkHandled: () -> Unit = {},
+    onDeepLinkHandled: (String) -> Unit = {},
     onRecoverNodes: () -> Unit = {},
     ipfsProgressSnapshot: () -> String? = { null },
     ipfsCounters: () -> LongArray? = { null },
@@ -1031,7 +1031,9 @@ fun BrowserScreen(
     // it's the [initialUrl] above — so a link tapped now is a second
     // destination and gets its own tab rather than replacing whatever
     // the user was reading. [onDeepLinkHandled] clears the pending URL
-    // so a config change doesn't re-open it.
+    // so a config change doesn't re-open it — but only if it is still
+    // [url]: a newer link published while this one was being opened
+    // must survive to get its own tab.
     LaunchedEffect(deepLinkUrl) {
         val url = deepLinkUrl ?: return@LaunchedEffect
         // Whatever full-screen overlay was up would otherwise hide the
@@ -1043,7 +1045,7 @@ fun BrowserScreen(
         showBookmarks = false
         showDownloads = false
         submit(tabs.newTab(), url)
-        onDeepLinkHandled()
+        onDeepLinkHandled(url)
     }
 
     // The chrome is a floating capsule layered *over* an edge-to-edge

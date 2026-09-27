@@ -64,6 +64,11 @@ class MainActivity : ComponentActivity() {
      */
     private val deepLinkFlow = MutableStateFlow<String?>(null)
 
+    /** Publishes [onNewIntent] links into [deepLinkFlow] in arrival order. */
+    private val deepLinks = OrderedDeepLinks(lifecycleScope, Dispatchers.Default) {
+        deepLinkFlow.value = it
+    }
+
     @Volatile
     private var binder: INodeService? = null
     private var bound = false
@@ -173,7 +178,7 @@ class MainActivity : ComponentActivity() {
                         onIpfsToggle = ::onIpfsToggle,
                         initialUrl = startUrl,
                         deepLinkUrl = deepLink,
-                        onDeepLinkHandled = { deepLinkFlow.value = null },
+                        onDeepLinkHandled = { deepLinkFlow.compareAndSet(it, null) },
                         onRecoverNodes = ::onRecoverNodes,
                         ipfsProgressSnapshot = ::ipfsProgressSnapshot,
                         ipfsCounters = ::ipfsCounters,
@@ -223,16 +228,12 @@ class MainActivity : ComponentActivity() {
         super.onNewIntent(intent)
         setIntent(intent)
         // Same off-Main parse as a cold-start link if the ENSIP-15
-        // tables are still decoding (a link tapped right after launch).
-        if (!EnsNormalize.isWarm && VirtualOrigin.needsEnsTables(deepLinkData(intent))) {
-            lifecycleScope.launch {
-                withContext(Dispatchers.Default) {
-                    EnsNormalize.warm()
-                    displayUrlForDeepLink(intent)
-                }?.let { deepLinkFlow.value = it }
-            }
-        } else {
-            displayUrlForDeepLink(intent)?.let { deepLinkFlow.value = it }
+        // tables are still decoding (a link tapped right after launch);
+        // [deepLinks] keeps a later ASCII link from overtaking it.
+        val slow = !EnsNormalize.isWarm && VirtualOrigin.needsEnsTables(deepLinkData(intent))
+        deepLinks.submit(slow) {
+            if (slow) EnsNormalize.warm()
+            displayUrlForDeepLink(intent)
         }
     }
 
