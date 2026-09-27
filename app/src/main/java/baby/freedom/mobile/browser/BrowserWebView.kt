@@ -723,6 +723,7 @@ fun BrowserWebViewHost(
             // Take down any permission prompt the tab still had up;
             // its request is denied along with the page.
             sitePermissions.onTabClosed(id)
+            UnverifiedOrigins.release(wv)
             wv.stopLoading()
             wv.destroy()
         }
@@ -808,6 +809,19 @@ fun BrowserWebViewHost(
                 }
             }
         }
+        // An external IPFS gateway was switched away from (#125): a tab
+        // still showing what it served would keep running it, unwarned,
+        // and could write to the origin again after its one-shot cleanup.
+        // Reload those tabs, and hold the origins for cleanup until each
+        // has committed its next document.
+        UnverifiedOrigins.onSweep = { swept ->
+            for (wv in webViews.values) {
+                val stale = sweptDocuments(wv, swept)
+                if (stale.isEmpty()) continue
+                UnverifiedOrigins.hold(wv, stale)
+                wv.reload()
+            }
+        }
         tabs.printPage = { tab ->
             webViews[tab.id]?.let { wv ->
                 printWebView(wv, printJobName(tab.title, tab.addressBarText, tab.url))
@@ -845,6 +859,7 @@ fun BrowserWebViewHost(
             tabs.saveWebViewState = null
             tabs.find = null
             tabs.printPage = null
+            UnverifiedOrigins.onSweep = null
         }
     }
 
@@ -874,6 +889,7 @@ fun BrowserWebViewHost(
     DisposableEffect(Unit) {
         onDispose {
             for (wv in webViews.values) {
+                UnverifiedOrigins.release(wv)
                 wv.stopLoading()
                 wv.destroy()
             }
@@ -1732,6 +1748,15 @@ private fun buildRefreshableWebView(
             override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
                 // The pending navigation committed; it's no download.
                 pendingNavigationUrls.clear()
+                // The previous document, and its frames, are gone: what a
+                // sweep held for them can go, and only the new one's
+                // origin is on screen (#125).
+                if (view is PageWebView) {
+                    UnverifiedOrigins.release(view)
+                    view.documentOrigins.clear()
+                    url?.let(VirtualOrigin::parseHostOfUrl)?.let(VirtualOrigin::originFor)
+                        ?.let(view.documentOrigins::add)
+                }
                 state.documentCommitted()
                 // The main-frame document committed: its ENS pins are now
                 // the page on screen's, and subresources held waiting on
@@ -2133,6 +2158,12 @@ private fun buildRefreshableWebView(
                 } else {
                     state.documentGeneration
                 }
+                if (view is PageWebView && request != null &&
+                    isDocumentRequest(request.isForMainFrame, request.requestHeaders)
+                ) {
+                    request.url?.toString()?.let(VirtualOrigin::parseHostOfUrl)
+                        ?.let(VirtualOrigin::originFor)?.let(view.documentOrigins::add)
+                }
                 val work = state.gatewayWork.start(generation)
                 val response = try {
                     interceptVirtualRequest(request, ensPins)
@@ -2435,6 +2466,14 @@ private const val REVEAL_HANDOVER_TIMEOUT_MS = 1_000L
  * protected: Chromium's unconsumed overscroll, and the scroll range.
  */
 internal class PageWebView(context: Context) : WebView(context) {
+    /**
+     * Virtual origins this tab has documents on — the main frame's, and
+     * any frame's requested since it committed. What [sweptDocuments]
+     * checks after an external IPFS gateway is switched away from (#125).
+     * Added to from the interceptor's IO threads.
+     */
+    val documentOrigins: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet()
+
     /** "Search" on the text-selection toolbar, with the selected text (#84). */
     var onSearchSelection: ((String) -> Unit)? = null
 
@@ -2982,10 +3021,15 @@ private val DOWNLOADED_TEXT_TYPES = setOf(
 private fun siteDataCleanupFor(req: WebResourceRequest, url: String): WebResourceResponse? {
     if (!isDocumentRequest(req.isForMainFrame, req.requestHeaders)) return null
     val origin = VirtualOrigin.parseHostOfUrl(url)?.let(VirtualOrigin::originFor) ?: return null
+    // At a cold start the origins left to clear are loaded, and swept,
+    // just before the endpoint settings land: a restored tab's first
+    // document must not get ahead of that.
+    Gateways.awaitExternalEndpointsBlocking()
     if (!UnverifiedOrigins.takeClearFor(origin)) return null
     return WebResourceResponse(
         "text/html", "utf-8", 200, "OK",
-        mapOf("Cache-Control" to "no-store"),
+        // `Vary: *`: a service worker's Cache Storage won't keep it.
+        mapOf("Cache-Control" to "no-store", "Vary" to "*"),
         ByteArrayInputStream(SITE_DATA_CLEANUP_HTML.toByteArray(Charsets.UTF_8)),
     )
 }
@@ -3094,42 +3138,97 @@ private fun interceptVirtualRequestFor(
     // being read: a restored tab must not reach the embedded gateway
     // meanwhile. Immediate once they're known.
     Gateways.awaitExternalEndpointsBlocking()
-    val target = Gateways.gatewayUrlFor(root, pathAndQuery, page = page)
-        ?: return syntheticResponse(
-            502, "Bad Gateway",
-            "No local gateway can serve this content root " +
-                "(node not running, or name resolution failed).",
-        )
-
-    // An unverified external IPFS gateway (#125) shares the root's
-    // virtual origin with the verified embedded node: note the origin so
-    // its storage is wiped once this gateway is no longer in use, and
-    // don't let the gateway install a service worker there — one would
-    // keep answering the origin from its own code after the switch.
-    Gateways.externalIpfsGatewayOf(target)?.let { gateway ->
-        VirtualOrigin.originFor(root)?.let { UnverifiedOrigins.record(gateway, it) }
-        if (isServiceWorkerScript(req.requestHeaders)) {
-            return syntheticResponse(
-                403, "Forbidden",
-                "Service workers aren't installed from an external IPFS gateway: " +
-                    "its content isn't verified against the CID.",
+    // Resolved again if the IPFS gateway is switched while this request
+    // is under way (see [UnverifiedOrigins.record]); a switch is a
+    // deliberate settings change, so more than one retry is a bound,
+    // not a path.
+    repeat(GATEWAY_SWITCH_RETRIES) {
+        val target = Gateways.gatewayUrlFor(root, pathAndQuery, page = page)
+            ?: return syntheticResponse(
+                502, "Bad Gateway",
+                "No local gateway can serve this content root " +
+                    "(node not running, or name resolution failed).",
             )
-        }
-    }
 
-    val response = if (isMediaLikeUrl(target)) {
-        fetchMediaWithRangeSupport(req, target)
-    } else {
-        fetchWithRetry(req, target, url)
+        // An unverified external IPFS gateway (#125) shares the root's
+        // virtual origin with the verified embedded node: note the origin
+        // so its storage is wiped once this gateway is no longer in use,
+        // and don't let the gateway install a service worker there — one
+        // would keep answering the origin from its own code after the
+        // switch.
+        val external = Gateways.externalIpfsGatewayOf(target)
+        var token: Long? = null
+        if (external != null) {
+            val origin = VirtualOrigin.originFor(root)
+            if (origin != null) {
+                // Swept away from since `target` was resolved: resolve again.
+                token = UnverifiedOrigins.record(external, origin) ?: return@repeat
+            }
+            if (isServiceWorkerScript(req.requestHeaders)) {
+                return syntheticResponse(
+                    403, "Forbidden",
+                    "Service workers aren't installed from an external IPFS gateway: " +
+                        "its content isn't verified against the CID.",
+                )
+            }
+        }
+
+        val response = if (isMediaLikeUrl(target)) {
+            fetchMediaWithRangeSupport(req, target)
+        } else {
+            fetchWithRetry(req, target, url)
+        }
+        // Fetched from a gateway a sweep switched away from meanwhile:
+        // the origin was already wiped, so this must not land there.
+        if (token != null && !UnverifiedOrigins.isCurrent(token)) {
+            runCatching { response?.data?.close() }
+            return@repeat
+        }
+        if (external != null && response != null) withoutCacheStorage(response)
+        // A null here means the gateway socket itself is gone (connection
+        // refused / node stopped). Synthesize instead of returning null —
+        // null would send Chromium to DNS for a hostname that doesn't
+        // exist, which surfaces as a slow, confusing resolver error.
+        return response ?: syntheticResponse(
+            502, "Bad Gateway",
+            "The local gateway did not answer (is the node running?).",
+        )
     }
-    // A null here means the gateway socket itself is gone (connection
-    // refused / node stopped). Synthesize instead of returning null —
-    // null would send Chromium to DNS for a hostname that doesn't
-    // exist, which surfaces as a slow, confusing resolver error.
-    return response ?: syntheticResponse(
-        502, "Bad Gateway",
-        "The local gateway did not answer (is the node running?).",
+    return syntheticResponse(
+        503, "Service Unavailable",
+        "The IPFS gateway was switched while this request was under way.",
     )
+}
+
+private const val GATEWAY_SWITCH_RETRIES = 3
+
+/**
+ * Mark an external IPFS gateway's response (#125) `Vary: *`, which
+ * Cache Storage refuses to store (`cache.put`/`add` reject it). A
+ * service worker registered while on the embedded node could otherwise
+ * keep the unverified gateway's responses and serve them on the origin
+ * after the switch, from a cache the interceptor never sees. WebView
+ * doesn't HTTP-cache intercepted responses, so nothing else changes.
+ */
+private fun withoutCacheStorage(response: WebResourceResponse) {
+    response.responseHeaders = varyAll(response.responseHeaders)
+}
+
+/** [headers] with any `Vary` replaced by `Vary: *` (see [withoutCacheStorage]). */
+internal fun varyAll(headers: Map<String, String>?): Map<String, String> =
+    headers.orEmpty().filterKeys { !it.equals("Vary", ignoreCase = true) } + ("Vary" to "*")
+
+/**
+ * The [swept] origins [webView] has a document on: its main frame's
+ * (a page a service worker answered never reaches the interceptor, so
+ * the committed URL is checked too) and its frames'.
+ */
+internal fun sweptDocuments(webView: WebView, swept: Set<String>): Set<String> {
+    val onScreen = (webView as? PageWebView)?.documentOrigins.orEmpty() +
+        listOfNotNull(
+            webView.url?.let(VirtualOrigin::parseHostOfUrl)?.let(VirtualOrigin::originFor),
+        )
+    return onScreen.intersect(swept)
 }
 
 // In-process LRU of fully-buffered media bodies keyed by bzz URL, so

@@ -24,15 +24,31 @@ import android.webkit.WebStorage
  * itself, by a page served in place of the next document requested
  * there ([takeClearFor]), before any content runs.
  *
- * Service workers can't be left behind this way: the interceptor
- * refuses a service-worker script from an external gateway (see
- * [isServiceWorkerScript]), since one would keep answering the origin's
- * requests from its own code after the switch.
+ * Documents the gateway already served may still be alive when the
+ * switch happens — one live WebView per tab. [sweep] hands the swept
+ * origins to [onSweep] (the tab host), which reloads every tab that
+ * showed one and [hold]s those origins until each such tab has
+ * committed its next document: until then every document requested
+ * there is the cleanup page again ([takeClearFor]), so storage a stale
+ * document writes in the meantime is cleared after it's gone.
+ *
+ * Service workers: the interceptor refuses a service-worker script from
+ * an external gateway (see [isServiceWorkerScript]), and stamps
+ * `Vary: *` on everything that gateway serves, which Cache Storage
+ * refuses to store — so a worker registered while on the embedded node
+ * can't keep the gateway's responses for later either. What this can't
+ * reach: a navigation such a worker answers itself (from a cache filled
+ * on the embedded node) never reaches the interceptor, so on an origin
+ * with a worker the cleanup page only runs once the worker lets a
+ * navigation through to the network. `WebStorage` has no per-origin way
+ * to drop a worker, and IndexedDB and cookies are still wiped straight
+ * away.
  *
  * Persisted, so a switch made while the app wasn't running (or a
  * process death between serving and switching) is still swept at the
  * next start. Recorded from the interceptor's IO threads, swept on the
- * main thread.
+ * main thread; a request that recorded against a gateway a sweep has
+ * since replaced is told so ([record], [isCurrent]) and re-resolved.
  */
 object UnverifiedOrigins {
     private const val PREFS = "unverified_origins"
@@ -45,6 +61,27 @@ object UnverifiedOrigins {
     private var gateway = ""
     private val origins = LinkedHashSet<String>()
     private val toClear = LinkedHashSet<String>()
+
+    /** The IPFS gateway [sweep] last saw in use; `null` until the first sweep. */
+    private var current: String? = null
+
+    /** Bumped whenever [current] changes: a [record] token from an earlier one is stale. */
+    private var generation = 0L
+
+    /** Origins held for cleanup, by holder, with their expiry ([hold]). */
+    private val holds = HashMap<Any, Pair<Set<String>, Long>>()
+
+    /**
+     * The tab host's reaction to a sweep: reload the tabs whose documents
+     * are on the swept origins and [hold] those. Main thread, called
+     * from [sweep] after the wipe.
+     */
+    @Volatile
+    var onSweep: ((Set<String>) -> Unit)? = null
+
+    /** Monotonic clock for [hold] expiry; a seam for tests. */
+    @Volatile
+    internal var clock: () -> Long = { System.nanoTime() / 1_000_000 }
 
     /** Load the persisted list (disk I/O). Call before the first [sweep]; idempotent. */
     fun init(context: Context) {
@@ -61,24 +98,50 @@ object UnverifiedOrigins {
         }
     }
 
-    /** [origin] was served content from the external IPFS gateway [gateway]. */
-    fun record(gateway: String, origin: String) {
-        synchronized(lock) {
-            if (this.gateway == gateway && origin in origins) return
+    /**
+     * [origin] is being served content from the external IPFS gateway
+     * [gateway]. Returns a token for [isCurrent], or `null` if a
+     * [sweep] has already switched away from [gateway] — the caller
+     * resolved its target before the switch and must resolve it again
+     * rather than serve (and record) the old gateway's content.
+     */
+    fun record(gateway: String, origin: String): Long? = synchronized(lock) {
+        if (current != null && current != gateway) return null
+        if (this.gateway != gateway || origin !in origins) {
             this.gateway = gateway
             origins.add(origin)
             persist()
         }
+        generation
     }
 
     /**
-     * The IPFS gateway in use is now [currentExternal] (`""` = the
-     * embedded node). If the recorded origins came from a different
-     * gateway, hand them to [wipe] and forget them. Returns what was
-     * wiped.
+     * Is the gateway a [record] returned [token] for still the one in
+     * use? `false` once a [sweep] switched away in between: the response
+     * fetched meanwhile must not be served.
      */
-    fun sweep(currentExternal: String, wipe: (Set<String>) -> Unit): Set<String> {
+    fun isCurrent(token: Long): Boolean = synchronized(lock) { token == generation }
+
+    /**
+     * The IPFS gateway in use is now [currentExternal] (`""` = the
+     * embedded node). [apply] runs first, under the same lock [record]
+     * takes, so it's where the new gateway is made the one requests
+     * resolve against: a request can't record against the old gateway
+     * after this sweep, nor re-resolve to it. If the recorded origins
+     * came from a different gateway, hand them to [wipe] and then
+     * [onSweep], and forget them. Returns what was swept.
+     */
+    fun sweep(
+        currentExternal: String,
+        apply: () -> Unit = {},
+        wipe: (Set<String>) -> Unit,
+    ): Set<String> {
         val swept = synchronized(lock) {
+            apply()
+            if (current != currentExternal) {
+                current = currentExternal
+                generation++
+            }
             if (origins.isEmpty() || gateway == currentExternal) return emptySet()
             val all = origins.toSet()
             origins.clear()
@@ -88,20 +151,46 @@ object UnverifiedOrigins {
             all
         }
         wipe(swept)
+        onSweep?.invoke(swept)
         return swept
     }
 
     /**
+     * [holder] (a tab) still has a document on [origins] that was
+     * served before a [sweep]: until [release] (its next document
+     * committed) or [HOLD_MS] passes, every document requested on them
+     * is the cleanup page again, so whatever the stale document writes
+     * meanwhile is cleared after it's gone.
+     */
+    fun hold(holder: Any, origins: Set<String>) {
+        if (origins.isEmpty()) return
+        synchronized(lock) { holds[holder] = origins to clock() + HOLD_MS }
+    }
+
+    /** [holder]'s stale document is gone (see [hold]). */
+    fun release(holder: Any) {
+        synchronized(lock) { holds.remove(holder) }
+    }
+
+    /** A bound on [hold], for a tab whose reload never commits. */
+    private const val HOLD_MS = 10_000L
+
+    /**
      * Should the document now being requested on [origin] clear the
-     * origin's site data first? True once per swept origin: the
-     * interceptor then answers with a same-origin page that clears it
-     * and reloads (`SITE_DATA_CLEANUP_HTML`) — the only way to reach the
-     * DOM storage and service workers [wipeWebData] can't.
+     * origin's site data first? True once per swept origin, and again
+     * while a tab [hold]s it: the interceptor then answers with a
+     * same-origin page that clears it and reloads
+     * (`SITE_DATA_CLEANUP_HTML`) — the only way to reach the DOM storage
+     * and service workers [wipeWebData] can't.
      */
     fun takeClearFor(origin: String): Boolean = synchronized(lock) {
-        if (!toClear.remove(origin)) return false
-        persist()
-        true
+        if (toClear.remove(origin)) {
+            persist()
+            return true
+        }
+        val now = clock()
+        holds.values.removeAll { (_, until) -> until <= now }
+        holds.values.any { (held, _) -> origin in held }
     }
 
     /**
@@ -134,6 +223,9 @@ object UnverifiedOrigins {
             gateway = ""
             origins.clear()
             toClear.clear()
+            holds.clear()
+            current = null
+            generation = 0
             persist()
         }
     }

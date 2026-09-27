@@ -132,9 +132,14 @@ class MainActivity : ComponentActivity() {
                 settings.externalIpfsGateway,
             ) { swarm, ipfs -> swarm to ipfs }.collect { (swarm, ipfs) ->
                 // What an unverified gateway left on the virtual origins
-                // goes before anything else is served there.
-                UnverifiedOrigins.sweep(ipfs, UnverifiedOrigins::wipeWebData)
-                Gateways.setExternalEndpoints(swarm, ipfs)
+                // goes before anything else is served there. The switch
+                // itself lands under the sweep's lock, so no request can
+                // record against the old gateway once it's swept.
+                UnverifiedOrigins.sweep(
+                    ipfs,
+                    apply = { Gateways.setExternalEndpoints(swarm, ipfs) },
+                    wipe = UnverifiedOrigins::wipeWebData,
+                )
             }
         }
 
