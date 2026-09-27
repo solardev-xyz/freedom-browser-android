@@ -2389,7 +2389,7 @@ private class GestureArmingNodeProvider(
 ) : AccessibilityNodeProvider() {
     override fun performAction(virtualViewId: Int, action: Int, arguments: Bundle?): Boolean {
         if (accessibilityActionArmsGestureLatch(action)) {
-            latch.onInputStart()
+            latch.onInputStart(untilConfirmed = true)
             latch.onInput()
         }
         return inner.performAction(virtualViewId, action, arguments)
@@ -2462,7 +2462,7 @@ internal class PageWebView(context: Context) : WebView(context) {
     // its node provider. Either way, armed before Chromium clicks.
     override fun performAccessibilityAction(action: Int, arguments: Bundle?): Boolean {
         if (accessibilityActionArmsGestureLatch(action)) {
-            userGestures.onInputStart()
+            userGestures.onInputStart(untilConfirmed = true)
             userGestures.onInput()
         }
         return super.performAccessibilityAction(action, arguments)

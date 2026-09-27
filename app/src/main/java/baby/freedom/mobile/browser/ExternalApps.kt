@@ -205,8 +205,12 @@ internal fun externalLinkVerdict(
  */
 internal class UserGestureLatch(private val clock: () -> Long) {
     /** One input: when it began and (so far) ended, on [clock]'s timeline. */
-    private class Input(val id: Int, val start: Long, var end: Long) {
+    private class Input(val id: Int, val start: Long, var end: Long, var untilConfirmed: Boolean) {
         var inTopDocument = false
+
+        /** Whether the top document's input at [at] can be this input's. */
+        fun covers(at: Long): Boolean =
+            at >= start - EARLY_MS && at <= (if (untilConfirmed) start + CONFIRM_MS else end + LATE_MS)
     }
 
     private var inputId = 0
@@ -220,10 +224,19 @@ internal class UserGestureLatch(private val clock: () -> Long) {
      * sees it — at [at] (the event's own time, e.g. `MotionEvent.eventTime`).
      * A new input id. An offer still waiting on an earlier input keeps
      * waiting: its confirmation names its own input, not "the latest".
+     *
+     * [untilConfirmed] is for an accessibility click, which has no
+     * platform event time: Blink stamps the click it simulates when it
+     * runs it in the renderer, as late as a long task on the page makes
+     * it. So such an input covers any confirmation from its start until
+     * [CONFIRM_MS] later (the most an offer waits anyway), and closes on
+     * the first one — the one click it makes. A later input whose word
+     * arrives while it is still open matches both and is refused: fail
+     * closed.
      */
-    fun onInputStart(at: Long = clock()) {
+    fun onInputStart(at: Long = clock(), untilConfirmed: Boolean = false) {
         inputId++
-        recent.addLast(Input(inputId, at, at))
+        recent.addLast(Input(inputId, at, at, untilConfirmed))
         val stale = clock() - WINDOW_MS - CONFIRM_MS
         while (recent.isNotEmpty() && (recent.size > MAX_RECENT || recent.first().end < stale)) recent.removeFirst()
     }
@@ -246,7 +259,11 @@ internal class UserGestureLatch(private val clock: () -> Long) {
     fun onTopDocumentInput(ageMs: Long) {
         // Event time plus the message's own (small, positive) transit.
         val at = clock() - ageMs
-        val input = recent.singleOrNull { at >= it.start - EARLY_MS && at <= it.end + LATE_MS } ?: return
+        val input = recent.singleOrNull { it.covers(at) } ?: return
+        if (input.untilConfirmed) {
+            input.untilConfirmed = false
+            if (at > input.end) input.end = at
+        }
         input.inTopDocument = true
         waiting.remove(input.id)?.invoke()
     }

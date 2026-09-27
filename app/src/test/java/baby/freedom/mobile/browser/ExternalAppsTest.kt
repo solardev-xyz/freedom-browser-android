@@ -274,6 +274,70 @@ class ExternalAppsTest {
     }
 
     @Test
+    fun `an accessibility click is confirmed when a busy renderer runs it late`() {
+        // R5-F1: Blink stamps the click it simulates for TalkBack when it
+        // runs it, here 200 ms after the double-tap behind a long task.
+        val c = Clock()
+        val at = c.now
+        c.latch.onInputStart(at, untilConfirmed = true)
+        c.latch.onInput()
+        val id = c.latch.consume()!!
+        var offered = 0
+        assertTrue(c.latch.whenInTopDocument(id) { offered++ })
+        c.now += 200
+        c.topDocumentSaw(c.now - 2)
+        assertEquals(1, offered)
+    }
+
+    @Test
+    fun `an accessibility click on an iframe is still refused`() {
+        val c = Clock()
+        c.latch.onInputStart(c.now, untilConfirmed = true)
+        c.latch.onInput()
+        val id = c.latch.consume()!!
+        var offered = 0
+        assertTrue(c.latch.whenInTopDocument(id) { offered++ })
+        c.now += 300
+        c.topDocumentSaw(c.now - 400) // an event before the click: not its word
+        c.now += UserGestureLatch.CONFIRM_MS // the iframe got the click: no word
+        assertTrue(c.latch.giveUp(id))
+        assertEquals(0, offered)
+    }
+
+    @Test
+    fun `a confirmed accessibility click closes, so a later tap's word is the tap's own`() {
+        val c = Clock()
+        c.latch.onInputStart(c.now, untilConfirmed = true)
+        c.latch.onInput()
+        c.now += 100
+        c.topDocumentSaw(c.now - 1) // the click's own word
+        c.latch.consume()
+        c.now += 300
+        val down = c.tap()
+        var offered = 0
+        assertTrue(c.latch.whenInTopDocument(c.latch.consume()!!) { offered++ })
+        c.topDocumentSaw(down)
+        assertEquals(1, offered)
+    }
+
+    @Test
+    fun `an unconfirmed accessibility click and a later tap share a word, so neither is confirmed`() {
+        // Fail closed: the word could be either's.
+        val c = Clock()
+        c.latch.onInputStart(c.now, untilConfirmed = true)
+        c.latch.onInput()
+        val click = c.latch.consume()!!
+        c.now += 300
+        val down = c.tap()
+        val tap = c.latch.consume()!!
+        var offered = 0
+        assertTrue(c.latch.whenInTopDocument(click) { offered++ })
+        assertTrue(c.latch.whenInTopDocument(tap) { offered++ })
+        c.topDocumentSaw(down)
+        assertEquals(0, offered)
+    }
+
+    @Test
     fun `a word that fits no input confirms nothing`() {
         val c = Clock()
         val down = c.tap()
