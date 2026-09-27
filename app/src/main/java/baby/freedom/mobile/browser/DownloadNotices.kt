@@ -18,7 +18,10 @@ import kotlinx.coroutines.launch
  *   the one on screen *and* the ones queued behind it — while a
  *   snackbar that isn't a download notice stays where it is;
  * - a background tab dropping download offers is [announceDrops]ed
- *   once per episode, and that notice is a download notice too.
+ *   once per episode, and that notice is a download notice too — but
+ *   one withdrawn by [cancelAll] before it ran its course counts as
+ *   not yet announced, since the Downloads list doesn't show drops:
+ *   the next [announceDrops] (once the list closes) says it again.
  *
  * Main thread only (it's driven from Compose effects), so no locking.
  */
@@ -85,8 +88,15 @@ internal class DownloadNotices {
         starts.remove(id)?.cancel()
     }
 
-    /** Withdraw every download notice, showing or queued. */
+    /**
+     * Withdraw every download notice, showing or queued. A tab whose
+     * drop notice is withdrawn here is announced again by the next
+     * [announceDrops] if it's still dropping: the notice was cut short
+     * (or never shown), and the Downloads list that replaced it doesn't
+     * carry that news.
+     */
     fun cancelAll() {
+        announcedDrops.removeAll(dropNotices.keys)
         // Copy: each cancel's completion handler edits the sets.
         live.toList().forEach { it.cancel() }
         live.clear()

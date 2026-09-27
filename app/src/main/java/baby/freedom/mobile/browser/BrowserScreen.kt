@@ -1451,7 +1451,8 @@ fun BrowserScreen(
     // The active tab needs no snackbar: its prompt carries the note.
     // It's a download notice, so opening the Downloads list withdraws
     // it and none is shown while the list is up (a tab that starts
-    // dropping then is announced once it closes). Launched in the
+    // dropping then, or whose notice the list withdrew, is announced
+    // once it closes — the list itself doesn't show drops). Launched in the
     // screen's [scope], not this effect's, so another tab starting to
     // drop (which restarts the effect) can't cancel it.
     LaunchedEffect(droppedOffers.keys, showDownloads) {
