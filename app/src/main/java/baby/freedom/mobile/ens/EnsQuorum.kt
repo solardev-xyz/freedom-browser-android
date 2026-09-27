@@ -143,16 +143,19 @@ internal object EnsQuorum {
     }
 
     /**
-     * Whether a finished wave should be widened to the servers not yet
-     * asked: only when it has no verdict to give — nobody answered, or
-     * too few did — and more servers could change that. A conflict is
-     * already a verdict (servers disagreed), and a gateway failure
-     * repeats on every server.
+     * Whether a finished wave of [asked] servers should be widened to the
+     * servers not yet asked: only when it has no verdict to give and more
+     * servers could change that — nobody answered, too few did, or the
+     * answers conflict only because a wave member gave no vote (a 1-vs-1
+     * tie beside a failed third server, which the rest of the pool can
+     * break). A conflict among every server asked is already a verdict,
+     * and a gateway failure repeats on every server.
      */
-    fun worthWidening(vote: WaveVote): Boolean = when (vote) {
+    fun worthWidening(vote: WaveVote, asked: Int): Boolean = when (vote) {
         is WaveVote.AllFailed -> !vote.ccip
         is WaveVote.Unverified -> true
-        is WaveVote.Agreed, is WaveVote.Conflict -> false
+        is WaveVote.Conflict -> vote.byKey.values.sumOf { it.size } < asked
+        is WaveVote.Agreed -> false
     }
 
     private fun bucketsOf(legs: Map<String, Leg>): Map<String, List<String>> {

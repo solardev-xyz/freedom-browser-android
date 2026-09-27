@@ -199,6 +199,29 @@ class EnsQuorumResolveTest {
     }
 
     @Test
+    fun `a tie beside a failed wave server is broken by the rest of the pool`() {
+        // Liar and one honest server disagree, the third can't answer: the
+        // two servers not yet asked settle it rather than a hard conflict.
+        val servers = serversOf(
+            honest(ref = otherRef, delayMs = 0),
+            honest(delayMs = 20),
+            honest(ref = null, delayMs = 40),
+            honest(delayMs = 60),
+            honest(delayMs = 80),
+        )
+
+        val result = resolve(servers)
+
+        require(result is EnsResult.Ok) { "got $result" }
+        assertEquals("bzz://$honestRef", result.uri)
+        assertTrue(result.trust.verified)
+        // The widened read stops once M agree; the liar stays on record.
+        assertTrue("rpc2.test" in result.trust.agreed)
+        assertTrue(result.trust.agreed.size >= EnsQuorum.M)
+        assertEquals(listOf("rpc1.test"), result.trust.dissented)
+    }
+
+    @Test
     fun `a record read from a server on another block doesn't count`() {
         // rpc3 is outvoted on block #anchor's hash, so its read — which
         // would otherwise conflict with rpc1's — has no vote.
@@ -382,6 +405,56 @@ class EnsQuorumResolveTest {
         val callbacks = rpcs.calls().filter { it.params.getJSONObject(0).getString("data").startsWith("0x11223344") }
         assertTrue(callbacks.isNotEmpty())
         assertTrue(callbacks.all { it.params.getString(1) == anchorTag })
+    }
+
+    @Test
+    fun `a server on another block can't make a failure look like the gateway's`() {
+        // rpc1 is on another block and its CCIP hop fails, like rpc2's and
+        // rpc3's. It has no vote, so the wave isn't a gateway-only failure
+        // and is widened to rpc4/rpc5, which answer directly.
+        val ur = "0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe"
+        val revert = encodeOffchainLookup(
+            sender = ur,
+            urls = listOf("https://gw.example/{sender}/{data}"),
+            callData = "deadbeef".hexToBytes(),
+            callback = "11223344".hexToBytes(),
+            extraData = "ee".hexToBytes(),
+        )
+        val offchainRevert = EnsHttp.Reply(
+            200,
+            """{"jsonrpc":"2.0","id":1,"error":{"code":3,"message":"reverted","data":"$revert"}}""",
+        )
+        fun offchain(delayMs: Long, hashOf: (Long) -> String?) =
+            Server(head = head, hashOf = hashOf, record = { _, _ -> offchainRevert }, headDelayMs = delayMs)
+        val rpcs = serversOf(
+            offchain(0) { "0x" + "f".repeat(64) },
+            offchain(20, ::canonicalHash),
+            offchain(40, ::canonicalHash),
+            honest(delayMs = 60),
+            honest(delayMs = 80),
+        )
+        val http = object : EnsHttp {
+            override fun request(
+                method: String,
+                url: String,
+                headers: Map<String, String>,
+                body: String?,
+                timeoutMs: Int,
+                maxBytes: Long,
+                followRedirects: Boolean,
+            ): EnsHttp.Reply =
+                if (url.startsWith("https://gw.example/")) {
+                    EnsHttp.Reply(500, "gateway down")
+                } else {
+                    rpcs.request(method, url, headers, body, timeoutMs, maxBytes, followRedirects)
+                }
+        }
+
+        val result = runBlocking { EnsResolver(rpcs.byUrl.keys.toList(), http).resolveContenthash("off.eth") }
+
+        require(result is EnsResult.Ok) { "got $result" }
+        assertTrue(result.trust.verified)
+        assertEquals(setOf("rpc4.test", "rpc5.test"), result.trust.agreed.toSet())
     }
 }
 

@@ -155,12 +155,22 @@ class EnsQuorumTest {
 
     @Test
     fun `only a wave with no verdict is widened`() {
-        assertTrue(EnsQuorum.worthWidening(WaveVote.AllFailed(ccip = false)))
-        assertTrue(EnsQuorum.worthWidening(WaveVote.Unverified("x", listOf("a"))))
+        assertTrue(EnsQuorum.worthWidening(WaveVote.AllFailed(ccip = false), asked = 3))
+        assertTrue(EnsQuorum.worthWidening(WaveVote.Unverified("x", listOf("a")), asked = 3))
         // Every server would ask the same broken gateway.
-        assertFalse(EnsQuorum.worthWidening(WaveVote.AllFailed(ccip = true)))
-        assertFalse(EnsQuorum.worthWidening(WaveVote.Agreed("x", listOf("a", "b"), emptyList())))
-        // Servers already disagreed: asking more can't undo that.
-        assertFalse(EnsQuorum.worthWidening(WaveVote.Conflict(mapOf("x" to listOf("a"), "y" to listOf("b")))))
+        assertFalse(EnsQuorum.worthWidening(WaveVote.AllFailed(ccip = true), asked = 3))
+        assertFalse(EnsQuorum.worthWidening(WaveVote.Agreed("x", listOf("a", "b"), emptyList()), asked = 3))
+        // Every server asked answered and they disagreed: that's the verdict.
+        val split = WaveVote.Conflict(mapOf("x" to listOf("a"), "y" to listOf("b"), "z" to listOf("c")))
+        assertFalse(EnsQuorum.worthWidening(split, asked = 3))
+    }
+
+    @Test
+    fun `a tie beside a server that gave no vote is widened`() {
+        // Liar says x, honest says y, the third timed out: the rest of the
+        // pool can still break the tie.
+        val tie = WaveVote.Conflict(mapOf("x" to listOf("a"), "y" to listOf("b")))
+        assertTrue(EnsQuorum.worthWidening(tie, asked = 3))
+        assertFalse(EnsQuorum.worthWidening(tie, asked = 2))
     }
 }

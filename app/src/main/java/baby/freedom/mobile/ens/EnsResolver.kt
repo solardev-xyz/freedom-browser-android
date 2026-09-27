@@ -272,7 +272,7 @@ class EnsResolver internal constructor(
         collectLegs(calls, round, hash, legs, outcomes)
         var vote = EnsQuorum.waveVote(legs)
         val rest = round.order.drop(EnsQuorum.K)
-        if (EnsQuorum.worthWidening(vote) && rest.isNotEmpty()) {
+        if (EnsQuorum.worthWidening(vote, asked = first.size) && rest.isNotEmpty()) {
             Log.i(TAG, "[$name] widening the wave to ${rest.map(::hostOf)} after $vote")
             val more = rest.associateWith { startCall(it, target, callData, contract, round.tag) }
             collectLegs(more, round, hash, legs, outcomes)
@@ -375,24 +375,25 @@ class EnsResolver internal constructor(
         round: AnchorRound,
         hash: String,
         outcomes: MutableMap<String, CallOutcome>,
-    ): EnsQuorum.Leg = try {
-        val outcome = call.await()
-        val key = keyOf(outcome)
-        val theirs = (round.hashes[rpc] ?: io.async { blockHash(rpc, round.tag) }).await()
-        when {
-            key == null -> EnsQuorum.Leg.Failed()
-            !theirs.equals(hash, ignoreCase = true) -> {
-                Log.w(TAG, "${hostOf(rpc)}: block #${round.number} is $theirs, not $hash")
-                EnsQuorum.Leg.Failed()
-            }
-            else -> {
-                synchronized(outcomes) { outcomes[rpc] = outcome }
-                EnsQuorum.Leg.Answer(key)
-            }
+    ): EnsQuorum.Leg {
+        // A CCIP failure only means "the gateway, not the server" once the
+        // server has shown it's on the agreed block: one that isn't has no
+        // vote at all, and mustn't count toward a gateway-only failure.
+        val outcome = try {
+            call.await()
+        } catch (e: CcipFailure) {
+            Log.w(TAG, "${hostOf(rpc)}: CCIP-Read failed: ${e.message}")
+            null
         }
-    } catch (e: CcipFailure) {
-        Log.w(TAG, "${hostOf(rpc)}: CCIP-Read failed: ${e.message}")
-        EnsQuorum.Leg.Failed(ccip = true)
+        val theirs = (round.hashes[rpc] ?: io.async { blockHash(rpc, round.tag) }).await()
+        if (!theirs.equals(hash, ignoreCase = true)) {
+            Log.w(TAG, "${hostOf(rpc)}: block #${round.number} is $theirs, not $hash")
+            return EnsQuorum.Leg.Failed()
+        }
+        if (outcome == null) return EnsQuorum.Leg.Failed(ccip = true)
+        val key = keyOf(outcome) ?: return EnsQuorum.Leg.Failed()
+        synchronized(outcomes) { outcomes[rpc] = outcome }
+        return EnsQuorum.Leg.Answer(key)
     }
 
     /** The exact bytes a read returned, as its vote; `null` = no answer. */
