@@ -2,9 +2,15 @@ package baby.freedom.mobile.browser
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Before
 import org.junit.Test
 
 class SearchEnginesTest {
+
+    @Before
+    fun realIcu() {
+        WhatwgHost.uts46 = Icu4jUts46
+    }
 
     @Test
     fun `built-in set matches desktop, DuckDuckGo default`() {
@@ -236,6 +242,12 @@ class SearchEnginesTest {
             "https://xn--ls8h/?q=%s" to "https://xn--ls8h/?q={searchTerms}",
             "https://xn--nxasmq6b/?q=%s" to "https://xn--nxasmq6b/?q={searchTerms}",
             "https://-xn--a/?q=%s" to "https://-xn--a/?q={searchTerms}",
+            // Chromium's host is non-loopback here, so cleartext http is refused.
+            "http://\u1806localhost/?q=%s" to null,
+            "http://127.0.0.1%E1%A0%86/?q=%s" to null,
+            "https://\u1806localhost/?q=%s" to "https://\u1806localhost/?q={searchTerms}",
+            "https://loca\u180Flhost/?q=%s" to "https://loca\u180Flhost/?q={searchTerms}",
+            "https://h\u0660st/?q=%s" to null,
         ).forEach { (input, desktop) ->
             assertEquals(input, desktop, SearchEngines.normalizeTemplate(input))
         }
@@ -251,6 +263,22 @@ class SearchEnginesTest {
             "ος" to "xn--0xag",
             "例。テスト" to "xn--fsq.xn--zckzah",
             "☃.example" to "xn--n3h.example",
+            // UTS-46 keeps U+1806 (IDNA2003 deleted it, making this `localhost`).
+            "\u1806localhost" to "xn--localhost-uf3c",
+            "127.0.0.1%E1%A0%86" to "127.0.0.xn--1-f3j",
+            // …and ignores these (IDNA2003 refused them as unassigned/prohibited).
+            "loca\u180Flhost" to "localhost",
+            "a\u2061b.example" to "ab.example",
+            "x\uD834\uDD73y" to "xy",
+            "a\u115Fb" to "ab",
+            // CheckBidi and disallowed symbols.
+            "h\u0660st" to null,
+            "a\u2066b" to null,
+            "a\uD83C\uDD00b" to null,
+            "a\uD804\uDCBDb" to null,
+            "\u05D0\u05D1.example" to "xn--4dbc.example",
+            "\u05D0a.example" to null,
+            "\u0627\u0661\u06F1" to null,
         ).forEach { (host, expected) ->
             assertEquals(host, expected, WhatwgHost.parse("https://$host/")?.hostname)
         }
