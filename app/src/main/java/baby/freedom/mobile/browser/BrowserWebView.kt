@@ -848,9 +848,13 @@ private fun buildRefreshableWebView(
             val hit = hitTestResult
             val type = hit.type
             val extra = hit.extra
-            val takes = type == WebView.HitTestResult.SRC_IMAGE_ANCHOR_TYPE ||
-                pageContextTargetFor(type, extra, focusHref = null, focusTitle = null) != null
-            if (!takes) return@setOnLongClickListener false
+            // Taken only when a menu is certain to open once the href
+            // lands — returning `true` has already suppressed Chromium's
+            // own long-press. An image inside a link is certain when the
+            // image itself is fetchable; a `blob:` image inside a link
+            // hangs on the link, which may yet resolve to nothing
+            // (`javascript:`), so that case stays Chromium's.
+            if (!pageContextMenuIsCertain(type, extra)) return@setOnLongClickListener false
             val reply = android.os.Handler(android.os.Looper.getMainLooper()) { msg ->
                 pageContextTargetFor(
                     type = type,

@@ -5,6 +5,14 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import org.junit.Test
 import org.mozilla.javascript.Context as JsContext
 
@@ -71,6 +79,9 @@ class PageContextMenuTest {
     fun `javascript links and blob images leave the long-press to Chromium`() {
         assertNull(pageContextTargetFor(HitTestResult.SRC_ANCHOR_TYPE, "javascript:void(0)", null, null))
         assertNull(pageContextTargetFor(HitTestResult.IMAGE_TYPE, "blob:https://a.com/1234", null, null))
+        // A `data:` payload that doesn't say it is an image isn't one.
+        assertNull(pageContextTargetFor(HitTestResult.IMAGE_TYPE, "data:,hello", null, null))
+        assertNull(pageContextTargetFor(HitTestResult.IMAGE_TYPE, "data:text/html,<b>x</b>", null, null))
         assertNull(
             pageContextTargetFor(HitTestResult.SRC_IMAGE_ANCHOR_TYPE, "blob:https://a.com/1", "javascript:x()", null),
         )
@@ -82,6 +93,26 @@ class PageContextMenuTest {
             PageContextTarget(null, null, "https://a.com/i.png"),
             pageContextTargetFor(HitTestResult.SRC_IMAGE_ANCHOR_TYPE, "https://a.com/i.png", "javascript:x()", "t"),
         )
+    }
+
+    @Test
+    fun `a long-press is taken only when the reply cannot leave it without a menu`() {
+        // Taken: whatever the href reply says, a target comes out of it.
+        val certain = listOf(
+            HitTestResult.SRC_ANCHOR_TYPE to "https://a.com/x",
+            HitTestResult.IMAGE_TYPE to "https://a.com/i.png",
+            HitTestResult.SRC_IMAGE_ANCHOR_TYPE to "https://a.com/i.png",
+        )
+        for ((type, extra) in certain) {
+            assertTrue(pageContextMenuIsCertain(type, extra))
+            for (reply in listOf(null, "", "javascript:void 0", "https://a.com/other")) {
+                assertTrue("$type $extra $reply", pageContextTargetFor(type, extra, reply, null) != null)
+            }
+        }
+        // Left to Chromium: a blob image in a link hangs on a reply that
+        // may be `javascript:` (and then nothing would open).
+        assertFalse(pageContextMenuIsCertain(HitTestResult.SRC_IMAGE_ANCHOR_TYPE, "blob:https://a.com/1"))
+        assertFalse(pageContextMenuIsCertain(HitTestResult.SRC_ANCHOR_TYPE, "javascript:void 0"))
     }
 
     @Test
@@ -221,5 +252,45 @@ class PageContextMenuTest {
             """,
         )
         assertEquals("query", JsContext.toString(out))
+    }
+
+    // ---- acting after the sheet hides ----------------------------------
+
+    @Test
+    fun `an action runs once the hide finishes`() = runBlocking {
+        val scope = CoroutineScope(Job())
+        val done = CompletableDeferred<Unit>()
+        var ran = false
+        afterUnlessDisposed(scope, { done.await() }) { ran = true }
+        assertFalse(ran)
+        done.complete(Unit)
+        yieldUntil { ran }
+        assertTrue(ran)
+        scope.cancel()
+    }
+
+    @Test
+    fun `an action picked before the menu went stale never runs`() = runBlocking {
+        val scope = CoroutineScope(Job())
+        val hiding = CompletableDeferred<Unit>()
+        var ran = false
+        afterUnlessDisposed(scope, { hiding.await() }) { ran = true }
+        scope.cancel() // the sheet left composition mid-hide
+        scope.coroutineContext[Job]!!.join()
+        assertFalse(ran)
+    }
+
+    @Test
+    fun `an interrupted hide still acts while the sheet is up`() = runBlocking {
+        val scope = CoroutineScope(Job())
+        var ran = false
+        afterUnlessDisposed(scope, { throw CancellationException("drag") }) { ran = true }
+        yieldUntil { ran }
+        assertTrue(ran)
+        scope.cancel()
+    }
+
+    private suspend fun yieldUntil(condition: () -> Boolean) {
+        withTimeout(5_000) { while (!condition()) delay(5) }
     }
 }

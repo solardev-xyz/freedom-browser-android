@@ -26,6 +26,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
 /**
@@ -71,7 +73,11 @@ internal fun pageContextTargetFor(
     focusTitle: String?,
 ): PageContextTarget? {
     val (link, image) = when (type) {
-        WebView.HitTestResult.SRC_ANCHOR_TYPE -> (focusHref?.ifBlank { null } ?: extra) to null
+        // The hit test's own href stands when the reply's isn't usable,
+        // so a link that was taken ([pageContextMenuIsCertain]) always
+        // opens its menu.
+        WebView.HitTestResult.SRC_ANCHOR_TYPE ->
+            (focusHref?.trim()?.takeIf { isActionableLink(it) } ?: extra) to null
         WebView.HitTestResult.SRC_IMAGE_ANCHOR_TYPE -> focusHref to extra
         WebView.HitTestResult.IMAGE_TYPE -> null to extra
         else -> return null
@@ -86,15 +92,29 @@ internal fun pageContextTargetFor(
     )
 }
 
+/**
+ * Whether a long-press hit test of [type] / [extra] is sure to produce a
+ * [PageContextTarget] once `requestFocusNodeHref` answers, whatever it
+ * answers — i.e. whether the long-press may be taken from Chromium
+ * before that reply is in. A target that already exists with no href
+ * at all is one: the href only ever adds a link.
+ */
+internal fun pageContextMenuIsCertain(type: Int, extra: String?): Boolean =
+    pageContextTargetFor(type, extra, focusHref = null, focusTitle = null) != null
+
 private fun schemeOf(url: String): String? =
     Regex("^([a-zA-Z][a-zA-Z0-9+.\\-]*):").find(url)?.groupValues?.get(1)?.lowercase()
 
 private fun isActionableLink(url: String): Boolean =
     schemeOf(url) in OPENABLE_SCHEMES
 
-/** Schemes whose bytes the browser can fetch outside the page (see [fetchImage]). */
+/**
+ * Schemes whose bytes the browser can fetch outside the page (see
+ * [fetchImage]). A `data:` URL counts only when it says it is an image:
+ * `<img src="data:,hello">` is text, and nothing to save as a picture.
+ */
 internal fun isFetchableImage(url: String): Boolean =
-    schemeOf(url) in OPENABLE_SCHEMES || schemeOf(url) == "data"
+    schemeOf(url) in OPENABLE_SCHEMES || url.startsWith("data:image/", ignoreCase = true)
 
 /** An image that can also be opened on its own in a tab: not a `data:` blob of bytes. */
 internal fun isOpenableImage(url: String): Boolean = schemeOf(url) in OPENABLE_SCHEMES
@@ -211,7 +231,7 @@ internal fun PageContextMenuSheet(
     // Take the sheet down, then act: an action that opens a tab makes
     // this menu stale, and the sheet would otherwise vanish mid-slide.
     fun act(action: () -> Unit): () -> Unit = {
-        scope.launch { sheetState.hide() }.invokeOnCompletion {
+        afterUnlessDisposed(scope, { sheetState.hide() }) {
             onDismiss()
             action()
         }
@@ -282,4 +302,19 @@ private fun SheetItem(label: String, icon: ImageVector, onClick: () -> Unit) {
         onClick = onClick,
         modifier = Modifier.padding(horizontal = 8.dp),
     )
+}
+
+/**
+ * Run [first] in [scope], then [then] — unless [scope] itself was
+ * cancelled first. The menu's scope ends when the sheet leaves
+ * composition, which [BrowserScreen] does the moment the menu goes
+ * stale (the page navigated, the tab closed); an action picked just
+ * before that must not then run against a document that is gone. A
+ * [first] cut short any other way (a drag interrupting the hide
+ * animation) still goes on to [then].
+ */
+internal fun afterUnlessDisposed(scope: CoroutineScope, first: suspend () -> Unit, then: () -> Unit) {
+    scope.launch { first() }.invokeOnCompletion {
+        if (scope.isActive) then()
+    }
 }

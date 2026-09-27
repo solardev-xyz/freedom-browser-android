@@ -1385,7 +1385,7 @@ fun BrowserScreen(
         } else if (owner != null) {
             fun withImage(url: String, action: suspend (FetchedImage) -> Boolean, failure: String) {
                 scope.launch {
-                    val image = fetchImage(url, WebSettings.getDefaultUserAgent(context))
+                    val image = fetchImage(url, request.pageUrl, WebSettings.getDefaultUserAgent(context))
                     val ok = image != null && action(image)
                     if (!ok) Toast.makeText(context, failure, Toast.LENGTH_SHORT).show()
                 }
