@@ -560,6 +560,7 @@ fun BrowserWebViewHost(
     val context = LocalContext.current
     val repo = remember(context) { BrowsingRepository.get(context) }
     val sitePermissions = remember(context) { SitePermissionBroker.get(context) }
+    val pageZoom = remember(context) { PageZoom.get(context) }
     val fileChooser = rememberFileChooser()
 
     // Enable Chrome DevTools inspection for debug builds so we can
@@ -626,6 +627,7 @@ fun BrowserWebViewHost(
             state = tab,
             repo = repo,
             sitePermissions = sitePermissions,
+            pageZoom = pageZoom,
             onSubmitUrl = { target, url ->
                 tabs.requestSubmit?.invoke(target, url)
             },
@@ -778,6 +780,21 @@ fun BrowserWebViewHost(
         }
     }
 
+    // Page zoom (#88): every tab's WebView at its site's level. A tab
+    // picks its level up at commit (see `onPageStarted`); this follows
+    // everything after that — a press in the menu, the same site changed
+    // from another tab, the remembered levels landing from disk after
+    // the first page of a cold start already committed.
+    LaunchedEffect(tabs) {
+        snapshotFlow { tabs.tabs.map { it.id to pageZoom.levelFor(it.zoomSite) } }
+            .collect { levels ->
+                for ((id, level) in levels) {
+                    val settings = webViews[id]?.settings ?: continue
+                    if (settings.textZoom != level) settings.textZoom = level
+                }
+            }
+    }
+
     DisposableEffect(Unit) {
         onDispose {
             for (wv in webViews.values) {
@@ -796,6 +813,7 @@ private fun buildRefreshableWebView(
     state: BrowserState,
     repo: BrowsingRepository,
     sitePermissions: SitePermissionBroker,
+    pageZoom: PageZoom,
     onSubmitUrl: (BrowserState, String) -> Unit,
     onEnterFullscreen: (View, WebChromeClient.CustomViewCallback?) -> Unit,
     onExitFullscreen: () -> Unit,
@@ -1664,6 +1682,12 @@ private fun buildRefreshableWebView(
                 // last Stop aborted, this document is a load of its own
                 // and its percentages are worth drawing (#41).
                 state.loadAborted = false
+                // …and at its own site's zoom level (#88), set before it
+                // paints so a remembered level never shows as a jump.
+                // Home and error pages aren't sites: they get the default.
+                val zoomSite = zoomSiteKey(url)
+                state.zoomSite = zoomSite
+                view?.settings?.textZoom = pageZoom.levelFor(zoomSite)
                 // …and above the home branch below, because the blank
                 // entry ends a page's probe exactly like any other
                 // document does (see [cancelProbeSupersededBy]).
@@ -1814,6 +1838,8 @@ private fun buildRefreshableWebView(
                     state.canGoBack = view?.canGoBack() == true
                     state.canGoForward = view?.canGoForward() == true
                     state.progress = -1
+                    // …and no site to zoom as (#88), for the same reason.
+                    state.zoomSite = null
                     // …and drop the park for the same reason as the
                     // `onPageStarted` branch: home has the screen now, so
                     // a page that finished but had not painted by the

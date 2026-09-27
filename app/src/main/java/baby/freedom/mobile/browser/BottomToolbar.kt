@@ -17,12 +17,14 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.IntrinsicSize
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -44,10 +46,13 @@ import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Remove
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.StarBorder
+import androidx.compose.material.icons.filled.ZoomIn
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.ColorScheme
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
@@ -58,6 +63,7 @@ import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.State
@@ -98,15 +104,16 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.isTraversalGroup
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.traversalIndex
 import androidx.compose.ui.text.TextRange
-import androidx.compose.ui.text.rememberTextMeasurer
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardCapitalization
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.TextFieldValue
+import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Constraints
@@ -1408,6 +1415,8 @@ internal fun BottomToolbar(
     onNewTab: () -> Unit,
     onExpandCapsule: () -> Unit,
     onFindInPage: () -> Unit,
+    zoomLevel: Int?,
+    onZoom: (ZoomAction) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     // Clamp rather than trust the caller: both fractions are driven by
@@ -1681,6 +1690,8 @@ internal fun BottomToolbar(
                     onReload = onReload,
                     onNewTab = onNewTab,
                     onFindInPage = onFindInPage,
+                    zoomLevel = zoomLevel,
+                    onZoom = onZoom,
                 )
             },
             modifier = Modifier
@@ -2876,6 +2887,8 @@ private fun OverflowMenuButton(
     onReload: () -> Unit,
     onNewTab: () -> Unit,
     onFindInPage: () -> Unit,
+    zoomLevel: Int?,
+    onZoom: (ZoomAction) -> Unit,
 ) {
     var menuExpanded by remember { mutableStateOf(false) }
     // We hand-roll the anchor positioning rather than rely on
@@ -2994,6 +3007,10 @@ private fun OverflowMenuButton(
                                 onFindInPage()
                             },
                         )
+                        // − / + and the percentage, which resets. The
+                        // menu stays open across presses so the user
+                        // can watch the page settle between steps.
+                        ZoomMenuRow(level = zoomLevel, onZoom = onZoom)
                         DropdownMenuItem(
                             text = { MenuItemLabel("History") },
                             leadingIcon = { Icon(Icons.Filled.History, contentDescription = null) },
@@ -3046,6 +3063,85 @@ private fun OverflowMenuButton(
                     }
                 }
             }
+        }
+    }
+}
+
+/**
+ * The overflow menu's page-zoom row (#88): "Zoom", then − / the level /
+ * +, laid out on [DropdownMenuItem]'s metrics so it lines up with the
+ * rows around it. Tapping the level resets it to 100%. [level] null
+ * (home, an error page — nothing to zoom) disables the whole row.
+ *
+ * The level is always in the row's text, never only in a tooltip or a
+ * content description, and sits in a fixed-width slot so stepping from
+ * 90% to 100% doesn't nudge the buttons under the user's finger.
+ */
+@Composable
+private fun ZoomMenuRow(level: Int?, onZoom: (ZoomAction) -> Unit) {
+    val enabled = level != null
+    val shown = level ?: PageZoomLevels.DEFAULT
+    val disabledAlpha = 0.38f
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier
+            .fillMaxWidth()
+            .heightIn(min = 48.dp)
+            .padding(start = 12.dp, end = 4.dp),
+    ) {
+        Icon(
+            imageVector = Icons.Filled.ZoomIn,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.onSurfaceVariant
+                .let { if (enabled) it else it.copy(alpha = disabledAlpha) },
+        )
+        Spacer(Modifier.width(12.dp))
+        Text(
+            text = "Zoom",
+            style = MaterialTheme.typography.labelLarge,
+            color = MaterialTheme.colorScheme.onSurface
+                .let { if (enabled) it else it.copy(alpha = disabledAlpha) },
+            modifier = Modifier.padding(end = 16.dp),
+        )
+        Spacer(Modifier.weight(1f))
+        IconButton(
+            onClick = { onZoom(ZoomAction.Out) },
+            enabled = enabled && shown > PageZoomLevels.MIN,
+            modifier = Modifier.size(40.dp),
+        ) {
+            Icon(Icons.Filled.Remove, contentDescription = "Zoom out")
+        }
+        TextButton(
+            onClick = { onZoom(ZoomAction.Reset) },
+            enabled = enabled && shown != PageZoomLevels.DEFAULT,
+            // At 100% there is nothing to reset, but the level is still
+            // the row's value: keep it readable rather than greyed out.
+            colors = ButtonDefaults.textButtonColors(
+                contentColor = MaterialTheme.colorScheme.primary,
+                disabledContentColor = MaterialTheme.colorScheme.onSurface
+                    .let { if (enabled) it else it.copy(alpha = disabledAlpha) },
+            ),
+            contentPadding = PaddingValues(horizontal = 4.dp),
+            modifier = Modifier
+                .width(64.dp)
+                .semantics {
+                    contentDescription = "Zoom $shown%" +
+                        if (enabled && shown != PageZoomLevels.DEFAULT) ", tap to reset to 100%" else ""
+                },
+        ) {
+            Text(
+                text = "$shown%",
+                maxLines = 1,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.fillMaxWidth(),
+            )
+        }
+        IconButton(
+            onClick = { onZoom(ZoomAction.In) },
+            enabled = enabled && shown < PageZoomLevels.MAX,
+            modifier = Modifier.size(40.dp),
+        ) {
+            Icon(Icons.Filled.Add, contentDescription = "Zoom in")
         }
     }
 }

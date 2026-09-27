@@ -160,6 +160,14 @@ class BrowserState(val id: Long) {
     val find = FindInPageState()
 
     /**
+     * The site the document on screen is zoomed as (#88, [zoomSiteKey]),
+     * or null when it isn't a site (home, an error page) and shows at the
+     * default level. Set by the tab's WebView at navigation commit.
+     */
+    var zoomSite: String? by mutableStateOf<String?>(null)
+        internal set
+
+    /**
      * Whether the page area stops above the bottom chrome for the
      * document on screen (#66). Set by the tab's WebView from its page's
      * bottom-nav detector (see [BottomChromeSlot]); back to overlay on
