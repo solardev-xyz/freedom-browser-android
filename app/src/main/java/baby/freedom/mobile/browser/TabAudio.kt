@@ -28,7 +28,10 @@ package baby.freedom.mobile.browser
  * listeners, `pagehide` included), so the WebView also [clear]s the set
  * whenever a new main-frame document replaces the last one: on the new
  * document's ready, or at `onPageStarted` for a document no detector runs
- * in ([isHttpUrl]).
+ * in ([isHttpUrl]). Messages from different frames aren't ordered, so
+ * that can also drop a new subframe whose report overtook the ready; an
+ * audible frame repeats [AUDIO_AUDIBLE] every [AUDIO_RECHECK_MS], which
+ * puts it back.
  */
 internal class TabAudioFrames<K> {
     private val audible = HashSet<K>()

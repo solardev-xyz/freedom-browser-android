@@ -1642,9 +1642,11 @@ private fun buildRefreshableWebView(
                     // A new main-frame document has replaced the last one,
                     // and every frame of that one is gone (#91): nothing
                     // they said about audio holds any more, whether or not
-                    // their `pagehide` silence made it here. Their reports
-                    // all came before this ready; the new document's
-                    // subframes only report after it.
+                    // their `pagehide` silence made it here. Frames report
+                    // on their own pipes, so a new subframe's first
+                    // report can overtake this ready and be wiped too; an
+                    // audible frame re-sends it every [AUDIO_RECHECK_MS],
+                    // so the indicator comes back within one period.
                     forgetTabAudio()
                     postBottomUiProbe(bottomUiChannels.onReady(replyProxy, bottomChrome.installed))
                     return@WebMessageListener

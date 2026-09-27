@@ -93,6 +93,10 @@ class BottomUiDetectorScriptTest {
           for (var i = 0; i < this.ls.length; i++) if (this.ls[i].t === t && this.ls[i].f === f) return;
           this.ls.push({ t: t, f: f });
         };
+        // Chromium's decoded-audio counter; an element has sound unless the test says otherwise.
+        function HTMLMediaElement() {}
+        Object.defineProperty(HTMLMediaElement.prototype, 'webkitAudioDecodedByteCount', { configurable: true,
+          get: function () { return this.decoded === undefined ? 4096 : this.decoded; } });
         function media() { var m = new EventTarget(); m.paused = true; m.ended = false; m.muted = false; m.volume = 1; m.connected = true; m.readyState = 4; return m; }
         function fire(m, t) {
           var e = { type: t, target: m, currentTarget: m, isTrusted: true };
@@ -531,17 +535,55 @@ class BottomUiDetectorScriptTest {
         assertEquals(1, timers)
         assertEquals(AUDIO_AUDIBLE, audio())
         assertEquals(AUDIO_RECHECK_MS, num("timers[0].ms"))
-        // Still playing: the check re-arms itself, and says nothing new.
+        // Still playing: the check re-arms itself, and says so again (a
+        // Kotlin that forgot the frame on a main-frame ready gets it back).
         assertEquals(1, flush())
         assertEquals(1, timers)
-        assertEquals(AUDIO_AUDIBLE, audio())
+        assertEquals("$AUDIO_AUDIBLE|$AUDIO_AUDIBLE", audio())
         // `document.open()`: every listener is erased and the element,
         // removed from the document, pauses without anyone hearing it.
         eval("mediaListeners = []; v.ls = []; v.paused = true")
         flush()
-        assertEquals("$AUDIO_AUDIBLE|$AUDIO_SILENT", audio())
+        assertEquals("$AUDIO_AUDIBLE|$AUDIO_AUDIBLE|$AUDIO_SILENT", audio())
         // Silent now: nothing runs any more.
         assertEquals(0, timers)
+    }
+
+    @Test
+    fun `a video with no audio track isn't audible, and stops being looked at`() = page {
+        documentStart()
+        eval("var v = media(); v.decoded = 0; play(v)")
+        assertEquals("", audio())
+        // Looked at again a few times, in case its sound isn't decoded yet…
+        assertEquals(AUDIO_SOUND_MS, num("timers[0].ms"))
+        var looks = 0
+        while (flush() > 0) looks++
+        assertEquals(AUDIO_SOUND_TRIES, looks)
+        // …then nothing runs, and nothing was said.
+        assertEquals(0, timers)
+        assertEquals("", audio())
+        // A later event on it looks again (new source, now with sound).
+        eval("v.decoded = 100; fire(v, 'playing')")
+        assertEquals(AUDIO_AUDIBLE, audio())
+    }
+
+    @Test
+    fun `sound decoded shortly after playing is picked up on a quick look`() = page {
+        documentStart()
+        eval("var v = media(); v.decoded = 0; play(v)")
+        assertEquals("", audio())
+        eval("v.decoded = 512")
+        flush()
+        assertEquals(AUDIO_AUDIBLE, audio())
+        assertEquals(AUDIO_RECHECK_MS, num("timers[0].ms"))
+    }
+
+    @Test
+    fun `a page shadowing the decoded-byte counter later can't make a silent video audible`() = page {
+        documentStart()
+        eval("Object.defineProperty(HTMLMediaElement.prototype, 'webkitAudioDecodedByteCount', { get: function () { return 1; } })")
+        eval("var v = media(); v.decoded = 0; play(v)")
+        assertEquals("", audio())
     }
 
     @Test
