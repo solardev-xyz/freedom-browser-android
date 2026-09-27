@@ -25,8 +25,8 @@ import java.net.URISyntaxException
  *    prompt is the real gate for everything not on the list.
  * 2. Only the top-level document may ask, and only right after the user
  *    interacted with it: WebView must report the navigation as carrying
- *    a user gesture, *and* the tab's WebView must have seen a tap or key
- *    press within [UserGestureLatch.WINDOW_MS] that no earlier launch
+ *    a user gesture, *and* the tab's WebView must have seen a tap, key
+ *    press or accessibility click within [UserGestureLatch.WINDOW_MS] that no earlier launch
  *    used up ([UserGestureLatch]). A page can't open an app — or a
  *    prompt — on load, from a timer, from an embedded frame, or turn
  *    one tap into a burst of launches.
@@ -35,6 +35,17 @@ import java.net.URISyntaxException
  *    allowing `magnet:` for a site never allows `sms:` too. Remembered
  *    decisions, the dismissal embargo and revoking from Settings all
  *    come from [SitePermissionBroker] unchanged.
+ *
+ *    The origin is the page the navigation *started from* — the
+ *    committed document — even when the app link is the end of a
+ *    server-redirect chain through other sites. As in Chrome, which
+ *    attributes the navigation to its initiator: a remembered Allow of
+ *    `intent:` for site A also covers a link on A to
+ *    `https://tracker.example` that redirects to an `intent:` URL. The
+ *    redirecting server isn't asked about separately; it can only reach
+ *    an app through a tap on a page the user already trusted with that
+ *    scheme, and `intent:` URLs are still stripped of components, flags
+ *    and grants ([externalAppLaunch]).
  *
  * The page's own navigation is always cancelled; an allowed link is
  * started as a separate `ACTION_VIEW` activity ([externalAppLaunch]).
@@ -181,6 +192,32 @@ internal class UserGestureLatch(private val clock: () -> Long) {
         const val WINDOW_MS = 5_000L
     }
 }
+
+/**
+ * Whether a key event arms the [UserGestureLatch]: one fresh press of a
+ * key that reaches the page. Not an auto-repeat (holding a key would
+ * re-arm it on every repeat, one launch each), not a system key (volume,
+ * media, back, call — pressed at the device, not at the page), and not
+ * a modifier on its own (Shift or Ctrl isn't a key the page acts on).
+ * Chromium grants activation on the same terms.
+ */
+internal fun keyArmsGestureLatch(
+    action: Int,
+    repeatCount: Int,
+    isSystem: Boolean,
+    isModifier: Boolean,
+): Boolean = action == android.view.KeyEvent.ACTION_DOWN && repeatCount == 0 && !isSystem && !isModifier
+
+/**
+ * Whether an accessibility action arms the [UserGestureLatch]. TalkBack's
+ * double-tap and Switch Access's select reach the page as `ACTION_CLICK`
+ * on a node, not as a touch, so without this a screen-reader user's
+ * activation of a `tel:` link would be refused with no feedback. A click
+ * is the only action that activates an element; focus, scroll and
+ * selection actions don't.
+ */
+internal fun accessibilityActionArmsGestureLatch(action: Int): Boolean =
+    action == android.view.accessibility.AccessibilityNodeInfo.ACTION_CLICK
 
 /**
  * Tells a tap from the end of a scroll, fling or pinch, so only a tap

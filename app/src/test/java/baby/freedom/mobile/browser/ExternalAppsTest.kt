@@ -135,6 +135,33 @@ class ExternalAppsTest {
     }
 
     @Test
+    fun `only a fresh press of a page key arms the latch`() {
+        val down = android.view.KeyEvent.ACTION_DOWN
+        val up = android.view.KeyEvent.ACTION_UP
+        assertTrue(keyArmsGestureLatch(down, repeatCount = 0, isSystem = false, isModifier = false))
+        // Holding a key: every auto-repeat is another ACTION_DOWN.
+        assertFalse(keyArmsGestureLatch(down, repeatCount = 1, isSystem = false, isModifier = false))
+        assertFalse(keyArmsGestureLatch(down, repeatCount = 30, isSystem = false, isModifier = false))
+        // Volume, media, back: pressed at the device, not at the page.
+        assertFalse(keyArmsGestureLatch(down, repeatCount = 0, isSystem = true, isModifier = false))
+        assertFalse(keyArmsGestureLatch(down, repeatCount = 0, isSystem = false, isModifier = true))
+        assertFalse(keyArmsGestureLatch(up, repeatCount = 0, isSystem = false, isModifier = false))
+    }
+
+    @Test
+    fun `an accessibility click arms the latch, other accessibility actions don't`() {
+        val info = android.view.accessibility.AccessibilityNodeInfo::class.java
+        fun action(name: String) = info.getField(name).getInt(null)
+        assertTrue(accessibilityActionArmsGestureLatch(action("ACTION_CLICK")))
+        for (name in listOf(
+            "ACTION_FOCUS", "ACTION_ACCESSIBILITY_FOCUS", "ACTION_LONG_CLICK",
+            "ACTION_SCROLL_FORWARD", "ACTION_SELECT", "ACTION_NEXT_AT_MOVEMENT_GRANULARITY",
+        )) {
+            assertFalse(name, accessibilityActionArmsGestureLatch(action(name)))
+        }
+    }
+
+    @Test
     fun `only a tap arms the latch, not a scroll, fling or pinch`() {
         val taps = TapTracker(slopPx = 10f)
         taps.onDown(100f, 100f)

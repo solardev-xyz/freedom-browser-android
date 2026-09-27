@@ -14,6 +14,7 @@ import android.graphics.PixelFormat
 import android.graphics.Rect
 import android.graphics.drawable.Drawable
 import android.net.Uri
+import android.os.Bundle
 import android.os.Message
 import android.os.SystemClock
 import android.util.Log
@@ -26,6 +27,8 @@ import android.view.MotionEvent
 import android.view.View
 import android.view.ViewConfiguration
 import android.view.ViewGroup
+import android.view.accessibility.AccessibilityNodeInfo
+import android.view.accessibility.AccessibilityNodeProvider
 import android.view.animation.DecelerateInterpolator
 import android.webkit.CookieManager
 import android.webkit.MimeTypeMap
@@ -2339,12 +2342,42 @@ private const val REVEAL_SETTLE_MS = 160L
 private const val REVEAL_HANDOVER_TIMEOUT_MS = 1_000L
 
 /**
+ * Chromium's accessibility node provider for the page, passed through
+ * untouched except that an `ACTION_CLICK` on any node (a TalkBack
+ * double-tap, a Switch Access select) arms [latch] first, as a tap on
+ * the screen would (#85).
+ */
+private class GestureArmingNodeProvider(
+    private val inner: AccessibilityNodeProvider,
+    private val latch: UserGestureLatch,
+) : AccessibilityNodeProvider() {
+    override fun performAction(virtualViewId: Int, action: Int, arguments: Bundle?): Boolean {
+        if (accessibilityActionArmsGestureLatch(action)) latch.onInput()
+        return inner.performAction(virtualViewId, action, arguments)
+    }
+
+    override fun createAccessibilityNodeInfo(virtualViewId: Int): AccessibilityNodeInfo? =
+        inner.createAccessibilityNodeInfo(virtualViewId)
+
+    override fun addExtraDataToAccessibilityNodeInfo(
+        virtualViewId: Int, info: AccessibilityNodeInfo, extraDataKey: String, arguments: Bundle?,
+    ) = inner.addExtraDataToAccessibilityNodeInfo(virtualViewId, info, extraDataKey, arguments)
+
+    override fun findAccessibilityNodeInfosByText(
+        text: String, virtualViewId: Int,
+    ): MutableList<AccessibilityNodeInfo>? = inner.findAccessibilityNodeInfosByText(text, virtualViewId)
+
+    override fun findFocus(focus: Int): AccessibilityNodeInfo? = inner.findFocus(focus)
+}
+
+/**
  * The tab's WebView. A subclass only for what `WebView` keeps
  * protected: Chromium's unconsumed overscroll, and the scroll range.
  */
 internal class PageWebView(context: Context) : WebView(context) {
     /**
-     * The user's taps and key presses on this page, each good for one
+     * The user's taps, key presses and accessibility clicks on this
+     * page, each good for one
      * link to another app (#85, see [UserGestureLatch]). Recorded before
      * Chromium sees the event, so the click it turns into — and the
      * navigation that starts — find it already there.
@@ -2365,8 +2398,32 @@ internal class PageWebView(context: Context) : WebView(context) {
     }
 
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
-        if (event.action == KeyEvent.ACTION_DOWN) userGestures.onInput()
+        if (keyArmsGestureLatch(
+                action = event.action,
+                repeatCount = event.repeatCount,
+                isSystem = event.isSystem,
+                isModifier = KeyEvent.isModifierKey(event.keyCode),
+            )
+        ) {
+            userGestures.onInput()
+        }
         return super.dispatchKeyEvent(event)
+    }
+
+    // TalkBack / Switch Access clicks: on the WebView itself when it has
+    // no virtual tree, else on one of Chromium's virtual nodes, through
+    // its node provider. Either way, armed before Chromium clicks.
+    override fun performAccessibilityAction(action: Int, arguments: Bundle?): Boolean {
+        if (accessibilityActionArmsGestureLatch(action)) userGestures.onInput()
+        return super.performAccessibilityAction(action, arguments)
+    }
+
+    private var a11yProvider: Pair<AccessibilityNodeProvider, AccessibilityNodeProvider>? = null
+
+    override fun getAccessibilityNodeProvider(): AccessibilityNodeProvider? {
+        val inner = super.getAccessibilityNodeProvider() ?: return null
+        a11yProvider?.let { (wrapped, wrapper) -> if (wrapped === inner) return wrapper }
+        return GestureArmingNodeProvider(inner, userGestures).also { a11yProvider = inner to it }
     }
 
     /** "Search" on the text-selection toolbar, with the selected text (#84). */
