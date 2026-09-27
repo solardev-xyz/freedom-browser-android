@@ -15,6 +15,8 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalView
 import androidx.core.view.WindowCompat
@@ -24,6 +26,7 @@ import baby.freedom.mobile.browser.Gateways
 import baby.freedom.mobile.browser.HOME_URL
 import baby.freedom.mobile.browser.PublicSuffixList
 import baby.freedom.mobile.browser.VirtualOrigin
+import baby.freedom.mobile.browser.statusBarIconsDark
 import baby.freedom.mobile.data.NodeSettings
 import baby.freedom.mobile.node.INodeCallback
 import baby.freedom.mobile.node.INodeService
@@ -61,6 +64,10 @@ class MainActivity : ComponentActivity() {
      * don't use this — they're passed straight in as the initial URL.
      */
     private val deepLinkFlow = MutableStateFlow<String?>(null)
+
+    // The page theme colour the browser paints behind the status bar,
+    // as ARGB, or null when it shows the app background there (#92).
+    private var statusBarTint by mutableStateOf<Int?>(null)
 
     @Volatile
     private var binder: INodeService? = null
@@ -154,6 +161,7 @@ class MainActivity : ComponentActivity() {
                         onRecoverNodes = ::onRecoverNodes,
                         ipfsProgressSnapshot = ::ipfsProgressSnapshot,
                         ipfsCounters = ::ipfsCounters,
+                        onStatusBarTint = { statusBarTint = it },
                     )
                 }
             }
@@ -176,15 +184,22 @@ class MainActivity : ComponentActivity() {
      * [androidx.compose.material3.ColorScheme] instead keeps them
      * right across a live switch, and keys them off the same thing
      * every other light/dark decision in the app reads.
+     *
+     * The status bar has a second input since #92: while the browser
+     * paints a page's theme colour behind it ([statusBarTint]), its icons
+     * follow that colour instead of the scheme ([statusBarIconsDark]).
+     * One effect decides both, so a live theme switch can't race a tint
+     * change into the wrong icons.
      */
     @Composable
     private fun SystemBarsForScheme() {
         val lightScheme = MaterialTheme.colorScheme.isLight
+        val darkStatusIcons = statusBarIconsDark(statusBarTint, lightScheme)
         val view = LocalView.current
-        LaunchedEffect(lightScheme, view) {
+        LaunchedEffect(lightScheme, darkStatusIcons, view) {
             if (view.isInEditMode) return@LaunchedEffect
             WindowCompat.getInsetsController(window, view).apply {
-                isAppearanceLightStatusBars = lightScheme
+                isAppearanceLightStatusBars = darkStatusIcons
                 isAppearanceLightNavigationBars = lightScheme
             }
         }

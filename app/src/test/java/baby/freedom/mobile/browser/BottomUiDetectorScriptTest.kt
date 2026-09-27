@@ -41,7 +41,7 @@ class BottomUiDetectorScriptTest {
           compatMode: 'CSS1Compat', documentElement: html, body: body,
           scrollingElement: { get scrollHeight() { return scrollHeight; } },
           elementFromPoint: function (x, y) { this.lastProbe = [x, y]; return hit; },
-          querySelectorAll: function (sel) { return sel === 'meta[name="theme-color"]' ? metas : []; },
+          querySelectorAll: function (sel) { return sel === 'meta[name="theme-color" i]' ? metas : []; },
           createElement: function (t) {
             return { getContext: function () {
               var v = '#000000';
@@ -113,7 +113,9 @@ class BottomUiDetectorScriptTest {
           if (pageCancels) e.defaultPrevented = true;
           flushTimers();
         }
-        function MutationObserver(cb) { mutationCb = cb; this.observe = function (n, o) { this.target = n; this.opts = o; }; }
+        var mutationObs = null;
+        function mutationCbOpts() { return mutationObs.opts; }
+        function MutationObserver(cb) { mutationCb = cb; mutationObs = this; this.observe = function (n, o) { this.target = n; this.opts = o; }; }
         function ResizeObserver(cb) { this.cb = cb; var self = this;
           this.observe = function (e) { observed.push({ kind: 'resize', el: e, cb: cb, obs: self }); };
           this.disconnect = function () { observed = observed.filter(function (o) { return o.obs !== self; }); }; }
@@ -314,6 +316,42 @@ class BottomUiDetectorScriptTest {
         mutate(); flush()
         assertEquals(2, sent)
         assertEquals("rgb(0, 0, 0)", last().color())
+    }
+
+    @Test
+    fun `a meta change sends Kotlin the theme colour, debounced, and nothing else does`() = page {
+        eval("hit = tab")
+        install()
+        val sentStr = { Context.toString(eval("sent.join('|')")) }
+        // It watches the attributes a theme-color change comes through.
+        assertEquals(
+            "class,style,hidden,open,content,media,name",
+            Context.toString(eval("mutationCbOpts().attributeFilter.join(',')")),
+        )
+        // A mutation elsewhere: no ping.
+        eval("mutationCb([{ type: 'attributes', target: { nodeName: 'DIV' } }, { type: 'childList', addedNodes: [{ nodeName: 'P' }], removedNodes: [] }])")
+        flush()
+        assertEquals(1, sent)
+        // A route setting its colour after a fetch: `content` changes, twice in one debounce.
+        eval("mutationCb([{ type: 'attributes', target: { nodeName: 'META' } }])")
+        eval("mutationCb([{ type: 'attributes', target: { nodeName: 'META' } }])")
+        assertEquals(1, timers)
+        flush()
+        assertEquals(2, sent)
+        val ping = Context.toString(eval("sent[1]"))
+        assertEquals("theme $token none", ping)
+        assertEquals(ThemeColorReport(null), parseThemeColorReport(ping, isMainFrame = true, expectedToken = token))
+        assertNull(parseThemeColorReport(ping, isMainFrame = false, expectedToken = token))
+        assertNull(parseThemeColorReport(ping, isMainFrame = true, expectedToken = "ffff"))
+        assertNull(parseThemeColorReport(ping, isMainFrame = true, expectedToken = null))
+        // A tag added, a tag removed, a `<head>` swapped: one ping each.
+        eval("mutationCb([{ type: 'childList', addedNodes: [{ nodeName: 'META' }], removedNodes: [] }])"); flush()
+        eval("mutationCb([{ type: 'childList', addedNodes: [], removedNodes: [{ nodeName: 'META' }] }])"); flush()
+        eval("mutationCb([{ type: 'childList', addedNodes: [{ nodeName: 'HEAD' }], removedNodes: [] }])"); flush()
+        assertEquals(5, sent)
+        // …and it's no probe report: the bottom-UI answer is unchanged, so none was sent.
+        assertNull(parseBottomUiMessage(ping, true, token))
+        assertTrue(sentStr().split('|').drop(1).all { it == ping })
     }
 
     @Test
@@ -767,5 +805,64 @@ class BottomUiDetectorScriptTest {
             throw AssertionError("accepted a non-letter channel name")
         } catch (_: IllegalArgumentException) {
         }
+    }
+
+    @Test
+    fun `Kotlin's theme-colour ask is answered with the current token only, once started`() = page {
+        eval("hit = tab; metas = [{ getAttribute: function (a) { return a === 'content' ? 'navy' : null; } }]")
+        documentStart()
+        // Before the start at first paint: no answer.
+        eval("kotlinSays('${themeColorRequest(token)}')")
+        assertEquals(0, sent)
+        firstPaint()
+        assertEquals(1, sent)
+        eval("kotlinSays('${themeColorRequest(token)}')")
+        assertEquals(2, sent)
+        val answer = Context.toString(eval("sent[1]"))
+        assertEquals("theme $token rgb(0, 0, 128)", answer)
+        assertEquals(ThemeColorReport(0xFF000080.toInt()), parseThemeColorReport(answer, true, token))
+        // Another document's ask: silence.
+        eval("kotlinSays('${themeColorRequest("ffff")}')")
+        assertEquals(2, sent)
+    }
+
+    @Test
+    fun `the theme-colour read goes only through functions saved at document start`() = page {
+        // Real-shaped prototypes, as the page would find them.
+        eval(
+            """
+            function Element() {}
+            Element.prototype.getAttribute = function (n) { return this.attrs[n] === undefined ? null : this.attrs[n]; };
+            function meta(attrs) { var m = Object.create(Element.prototype); m.attrs = attrs; return m; }
+            function MediaQueryList(q) { this.q = q; }
+            Object.defineProperty(MediaQueryList.prototype, 'matches', { configurable: true, get: function () { return !!mediaMatches[this.q]; } });
+            matchMedia = function (q) { return new MediaQueryList(q); };
+            metas = [meta({ media: '(prefers-color-scheme: dark)', content: '#112233' }), meta({ content: 'navy' })];
+            """,
+        )
+        documentStart()
+        // Then the page wraps everything the read uses, counting calls.
+        // (Not `RegExp.prototype.test`: the fake canvas's own setter uses it.)
+        eval(
+            """
+            var seen = [];
+            function spy(o, n) { var f = o[n]; o[n] = function () { seen.push(n); return f.apply(this, arguments); }; }
+            spy(document, 'querySelectorAll'); spy(document, 'createElement'); spy(window, 'matchMedia');
+            spy(Element.prototype, 'getAttribute'); spy(RegExp.prototype, 'exec');
+            spy(window, 'parseInt'); spy(window, 'parseFloat'); spy(Math, 'round');
+            Object.defineProperty(MediaQueryList.prototype, 'matches', { get: function () { seen.push('matches'); return !!mediaMatches[this.q]; } });
+            var realCall = Function.prototype.call;
+            Function.prototype.call = function () { seen.push('call'); return realCall.apply(this, arguments); };
+            """,
+        )
+        firstPaint()
+        eval("seen = []")
+        eval("kotlinSays('${themeColorRequest(token)}')")
+        assertEquals("theme $token rgb(0, 0, 128)", Context.toString(eval("sent[sent.length - 1]")))
+        eval("mediaMatches['(prefers-color-scheme: dark)'] = true")
+        eval("kotlinSays('${themeColorRequest(token)}')")
+        assertEquals("theme $token rgb(17, 34, 51)", Context.toString(eval("sent[sent.length - 1]")))
+        // Not one of the page's functions saw either read.
+        assertEquals("", Context.toString(eval("Function.prototype.call = realCall; seen.join(',')")))
     }
 }
