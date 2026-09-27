@@ -167,18 +167,63 @@ class ScrollRevealTest {
     }
 
     @Test
-    fun `downward or sideways first disarms`() {
-        // Disarmed back to tracking: the push that armed at the down
-        // no longer counts (only a fresh overscroll arms again).
+    fun `downward first disarms back to tracking`() {
+        // The push that armed at the down no longer counts (only a fresh
+        // overscroll arms again).
         val down = armed()
         assertFalse(down.onMove(500f, 1730f, slop))
         assertEquals(Phase.Tracking, down.phase)
         assertFalse(down.onMove(500f, 1600f, slop))
+    }
 
+    @Test
+    fun `sideways first leaves the gesture to the page, drift and all`() {
+        // Armed at the end; a left swipe with a little upward drift
+        // (#144 review): the drift overscrolls the end, but a sideways
+        // gesture never re-arms, so the page's swipe isn't cancelled.
         val side = armed()
-        assertFalse(side.onMove(560f, 1680f, slop))
-        assertEquals(Phase.Tracking, side.phase)
-        assertFalse(side.onMove(560f, 1500f, slop))
+        assertFalse(side.onMove(440f, 1695f, slop))
+        assertEquals(Phase.Idle, side.phase)
+        assertFalse(side.onBottomOverscroll())
+        for (x in 400 downTo 200 step 20) {
+            assertFalse(side.onMove(x.toFloat(), 1690f - (400 - x) / 20f, slop))
+            assertFalse(side.onBottomOverscroll())
+        }
+        assertEquals(Phase.Idle, side.phase)
+
+        // The same from mid-page (a carousel near the end).
+        val mid = ScrollRevealSlot()
+        mid.onDown(500f, 1700f, atEnd = false, allowed = true)
+        assertFalse(mid.onMove(440f, 1695f, slop))
+        assertEquals(Phase.Idle, mid.phase)
+        assertFalse(mid.onBottomOverscroll())
+        assertFalse(mid.onMove(420f, 1690f, slop))
+        assertFalse(mid.onMove(400f, 1689f, slop))
+    }
+
+    @Test
+    fun `a drag armed mid-page that turns sideways isn't taken over`() {
+        val s = ScrollRevealSlot()
+        s.onDown(500f, 1700f, atEnd = false, allowed = true)
+        s.onMove(500f, 1300f, slop) // vertical: the page scrolls
+        assertTrue(s.onBottomOverscroll())
+        // Now mostly sideways, drifting up: not a push.
+        assertFalse(s.onMove(510f, 1299.5f, slop))
+        assertEquals(Phase.Armed, s.phase)
+        assertFalse(s.onMove(560f, 1295f, slop))
+        assertEquals(Phase.Idle, s.phase)
+        assertFalse(s.onBottomOverscroll())
+        assertFalse(s.onMove(600f, 1280f, slop))
+    }
+
+    @Test
+    fun `a diagonal but mostly vertical push armed mid-page takes over`() {
+        val s = ScrollRevealSlot()
+        s.onDown(500f, 1700f, atEnd = false, allowed = true)
+        s.onMove(560f, 1300f, slop)
+        assertTrue(s.onBottomOverscroll())
+        assertTrue(s.onMove(565f, 1290f, slop))
+        assertEquals(Phase.Dragging, s.phase)
     }
 
     @Test

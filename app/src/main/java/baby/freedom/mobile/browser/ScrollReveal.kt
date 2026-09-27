@@ -249,9 +249,16 @@ internal class ScrollRevealSlot {
 
     private var downX = 0f
     private var downY = 0f
+    private var lastX = 0f
     private var lastY = 0f
+    private var startX = 0f
     private var startY = 0f
     private var overscrolled = false
+
+    // Has the drag left the slop around the down yet? The first move out
+    // of it decides the gesture's axis: a mostly sideways one is the
+    // page's (a carousel, a horizontal scroller) for good.
+    private var axisDecided = false
 
     // Armed by a drag that reached the end ([onBottomOverscroll] from
     // [Phase.Tracking]) rather than by a touch that went down there.
@@ -267,10 +274,12 @@ internal class ScrollRevealSlot {
     fun onDown(x: Float, y: Float, atEnd: Boolean, allowed: Boolean): Boolean {
         overscrolled = false
         armedMidDrag = false
+        axisDecided = false
         if (phase == Phase.Armed || phase == Phase.Tracking) phase = Phase.Idle
         if (phase != Phase.Idle || !allowed) return false
         downX = x
         downY = y
+        lastX = x
         lastY = y
         phase = if (atEnd) Phase.Armed else Phase.Tracking
         return atEnd
@@ -292,6 +301,7 @@ internal class ScrollRevealSlot {
                 overscrolled = true
                 // The rubber band starts from where the finger was when
                 // the page ran out, so the takeover doesn't jump.
+                startX = lastX
                 startY = lastY
                 return true
             }
@@ -304,32 +314,56 @@ internal class ScrollRevealSlot {
      * The finger is at ([x], [y]). Returns true when the reveal takes the
      * gesture over *on this event*.
      *
+     * Any drag whose first move out of the [slopPx] is mostly sideways
+     * is a horizontal gesture and stays the page's: back to Idle, for the
+     * rest of the gesture — a vertical drift in it overscrolling the end
+     * doesn't re-arm (#144 review).
+     *
      * Armed at the touch down: an upward, mostly vertical move past
      * [slopPx], with the page having let the drag through (overscroll).
-     * A move that goes down or sideways first disarms — back to
-     * [Phase.Tracking]: the same drag may still reach the end later.
+     * A move that goes down first disarms — back to [Phase.Tracking]:
+     * the same drag may still reach the end later. One that turns
+     * mostly sideways drops to Idle.
      *
      * Armed mid-drag: the finger is long past the slop, so the next move
-     * up takes over; a move down (the page scrolling back up) goes back
-     * to tracking.
+     * up takes over, as long as the drag since it was armed is mostly
+     * vertical; one that turns mostly sideways past the slop drops to
+     * Idle, and a move down (the page scrolling back up) goes back to
+     * tracking.
      */
     fun onMove(x: Float, y: Float, slopPx: Float): Boolean {
         val prevY = lastY
+        lastX = x
         lastY = y
+        if (phase != Phase.Armed && phase != Phase.Tracking) return false
+        val up = downY - y
+        val side = abs(x - downX)
+        if (!axisDecided && (side > slopPx || abs(up) > slopPx)) {
+            axisDecided = true
+            if (side > abs(up)) {
+                dropGesture()
+                return false
+            }
+        }
         if (phase != Phase.Armed) return false
         if (armedMidDrag) {
+            val upSince = startY - y
+            val sideSince = abs(x - startX)
             when {
-                y < prevY -> {
+                sideSince > slopPx && sideSince > abs(upSince) -> dropGesture()
+                y > prevY -> disarmToTracking()
+                y < prevY && upSince > sideSince -> {
                     phase = Phase.Dragging
                     return true
                 }
-                y > prevY -> disarmToTracking()
             }
             return false
         }
-        val up = downY - y
-        val side = abs(x - downX)
-        if (up < -slopPx || (side > slopPx && side > abs(up))) {
+        if (side > slopPx && side > abs(up)) {
+            dropGesture()
+            return false
+        }
+        if (up < -slopPx) {
             disarmToTracking()
             return false
         }
@@ -341,6 +375,13 @@ internal class ScrollRevealSlot {
 
     private fun disarmToTracking() {
         phase = Phase.Tracking
+        armedMidDrag = false
+        overscrolled = false
+    }
+
+    /** The gesture is the page's (sideways): nothing more until the next touch down. */
+    private fun dropGesture() {
+        phase = Phase.Idle
         armedMidDrag = false
         overscrolled = false
     }
