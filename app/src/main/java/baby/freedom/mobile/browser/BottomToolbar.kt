@@ -580,8 +580,8 @@ private fun addressBadgeBlock(hasBadge: Boolean): Dp =
  * state (#62) — the one mapping from the tab's two history flags to the
  * bar, stated apart from the composable so it can be tested on its own.
  *
- * Back is **always** on the bar: with nothing to pop it is drawn
- * disabled rather than taken away, so history appearing or disappearing
+ * Back is **always** on the bar: with nowhere to go back to (see
+ * [backActionFor]) it is drawn disabled rather than taken away, so history appearing or disappearing
  * never moves the field. Forward has no slot of its own until there is
  * somewhere to go — then the round Back button grows into a two-button
  * pill holding both, Safari's shape, and Forward leaves the overflow
@@ -601,8 +601,43 @@ internal data class NavControls(
     val pillTarget: Float get() = if (showsForward) 1f else 0f
 }
 
-internal fun navControlsFor(canGoBack: Boolean, canGoForward: Boolean): NavControls =
-    NavControls(backEnabled = canGoBack, showsForward = canGoForward)
+internal fun navControlsFor(
+    canGoBack: Boolean,
+    canGoForward: Boolean,
+    isHome: Boolean,
+): NavControls = NavControls(
+    backEnabled = backActionFor(canGoBack, isHome) != BackAction.None,
+    showsForward = canGoForward,
+)
+
+/** What a Back press does — the on-bar button and the system gesture alike. */
+internal enum class BackAction {
+    /** Nothing to go back to: the tab is already on the home overlay. */
+    None,
+
+    /** Pop the WebView's own history stack. */
+    History,
+
+    /**
+     * Leave for the home overlay: the tab is off home but the WebView has
+     * nothing to pop — an `ens://` name still resolving, or a typed URL
+     * that failed before the WebView was ever told to navigate.
+     */
+    Home,
+}
+
+/**
+ * The one rule for Back, shared by the system back handler and the
+ * bar's Back button so the two can never disagree: `canGoBack` alone
+ * isn't enough, because it is only refreshed from the WebView client's
+ * async callbacks and stays false through a pre-WebView phase (ENS
+ * resolve, a failed typed URL) that Back must still be able to leave.
+ */
+internal fun backActionFor(canGoBack: Boolean, isHome: Boolean): BackAction = when {
+    canGoBack -> BackAction.History
+    !isHome -> BackAction.Home
+    else -> BackAction.None
+}
 
 /**
  * Width of the leading navigation control's *layout* slot, at a given
@@ -1451,7 +1486,7 @@ internal fun BottomToolbar(
     // use, and every x on the bar — the field's edges, its centre, the
     // domain label — is read off this one fraction, so the label stays
     // centred in the field all the way through the grow.
-    val nav = navControlsFor(state.canGoBack, state.canGoForward)
+    val nav = navControlsFor(state.canGoBack, state.canGoForward, state.isHome)
     val navPillAnimated by animateFloatAsState(
         targetValue = nav.pillTarget,
         animationSpec = MaterialTheme.motionScheme.defaultSpatialSpec(),

@@ -109,27 +109,59 @@ class CapsuleCompactStateTest {
 
     @Test
     fun `history maps onto a disabled Back and a Forward pill`() {
-        // No history either way: Back is still there, just disabled —
-        // the round button, not a gap.
+        // On the home overlay with no history: Back is still there, just
+        // disabled — the round button, not a gap.
         assertEquals(
             NavControls(backEnabled = false, showsForward = false),
-            navControlsFor(canGoBack = false, canGoForward = false),
+            navControlsFor(canGoBack = false, canGoForward = false, isHome = true),
         )
         assertEquals(
             NavControls(backEnabled = true, showsForward = false),
-            navControlsFor(canGoBack = true, canGoForward = false),
+            navControlsFor(canGoBack = true, canGoForward = false, isHome = false),
         )
         assertEquals(
             NavControls(backEnabled = true, showsForward = true),
-            navControlsFor(canGoBack = true, canGoForward = true),
+            navControlsFor(canGoBack = true, canGoForward = true, isHome = false),
         )
-        // Safari's screenshot: forward only — the pill, Back dimmed.
+        // Forward only, from home: the pill, Back dimmed.
         assertEquals(
             NavControls(backEnabled = false, showsForward = true),
-            navControlsFor(canGoBack = false, canGoForward = true),
+            navControlsFor(canGoBack = false, canGoForward = true, isHome = true),
         )
-        assertEquals(0f, navControlsFor(true, false).pillTarget, 0f)
-        assertEquals(1f, navControlsFor(false, true).pillTarget, 0f)
+        assertEquals(0f, navControlsFor(true, false, false).pillTarget, 0f)
+        assertEquals(1f, navControlsFor(false, true, true).pillTarget, 0f)
+    }
+
+    @Test
+    fun `Back off home with no history stays enabled and goes home`() {
+        // An ens:// bookmark still resolving, or a typed URL that failed
+        // before the WebView navigated: canGoBack is false but the tab is
+        // off home, and the system back gesture takes it home. The bar's
+        // Back must agree — enabled, same action — not sit there dimmed.
+        assertEquals(BackAction.Home, backActionFor(canGoBack = false, isHome = false))
+        assertEquals(
+            NavControls(backEnabled = true, showsForward = false),
+            navControlsFor(canGoBack = false, canGoForward = false, isHome = false),
+        )
+        assertEquals(
+            NavControls(backEnabled = true, showsForward = true),
+            navControlsFor(canGoBack = false, canGoForward = true, isHome = false),
+        )
+        assertEquals(BackAction.History, backActionFor(canGoBack = true, isHome = false))
+        assertEquals(BackAction.History, backActionFor(canGoBack = true, isHome = true))
+        assertEquals(BackAction.None, backActionFor(canGoBack = false, isHome = true))
+    }
+
+    @Test
+    fun `bar Back is enabled exactly when the system back handler would act`() {
+        for (canGoBack in listOf(false, true)) for (isHome in listOf(false, true)) {
+            val barEnabled = navControlsFor(canGoBack, false, isHome).backEnabled
+            assertEquals(
+                "canGoBack=$canGoBack isHome=$isHome",
+                backActionFor(canGoBack, isHome) != BackAction.None,
+                barEnabled,
+            )
+        }
     }
 
     @Test

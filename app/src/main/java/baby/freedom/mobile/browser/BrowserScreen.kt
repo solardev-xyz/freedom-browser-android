@@ -448,15 +448,21 @@ fun BrowserScreen(
     // nothing to pop (mid-probe, or a direct typed URL that failed
     // before the WebView ever navigated), cancel any in-flight resolver
     // work and fall back to a clean home state.
-    val isHomeTab = state.url.isBlank() && state.addressBarText.isBlank()
-    BackHandler(enabled = !isHomeTab) {
-        if (state.canGoBack) {
-            state.loadUrl("javascript:history.back();void(0);")
-        } else {
-            state.cancelPendingProbe()
-            state.navigateHome()
+    //
+    // The bar's Back button runs this same [goBack] and is enabled off
+    // the same [backActionFor] rule, so the two never disagree.
+    val isHomeTab = state.isHome
+    val goBack: () -> Unit = {
+        when (backActionFor(state.canGoBack, state.isHome)) {
+            BackAction.History -> state.loadUrl("javascript:history.back();void(0);")
+            BackAction.Home -> {
+                state.cancelPendingProbe()
+                state.navigateHome()
+            }
+            BackAction.None -> Unit
         }
     }
+    BackHandler(enabled = !isHomeTab, onBack = goBack)
 
     // Run the peer-warmup probe against a bzz:// / ipfs:// / ipns://
     // URL, then either load it or fall back to the in-app error page.
@@ -1208,7 +1214,7 @@ fun BrowserScreen(
                             submit(state, text)
                         }
                     },
-                    onBack = { state.loadUrl("javascript:history.back();void(0);") },
+                    onBack = goBack,
                     onForward = { state.loadUrl("javascript:history.forward();void(0);") },
                     onHome = {
                         submit(state, tabs.homepageUrl)

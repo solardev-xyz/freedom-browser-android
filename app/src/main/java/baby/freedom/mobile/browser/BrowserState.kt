@@ -45,6 +45,13 @@ class BrowserState(val id: Long) {
      */
     var addressBarText by mutableStateOf("")
 
+    /**
+     * The tab is showing the home overlay: no committed page and nothing
+     * pending in the address bar. Back has nowhere to go from here unless
+     * the WebView has history (see [backActionFor]).
+     */
+    val isHome: Boolean get() = url.isBlank() && addressBarText.isBlank()
+
     /** 0..100, or -1 when idle. */
     var progress by mutableIntStateOf(-1)
 
