@@ -182,11 +182,17 @@ internal fun nameResolutionRefusal(name: String, code: String): WebResourceRespo
         "ens_unsupported_codec" -> "Unsupported content format" to
             "This ENS name now resolves to a content format Freedom Browser " +
             "cannot load yet on mobile."
+        // Both one server's new record and one server's "no content"
+        // for a name with an earlier answer ([Gateways.reverifyEnsDocument])
+        // land here; a typed navigation shows the former with Continue and
+        // the latter as "No content" with a trust note, so the copy
+        // promises neither.
         "ens_unverified" -> "Not cross-checked" to
             "Only one Ethereum RPC server answered for this name, so Freedom " +
-            "couldn't check its answer against another server. It isn't an " +
-            "answer this tab has already loaded, so nothing was loaded. Try " +
-            "again, or enter the name in the address bar to review the answer."
+            "couldn't check its answer against another server. That answer " +
+            "differs from what this tab loaded before, so nothing was loaded. " +
+            "Try again, or enter the name in the address bar to see what that " +
+            "server answered."
         "ens_conflict" -> "RPC servers disagreed" to
             "The Ethereum RPC servers Freedom asked gave different answers for " +
             "this name. At least one of them is wrong, so nothing was loaded."
