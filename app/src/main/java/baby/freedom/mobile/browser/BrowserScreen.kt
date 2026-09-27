@@ -678,6 +678,7 @@ fun BrowserScreen(
         displayPrefix: String?,
         displayUrl: String,
         loadUri: String = contentUri,
+        namedByUser: Boolean = false,
     ) {
         val generation = target.loadGeneration
         val isIpfs = contentUri.startsWith("ipfs://") || contentUri.startsWith("ipns://")
@@ -759,7 +760,8 @@ fun BrowserScreen(
             target.gatewayWork.finish(probeWork)
         }
         when (outcome) {
-            GatewayProbe.Outcome.Ok -> target.loadUrl(loadUri, displayPrefix = displayPrefix)
+            GatewayProbe.Outcome.Ok ->
+                target.loadUrl(loadUri, displayPrefix = displayPrefix, namedByUser = namedByUser)
             GatewayProbe.Outcome.Aborted -> { /* superseded by a later submit */ }
             is GatewayProbe.Outcome.Unreachable -> showError("ERR_CONNECTION_REFUSED")
             GatewayProbe.Outcome.NotFound, is GatewayProbe.Outcome.Other -> {
@@ -820,6 +822,11 @@ fun BrowserScreen(
         // lifts a download block a declined offer left on it
         // ([DownloadOffers]); a page's own navigation doesn't.
         if (source == SubmitSource.User) downloads.allowOffers(target.id)
+        // And the load it schedules is theirs: its redirects may end in
+        // an app link without a tap on a page (#173). Handed to that
+        // load's own `loadUrl` below, never left for whichever load
+        // comes next (R2-F2).
+        val namedByUser = source == SubmitSource.User
 
         // Any new submit supersedes a probe that was still in flight on
         // this tab — otherwise switching URL mid-probe would let the
@@ -941,6 +948,7 @@ fun BrowserScreen(
                                     // above), and per-site storage sticks
                                     // to the name across content updates.
                                     loadUri = "ens://$name$suffix",
+                                    namedByUser = namedByUser,
                                 )
                             } else {
                                 ensError(
@@ -1008,6 +1016,7 @@ fun BrowserScreen(
                         contentUri = contentUri,
                         displayPrefix = null,
                         displayUrl = contentUri,
+                        namedByUser = namedByUser,
                     )
                 } finally {
                     target.resolving = false
@@ -1018,7 +1027,7 @@ fun BrowserScreen(
             return
         }
 
-        target.loadUrl(url)
+        target.loadUrl(url, namedByUser = namedByUser)
     }
 
     // "New private tab" (#86), from the menu and the tab switcher —

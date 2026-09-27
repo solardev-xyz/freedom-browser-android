@@ -297,6 +297,22 @@ class BrowserState(val id: Long, val private: Boolean = false) {
         internal set
 
     /**
+     * The WebView URL of the navigation the user named, scheduled as
+     * [pendingUrl] by their submit's own [loadUrl] (`namedByUser`),
+     * until the WebView takes it ([takeUserNamedLoad]).
+     */
+    private var userNamedPendingUrl: String? = null
+
+    /**
+     * Whether the load of [url] the tab's WebView is starting from
+     * [pendingUrl] is the one the user named: its server redirects may
+     * then end in a link to another app without a tap on any page
+     * (#173, see [externalLinkVerdict]). One load's worth: taken here.
+     */
+    internal fun takeUserNamedLoad(url: String): Boolean =
+        (userNamedPendingUrl == url).also { userNamedPendingUrl = null }
+
+    /**
      * The site-permission prompt this tab is waiting on (#81), or null.
      * Owned by [SitePermissionBroker]; [BrowserScreen] shows it while
      * this tab is the active one, so a background tab can never put a
@@ -565,8 +581,12 @@ class BrowserState(val id: Long, val private: Boolean = false) {
      * scheme-constrained ENS load. Passing `null` (the default) leaves
      * any existing override untouched — reload, back, and forward all
      * reuse the current override. Call [clearEnsOverride] to reset.
+     *
+     * [namedByUser]: this is the load a user's own submit scheduled
+     * (#173, [takeUserNamedLoad]). Only [BrowserScreen]'s submit passes
+     * it, at the load that submit makes.
      */
-    fun loadUrl(url: String, displayPrefix: String? = null) {
+    fun loadUrl(url: String, displayPrefix: String? = null, namedByUser: Boolean = false) {
         cancelPendingProbe()
         // A new load supersedes whatever the last Stop aborted, so the
         // progress latch opens again.
@@ -574,6 +594,10 @@ class BrowserState(val id: Long, val private: Boolean = false) {
         ipfsLoad = ipfsLoadFor(url, ipfsLoad)
         val loadable = Gateways.toLoadable(url)
         pendingUrl = loadable
+        // Named by the user only when their submit's own load says so
+        // (#173): never an error page, a restore, or a Back step that
+        // happens to come after it (R2-F2).
+        userNamedPendingUrl = loadable.takeIf { namedByUser }
         if (displayPrefix != null) {
             // The override base is the virtual origin the content is
             // served from — in-manifest navigation stays under it, so
