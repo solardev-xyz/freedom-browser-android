@@ -677,21 +677,37 @@ private fun buildRefreshableWebView(
     // Reserved mode (#66): does the document on screen have its own
     // bottom navigation the capsule would cover? [BottomChromeSlot] holds
     // the per-document token and the hysteresis; the page side is the
-    // detector from [bottomUiDetectorJs], installed once per document at
-    // first paint and otherwise woken only by events.
+    // detector from [bottomUiDetectorJs], a document-start script that
+    // starts once per document at first paint and is otherwise woken only
+    // by events. Both platform features or neither: without the
+    // document-start script the channel object would sit on every page's
+    // `window` for any script to find (#69).
     val bottomChrome = BottomChromeSlot()
-    val bottomUiSupported = WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER)
+    val bottomUiSupported = WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER) &&
+        WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)
 
-    // The channel back into the current document's detector, from its
-    // last valid report. Null until it has reported; dropped on every
-    // new document.
-    var bottomUiReply: JavaScriptReplyProxy? = null
+    // The channels back into main-frame detectors: candidates from their
+    // [BOTTOM_UI_READY] (posted at document start), and the current
+    // document's own once a valid report proves it. A ready can't say
+    // which document sent it, so it only counts once a report does
+    // ([BottomUiChannels]).
+    val bottomUiChannels = BottomUiChannels<JavaScriptReplyProxy>()
 
-    /** Install the detector in the document on screen, once. */
-    fun installBottomUiDetector(view: WebView) {
+    /** Send the current document's token to [targets]: the detector's start, or a fresh probe. */
+    fun postBottomUiProbe(targets: List<JavaScriptReplyProxy> = bottomUiChannels.targets) {
+        val token = bottomChrome.token ?: return
+        val request = bottomUiProbeRequest(token)
+        for (reply in targets) runCatching { reply.postMessage(request) }
+    }
+
+    /**
+     * Start the detector in the document on screen, once. If its ready
+     * hasn't arrived yet, the ready starts it instead (see the listener).
+     */
+    fun installBottomUiDetector() {
         if (!bottomUiSupported) return
-        val token = bottomChrome.install() ?: return
-        view.evaluateJavascript(bottomUiDetectorJs(token), null)
+        bottomChrome.install() ?: return
+        postBottomUiProbe()
     }
 
     /**
@@ -704,21 +720,19 @@ private fun buildRefreshableWebView(
      * [installIfUnpainted] lets load-finished install it for a document
      * that never reports a first paint. A cross-document commit also
      * fires `doUpdateVisitedHistory`, *before* first paint; that one
-     * must not install, or the detector would land in a document that
-     * may have no `<body>` yet.
+     * must not install: the detector is already in the document (a
+     * document-start script) and must not start before first paint.
      *
-     * An installed detector that hasn't reported yet (no `<body>` at
-     * install) gives Kotlin no reply channel; it owes its report and
-     * sends it on its next probe (see [bottomUiDetectorJs]).
+     * A detector asked while it has no `<body>` to probe owes its
+     * report and sends it on its next probe (see [bottomUiDetectorJs]).
      */
-    fun requestBottomUiProbe(view: WebView, installIfUnpainted: Boolean = false) {
+    fun requestBottomUiProbe(installIfUnpainted: Boolean = false) {
         if (!bottomUiSupported) return
         if (!bottomChrome.installed) {
-            if (installIfUnpainted) installBottomUiDetector(view)
+            if (installIfUnpainted) installBottomUiDetector()
             return
         }
-        val token = bottomChrome.token ?: return
-        runCatching { bottomUiReply?.postMessage(bottomUiProbeRequest(token)) }
+        postBottomUiProbe()
     }
 
     // Scroll-to-reveal (#65): a push past the end of an overlay page
@@ -1184,18 +1198,28 @@ private fun buildRefreshableWebView(
             false
         }
 
-        // The detector's reports (#66). A message is taken only from an
+        // The detector's messages (#66). A message is taken only from an
         // http(s) origin (see [BOTTOM_UI_ORIGIN_RULES] for why the rule
-        // itself can't say that), only from the main frame, only in the
-        // exact shape [parseBottomUiMessage] allows and only with the
-        // current document's token.
+        // itself can't say that), only from the main frame, and is either
+        // the detector's ready or a report in the exact shape
+        // [parseBottomUiMessage] allows with the current document's token.
         if (bottomUiSupported) {
             val listener = WebViewCompat.WebMessageListener { view, message, sourceOrigin, isMainFrame, replyProxy ->
                 if (sourceOrigin.scheme != "https" && sourceOrigin.scheme != "http") return@WebMessageListener
                 if (message.type != WebMessageCompat.TYPE_STRING) return@WebMessageListener
+                if (message.data == BOTTOM_UI_READY) {
+                    // A main-frame detector at document start, from the
+                    // document on screen or one still on its way in. It
+                    // is started now only if it can be the painted
+                    // document's own late ready (see [BottomUiChannels]);
+                    // otherwise it waits for its document's first paint.
+                    if (!isMainFrame) return@WebMessageListener
+                    postBottomUiProbe(bottomUiChannels.onReady(replyProxy, bottomChrome.installed))
+                    return@WebMessageListener
+                }
                 val report = parseBottomUiMessage(message.data, isMainFrame, bottomChrome.token)
                     ?: return@WebMessageListener
-                bottomUiReply = replyProxy
+                bottomUiChannels.onReport(replyProxy)
                 val verdict = bottomChrome.accept(report, SystemClock.uptimeMillis())
                 if (verdict.changed) applyBottomChrome()
                 val confirmIn = verdict.confirmInMs
@@ -1205,11 +1229,16 @@ private fun buildRefreshableWebView(
                     // new document in the meantime cancels it.
                     val token = bottomChrome.token
                     view.postDelayed({
-                        if (bottomChrome.token == token) requestBottomUiProbe(view)
+                        if (bottomChrome.token == token) requestBottomUiProbe()
                     }, confirmIn)
                 }
             }
-            WebViewCompat.addWebMessageListener(this, BOTTOM_UI_CHANNEL, BOTTOM_UI_ORIGIN_RULES, listener)
+            // A fresh channel name per WebView, and the script that takes
+            // the channel object back off every frame's `window` before
+            // the page runs (#69). Registered before the first load.
+            val channel = newBottomUiChannelName()
+            WebViewCompat.addWebMessageListener(this, channel, BOTTOM_UI_ORIGIN_RULES, listener)
+            WebViewCompat.addDocumentStartJavaScript(this, bottomUiDetectorJs(channel), BOTTOM_UI_ORIGIN_RULES)
         }
 
         // Force an initial paint so the WebView's compositor surface
@@ -1258,7 +1287,7 @@ private fun buildRefreshableWebView(
                 // from the outgoing document carries its old token and
                 // is dropped.
                 bottomChrome.startDocument()
-                bottomUiReply = null
+                bottomUiChannels.startDocument()
                 state.bottomChromeMode = BottomChromeMode.Overlay
                 // …and with the progress latch open again: whatever the
                 // last Stop aborted, this document is a load of its own
@@ -1345,8 +1374,8 @@ private fun buildRefreshableWebView(
                 // can answer, and pages are touchable from here on.
                 probeRootPanStyles(view)
                 if (view != null && bottomUiApplies(url)) {
-                    // The bottom-nav detector goes in here, once (#66).
-                    installBottomUiDetector(view)
+                    // The bottom-nav detector starts here, once (#66).
+                    installBottomUiDetector()
                 }
                 if (url == ABOUT_BLANK) return
                 visitGate.commit()
@@ -1375,7 +1404,7 @@ private fun buildRefreshableWebView(
                     // A late-mounting nav: probe again now the load is
                     // done (or install, if first paint didn't) (#66).
                     if (finishedLoadIsCurrent(url, view.url)) {
-                        requestBottomUiProbe(view, installIfUnpainted = true)
+                        requestBottomUiProbe(installIfUnpainted = true)
                     }
                 }
                 if (url != null && !ErrorPage.isErrorPage(url) && url != ABOUT_BLANK) {
@@ -1508,7 +1537,7 @@ private fun buildRefreshableWebView(
             // and this doesn't install it (see [requestBottomUiProbe]).
             override fun doUpdateVisitedHistory(view: WebView?, url: String?, isReload: Boolean) {
                 if (view == null || !bottomUiApplies(url)) return
-                requestBottomUiProbe(view)
+                requestBottomUiProbe()
             }
 
             override fun shouldOverrideUrlLoading(
