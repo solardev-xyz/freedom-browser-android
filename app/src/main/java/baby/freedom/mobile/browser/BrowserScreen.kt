@@ -1359,8 +1359,18 @@ fun BrowserScreen(
         androidx.compose.runtime.key(prompt) { SitePermissionPrompt(prompt) }
     }
     // The same gate for Android's own runtime-permission dialog, which
-    // the broker raises only over the tab named here.
-    val onScreenTabId = state.id.takeIf { pageOnScreen }
+    // the broker raises only over the tab named here — plus the app
+    // itself being in the foreground: WebViews aren't paused in the
+    // background, so page JS can still ask, and launching the system
+    // dialog from a stopped Activity would either pop it over another
+    // app or be blocked with no result ever delivered (stranding the
+    // broker's dialog lock). RESUMED, not STARTED, so the paused sliver
+    // on the way to the background doesn't count either.
+    val lifecycleState by androidx.lifecycle.compose.LocalLifecycleOwner.current.lifecycle
+        .currentStateFlow.collectAsState()
+    val onScreenTabId = state.id.takeIf {
+        pageOnScreen && lifecycleState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED)
+    }
     androidx.compose.runtime.SideEffect { sitePermissions.onScreenTab.value = onScreenTabId }
     DisposableEffect(sitePermissions) {
         onDispose { sitePermissions.onScreenTab.value = null }

@@ -349,8 +349,9 @@ class SitePermissionBroker private constructor(
      *
      * The dialog waits, like the Freedom prompt, until the requesting
      * tab's page is on screen ([onScreenTab]): a remembered Allow in a
-     * background tab (or behind Settings) must not pop a site-less
-     * system dialog over something else. The wait happens outside the
+     * background tab (or behind Settings), or from a page still running
+     * while the app itself is in the background, must not pop a
+     * site-less system dialog over something else. The wait happens outside the
      * dialog lock so a background request can't hold up the tab the
      * user is actually looking at.
      */
