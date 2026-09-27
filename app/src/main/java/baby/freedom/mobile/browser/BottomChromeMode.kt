@@ -303,6 +303,70 @@ internal class BottomChromeSlot(
     }
 }
 
+/**
+ * Which reply channels a detector request goes to (#69). Every main-frame
+ * document posts [BOTTOM_UI_READY] at document start, but a ready carries
+ * nothing that says *which* document sent it, and it can arrive on either
+ * side of that document's `onPageStarted` and, over different renderer
+ * pipes, out of order with other documents' readies. So a ready's channel
+ * is only a candidate until a report tagged with the current document's
+ * token comes back through it: that proves the channel belongs to the
+ * document on screen. Until then a request goes to every candidate, since
+ * the channels of documents that are gone drop it and the new document's
+ * channel is among them.
+ *
+ * - A ready is started right away only when the document on screen is
+ *   installed and nothing has proved its channel yet. That is its own late
+ *   ready. Once its channel is proved, a ready belongs to a document still
+ *   on its way in (its ready beat its `onPageStarted`). It waits as a
+ *   candidate, dormant until that document's first paint.
+ * - A proved channel is the only target until the next document starts.
+ *
+ * One ordering is still ambiguous. If an incoming document's ready
+ * arrives after the painted document was started but before its first
+ * report, it can't be told from the painted document's own late ready,
+ * so it is started with the painted document's token. That document then
+ * starts before its first paint. Its reports are still right, because
+ * its own start at first paint re-tags them.
+ *
+ * Generic over the channel type so the bookkeeping can be unit-tested; the
+ * WebView uses [androidx.webkit.JavaScriptReplyProxy]. Single-threaded,
+ * like [BottomChromeSlot].
+ */
+internal class BottomUiChannels<P : Any>(private val maxCandidates: Int = 4) {
+    private val candidates = ArrayDeque<P>()
+
+    /** The current document's channel, proved by one of its reports; null until then. */
+    var proved: P? = null
+        private set
+
+    /** Where a request for the current document goes: its proved channel, else every candidate. */
+    val targets: List<P> get() = proved?.let(::listOf) ?: candidates.toList()
+
+    /**
+     * A main-frame ready through [channel]. Returns the channels to send the
+     * current document's start to now, if [installed]: this one when the
+     * current document's channel is still unproved, nothing otherwise.
+     */
+    fun onReady(channel: P, installed: Boolean): List<P> {
+        candidates.remove(channel)
+        candidates.addLast(channel)
+        while (candidates.size > maxCandidates) candidates.removeFirst()
+        return if (installed && proved == null) listOf(channel) else emptyList()
+    }
+
+    /** A valid report for the current document's token came through [channel]. */
+    fun onReport(channel: P) {
+        proved = channel
+        candidates.remove(channel)
+    }
+
+    /** A new main-frame document: the proved channel was the old one's. Candidates stay. */
+    fun startDocument() {
+        proved = null
+    }
+}
+
 private val tokenRandom = SecureRandom()
 
 private fun randomToken(): String {
@@ -415,6 +479,15 @@ internal fun bottomUiProbeRequest(token: String): String = "probe $token"
  * Kotlin asked. Nothing is written to the page: no DOM node, attribute,
  * style or global of ours — the platform's channel object included,
  * see above — and history methods are not patched.
+ *
+ * **Not invisible once started.** The probe and the start still call
+ * DOM methods the page can replace: `addEventListener`,
+ * `MutationObserver.prototype.observe`, `elementFromPoint`,
+ * `querySelectorAll`, `getComputedStyle`. The detector only saves the
+ * constructors and `getComputedStyle` at document start. A page that
+ * wraps these methods before first paint can see the detector's calls,
+ * and the listener it registers (whose source it can read). What stays
+ * hidden is the channel object, and with it any way to talk to Kotlin.
  */
 internal fun bottomUiDetectorJs(channel: String, debounceMs: Int = BOTTOM_UI_DEBOUNCE_MS): String {
     require(CHANNEL_SAFE.matches(channel)) { "channel must be lower-case letters" }

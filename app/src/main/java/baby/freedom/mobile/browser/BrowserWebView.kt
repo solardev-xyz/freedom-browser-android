@@ -686,18 +686,18 @@ private fun buildRefreshableWebView(
     val bottomUiSupported = WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER) &&
         WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)
 
-    // The channel back into the main-frame document's detector, from its
-    // [BOTTOM_UI_READY] (posted at document start) or its latest valid
-    // report. Deliberately not dropped at `onPageStarted`: the new
-    // document's ready can arrive on either side of that callback. A
-    // stale one only ever reaches a document that is gone, which drops
-    // the message; the new document's ready replaces it.
-    var bottomUiReply: JavaScriptReplyProxy? = null
+    // The channels back into main-frame detectors: candidates from their
+    // [BOTTOM_UI_READY] (posted at document start), and the current
+    // document's own once a valid report proves it. A ready can't say
+    // which document sent it, so it only counts once a report does
+    // ([BottomUiChannels]).
+    val bottomUiChannels = BottomUiChannels<JavaScriptReplyProxy>()
 
-    /** Send the current document's token to its detector: its start, or a fresh probe. */
-    fun postBottomUiProbe() {
+    /** Send the current document's token to [targets]: the detector's start, or a fresh probe. */
+    fun postBottomUiProbe(targets: List<JavaScriptReplyProxy> = bottomUiChannels.targets) {
         val token = bottomChrome.token ?: return
-        runCatching { bottomUiReply?.postMessage(bottomUiProbeRequest(token)) }
+        val request = bottomUiProbeRequest(token)
+        for (reply in targets) runCatching { reply.postMessage(request) }
     }
 
     /**
@@ -720,8 +720,8 @@ private fun buildRefreshableWebView(
      * [installIfUnpainted] lets load-finished install it for a document
      * that never reports a first paint. A cross-document commit also
      * fires `doUpdateVisitedHistory`, *before* first paint; that one
-     * must not install, or the detector would land in a document that
-     * may have no `<body>` yet.
+     * must not install: the detector is already in the document (a
+     * document-start script) and must not start before first paint.
      *
      * A detector asked while it has no `<body>` to probe owes its
      * report and sends it on its next probe (see [bottomUiDetectorJs]).
@@ -1196,18 +1196,18 @@ private fun buildRefreshableWebView(
                 if (sourceOrigin.scheme != "https" && sourceOrigin.scheme != "http") return@WebMessageListener
                 if (message.type != WebMessageCompat.TYPE_STRING) return@WebMessageListener
                 if (message.data == BOTTOM_UI_READY) {
-                    // A new main-frame document's detector, at document
-                    // start. If this document already painted (its
-                    // ready lost the race with `onPageCommitVisible`),
-                    // start it now.
+                    // A main-frame detector at document start, from the
+                    // document on screen or one still on its way in. It
+                    // is started now only if it can be the painted
+                    // document's own late ready (see [BottomUiChannels]);
+                    // otherwise it waits for its document's first paint.
                     if (!isMainFrame) return@WebMessageListener
-                    bottomUiReply = replyProxy
-                    if (bottomChrome.installed) postBottomUiProbe()
+                    postBottomUiProbe(bottomUiChannels.onReady(replyProxy, bottomChrome.installed))
                     return@WebMessageListener
                 }
                 val report = parseBottomUiMessage(message.data, isMainFrame, bottomChrome.token)
                     ?: return@WebMessageListener
-                bottomUiReply = replyProxy
+                bottomUiChannels.onReport(replyProxy)
                 val verdict = bottomChrome.accept(report, SystemClock.uptimeMillis())
                 if (verdict.changed) applyBottomChrome()
                 val confirmIn = verdict.confirmInMs
@@ -1275,6 +1275,7 @@ private fun buildRefreshableWebView(
                 // from the outgoing document carries its old token and
                 // is dropped.
                 bottomChrome.startDocument()
+                bottomUiChannels.startDocument()
                 state.bottomChromeMode = BottomChromeMode.Overlay
                 // …and with the progress latch open again: whatever the
                 // last Stop aborted, this document is a load of its own
