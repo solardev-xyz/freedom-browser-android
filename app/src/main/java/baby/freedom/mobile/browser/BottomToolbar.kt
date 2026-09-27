@@ -39,11 +39,13 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Print
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.StarBorder
@@ -1291,7 +1293,7 @@ internal fun capsuleBorder(colors: ColorScheme): Color = colors.onSurface.copy(
  * cannot cover either.
  */
 @Composable
-private fun CapsuleSurface(
+internal fun CapsuleSurface(
     shape: Shape,
     modifier: Modifier = Modifier,
 ) {
@@ -1401,11 +1403,13 @@ internal fun BottomToolbar(
     onOpenTabs: () -> Unit,
     onOpenHistory: () -> Unit,
     onOpenBookmarks: () -> Unit,
+    onOpenDownloads: () -> Unit,
     onReload: () -> Unit,
     onStop: () -> Unit,
     onNewTab: () -> Unit,
     onPrint: () -> Unit,
     onExpandCapsule: () -> Unit,
+    onFindInPage: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     // Clamp rather than trust the caller: both fractions are driven by
@@ -1464,12 +1468,6 @@ internal fun BottomToolbar(
     // crosses the loading/idle boundary; the percentage itself is read
     // in the draw phase below, where it invalidates drawing only.
     val loading by remember(state) { derivedStateOf { isCapsuleLoading(state) } }
-    // The travelling segment only exists while we have no percentage to
-    // show; composing the infinite transition conditionally keeps an
-    // idle capsule off the animation clock entirely.
-    val sweep: State<Float>? = if (state.resolving) rememberCapsuleSweep() else null
-    val progressColor = MaterialTheme.colorScheme.primary
-    val progressStrokePx = with(LocalDensity.current) { CapsuleProgressStroke.toPx() }
 
     // The label the capsule shows while it isn't being edited — the
     // committed address reduced to a domain, which is also the string
@@ -1681,8 +1679,10 @@ internal fun BottomToolbar(
                     onOpenNode = onOpenNode,
                     onOpenHistory = onOpenHistory,
                     onOpenBookmarks = onOpenBookmarks,
+                    onOpenDownloads = onOpenDownloads,
                     onReload = onReload,
                     onNewTab = onNewTab,
+                    onFindInPage = onFindInPage,
                     onPrint = onPrint,
                 )
             },
@@ -1839,34 +1839,14 @@ internal fun BottomToolbar(
         // boundary, through `loading` above), so a ticking load
         // invalidates drawing only — never layout or composition.
         if (loading) {
-            Box(
+            CapsuleLoadTrace(
+                state = state,
                 modifier = Modifier
                     .align(Alignment.Center)
                     .width(fieldWidth)
                     .height(drawnHeight)
                     .offset { IntOffset((fieldCenter.toPx() * direction).roundToInt(), 0) }
-                    .offset(y = bottomAnchor)
-                    .drawWithCache {
-                        // The outline only changes when the capsule's
-                        // size does, so it is traced and measured here in
-                        // the cache block — a frame of the sweep then
-                        // costs one `getSegment` per half, not two fresh
-                        // paths and a fresh PathMeasure.
-                        val trace = CapsuleEdgeTrace(size, progressStrokePx)
-                        onDrawBehind {
-                            val start: Float
-                            val end: Float
-                            if (sweep != null) {
-                                val head = sweep.value * (1f + CAPSULE_SWEEP_WINDOW)
-                                start = (head - CAPSULE_SWEEP_WINDOW).coerceIn(0f, 1f)
-                                end = head.coerceIn(0f, 1f)
-                            } else {
-                                start = 0f
-                                end = state.progress.coerceIn(0, 100) / 100f
-                            }
-                            trace.draw(this, start, end, progressColor)
-                        }
-                    },
+                    .offset(y = bottomAnchor),
             )
         }
     }
@@ -2087,6 +2067,47 @@ private fun rememberCapsuleSweep(): State<Float> {
             repeatMode = RepeatMode.Restart,
         ),
         label = "capsuleSweepPhase",
+    )
+}
+
+/**
+ * The load-progress trace stroked along the outline of whatever capsule
+ * [modifier] sizes it to: `0 → progress` for a determinate load, a
+ * travelling segment while [BrowserState.resolving] (ENS resolve /
+ * gateway warm-up). Shared by the address field and the find bar, which
+ * stands in for the capsule while it is open, so a load started with the
+ * bar up still shows (#83). Callers compose it only while
+ * [isCapsuleLoading]; `state.progress` is read in the draw phase only.
+ */
+@Composable
+internal fun CapsuleLoadTrace(state: BrowserState, modifier: Modifier = Modifier) {
+    // The travelling segment only exists while we have no percentage to
+    // show; composing the infinite transition conditionally keeps an
+    // idle capsule off the animation clock entirely.
+    val sweep: State<Float>? = if (state.resolving) rememberCapsuleSweep() else null
+    val progressColor = MaterialTheme.colorScheme.primary
+    val progressStrokePx = with(LocalDensity.current) { CapsuleProgressStroke.toPx() }
+    Box(
+        modifier = modifier.drawWithCache {
+            // The outline only changes when the capsule's size does, so
+            // it is traced and measured here in the cache block — a frame
+            // of the sweep then costs one `getSegment` per half, not two
+            // fresh paths and a fresh PathMeasure.
+            val trace = CapsuleEdgeTrace(size, progressStrokePx)
+            onDrawBehind {
+                val start: Float
+                val end: Float
+                if (sweep != null) {
+                    val head = sweep.value * (1f + CAPSULE_SWEEP_WINDOW)
+                    start = (head - CAPSULE_SWEEP_WINDOW).coerceIn(0f, 1f)
+                    end = head.coerceIn(0f, 1f)
+                } else {
+                    start = 0f
+                    end = state.progress.coerceIn(0, 100) / 100f
+                }
+                trace.draw(this, start, end, progressColor)
+            }
+        },
     )
 }
 
@@ -2854,8 +2875,10 @@ private fun OverflowMenuButton(
     onOpenNode: () -> Unit,
     onOpenHistory: () -> Unit,
     onOpenBookmarks: () -> Unit,
+    onOpenDownloads: () -> Unit,
     onReload: () -> Unit,
     onNewTab: () -> Unit,
+    onFindInPage: () -> Unit,
     onPrint: () -> Unit,
 ) {
     var menuExpanded by remember { mutableStateOf(false) }
@@ -2964,9 +2987,20 @@ private fun OverflowMenuButton(
                                 onReload()
                             },
                         )
-                        // Print or save as PDF (#89). Off on the home tab,
-                        // which is Compose rather than a page: there is no
-                        // document behind it to print.
+                        DropdownMenuItem(
+                            text = { MenuItemLabel("Find in page") },
+                            leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null) },
+                            // Same rule as the bookmark row: nothing to
+                            // search on the home surface.
+                            enabled = state.url.isNotBlank(),
+                            onClick = {
+                                menuExpanded = false
+                                onFindInPage()
+                            },
+                        )
+                        // Print or save as PDF (#89). Same rule as Find
+                        // in page: the home tab is Compose rather than a
+                        // page, so there is no document behind it to print.
                         DropdownMenuItem(
                             text = { MenuItemLabel("Print") },
                             leadingIcon = { Icon(Icons.Filled.Print, contentDescription = null) },
@@ -2990,6 +3024,14 @@ private fun OverflowMenuButton(
                             onClick = {
                                 menuExpanded = false
                                 onOpenBookmarks()
+                            },
+                        )
+                        DropdownMenuItem(
+                            text = { MenuItemLabel("Downloads") },
+                            leadingIcon = { Icon(Icons.Filled.Download, contentDescription = null) },
+                            onClick = {
+                                menuExpanded = false
+                                onOpenDownloads()
                             },
                         )
                         DropdownMenuItem(

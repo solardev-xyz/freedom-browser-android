@@ -79,7 +79,7 @@ Environment (all optional, defaults shown):
 | `SWARM_GATEWAY`      | `https://gateway.ethswarm.org` | path-style Swarm gateway base                 |
 | `IPFS_GATEWAY_HOST`  | `dweb.link`                    | subdomain-style IPFS gateway host             |
 | `IPNS_GATEWAY_HOST`  | `dweb.link`                    | subdomain-style IPNS gateway host             |
-| `ENS_GATEWAY_SUFFIX` | `limo`                         | suffix appended to ENS names (`<name>.limo`)  |
+| `ENS_GATEWAY_SUFFIX` | `limo`                         | suffix appended to ENS names (`<name>.limo`); WNS `.wei` / GNS `.gwei` names get a 404 (no public gateway) |
 
 The public gateways are the defaults so a fresh deploy works; swap them
 for your own if the share-link traffic ever matters.

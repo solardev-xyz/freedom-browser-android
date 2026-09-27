@@ -9,12 +9,26 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.filled.Search
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.RadioButton
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.LocationOn
+import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material.icons.filled.Cookie
 import androidx.compose.material.icons.filled.DeleteForever
 import androidx.compose.material.icons.filled.ErrorOutline
@@ -27,6 +41,7 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -56,11 +71,15 @@ import kotlinx.coroutines.launch
 /**
  * Full-screen settings page. Top to bottom:
  *
+ *  0. **Search** — the address bar's search engine: the desktop set
+ *     ([SearchEngines.BUILT_IN]) or a custom template (#87).
  *  1. **Browsing data** — wipe history, bookmarks, and WebView cookies /
  *     site storage / per-tab caches. Each action is guarded by a
  *     confirmation dialog.
- *  2. **About** — app name, version, package, and a short blurb.
- *  3. **Other** — a single "Show advanced options" row. Tapping it
+ *  2. **Site permissions** — every camera / microphone / location
+ *     decision (remembered, or this run's), each revocable (#81).
+ *  3. **About** — app name, version, package, and a short blurb.
+ *  4. **Other** — a single "Show advanced options" row. Tapping it
  *     flips [NodeSettings.showIpfsUi] on, which reveals an "IPFS node
  *     (experimental)" card below (status, peers, gateway URL, and
  *     routing preferences). This gate exists so IPFS support stays a
@@ -87,10 +106,18 @@ fun SettingsScreen(
     val context = LocalContext.current
     val settings = remember(context) { NodeSettings.get(context) }
     val showIpfsUi by settings.showIpfsUi.collectAsState(initial = false)
+    val searchEngine by settings.searchEngine
+        .collectAsState(initial = SearchEngines.DEFAULT_ID)
+    val customSearchTemplate by settings.customSearchTemplate.collectAsState(initial = "")
+    var pickSearchEngine by remember { mutableStateOf(false) }
 
     var confirmClearHistory by remember { mutableStateOf(false) }
     var confirmClearBookmarks by remember { mutableStateOf(false) }
     var confirmClearSiteData by remember { mutableStateOf(false) }
+
+    val sitePermissions = remember(context) { SitePermissionBroker.get(context) }
+    val permissionEntries by remember(sitePermissions) { sitePermissions.entries }
+        .collectAsState(initial = emptyList())
 
     val scope = rememberCoroutineScope()
 
@@ -103,6 +130,13 @@ fun SettingsScreen(
             contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
             modifier = Modifier.fillMaxSize(),
         ) {
+            item("search") {
+                SearchSection(
+                    engineId = searchEngine,
+                    customTemplate = customSearchTemplate,
+                    onClick = { pickSearchEngine = true },
+                )
+            }
             item("browsing") {
                 BrowsingDataSection(
                     historyCount = history.size,
@@ -110,6 +144,12 @@ fun SettingsScreen(
                     onClearHistoryRequested = { confirmClearHistory = true },
                     onClearBookmarksRequested = { confirmClearBookmarks = true },
                     onClearSiteDataRequested = { confirmClearSiteData = true },
+                )
+            }
+            item("permissions") {
+                SitePermissionsSection(
+                    entries = permissionEntries,
+                    onRevoke = sitePermissions::revoke,
                 )
             }
             item("about") {
@@ -135,6 +175,21 @@ fun SettingsScreen(
         }
     }
 
+    if (pickSearchEngine) {
+        SearchEngineDialog(
+            selectedId = searchEngine,
+            savedCustomTemplate = customSearchTemplate,
+            onSelectBuiltIn = { id ->
+                scope.launch { settings.setSearchEngine(id) }
+                pickSearchEngine = false
+            },
+            onSaveCustom = { template ->
+                scope.launch { settings.setCustomSearchTemplate(template) }
+                pickSearchEngine = false
+            },
+            onDismiss = { pickSearchEngine = false },
+        )
+    }
     if (confirmClearHistory) {
         ConfirmDialog(
             title = "Clear history?",
@@ -174,6 +229,140 @@ fun SettingsScreen(
 }
 
 @Composable
+private fun SearchSection(
+    engineId: String,
+    customTemplate: String,
+    onClick: () -> Unit,
+) {
+    // A `custom` id without a usable template searches with the default
+    // ([SearchEngines.effectiveId]) — say so rather than claim "Custom".
+    val isCustom = SearchEngines.effectiveId(engineId, customTemplate) == SearchEngines.CUSTOM_ID
+    SectionCard(title = "Search") {
+        PageRow(
+            title = "Search engine",
+            subtitle = SearchEngines.labelFor(engineId, customTemplate),
+            style = PageRowStyle.Inset,
+            leadingIcon = Icons.Filled.Search,
+            // The whole template, wrapped — never cut, so it's readable
+            // on the narrowest screen.
+            thirdLine = if (isCustom) customTemplate else null,
+            onClick = onClick,
+        )
+    }
+}
+
+/**
+ * Radio list of the built-in engines plus "Custom". Tapping a built-in
+ * applies it straight away; "Custom" reveals a template field and a
+ * Save button that stays disabled until [SearchEngines.normalizeTemplate]
+ * accepts the text, with the reason shown under the field.
+ */
+@Composable
+private fun SearchEngineDialog(
+    selectedId: String,
+    savedCustomTemplate: String,
+    onSelectBuiltIn: (String) -> Unit,
+    onSaveCustom: (String) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    // Check the radio of the engine search actually uses — the same
+    // resolver as the Settings row, so a stale `custom` shows DuckDuckGo
+    // here too rather than a checked "Custom" the row doesn't name.
+    val effectiveId = SearchEngines.effectiveId(selectedId, savedCustomTemplate)
+    var customSelected by remember {
+        mutableStateOf(effectiveId == SearchEngines.CUSTOM_ID)
+    }
+    var draft by remember { mutableStateOf(savedCustomTemplate) }
+    val validation = SearchEngines.validateTemplate(draft)
+    val normalized = validation.template
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Search engine") },
+        text = {
+            Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
+                SearchEngines.BUILT_IN.forEach { engine ->
+                    EngineRadioRow(
+                        label = engine.label,
+                        selected = !customSelected && effectiveId == engine.id,
+                        onClick = { onSelectBuiltIn(engine.id) },
+                    )
+                }
+                EngineRadioRow(
+                    label = "Custom",
+                    selected = customSelected,
+                    onClick = { customSelected = true },
+                )
+                if (customSelected) {
+                    OutlinedTextField(
+                        value = draft,
+                        onValueChange = { draft = it },
+                        label = { Text("Search URL") },
+                        placeholder = { Text("https://example.com/search?q={searchTerms}") },
+                        isError = draft.isNotBlank() && normalized == null,
+                        supportingText = {
+                            Text(
+                                validation.rejection
+                                    ?.takeIf { draft.isNotBlank() }
+                                    ?.let(::templateHint)
+                                    ?: "Your search replaces {searchTerms} (or %s)",
+                            )
+                        },
+                        keyboardOptions = KeyboardOptions(
+                            keyboardType = KeyboardType.Uri,
+                            autoCorrectEnabled = false,
+                        ),
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            if (customSelected) {
+                TextButton(
+                    onClick = { normalized?.let(onSaveCustom) },
+                    enabled = normalized != null,
+                ) { Text("Save") }
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Cancel") }
+        },
+    )
+}
+
+/** What to fix, for each reason [SearchEngines.validateTemplate] refuses a template. */
+private fun templateHint(rejection: SearchEngines.Rejection): String = when (rejection) {
+    SearchEngines.Rejection.EMPTY,
+    SearchEngines.Rejection.NO_PLACEHOLDER -> "Put {searchTerms} (or %s) where your search goes"
+    SearchEngines.Rejection.MULTIPLE_PLACEHOLDERS -> "Use {searchTerms} (or %s) only once"
+    SearchEngines.Rejection.TOO_LONG -> "Too long: at most 2048 characters"
+    SearchEngines.Rejection.NOT_A_URL -> "Not a full URL: start with https:// and a host name"
+    SearchEngines.Rejection.SCHEME ->
+        "Needs https:// (http:// only to localhost, 127.0.0.1 or [::1])"
+    SearchEngines.Rejection.USER_INFO -> "Remove the user name or password before the host"
+}
+
+@Composable
+private fun EngineRadioRow(
+    label: String,
+    selected: Boolean,
+    onClick: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .heightIn(min = 48.dp)
+            .selectable(selected = selected, role = Role.RadioButton, onClick = onClick),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        RadioButton(selected = selected, onClick = null)
+        Spacer(Modifier.width(12.dp))
+        Text(label)
+    }
+}
+
+@Composable
 private fun BrowsingDataSection(
     historyCount: Int,
     bookmarkCount: Int,
@@ -205,6 +394,79 @@ private fun BrowsingDataSection(
             enabled = true,
             onClick = onClearSiteDataRequested,
         )
+    }
+}
+
+/**
+ * Site permissions (#81): one row per decision — the site, in full and
+ * wrapping (never ellipsised: the end of a host is the part that
+ * matters), the permission and its state, and a Remove button that
+ * makes the site ask again next time. Session-only decisions are listed
+ * too, so a Block or a dismissal embargo made this run can be lifted
+ * without restarting the app.
+ */
+@Composable
+private fun SitePermissionsSection(
+    entries: List<SitePermissionEntry>,
+    onRevoke: (SitePermissionEntry) -> Unit,
+) {
+    SectionCard(title = "Site permissions") {
+        if (entries.isEmpty()) {
+            Text(
+                "Sites you allow or block from using your camera, microphone or location appear here.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+            )
+        }
+        for (entry in entries) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(start = 12.dp, top = 6.dp, bottom = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(
+                    when (entry.permission) {
+                        SitePermission.CAMERA -> Icons.Filled.Videocam
+                        SitePermission.MICROPHONE -> Icons.Filled.Mic
+                        SitePermission.LOCATION -> Icons.Filled.LocationOn
+                    },
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onSurface,
+                )
+                Spacer(Modifier.width(12.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        permissionOriginDisplay(entry.origin),
+                        fontWeight = FontWeight.Medium,
+                    )
+                    Text(
+                        "${entry.permission.label} · ${sitePermissionStateLabel(entry)}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                IconButton(onClick = { onRevoke(entry) }) {
+                    Icon(
+                        Icons.Filled.Close,
+                        contentDescription = "Remove ${entry.permission.label} permission for ${permissionOriginDisplay(entry.origin)}",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+        }
+    }
+}
+
+/** "Allowed", "Blocked (this session)", "Blocked after 3 dismissals (this session)". */
+internal fun sitePermissionStateLabel(entry: SitePermissionEntry): String {
+    val scope = if (entry.remembered) "" else " (this session)"
+    return when {
+        entry.embargoed ->
+            "Blocked after ${PermissionSession.DISMISS_EMBARGO_THRESHOLD} dismissals$scope"
+        entry.decision == PermissionDecision.ALLOW -> "Allowed$scope"
+        else -> "Blocked$scope"
     }
 }
 

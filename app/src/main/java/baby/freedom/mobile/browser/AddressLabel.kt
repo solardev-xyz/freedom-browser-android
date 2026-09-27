@@ -1,5 +1,7 @@
 package baby.freedom.mobile.browser
 
+import baby.freedom.mobile.ens.NameSystem
+
 /**
  * The *resting* address-bar label: what the floating capsule shows while
  * the user is not editing.
@@ -33,8 +35,9 @@ package baby.freedom.mobile.browser
 object AddressLabel {
 
     /**
-     * TLDs whose names are ENS names rather than DNS domains (the two
-     * [baby.freedom.mobile.ens.EnsInput] accepts).
+     * TLDs whose names are ENS-style names rather than DNS domains —
+     * the ones [baby.freedom.mobile.ens.EnsInput] accepts, ENS's `.eth`
+     * / `.box` plus WNS `.wei` and GNS `.gwei`.
      *
      * DNS has a registrable-domain boundary — everything under
      * `example.com` is `example.com`'s to give away, so collapsing
@@ -47,7 +50,8 @@ object AddressLabel {
      * into a bold `vitalik.eth` would have the capsule vouch for a name
      * the user is not on. ENS names are shown whole.
      */
-    private val ENS_TLDS: Set<String> = setOf("eth", "box")
+    private val ENS_TLDS: Set<String> =
+        NameSystem.navigableSuffixes.map { it.removePrefix(".") }.toSet()
 
     /**
      * The WHATWG URL Standard's *special* schemes — the ones Chromium

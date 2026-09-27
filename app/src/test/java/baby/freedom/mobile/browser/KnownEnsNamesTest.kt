@@ -60,4 +60,16 @@ class KnownEnsNamesTest {
         assertNull(KnownEnsNames.protocolFor("a.eth"))
         assertNull(KnownEnsNames.protocolFor("b.eth"))
     }
+
+    @Test
+    fun `forgetting a name keeps a shared root's mapping for the name still on it`() {
+        KnownEnsNames.record("bzz://abcdef0123", "a.eth")
+        KnownEnsNames.record("bzz://abcdef0123", "b.eth")
+        assertEquals("b.eth", KnownEnsNames.nameFor("abcdef0123"))
+        KnownEnsNames.forgetName("b.eth")
+        assertEquals("a.eth", KnownEnsNames.nameFor("abcdef0123"))
+        assertEquals("bzz", KnownEnsNames.protocolFor("a.eth"))
+        KnownEnsNames.forgetName("a.eth")
+        assertNull(KnownEnsNames.nameFor("abcdef0123"))
+    }
 }
