@@ -962,17 +962,6 @@ fun BrowserScreen(
         target.loadUrl(url)
     }
 
-    // Wire the WebView layer's "route this URL through submit" hook up
-    // to this screen's [submit] function. The callback lives on
-    // [TabsState] so BrowserWebView (which is composed under us) can
-    // bounce bzz:// / ens:// link-clicks + error-page "Try Again"
-    // back through the same probe gate the top address bar uses.
-    //
-    // Everything arriving on this hook comes out of
-    // `shouldOverrideUrlLoading`, i.e. the page asked — never the user
-    // directly — so it submits as [SubmitSource.Renderer] and the pill
-    // keeps describing the page still on screen until the new one
-    // commits.
     // "New private tab" (#86), from the menu and the tab switcher —
     // null, so neither offers it, where the WebView can't run private
     // tabs (no multi-profile support).
@@ -986,6 +975,17 @@ fun BrowserScreen(
         null
     }
 
+    // Wire the WebView layer's "route this URL through submit" hook up
+    // to this screen's [submit] function. The callback lives on
+    // [TabsState] so BrowserWebView (which is composed under us) can
+    // bounce bzz:// / ens:// link-clicks + error-page "Try Again"
+    // back through the same probe gate the top address bar uses.
+    //
+    // Everything arriving on this hook comes out of
+    // `shouldOverrideUrlLoading`, i.e. the page asked — never the user
+    // directly — so it submits as [SubmitSource.Renderer] and the pill
+    // keeps describing the page still on screen until the new one
+    // commits.
     DisposableEffect(tabs) {
         tabs.requestSubmit = { tab, url -> submit(tab, url, SubmitSource.Renderer) }
         tabs.requestNodeRecovery = onRecoverNodes

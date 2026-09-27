@@ -10,6 +10,7 @@ import androidx.compose.foundation.gestures.awaitLongPressOrCancellation
 import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -112,35 +113,48 @@ fun TabSwitcherScreen(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(horizontal = 8.dp, vertical = 4.dp),
-            verticalAlignment = Alignment.CenterVertically,
+            // Top: the × stays on the first line when the actions wrap
+            // (every control here is a 48dp touch target, so one line
+            // is centred either way).
+            verticalAlignment = Alignment.Top,
         ) {
-            TextButton(onClick = {
-                onNewTab()
-                onDismiss()
-            }) {
-                Icon(Icons.Filled.Add, contentDescription = null)
-                Spacer(Modifier.size(8.dp))
-                Text("New tab", fontWeight = FontWeight.Medium)
-            }
-            if (onNewPrivateTab != null) {
+            // The actions wrap onto a second line rather than squeezing
+            // each other (or the ×) when they don't fit — a narrow
+            // screen or a large font with Private and Reopen both shown.
+            // The × sits outside the flow, so it's always there.
+            FlowRow(
+                modifier = Modifier.weight(1f),
+                itemVerticalAlignment = Alignment.CenterVertically,
+            ) {
                 TextButton(onClick = {
-                    onNewPrivateTab()
+                    onNewTab()
                     onDismiss()
                 }) {
-                    Icon(PrivateTabIcon, contentDescription = null)
+                    Icon(Icons.Filled.Add, contentDescription = null)
                     Spacer(Modifier.size(8.dp))
-                    Text("Private", fontWeight = FontWeight.Medium)
+                    Text("New tab", fontWeight = FontWeight.Medium, softWrap = false)
                 }
-            }
-            Spacer(Modifier.weight(1f))
-            if (tabs.canReopenClosedTab) {
-                TextButton(onClick = {
-                    tabs.reopenClosedTab()
-                    onDismiss()
-                }) {
-                    Icon(Icons.Filled.Restore, contentDescription = null)
-                    Spacer(Modifier.size(8.dp))
-                    Text("Reopen", fontWeight = FontWeight.Medium)
+                if (onNewPrivateTab != null) {
+                    TextButton(onClick = {
+                        onNewPrivateTab()
+                        onDismiss()
+                    }) {
+                        Icon(PrivateTabIcon, contentDescription = null)
+                        Spacer(Modifier.size(8.dp))
+                        Text("Private", fontWeight = FontWeight.Medium, softWrap = false)
+                    }
+                }
+                if (tabs.canReopenClosedTab) {
+                    // Pushes Reopen to the end of its line.
+                    Spacer(Modifier.weight(1f))
+                    TextButton(onClick = {
+                        tabs.reopenClosedTab()
+                        onDismiss()
+                    }) {
+                        Icon(Icons.Filled.Restore, contentDescription = null)
+                        Spacer(Modifier.size(8.dp))
+                        Text("Reopen", fontWeight = FontWeight.Medium, softWrap = false)
+                    }
                 }
             }
             IconButton(onClick = onDismiss, shapes = IconButtonDefaults.shapes()) {

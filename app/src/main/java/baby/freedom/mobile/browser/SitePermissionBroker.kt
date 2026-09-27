@@ -81,9 +81,10 @@ class SitePermissionBroker private constructor(
      * remembered or answered in normal tabs, and what it's told applies
      * to private tabs only, is never written to the store, and isn't
      * listed in Settings. Replaced when the private session ends
-     * ([onPrivateSessionEnded]).
+     * ([onPrivateSessionEnded]). Since Settings can't show it, it never
+     * embargoes: a dismissed prompt is a deny-once, nothing more.
      */
-    private var privateSession = PermissionSession()
+    private var privateSession = PermissionSession(embargoes = false)
 
     private fun sessionFor(tab: BrowserState): PermissionSession =
         if (tab.private) privateSession else session
@@ -242,7 +243,7 @@ class SitePermissionBroker private constructor(
 
     /** The last private tab has closed (#86): forget its answers. */
     fun onPrivateSessionEnded() {
-        privateSession = PermissionSession()
+        privateSession = PermissionSession(embargoes = false)
     }
 
     // ---------------------------------------------------------------

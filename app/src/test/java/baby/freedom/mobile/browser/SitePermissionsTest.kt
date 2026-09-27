@@ -97,6 +97,16 @@ class SitePermissionsTest {
     }
 
     @Test
+    fun `a tier without embargoes never blocks on dismissals`() {
+        val s = PermissionSession(embargoes = false)
+        repeat(PermissionSession.DISMISS_EMBARGO_THRESHOLD * 2) {
+            assertFalse(s.dismiss(o, SitePermission.CAMERA))
+        }
+        assertEquals(PermissionPlan.Ask(listOf(SitePermission.CAMERA)), planFor(o, listOf(SitePermission.CAMERA), emptyMap(), s))
+        assertEquals(emptyList<SitePermissionEntry>(), s.entries())
+    }
+
+    @Test
     fun `three dismissals embargo the pair, an answer resets the count`() {
         val s = PermissionSession()
         val loc = SitePermission.LOCATION

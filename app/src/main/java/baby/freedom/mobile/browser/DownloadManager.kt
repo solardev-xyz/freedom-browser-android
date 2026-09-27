@@ -40,12 +40,13 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.IOException
 import java.io.InputStream
 import java.net.HttpURLConnection
 import java.net.URL
-import java.util.concurrent.atomic.AtomicLong
 
 private const val LOG_TAG = "Downloads"
 
@@ -140,13 +141,20 @@ class DownloadManager private constructor(context: Context) {
     /**
      * Private tabs' downloads (#86): the same table, in a database that
      * only exists in memory, emptied when the private session ends
-     * ([endPrivateSession]). Their ids are negative ([privateIds]), so
-     * one id space covers both lists and [daoFor] tells them apart.
+     * ([endPrivateSession]). Their ids are negative ([privateSessions]),
+     * so one id space covers both lists and [daoFor] tells them apart.
      */
     private val memoryDao = Room.inMemoryDatabaseBuilder(appContext, AppDatabase::class.java)
         .build()
         .downloads()
-    private val privateIds = AtomicLong(0)
+    private val privateSessions = PrivateDownloadSessions()
+
+    /**
+     * Held while a private row is inserted and while an ended session's
+     * rows are cleared, so an insert that got its id before the session
+     * ended is always cleared with it rather than landing after.
+     */
+    private val privateRows = Mutex()
 
     private fun daoFor(id: Long): DownloadDao = if (id < 0) memoryDao else dao
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
@@ -227,8 +235,11 @@ class DownloadManager private constructor(context: Context) {
         // origin (`data:`, `about:blank`) still asked: it's named by
         // its scheme rather than passed off as the user's own request.
         val requestedBy = downloadRequester(pageUrl, Gateways::toDisplay)
+        // A private offer belongs to the session live when it was made:
+        // accepted after that session ended, it's dropped ([enqueue]).
+        val session = if (private) privateSession() else null
         val queued = offerQueue.offer(tabId, requestedBy, name, target.displayUrl, contentLength.coerceAtLeast(-1)) {
-            enqueue(url, userAgent, contentDisposition, mimeType, contentLength, refererOrigin, private)
+            enqueue(url, userAgent, contentDisposition, mimeType, contentLength, refererOrigin, session)
         }
         if (!queued) Log.i(LOG_TAG, "download offer from tab $tabId dropped (tab blocked or $MAX_PENDING_OFFERS waiting)")
     }
@@ -248,6 +259,15 @@ class DownloadManager private constructor(context: Context) {
     /** Only [tabIds] are open; offers and blocks of other tabs go. */
     fun retainOfferTabs(tabIds: Set<Long>) = offerQueue.retainTabs(tabIds)
 
+    /**
+     * A private download's session (#86): its generation, and the
+     * cookie jar it sends — that session's, never a later one's.
+     */
+    private class PrivateSession(val generation: Long, val cookies: CookieManager?)
+
+    private fun privateSession() = PrivateSession(privateSessions.current(), PrivateProfile.cookieManager())
+
+    /** [session]: the private session a private download belongs to; null for a normal one. */
     private fun enqueue(
         url: String,
         userAgent: String?,
@@ -255,7 +275,7 @@ class DownloadManager private constructor(context: Context) {
         mimeType: String?,
         contentLength: Long,
         refererOrigin: String?,
-        private: Boolean,
+        session: PrivateSession?,
     ) {
         val target = classifyDownloadUrl(url, Gateways::isLocalGateway, Gateways::toDisplay)
         val guessedMime = normalizeMime(mimeType)
@@ -279,14 +299,23 @@ class DownloadManager private constructor(context: Context) {
                     finishedAt = null,
                     refererOrigin = refererOrigin.takeIf { target is DownloadTarget.Web },
                 )
-            val id = if (private) {
-                memoryDao.insert(row.copy(id = privateIds.decrementAndGet()))
+            val id = if (session != null) {
+                privateRows.withLock {
+                    // Its session ended meanwhile: nothing to list it in.
+                    val id = privateSessions.allocate(session.generation) ?: return@launch
+                    memoryDao.insert(row.copy(id = id))
+                }
             } else {
                 dao.insert(row)
             }
             _events.tryEmit(DownloadEvent.Started(id, initialName))
+            val cookies = if (session != null) {
+                session.cookies
+            } else {
+                runCatching { CookieManager.getInstance() }.getOrNull()
+            }
             val job = scope.launch(start = CoroutineStart.LAZY) {
-                run(id, target, userAgent, contentDisposition, refererOrigin)
+                run(id, target, userAgent, contentDisposition, refererOrigin, cookies)
             }
             val cancelled = !cancellation.register(id, job)
             // Cancelled before it began: run() never starts, so mark the
@@ -310,6 +339,9 @@ class DownloadManager private constructor(context: Context) {
     /** Fetch a finished-unsuccessfully download again, as a new entry. */
     fun retry(entry: DownloadEntry) {
         if (entry.sourceUrl.isBlank()) return
+        // A private row from a session that has ended is already being
+        // cleared; retrying it would carry it into the next one.
+        if (entry.id < 0 && !privateSessions.isLive(entry.id)) return
         scope.launch { daoFor(entry.id).delete(entry.id) }
         enqueue(
             url = entry.sourceUrl,
@@ -320,7 +352,7 @@ class DownloadManager private constructor(context: Context) {
             mimeType = entry.mimeType,
             contentLength = -1,
             refererOrigin = entry.refererOrigin,
-            private = entry.id < 0,
+            session = if (entry.id < 0) privateSession() else null,
         )
     }
 
@@ -380,20 +412,23 @@ class DownloadManager private constructor(context: Context) {
      * downloads still running (as Chrome does with incognito ones —
      * their partial files are deleted) and forget the private list.
      * Files that finished stay in Downloads: they're the user's.
+     *
+     * The session ends here and now: offers it made can no longer be
+     * started, and only its own rows are cleared — never those of a
+     * private session started before the clean-up runs.
      */
     fun endPrivateSession() {
+        val ended = privateSessions.end()
+        if (ended.isEmpty()) return
         scope.launch {
-            for (running in memoryDao.withStatus(DownloadStatus.RUNNING)) cancel(running.id)
-            memoryDao.clear()
+            privateRows.withLock {
+                for (running in memoryDao.withStatus(DownloadStatus.RUNNING)) {
+                    if (running.id in ended) cancel(running.id)
+                }
+                memoryDao.deleteRange(ended.first, ended.last)
+            }
         }
     }
-
-    /**
-     * The cookies a download sends: its tab's. A private download
-     * whose session has ended sends none — never the normal tabs'.
-     */
-    private fun cookieJarFor(id: Long): CookieManager? =
-        if (id < 0) PrivateProfile.cookieManager() else runCatching { CookieManager.getInstance() }.getOrNull()
 
     private suspend fun markFileDeleted(id: Long) = withContext(Dispatchers.IO) {
         // Re-read: the caller's copy may be stale (removed, or retried).
@@ -415,6 +450,7 @@ class DownloadManager private constructor(context: Context) {
         userAgent: String?,
         contentDisposition: String?,
         refererOrigin: String?,
+        cookies: CookieManager?,
     ) {
         val dao = daoFor(id)
         var entry = dao.get(id) ?: return
@@ -428,7 +464,7 @@ class DownloadManager private constructor(context: Context) {
         val job = currentCoroutineContext()[Job]
         val track: (AutoCloseable) -> Unit = { cancellation.track(id, job, it) }
         try {
-            val body = openBody(target, userAgent, contentDisposition, refererOrigin, cookieJarFor(id), track)
+            val body = openBody(target, userAgent, contentDisposition, refererOrigin, cookies, track)
             body.use { src ->
                 track(src)
                 currentCoroutineContext().ensureActive()
