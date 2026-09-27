@@ -107,13 +107,44 @@ class EnsNormalizeTest {
     @Test
     fun `resolver answers INVALID_NAME without a lookup`() {
         val http = RecordingRpc()
-        val r = runBlocking { EnsResolver(listOf(rpc), http).resolveContenthash("ab--c.eth") }
+        val r = runBlocking { EnsResolver(listOf(rpc), http).resolveContenthash("a\u0661b.eth") }
 
         require(r is EnsResult.Error) { "got $r" }
         assertEquals("INVALID_NAME", r.reason)
-        assertEquals("ab--c.eth", r.name)
-        assertTrue(r.error, r.error.contains("invalid label extension"))
+        assertEquals("a\u0661b.eth", r.name)
         assertTrue(http.calls.isEmpty())
+    }
+
+    @Test
+    fun `invalid-name detail carries no bidi marks`() {
+        val http = RecordingRpc()
+        val r = runBlocking { EnsResolver(listOf(rpc), http).resolveContenthash("a．b.eth") }
+
+        require(r is EnsResult.Error) { "got $r" }
+        assertEquals("INVALID_NAME", r.reason)
+        assertTrue(r.error, r.error.contains("disallowed character"))
+        assertTrue(r.error, r.error.none { it == '\u200E' || it == '\u200F' || it in '\u202A'..'\u202E' || it in '\u2066'..'\u2069' })
+        // The library does emit them — the cleanup is what removes them.
+        val raw = runCatching { io.github.adraffy.ens.ENSNormalize.ENSIP15.normalize("a．b.eth") }
+            .exceptionOrNull()?.message.orEmpty()
+        assertTrue(raw, raw.contains('\u200E'))
+    }
+
+    @Test
+    fun `plain ASCII names skip ENSIP-15 like desktop fastNormalize`() {
+        // Pre-ENSIP-15 registrations: punycode and `--` at 3-4 are refused
+        // by the spec but resolve on desktop (and did on main), so they
+        // must still be looked up.
+        for (name in listOf("xn--2i8h.eth", "ab--c.eth", "AB--C.ETH")) {
+            val http = RecordingRpc()
+            val r = runBlocking { EnsResolver(listOf(rpc), http).resolveContenthash(name) }
+            assertTrue("$name → $r", !(r is EnsResult.Error && r.reason == "INVALID_NAME"))
+            assertEquals(name, 1, http.calls.size)
+        }
+        assertEquals("ab--c.eth", EnsNormalize.fastNormalize("AB--c.eth"))
+        assertEquals("xn--2i8h.eth", EnsNormalize.fastNormalize("xn--2i8h.eth"))
+        // Anything outside [a-z0-9.-] still gets the full pass.
+        assertEquals("vitalik.eth", EnsNormalize.fastNormalize("ＶＩＴＡＬＩＫ.eth"))
     }
 
     @Test

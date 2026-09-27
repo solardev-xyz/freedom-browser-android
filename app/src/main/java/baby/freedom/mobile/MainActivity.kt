@@ -25,6 +25,7 @@ import baby.freedom.mobile.browser.HOME_URL
 import baby.freedom.mobile.browser.PublicSuffixList
 import baby.freedom.mobile.browser.VirtualOrigin
 import baby.freedom.mobile.data.NodeSettings
+import baby.freedom.mobile.ens.EnsNormalize
 import baby.freedom.mobile.node.INodeCallback
 import baby.freedom.mobile.node.INodeService
 import baby.freedom.mobile.node.NodeService
@@ -124,6 +125,9 @@ class MainActivity : ComponentActivity() {
         // idempotent and thread-safe, so a label that arrives first
         // just does the load itself, exactly as it does today.
         lifecycleScope.launch(Dispatchers.Default) { PublicSuffixList.warm() }
+        // Same for ENSIP-15's spec tables (a few hundred ms on a cold
+        // ART): the first non-ASCII name must not decode them on Main.
+        lifecycleScope.launch(Dispatchers.Default) { EnsNormalize.warm() }
 
         // A cold start from an App Link opens straight at the shared
         // content instead of the home surface.

@@ -38,10 +38,12 @@ import org.json.JSONObject
  * Universal Resolver (see [NameSystem]). Same namehash, same record
  * decoding, same cache and RPC rotation; no CCIP-Read.
  *
- * Names are ENSIP-15 normalized ([EnsNormalize], desktop's
- * `@adraffy/ens-normalize`) before they are hashed, so emoji and
- * non-ASCII labels hash to the same node as in every other client; a
- * name ENSIP-15 rejects is an `INVALID_NAME` error, never a lookup.
+ * Names are ENSIP-15 normalized ([EnsNormalize.fastNormalize], desktop's
+ * `fastNormalize` over `@adraffy/ens-normalize`) before they are hashed,
+ * so emoji and non-ASCII labels hash to the same node as in every other
+ * client; a non-ASCII name ENSIP-15 rejects is an `INVALID_NAME` error,
+ * never a lookup. Plain `[a-z0-9.-]` names skip the pass, as on desktop,
+ * so legacy `xn--…`/`ab--c` registrations still resolve.
  */
 class EnsResolver internal constructor(
     private val rpcEndpoints: List<String>,
@@ -85,7 +87,7 @@ class EnsResolver internal constructor(
             return EnsResult.Error(name = "", reason = "INVALID_NAME", error = "empty name")
         }
         val normalized = try {
-            EnsNormalize.normalize(trimmed)
+            EnsNormalize.fastNormalize(trimmed)
         } catch (e: EnsNormalize.InvalidNameException) {
             return EnsResult.Error(name = trimmed, reason = "INVALID_NAME", error = e.message.orEmpty())
         }

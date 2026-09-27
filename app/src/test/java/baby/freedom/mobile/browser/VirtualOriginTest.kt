@@ -289,4 +289,57 @@ class VirtualOriginTest {
         assertEquals("/a/b?q=1", VirtualOrigin.pathAndQueryOf("https://h.bzz.freedom.baby/a/b?q=1#frag"))
         assertEquals("/", VirtualOrigin.pathAndQueryOf("https://h.bzz.freedom.baby"))
     }
+
+    // ------------------------------------------------------------------
+    // Unicode ENS names (ENSIP-15) — Punycode host labels
+    // ------------------------------------------------------------------
+
+    @Test
+    fun `punycode matches RFC 3492 and IDNA vectors`() {
+        assertEquals("bcher-kva", Punycode.encode("bücher"))
+        assertEquals("bücher", Punycode.decode("bcher-kva"))
+        // Chromium / WHATWG: new URL("https://🦊.eth").host == "xn--9s9h.eth"
+        assertEquals("9s9h", Punycode.encode("🦊"))
+        assertEquals("🦊", Punycode.decode("9s9h"))
+        assertNull(Punycode.decode("a!b"))
+    }
+
+    @Test
+    fun `unicode ENS names get an ASCII punycode host that round-trips`() {
+        for (name in listOf("🦊.eth", "café.eth", "⌐◨-◨.eth", "🏴‍☠.eth", "日本.wei")) {
+            val host = VirtualOrigin.hostFor(ContentRoot.Ens(name))!!
+            assertTrue(host, host.all { it.code < 0x80 })
+            assertTrue(host, host.startsWith("xn--"))
+            assertEquals(name, ContentRoot.Ens(name), VirtualOrigin.parseHost(host))
+            // Hosts come back case-folded, possibly upper-cased by a caller.
+            assertEquals(name, ContentRoot.Ens(name), VirtualOrigin.parseHost(host.uppercase()))
+        }
+        assertEquals("xn---eth-9y14c.ens.freedom.baby", VirtualOrigin.hostFor(ContentRoot.Ens("🦊.eth")))
+    }
+
+    @Test
+    fun `chromium's FE0F-less punycode still maps back to the normalized name`() {
+        // Chromium's IDNA mapping drops U+FE0F; ENSIP-15 re-normalization
+        // of the decoded label must land on the same name.
+        val host = "xn--" + Punycode.encode("\u263A\uFE0F-eth".replace("\uFE0F", "")) + ".ens.freedom.baby"
+        assertEquals(
+            ContentRoot.Ens(baby.freedom.mobile.ens.EnsNormalize.normalize("\u263A\uFE0F.eth")),
+            VirtualOrigin.parseHost(host),
+        )
+    }
+
+    @Test
+    fun `ASCII names starting with xn-- keep the plain escape`() {
+        for (name in listOf("xn--2i8h.eth", "xn--a.b.eth", "xn--bcher-kva.eth")) {
+            val host = VirtualOrigin.hostFor(ContentRoot.Ens(name))!!
+            assertEquals(name, ContentRoot.Ens(name), VirtualOrigin.parseHost(host))
+        }
+    }
+
+    @Test
+    fun `unicode ENS virtual url maps back to the display name`() {
+        val url = VirtualOrigin.toVirtualUrl("ens://🦊.eth/docs?q=1")!!
+        assertEquals("https://xn---eth-9y14c.ens.freedom.baby/docs?q=1", url)
+        assertEquals("🦊.eth/docs?q=1", VirtualOrigin.displayUrlFor(url))
+    }
 }

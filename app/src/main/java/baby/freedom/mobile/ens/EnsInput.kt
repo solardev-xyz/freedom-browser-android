@@ -50,7 +50,18 @@ object EnsInput {
         // still a name — lowercased as typed, it goes on to the resolver
         // and comes back as an `INVALID_NAME` error page rather than
         // falling through to web search.
-        val canonical = EnsNormalize.normalizeOrNull(name) ?: name.lowercase()
+        //
+        // Pure-ASCII input skips the library: ENSIP-15 maps an ASCII
+        // name it accepts to its lowercase, and a rejected one falls back
+        // to the lowercase anyway — so the answer is the same, and the
+        // address bar's per-composition checks (every `https://…` URL
+        // goes through here via [looksLikeEns]) never trigger the
+        // library's spec decode on the main thread.
+        val canonical = if (name.all { it.code < 0x80 }) {
+            name.lowercase()
+        } else {
+            EnsNormalize.normalizeOrNull(name) ?: name.lowercase()
+        }
         if (NameSystem.navigableSuffixes.none { canonical.endsWith(it) }) return null
 
         return Parsed(name = canonical, suffix = suffix)

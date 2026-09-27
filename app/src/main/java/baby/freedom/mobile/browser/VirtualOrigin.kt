@@ -1,5 +1,7 @@
 package baby.freedom.mobile.browser
 
+import baby.freedom.mobile.ens.EnsNormalize
+import baby.freedom.mobile.ens.NameSystem
 import java.math.BigInteger
 
 /**
@@ -56,6 +58,8 @@ sealed interface ContentRoot {
  *    CIDv1; DNSLink names are dot-escaped like ENS names.
  *  - ENS / DNSLink names: the IPFS subdomain-gateway convention —
  *    `-` → `--` first, then `.` → `-` (so `foo-bar.eth` → `foo--bar-eth`).
+ *    A non-ASCII ENS name's escaped label is then Punycoded (`xn--…`,
+ *    what Chromium would turn it into anyway; see [hostFor]).
  */
 object VirtualOrigin {
     /**
@@ -86,7 +90,43 @@ object VirtualOrigin {
         is ContentRoot.Ipfs -> cidLabel(root.cid)?.let { "$it.$IPFS_SUFFIX" }
         is ContentRoot.IpnsKey -> ipnsKeyLabel(root.key)?.let { "$it.$IPNS_SUFFIX" }
         is ContentRoot.IpnsName -> "${escapeName(root.name.lowercase())}.$IPNS_SUFFIX"
-        is ContentRoot.Ens -> "${escapeName(root.name.lowercase())}.$ENS_SUFFIX"
+        is ContentRoot.Ens -> "${ensLabel(root.name)}.$ENS_SUFFIX"
+    }
+
+    /**
+     * The host label for an ENS name: [escapeName] of it, and for a
+     * non-ASCII (ENSIP-15 emoji / Unicode) name the `xn--` Punycode of
+     * that — the form Chromium canonicalizes a Unicode host to anyway,
+     * so the origin we build is byte-for-byte the one the WebView
+     * reports back. U+FE0F is dropped first because Chromium's IDNA
+     * mapping ignores variation selectors; [parseHost] re-normalizes the
+     * decoded name, which puts it back.
+     */
+    private fun ensLabel(name: String): String {
+        val escaped = escapeName(name.lowercase())
+        if (escaped.all { it.code < 0x80 }) return escaped
+        return "xn--" + Punycode.encode(escaped.replace("\uFE0F", ""))
+    }
+
+    /**
+     * Inverse of [ensLabel]. A `xn--` label is a Unicode name when it
+     * decodes to one — non-ASCII, a navigable suffix, ENSIP-15-valid;
+     * otherwise it is a plain escaped ASCII name that happens to start
+     * with `xn--` (`xn--2i8h.eth` → `xn----2i8h-eth`), which can't decode
+     * to a `.eth` name: Punycode only inserts non-ASCII code points, and
+     * the escape's last `-` (before the TLD) is taken as the delimiter,
+     * so the ASCII TLD never survives into the decoded text.
+     */
+    private fun decodeEnsLabel(label: String): ContentRoot.Ens {
+        if (label.startsWith("xn--")) {
+            val unicode = Punycode.decode(label.substring(4))
+                ?.takeIf { d -> d.any { it.code >= 0x80 } }
+                ?.let { unescapeName(it) }
+                ?.let { EnsNormalize.normalizeOrNull(it) }
+                ?.takeIf { n -> NameSystem.navigableSuffixes.any { n.endsWith(it) } }
+            if (unicode != null) return ContentRoot.Ens(unicode)
+        }
+        return ContentRoot.Ens(unescapeName(label))
     }
 
     /** `https://<label(s)>.<ns>.freedom.baby` for [root]. */
@@ -116,7 +156,7 @@ object VirtualOrigin {
             "bzz" -> decodeBzzLabels(labels)
             "ipfs" -> if (labels.size == 1) decodeIpfsLabel(labels[0]) else null
             "ipns" -> if (labels.size == 1) decodeIpnsLabel(labels[0]) else null
-            "ens" -> if (labels.size == 1) ContentRoot.Ens(unescapeName(labels[0])) else null
+            "ens" -> if (labels.size == 1) decodeEnsLabel(labels[0]) else null
             else -> null
         }
     }
