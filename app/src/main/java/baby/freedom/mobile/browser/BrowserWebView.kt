@@ -591,6 +591,9 @@ fun BrowserWebViewHost(
                 runCatching { wv.clearFormData() }
                 runCatching { wv.clearHistory() }
             }
+            // Camera captures handed to pages live in our own cache/uploads
+            // (served by our FileProvider), outside Chromium's cache dir.
+            runCatching { fileChooser.clearCaptures() }
         }
         onDispose {
             tabs.captureActiveThumbnail = null

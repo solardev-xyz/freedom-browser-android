@@ -4,7 +4,10 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Assert.assertNull
+import org.junit.Rule
 import org.junit.Test
+import org.junit.rules.TemporaryFolder
+import java.io.File
 
 class FileChooserTest {
 
@@ -106,5 +109,29 @@ class FileChooserTest {
 
     @Test fun `nothing picked is empty`() {
         assertEquals(emptyList<String>(), pickedUris(emptyList<String>(), null, true, ::uploadable))
+    }
+
+    @get:Rule val tmp = TemporaryFolder()
+
+    @Test fun `deleteCaptures empties the capture dir`() {
+        val dir = tmp.newFolder("uploads")
+        File(dir, "IMG_20260101_000000.jpg").writeText("x")
+        File(dir, "VID_20260101_000000.mp4").writeText("y")
+        assertEquals(0, deleteCaptures(dir, keep = null))
+        assertEquals(0, dir.listFiles()!!.size)
+        assertTrue(dir.isDirectory)
+    }
+
+    @Test fun `deleteCaptures keeps an in-flight capture target`() {
+        val dir = tmp.newFolder("uploads")
+        val old = File(dir, "IMG_old.jpg").apply { writeText("x") }
+        val inFlight = File(dir, "IMG_new.jpg").apply { createNewFile() }
+        assertEquals(0, deleteCaptures(dir, keep = File(dir.path, "IMG_new.jpg")))
+        assertFalse(old.exists())
+        assertTrue(inFlight.exists())
+    }
+
+    @Test fun `deleteCaptures tolerates a missing dir`() {
+        assertEquals(0, deleteCaptures(File(tmp.root, "never-created"), keep = null))
     }
 }

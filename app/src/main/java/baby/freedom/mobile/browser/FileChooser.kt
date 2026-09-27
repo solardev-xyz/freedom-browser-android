@@ -212,6 +212,18 @@ internal class FileChooser(private val context: Context) {
         runCatching { p.callback.onReceiveValue(null) }
     }
 
+    /**
+     * Delete every camera capture in cache/uploads — part of "clear
+     * browsing data": they're served by our [FileProvider] and would
+     * otherwise linger until the next capture's age-based prune (or
+     * forever, if none follows). WebView's `clearCache` only covers
+     * Chromium's own cache directory. The target of a capture still in
+     * progress is kept so the camera app has somewhere to write.
+     */
+    fun clearCaptures() {
+        deleteCaptures(File(context.cacheDir, CAPTURE_DIR), keep = pending?.captureFile)
+    }
+
     private fun newCaptureFile(kind: CaptureKind): File? {
         val dir = File(context.cacheDir, CAPTURE_DIR)
         if (!dir.isDirectory && !dir.mkdirs()) return null
@@ -269,6 +281,18 @@ internal fun rememberFileChooser(): FileChooser {
 }
 
 internal enum class CaptureKind { IMAGE, VIDEO }
+
+/**
+ * Delete the files in the capture directory [dir], except [keep]. A
+ * missing directory is fine (nothing captured yet). Returns how many
+ * files could not be deleted.
+ */
+internal fun deleteCaptures(dir: File, keep: File?): Int {
+    val keepPath = keep?.absoluteFile
+    return dir.listFiles().orEmpty()
+        .filter { it.absoluteFile != keepPath }
+        .count { !it.deleteRecursively() }
+}
 
 /**
  * An `accept` attribute, as WebView hands it over in
