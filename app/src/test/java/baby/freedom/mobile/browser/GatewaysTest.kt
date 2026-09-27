@@ -283,6 +283,18 @@ class GatewaysTest {
     }
 
     @Test
+    fun `reverifyEnsDocument refuses a name ENSIP-15 rejects, even with an earlier answer`() {
+        val pins = EnsDocumentPins()
+        pins.pin("ab--c.eth", "bzz://$ref64")
+        withLookup({ EnsResult.Error(it, "INVALID_NAME", "invalid label extension") }) {
+            // Not a transport failure: serving the last answer would keep
+            // a name no client can resolve alive.
+            assertEquals("ens_invalid_name", Gateways.reverifyEnsDocument("ab--c.eth", pins))
+            assertNull(pins.lastAnswerFor("ab--c.eth"))
+        }
+    }
+
+    @Test
     fun `reverifyEnsDocument refuses a name whose content is no longer loadable`() {
         KnownEnsNames.record("bzz://$ref64", "swarm.eth")
         withLookup({ EnsResult.Unsupported(it, "0xe5", "") }) {

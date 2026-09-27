@@ -38,10 +38,10 @@ import org.json.JSONObject
  * Universal Resolver (see [NameSystem]). Same namehash, same record
  * decoding, same cache and RPC rotation; no CCIP-Read.
  *
- * Known limitations vs. the desktop resolver:
- *   - ENSIP-15 normalization is lowercased-ASCII only. Pure-ASCII names
- *     round-trip correctly; emoji / non-ASCII labels may normalize
- *     differently than `@adraffy/ens-normalize`.
+ * Names are ENSIP-15 normalized ([EnsNormalize], desktop's
+ * `@adraffy/ens-normalize`) before they are hashed, so emoji and
+ * non-ASCII labels hash to the same node as in every other client; a
+ * name ENSIP-15 rejects is an `INVALID_NAME` error, never a lookup.
  */
 class EnsResolver internal constructor(
     private val rpcEndpoints: List<String>,
@@ -80,9 +80,14 @@ class EnsResolver internal constructor(
     }
 
     private suspend fun resolve(rawName: String): EnsResult {
-        val normalized = (rawName).trim().lowercase()
-        if (normalized.isEmpty()) {
+        val trimmed = rawName.trim()
+        if (trimmed.isEmpty()) {
             return EnsResult.Error(name = "", reason = "INVALID_NAME", error = "empty name")
+        }
+        val normalized = try {
+            EnsNormalize.normalize(trimmed)
+        } catch (e: EnsNormalize.InvalidNameException) {
+            return EnsResult.Error(name = trimmed, reason = "INVALID_NAME", error = e.message.orEmpty())
         }
 
         cache[normalized]?.let {
@@ -97,7 +102,13 @@ class EnsResolver internal constructor(
         val callData = if (contract != null) {
             CONTENTHASH_SELECTOR + namehash(normalized)
         } else {
-            buildResolveCallData(normalized)
+            try {
+                buildResolveCallData(normalized)
+            } catch (e: IllegalArgumentException) {
+                // A label past the DNS encoding's 255 bytes: normalized,
+                // but not something the Universal Resolver can be asked.
+                return EnsResult.Error(name = normalized, reason = "INVALID_NAME", error = e.message.orEmpty())
+            }
         }
 
         var lastError: EnsResult.Error? = null
@@ -563,7 +574,10 @@ class EnsResolver internal constructor(
             var pos = 0
             for (l in labels) {
                 val bytes = l.toByteArray(Charsets.UTF_8)
-                require(bytes.size in 1..63) { "invalid DNS label: '$l'" }
+                // ENS's DNS encoding (ENSIP-10) allows 255-byte labels —
+                // desktop's `ethers.dnsEncode(name, 255)` — not DNS's 63:
+                // a label of 16 emoji is already 64 UTF-8 bytes.
+                require(bytes.size in 1..255) { "invalid DNS label: '$l'" }
                 out[pos++] = bytes.size.toByte()
                 bytes.copyInto(out, pos)
                 pos += bytes.size
@@ -572,7 +586,7 @@ class EnsResolver internal constructor(
             return out
         }
 
-        /** ENSIP-1 namehash. Pure-ASCII normalization only; see class kdoc. */
+        /** ENSIP-1 namehash of an already [EnsNormalize]d name. */
         internal fun namehash(name: String): ByteArray {
             var node = ByteArray(32)
             if (name.isEmpty()) return node

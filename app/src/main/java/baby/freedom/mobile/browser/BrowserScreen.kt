@@ -904,8 +904,13 @@ fun BrowserScreen(
                             ensError("ens_not_found", detail = result.reason)
                         is EnsResult.Unsupported ->
                             ensError("ens_unsupported_codec", detail = "codec ${result.codec}")
-                        is EnsResult.Error ->
+                        // ENSIP-15 refused the name: no lookup ran, so
+                        // "couldn't reach an RPC endpoint" would be a lie.
+                        is EnsResult.Error -> if (result.reason == "INVALID_NAME") {
+                            ensError("ens_invalid_name", detail = result.error)
+                        } else {
                             ensError("ens_lookup_failed", detail = result.reason)
+                        }
                     }
                 } finally {
                     target.resolving = false

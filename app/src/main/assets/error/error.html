@@ -197,6 +197,12 @@
           titleEl.textContent = 'Unsupported content format';
           descriptionEl.innerHTML =
             'This ' + nameLabel + ' name resolves to a content format Freedom Browser cannot load yet on mobile.';
+        } else if (error === 'ens_invalid_name') {
+          titleEl.textContent = 'Not a valid ' + nameLabel + ' name';
+          descriptionEl.innerHTML =
+            "This name can't exist on " + nameLabel + ': it breaks the ENSIP-15 naming rules ' +
+            '(a disallowed character, mixed scripts, a lookalike, &hellip;), so no one can own it. ' +
+            'Check the spelling.';
         } else if (error === 'ens_lookup_failed') {
           titleEl.textContent = nameLabel + ' lookup failed';
           descriptionEl.innerHTML =

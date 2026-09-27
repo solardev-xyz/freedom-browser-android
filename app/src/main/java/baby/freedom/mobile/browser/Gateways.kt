@@ -283,7 +283,9 @@ object Gateways {
      * (service workers).
      *
      * Only an *answer* refuses the document: `NotFound` / `Unsupported`
-     * say the name no longer points at loadable content. A lookup that
+     * say the name no longer points at loadable content, and an
+     * `INVALID_NAME` error says ENSIP-15 refuses the name itself
+     * (`ens_invalid_name`). A lookup that
      * merely failed (RPC unreachable) serves the last answer this tab
      * or this session had for the name, as it did before the re-check
      * existed — the network being down is no reason to stop Back from
@@ -345,9 +347,13 @@ object Gateways {
             }
             is EnsResult.NotFound -> gone("ens_not_found")
             is EnsResult.Unsupported -> gone("ens_unsupported_codec")
-            // Failed, or still running at the deadline: not an answer.
+            // Failed, or still running at the deadline: not an answer —
+            // unless ENSIP-15 refused the name, which is as final as a
+            // NotFound (no lookup ran, and none ever will).
             is EnsResult.Error, null -> {
-                if (last == null) {
+                if (result?.reason == "INVALID_NAME") {
+                    gone("ens_invalid_name")
+                } else if (last == null) {
                     "ens_lookup_failed"
                 } else {
                     pins?.pin(name, last, page)
