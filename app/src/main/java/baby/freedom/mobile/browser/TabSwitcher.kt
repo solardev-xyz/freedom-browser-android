@@ -48,6 +48,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import baby.freedom.mobile.ui.PrivateTheme
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.graphicsLayer
@@ -85,12 +86,17 @@ import kotlinx.coroutines.launch
  * Long-press a card and drag it to move the tab ([TabsState.moveTab]);
  * the header's "Reopen" brings back the most recently closed tab
  * ([TabsState.reopenClosedTab]) while there is one.
+ *
+ * "Private" opens a private tab (#86) — offered only where the WebView
+ * can run them ([onNewPrivateTab] non-null) — and private tabs' cards
+ * wear the private scheme and mark.
  */
 @Composable
 fun TabSwitcherScreen(
     tabs: TabsState,
     onDismiss: () -> Unit,
     onNewTab: () -> Unit,
+    onNewPrivateTab: (() -> Unit)? = null,
 ) {
     // Snapshot the currently-active tab right before we render so the
     // user sees an up-to-date preview of whatever they were last reading.
@@ -115,6 +121,16 @@ fun TabSwitcherScreen(
                 Icon(Icons.Filled.Add, contentDescription = null)
                 Spacer(Modifier.size(8.dp))
                 Text("New tab", fontWeight = FontWeight.Medium)
+            }
+            if (onNewPrivateTab != null) {
+                TextButton(onClick = {
+                    onNewPrivateTab()
+                    onDismiss()
+                }) {
+                    Icon(PrivateTabIcon, contentDescription = null)
+                    Spacer(Modifier.size(8.dp))
+                    Text("Private", fontWeight = FontWeight.Medium)
+                }
             }
             Spacer(Modifier.weight(1f))
             if (tabs.canReopenClosedTab) {
@@ -411,7 +427,7 @@ private fun TabCard(
     onClose: () -> Unit,
     modifier: Modifier = Modifier,
     moveActions: List<CustomAccessibilityAction> = emptyList(),
-) {
+) = PrivateTheme(tab.private) {
     val borderColor = if (isActive) {
         MaterialTheme.colorScheme.primary
     } else {
@@ -442,7 +458,16 @@ private fun TabCard(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             val title = tab.title.ifBlank {
-                tab.url.ifBlank { "New tab" }
+                tab.url.ifBlank { if (tab.private) "Private tab" else "New tab" }
+            }
+            if (tab.private) {
+                Icon(
+                    PrivateTabIcon,
+                    contentDescription = "Private",
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(14.dp),
+                )
+                Spacer(Modifier.size(6.dp))
             }
             Text(
                 text = title,
@@ -504,12 +529,20 @@ private fun ThumbnailPlaceholder(tab: BrowserState) {
                 .background(MaterialTheme.colorScheme.primaryContainer),
             contentAlignment = Alignment.Center,
         ) {
-            Text(
-                letter,
-                color = MaterialTheme.colorScheme.onPrimaryContainer,
-                fontWeight = FontWeight.Bold,
-                fontSize = 22.sp,
-            )
+            if (tab.private && letter == "•") {
+                Icon(
+                    PrivateTabIcon,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                )
+            } else {
+                Text(
+                    letter,
+                    color = MaterialTheme.colorScheme.onPrimaryContainer,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 22.sp,
+                )
+            }
         }
     }
 }

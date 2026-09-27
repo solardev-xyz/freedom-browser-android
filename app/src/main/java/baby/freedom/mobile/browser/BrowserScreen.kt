@@ -93,6 +93,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.lerp
 import baby.freedom.mobile.data.BrowsingRepository
+import baby.freedom.mobile.ui.PrivateTheme
 import baby.freedom.mobile.data.NodeSettings
 import baby.freedom.mobile.data.UrlSuggestion
 import baby.freedom.mobile.ens.EnsInput
@@ -972,6 +973,19 @@ fun BrowserScreen(
     // directly — so it submits as [SubmitSource.Renderer] and the pill
     // keeps describing the page still on screen until the new one
     // commits.
+    // "New private tab" (#86), from the menu and the tab switcher —
+    // null, so neither offers it, where the WebView can't run private
+    // tabs (no multi-profile support).
+    val privateTabsSupported = remember { PrivateProfile.isSupported() }
+    val newPrivateTab: (() -> Unit)? = if (privateTabsSupported) {
+        {
+            val fresh = tabs.newTab(private = true)
+            submit(fresh, tabs.homepageUrl)
+        }
+    } else {
+        null
+    }
+
     DisposableEffect(tabs) {
         tabs.requestSubmit = { tab, url -> submit(tab, url, SubmitSource.Renderer) }
         tabs.requestNodeRecovery = onRecoverNodes
@@ -980,13 +994,13 @@ fun BrowserScreen(
         // they submit as [SubmitSource.User]. A background tab says so
         // in a snackbar that can bring it forward — otherwise nothing
         // on screen would change.
-        tabs.requestOpenInNewTab = { url, background ->
-            val fresh = tabs.newTab(activate = !background)
+        tabs.requestOpenInNewTab = { url, background, private ->
+            val fresh = tabs.newTab(activate = !background, private = private)
             submit(fresh, url)
             if (background) {
                 scope.launch {
                     val result = snackbarHostState.showSnackbar(
-                        message = "Opened in new tab",
+                        message = if (private) "Opened in new private tab" else "Opened in new tab",
                         actionLabel = "Switch",
                         duration = SnackbarDuration.Short,
                     )
@@ -999,8 +1013,8 @@ fun BrowserScreen(
         }
         // Read [searchTemplate] when the search runs, so a change of
         // engine in Settings applies to the next one.
-        tabs.requestSearchInNewTab = { query ->
-            tabs.requestOpenInNewTab?.invoke(UrlParser.searchUrl(query, searchTemplate), false)
+        tabs.requestSearchInNewTab = { query, private ->
+            tabs.requestOpenInNewTab?.invoke(UrlParser.searchUrl(query, searchTemplate), false, private)
         }
         onDispose {
             tabs.requestSubmit = null
@@ -1334,7 +1348,14 @@ fun BrowserScreen(
             // moment the user hits Go on a typed URL, before the
             // WebView has a chance to fire onPageStarted and
             // populate `state.url`.
-            if (isHomeTab) {
+            if (isHomeTab && state.private) {
+                PrivateTheme(private = true) {
+                    PrivateHomeScreen(
+                        bottomContentPadding = capsuleOverlap,
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                }
+            } else if (isHomeTab) {
                 HomeScreen(
                     repo = repo,
                     onOpen = { submit(state, it) },
@@ -1414,6 +1435,8 @@ fun BrowserScreen(
                     ),
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
+                // A private tab's chrome wears the private scheme (#86).
+                PrivateTheme(state.private) {
                 if (findOpen) {
                     // Keyed on the tab: each tab's bar is its own field,
                     // seeded from that tab's query.
@@ -1522,19 +1545,21 @@ fun BrowserScreen(
                         val fresh = tabs.newTab()
                         submit(fresh, tabs.homepageUrl)
                     },
+                    onNewPrivateTab = newPrivateTab,
                     onFindInPage = { state.find.show() },
                     // Same rule as Find in page: nothing to zoom on the
                     // home surface — nor on a document that isn't a
                     // site (an error page), which has no zoomSite.
                     zoomLevel = state.zoomSite
                         ?.takeIf { state.url.isNotBlank() }
-                        ?.let(pageZoom::levelFor),
-                    onZoom = { action -> state.zoomSite?.let { pageZoom.apply(it, action) } },
+                        ?.let { pageZoom.levelFor(it, state.private) },
+                    onZoom = { action -> state.zoomSite?.let { pageZoom.apply(it, action, state.private) } },
                     onPrint = { tabs.printPage?.invoke(state) },
                     modifier = Modifier
                         .widthIn(max = CHROME_MAX_WIDTH)
                         .fillMaxWidth(),
                 )
+                }
             }
         }
 
@@ -1627,6 +1652,7 @@ fun BrowserScreen(
                 val fresh = tabs.newTab()
                 submit(fresh, tabs.homepageUrl)
             },
+            onNewPrivateTab = newPrivateTab,
         )
     }
 
@@ -1673,7 +1699,7 @@ fun BrowserScreen(
                         Toast.makeText(context, "Loading image\u2026", Toast.LENGTH_SHORT).show()
                     }
                     val image = try {
-                        fetchImage(url, request.pageUrl, WebSettings.getDefaultUserAgent(context))
+                        fetchImage(url, request.pageUrl, WebSettings.getDefaultUserAgent(context), owner.private)
                     } finally {
                         progress.cancel()
                     }
@@ -1685,10 +1711,10 @@ fun BrowserScreen(
                 PageContextMenuSheet(
                     target = request.target,
                     displayUrl = { displayFor(it, owner) },
-                    onOpenInNewTab = { tabs.requestOpenInNewTab?.invoke(displayFor(it, owner), true) },
+                    onOpenInNewTab = { tabs.requestOpenInNewTab?.invoke(displayFor(it, owner), true, owner.private) },
                     onCopyLink = { copyUrlToClipboard(context, it) },
                     onShareLink = { url, title -> shareUrl(context, url, title) },
-                    onOpenImage = { tabs.requestOpenInNewTab?.invoke(displayFor(it, owner), true) },
+                    onOpenImage = { tabs.requestOpenInNewTab?.invoke(displayFor(it, owner), true, owner.private) },
                     onCopyImage = { url ->
                         withImage(url, { copyImageToClipboard(context, it, url) }, "Couldn't copy image")
                     },
