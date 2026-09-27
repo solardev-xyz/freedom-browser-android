@@ -461,6 +461,45 @@ internal fun parseTopDocumentInput(data: String?): TopDocumentInput? {
     return TopDocumentInput(m.groupValues[2].toLong(), isClick = m.groupValues[1] == "click")
 }
 
+/**
+ * A frame's report that media in its document is now audible (#91):
+ * playing, not muted by the page, volume above zero. Sent on a change
+ * only; [AUDIO_SILENT] when that stops. See [TabAudioFrames].
+ */
+internal const val AUDIO_AUDIBLE = "audio 1"
+
+/** A frame's report that nothing in its document is audible any more (#91). */
+internal const val AUDIO_SILENT = "audio 0"
+
+/**
+ * How often an audible frame's detector looks at its elements again,
+ * whatever events it heard (#91): the safety net for a silence no event
+ * announces — `document.open()` erases every listener of the document and
+ * its window, the detector's included, and pauses the elements it removes.
+ * Each look that still finds sound says so again ([AUDIO_AUDIBLE]), so a
+ * frame Kotlin forgot ([TabAudioFrames.clear], on a main-frame ready that
+ * may overtake a subframe's report) is back within one period. Only while
+ * the frame is audible; a silent frame runs nothing after [AUDIO_SOUND_TRIES].
+ */
+internal const val AUDIO_RECHECK_MS = 2000
+
+/**
+ * How soon a frame looks again at an element that plays but has decoded
+ * no audio yet (#91) — a video with no audio track, or one whose first
+ * audio isn't decoded at `playing` — and how many times before it gives
+ * up until the element's next event. A track-less video looping forever
+ * costs [AUDIO_SOUND_TRIES] looks, then nothing.
+ */
+internal const val AUDIO_SOUND_MS = 500
+internal const val AUDIO_SOUND_TRIES = 6
+
+/** Is [data] a frame's audio report ([AUDIO_AUDIBLE] → true, [AUDIO_SILENT] → false)? `null` if not one. */
+internal fun parseAudioReport(data: String?): Boolean? = when (data) {
+    AUDIO_AUDIBLE -> true
+    AUDIO_SILENT -> false
+    else -> null
+}
+
 /** What Kotlin sends back through the channel to ask for a fresh, reported probe. */
 internal fun bottomUiProbeRequest(token: String): String = "probe $token"
 
@@ -486,7 +525,37 @@ internal fun bottomUiProbeRequest(token: String): String = "probe $token"
  * browser's link / image menu opens only for a press the page didn't
  * `preventDefault()` ([PageContextMenuPress]). (`-webkit-touch-callout`
  * needs no check: Android's Blink doesn't parse it — `CSS.supports` is
- * false on the API 36 AVD.) In a subframe that is all it does.
+ * false on the API 36 AVD.) In a subframe that and the audio reports
+ * below are all it does.
+ *
+ * **Audible media** (#91), in every frame: a capture listener for
+ * trusted `playing` on `window` picks up each `<audio>`/`<video>` of the
+ * document as it starts, and from then on listens on the element itself
+ * (`pause`, `ended`, `emptied`, `volumechange`, `waiting`, `stalled`,
+ * `playing`, through
+ * `EventTarget.prototype.addEventListener` saved at document start) — so
+ * an element the page detaches mid-play, whose `pause` no longer reaches
+ * `window`, is still heard, and one the page plays again after detaching
+ * it (its trusted `playing` fires only on itself) is tracked again. The frame posts [AUDIO_AUDIBLE] when one of
+ * its elements becomes audible (playing, not `muted`, `volume` above 0,
+ * not starved of data: `readyState` past `HAVE_CURRENT_DATA`, so a
+ * stream stuck `waiting`/`stalled` with `paused` still false doesn't
+ * count until its next `playing` — and with sound: Chromium's
+ * `webkitAudioDecodedByteCount`, read through the `HTMLMediaElement`
+ * getter saved at document start, above 0, so a video with no audio
+ * track isn't audible; one not yet decoded is looked at again every
+ * [AUDIO_SOUND_MS], [AUDIO_SOUND_TRIES] times) and [AUDIO_SILENT] when none is any
+ * more, or when the document goes (`pagehide`: navigated away, or its
+ * iframe removed). While audible it also looks again every
+ * [AUDIO_RECHECK_MS], so a silence no event reports (`document.open()`
+ * erases the detector's listeners) still reaches Kotlin, and re-sends
+ * [AUDIO_AUDIBLE] each time it still hears sound; Kotlin in turn
+ * forgets every frame when a new main-frame document starts
+ * ([TabAudioFrames.clear]). What it can't
+ * see: Web Audio (an `AudioContext` fires nothing on `window`), an
+ * element that never joined the document (`new Audio(src).play()`), and
+ * one inside a shadow root (`playing` isn't composed). WebView itself has
+ * no "this page is audible" signal (see [TabAudioFrames]).
  *
  * **Input in the top document** (#85): in the main frame, capture
  * listeners for trusted `pointerdown`, `keydown` and `click` post
@@ -600,7 +669,7 @@ internal fun bottomUiDetectorJs(channel: String, debounceMs: Int = BOTTOM_UI_DEB
     require(CHANNEL_SAFE.matches(channel)) { "channel must be lower-case letters" }
     return """
 (function () {
-  var w = window, d = document, N = '$channel', port = w[N];
+  var w = window, d = document, N = '$channel', port = w[N], AUDIO_EVENTS = ['pause', 'ended', 'emptied', 'volumechange', 'waiting', 'stalled', 'playing'];
   if (port === undefined) return;
   try { delete w[N]; } catch (e) {}
   if (!port || typeof port.postMessage !== 'function') return;
@@ -609,6 +678,44 @@ internal fun bottomUiDetectorJs(channel: String, debounceMs: Int = BOTTOM_UI_DEB
     if (!e.isTrusted) return;
     setT(function () { port.postMessage(e.defaultPrevented ? '$CONTEXT_MENU_KEPT' : '$CONTEXT_MENU_ALLOWED'); }, 0);
   }, true);
+  var ET = w.EventTarget, onEl = ET && ET.prototype && ET.prototype.addEventListener, media = [], loud = false, recheck = 0, tries = 0;
+  var HM = w.HTMLMediaElement, adb = HM && HM.prototype && Object.getOwnPropertyDescriptor(HM.prototype, 'webkitAudioDecodedByteCount'), adbOf = adb && adb.get;
+  function sound(m) {
+    if (!adbOf) return true;
+    try { return !(adbOf.call(m) === 0); } catch (e) { return true; }
+  }
+  function hear(beat) {
+    var now = false, unsure = false;
+    for (var i = media.length - 1; i >= 0; i--) {
+      var m = media[i];
+      if (m.paused || m.ended) media.splice(i, 1);
+      else if (!m.muted && m.volume > 0 && m.readyState > 2) { if (sound(m)) now = true; else unsure = true; }
+    }
+    if (now !== loud || (beat && now)) { loud = now; port.postMessage(now ? '$AUDIO_AUDIBLE' : '$AUDIO_SILENT'); }
+    if (!recheck && (loud || (unsure && tries < $AUDIO_SOUND_TRIES))) {
+      recheck = setT(function () { recheck = 0; if (!loud) tries++; hear(true); }, loud ? $AUDIO_RECHECK_MS : $AUDIO_SOUND_MS);
+    }
+  }
+  function heard(e) {
+    var m = e.currentTarget;
+    tries = 0;
+    if (e.type === 'playing' && e.isTrusted && media.indexOf(m) < 0) media.push(m);
+    hear();
+  }
+  if (onEl) {
+    w.addEventListener('playing', function (e) {
+      var m = e.target;
+      if (!e.isTrusted || !m || typeof m.paused !== 'boolean') return;
+      if (media.indexOf(m) < 0) {
+        media.push(m);
+        for (var i = 0; i < AUDIO_EVENTS.length; i++) onEl.call(m, AUDIO_EVENTS[i], heard);
+      }
+      tries = 0;
+      hear();
+    }, true);
+    w.addEventListener('pagehide', function () { if (loud) { loud = false; port.postMessage('$AUDIO_SILENT'); } }, true);
+    w.addEventListener('pageshow', function (e) { if (e.persisted) hear(); }, true);
+  }
   if (w.top !== w) return;
   var P = w.performance, pnow = P && P.now && P.now.bind(P), EP = w.Event && w.Event.prototype,
       tsd = EP && Object.getOwnPropertyDescriptor(EP, 'timeStamp'), tsOf = tsd && tsd.get;

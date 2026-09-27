@@ -817,6 +817,16 @@ fun BrowserWebViewHost(
                 }
             }
         }
+        // Per-tab mute (#91). Only where the WebView can: without the
+        // hook the switcher shows the indicator but no toggle.
+        if (WebViewFeature.isFeatureSupported(WebViewFeature.MUTE_AUDIO)) {
+            tabs.setAudioMuted = { tab, muted ->
+                webViews[tab.id]?.let { wv ->
+                    WebViewCompat.setAudioMuted(wv, muted)
+                    tab.audioMuted = WebViewCompat.isAudioMuted(wv)
+                }
+            }
+        }
         tabs.printPage = { tab ->
             webViews[tab.id]?.let { wv ->
                 printWebView(wv, printJobName(tab.title, tab.addressBarText, tab.url))
@@ -854,6 +864,7 @@ fun BrowserWebViewHost(
             tabs.saveWebViewState = null
             tabs.find = null
             tabs.printPage = null
+            tabs.setAudioMuted = null
         }
     }
 
@@ -996,6 +1007,14 @@ private fun buildRefreshableWebView(
     // which document sent it, so it only counts once a report does
     // ([BottomUiChannels]).
     val bottomUiChannels = BottomUiChannels<JavaScriptReplyProxy>()
+
+    // Audio indicator (#91): the frames whose media is audible, as their
+    // detectors report it on the same channel (see [TabAudioFrames]).
+    val audioFrames = TabAudioFrames<JavaScriptReplyProxy>()
+    fun forgetTabAudio() {
+        audioFrames.clear()
+        state.playingAudio = false
+    }
 
     // Page context menu (#84): the long-press waiting on the page's
     // `contextmenu` verdict, which the detector's document-start script
@@ -1714,6 +1733,13 @@ private fun buildRefreshableWebView(
             val listener = WebViewCompat.WebMessageListener { view, message, sourceOrigin, isMainFrame, replyProxy ->
                 if (sourceOrigin.scheme != "https" && sourceOrigin.scheme != "http") return@WebMessageListener
                 if (message.type != WebMessageCompat.TYPE_STRING) return@WebMessageListener
+                // A frame's media became audible or fell silent (#91):
+                // any frame, keyed by its reply proxy, folded into the
+                // tab's indicator.
+                parseAudioReport(message.data)?.let { audible ->
+                    state.playingAudio = audioFrames.onReport(replyProxy, audible)
+                    return@WebMessageListener
+                }
                 // Input the top document itself received (#85): only the
                 // main frame's word counts — an iframe's would let it
                 // vouch for a tap on itself ([UserGestureLatch]).
@@ -1736,6 +1762,15 @@ private fun buildRefreshableWebView(
                     // document's own late ready (see [BottomUiChannels]);
                     // otherwise it waits for its document's first paint.
                     if (!isMainFrame) return@WebMessageListener
+                    // A new main-frame document has replaced the last one,
+                    // and every frame of that one is gone (#91): nothing
+                    // they said about audio holds any more, whether or not
+                    // their `pagehide` silence made it here. Frames report
+                    // on their own pipes, so a new subframe's first
+                    // report can overtake this ready and be wiped too; an
+                    // audible frame re-sends it every [AUDIO_RECHECK_MS],
+                    // so the indicator comes back within one period.
+                    forgetTabAudio()
                     val starts = bottomUiChannels.onReady(replyProxy, bottomChrome.installed)
                     postBottomUiProbe(starts)
                     // The theme-colour ask sent at first paint had no
@@ -1971,6 +2006,12 @@ private fun buildRefreshableWebView(
                 // is dropped.
                 bottomChrome.startDocument()
                 bottomUiChannels.startDocument()
+                // A main-frame document no detector runs in (not
+                // http(s)) sends no ready to reset the tab's audio frames
+                // on (#91), so they are forgotten here. An http(s) one's
+                // ready does it instead: its subframes can report before
+                // this callback arrives.
+                if (!isHttpUrl(url)) forgetTabAudio()
                 state.bottomChromeMode = BottomChromeMode.Overlay
                 // …and with no permission prompt from the outgoing
                 // document left standing: its requests are denied and
