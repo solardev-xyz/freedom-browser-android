@@ -55,16 +55,19 @@ object ServiceWorkerInterception {
                     override fun shouldInterceptRequest(
                         request: WebResourceRequest,
                     ): WebResourceResponse? {
+                        val response = interceptVirtualRequest(request)
                         // A frame document a worker fetches never reaches
                         // the tab's WebViewClient, so no tab's
-                        // `documentOrigins` has it: note it for every tab
-                        // (#125, [UnverifiedOrigins.noteWorkerDocument]).
+                        // `documents` has it: note it for every tab
+                        // (#125, [UnverifiedOrigins.noteWorkerDocument]) —
+                        // after the answer, so an external gateway's
+                        // has been recorded by then.
                         if (isDocumentRequest(request.isForMainFrame, request.requestHeaders)) {
                             request.url?.toString()?.let(VirtualOrigin::parseHostOfUrl)
                                 ?.let(VirtualOrigin::originFor)
                                 ?.let(UnverifiedOrigins::noteWorkerDocument)
                         }
-                        return interceptVirtualRequest(request)
+                        return response
                     }
                 },
             )

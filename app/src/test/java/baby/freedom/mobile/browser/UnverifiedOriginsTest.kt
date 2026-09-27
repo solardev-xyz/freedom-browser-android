@@ -133,29 +133,63 @@ class UnverifiedOriginsTest {
     }
 
     @Test
-    fun `frame documents a service worker fetched count for every tab`() {
+    fun `frame documents a service worker fetched count for every tab not navigated since`() {
+        UnverifiedOrigins.sweep("https://gw.example") {}
+        // An origin the external gateway never served isn't kept at all.
+        UnverifiedOrigins.noteWorkerDocument(b)
+        assertTrue(UnverifiedOrigins.workerDocumentOrigins().isEmpty())
+
+        val stayed = TabDocuments()
+        val navigated = TabDocuments()
+        UnverifiedOrigins.record("https://gw.example", a)
         UnverifiedOrigins.noteWorkerDocument(a)
+        // This tab has moved to a new document since the worker's fetch.
+        navigated.mainFrameAnswered("https://example.org/")
+        navigated.committed("https://example.org/", null)
+
         val anyTab = UnverifiedOrigins.takeWorkerDocuments(setOf(a, b))
-        assertEquals(setOf(a), anyTab)
+        assertEquals(setOf(a), anyTab.keys)
+        assertTrue(stayed.mayHoldWorkerFetchAt(anyTab.getValue(a)))
+        assertFalse(navigated.mayHoldWorkerFetchAt(anyTab.getValue(a)))
         // A tab whose own requests never showed the origin is still reloaded.
         assertEquals(
             setOf(a),
-            sweptOrigins(setOf(a), emptySet(), "https://example.org/", anyTab),
+            sweptOrigins(setOf(a), emptySet(), "https://example.org/", anyTab.keys),
         )
-        // Handed over once.
+        // Handed over once, and nothing is left behind.
         assertTrue(UnverifiedOrigins.takeWorkerDocuments(setOf(a)).isEmpty())
+        assertTrue(UnverifiedOrigins.workerDocumentOrigins().isEmpty())
     }
 
     @Test
     fun `a tab's frames count alongside its committed page`() {
         val frame = "https://bafyframe.ipfs.freedom.baby"
-        // A frame recorded before the main frame's commit reached the UI
-        // thread is still found: commits don't prune the tab's origins.
         assertEquals(
             setOf(frame),
             sweptOrigins(setOf(frame, b), setOf(frame), "https://example.org/"),
         )
         assertEquals(setOf(b), sweptOrigins(setOf(b), emptySet(), "$b/page"))
+    }
+
+    @Test
+    fun `a second sweep before the tab commits adds to its hold`() {
+        val tab = Any()
+        var sweeps = 0
+        UnverifiedOrigins.onSweep = { swept -> sweeps++; UnverifiedOrigins.hold(tab, swept) }
+        // External A serves a, external B serves b, then embedded: the
+        // tab never commits in between.
+        UnverifiedOrigins.sweep("https://a.example") {}
+        UnverifiedOrigins.record("https://a.example", a)
+        UnverifiedOrigins.sweep("https://b.example") {}
+        UnverifiedOrigins.record("https://b.example", b)
+        UnverifiedOrigins.sweep("") {}
+        assertEquals(2, sweeps)
+        // Take the one-shot clears (another tab's reload, say).
+        assertTrue(UnverifiedOrigins.takeClearFor(a))
+        assertTrue(UnverifiedOrigins.takeClearFor(b))
+        // Both are still held, and both get the cleanup page again at release.
+        UnverifiedOrigins.release(tab)
+        assertEquals(setOf(a, b), UnverifiedOrigins.pendingClears())
     }
 
     @Test

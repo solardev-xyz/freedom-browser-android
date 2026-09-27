@@ -28,7 +28,7 @@ import android.webkit.WebStorage
  * switch happens — one live WebView per tab. [sweep] hands the swept
  * origins to [onSweep] (the tab host), which reloads every tab that
  * showed one (in any frame; frame documents a service worker fetched
- * count for every tab, [noteWorkerDocument]) and [hold]s those origins
+ * count for every tab not navigated since, [noteWorkerDocument]) and [hold]s those origins
  * until each such tab has committed its next document: until then
  * every document requested there is the cleanup page again
  * ([takeClearFor]), and once it has, the next one is again
@@ -74,8 +74,13 @@ object UnverifiedOrigins {
     /** Origins held for cleanup, by holder, with their expiry ([hold]). */
     private val holds = HashMap<Any, Pair<Set<String>, Long>>()
 
-    /** Origins a service worker fetched a document on ([noteWorkerDocument]). */
-    private val workerDocuments = LinkedHashSet<String>()
+    /**
+     * Recorded origins a service worker fetched a document on, with the
+     * [DocumentClock] tick of the last such fetch ([noteWorkerDocument]).
+     * Only ever recorded origins, so a sweep (which takes them all)
+     * empties it.
+     */
+    private val workerDocuments = HashMap<String, Long>()
 
     /**
      * The tab host's reaction to a sweep: reload the tabs whose documents
@@ -167,10 +172,17 @@ object UnverifiedOrigins {
      * committed) or [HOLD_MS] passes, every document requested on them
      * is the cleanup page again, so whatever the stale document writes
      * meanwhile is cleared after it's gone.
+     *
+     * Adds to a hold [holder] already has (two sweeps in a row, say
+     * external A → external B → embedded, before the tab commits): the
+     * first sweep's origins still get their cleanup page at [release].
      */
     fun hold(holder: Any, origins: Set<String>) {
         if (origins.isEmpty()) return
-        synchronized(lock) { holds[holder] = origins to clock() + HOLD_MS }
+        synchronized(lock) {
+            val held = holds[holder]?.first.orEmpty()
+            holds[holder] = (held + origins) to clock() + HOLD_MS
+        }
     }
 
     /**
@@ -179,6 +191,13 @@ object UnverifiedOrigins {
      * tab can have consumed the one-shot clear first — so each held
      * origin's next document is the cleanup page once more, whichever
      * tab or frame requests it.
+     *
+     * Also called for a holder that went away rather than committed —
+     * its tab closed, or the tab host disposed — and it re-queues the
+     * cleanup there too, deliberately: the stale document ran until
+     * then, so what it wrote must still be cleared, at the price of one
+     * extra cleanup page (persisted, so possibly at a later start) on
+     * each held origin's next visit.
      */
     fun release(holder: Any) {
         synchronized(lock) {
@@ -189,23 +208,32 @@ object UnverifiedOrigins {
 
     /**
      * A service worker fetched a document (typically a frame's) on
-     * [origin]. Worker fetches reach no tab's `WebViewClient`, so the
+     * [origin], once its answer is in (so an external gateway's has been
+     * [record]ed). Worker fetches reach no tab's `WebViewClient`, so the
      * tab host can't tell which tab it's in: a sweep of [origin] treats
-     * every tab as having it ([takeWorkerDocuments]). Any thread.
+     * every tab whose document on screen was answered before this fetch
+     * as having it ([takeWorkerDocuments],
+     * [TabDocuments.mayHoldWorkerFetchAt]). Only an origin the external
+     * gateway served is kept — nothing else is ever swept. Any thread.
      */
     fun noteWorkerDocument(origin: String) {
-        synchronized(lock) { workerDocuments.add(origin) }
+        val tick = DocumentClock.next()
+        synchronized(lock) { if (origin in origins) workerDocuments[origin] = tick }
     }
 
     /**
-     * The [swept] origins a service worker fetched a document on, now
-     * handed to the tab host to reload every tab for, and forgotten.
+     * The [swept] origins a service worker fetched a document on, with
+     * the tick of the last such fetch, now handed to the tab host to
+     * reload the tabs that may have them, and forgotten.
      */
-    fun takeWorkerDocuments(swept: Set<String>): Set<String> = synchronized(lock) {
-        val taken = workerDocuments.intersect(swept)
-        workerDocuments.removeAll(taken)
+    fun takeWorkerDocuments(swept: Set<String>): Map<String, Long> = synchronized(lock) {
+        val taken = workerDocuments.filterKeys { it in swept }
+        workerDocuments.keys.removeAll(taken.keys)
         taken
     }
+
+    /** Origins noted by [noteWorkerDocument] and not yet taken (tests). */
+    internal fun workerDocumentOrigins(): Set<String> = synchronized(lock) { workerDocuments.keys.toSet() }
 
     /** A bound on [hold], for a tab whose reload never commits. */
     private const val HOLD_MS = 10_000L
