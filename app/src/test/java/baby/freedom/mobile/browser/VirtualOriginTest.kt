@@ -1,6 +1,7 @@
 package baby.freedom.mobile.browser
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -334,6 +335,36 @@ class VirtualOriginTest {
             val host = VirtualOrigin.hostFor(ContentRoot.Ens(name))!!
             assertEquals(name, ContentRoot.Ens(name), VirtualOrigin.parseHost(host))
         }
+    }
+
+    @Test
+    fun `ASCII xn-- names whose escape also decodes to a refused unicode name keep the ASCII reading`() {
+        // `xn----abc-eth-eth` is also valid Punycode: `-abмc.eth`, which
+        // ENSIP-15 refuses — the resolvable ASCII name wins the tie.
+        for (name in listOf("xn--abc.eth.eth", "xn--foo.box.eth", "xn--abc.eth.box")) {
+            val host = VirtualOrigin.hostFor(ContentRoot.Ens(name))!!
+            assertEquals(name, ContentRoot.Ens(name), VirtualOrigin.parseHost(host))
+            assertEquals(name + "/p", VirtualOrigin.displayUrlFor("https://$host/p"))
+        }
+        assertEquals("-ab\u041Cc.eth", Punycode.decode("--abc-eth-eth")!!.let(VirtualOrigin::unescapeName))
+        assertNull(baby.freedom.mobile.ens.EnsNormalize.normalizeOrNull("-ab\u043Cc.eth"))
+    }
+
+    @Test
+    fun `needsEnsTables flags only parses that reach ENSIP-15`() {
+        val fox = VirtualOrigin.toVirtualUrl("ens://🦊.eth/x")!!
+        assertTrue(VirtualOrigin.needsEnsTables(fox))
+        assertTrue(VirtualOrigin.needsEnsTables(fox.uppercase().replace("HTTPS", "https")))
+        assertTrue(VirtualOrigin.needsEnsTables("https://xn----2i8h-eth.ens.freedom.baby/"))
+        assertTrue(VirtualOrigin.needsEnsTables("ens://🦊.eth/x"))
+        assertTrue(VirtualOrigin.needsEnsTables("ENS://%F0%9F%A6%8A.eth"))
+        assertTrue(VirtualOrigin.needsEnsTables("ens://Ⓜ️.eth"))
+        assertFalse(VirtualOrigin.needsEnsTables("https://vitalik-eth.ens.freedom.baby/"))
+        assertFalse(VirtualOrigin.needsEnsTables("ens://VITALIK.eth/a?b"))
+        assertFalse(VirtualOrigin.needsEnsTables("https://xn--abc.bzz.freedom.baby/"))
+        assertFalse(VirtualOrigin.needsEnsTables("https://example.com/"))
+        assertFalse(VirtualOrigin.needsEnsTables("bzz://" + "a".repeat(64)))
+        assertFalse(VirtualOrigin.needsEnsTables(null))
     }
 
     @Test

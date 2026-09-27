@@ -37,6 +37,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * Hosts the browser UI and brokers the bind/unbind lifecycle of the
@@ -130,9 +131,27 @@ class MainActivity : ComponentActivity() {
         lifecycleScope.launch(Dispatchers.Default) { EnsNormalize.warm() }
 
         // A cold start from an App Link opens straight at the shared
-        // content instead of the home surface.
-        val startUrl = displayUrlForDeepLink(intent) ?: HOME_URL
+        // content instead of the home surface. A Unicode ENS link
+        // (`xn--…` host) needs the ENSIP-15 tables to map back to its
+        // name, and the warm-up above has only just started — so parse
+        // it on Default once they're decoded and compose then, rather
+        // than decode them on Main here (every later main-thread parse
+        // is cheap once the tables are warm).
+        val link = intent
+        if (!EnsNormalize.isWarm && VirtualOrigin.needsEnsTables(deepLinkData(link))) {
+            lifecycleScope.launch {
+                val startUrl = withContext(Dispatchers.Default) {
+                    EnsNormalize.warm()
+                    displayUrlForDeepLink(link)
+                }
+                showBrowser(startUrl ?: HOME_URL)
+            }
+        } else {
+            showBrowser(displayUrlForDeepLink(link) ?: HOME_URL)
+        }
+    }
 
+    private fun showBrowser(startUrl: String) {
         setContent {
             FreedomTheme {
                 SystemBarsForScheme()
@@ -203,8 +222,22 @@ class MainActivity : ComponentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
-        displayUrlForDeepLink(intent)?.let { deepLinkFlow.value = it }
+        // Same off-Main parse as a cold-start link if the ENSIP-15
+        // tables are still decoding (a link tapped right after launch).
+        if (!EnsNormalize.isWarm && VirtualOrigin.needsEnsTables(deepLinkData(intent))) {
+            lifecycleScope.launch {
+                withContext(Dispatchers.Default) {
+                    EnsNormalize.warm()
+                    displayUrlForDeepLink(intent)
+                }?.let { deepLinkFlow.value = it }
+            }
+        } else {
+            displayUrlForDeepLink(intent)?.let { deepLinkFlow.value = it }
+        }
     }
+
+    private fun deepLinkData(intent: Intent?): String? =
+        intent?.takeIf { it.action == Intent.ACTION_VIEW }?.dataString
 
     /**
      * The user-facing display URL for an incoming `VIEW` intent, or
@@ -218,8 +251,7 @@ class MainActivity : ComponentActivity() {
      * ignored rather than loaded.
      */
     private fun displayUrlForDeepLink(intent: Intent?): String? {
-        if (intent?.action != Intent.ACTION_VIEW) return null
-        return intent.dataString?.let { VirtualOrigin.displayUrlFor(it) }
+        return deepLinkData(intent)?.let { VirtualOrigin.displayUrlFor(it) }
     }
 
     /**

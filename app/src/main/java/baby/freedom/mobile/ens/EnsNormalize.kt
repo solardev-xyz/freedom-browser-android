@@ -55,10 +55,17 @@ object EnsNormalize {
      * lowercases to `[a-z0-9.-]` only is taken as-is, anything else gets
      * the full [normalize]. Throws [InvalidNameException] like [normalize].
      */
-    fun fastNormalize(name: String): String {
-        val lowered = name.lowercase()
-        return if (pureAsciiHost.matches(lowered)) lowered else normalize(name)
-    }
+    fun fastNormalize(name: String): String =
+        if (isFastPath(name)) name.lowercase() else normalize(name)
+
+    /** Does [fastNormalize] take [name] as-is, without the spec tables? */
+    fun isFastPath(name: String): Boolean = pureAsciiHost.matches(name.lowercase())
+
+    @Volatile
+    private var warmed = false
+
+    /** Have the spec tables been decoded ([warm] has returned)? */
+    val isWarm: Boolean get() = warmed
 
     /**
      * Force the library's one-time spec decode (`spec.bin`/`nf.bin`, a
@@ -68,6 +75,7 @@ object EnsNormalize {
      */
     fun warm() {
         normalizeOrNull("a.eth")
+        warmed = true
     }
 
     /**

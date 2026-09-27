@@ -109,30 +109,69 @@ object VirtualOrigin {
     }
 
     /**
-     * Inverse of [ensLabel]. A `xn--` label is a Unicode name when it
-     * decodes to one — non-ASCII and on a navigable suffix (normalized
-     * when ENSIP-15 accepts it, as decoded when it doesn't);
-     * otherwise it is a plain escaped ASCII name that happens to start
-     * with `xn--` (`xn--2i8h.eth` → `xn----2i8h-eth`), which can't decode
-     * to a `.eth` name: Punycode only inserts non-ASCII code points, and
-     * the escape's last `-` (before the TLD) is taken as the delimiter,
-     * so the ASCII TLD never survives into the decoded text.
+     * Inverse of [ensLabel]. A `xn--` label has two readings: the
+     * Punycode of a Unicode name, or the plain escape of an ASCII name
+     * that happens to start with `xn--` (`xn--2i8h.eth` →
+     * `xn----2i8h-eth`). They can genuinely collide — the escape's last
+     * `-` reads as the Punycode delimiter, so when the ASCII name's
+     * second-to-last label is itself a navigable suffix the "deltas"
+     * are that TLD and the label decodes to a Unicode `.eth` name too
+     * (`xn--abc.eth.eth` → `xn----abc-eth-eth` → `-abмc.eth`). The
+     * host alone can't tell them apart, so resolvability breaks the tie:
+     *
+     * 1. a Unicode reading ENSIP-15 accepts wins (normalized — which
+     *    also puts back the U+FE0F Chromium dropped);
+     * 2. else an ASCII reading on a navigable suffix — resolvable via
+     *    [EnsNormalize.fastNormalize]'s ASCII path, whereas a refused
+     *    Unicode name never resolves;
+     * 3. else a Unicode reading on a navigable suffix is kept as
+     *    decoded, so the resolver reports it `INVALID_NAME` rather than
+     *    looking up the literal `xn--…` label;
+     * 4. else the ASCII reading.
+     *
+     * Only `xn--` labels reach ENSIP-15 here; see [needsEnsTables].
      */
     private fun decodeEnsLabel(label: String): ContentRoot.Ens {
-        if (label.startsWith("xn--")) {
-            val decoded = Punycode.decode(label.substring(4))
-                ?.takeIf { d -> d.any { it.code >= 0x80 } }
-                ?.let { unescapeName(it) }
-            // A Unicode name ENSIP-15 refuses is still that name — kept as
-            // decoded so the resolver reports it `INVALID_NAME`, rather
-            // than falling back to an on-chain lookup of the literal
-            // `xn--…` ASCII label.
-            val unicode = decoded
-                ?.let { EnsNormalize.normalizeOrNull(it) ?: it.lowercase() }
-                ?.takeIf { n -> NameSystem.navigableSuffixes.any { n.endsWith(it) } }
-            if (unicode != null) return ContentRoot.Ens(unicode)
+        val ascii = unescapeName(label)
+        if (!label.startsWith("xn--")) return ContentRoot.Ens(ascii)
+        val decoded = Punycode.decode(label.substring(4))
+            ?.takeIf { d -> d.any { it.code >= 0x80 } }
+            ?.let { unescapeName(it) }
+            ?: return ContentRoot.Ens(ascii)
+        val normalized = EnsNormalize.normalizeOrNull(decoded)
+        return when {
+            normalized != null && isNavigableEns(normalized) -> ContentRoot.Ens(normalized)
+            isNavigableEns(ascii) -> ContentRoot.Ens(ascii)
+            normalized == null && isNavigableEns(decoded.lowercase()) ->
+                ContentRoot.Ens(decoded.lowercase())
+            else -> ContentRoot.Ens(ascii)
         }
-        return ContentRoot.Ens(unescapeName(label))
+    }
+
+    private fun isNavigableEns(name: String): Boolean =
+        NameSystem.navigableSuffixes.any { name.endsWith(it) }
+
+    /**
+     * Would [parseContentUrl] / [parseHostOfUrl] on [url] consult the
+     * ENSIP-15 tables ([EnsNormalize]), whose one-time decode costs a few
+     * hundred ms on a cold ART? True for an ENS virtual host with a
+     * `xn--` label and for an `ens://` URL whose name isn't plain ASCII.
+     * Lets a main-thread caller that may run before the startup warm-up
+     * has finished (a cold-start App Link) do the parse off Main instead.
+     * Cheap: no table access.
+     */
+    fun needsEnsTables(url: String?): Boolean {
+        if (url == null) return false
+        if (url.startsWith("https://")) {
+            val h = hostOf(url)?.lowercase() ?: return false
+            val (labels, ns) = splitHost(h) ?: return false
+            return ns == "ens" && labels.size == 1 && labels[0].startsWith("xn--")
+        }
+        if (!url.regionMatches(0, "ens://", 0, 6, ignoreCase = true)) return false
+        val rest = url.substring(6)
+        val id = rest.substring(0, rest.indexOfFirst { it == '/' || it == '?' || it == '#' }
+            .let { if (it < 0) rest.length else it })
+        return !EnsNormalize.isFastPath(WhatwgHost.percentDecode(id))
     }
 
     /** `https://<label(s)>.<ns>.freedom.baby` for [root]. */
