@@ -164,10 +164,13 @@ class TezosDomainsResolver internal constructor(
         //    no telling which, but it's still the best answer there is);
         //  - a head is further in the future than a live chain can be
         //    (Tezos nodes don't take blocks from the future): the clock
-        //    is slow — or that provider is lying, so it may push aside
-        //    no more heads than it keeps. Two honest heads outvote one
-        //    from the future; one against one is the slow-clock case, and the
-        //    newest provider's answer is then a lone, unverified one.
+        //    is slow — or that provider is lying. A liar can claim any
+        //    timestamp, so the newest head may only set aside strictly
+        //    fewer heads than it keeps: two honest heads outvote one from
+        //    the future, and one against one stays judged by the clock —
+        //    a slow clock and a stuck provider look exactly like a live
+        //    provider and a liar, so the round refuses rather than
+        //    picking a side.
         // A stuck provider takes no further part: it can't vouch for the
         // chain after it stalled (see the class doc, step 4).
         val clock = now()
@@ -178,7 +181,7 @@ class TezosDomainsResolver internal constructor(
         var (stale, allHeads) = stuckBy(clock)
         if (newest != null && (allHeads.isEmpty() || newest > clock + STALE_HEAD_AGE_MS)) {
             val (s, c) = stuckBy(newest)
-            if (allHeads.isEmpty() || s.size <= c.size) {
+            if (allHeads.isEmpty() || s.size < c.size) {
                 ageFrom = newest
                 stale = s
                 allHeads = c

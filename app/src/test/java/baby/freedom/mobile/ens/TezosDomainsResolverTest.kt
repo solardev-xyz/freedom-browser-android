@@ -349,10 +349,29 @@ class TezosDomainsResolverTest {
     }
 
     @Test
-    fun `with the device clock slow, a stuck provider is still told from a live one`() = runBlocking {
-        // 12 h slow: octez stuck 11 h and tzkt live both look "current"
-        // by the device clock, and the median of two would be the stuck
-        // head. A head from the future says the clock is off.
+    fun `with the device clock slow, a stuck provider is still told from two live ones`() = runBlocking {
+        // 12 h slow: octez stuck 11 h and the live heads all look
+        // "current" by the device clock. Heads from the future say the
+        // clock is off, and two of them outvote the stuck one.
+        val slow = clock - 12 * 3_600_000L
+        val http = rpc(
+            record("web:content_url" to "ipfs://bafybeigdyrzt"),
+            headLevels = mapOf(one to 15_128_200, two to 15_133_180, three to 15_133_180),
+            headTimes = mapOf(one to "2026-09-27T13:00:00Z", two to liveTime, three to liveTime),
+        )
+        val a = answer(TezosDomainsResolver(threeEndpoints, http) { slow }.resolveOutcome("slow.tez"))
+        assertEquals("ipfs://bafybeigdyrzt", a.leg.uri)
+        assertTrue(a.verified)
+        assertEquals(2, a.agreed)
+        assertEquals(3, a.asked)
+        assertFalse(http.calls.any { it.startsWith(one) && it.contains("/hash") })
+    }
+
+    @Test
+    fun `one against one, a head from the future sets nothing aside`() = runBlocking {
+        // A slow clock with one stuck provider looks exactly like a
+        // correct clock with a live provider and one lying about its
+        // head's timestamp. Neither side is picked.
         val slow = clock - 12 * 3_600_000L
         val http = rpc(
             record("web:content_url" to "ipfs://bafybeigdyrzt"),
@@ -360,10 +379,24 @@ class TezosDomainsResolverTest {
             headTimes = mapOf(one to "2026-09-27T13:00:00Z", two to liveTime),
             down = setOf(three),
         )
-        val a = answer(TezosDomainsResolver(threeEndpoints, http) { slow }.resolveOutcome("slow.tez"))
-        assertEquals("ipfs://bafybeigdyrzt", a.leg.uri)
-        assertFalse(a.verified)
-        assertFalse(http.calls.any { it.startsWith(one) && it.contains("/hash") })
+        val outcome = TezosDomainsResolver(threeEndpoints, http) { slow }.resolveOutcome("slow.tez")
+        assertTrue("$outcome", outcome is Outcome.Conflict)
+    }
+
+    @Test
+    fun `a lone provider claiming a head from the future can't push a live one aside`() = runBlocking {
+        val http = rpc(
+            null,
+            headLevels = mapOf(one to 15_133_180, two to 15_133_180),
+            headTimes = mapOf(one to liveTime, two to "2026-09-28T06:00:00Z"),
+            recordsByEndpoint = mapOf(
+                one to record("web:content_url" to "ipfs://bafyreal"),
+                two to record("web:content_url" to "ipfs://bafyEVIL"),
+            ),
+            down = setOf(three),
+        )
+        val outcome = TezosDomainsResolver(threeEndpoints, http) { clock }.resolveOutcome("future.tez")
+        assertTrue("$outcome", outcome is Outcome.Conflict)
     }
 
     @Test
