@@ -162,6 +162,24 @@ class VirtualOriginVectorsTest {
         "foo-bar.swarm.eth",
     )
 
+    // The redirector has no gateway for these (`redirect: null`), but the
+    // app's encoding is the same as for any ENS name.
+    @Test
+    fun `ens - WNS wei name`() = check(
+        ContentRoot.Ens("meinhard.wei"),
+        "meinhard-wei.ens.freedom.baby",
+        "/",
+        "meinhard.wei",
+    )
+
+    @Test
+    fun `ens - GNS gwei name`() = check(
+        ContentRoot.Ens("alice.gwei"),
+        "alice-gwei.ens.freedom.baby",
+        "/docs",
+        "alice.gwei/docs",
+    )
+
     // ------------------------------------------------------------------
     // vectors.escaping
     // ------------------------------------------------------------------
