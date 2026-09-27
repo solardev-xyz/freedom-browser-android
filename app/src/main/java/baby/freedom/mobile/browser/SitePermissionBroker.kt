@@ -7,6 +7,7 @@ import android.webkit.GeolocationPermissions
 import android.webkit.PermissionRequest
 import androidx.core.content.ContextCompat
 import baby.freedom.mobile.data.SitePermissionStore
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.MainScope
 import kotlinx.coroutines.flow.Flow
@@ -218,33 +219,58 @@ class SitePermissionBroker private constructor(
         val entry = Pending(tab.id, token)
         pending += entry
         fun live() = !entry.withdrawn && (documents[tab.id] ?: 0) == doc
+        var finished = false
         fun finish(allowed: Boolean) {
+            if (finished) return
+            finished = true
             pending.remove(entry)
             runCatching { if (allowed && live()) grant() else deny() }
                 .onFailure { Log.w(TAG, "answering permission request failed", it) }
         }
         scope.launch {
-            // Withdrawn before it got going (e.g. the tab closed): don't
-            // re-create the closed tab's lock.
-            if (!live()) return@launch finish(false)
-            val lock = tabLocks.getOrPut(tab.id) { Mutex() }
-            val siteAllowed = lock.withLock {
-                if (!live()) return@withLock false
-                val stored = store.decisionsFor(origin).mapNotNull { (k, v) ->
-                    val p = SitePermission.forKey(k) ?: return@mapNotNull null
-                    val d = PermissionDecision.fromStored(v) ?: return@mapNotNull null
-                    p to d
-                }.toMap()
-                if (!live()) return@withLock false
-                when (val plan = planFor(origin, permissions, stored, session)) {
-                    PermissionPlan.Deny -> false
-                    PermissionPlan.Grant -> true
-                    is PermissionPlan.Ask -> ask(tab, entry, origin, plan.undecided)
-                }
+            // Whatever goes wrong below, the page gets an answer (a deny)
+            // instead of a request left hanging — and the app doesn't
+            // crash on a main-thread exception.
+            try {
+                decide(tab, entry, origin, permissions, ::live, ::finish)
+            } catch (e: CancellationException) {
+                finish(false)
+                throw e
+            } catch (e: Exception) {
+                Log.w(TAG, "permission request failed; denying", e)
+                finish(false)
             }
-            if (!siteAllowed || !live()) return@launch finish(false)
-            finish(ensureAndroidPermissions(permissions, ::live))
         }
+    }
+
+    private suspend fun decide(
+        tab: BrowserState,
+        entry: Pending,
+        origin: String,
+        permissions: List<SitePermission>,
+        live: () -> Boolean,
+        finish: (Boolean) -> Unit,
+    ) {
+        // Withdrawn before it got going (e.g. the tab closed): don't
+        // re-create the closed tab's lock.
+        if (!live()) return finish(false)
+        val lock = tabLocks.getOrPut(tab.id) { Mutex() }
+        val siteAllowed = lock.withLock {
+            if (!live()) return@withLock false
+            val stored = store.decisionsFor(origin).mapNotNull { (k, v) ->
+                val p = SitePermission.forKey(k) ?: return@mapNotNull null
+                val d = PermissionDecision.fromStored(v) ?: return@mapNotNull null
+                p to d
+            }.toMap()
+            if (!live()) return@withLock false
+            when (val plan = planFor(origin, permissions, stored, session)) {
+                PermissionPlan.Deny -> false
+                PermissionPlan.Grant -> true
+                is PermissionPlan.Ask -> ask(tab, entry, origin, plan.undecided)
+            }
+        }
+        if (!siteAllowed || !live()) return finish(false)
+        finish(ensureAndroidPermissions(permissions, live))
     }
 
     /** Show the prompt, record the answer, and say whether the site is now allowed. */
@@ -293,8 +319,11 @@ class SitePermissionBroker private constructor(
         // store holds it.
         for (p in permissions) session.record(origin, p, decision, remembered = false)
         if (!remember) return
-        for (p in permissions) store.set(origin, p.key, decision.stored)
-        for (p in permissions) {
+        // A failed write (the store logs it) leaves the decision as a
+        // session one: it still applies this run and Settings shows it
+        // as "this session", which is the truth.
+        val written = permissions.filter { store.set(origin, it.key, decision.stored) }
+        for (p in written) {
             // Unless the user revoked or re-decided it meanwhile.
             if (session.decisionFor(origin, p) == decision) {
                 session.record(origin, p, decision, remembered = true)

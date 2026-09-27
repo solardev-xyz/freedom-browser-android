@@ -1,12 +1,18 @@
 package baby.freedom.mobile.data
 
 import android.content.Context
+import android.util.Log
 import androidx.datastore.core.DataStore
+import androidx.datastore.core.handlers.ReplaceFileCorruptionHandler
+import androidx.datastore.preferences.core.MutablePreferences
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.emptyPreferences
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import java.io.IOException
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 
@@ -26,15 +32,25 @@ import kotlinx.coroutines.flow.map
  * `|`) and `<permission>` the storage key shared with the desktop
  * browser (`camera`, `microphone`, `geolocation`). Values are kept as
  * plain strings so this layer stays free of browser types.
+ *
+ * Never throws for storage trouble: a file that can't be read reads as
+ * empty (the site is simply asked again) and a failed write reports
+ * `false`, so a broken preferences file can't crash a permission
+ * request or leave it unanswered. A corrupt file is replaced with an
+ * empty one rather than failing every read.
  */
-class SitePermissionStore private constructor(
+class SitePermissionStore internal constructor(
     private val store: DataStore<Preferences>,
 ) {
     /** One stored decision. */
     data class Record(val origin: String, val permission: String, val decision: String)
 
     /** Every stored decision, sorted by origin then permission. */
-    val all: Flow<List<Record>> = store.data.map { prefs ->
+    val all: Flow<List<Record>> = store.data.catch { e ->
+        if (e !is IOException) throw e
+        Log.w(TAG, "reading site permissions failed; treating as none", e)
+        emit(emptyPreferences())
+    }.map { prefs ->
         prefs.asMap().mapNotNull { (k, v) ->
             val name = k.name
             if (!name.startsWith(PREFIX)) return@mapNotNull null
@@ -49,12 +65,22 @@ class SitePermissionStore private constructor(
     suspend fun decisionsFor(origin: String): Map<String, String> =
         all.first().filter { it.origin == origin }.associate { it.permission to it.decision }
 
-    suspend fun set(origin: String, permission: String, decision: String) {
-        store.edit { it[keyOf(origin, permission)] = decision }
-    }
+    /** Store a decision; `false` if it couldn't be written. */
+    suspend fun set(origin: String, permission: String, decision: String): Boolean =
+        write { it[keyOf(origin, permission)] = decision }
 
-    suspend fun remove(origin: String, permission: String) {
-        store.edit { it.remove(keyOf(origin, permission)) }
+    /** Forget a decision; `false` if the store couldn't be written. */
+    suspend fun remove(origin: String, permission: String): Boolean =
+        write { it.remove(keyOf(origin, permission)) }
+
+    private suspend fun write(
+        change: (MutablePreferences) -> Unit,
+    ): Boolean = try {
+        store.edit(change)
+        true
+    } catch (e: IOException) {
+        Log.w(TAG, "writing site permissions failed", e)
+        false
     }
 
     private fun keyOf(origin: String, permission: String) =
@@ -62,9 +88,11 @@ class SitePermissionStore private constructor(
 
     companion object {
         private const val PREFIX = "perm:"
+        private const val TAG = "SitePermissionStore"
 
         private val Context.sitePermissionStore by preferencesDataStore(
             name = "freedom_site_permissions",
+            corruptionHandler = ReplaceFileCorruptionHandler { emptyPreferences() },
         )
 
         @Volatile

@@ -1347,9 +1347,15 @@ fun BrowserScreen(
         )
     }
 
-    // Site-permission prompt (#81) — only ever the active tab's; a
-    // background tab's request waits until the user switches to it.
-    state.permissionPrompt?.let { prompt ->
+    // Site-permission prompt (#81) — only ever the active tab's, and
+    // only while its page is what's on screen: a background tab's
+    // request waits until the user switches to it, and any request
+    // waits while a full-screen panel (Settings, Node, tabs, History,
+    // Bookmarks) covers the page, so the user always sees the page
+    // that is asking.
+    val pageOnScreen = !showSettings && !showNode && !showTabSwitcher &&
+        !showHistory && !showBookmarks
+    state.permissionPrompt?.takeIf { pageOnScreen }?.let { prompt ->
         androidx.compose.runtime.key(prompt) { SitePermissionPrompt(prompt) }
     }
 
