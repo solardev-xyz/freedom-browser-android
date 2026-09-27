@@ -207,19 +207,34 @@ class CapsuleCompactStateTest {
     }
 
     @Test
-    fun `the label's ellipsis follows the pill as a flag, not a fraction`() {
-        // With the pill on screen the label is settled against the
-        // narrower field — the 48 dp the Forward half takes.
-        val round = addressLabelMaxWidth(restingWidth, hasBadge = false, reserveForward = false)
-        val pill = addressLabelMaxWidth(restingWidth, hasBadge = false, reserveForward = true)
-        assertEquals(CapsuleControlSize, round - pill)
+    fun `the label's ellipsis does not depend on whether Forward is possible`() {
+        // The Forward half is reserved whether or not the pill is shown:
+        // the threshold takes no history input at all, so a pushState
+        // that drops forward history while the bar is compact cannot
+        // re-ellipsise the domain or step the compact capsule by 48 dp.
+        val reserved = addressLabelMaxWidth(restingWidth, hasBadge = false)
+        assertEquals(addressFieldRestingWidth(restingWidth, 1f) - 80.dp, reserved)
+        assertEquals(
+            CapsuleControlSize,
+            (addressFieldRestingWidth(restingWidth, 0f) - 80.dp) - reserved,
+        )
+        // …and so the compact capsule built from it is the same on both
+        // sides of a canGoForward flip.
+        val label = reserved + 40.dp // a long domain, elided to the cap
+        val laidOut = minOf(label, reserved)
+        for (pill in listOf(0f, 1f)) {
+            assertEquals(
+                compactCapsuleWidth(laidOut, addressFieldRestingWidth(restingWidth, 1f)),
+                compactCapsuleWidth(laidOut, addressFieldRestingWidth(restingWidth, pill)),
+            )
+        }
         // The reserved width is never wider than any field the morph
         // passes through, so the label always fits the field it is in.
         for (step in 0..20) {
             val p = step / 20f
             assertTrue(
                 "label wider than the field at pill=$p",
-                pill <= addressFieldRestingWidth(restingWidth, p) - 80.dp,
+                reserved <= addressFieldRestingWidth(restingWidth, p) - 80.dp,
             )
         }
     }
@@ -524,12 +539,8 @@ class CapsuleCompactStateTest {
         // Everything beside the label inside the field, added up: 8 dp of
         // inset and a 32 dp slot at each end.
         val max = addressLabelMaxWidth(restingWidth, hasBadge = false)
-        assertEquals(addressFieldRestingWidth(restingWidth, 0f) - 80.dp, max)
+        assertEquals(addressFieldRestingWidth(restingWidth, 1f) - 80.dp, max)
         assertTrue("a phone-width bar must leave room for a domain", max > 120.dp)
-        assertEquals(
-            addressFieldRestingWidth(restingWidth, 1f) - 80.dp,
-            addressLabelMaxWidth(restingWidth, hasBadge = false, reserveForward = true),
-        )
         // The badge takes its 24 dp — mark plus the air after it — out of
         // the same width.
         assertEquals(max - 24.dp, addressLabelMaxWidth(restingWidth, hasBadge = true))

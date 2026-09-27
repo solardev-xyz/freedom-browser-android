@@ -726,23 +726,25 @@ internal fun capsuleLabelInset(
  * then sized to whatever that one layout came out as, so a label the
  * capsule was built to hold cannot elide inside it either.
  *
- * Back no longer moves anything (#62): it is on the bar whether or not
- * there is history, so a tab gaining its first entry cannot change this.
- * Forward can — the pill takes 48 dp from the field — and it is decided
- * off a Boolean, [reserveForward], never off the animated fraction, so
- * the ellipsis still settles once per change rather than every frame of
- * the morph. The caller holds it `true` for as long as *any* of the pill
- * is on screen: the label steps down to the narrow field the moment
- * Forward appears (the field is still wider than that, so it fits all
- * the way through the grow), and only steps back up once the pill has
- * fully shrunk away — never a label wider than the field it is in.
+ * The Back + Forward pill's full width is reserved here **whether or
+ * not there is anywhere to go forward** (#62) — the same call #55 made
+ * for Back before Back was always on the bar. `canGoForward` flips while
+ * the domain stays put (an in-page `pushState` drops forward history, a
+ * scripted `history.back()` creates it), including while the bar is
+ * compact and the pill is off screen; the compact capsule is sized from
+ * this one layout, so letting the threshold follow it would re-ellipsise
+ * a long name and step the compact capsule by Forward's 48 dp in a single
+ * unanimated frame, with no pill on screen to explain it. Reserved either
+ * way, what the label *says* depends only on the domain and the window,
+ * and it is never wider than the field at any point of the pill's morph.
+ * The cost is a domain between the two thresholds eliding while there is
+ * no Forward — a settled ellipsis is worth more than the last 48 dp.
  */
 internal fun addressLabelMaxWidth(
     restingWidth: Dp,
     hasBadge: Boolean,
-    reserveForward: Boolean = false,
 ): Dp = (
-    addressFieldRestingWidth(restingWidth, if (reserveForward) 1f else 0f) -
+    addressFieldRestingWidth(restingWidth, navPillProgress = 1f) -
         (AddressPillControlInset + CapsuleTrailingSlotSize) * 2 -
         addressBadgeBlock(hasBadge)
     ).coerceAtLeast(0.dp)
@@ -1458,9 +1460,6 @@ internal fun BottomToolbar(
     // Clamped like the other two fractions: the spring overshoots, and
     // a pill narrower than the round button it grew from is not a shape.
     val navPill = navPillAnimated.coerceIn(0f, 1f)
-    // The label's ellipsis is settled against the narrow field for as
-    // long as any of the pill is on screen — see [addressLabelMaxWidth].
-    val labelReservesForward = nav.showsForward || navPill > 0f
     // Where the domain settles at rest. Both of the things that move it
     // are known here: the navigation pill (which decides where the field is)
     // and the protocol badge (which shares the field's content box with
@@ -1507,7 +1506,6 @@ internal fun BottomToolbar(
         val labelMaxWidth = addressLabelMaxWidth(
             restingWidth = restingWidth,
             hasBadge = badge != null,
-            reserveForward = labelReservesForward,
         )
         val labelWidth = remember(restingLabel, restingLabelStyle, labelMaxWidth, density) {
             if (restingLabel.isEmpty()) 0.dp
