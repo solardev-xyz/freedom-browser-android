@@ -109,10 +109,36 @@ object IpfsProgress {
     /**
      * The line to show: the snapshot's phase when it has one, else the
      * phase [fromCounters] reads off the counters' growth since
-     * [baseline] (the reading taken when this load started).
+     * [baseline] (the reading taken when this load started), leaving out
+     * whatever [carried] marks as a superseded load's.
      */
-    fun line(snapshotJson: String?, baseline: Counters?, now: Counters?): String? =
-        message(snapshotJson) ?: if (baseline != null && now != null) fromCounters(baseline, now) else null
+    fun line(
+        snapshotJson: String?,
+        baseline: Counters?,
+        now: Counters?,
+        carried: Counters? = null,
+    ): String? =
+        message(snapshotJson)
+            ?: if (baseline != null && now != null) fromCounters(baseline, now, carried) else null
+
+    /**
+     * The counters superseded loads moved: their growth from [earlier]
+     * (the baseline of the first load in an unbroken run of superseded
+     * ones) to [atStart] (the new load's). Null when there is no earlier
+     * reading — nothing was in flight.
+     *
+     * The node doesn't stop a gateway fetch because the WebView went
+     * elsewhere, so an old load keeps ticking the node-wide counters
+     * well into the next one, and in bursts (a page's cache hits land
+     * hundreds at a time, seconds apart) — so every counter it moved at
+     * all is treated as still its, not only the ones that moved in the
+     * last poll or two. Without this, a new load of an unprovided
+     * CID that supersedes a busy page reads the old page's arriving
+     * blocks as its own ("Fetching from verified provider…") for its
+     * whole DHT search.
+     */
+    fun carriedOver(earlier: Counters?, atStart: Counters?): Counters? =
+        if (earlier == null || atStart == null) null else atStart - earlier
 
     /**
      * The phase a load is in, from how the node's cumulative counters
@@ -125,10 +151,15 @@ object IpfsProgress {
      *
      * The counters are node-wide, so a second IPFS tab loading at the
      * same time blends in — the price of a signal that works today; the
-     * snapshot [message] reads is per-request.
+     * snapshot [message] reads is per-request. The one blend we can see
+     * coming — this load superseding one on the same tab that is still
+     * running in the node — is handled by [carried] (see [carriedOver]):
+     * every counter the old load was moving is left out for this load,
+     * so the line may under-report a phase but never shows the old
+     * load's.
      */
-    fun fromCounters(baseline: Counters, now: Counters): String {
-        val d = now - baseline
+    fun fromCounters(baseline: Counters, now: Counters, carried: Counters? = null): String {
+        val d = (now - baseline).without(carried)
         return when {
             d.bitswapBlocks > 0 && d.bitswapBlocks >= d.httpProviderBlocks ->
                 PHASE_MESSAGES.getValue("fetching_bitswap")
@@ -155,6 +186,16 @@ object IpfsProgress {
         /** Providers found, delegated routing and DHT together. */
         val providerResults: Long = 0,
     ) {
+        /** This, with every field [mask] has grown (> 0) zeroed. */
+        fun without(mask: Counters?): Counters = if (mask == null) this else Counters(
+            cacheHits = if (mask.cacheHits > 0) 0 else cacheHits,
+            httpProviderBlocks = if (mask.httpProviderBlocks > 0) 0 else httpProviderBlocks,
+            bitswapBlocks = if (mask.bitswapBlocks > 0) 0 else bitswapBlocks,
+            delegatedLookups = if (mask.delegatedLookups > 0) 0 else delegatedLookups,
+            dhtLookups = if (mask.dhtLookups > 0) 0 else dhtLookups,
+            providerResults = if (mask.providerResults > 0) 0 else providerResults,
+        )
+
         operator fun minus(other: Counters) = Counters(
             cacheHits = cacheHits - other.cacheHits,
             httpProviderBlocks = httpProviderBlocks - other.httpProviderBlocks,
@@ -249,9 +290,13 @@ object IpfsProgress {
  * An ENS name (`ens://name.eth`, `https://name.eth.ens.…`) is IPFS when
  * this session resolved its contenthash to IPFS ([KnownEnsNames] — the
  * submit flow records every resolution before the WebView is handed
- * the name). One not resolved yet leaves [current] alone: the
- * probe-gated submit path sets the flag itself once the contenthash is
- * in (see `gateGatewayNavigation`). A `javascript:` URL also leaves it
+ * the name). One not resolved yet — a tab restored after a process
+ * restart, a link to another name — is not IPFS *yet*: it is not
+ * allowed to inherit [current], which may be a previous IPFS page's
+ * (back from an IPFS page into a Swarm-hosted name must not poll the
+ * IPFS node). The WebView's main-frame interceptor resolves the name
+ * before fetching it and re-derives the flag then (see
+ * `noteMainFrameContentLoad`). A `javascript:` URL leaves [current]
  * alone — it runs in the current page, it isn't a navigation.
  *
  * Everything else — Swarm, the web, the error page, home — is not IPFS.
@@ -264,7 +309,6 @@ internal fun ipfsLoadFor(url: String, current: Boolean): Boolean {
         is ContentRoot.Ipfs, is ContentRoot.IpnsKey, is ContentRoot.IpnsName -> return true
         is ContentRoot.Ens -> return when (KnownEnsNames.protocolFor(root.name)) {
             "ipfs", "ipns" -> true
-            null -> current
             else -> false
         }
         is ContentRoot.Bzz -> return false

@@ -1,5 +1,6 @@
 package baby.freedom.mobile.browser
 
+import android.os.SystemClock
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
@@ -63,6 +64,7 @@ import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -73,6 +75,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
@@ -135,6 +138,13 @@ private const val STRIP_FADE_MS = 250
  * the line at once.
  */
 private const val IPFS_STATUS_LINGER_MS: Long = 250L
+
+/**
+ * A new IPFS load counts as superseding the tab's previous one — which
+ * then keeps running in the node, see [IpfsProgress.carriedOver] — when
+ * that one was polled this recently: a few poll intervals.
+ */
+private const val IPFS_SUPERSEDE_WINDOW_MS: Long = 1_500L
 
 /** Air between the IPFS phase line and the capsule under it. */
 private val IpfsStatusGap = 8.dp
@@ -474,29 +484,65 @@ fun BrowserScreen(
     // progress callback can read "not busy" for a frame, and the line
     // shouldn't blink out and back in across it. The counter baseline
     // (see [IpfsProgress.fromCounters]) survives that blink for the same
-    // reason — it is the load's, not the poll loop's.
+    // reason — it is the load's, not the poll loop's: it is keyed on the
+    // tab and its [BrowserState.loadGeneration], so a new navigation that
+    // supersedes one still loading (and so never lets the tab go idle)
+    // starts from a fresh baseline instead of inheriting the old load's
+    // counter growth.
     val pollIpfsProgress = state.ipfsLoad &&
         isCapsuleLoading(state) &&
         ipfsInfo.status == IpfsStatus.Running
+    val ipfsLoadKey = state.id to state.loadGeneration
     var ipfsStatus by remember { mutableStateOf<String?>(null) }
     var ipfsStatusTab by remember { mutableStateOf<Long?>(null) }
     var ipfsBaseline by remember { mutableStateOf<IpfsProgress.Counters?>(null) }
-    LaunchedEffect(state.id, pollIpfsProgress) {
+    var ipfsBaselineKey by remember { mutableStateOf<Pair<Long, Int>?>(null) }
+    // When the load being polled last read the counters; the baseline
+    // of the first load in a run of loads that superseded one another
+    // without the tab going idle (null when this load didn't supersede
+    // one); and so the counters those superseded loads moved (see
+    // [IpfsProgress.carriedOver]).
+    var ipfsLastPollAt by remember { mutableStateOf(0L) }
+    var ipfsChainStart by remember { mutableStateOf<IpfsProgress.Counters?>(null) }
+    var ipfsCarried by remember { mutableStateOf<IpfsProgress.Counters?>(null) }
+    LaunchedEffect(ipfsLoadKey, pollIpfsProgress) {
         if (!pollIpfsProgress) {
             delay(IPFS_STATUS_LINGER_MS)
             ipfsStatus = null
             ipfsBaseline = null
+            ipfsCarried = null
+            ipfsChainStart = null
+            ipfsLastPollAt = 0L
             return@LaunchedEffect
         }
-        if (ipfsStatusTab != state.id) ipfsBaseline = null
+        // A new load on a tab whose previous load was still being polled
+        // a moment ago — superseded mid-flight, so the tab never went
+        // idle: keep the old load's baseline (or, if it superseded one
+        // too, the first one's) to tell which counters are theirs.
+        if (ipfsBaselineKey != ipfsLoadKey) {
+            ipfsChainStart = if (ipfsBaselineKey?.first == state.id &&
+                SystemClock.uptimeMillis() - ipfsLastPollAt <= IPFS_SUPERSEDE_WINDOW_MS
+            ) {
+                ipfsChainStart ?: ipfsBaseline
+            } else {
+                null
+            }
+            ipfsBaseline = null
+            ipfsCarried = null
+            ipfsBaselineKey = ipfsLoadKey
+        }
         while (true) {
             val (snapshot, counters) = withContext(Dispatchers.IO) {
                 runCatching { ipfsProgressSnapshot() }.getOrNull() to
                     IpfsProgress.Counters.of(runCatching { ipfsCounters() }.getOrNull())
             }
-            val baseline = ipfsBaseline ?: counters.also { ipfsBaseline = it }
-            ipfsStatus = IpfsProgress.line(snapshot, baseline, counters)
+            val baseline = ipfsBaseline ?: counters.also {
+                ipfsBaseline = it
+                ipfsCarried = IpfsProgress.carriedOver(ipfsChainStart, it)
+            }
+            ipfsStatus = IpfsProgress.line(snapshot, baseline, counters, ipfsCarried)
             ipfsStatusTab = state.id
+            ipfsLastPollAt = SystemClock.uptimeMillis()
             delay(IpfsProgress.POLL_INTERVAL_MS)
         }
     }
@@ -663,6 +709,7 @@ fun BrowserScreen(
         // this tab — otherwise switching URL mid-probe would let the
         // stale probe decide the navigation.
         target.cancelPendingProbe()
+        target.beginLoad()
 
         val trimmed = raw.trim()
         // Let the user type the friendly form and re-submit to reload.
@@ -1353,6 +1400,9 @@ fun BrowserScreen(
         // the capsule's slot, clear of the page's own bottom edge. Not
         // while the address bar is open — the editor owns that band.
         val ipfsLine = ipfsStatus?.takeIf { ipfsStatusTab == state.id && !addressFocused }
+        // The pill's measured height, so a snackbar raised while it is up
+        // stacks above it instead of drawing over it.
+        var ipfsLineHeightPx by remember { mutableIntStateOf(0) }
         AnimatedVisibility(
             visible = ipfsLine != null,
             enter = fadeIn(),
@@ -1369,7 +1419,15 @@ fun BrowserScreen(
             // Keep drawing the last line while it fades out.
             var shown by remember { mutableStateOf("") }
             if (ipfsLine != null) shown = ipfsLine
-            IpfsStatusLine(text = shown)
+            IpfsStatusLine(
+                text = shown,
+                modifier = Modifier.onSizeChanged { ipfsLineHeightPx = it.height },
+            )
+        }
+        val snackbarLift = if (ipfsLine != null) {
+            with(density) { ipfsLineHeightPx.toDp() } + IpfsStatusGap * 2
+        } else {
+            0.dp
         }
 
         // Snackbars pop up above the capsule rather than under it —
@@ -1381,7 +1439,7 @@ fun BrowserScreen(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .windowInsetsPadding(chromeInsets)
-                .padding(bottom = capsuleSlot + CapsuleBottomMargin),
+                .padding(bottom = capsuleSlot + CapsuleBottomMargin + snackbarLift),
         ) { data -> Snackbar(snackbarData = data) }
     }
 
@@ -1600,13 +1658,13 @@ private fun highlightedText(text: String, needle: String): AnnotatedString {
  * and a narrow screen or a large font scale must still show all of it.
  */
 @Composable
-private fun IpfsStatusLine(text: String) {
+private fun IpfsStatusLine(text: String, modifier: Modifier = Modifier) {
     Surface(
         shape = RoundedCornerShape(50),
         color = MaterialTheme.colorScheme.surfaceContainerHigh,
         contentColor = MaterialTheme.colorScheme.onSurface,
         shadowElevation = 2.dp,
-        modifier = Modifier
+        modifier = modifier
             .widthIn(max = CHROME_MAX_WIDTH)
             .semantics { liveRegion = LiveRegionMode.Polite },
     ) {
@@ -1624,3 +1682,4 @@ private fun IpfsStatusLine(text: String) {
         }
     }
 }
+

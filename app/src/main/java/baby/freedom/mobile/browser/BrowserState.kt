@@ -81,6 +81,22 @@ class BrowserState(val id: Long) {
         internal set
 
     /**
+     * Bumped each time a new navigation starts on this tab — a submit
+     * (typed, bookmark, detoured link) or a main-frame link the WebView
+     * follows itself. Not by the probe → WebView hand-off inside one
+     * submit, which is the same load. The IPFS phase line (#94) keys its
+     * counter baseline on it, so a load that supersedes one still in
+     * flight is measured from its own start, not the previous load's.
+     */
+    var loadGeneration by mutableIntStateOf(0)
+        private set
+
+    /** Mark the start of a new navigation (see [loadGeneration]). */
+    internal fun beginLoad() {
+        loadGeneration++
+    }
+
+    /**
      * True between a Stop tap and the tab's next navigation.
      *
      * Chromium answers `stopLoading()` on an *uncommitted* navigation

@@ -1524,6 +1524,9 @@ private fun buildRefreshableWebView(
                 // [navigationOpensStopLatch]).
                 if (navigationOpensStopLatch(request.isForMainFrame, detoured)) {
                     state.loadAborted = false
+                    // A link the WebView follows itself is a new load
+                    // (a detoured one gets this from the submit, #94).
+                    state.beginLoad()
                 }
                 if (detoured) {
                     onSubmitUrl(state, target)
@@ -1535,7 +1538,12 @@ private fun buildRefreshableWebView(
             override fun shouldInterceptRequest(
                 view: WebView?,
                 request: WebResourceRequest?,
-            ): WebResourceResponse? = interceptVirtualRequest(request)
+            ): WebResourceResponse? {
+                if (request?.isForMainFrame == true) {
+                    noteMainFrameContentLoad(view, state, request.url.toString())
+                }
+                return interceptVirtualRequest(request)
+            }
 
             override fun onReceivedError(
                 view: WebView?,
@@ -2486,4 +2494,30 @@ internal fun sanitizeTitle(rawTitle: String?, actualUrl: String?): String {
     return if (title == url || title == stripped ||
         stripped.startsWith(title) || title.startsWith(stripped)
     ) "" else title
+}
+
+/**
+ * Re-derive [BrowserState.ipfsLoad] for a main-frame request to a
+ * virtual dweb origin, before the (possibly slow) gateway fetch starts
+ * (#94). Runs on the interceptor's thread.
+ *
+ * The submit flow resolves and records every ENS name it navigates to,
+ * but a reload of a restored tab (the session-only [KnownEnsNames] is
+ * empty after a process restart), back/forward, or an in-page link to
+ * another name reach the WebView unresolved — [ipfsLoadFor] can't know
+ * yet whether they lead to IPFS. Resolve the name here (the same lookup
+ * [interceptVirtualRequest] is about to do, which then hits the registry)
+ * so the phase line shows for the fetch itself, not only after commit.
+ * The write is posted to the main thread and dropped if another
+ * navigation started meanwhile.
+ */
+private fun noteMainFrameContentLoad(view: WebView?, state: BrowserState, url: String) {
+    val root = VirtualOrigin.parseHostOfUrl(url) ?: return
+    if (root is ContentRoot.Ens) Gateways.resolveEnsRoot(root.name)
+    val generation = state.loadGeneration
+    view?.post {
+        if (state.loadGeneration == generation) {
+            state.ipfsLoad = ipfsLoadFor(url, state.ipfsLoad)
+        }
+    }
 }

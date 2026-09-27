@@ -160,9 +160,12 @@ class IpfsProgressTest {
     }
 
     @Test
-    fun `ENS names follow the session's resolution, else keep the flag`() {
-        // Not resolved yet: the submit path decides.
-        assertTrue(ipfsLoadFor("ens://vitalik.eth/", current = true))
+    fun `ENS names follow the session's resolution, else are not IPFS yet`() {
+        // Not resolved yet (restored tab, link to another name): never
+        // inherits a previous IPFS page's flag — the interceptor
+        // re-derives it once the name resolves.
+        assertFalse(ipfsLoadFor("ens://vitalik.eth/", current = true))
+        assertFalse(ipfsLoadFor("https://vitalik-eth.ens.freedom.baby/", current = true))
         assertFalse(ipfsLoadFor("ens://vitalik.eth/", current = false))
 
         KnownEnsNames.record("ipfs://$cid", "vitalik.eth")
@@ -228,6 +231,41 @@ class IpfsProgressTest {
         assertEquals("IPFS: Looking up content…", IpfsProgress.fromCounters(before, before))
         val lookingUp = counters(0, 0, 50, 20, 30, 11, 12, 0, 4, 2, 0)
         assertEquals("IPFS: Finding providers…", IpfsProgress.fromCounters(before, lookingUp))
+    }
+
+    @Test
+    fun `a superseded load still running in the node doesn't lend the new load its phase`() {
+        // The old page (baseline `earlier`) had pulled blocks off an
+        // HTTP provider (one delegated lookup + providers per block)
+        // and a burst of cache hits by the time the new load started…
+        val earlier = counters(0, 0, 0, 10, 0, 10, 20, 0, 0, 0, 0)
+        val atStart = counters(0, 0, 100, 12, 0, 12, 26, 0, 0, 0, 0)
+        val carried = IpfsProgress.carriedOver(earlier, atStart)
+        // …and keeps doing so, while the new, unprovided CID falls back
+        // to the DHT.
+        val later = counters(0, 0, 700, 20, 0, 20, 50, 0, 2, 0, 0)
+        assertEquals(
+            "IPFS: Fetching from verified provider…",
+            IpfsProgress.fromCounters(atStart, later),
+        )
+        assertEquals(
+            "IPFS: Searching the DHT…",
+            IpfsProgress.fromCounters(atStart, later, carried),
+        )
+        assertEquals(
+            "IPFS: Searching the DHT…",
+            IpfsProgress.line(null, atStart, later, carried),
+        )
+        // Counters the old load wasn't moving still count: blocks from
+        // Bitswap for the new load show.
+        val fetching = counters(0, 0, 700, 20, 3, 20, 50, 0, 2, 0, 0)
+        assertEquals(
+            "IPFS: Fetching from peers…",
+            IpfsProgress.fromCounters(atStart, fetching, carried),
+        )
+        // Nothing in flight before: nothing carried.
+        assertNull(IpfsProgress.carriedOver(null, atStart))
+        assertEquals(later - atStart, (later - atStart).without(null))
     }
 
     @Test

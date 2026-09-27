@@ -68,9 +68,11 @@ class IpfsNode(
     private var handle: Long = 0L
 
     /**
-     * Held across [releaseHandle] and [progressSnapshotJson] so a
-     * snapshot polled from a binder thread can never read a handle that
-     * is being freed underneath it.
+     * Guards [handle] for the binder-thread polls ([progressSnapshotJson],
+     * [diagnostics]): a poll holds it for its whole native call, and
+     * [releaseHandle] takes it only to swap the handle to 0 — so a poll
+     * never reads a handle that is being freed, and never waits on the
+     * (slow) gateway shutdown either.
      */
     private val handleLock = Any()
     private var statsPoller: Job? = null
@@ -167,8 +169,9 @@ class IpfsNode(
      * The node's live retrieval-progress snapshot (JSON, see
      * [FreedomIpfsNative.progressSnapshotJson]), or null while the node
      * isn't running. Blocking but cheap — a mutex-guarded copy of an
-     * in-memory ring — so the browser can poll it a few times a second
-     * while an `ipfs://` / `ipns://` page loads.
+     * in-memory ring, and [releaseHandle] never holds [handleLock] across
+     * the node's shutdown — so the browser can poll it a few times a
+     * second while an `ipfs://` / `ipns://` page loads.
      */
     fun progressSnapshotJson(): String? = synchronized(handleLock) {
         val node = handle
@@ -194,9 +197,16 @@ class IpfsNode(
             .getOrNull()
     }
 
-    private fun releaseHandle() = synchronized(handleLock) {
-        val node = handle
-        handle = 0L
+    private fun releaseHandle() {
+        // Swap under the lock, free outside it: once the swap is done no
+        // poll can pick the old handle up (and any poll that had it has
+        // finished, since it held the lock), so the slow stopGateway +
+        // nodeFree needn't block the binder threads.
+        val node = synchronized(handleLock) {
+            val old = handle
+            handle = 0L
+            old
+        }
         if (node != 0L) {
             runCatching { FreedomIpfsNative.stopGateway(node) }
                 .onFailure { Log.w(TAG, "stopGateway threw", it) }
