@@ -1,0 +1,522 @@
+package baby.freedom.mobile.browser
+
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.ArrowDownward
+import androidx.compose.material.icons.filled.ArrowUpward
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Key
+import androidx.compose.material.icons.filled.Link
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Switch
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.unit.dp
+import baby.freedom.mobile.data.NodeSettings
+import baby.freedom.mobile.ens.EnsRpcConfig
+import baby.freedom.mobile.ens.KeyedRpcProvider
+import baby.freedom.mobile.ens.RpcEndpointCheck
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+
+/*
+ * Settings → Name resolution and → RPC providers (#102): the desktop
+ * browser's pages of the same names, cut to what the Android resolver
+ * does today — one RPC endpoint at a time, in the order below. Every
+ * edit goes to [NodeSettings.ensRpcConfig], which the resolver reads
+ * for each lookup, so it applies to the next name without a restart.
+ */
+
+internal const val SECTION_ENS = "Name resolution"
+internal const val SECTION_RPC = "RPC providers"
+
+private const val ENS_ABOUT =
+    "How ENS (.eth), WNS (.wei) and GNS (.gwei) names are resolved. Each answer comes from a single RPC endpoint and isn't cross-checked, so an endpoint you run or trust gives the most trustworthy answers."
+private const val ROW_ORDER = "Resolution order"
+private const val ORDER_HELP =
+    "Tried top to bottom until one answers. One that fails moves to the end for 10 minutes. Change it under RPC providers."
+private const val ROW_CCIP = "Off-chain lookups (CCIP-Read)"
+private const val CCIP_HELP =
+    "Some names (base.eth and cb.id subnames, NameStone names) are answered by a gateway their resolver names. The gateway sees the name you look up. Off: those names don't resolve."
+
+private const val SUB_CUSTOM = "Your endpoints"
+private const val CUSTOM_HELP = "Tried first, in this order. An Ethereum mainnet JSON-RPC URL."
+private const val ROW_ADD_ENDPOINT = "Add endpoint"
+private const val SUB_KEYED = "Keyed providers"
+private const val KEYED_HELP = "Tried after your endpoints, with your own API key."
+private const val SUB_PUBLIC = "Public endpoints"
+private const val PUBLIC_HELP = "Tried last. Switch off any you'd rather not send lookups to."
+private const val LAST_ENDPOINT_HELP = "At least one endpoint has to stay on."
+
+/** "Ordered" line for [EnsRpcConfig.Source]: never shows an API key. */
+private fun sourceLine(source: EnsRpcConfig.Source): String = when (source.kind) {
+    EnsRpcConfig.Kind.KEYED -> "${source.label} · ${EnsRpcConfig.redact(source.url)}"
+    else -> "${source.label} · ${source.url}"
+}
+
+internal fun ensSectionRows(config: EnsRpcConfig) = listOf(
+    settingsRow("about", ENS_ABOUT),
+    settingsRow(
+        "order",
+        ROW_ORDER,
+        ORDER_HELP,
+        *config.sources.map(::sourceLine).toTypedArray(),
+    ),
+    settingsRow("ccip", ROW_CCIP, if (config.ccipRead) "On" else "Off", CCIP_HELP, "EIP-3668"),
+)
+
+private fun keyedSubtitle(config: EnsRpcConfig, provider: KeyedRpcProvider): String =
+    config.apiKeys[provider.id]?.let { "Key ${EnsRpcConfig.maskKey(it)}" } ?: "No key"
+
+internal fun rpcSectionRows(config: EnsRpcConfig) = listOf(
+    settingsRow(
+        "custom",
+        SUB_CUSTOM,
+        CUSTOM_HELP,
+        ROW_ADD_ENDPOINT,
+        *config.customEndpoints.toTypedArray(),
+    ),
+) + EnsRpcConfig.KEYED_PROVIDERS.map { provider ->
+    settingsRow(
+        "keyed:${provider.id}",
+        SUB_KEYED,
+        provider.name,
+        keyedSubtitle(config, provider),
+        "API key",
+    )
+} + settingsRow(
+    "public",
+    SUB_PUBLIC,
+    PUBLIC_HELP,
+    *EnsRpcConfig.PUBLIC_ENDPOINTS.toTypedArray(),
+)
+
+@Composable
+internal fun NameResolutionSection(
+    visible: Set<Any>,
+    config: EnsRpcConfig,
+    settings: NodeSettings,
+) {
+    val scope = rememberCoroutineScope()
+    SectionCard(title = SECTION_ENS) {
+        if ("about" in visible) HelpText(ENS_ABOUT)
+        if ("order" in visible) {
+            if ("about" in visible) Spacer(Modifier.height(12.dp))
+            Text(ROW_ORDER, fontWeight = FontWeight.Medium)
+            HelpText(ORDER_HELP)
+            Spacer(Modifier.height(6.dp))
+            config.sources.forEachIndexed { i, source ->
+                Row(modifier = Modifier.padding(vertical = 2.dp)) {
+                    Text(
+                        "${i + 1}.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.widthIn(min = 22.dp),
+                    )
+                    // In full, wrapping: the end of a URL is what tells
+                    // two endpoints of one provider apart.
+                    Text(
+                        sourceLine(source),
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+            }
+        }
+        if ("ccip" in visible) {
+            if ("about" in visible || "order" in visible) Spacer(Modifier.height(12.dp))
+            SwitchRow(
+                title = ROW_CCIP,
+                help = CCIP_HELP,
+                checked = config.ccipRead,
+                enabled = true,
+                onCheckedChange = { on -> scope.launch { settings.setEnsCcipRead(on) } },
+            )
+        }
+    }
+}
+
+@Composable
+internal fun RpcProvidersSection(
+    visible: Set<Any>,
+    config: EnsRpcConfig,
+    settings: NodeSettings,
+) {
+    val scope = rememberCoroutineScope()
+    var addingEndpoint by remember { mutableStateOf(false) }
+    var editingProvider by remember { mutableStateOf<KeyedRpcProvider?>(null) }
+
+    SectionCard(title = SECTION_RPC) {
+        var first = true
+        fun gap(): Boolean = (!first).also { first = false }
+
+        if ("custom" in visible) {
+            gap()
+            SubHeader(SUB_CUSTOM)
+            HelpText(CUSTOM_HELP)
+            val custom = config.customEndpoints
+            custom.forEachIndexed { i, url ->
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        url,
+                        fontFamily = FontFamily.Monospace,
+                        style = MaterialTheme.typography.bodySmall,
+                        modifier = Modifier.weight(1f),
+                    )
+                    if (custom.size > 1) {
+                        IconButton(
+                            onClick = { scope.launch { settings.moveEnsRpcEndpoint(url, -1) } },
+                            enabled = i > 0,
+                        ) { Icon(Icons.Filled.ArrowUpward, contentDescription = "Move $url up") }
+                        IconButton(
+                            onClick = { scope.launch { settings.moveEnsRpcEndpoint(url, +1) } },
+                            enabled = i < custom.lastIndex,
+                        ) { Icon(Icons.Filled.ArrowDownward, contentDescription = "Move $url down") }
+                    }
+                    IconButton(
+                        onClick = { scope.launch { settings.removeEnsRpcEndpoint(url) } },
+                        enabled = config.canRemove(url),
+                    ) { Icon(Icons.Filled.Close, contentDescription = "Remove $url") }
+                }
+            }
+            if (custom.size < EnsRpcConfig.MAX_CUSTOM_ENDPOINTS) {
+                PageRow(
+                    title = ROW_ADD_ENDPOINT,
+                    subtitle = "Your own node or a provider URL",
+                    style = PageRowStyle.Inset,
+                    leadingIcon = Icons.Filled.Add,
+                    onClick = { addingEndpoint = true },
+                )
+            }
+        }
+
+        val keyedVisible = EnsRpcConfig.KEYED_PROVIDERS.filter { "keyed:${it.id}" in visible }
+        if (keyedVisible.isNotEmpty()) {
+            if (gap()) Spacer(Modifier.height(12.dp))
+            SubHeader(SUB_KEYED)
+            HelpText(KEYED_HELP)
+            for (provider in keyedVisible) {
+                PageRow(
+                    title = provider.name,
+                    subtitle = keyedSubtitle(config, provider),
+                    style = PageRowStyle.Inset,
+                    leadingIcon = Icons.Filled.Key,
+                    onClick = { editingProvider = provider },
+                )
+            }
+        }
+
+        if ("public" in visible) {
+            if (gap()) Spacer(Modifier.height(12.dp))
+            SubHeader(SUB_PUBLIC)
+            HelpText(PUBLIC_HELP)
+            for (url in EnsRpcConfig.PUBLIC_ENDPOINTS) {
+                val on = url !in config.disabledPublicEndpoints
+                // Switching off the last endpoint would leave nothing
+                // to resolve with.
+                val locked = on && !config.canRemove(url)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            url,
+                            fontFamily = FontFamily.Monospace,
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                        if (locked) {
+                            Text(
+                                LAST_ENDPOINT_HELP,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                    Spacer(Modifier.width(8.dp))
+                    Switch(
+                        checked = on,
+                        enabled = !locked,
+                        onCheckedChange = { enable ->
+                            scope.launch { settings.setPublicEnsRpcEnabled(url, enable) }
+                        },
+                    )
+                }
+            }
+        }
+    }
+
+    if (addingEndpoint) {
+        AddEndpointDialog(
+            existing = config.customEndpoints,
+            onAdd = { url ->
+                scope.launch { settings.addEnsRpcEndpoint(url) }
+                addingEndpoint = false
+            },
+            onDismiss = { addingEndpoint = false },
+        )
+    }
+    editingProvider?.let { provider ->
+        val saved = config.apiKeys[provider.id].orEmpty()
+        ApiKeyDialog(
+            provider = provider,
+            savedKey = saved,
+            // Removing the key takes that provider's endpoint away.
+            canRemove = saved.isEmpty() || config.canRemove(provider.urlFor(saved)),
+            onSave = { key ->
+                scope.launch { settings.setRpcApiKey(provider.id, key) }
+                editingProvider = null
+            },
+            onDismiss = { editingProvider = null },
+        )
+    }
+}
+
+@Composable
+private fun SubHeader(text: String) {
+    Text(text, fontWeight = FontWeight.Medium)
+}
+
+@Composable
+private fun HelpText(text: String) {
+    Text(
+        text,
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+}
+
+@Composable
+private fun SwitchRow(
+    title: String,
+    help: String,
+    checked: Boolean,
+    enabled: Boolean,
+    onCheckedChange: (Boolean) -> Unit,
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(title, fontWeight = FontWeight.Medium)
+            HelpText(help)
+        }
+        Spacer(Modifier.width(8.dp))
+        Switch(checked = checked, enabled = enabled, onCheckedChange = onCheckedChange)
+    }
+}
+
+private fun endpointHint(rejection: EnsRpcConfig.Rejection): String = when (rejection) {
+    EnsRpcConfig.Rejection.EMPTY -> "An Ethereum mainnet JSON-RPC URL"
+    EnsRpcConfig.Rejection.TOO_LONG -> "Too long: at most 2048 characters"
+    EnsRpcConfig.Rejection.NOT_A_URL -> "Not a full URL: start with https:// and a host name"
+    EnsRpcConfig.Rejection.SCHEME -> "Needs https:// (or http:// for a node on your network)"
+    EnsRpcConfig.Rejection.USER_INFO -> "Remove the user name or password before the host"
+}
+
+/** The "Test" button's verdict, as the dialogs show it. */
+private fun checkLabel(outcome: RpcEndpointCheck.Outcome): String = when (outcome) {
+    is RpcEndpointCheck.Outcome.Ok -> "Works: Ethereum mainnet, ${outcome.latencyMs} ms"
+    is RpcEndpointCheck.Outcome.WrongChain ->
+        "Not Ethereum mainnet (chain ${outcome.chainId}) — names won't resolve"
+    is RpcEndpointCheck.Outcome.Failed -> "Didn't answer: ${outcome.message}"
+}
+
+/**
+ * "Test" + its verdict under a dialog's field. [url] is `null` while
+ * the field doesn't hold something testable; editing the field clears
+ * the verdict (the caller keys this on the text).
+ */
+@Composable
+private fun EndpointTestRow(url: String?) {
+    val scope = rememberCoroutineScope()
+    var testing by remember { mutableStateOf(false) }
+    var outcome by remember { mutableStateOf<RpcEndpointCheck.Outcome?>(null) }
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        TextButton(
+            enabled = url != null && !testing,
+            onClick = {
+                val target = url ?: return@TextButton
+                testing = true
+                outcome = null
+                scope.launch {
+                    outcome = withContext(Dispatchers.IO) { RpcEndpointCheck.check(target) }
+                    testing = false
+                }
+            },
+        ) { Text(if (testing) "Testing…" else "Test") }
+        outcome?.let {
+            Text(
+                checkLabel(it),
+                style = MaterialTheme.typography.bodySmall,
+                color = if (it is RpcEndpointCheck.Outcome.Ok) {
+                    Color(0xFF22C55E)
+                } else {
+                    MaterialTheme.colorScheme.error
+                },
+            )
+        }
+    }
+}
+
+@Composable
+private fun AddEndpointDialog(
+    existing: List<String>,
+    onAdd: (String) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var draft by remember { mutableStateOf("") }
+    val validation = EnsRpcConfig.validateEndpoint(draft)
+    val duplicate = validation.url != null && validation.url in existing
+    val url = validation.url?.takeIf { !duplicate }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(ROW_ADD_ENDPOINT) },
+        text = {
+            Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
+                OutlinedTextField(
+                    value = draft,
+                    onValueChange = { draft = it },
+                    label = { Text("RPC URL") },
+                    placeholder = { Text("https://your-node.example") },
+                    isError = draft.isNotBlank() && url == null,
+                    supportingText = {
+                        Text(
+                            when {
+                                duplicate -> "Already in your endpoints"
+                                draft.isNotBlank() && validation.rejection != null ->
+                                    endpointHint(validation.rejection)
+                                url != null && url.startsWith("http://", ignoreCase = true) ->
+                                    "Unencrypted: the names you look up are visible on the network"
+                                else -> "An Ethereum mainnet JSON-RPC URL"
+                            },
+                        )
+                    },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(
+                        keyboardType = KeyboardType.Uri,
+                        autoCorrectEnabled = false,
+                    ),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                androidx.compose.runtime.key(url) { EndpointTestRow(url) }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = { url?.let(onAdd) }, enabled = url != null) { Text("Add") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Cancel") }
+        },
+    )
+}
+
+@Composable
+private fun ApiKeyDialog(
+    provider: KeyedRpcProvider,
+    savedKey: String,
+    canRemove: Boolean,
+    onSave: (String) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var draft by remember { mutableStateOf(savedKey) }
+    val key = draft.trim()
+    // A key is a path segment: nothing that would change the URL's shape.
+    val usable = key.isNotEmpty() && key.none { it.isWhitespace() || it in "/?#%@" }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(provider.name) },
+        text = {
+            Column(
+                modifier = Modifier.verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                OutlinedTextField(
+                    value = draft,
+                    onValueChange = { draft = it },
+                    label = { Text("API key") },
+                    isError = key.isNotEmpty() && !usable,
+                    supportingText = {
+                        Text(
+                            if (key.isNotEmpty() && !usable) {
+                                "Just the key, not the whole URL"
+                            } else {
+                                "Stored on this device only"
+                            },
+                        )
+                    },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(
+                        keyboardType = KeyboardType.Password,
+                        autoCorrectEnabled = false,
+                    ),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                androidx.compose.runtime.key(key) {
+                    EndpointTestRow(if (usable) provider.urlFor(key) else null)
+                }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        Icons.Filled.Link,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Spacer(Modifier.width(6.dp))
+                    HelpText("Get a key: ${provider.website}")
+                }
+                if (savedKey.isNotEmpty()) {
+                    TextButton(
+                        onClick = { onSave("") },
+                        enabled = canRemove,
+                    ) {
+                        Text(
+                            if (canRemove) "Remove key" else "Remove key — $LAST_ENDPOINT_HELP",
+                            color = if (canRemove) MaterialTheme.colorScheme.error else Color.Unspecified,
+                        )
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = { onSave(key) },
+                enabled = usable && key != savedKey,
+            ) { Text("Save") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Cancel") }
+        },
+    )
+}

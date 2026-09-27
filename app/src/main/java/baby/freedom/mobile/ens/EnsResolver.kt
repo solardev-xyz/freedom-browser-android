@@ -44,18 +44,43 @@ import org.json.JSONObject
  *     differently than `@adraffy/ens-normalize`.
  */
 class EnsResolver internal constructor(
-    private val rpcEndpoints: List<String>,
+    private val settings: suspend () -> Settings,
     private val http: EnsHttp,
 ) {
+    /**
+     * What the user configured (#102): the RPC endpoints to try, in
+     * order, and whether to follow CCIP-Read. Read afresh for every
+     * lookup, so a change in Settings applies to the next one without
+     * a restart; a change also drops the cache (see [resolve]).
+     */
+    data class Settings(
+        val endpoints: List<String>,
+        val ccipRead: Boolean = true,
+    )
+
+    constructor(settings: suspend () -> Settings) : this(settings, EnsHttp.Default)
+
     constructor(rpcEndpoints: List<String> = DEFAULT_RPC_ENDPOINTS) :
-        this(rpcEndpoints, EnsHttp.Default)
+        this({ Settings(rpcEndpoints) }, EnsHttp.Default)
+
+    internal constructor(rpcEndpoints: List<String>, http: EnsHttp) :
+        this({ Settings(rpcEndpoints) }, http)
 
     private data class Cached(val result: EnsResult, val timestamp: Long)
 
     private val cache = ConcurrentHashMap<String, Cached>()
 
+    /** The settings the cache was filled under. */
     @Volatile
-    private var preferredRpcIndex: Int = 0
+    private var cachedUnder: Settings? = null
+
+    /**
+     * When each endpoint last failed. An endpoint that failed within
+     * [FAILED_ENDPOINT_COOLDOWN_MS] is tried after the others, so a
+     * provider outage costs one timeout rather than one per lookup,
+     * while the configured order comes back once it has passed.
+     */
+    private val failedAt = ConcurrentHashMap<String, Long>()
 
     /**
      * Resolve [rawName] (e.g. `swarm.eth`) to a content-addressed URI.
@@ -85,6 +110,19 @@ class EnsResolver internal constructor(
             return EnsResult.Error(name = "", reason = "INVALID_NAME", error = "empty name")
         }
 
+        val config = settings()
+        if (config != cachedUnder) {
+            // Answers from endpoints the user has since dropped (or got
+            // with CCIP-Read on) must not outlive the change by the
+            // cache TTL.
+            cache.clear()
+            failedAt.clear()
+            cachedUnder = config
+        }
+        if (config.endpoints.isEmpty()) {
+            return EnsResult.Error(normalized, "NO_RPC_ENDPOINTS", "no RPC endpoints configured")
+        }
+
         cache[normalized]?.let {
             if (System.currentTimeMillis() - it.timestamp < CACHE_TTL_MS) {
                 return it.result
@@ -101,19 +139,21 @@ class EnsResolver internal constructor(
         }
 
         var lastError: EnsResult.Error? = null
-        val total = rpcEndpoints.size
-        // Try each endpoint up to MAX_RETRIES times, starting at the one
-        // that last worked. Rotates on failure so persistent provider
-        // outages fall through to the next one quickly.
-        for (attempt in 0 until total) {
-            val idx = (preferredRpcIndex + attempt) % total
-            val rpc = rpcEndpoints[idx]
+        // Each endpoint once, in the configured order — except that the
+        // ones that failed recently go last (see [failedAt]).
+        val now = System.currentTimeMillis()
+        val order = config.endpoints.sortedBy { rpc ->
+            if (failedAt[rpc]?.let { now - it < FAILED_ENDPOINT_COOLDOWN_MS } == true) 1 else 0
+        }
+        for (rpc in order) {
             val rpcResult = runCatchingCancellable {
                 withContext(Dispatchers.IO) { ethCall(rpc, target, callData) }
             }
             if (rpcResult.isFailure) {
                 val err = rpcResult.exceptionOrNull()!!
-                Log.w(TAG, "[$normalized] rpc=$rpc failed: ${err.message}")
+                failedAt[rpc] = System.currentTimeMillis()
+                // Keyed endpoints carry the API key in their path.
+                Log.w(TAG, "[$normalized] rpc=${EnsRpcConfig.redact(rpc)} failed: ${err.message}")
                 lastError = EnsResult.Error(
                     name = normalized,
                     reason = "PROVIDER_ERROR",
@@ -127,6 +167,17 @@ class EnsResolver internal constructor(
             // CCIP-Read is a Universal Resolver affair; a NameNFT
             // registry is called directly and never defers offchain.
             if (contract == null && call.revertData != null && isOffchainLookup(call.revertData)) {
+                failedAt.remove(rpc)
+                if (!config.ccipRead) {
+                    // Following it would tell a third-party gateway the
+                    // name; the user has said no. Not retryable, and
+                    // not cached, so turning it back on works at once.
+                    return EnsResult.Error(
+                        name = normalized,
+                        reason = "CCIP_DISABLED",
+                        error = "name needs an off-chain lookup (CCIP-Read), which is off",
+                    )
+                }
                 // Offchain resolver: run the CCIP-Read loop against the
                 // same RPC. Gateway failures are retryable transport
                 // errors, not "no such name", and aren't cached.
@@ -150,7 +201,7 @@ class EnsResolver internal constructor(
             if (call.revertData != null) {
                 val mapped = if (contract == null) mapRevert(normalized, call.revertData) else null
                 if (mapped != null) {
-                    preferredRpcIndex = idx
+                    failedAt.remove(rpc)
                     return cacheAndReturn(normalized, mapped)
                 }
                 lastError = EnsResult.Error(
@@ -171,7 +222,7 @@ class EnsResolver internal constructor(
                 continue
             }
 
-            preferredRpcIndex = idx
+            failedAt.remove(rpc)
             val decoded = if (contract != null) {
                 // The registry's own `contenthash(bytes32)` return: the
                 // ABI `bytes` the UR would have wrapped in its tuple.
@@ -491,6 +542,7 @@ class EnsResolver internal constructor(
     companion object {
         private const val TAG = "EnsResolver"
         private const val CACHE_TTL_MS = 15L * 60 * 1000
+        private const val FAILED_ENDPOINT_COOLDOWN_MS = 10L * 60 * 1000
 
         private const val RPC_TIMEOUT_MS = 15_000
         private const val RPC_MAX_RESPONSE_BYTES = 1L * 1024 * 1024
@@ -544,13 +596,7 @@ class EnsResolver internal constructor(
         // bytes4(keccak256("contenthash(bytes32)"))
         private val CONTENTHASH_SELECTOR = "bc1c58d1".hexToBytes()
 
-        val DEFAULT_RPC_ENDPOINTS: List<String> = listOf(
-            "https://ethereum.publicnode.com",
-            "https://1rpc.io/eth",
-            "https://eth.drpc.org",
-            "https://eth-mainnet.public.blastapi.io",
-            "https://eth.merkle.io",
-        )
+        val DEFAULT_RPC_ENDPOINTS: List<String> = EnsRpcConfig.PUBLIC_ENDPOINTS
 
         // ---- helpers used by both the instance and tests ----
 

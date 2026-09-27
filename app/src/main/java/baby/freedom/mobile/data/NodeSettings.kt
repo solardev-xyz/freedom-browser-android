@@ -6,8 +6,10 @@ import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
+import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import baby.freedom.mobile.browser.SearchEngines
+import baby.freedom.mobile.ens.EnsRpcConfig
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 
@@ -37,6 +39,15 @@ import kotlinx.coroutines.flow.map
  * it has passed [baby.freedom.mobile.browser.SearchEngines.normalizeTemplate].
  * [searchTemplate] resolves the pair to the template the address bar
  * searches with.
+ *
+ * ## Name resolution keys (#102)
+ *
+ * `ens_rpc_custom_endpoints` (JSON array of URLs, each passed
+ * [EnsRpcConfig.normalizeEndpoint]), `ens_rpc_disabled_public` (the
+ * built-in public endpoints switched off), `ens_rpc_api_keys` (JSON
+ * object, keyed-provider id → API key) and `ens_ccip_read`. Read
+ * together as [ensRpcConfig]; the resolver reads that for every lookup,
+ * so edits apply without a restart.
  *
  * There is no persistent "run IPFS" flag by design. The IPFS node is
  * always off at cold launch (demo-surprise requirement) and driven
@@ -144,6 +155,82 @@ class NodeSettings private constructor(
         return true
     }
 
+    /** Everything name resolution reads, as one value (see class kdoc). */
+    val ensRpcConfig: Flow<EnsRpcConfig> = store.data.map(::readEnsRpc)
+
+    private fun readEnsRpc(prefs: Preferences) = EnsRpcConfig(
+        customEndpoints = EnsRpcConfig.decodeList(prefs[Keys.ENS_RPC_CUSTOM]),
+        disabledPublicEndpoints = prefs[Keys.ENS_RPC_DISABLED_PUBLIC].orEmpty(),
+        apiKeys = EnsRpcConfig.decodeKeys(prefs[Keys.ENS_RPC_API_KEYS]),
+        ccipRead = prefs[Keys.ENS_CCIP_READ] ?: true,
+    )
+
+    private suspend fun editEnsRpc(change: (EnsRpcConfig) -> EnsRpcConfig) {
+        store.edit { prefs ->
+            val next = change(readEnsRpc(prefs))
+            // Never write a configuration that leaves the resolver
+            // nothing to ask; the page greys those controls out, this
+            // is the backstop.
+            if (next.endpoints.isEmpty()) return@edit
+            prefs[Keys.ENS_RPC_CUSTOM] = EnsRpcConfig.encodeList(next.customEndpoints)
+            prefs[Keys.ENS_RPC_DISABLED_PUBLIC] = next.disabledPublicEndpoints
+            prefs[Keys.ENS_RPC_API_KEYS] = EnsRpcConfig.encodeKeys(next.apiKeys)
+            prefs[Keys.ENS_CCIP_READ] = next.ccipRead
+        }
+    }
+
+    /**
+     * Add [url] to the user's own endpoints (after the ones already
+     * there). `false`, changing nothing, if it isn't a valid endpoint,
+     * is already listed, or the list is full.
+     */
+    suspend fun addEnsRpcEndpoint(url: String): Boolean {
+        val normalized = EnsRpcConfig.normalizeEndpoint(url) ?: return false
+        var added = false
+        editEnsRpc { c ->
+            if (normalized in c.customEndpoints ||
+                c.customEndpoints.size >= EnsRpcConfig.MAX_CUSTOM_ENDPOINTS
+            ) {
+                c
+            } else {
+                added = true
+                c.copy(customEndpoints = c.customEndpoints + normalized)
+            }
+        }
+        return added
+    }
+
+    suspend fun removeEnsRpcEndpoint(url: String) =
+        editEnsRpc { it.copy(customEndpoints = it.customEndpoints - url) }
+
+    /** Move one of the user's endpoints up (-1) or down (+1) the order. */
+    suspend fun moveEnsRpcEndpoint(url: String, by: Int) = editEnsRpc { c ->
+        val list = c.customEndpoints.toMutableList()
+        val from = list.indexOf(url)
+        val to = from + by
+        if (from < 0 || to !in list.indices) return@editEnsRpc c
+        list.add(to, list.removeAt(from))
+        c.copy(customEndpoints = list)
+    }
+
+    suspend fun setPublicEnsRpcEnabled(url: String, enabled: Boolean) = editEnsRpc { c ->
+        c.copy(
+            disabledPublicEndpoints = if (enabled) {
+                c.disabledPublicEndpoints - url
+            } else {
+                c.disabledPublicEndpoints + url
+            },
+        )
+    }
+
+    /** Save (or, with a blank [key], remove) a keyed provider's API key. */
+    suspend fun setRpcApiKey(providerId: String, key: String) = editEnsRpc { c ->
+        val trimmed = key.trim()
+        c.copy(apiKeys = if (trimmed.isEmpty()) c.apiKeys - providerId else c.apiKeys + (providerId to trimmed))
+    }
+
+    suspend fun setEnsCcipRead(enabled: Boolean) = editEnsRpc { it.copy(ccipRead = enabled) }
+
     private object Keys {
         val RUN_NODE_ENABLED = booleanPreferencesKey("run_node_enabled")
         val SHOW_IPFS_UI = booleanPreferencesKey("show_ipfs_ui")
@@ -151,6 +238,10 @@ class NodeSettings private constructor(
         val IPFS_ROUTING_MODE = stringPreferencesKey("ipfs_routing_mode")
         val SEARCH_ENGINE = stringPreferencesKey("search_engine")
         val SEARCH_CUSTOM_TEMPLATE = stringPreferencesKey("search_custom_template")
+        val ENS_RPC_CUSTOM = stringPreferencesKey("ens_rpc_custom_endpoints")
+        val ENS_RPC_DISABLED_PUBLIC = stringSetPreferencesKey("ens_rpc_disabled_public")
+        val ENS_RPC_API_KEYS = stringPreferencesKey("ens_rpc_api_keys")
+        val ENS_CCIP_READ = booleanPreferencesKey("ens_ccip_read")
     }
 
     companion object {

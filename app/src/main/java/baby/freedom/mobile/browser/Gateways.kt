@@ -2,6 +2,7 @@ package baby.freedom.mobile.browser
 
 import baby.freedom.mobile.ens.EnsResolver
 import baby.freedom.mobile.ens.EnsResult
+import baby.freedom.mobile.ens.EnsRpcConfig
 import baby.freedom.swarm.SwarmNode
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
@@ -51,11 +52,20 @@ object Gateways {
     }
 
     /**
+     * The name-resolution settings (#102), read by [ensResolver] for
+     * every lookup. `MainActivity` points this at the persisted
+     * settings on start; until then (and in unit tests) it's the
+     * defaults.
+     */
+    @Volatile
+    var ensRpcConfig: suspend () -> EnsRpcConfig = { EnsRpcConfig() }
+
+    /**
      * Shared ENS resolver. One instance so the submit flow and the
      * request interceptor (which resolves `<name>.ens.…` hosts) share
      * a cache and never disagree mid-session.
      */
-    val ensResolver: EnsResolver by lazy { EnsResolver() }
+    val ensResolver: EnsResolver by lazy { EnsResolver { ensRpcConfig().resolverSettings } }
 
     /**
      * Blocking ENS lookup used by the request interceptor. A seam so the

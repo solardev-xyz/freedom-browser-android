@@ -113,6 +113,9 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         settings = NodeSettings.get(this)
+        // Name resolution reads the user's RPC settings for every
+        // lookup, so a change in Settings applies to the next name.
+        Gateways.ensRpcConfig = { settings.ensRpcConfig.first() }
 
         // Honor the persisted preference on cold start. If the user had
         // the node enabled, start + bind right away; otherwise leave

@@ -73,6 +73,7 @@ import androidx.compose.ui.unit.dp
 import baby.freedom.mobile.R
 import baby.freedom.mobile.data.BrowsingRepository
 import baby.freedom.mobile.data.NodeSettings
+import baby.freedom.mobile.ens.EnsRpcConfig
 import baby.freedom.swarm.IpfsInfo
 import baby.freedom.swarm.IpfsStatus
 import kotlinx.coroutines.flow.drop
@@ -86,6 +87,10 @@ import kotlinx.coroutines.launch
  *
  *  0. **Search** — the address bar's search engine: the desktop set
  *     ([SearchEngines.BUILT_IN]) or a custom template (#87).
+ *  0a. **Name resolution** and **RPC providers** — the resolution
+ *     order, CCIP-Read, and the endpoints names resolve through: your
+ *     own, keyed providers, the public ones (#102; see
+ *     [NameResolutionSection]).
  *  1. **Browsing data** — wipe history, bookmarks, and WebView cookies /
  *     site storage / per-tab caches. Each action is guarded by a
  *     confirmation dialog.
@@ -130,6 +135,7 @@ fun SettingsScreen(
         .collectAsState(initial = SearchEngines.DEFAULT_ID)
     val customSearchTemplate by settings.customSearchTemplate.collectAsState(initial = "")
     var pickSearchEngine by remember { mutableStateOf(false) }
+    val ensRpcConfig by settings.ensRpcConfig.collectAsState(initial = EnsRpcConfig())
 
     var confirmClearHistory by remember { mutableStateOf(false) }
     var confirmClearBookmarks by remember { mutableStateOf(false) }
@@ -148,6 +154,8 @@ fun SettingsScreen(
     val searchRows = visibleSettingsRows(
         query, SECTION_SEARCH, searchSectionRows(searchEngine, customSearchTemplate),
     )
+    val ensRows = visibleSettingsRows(query, SECTION_ENS, ensSectionRows(ensRpcConfig))
+    val rpcRows = visibleSettingsRows(query, SECTION_RPC, rpcSectionRows(ensRpcConfig))
     val browsingRows = visibleSettingsRows(
         query, SECTION_BROWSING, browsingDataRows(history.size, bookmarks.size),
     )
@@ -162,7 +170,7 @@ fun SettingsScreen(
         visibleSettingsRows(query, SECTION_IPFS, ipfsRows(ipfsInfo))
     } else emptySet()
     val nothingMatches = listOf(
-        searchRows, browsingRows, permissionRows, aboutRows, otherRows, ipfsRows,
+        searchRows, ensRows, rpcRows, browsingRows, permissionRows, aboutRows, otherRows, ipfsRows,
     ).all { it.isEmpty() }
 
     // A new query starts the results from the top, so the first match
@@ -192,6 +200,20 @@ fun SettingsScreen(
                         engineId = searchEngine,
                         customTemplate = customSearchTemplate,
                         onClick = { pickSearchEngine = true },
+                    )
+                }
+                if (ensRows.isNotEmpty()) item("ens") {
+                    NameResolutionSection(
+                        visible = ensRows,
+                        config = ensRpcConfig,
+                        settings = settings,
+                    )
+                }
+                if (rpcRows.isNotEmpty()) item("rpc") {
+                    RpcProvidersSection(
+                        visible = rpcRows,
+                        config = ensRpcConfig,
+                        settings = settings,
                     )
                 }
                 if (browsingRows.isNotEmpty()) item("browsing") {
