@@ -212,11 +212,39 @@ class ThemeColorTest {
     @Test
     fun `a written blank page reads once per burst of frames, and frames after a read read again`() {
         val reads = BlankPageReads()
-        assertTrue(reads.drawn())      // first frame: schedule a read
-        assertFalse(reads.drawn())     // frames before it runs are covered by it
-        assertFalse(reads.drawn())
+        assertEquals(BLANK_PAGE_READ_MS, reads.drawn()) // first frame: schedule a read
+        assertNull(reads.drawn())      // frames before it runs are covered by it
+        assertNull(reads.drawn())
         reads.fired()                  // it runs (whether or not it ever answers)…
-        assertTrue(reads.drawn())      // …and a later frame schedules the next
-        assertFalse(reads.drawn())
+        assertEquals(BLANK_PAGE_READ_MS, reads.drawn()) // …and a later frame schedules the next
+        assertNull(reads.drawn())
+    }
+
+    @Test
+    fun `an animating written page with an unchanging colour is read a bounded number of times`() {
+        val reads = BlankPageReads()
+        val red = 0xFFFF0000.toInt()
+        var count = 0
+        var waited = 0L
+        // A frame every 16 ms for ten minutes; each read answers red.
+        for (frame in 0 until 10 * 60 * 60) {
+            val delay = reads.drawn() ?: continue
+            count++
+            waited += delay
+            reads.fired()
+            reads.answered(red)
+        }
+        assertEquals(1 + BLANK_PAGE_MAX_UNCHANGED, count)
+        assertNull(reads.drawn())
+        // A change resets the back-off (e.g. the first answer after a new write).
+        val r2 = BlankPageReads()
+        r2.drawn(); r2.fired(); r2.answered(red)
+        r2.drawn(); r2.fired(); r2.answered(red)
+        assertEquals(BLANK_PAGE_READ_MS * 2, r2.drawn())
+        r2.fired(); r2.answered(0xFF0000FF.toInt())
+        assertEquals(BLANK_PAGE_READ_MS, r2.drawn())
+        // A new document starts over.
+        reads.reset()
+        assertEquals(BLANK_PAGE_READ_MS, reads.drawn())
     }
 }

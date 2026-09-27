@@ -41,6 +41,17 @@ import kotlin.math.pow
  * Nothing is written to the page: no node is inserted, the canvas is
  * never attached, and there is no global or listener of ours left
  * behind. Deliberately total — any exception reads as "no theme colour".
+ *
+ * **Only a fallback.** Evaluated after the page's scripts have run, it
+ * calls whatever `createElement`, `querySelectorAll`, `matchMedia`… the
+ * page has left in place, so a page that wraps them sees each read. So a
+ * document that has the bottom-nav detector (every http(s) main-frame
+ * document, when the WebView has the two features it needs) is read by
+ * the detector instead, with the same rules but through functions it
+ * saved at document start ([bottomUiDetectorJs], [themeColorRequest]).
+ * This script reads only what has no detector: a popup's blank page its
+ * opener writes into (whose opener, a same-origin script, can see that
+ * document anyway), other schemes, a WebView without those features.
  */
 internal const val THEME_COLOR_JS = """
 (function () {
@@ -171,33 +182,72 @@ internal class ThemeColorSlot {
     fun accept(token: Int): Boolean = token == generation
 }
 
-/** How long a popup's written blank page's frames wait for their theme-colour read. */
+/** How long a popup's written blank page's frames wait for their theme-colour read, at first. */
 internal const val BLANK_PAGE_READ_MS = 250L
+
+/**
+ * Unchanged reads in a row after which a written blank page's frames stop
+ * asking. With the wait doubling after each one, that is 7 reads in all
+ * over about 16 s of drawing, then none.
+ */
+internal const val BLANK_PAGE_MAX_UNCHANGED = 6
 
 /**
  * Paces the theme-colour reads of a popup's blank page, which its opener
  * writes into without any navigation callback, so a drawn frame is the
  * only sign it changed (see `onBlankPageDrawn`). A frame schedules a read
- * [BLANK_PAGE_READ_MS] out unless one is already scheduled, which then
- * covers it; frames after the read went schedule the next. So the last
- * change is always read, a static page stops asking, and a read that
- * never answers (one sent before the popup's first document can run
- * script) holds nothing up.
+ * unless one is already scheduled, which then covers it; frames after the
+ * read went schedule the next. So a change is read, a static page stops
+ * asking, and a read that never answers (one sent before the popup's
+ * first document can run script) holds nothing up.
  *
- * Single-threaded: draws and posted reads are all on the UI thread.
+ * Frames are not changes, though: a page that animates (a spinner, a CSS
+ * transition) draws for as long as it is on screen. So the wait starts at
+ * [BLANK_PAGE_READ_MS] and doubles with every read that answers the same
+ * as the one before, and after [BLANK_PAGE_MAX_UNCHANGED] of those in a
+ * row the frames stop asking; a read that answers something new starts
+ * over at the short wait. An animating page is read a bounded number of
+ * times, not four times a second for as long as it is open; the price is
+ * that a colour it changes long after its last change isn't seen.
+ *
+ * Single-threaded: draws, posted reads and their answers are all on the UI thread.
  */
 internal class BlankPageReads {
     private var scheduled = false
+    private var unchanged = 0
+    private var answered = false
+    private var last: Int? = null
 
-    /** A frame was drawn. `true`: schedule a read, and call [fired] when it runs. */
-    fun drawn(): Boolean {
-        if (scheduled) return false
+    /**
+     * A frame was drawn. Non-null: schedule a read that many ms out, and
+     * call [fired] when it runs; `null`: nothing to do.
+     */
+    fun drawn(): Long? {
+        if (scheduled || unchanged >= BLANK_PAGE_MAX_UNCHANGED) return null
         scheduled = true
-        return true
+        return BLANK_PAGE_READ_MS shl unchanged
     }
 
     /** The scheduled read is running: frames from now on need another. */
     fun fired() {
         scheduled = false
+    }
+
+    /** A read answered [argb] (`null`: no theme colour). */
+    fun answered(argb: Int?) {
+        if (answered && argb == last) {
+            unchanged++
+        } else {
+            unchanged = 0
+            last = argb
+            answered = true
+        }
+    }
+
+    /** A new document: forget the old one's answers. */
+    fun reset() {
+        unchanged = 0
+        answered = false
+        last = null
     }
 }

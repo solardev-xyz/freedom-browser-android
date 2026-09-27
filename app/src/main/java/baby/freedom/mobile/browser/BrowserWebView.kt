@@ -968,42 +968,6 @@ private fun buildRefreshableWebView(
         }
     }
 
-    // The page's theme colour behind the status bar (#92). Read at first
-    // paint, when the load finishes (a tag a script adds late) and on a
-    // same-document history change (an SPA route with its own colour),
-    // and whenever the detector sees a `<meta>` change (a route that sets
-    // its colour only after its data arrives, [THEME_COLOR_PING_PREFIX]);
-    // each read is stamped with its document and gated on that document
-    // having painted, so the outgoing page can't answer for the incoming
-    // one (see [ThemeColorSlot]).
-    val themeColor = ThemeColorSlot()
-
-    fun readThemeColor(view: WebView?, onScreen: Boolean = false) {
-        view ?: return
-        val token = themeColor.beginRead(onScreen) ?: return
-        view.evaluateJavascript(THEME_COLOR_JS) { result ->
-            if (themeColor.accept(token)) state.themeColorArgb = themeColorArgb(result)
-        }
-    }
-
-    // A popup's blank document is the page's own while [BrowserState.blankIsPage]
-    // holds, and its opener can write a whole page into it
-    // (`window.open('')` + `document.write`) — which gets no navigation
-    // callback at all, not even `onPageCommitVisible` (verified on the
-    // AVD), and no detector either (#92). So while that document is the
-    // one on screen, the frames it draws ask for a read, at most one per
-    // [BLANK_PAGE_READ_MS] ([BlankPageReads]).
-    val blankPageReads = BlankPageReads()
-
-    fun onBlankPageDrawn(view: WebView) {
-        if (!state.blankIsPage || state.url != ABOUT_BLANK) return
-        if (!blankPageReads.drawn()) return
-        view.postDelayed({
-            blankPageReads.fired()
-            if (state.blankIsPage && state.url == ABOUT_BLANK) readThemeColor(view, onScreen = true)
-        }, BLANK_PAGE_READ_MS)
-    }
-
     // Reserved mode (#66): does the document on screen have its own
     // bottom navigation the capsule would cover? [BottomChromeSlot] holds
     // the per-document token and the hysteresis; the page side is the
@@ -1037,6 +1001,83 @@ private fun buildRefreshableWebView(
         val token = bottomChrome.token ?: return
         val request = bottomUiProbeRequest(token)
         for (reply in targets) runCatching { reply.postMessage(request) }
+    }
+
+    /**
+     * Does the document at [url] answer theme-colour asks itself? Only
+     * where its detector is running and heard: http(s) (the only origins
+     * the listener takes), past the detector's start.
+     */
+    fun themeColorFromDetector(url: String?): Boolean {
+        if (!bottomUiSupported || !bottomChrome.installed || !bottomUiApplies(url)) return false
+        val u = url!!.lowercase()
+        return u.startsWith("https://") || u.startsWith("http://")
+    }
+
+    /** Ask the current document's detector for its theme colour (#92). */
+    fun postThemeColorRequest(targets: List<JavaScriptReplyProxy> = bottomUiChannels.targets) {
+        val token = bottomChrome.token ?: return
+        val request = themeColorRequest(token)
+        for (reply in targets) runCatching { reply.postMessage(request) }
+    }
+
+    // The page's theme colour behind the status bar (#92). Read at first
+    // paint, when the load finishes (a tag a script adds late) and on a
+    // same-document history change (an SPA route with its own colour),
+    // and whenever the detector sees a `<meta>` change (a route that sets
+    // its colour only after its data arrives, [THEME_COLOR_PREFIX]);
+    // each read is stamped with its document and gated on that document
+    // having painted, so the outgoing page can't answer for the incoming
+    // one (see [ThemeColorSlot]).
+    val themeColor = ThemeColorSlot()
+
+    /**
+     * Read the theme colour of the document on screen. A document whose
+     * detector is running is asked through its channel: the detector
+     * reads with functions it saved at document start, so the page
+     * can't see the read, and its answer is tagged with the document's
+     * token. Anything else falls back to [THEME_COLOR_JS], which the
+     * page can see; [onAnswer] hears only such an answer.
+     */
+    fun readThemeColor(view: WebView?, onScreen: Boolean = false, onAnswer: ((Int?) -> Unit)? = null) {
+        view ?: return
+        val token = themeColor.beginRead(onScreen) ?: return
+        if (themeColorFromDetector(view.url)) {
+            // The detector's answer lands through the painted gate;
+            // `onScreen` vouches for this document the same way.
+            if (onScreen) themeColor.painted()
+            postThemeColorRequest()
+            return
+        }
+        view.evaluateJavascript(THEME_COLOR_JS) { result ->
+            if (themeColor.accept(token)) {
+                val argb = themeColorArgb(result)
+                state.themeColorArgb = argb
+                onAnswer?.invoke(argb)
+            }
+        }
+    }
+
+    // A popup's blank document is the page's own while [BrowserState.blankIsPage]
+    // holds, and its opener can write a whole page into it
+    // (`window.open('')` + `document.write`) — which gets no navigation
+    // callback at all, not even `onPageCommitVisible` (verified on the
+    // AVD), and no detector either (#92). So while that document is the
+    // one on screen, the frames it draws ask for a read, at most one per
+    // [BLANK_PAGE_READ_MS], backing off while the answer stays the same
+    // so an animating page isn't re-read for as long as it is open
+    // ([BlankPageReads]).
+    val blankPageReads = BlankPageReads()
+
+    fun onBlankPageDrawn(view: WebView) {
+        if (!state.blankIsPage || state.url != ABOUT_BLANK) return
+        val delayMs = blankPageReads.drawn() ?: return
+        view.postDelayed({
+            blankPageReads.fired()
+            if (state.blankIsPage && state.url == ABOUT_BLANK) {
+                readThemeColor(view, onScreen = true, onAnswer = blankPageReads::answered)
+            }
+        }, delayMs)
     }
 
     /**
@@ -1657,15 +1698,22 @@ private fun buildRefreshableWebView(
                     // document's own late ready (see [BottomUiChannels]);
                     // otherwise it waits for its document's first paint.
                     if (!isMainFrame) return@WebMessageListener
-                    postBottomUiProbe(bottomUiChannels.onReady(replyProxy, bottomChrome.installed))
+                    val starts = bottomUiChannels.onReady(replyProxy, bottomChrome.installed)
+                    postBottomUiProbe(starts)
+                    // The theme-colour ask sent at first paint had no
+                    // channel to go to yet: ask again with the start (#92).
+                    if (starts.isNotEmpty() && themeColor.beginRead() != null) postThemeColorRequest(starts)
                     return@WebMessageListener
                 }
-                // A `<meta>` changed in the current document (#92): an
-                // SPA route that sets its theme colour only after its
-                // data arrives, well after `doUpdateVisitedHistory`'s
-                // read. [readThemeColor] still gates on that document.
-                if (isThemeColorPing(message.data, isMainFrame, bottomChrome.token)) {
-                    readThemeColor(view)
+                // The current document's theme colour (#92): the answer
+                // to [readThemeColor]'s ask, or sent unasked when a
+                // `<meta>` changed (an SPA route that sets its colour
+                // only after its data arrives, well after
+                // `doUpdateVisitedHistory`'s read). Only for the current
+                // token, and only once that document has painted.
+                val theme = parseThemeColorReport(message.data, isMainFrame, bottomChrome.token)
+                if (theme != null) {
+                    if (themeColor.beginRead() != null) state.themeColorArgb = theme.argb
                     return@WebMessageListener
                 }
                 val report = parseBottomUiMessage(message.data, isMainFrame, bottomChrome.token)
@@ -1824,6 +1872,7 @@ private fun buildRefreshableWebView(
                 // outgoing page keeps its tint until then, as it keeps
                 // the screen (#92).
                 themeColor.startDocument()
+                blankPageReads.reset()
                 // …and at full height again: a reveal belongs to the
                 // document it was pushed on (#65).
                 cancelReveal()

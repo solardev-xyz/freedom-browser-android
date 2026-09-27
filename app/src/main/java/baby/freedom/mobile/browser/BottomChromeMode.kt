@@ -404,21 +404,35 @@ internal const val CONTEXT_MENU_ALLOWED = "contextmenu 1"
 internal const val CONTEXT_MENU_KEPT = "contextmenu 0"
 
 /**
- * What the detector posts, followed by the current document's token,
- * when a mutation touched a `<meta>` (added, removed, or its `content` /
- * `media` / `name` changed) or swapped a `<head>`: the page's theme
- * colour may have changed, so Kotlin reads it again (#92). A ping only —
- * the colour itself is read by [THEME_COLOR_JS].
+ * The prefix of the detector's theme-colour messages (#92), both ways:
+ * Kotlin asks with [themeColorRequest], and the detector answers
+ * `theme <token> <colour>` — `rgb(r, g, b)` or `none` — to that ask and,
+ * unasked, whenever a mutation touched a `<meta>` (added, removed, or its
+ * `content` / `media` / `name` changed) or swapped a `<head>`. See
+ * [parseThemeColorReport].
  */
-internal const val THEME_COLOR_PING_PREFIX = "theme "
+internal const val THEME_COLOR_PREFIX = "theme "
+
+/** What Kotlin sends through the channel to ask the detector for the theme colour. */
+internal fun themeColorRequest(token: String): String = THEME_COLOR_PREFIX + token
+
+/** One validated theme-colour answer: [argb] is the opaque colour, or `null` for none. */
+internal data class ThemeColorReport(val argb: Int?)
 
 /**
- * Is [data] the current document's [THEME_COLOR_PING_PREFIX] ping? Main
- * frame only, and only with [expectedToken] (another document's ping, or
- * one sent before Kotlin's first probe request, is dropped).
+ * Validate a detector theme-colour message for the document
+ * [expectedToken]: exactly `theme <token> none` or `theme <token>
+ * rgb(r, g, b)` ([parseRgb]'s form), main frame only. Anything else —
+ * another document's token, no token yet, another shape — is `null`.
  */
-internal fun isThemeColorPing(data: String?, isMainFrame: Boolean, expectedToken: String?): Boolean =
-    isMainFrame && expectedToken != null && data == THEME_COLOR_PING_PREFIX + expectedToken
+internal fun parseThemeColorReport(data: String?, isMainFrame: Boolean, expectedToken: String?): ThemeColorReport? {
+    if (!isMainFrame || data == null || expectedToken == null || data.length > 128) return null
+    val head = THEME_COLOR_PREFIX + expectedToken + " "
+    if (!data.startsWith(head)) return null
+    val value = data.substring(head.length)
+    if (value == "none") return ThemeColorReport(null)
+    return parseRgb(value)?.let(::ThemeColorReport)
+}
 
 /** What Kotlin sends back through the channel to ask for a fresh, reported probe. */
 internal fun bottomUiProbeRequest(token: String): String = "probe $token"
@@ -510,12 +524,23 @@ internal fun bottomUiProbeRequest(token: String): String = "probe $token"
  * wasn't there at install, the `MutationObserver` is attached on the
  * document's next `readystatechange` (which also probes).
  *
- * **Theme colour** (#92). The same `MutationObserver` also watches
+ * **Theme colour** (#92). Read here, not by an injected script, so the
+ * page can't watch it being read: the read ([THEME_COLOR_JS]'s rules)
+ * goes only through functions saved at document start, before any page
+ * script could replace them — `querySelectorAll`, `getAttribute`,
+ * `matchMedia` and `MediaQueryList.matches`, `createElement`,
+ * `getContext`, the 2D context's `fillStyle` accessor, `clearRect`,
+ * `fillRect`, `getImageData` and `ImageData.data`, `NodeList.length`,
+ * `RegExp.prototype.exec`, `parseInt`/`parseFloat`/`Math.round` — each
+ * called through a `Function.prototype.call` bound at document start, so
+ * a page that wraps any of them (or `call` itself) sees nothing. Kotlin
+ * asks with [themeColorRequest]; a started detector answers an ask with
+ * its own token only. The same `MutationObserver` also watches
  * `content`, `media` and `name`; a batch that touched a `<meta>` (or a
  * `<head>`) marks the theme colour dirty, and the next debounced run
- * posts a [THEME_COLOR_PING_PREFIX] ping with the token, so a route that
- * sets its `theme-color` after a data fetch (react-helmet, Next.js, Vue's
- * `useHead`) is still read. The ping carries no colour; Kotlin reads it.
+ * sends the colour unasked, so a route that sets its `theme-color` after
+ * a data fetch (react-helmet, Next.js, Vue's `useHead`) is still read.
+ * The probe's own `theme-color` fallback for the strip uses the same read.
  *
  * **Reporting.** Only when the answer (flag, colour) changes, or when
  * Kotlin asked. Nothing is written to the page: no DOM node, attribute,
@@ -525,8 +550,9 @@ internal fun bottomUiProbeRequest(token: String): String = "probe $token"
  * **Not invisible once started.** The probe and the start still call
  * DOM methods the page can replace: `addEventListener`,
  * `MutationObserver.prototype.observe`, `elementFromPoint`,
- * `querySelectorAll`, `getComputedStyle`. The detector only saves the
- * constructors and `getComputedStyle` at document start. A page that
+ * `querySelector`, `getBoundingClientRect`. For those the detector only
+ * saves the constructors and `getComputedStyle` at document start (the
+ * theme-colour read saves all of its own, see above). A page that
  * wraps these methods before first paint can see the detector's calls,
  * and the listener it registers (whose source it can read). What stays
  * hidden is the channel object, and with it any way to talk to Kotlin.
@@ -545,40 +571,81 @@ internal fun bottomUiDetectorJs(channel: String, debounceMs: Int = BOTTOM_UI_DEB
     setT(function () { port.postMessage(e.defaultPrevented ? '$CONTEXT_MENU_KEPT' : '$CONTEXT_MENU_ALLOWED'); }, 0);
   }, true);
   if (w.top !== w) return;
-  var T = null, started = false, ASK = /^probe ([0-9a-f]{1,64})$/, SEL = 'a, button, [role="button"], [role="tab"], [role="link"]';
+  var T = null, started = false, ASK = /^probe ([0-9a-f]{1,64})$/, THEME_ASK = /^theme ([0-9a-f]{1,64})$/, SEL = 'a, button, [role="button"], [role="tab"], [role="link"]';
   var gcs = w.getComputedStyle, MO = w.MutationObserver,
       RO = w.ResizeObserver, IO = w.IntersectionObserver, str = JSON.stringify;
   var timer = 0, last = null, owed = false, mo = null, watched = null, ro = null, io = null, fullW = -1, fullH = 0, ctx = null,
       metaDirty = false;
-  var RGBA = /^rgba?\(\s*([\d.]+)[\s,]+([\d.]+)[\s,]+([\d.]+)\s*(?:[,\/]\s*([\d.]+)(%?)\s*)?\)$/;
+  // The theme-colour read's natives, saved before the page runs (#92):
+  // un(f)(o, …) is f.call(o, …) through a `call` bound now, so neither a
+  // wrapped method nor a wrapped `Function.prototype.call` sees a read.
+  var tc = null;
+  try {
+    var fcall = Function.prototype.call, fbind = Function.prototype.bind, gopd = Object.getOwnPropertyDescriptor;
+    var un = function (f) { return typeof f === 'function' ? fbind.call(fcall, f) : null; };
+    var method = function (proto, n) {
+      return (proto && un(proto[n])) || function (o, a, b, c, e) { return o[n](a, b, c, e); };
+    };
+    var prop = function (proto, n, set) {
+      var x = proto && gopd(proto, n), f = x && un(set ? x.set : x.get);
+      return f || (set ? function (o, v) { o[n] = v; } : function (o) { return o[n]; });
+    };
+    var C2 = w.CanvasRenderingContext2D && w.CanvasRenderingContext2D.prototype;
+    tc = {
+      qsa: un(d.querySelectorAll), mkEl: un(d.createElement),
+      attr: method(w.Element && w.Element.prototype, 'getAttribute'),
+      len: prop(w.NodeList && w.NodeList.prototype, 'length'),
+      mm: un(w.matchMedia), mqMatches: prop(w.MediaQueryList && w.MediaQueryList.prototype, 'matches'),
+      getCtx: method(w.HTMLCanvasElement && w.HTMLCanvasElement.prototype, 'getContext'),
+      getFS: prop(C2, 'fillStyle'), setFS: prop(C2, 'fillStyle', true),
+      clear: method(C2, 'clearRect'), fill: method(C2, 'fillRect'), pixels: method(C2, 'getImageData'),
+      data: prop(w.ImageData && w.ImageData.prototype, 'data'),
+      exec: un(RegExp.prototype.exec), pInt: w.parseInt, pFloat: w.parseFloat, round: Math.round
+    };
+  } catch (e) { tc = null; }
+  // Without them there is no theme-colour read; the probe still runs.
+  var live = !tc;
+  if (live) tc = { exec: function (r, s) { return r.exec(s); }, pFloat: w.parseFloat, round: Math.round };
+  var RGBA = /^rgba?\(\s*([\d.]+)[\s,]+([\d.]+)[\s,]+([\d.]+)\s*(?:[,\/]\s*([\d.]+)(%?)\s*)?\)$/,
+      HEX = /^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i, CURRENT = /currentcolor/i;
+  function rgb(r, g, b) { return 'rgb(' + r + ', ' + g + ', ' + b + ')'; }
   function paint(c) {
-    var m = RGBA.exec(c || '');
+    var m = tc.exec(RGBA, c || '');
     if (!m) return null;
-    if (m[4] !== undefined && parseFloat(m[4]) === 0) return null;
-    return 'rgb(' + Math.round(+m[1]) + ', ' + Math.round(+m[2]) + ', ' + Math.round(+m[3]) + ')';
+    if (m[4] !== undefined && tc.pFloat(m[4]) === 0) return null;
+    return rgb(tc.round(+m[1]), tc.round(+m[2]), tc.round(+m[3]));
   }
   function norm(c) {
-    if (!c) return null;
+    if (!c || tc.exec(CURRENT, c)) return null;
     var p = paint(c);
     if (p) return p;
     try {
-      if (!ctx) ctx = d.createElement('canvas').getContext('2d');
-      ctx.fillStyle = '#000'; ctx.fillStyle = c; var a = ctx.fillStyle;
-      ctx.fillStyle = '#fff'; ctx.fillStyle = c; if (ctx.fillStyle !== a) return null;
-      var h = /^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(a);
-      return h ? 'rgb(' + parseInt(h[1], 16) + ', ' + parseInt(h[2], 16) + ', ' + parseInt(h[3], 16) + ')' : paint(a);
+      if (!ctx) ctx = tc.getCtx(tc.mkEl(d, 'canvas'), '2d');
+      tc.setFS(ctx, '#000'); tc.setFS(ctx, c); var a = tc.getFS(ctx);
+      tc.setFS(ctx, '#fff'); tc.setFS(ctx, c); if (tc.getFS(ctx) !== a) return null;
+      var h = tc.exec(HEX, a);
+      if (h) return rgb(tc.pInt(h[1], 16), tc.pInt(h[2], 16), tc.pInt(h[3], 16));
+      p = paint(a);
+      if (p || tc.exec(RGBA, a)) return p;
+      tc.clear(ctx, 0, 0, 1, 1); tc.fill(ctx, 0, 0, 1, 1);
+      var px = tc.data(tc.pixels(ctx, 0, 0, 1, 1));
+      return px[3] ? rgb(px[0], px[1], px[2]) : null;
     } catch (e) { return null; }
   }
   function themeColor() {
-    var ms = d.querySelectorAll('meta[name="theme-color" i]');
-    for (var i = 0; i < ms.length; i++) {
-      var q = ms[i].getAttribute('media');
-      if (q && !(w.matchMedia && w.matchMedia(q).matches)) continue;
-      var c = norm(ms[i].getAttribute('content'));
-      if (c) return c;
-    }
+    if (live) return null;
+    try {
+      var ms = tc.qsa(d, 'meta[name="theme-color" i]'), n = tc.len(ms);
+      for (var i = 0; i < n; i++) {
+        var q = tc.attr(ms[i], 'media');
+        if (q && !(tc.mm && tc.mqMatches(tc.mm(w, q)))) continue;
+        var c = norm(tc.attr(ms[i], 'content'));
+        if (c) return c;
+      }
+    } catch (e) {}
     return null;
   }
+  function reportTheme() { port.postMessage('$THEME_COLOR_PREFIX' + T + ' ' + (themeColor() || 'none')); }
   function pinned(n) {
     for (; n && n !== d.documentElement; n = n.parentElement) {
       var p = gcs(n).position;
@@ -615,7 +682,7 @@ internal fun bottomUiDetectorJs(channel: String, debounceMs: Int = BOTTOM_UI_DEB
   }
   function run(force) {
     timer = 0;
-    if (metaDirty) { metaDirty = false; port.postMessage('$THEME_COLOR_PING_PREFIX' + T); }
+    if (metaDirty) { metaDirty = false; reportTheme(); }
     var p = null;
     try { p = probe(); } catch (e) {}
     if (!p) { if (force) owed = true; return; }
@@ -651,8 +718,12 @@ internal fun bottomUiDetectorJs(channel: String, debounceMs: Int = BOTTOM_UI_DEB
     attach();
   }
   port.addEventListener('message', function (e) {
-    var m = e && typeof e.data === 'string' ? ASK.exec(e.data) : null;
-    if (!m) return;
+    var m = e && typeof e.data === 'string' ? tc.exec(ASK, e.data) : null;
+    if (!m) {
+      var t = e && typeof e.data === 'string' ? tc.exec(THEME_ASK, e.data) : null;
+      if (t && started && t[1] === T) reportTheme();
+      return;
+    }
     if (m[1] !== T) { T = m[1]; last = null; }
     if (!started) start();
     run(true);
