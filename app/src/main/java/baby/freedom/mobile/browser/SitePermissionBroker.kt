@@ -164,10 +164,15 @@ class SitePermissionBroker private constructor(
         withdraw(tab.id) { true }
     }
 
-    /** The tab is gone. */
+    /**
+     * The tab is gone. Its requests are withdrawn (which alone keeps
+     * them from landing), and its bookkeeping dropped so a long session
+     * doesn't accumulate an entry per tab ever opened.
+     */
     fun onTabClosed(tabId: Long) {
-        documents[tabId] = (documents[tabId] ?: 0) + 1
         withdraw(tabId) { true }
+        documents.remove(tabId)
+        tabLocks.remove(tabId)
     }
 
     // ---------------------------------------------------------------
@@ -219,6 +224,9 @@ class SitePermissionBroker private constructor(
                 .onFailure { Log.w(TAG, "answering permission request failed", it) }
         }
         scope.launch {
+            // Withdrawn before it got going (e.g. the tab closed): don't
+            // re-create the closed tab's lock.
+            if (!live()) return@launch finish(false)
             val lock = tabLocks.getOrPut(tab.id) { Mutex() }
             val siteAllowed = lock.withLock {
                 if (!live()) return@withLock false
@@ -235,7 +243,7 @@ class SitePermissionBroker private constructor(
                 }
             }
             if (!siteAllowed || !live()) return@launch finish(false)
-            finish(ensureAndroidPermissions(permissions))
+            finish(ensureAndroidPermissions(permissions, ::live))
         }
     }
 
@@ -278,22 +286,38 @@ class SitePermissionBroker private constructor(
         decision: PermissionDecision,
         remember: Boolean,
     ) {
+        // The session tier takes the decision at once, so a same-origin
+        // request from another tab (whose own lock doesn't wait for this
+        // one) sees it while the store write is still in flight; a
+        // remembered decision only leaves the session tier once the
+        // store holds it.
+        for (p in permissions) session.record(origin, p, decision, remembered = false)
+        if (!remember) return
+        for (p in permissions) store.set(origin, p.key, decision.stored)
         for (p in permissions) {
-            session.record(origin, p, decision, remembered = remember)
-            if (remember) store.set(origin, p.key, decision.stored)
+            // Unless the user revoked or re-decided it meanwhile.
+            if (session.decisionFor(origin, p) == decision) {
+                session.record(origin, p, decision, remembered = true)
+            }
         }
     }
 
     /**
      * The site is allowed; make sure the app is too. Asks Android only
-     * for what's missing, one system dialog at a time.
+     * for what's missing, one system dialog at a time — and not at all
+     * for a request that was withdrawn while it queued for the dialog
+     * ([live] false), which is denied without a word.
      */
-    private suspend fun ensureAndroidPermissions(permissions: List<SitePermission>): Boolean {
+    private suspend fun ensureAndroidPermissions(
+        permissions: List<SitePermission>,
+        live: () -> Boolean,
+    ): Boolean {
         fun held(p: SitePermission) = p.androidPermissions.any {
             ContextCompat.checkSelfPermission(appContext, it) == PackageManager.PERMISSION_GRANTED
         }
         if (permissions.all(::held)) return true
         val missing = androidDialogLock.withLock {
+            if (!live()) return false
             val before = permissions.filterNot(::held)
             if (before.isEmpty()) return@withLock before
             val launch = requestAndroidPermissions ?: return@withLock before
@@ -302,7 +326,7 @@ class SitePermissionBroker private constructor(
             permissions.filterNot(::held)
         }
         if (missing.isEmpty()) return true
-        onAndroidPermissionMissing?.invoke(missing)
+        if (live()) onAndroidPermissionMissing?.invoke(missing)
         return false
     }
 

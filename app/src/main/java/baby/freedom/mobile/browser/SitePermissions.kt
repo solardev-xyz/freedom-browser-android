@@ -265,3 +265,57 @@ class PermissionSession {
         const val DISMISS_EMBARGO_THRESHOLD = 3
     }
 }
+
+/**
+ * Tap protection for the permission prompt. A page chooses *when* its
+ * prompt appears (it calls `getUserMedia()` / `getCurrentPosition()`),
+ * so it can ask the user to double-tap where Allow is about to render
+ * and have the second tap land on the prompt. Like Chrome's permission
+ * dialogs, the prompt ignores its buttons until it has been on screen
+ * for [PROTECTION_MS]: long enough that a tap aimed at the page before
+ * it appeared can't reach it, short enough that nobody reading it
+ * notices.
+ *
+ * [clock] is a monotonic millisecond clock (`SystemClock.uptimeMillis`).
+ */
+class PromptTapGuard(private val clock: () -> Long) {
+    private var shownAt: Long? = null
+
+    /** The prompt's first frame is on screen; start the protection period. */
+    fun onShown() {
+        if (shownAt == null) shownAt = clock()
+    }
+
+    /** Whether a button press now is a deliberate answer. */
+    fun accepts(): Boolean {
+        val shown = shownAt ?: return false
+        return clock() - shown >= PROTECTION_MS
+    }
+
+    /** Milliseconds until [accepts] turns true (0 once it has). */
+    fun remainingMs(): Long {
+        val shown = shownAt ?: return PROTECTION_MS
+        return (PROTECTION_MS - (clock() - shown)).coerceAtLeast(0)
+    }
+
+    companion object {
+        const val PROTECTION_MS = 500L
+    }
+}
+
+/**
+ * Whether Android will refuse [permission] without showing its dialog,
+ * so the only way left is the app's system settings — the one case the
+ * "Turn it on in Android settings" snackbar is for.
+ *
+ * Android has no direct query for this. After a refusal,
+ * `shouldShowRequestPermissionRationale` is true when the user denied
+ * once and a new request would ask again; it is false both when the
+ * user has denied for good *and* when the dialog was merely backed out
+ * of before ever being answered. The two false cases are told apart by
+ * [deniedBefore]: a permanent denial is always preceded by a denial
+ * that set the rationale flag (Android 11+ needs two denials; older
+ * versions only offer "Don't ask again" on the second request).
+ */
+fun androidPermissionBlockedInSettings(rationale: Boolean, deniedBefore: Boolean): Boolean =
+    !rationale && deniedBefore

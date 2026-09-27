@@ -126,4 +126,34 @@ class SitePermissionsTest {
         s.record(o, SitePermission.CAMERA, PermissionDecision.ALLOW, remembered = true)
         assertTrue(s.entries().isEmpty())
     }
+
+    @Test
+    fun `prompt buttons ignore taps until it has been on screen for the protection period`() {
+        var now = 1_000L
+        val g = PromptTapGuard { now }
+        // Not yet drawn: a tap can only have been aimed at the page.
+        assertFalse(g.accepts())
+        g.onShown()
+        assertFalse(g.accepts())
+        now += PromptTapGuard.PROTECTION_MS - 1
+        assertFalse(g.accepts())
+        assertEquals(1L, g.remainingMs())
+        now += 1
+        assertTrue(g.accepts())
+        assertEquals(0L, g.remainingMs())
+        // A later recomposition's onShown doesn't restart the clock.
+        g.onShown()
+        assertTrue(g.accepts())
+    }
+
+    @Test
+    fun `settings snackbar only for a permission Android won't ask for again`() {
+        // First refusal: a re-request shows the dialog again.
+        assertFalse(androidPermissionBlockedInSettings(rationale = true, deniedBefore = false))
+        assertFalse(androidPermissionBlockedInSettings(rationale = true, deniedBefore = true))
+        // Dialog backed out of before ever being answered.
+        assertFalse(androidPermissionBlockedInSettings(rationale = false, deniedBefore = false))
+        // Denied for good.
+        assertTrue(androidPermissionBlockedInSettings(rationale = false, deniedBefore = true))
+    }
 }
