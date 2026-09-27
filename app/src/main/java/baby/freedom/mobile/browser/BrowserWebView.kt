@@ -1708,8 +1708,10 @@ private fun buildRefreshableWebView(
                 return true
             }
 
-            // `window.close()` from a window this browser opened for a
-            // page (Chromium only lets script close those): drop its tab.
+            // `window.close()` from script. Chromium doesn't only allow
+            // this for windows a page opened — it also honours it in a
+            // tab with a single history entry — so the real gate is
+            // `TabsState.closePopup`, which ignores tabs with no opener.
             override fun onCloseWindow(window: WebView?) {
                 onCloseWindow()
             }
