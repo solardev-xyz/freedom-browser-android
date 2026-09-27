@@ -74,12 +74,12 @@ internal class FileChooser(private val context: Context) {
         // the earlier page's input wedged.
         cancelPending()
 
-        val mimeTypes = mimeTypesForAccept(params.acceptTypes) { ext ->
+        val accept = parseAccept(params.acceptTypes) { ext ->
             MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext)
         }
         val multiple = params.mode == FileChooserParams.MODE_OPEN_MULTIPLE
 
-        val capture = captureKindFor(params.isCaptureEnabled, mimeTypes)
+        val capture = captureKindFor(params.isCaptureEnabled, accept)
         if (capture != null) {
             val started = runCatching { launchCapture(launcher, callback, capture) }
                 .onFailure { Log.w(LOG_TAG, "camera capture unavailable, using picker", it) }
@@ -87,7 +87,7 @@ internal class FileChooser(private val context: Context) {
             if (started) return true
         }
 
-        val picker = pickerIntent(mimeTypes, multiple)
+        val picker = pickerIntent(accept.pickerTypes, multiple)
         pending = Pending(callback, multiple, captureFile = null, captureUri = null)
         return try {
             launcher.launch(picker)
@@ -271,44 +271,65 @@ internal fun rememberFileChooser(): FileChooser {
 internal enum class CaptureKind { IMAGE, VIDEO }
 
 /**
- * MIME types for an `accept` attribute, as WebView hands it over in
+ * An `accept` attribute, as WebView hands it over in
  * [FileChooserParams.getAcceptTypes] (the attribute split on commas —
  * entries may carry whitespace, be empty, or be file extensions like
- * `.pdf`). Extensions are mapped through [extensionToMime]; if any
- * can't be mapped (e.g. `.gpx`), the result widens to "anything" —
- * filtering to only the mappable types would hide files the page
- * explicitly accepts. An empty result means "anything".
+ * `.pdf`), parsed with extensions mapped through `extensionToMime`.
+ *
+ * [named] is every MIME type the attribute names that we could map;
+ * [unmapped] is whether some extension (e.g. `.gpx`) couldn't be.
  */
-internal fun mimeTypesForAccept(
+internal class AcceptTypes(val named: List<String>, val unmapped: Boolean) {
+    /** No restriction at all: no `accept`, or a wildcard in it. */
+    val anything: Boolean get() = (named.isEmpty() && !unmapped) || "*/*" in named
+
+    /**
+     * The picker filter (empty = anything). An unmappable extension
+     * widens it to anything — filtering to only the mappable types
+     * would hide files the page explicitly accepts.
+     */
+    val pickerTypes: List<String> get() = if (anything || unmapped) emptyList() else named
+}
+
+internal fun parseAccept(
     acceptTypes: Array<String>?,
     extensionToMime: (String) -> String?,
-): List<String> {
-    if (acceptTypes == null) return emptyList()
+): AcceptTypes {
+    if (acceptTypes == null) return AcceptTypes(emptyList(), unmapped = false)
     val out = LinkedHashSet<String>()
+    var unmapped = false
     for (raw in acceptTypes.flatMap { it.split(',') }) {
         val entry = raw.trim().lowercase()
         when {
             entry.isEmpty() -> Unit
             entry.startsWith('.') ->
-                out += extensionToMime(entry.substring(1)) ?: return emptyList()
+                extensionToMime(entry.substring(1))?.let { out += it } ?: run { unmapped = true }
             entry.contains('/') -> out += entry
         }
     }
-    // A wildcard anywhere accepts everything.
-    return if ("*/*" in out) emptyList() else out.toList()
+    return AcceptTypes(out.toList(), unmapped)
 }
+
+/** The picker's MIME filter for an `accept` attribute; see [AcceptTypes.pickerTypes]. */
+internal fun mimeTypesForAccept(
+    acceptTypes: Array<String>?,
+    extensionToMime: (String) -> String?,
+): List<String> = parseAccept(acceptTypes, extensionToMime).pickerTypes
 
 /**
  * What the camera should record for an input with `capture`, or null
  * to use the document picker instead (no `capture`, or an `accept`
  * the camera can't produce, e.g. `capture accept="application/pdf"`).
- * Images win when the input accepts both, matching Chrome.
+ * Decided on the types the page actually names, not on the widened
+ * picker filter: `accept="application/pdf,.xyz"` widens the picker to
+ * anything but still names nothing a camera makes. Images win when
+ * the input accepts both, matching Chrome.
  */
-internal fun captureKindFor(captureEnabled: Boolean, mimeTypes: List<String>): CaptureKind? {
+internal fun captureKindFor(captureEnabled: Boolean, accept: AcceptTypes): CaptureKind? {
     if (!captureEnabled) return null
-    if (mimeTypes.isEmpty()) return CaptureKind.IMAGE
-    if (mimeTypes.any { it.startsWith("image/") }) return CaptureKind.IMAGE
-    if (mimeTypes.any { it.startsWith("video/") }) return CaptureKind.VIDEO
+    if (accept.anything) return CaptureKind.IMAGE
+    if (accept.named.any { it.startsWith("image/") }) return CaptureKind.IMAGE
+    if (accept.named.any { it.startsWith("video/") }) return CaptureKind.VIDEO
     return null
 }
 

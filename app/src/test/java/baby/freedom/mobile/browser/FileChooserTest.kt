@@ -36,14 +36,30 @@ class FileChooserTest {
         assertEquals(emptyList<String>(), mimes("image/*", "*/*"))
     }
 
+    private fun camera(capture: Boolean, vararg accept: String) =
+        captureKindFor(capture, parseAccept(arrayOf(*accept)) { ext[it] })
+
     @Test fun `camera only for capture inputs the camera can satisfy`() {
-        assertNull(captureKindFor(false, listOf("image/*")))
-        assertEquals(CaptureKind.IMAGE, captureKindFor(true, emptyList()))
-        assertEquals(CaptureKind.IMAGE, captureKindFor(true, listOf("image/jpeg")))
-        assertEquals(CaptureKind.IMAGE, captureKindFor(true, listOf("video/*", "image/*")))
-        assertEquals(CaptureKind.VIDEO, captureKindFor(true, listOf("video/mp4")))
-        assertNull(captureKindFor(true, listOf("application/pdf")))
-        assertNull(captureKindFor(true, listOf("audio/*")))
+        assertNull(camera(false, "image/*"))
+        assertEquals(CaptureKind.IMAGE, captureKindFor(true, parseAccept(null) { null }))
+        assertEquals(CaptureKind.IMAGE, camera(true, ""))
+        assertEquals(CaptureKind.IMAGE, camera(true, "image/jpeg"))
+        assertEquals(CaptureKind.IMAGE, camera(true, ".jpg"))
+        assertEquals(CaptureKind.IMAGE, camera(true, "video/*", "image/*"))
+        assertEquals(CaptureKind.IMAGE, camera(true, "application/pdf", "*/*"))
+        assertEquals(CaptureKind.VIDEO, camera(true, "video/mp4"))
+        assertNull(camera(true, "application/pdf"))
+        assertNull(camera(true, "audio/*"))
+    }
+
+    @Test fun `an unmappable extension widens the picker but never opens the camera by itself`() {
+        // Picker is widened to anything...
+        assertEquals(emptyList<String>(), mimes("application/pdf", ".xyz"))
+        // ...but the camera still only opens for types the page names.
+        assertNull(camera(true, "application/pdf", ".xyz"))
+        assertNull(camera(true, ".xyz"))
+        assertEquals(CaptureKind.IMAGE, camera(true, ".xyz", "image/*"))
+        assertEquals(CaptureKind.VIDEO, camera(true, ".xyz", "video/*"))
     }
 
     private val own = setOf("baby.freedom.mobile.files", "baby.freedom.mobile.androidx-startup")
