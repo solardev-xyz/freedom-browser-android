@@ -3,7 +3,6 @@ package baby.freedom.mobile.browser
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.update
 import java.util.concurrent.atomic.AtomicLong
 
 /** Most downloads that can wait for an answer at once; later ones are dropped. */
@@ -18,6 +17,13 @@ internal const val MAX_PENDING_OFFERS = 10
  */
 class DownloadOffer internal constructor(
     val key: Long,
+    /** The tab ([BrowserState.id]) whose page asked; only that tab shows it. */
+    val tabId: Long,
+    /**
+     * The origin of the page that asked (`https://example.com`), shown as
+     * "Requested by"; null for an address the user submitted themselves.
+     */
+    val requestedBy: String?,
     /** The name the file will most likely get (the server may still rename it). */
     val fileName: String,
     /** Where it comes from, as the downloads list shows it. */
@@ -31,22 +37,45 @@ class DownloadOffer internal constructor(
  * The offers waiting for an answer, oldest first. At most
  * [MAX_PENDING_OFFERS]: a page firing downloads in a loop can't queue
  * an endless line of prompts (or hold its `data:` payloads in memory).
+ *
+ * The prompt is modal, so a page that keeps firing downloads could
+ * otherwise re-raise it as fast as it's answered and hold the whole
+ * browser behind it. So a *no* to a page's offer blocks that tab: every
+ * further download a page in it asks for is dropped unasked, until the
+ * user navigates the tab themselves ([allow]: a submitted address or a
+ * reload) or closes it ([retainTabs]). Offers that were already waiting
+ * from that tab go with the no. A download of an address the user
+ * submitted (no [DownloadOffer.requestedBy]) is theirs, never blocked.
  */
 internal class DownloadOffers {
     private val nextKey = AtomicLong(1)
     private val _pending = MutableStateFlow<List<DownloadOffer>>(emptyList())
     val pending: StateFlow<List<DownloadOffer>> = _pending.asStateFlow()
+    private val blockedTabs = mutableSetOf<Long>()
 
-    /** Queue an offer. False when the queue is full and it was dropped. */
-    fun offer(fileName: String, source: String, totalBytes: Long, start: () -> Unit): Boolean {
-        val offer = DownloadOffer(nextKey.getAndIncrement(), fileName, source, totalBytes, start)
-        var added = false
-        _pending.update { current ->
-            added = current.size < MAX_PENDING_OFFERS
-            if (added) current + offer else current
+    /**
+     * Queue an offer from [tabId]'s page [requestedBy]. False when it was
+     * dropped: the tab is blocked, or the queue is full.
+     */
+    fun offer(
+        tabId: Long,
+        requestedBy: String?,
+        fileName: String,
+        source: String,
+        totalBytes: Long,
+        start: () -> Unit,
+    ): Boolean {
+        val offer = DownloadOffer(nextKey.getAndIncrement(), tabId, requestedBy, fileName, source, totalBytes, start)
+        synchronized(this) {
+            if (requestedBy != null && tabId in blockedTabs) return false
+            if (_pending.value.size >= MAX_PENDING_OFFERS) return false
+            _pending.value = _pending.value + offer
+            return true
         }
-        return added
     }
+
+    /** Whether [tabId]'s pages may currently ask. */
+    fun isBlocked(tabId: Long): Boolean = synchronized(this) { tabId in blockedTabs }
 
     /**
      * The user said yes to [key]: it leaves the queue and starts. Only
@@ -57,22 +86,46 @@ internal class DownloadOffers {
         take(key)?.start?.invoke()
     }
 
-    /** The user said no to [key]: it goes, nothing is fetched. */
-    fun decline(key: Long) {
-        take(key)
+    /**
+     * The user said no to [key]: it goes, nothing is fetched, and if a
+     * page asked, its tab's pages can't ask again (nor can the other
+     * offers they left waiting) until [allow].
+     */
+    fun decline(key: Long) = synchronized(this) {
+        val offer = take(key) ?: return@synchronized
+        if (offer.requestedBy != null) block(offer.tabId)
     }
 
-    /** No to every offer waiting. */
-    fun declineAll() {
-        _pending.value = emptyList()
+    /** No to every offer [tabId] has waiting, and block it like [decline]. */
+    fun declineAll(tabId: Long) = synchronized(this) {
+        val mine = _pending.value.filter { it.tabId == tabId }
+        _pending.value = _pending.value - mine.toSet()
+        if (mine.any { it.requestedBy != null }) block(tabId)
     }
 
-    private fun take(key: Long): DownloadOffer? {
-        var taken: DownloadOffer? = null
-        _pending.update { current ->
-            taken = current.firstOrNull { it.key == key }
-            if (taken == null) current else current.filterNot { it.key == key }
-        }
-        return taken
+    /** The user navigated [tabId] themselves: its pages may ask again. */
+    fun allow(tabId: Long) = synchronized(this) {
+        blockedTabs.remove(tabId)
+        Unit
+    }
+
+    /**
+     * Only [tabIds] are open: offers and blocks of any other tab go (a
+     * closed tab, or a screen that's been rebuilt with new tabs).
+     */
+    fun retainTabs(tabIds: Set<Long>) = synchronized(this) {
+        blockedTabs.retainAll(tabIds)
+        _pending.value = _pending.value.filter { it.tabId in tabIds }
+    }
+
+    private fun block(tabId: Long) {
+        blockedTabs += tabId
+        _pending.value = _pending.value.filterNot { it.tabId == tabId && it.requestedBy != null }
+    }
+
+    private fun take(key: Long): DownloadOffer? = synchronized(this) {
+        val taken = _pending.value.firstOrNull { it.key == key } ?: return@synchronized null
+        _pending.value = _pending.value.filterNot { it.key == key }
+        taken
     }
 }

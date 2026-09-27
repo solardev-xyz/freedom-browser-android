@@ -31,8 +31,11 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -41,6 +44,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import baby.freedom.mobile.data.DownloadEntry
 import baby.freedom.mobile.data.DownloadStatus
+import kotlinx.coroutines.delay
 import java.text.DateFormat
 import java.util.Date
 
@@ -215,10 +219,24 @@ internal fun downloadOfferSizeLine(totalBytes: Long): String =
     if (totalBytes > 0) formatBytes(totalBytes) else "Size unknown"
 
 /**
+ * How long each offer's Download button stays disabled after it
+ * appears — the same input-protection delay Firefox puts on its
+ * download and permission dialogs (`security.dialog_enable_delay`,
+ * 1 s). A page chooses when the prompt appears, so without it the page
+ * could fire a download just before a tap it has coaxed out of the
+ * user (a "tap here fast" game with Download under the finger) and have
+ * that tap say yes.
+ */
+internal const val DOWNLOAD_OFFER_ARM_DELAY_MS = 1_000L
+
+/**
  * "Download file?" for a download a page asked for (#79): its name,
- * size and source, with Download / Cancel. Dismissing it declines —
- * nothing is saved without an explicit yes. When a page has asked for
- * more, they wait behind this one and can all be declined at once.
+ * size and source, the page that asked, with Download / Cancel.
+ * Dismissing it declines — nothing is saved without an explicit yes —
+ * and a no also stops that tab's pages asking again until the user
+ * navigates it ([DownloadOffers]). When a page has asked for more, they
+ * wait behind this one and can all be declined at once. Download is
+ * armed only [DOWNLOAD_OFFER_ARM_DELAY_MS] after each offer appears.
  */
 @Composable
 internal fun DownloadOfferDialog(
@@ -228,6 +246,14 @@ internal fun DownloadOfferDialog(
     onDecline: () -> Unit,
     onDeclineAll: () -> Unit,
 ) {
+    // Keyed on the offer: the next one in line re-arms, so a page
+    // can't line a second prompt up under a tap meant for the first.
+    var armed by remember(offer.key) { mutableStateOf(false) }
+    LaunchedEffect(offer.key) {
+        delay(DOWNLOAD_OFFER_ARM_DELAY_MS)
+        armed = true
+    }
+    val secondary = MaterialTheme.colorScheme.onSurfaceVariant
     AlertDialog(
         onDismissRequest = onDecline,
         title = { Text("Download file?") },
@@ -237,20 +263,32 @@ internal fun DownloadOfferDialog(
                 Text(downloadOfferSizeLine(offer.totalBytes))
                 Text(
                     "From ${offer.source}",
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    color = secondary,
                     style = MaterialTheme.typography.bodySmall,
                 )
+                offer.requestedBy?.let { page ->
+                    Text(
+                        "Requested by $page",
+                        color = secondary,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    Text(
+                        "Cancel also blocks further downloads from this tab until you reload it or enter an address.",
+                        color = secondary,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
                 if (othersWaiting > 0) {
                     Text(
                         if (othersWaiting == 1) "1 more download waiting" else "$othersWaiting more downloads waiting",
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        color = secondary,
                         style = MaterialTheme.typography.bodySmall,
                     )
                 }
             }
         },
         confirmButton = {
-            TextButton(onClick = onAccept) { Text("Download") }
+            TextButton(onClick = onAccept, enabled = armed) { Text("Download") }
         },
         dismissButton = {
             Row {

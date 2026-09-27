@@ -1250,14 +1250,19 @@ private fun buildRefreshableWebView(
                 downloadIsNavigationResponse = wasPending || url == state.addressBarText,
             )
             DownloadManager.get(context).start(
+                tabId = state.id,
                 url = url,
                 userAgent = userAgent,
                 contentDisposition = contentDisposition,
                 mimeType = mimeType,
                 contentLength = contentLength,
                 // An address the user submitted has no referrer — the
-                // page on screen had nothing to do with it.
-                pageUrl = if (endsTypedNavigation) null else this.url,
+                // page on screen had nothing to do with it. Anything else
+                // a page asked for, even with no URL to show ("" — the
+                // prompt then says "a page"): null would pass it off as
+                // the user's own request, which a declined tab still
+                // lets through.
+                pageUrl = if (endsTypedNavigation) null else (this.url ?: ""),
             )
             if (endsTypedNavigation) {
                 state.stopProgress()

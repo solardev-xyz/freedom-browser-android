@@ -61,6 +61,16 @@ private const val PROGRESS_INTERVAL_MS = 200L
 private val DWEB_RETRY_DELAYS_MS = longArrayOf(0, 500, 1_000, 2_000, 3_000, 5_000, 8_000, 10_000, 15_000)
 private val DWEB_TRANSIENT_STATUSES = setOf(404, 500, 502, 503, 504)
 
+/**
+ * Whether a dweb attempt that failed before the response headers (a
+ * reset, a read timeout) gets another try. A reset is quick and cold
+ * nodes do it, so it retries like a 404. A read timeout already cost a
+ * whole `readTimeout` (60 s): retrying those would stretch the ~45 s
+ * budget to ~10 min, so the first one ends the download
+ * ("Gateway didn't answer").
+ */
+internal fun dwebHeaderFailureRetries(e: IOException): Boolean = e !is java.net.SocketTimeoutException
+
 private const val MAX_REDIRECTS = 8
 
 /**
@@ -164,16 +174,19 @@ class DownloadManager private constructor(context: Context) {
 
     /**
      * Offer to download [url] — the arguments of
-     * `DownloadListener.onDownloadStart`, plus the page the download
-     * came from ([pageUrl]; null for a navigation the user started,
-     * which has no referrer). Only [pageUrl]'s origin is kept, for a
-     * same-origin Referer ([downloadReferer]).
+     * `DownloadListener.onDownloadStart`, plus the tab it came from
+     * ([tabId], a [BrowserState.id]) and the page ([pageUrl]; null for
+     * a navigation the user started, which has no referrer). Only
+     * [pageUrl]'s origin is kept, for a same-origin Referer
+     * ([downloadReferer]) and to say who asked.
      *
      * Nothing is fetched yet: the listener fires for script-initiated
      * downloads too, with no tap, so the download waits in [offers]
-     * until the user accepts it.
+     * until the user accepts it — unless the tab is blocked (see
+     * [DownloadOffers]), when it's dropped unasked.
      */
     fun start(
+        tabId: Long,
         url: String,
         userAgent: String?,
         contentDisposition: String?,
@@ -184,10 +197,14 @@ class DownloadManager private constructor(context: Context) {
         val target = classifyDownloadUrl(url, Gateways::isLocalGateway, Gateways::toDisplay)
         val name = downloadFileName(contentDisposition, url, normalizeMime(mimeType), ::extensionForMime)
         val refererOrigin = downloadRefererOrigin(pageUrl)
-        val queued = offerQueue.offer(name, target.displayUrl, contentLength.coerceAtLeast(-1)) {
+        // Who asked, as the prompt names them. A page with no usable
+        // origin (`data:`, `about:blank`) still asked: it's named by
+        // its scheme rather than passed off as the user's own request.
+        val requestedBy = downloadRequester(pageUrl, Gateways::toDisplay)
+        val queued = offerQueue.offer(tabId, requestedBy, name, target.displayUrl, contentLength.coerceAtLeast(-1)) {
             enqueue(url, userAgent, contentDisposition, mimeType, contentLength, refererOrigin)
         }
-        if (!queued) Log.i(LOG_TAG, "download offer dropped, ${MAX_PENDING_OFFERS} already waiting")
+        if (!queued) Log.i(LOG_TAG, "download offer dropped (tab blocked or ${MAX_PENDING_OFFERS} waiting)")
     }
 
     /** The user wants [DownloadOffer.key]'s file: start it. */
@@ -196,8 +213,14 @@ class DownloadManager private constructor(context: Context) {
     /** The user doesn't want [DownloadOffer.key]'s file. */
     fun decline(key: Long) = offerQueue.decline(key)
 
-    /** Decline every offer waiting. */
-    fun declineAll() = offerQueue.declineAll()
+    /** Decline every offer [tabId] has waiting. */
+    fun declineAll(tabId: Long) = offerQueue.declineAll(tabId)
+
+    /** The user navigated [tabId] themselves: its pages may offer downloads again. */
+    fun allowOffers(tabId: Long) = offerQueue.allow(tabId)
+
+    /** Only [tabIds] are open; offers and blocks of other tabs go. */
+    fun retainOfferTabs(tabIds: Set<Long>) = offerQueue.retainTabs(tabIds)
 
     private fun enqueue(
         url: String,
@@ -528,8 +551,11 @@ class DownloadManager private constructor(context: Context) {
                 continue
             }
             // The header wait is part of the attempt: a cold node that
-            // accepts the connection and then stalls (read timeout) or
-            // resets gets the rest of the retry budget, like a 404.
+            // accepts the connection and then resets gets the rest of
+            // the retry budget, like a 404. A read timeout doesn't: that
+            // attempt alone already waited a full [readTimeout], twice
+            // the node's own retrieval timeout, and nine of those would
+            // hold the row at 0 B for ~10 min (see [dwebHeaderFailureRetries]).
             val status = try {
                 conn.connect()
                 conn.responseCode
@@ -540,6 +566,7 @@ class DownloadManager private constructor(context: Context) {
                 conn.disconnect()
                 currentCoroutineContext().ensureActive()
                 Log.i(LOG_TAG, "dweb download attempt failed: $gatewayUrl", e)
+                if (!dwebHeaderFailureRetries(e)) break
                 continue
             }
             if (status in 200..299) return bodyOf(conn, nameUrl)

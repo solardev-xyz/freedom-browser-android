@@ -657,6 +657,11 @@ fun BrowserScreen(
             addressBarEdited = false
         }
 
+        // The user navigating the tab themselves (an address, a reload)
+        // lifts a download block a declined offer left on it
+        // ([DownloadOffers]); a page's own navigation doesn't.
+        if (source == SubmitSource.User) downloads.allowOffers(target.id)
+
         // Any new submit supersedes a probe that was still in flight on
         // this tab — otherwise switching URL mid-probe would let the
         // stale probe decide the navigation.
@@ -1421,16 +1426,26 @@ fun BrowserScreen(
 
     // Nothing a page asks to download is saved without a yes here: the
     // listener fires for script-driven downloads too, with no tap.
+    // Only the tab in view asks — a background tab's offers wait until
+    // the user switches to it — and a no blocks that tab's pages from
+    // asking again until the user navigates it ([DownloadOffers]), so a
+    // page firing downloads in a loop can't hold the browser behind
+    // this modal prompt.
     val downloadOffers by downloads.offers.collectAsState()
-    downloadOffers.firstOrNull()?.let { offer ->
+    val activeTabId = tabs.active.id
+    val tabOffers = downloadOffers.filter { it.tabId == activeTabId }
+    tabOffers.firstOrNull()?.let { offer ->
         DownloadOfferDialog(
             offer = offer,
-            othersWaiting = downloadOffers.size - 1,
+            othersWaiting = tabOffers.size - 1,
             onAccept = { downloads.accept(offer.key) },
             onDecline = { downloads.decline(offer.key) },
-            onDeclineAll = { downloads.declineAll() },
+            onDeclineAll = { downloads.declineAll(activeTabId) },
         )
     }
+    // A closed tab's offers (and block) go with it.
+    val openTabIds = tabs.tabs.map { it.id }.toSet()
+    LaunchedEffect(openTabIds) { downloads.retainOfferTabs(openTabIds) }
 
     if (showDownloads) {
         DownloadsScreen(

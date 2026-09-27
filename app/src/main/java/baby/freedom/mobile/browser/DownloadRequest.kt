@@ -306,6 +306,27 @@ internal fun downloadReferer(refererOrigin: String?, requestUrl: String): String
     return if (originOf(requestUrl) == origin) "$origin/" else null
 }
 
+/**
+ * Who asked for a download, as the prompt names them: the origin of
+ * the page ([pageUrl]) — its dweb root (`bzz://<hash>`, `name.eth`) for
+ * a page on a virtual origin or the gateway ([gatewayDisplay] is
+ * `Gateways.toDisplay`), `scheme://host[:port]` for a web page, and
+ * just the scheme (`data:`) for a page with no host. Null when there's
+ * no page: an address the user submitted.
+ */
+internal fun downloadRequester(pageUrl: String?, gatewayDisplay: (String) -> String = { it }): String? {
+    if (pageUrl == null) return null
+    val display = gatewayDisplay(pageUrl)
+    if (display != pageUrl) {
+        val rest = display.substringAfter("://", display)
+        val prefix = display.removeSuffix(rest)
+        return prefix + rest.substringBefore('/').substringBefore('?').substringBefore('#')
+    }
+    originOf(pageUrl)?.let { return it }
+    val scheme = pageUrl.substringBefore(':', "").lowercase()
+    return if (scheme.isNotEmpty() && scheme.all { it.isLetterOrDigit() || it in "+-." }) "$scheme:" else "a page"
+}
+
 /** `scheme://host[:port]` of an http(s) URL, default port dropped; null otherwise. */
 private fun originOf(url: String): String? {
     val uri = runCatching { java.net.URI(url) }.getOrNull() ?: return null

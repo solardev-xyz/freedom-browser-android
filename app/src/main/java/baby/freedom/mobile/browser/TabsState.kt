@@ -23,8 +23,6 @@ import java.util.concurrent.atomic.AtomicLong
 class TabsState(
     private val homepage: String,
 ) {
-    private val idSeq = AtomicLong(0L)
-
     val tabs: MutableList<BrowserState> = mutableStateListOf<BrowserState>().apply {
         add(newBlankTab())
     }
@@ -195,4 +193,13 @@ class TabsState(
         get() = homepage
 
     private fun newBlankTab(): BrowserState = BrowserState(id = idSeq.incrementAndGet())
+
+    private companion object {
+        /**
+         * Process-wide, not per [TabsState]: the process-scoped
+         * [DownloadManager] keys pending download offers by tab id, and
+         * a rebuilt screen's new tabs mustn't inherit the old ones'.
+         */
+        val idSeq = AtomicLong(0L)
+    }
 }
