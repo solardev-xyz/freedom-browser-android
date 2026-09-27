@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  What the FileProvider may serve: only camera captures for
+  <input type=file capture> (see FileChooser.kt, CAPTURE_DIR).
+-->
+<paths>
+    <cache-path name="uploads" path="uploads/" />
+</paths>
