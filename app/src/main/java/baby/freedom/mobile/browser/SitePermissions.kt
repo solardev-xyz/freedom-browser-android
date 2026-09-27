@@ -33,21 +33,42 @@ import kotlinx.coroutines.flow.first
  * not implement the Notifications API at all (`window.Notification` is
  * undefined), so there is no request a site can make and nothing to
  * prompt for.
+ *
+ * What a site can be allowed is a [SiteCapability]: one of the device
+ * capabilities below, or handing one kind of link to another app
+ * ([ExternalScheme], #85). Both go through the same prompt, tiers and
+ * embargo, and are listed and revoked together in Settings.
  */
-enum class SitePermission(
+sealed interface SiteCapability {
     /** Storage key; shared with the desktop browser's `permissions.json`. */
-    val key: String,
+    val key: String
+
     /** Noun for lists ("Camera"). */
-    val label: String,
+    val label: String
+
     /** Verb phrase for the prompt ("example.com wants to …"). */
-    val phrase: String,
+    val phrase: String
+
     /**
      * Android runtime permissions backing the capability. The site is
      * granted once *any* of them is held (location: approximate is
-     * enough; the user chooses precision in the system dialog).
+     * enough; the user chooses precision in the system dialog). Empty
+     * when the app needs nothing from Android for it.
      */
-    val androidPermissions: List<String>,
-) {
+    val androidPermissions: List<String>
+
+    companion object {
+        fun forKey(key: String): SiteCapability? =
+            SitePermission.forKey(key) ?: ExternalScheme.forKey(key)
+    }
+}
+
+enum class SitePermission(
+    override val key: String,
+    override val label: String,
+    override val phrase: String,
+    override val androidPermissions: List<String>,
+) : SiteCapability {
     CAMERA("camera", "Camera", "use your camera", listOf(Manifest.permission.CAMERA)),
     MICROPHONE("microphone", "Microphone", "use your microphone", listOf(Manifest.permission.RECORD_AUDIO)),
     LOCATION(
@@ -122,7 +143,7 @@ fun permissionOriginDisplay(originKey: String): String {
  * [permissions]. Camera + microphone collapse into one phrase the way
  * the desktop prompt does.
  */
-fun describePermissionRequest(permissions: Collection<SitePermission>): String {
+fun describePermissionRequest(permissions: Collection<SiteCapability>): String {
     val unique = permissions.distinct()
     val phrases = mutableListOf<String>()
     val av = SitePermission.CAMERA in unique && SitePermission.MICROPHONE in unique
@@ -166,7 +187,7 @@ sealed interface PermissionPlan {
     data object Deny : PermissionPlan
 
     /** Ask the user about [undecided]; the rest are already allowed. */
-    data class Ask(val undecided: List<SitePermission>) : PermissionPlan
+    data class Ask(val undecided: List<SiteCapability>) : PermissionPlan
 }
 
 /**
@@ -178,11 +199,11 @@ sealed interface PermissionPlan {
  */
 fun planFor(
     origin: String,
-    permissions: List<SitePermission>,
-    stored: Map<SitePermission, PermissionDecision>,
+    permissions: List<SiteCapability>,
+    stored: Map<SiteCapability, PermissionDecision>,
     session: PermissionSession,
 ): PermissionPlan {
-    val undecided = mutableListOf<SitePermission>()
+    val undecided = mutableListOf<SiteCapability>()
     for (p in permissions.distinct()) {
         when (stored[p] ?: session.decisionFor(origin, p)) {
             PermissionDecision.DENY -> return PermissionPlan.Deny
@@ -198,7 +219,7 @@ fun planFor(
  */
 data class SitePermissionEntry(
     val origin: String,
-    val permission: SitePermission,
+    val permission: SiteCapability,
     val decision: PermissionDecision,
     /** False for a decision that lives only until the app process ends. */
     val remembered: Boolean,
@@ -214,7 +235,7 @@ data class SitePermissionEntry(
  * user can't see or lift would be a dead end).
  */
 class PermissionSession {
-    private data class Key(val origin: String, val permission: SitePermission)
+    private data class Key(val origin: String, val permission: SiteCapability)
 
     private val decisions = LinkedHashMap<Key, PermissionDecision>()
     private val embargoed = HashSet<Key>()
@@ -224,12 +245,12 @@ class PermissionSession {
     val version = kotlinx.coroutines.flow.MutableStateFlow(0)
 
     @Synchronized
-    fun decisionFor(origin: String, permission: SitePermission): PermissionDecision? =
+    fun decisionFor(origin: String, permission: SiteCapability): PermissionDecision? =
         decisions[Key(origin, permission)]
 
     /** Record an Allow/Block answered without "remember" (or alongside a remembered one). */
     @Synchronized
-    fun record(origin: String, permission: SitePermission, decision: PermissionDecision, remembered: Boolean) {
+    fun record(origin: String, permission: SiteCapability, decision: PermissionDecision, remembered: Boolean) {
         val k = Key(origin, permission)
         dismissals.remove(k)
         embargoed.remove(k)
@@ -242,7 +263,7 @@ class PermissionSession {
      * embargo threshold and the pair is now blocked for the run.
      */
     @Synchronized
-    fun dismiss(origin: String, permission: SitePermission): Boolean {
+    fun dismiss(origin: String, permission: SiteCapability): Boolean {
         val k = Key(origin, permission)
         val n = (dismissals[k] ?: 0) + 1
         dismissals[k] = n
@@ -258,7 +279,7 @@ class PermissionSession {
 
     /** Forget everything this run knows about the pair (decision, embargo, count). */
     @Synchronized
-    fun revoke(origin: String, permission: SitePermission) {
+    fun revoke(origin: String, permission: SiteCapability) {
         val k = Key(origin, permission)
         decisions.remove(k)
         embargoed.remove(k)
@@ -288,9 +309,9 @@ class PermissionSession {
  */
 suspend fun awaitPromptSuperseded(
     origin: String,
-    undecided: List<SitePermission>,
+    undecided: List<SiteCapability>,
     session: PermissionSession,
-    stored: suspend () -> Map<SitePermission, PermissionDecision>,
+    stored: suspend () -> Map<SiteCapability, PermissionDecision>,
 ) {
     val asked = PermissionPlan.Ask(undecided)
     session.version.first { planFor(origin, undecided, stored(), session) != asked }

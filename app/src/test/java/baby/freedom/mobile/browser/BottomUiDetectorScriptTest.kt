@@ -67,9 +67,20 @@ class BottomUiDetectorScriptTest {
         }
         function matchMedia(q) { return { matches: !!mediaMatches[q] }; }
         function setTimeout(f, ms) { timers.push({ f: f, ms: ms }); return ++timerSeq; }
-        var contextMenuListeners = [];
+        var contextMenuListeners = [], inputListeners = [];
+        // The page's clock, and Event's native timeStamp getter (which the page may later shadow).
+        var perfNow = 1000;
+        var performance = { now: function () { return perfNow; } };
+        function Event() {}
+        Object.defineProperty(Event.prototype, 'timeStamp', { configurable: true, get: function () { return this._ts; } });
+        // A trusted (or synthetic) input event of type [t] reaching this document.
+        function input(t, trusted) {
+          var e = new Event(); e.isTrusted = trusted; e._ts = perfNow - 7;
+          for (var i = 0; i < inputListeners.length; i++) if (inputListeners[i].t === t) inputListeners[i].f(e);
+        }
         function addEventListener(t, f, c) {
           if (t === 'contextmenu') { contextMenuListeners.push({ f: f, capture: c === true }); return; }
+          if (t === 'pointerdown' || t === 'keydown' || t === 'click') { inputListeners.push({ t: t, f: f, capture: c === true }); return; }
           windowListeners++; if (t === 'resize') resizeListeners.push(f);
         }
         // A trusted long-press's `contextmenu`: our listener, then the page's handlers, then tasks.
@@ -445,6 +456,63 @@ class BottomUiDetectorScriptTest {
         eval("pressAndHold({ isTrusted: true, defaultPrevented: false }, false)")
         assertEquals(CONTEXT_MENU_ALLOWED, verdicts())
         assertEquals(1, sent)
+    }
+
+    // ---- input in the top document (#85) ------------------------------
+
+    private fun Page.inputs(): Int = num("sent.filter(function (s) { return s.indexOf('$TOP_DOCUMENT_INPUT') === 0; }).length")
+
+    @Test
+    fun `trusted input in the top document is reported at once, from document start`() = page {
+        documentStart()
+        assertEquals(3, num("inputListeners.length"))
+        assertTrue(eval("inputListeners.every(function (l) { return l.capture; })") as Boolean)
+        eval("input('pointerdown', true)")
+        // Synchronously, not a task later: it has to beat the navigation.
+        assertEquals(1, inputs())
+        assertEquals(0, timers)
+        eval("input('keydown', true); input('click', true)")
+        assertEquals(3, inputs())
+        // Each says which event it was and how long ago it happened, on
+        // the page's clock.
+        assertEquals(
+            "$TOP_DOCUMENT_INPUT pointerdown 7,$TOP_DOCUMENT_INPUT keydown 7,$TOP_DOCUMENT_INPUT click 7",
+            eval("sent.join(',')").toString(),
+        )
+    }
+
+    @Test
+    fun `the page can't skew the input's age after document start`() = page {
+        documentStart()
+        eval("performance.now = function () { return 1e9; }")
+        eval("Object.defineProperty(Event.prototype, 'timeStamp', { get: function () { return 0; } })")
+        eval("input('pointerdown', true)")
+        assertEquals(1, inputs())
+        assertEquals(TopDocumentInput(7L, isClick = false), parseTopDocumentInput(eval("sent[sent.length - 1]").toString()))
+    }
+
+    @Test
+    fun `the page can't pass a keydown off as a click`() = page {
+        documentStart()
+        eval("Object.defineProperty(Event.prototype, 'type', { get: function () { return 'click'; } })")
+        eval("input('keydown', true)")
+        assertEquals(TopDocumentInput(7L, isClick = false), parseTopDocumentInput(eval("sent[sent.length - 1]").toString()))
+    }
+
+    @Test
+    fun `synthetic input is not reported`() = page {
+        documentStart()
+        eval("input('pointerdown', false); input('click', false); input('keydown', false)")
+        assertEquals(0, inputs())
+    }
+
+    @Test
+    fun `a subframe never reports input`() = page {
+        eval("top = {}")
+        documentStart()
+        assertEquals(0, num("inputListeners.length"))
+        eval("input('pointerdown', true); input('click', true)")
+        assertEquals(0, inputs())
     }
 
     @Test

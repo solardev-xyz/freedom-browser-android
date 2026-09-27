@@ -236,9 +236,10 @@ class BrowserState(val id: Long) {
      * can tell from the headers (an inline `application/zip`, say), so
      * the page on screen stayed after all: adopt its open requests the
      * way [mainFrameAnswered] does for a known non-replacing answer
-     * (R2-F1).
+     * (R2-F1). Likewise when a later redirect hop of that navigation is
+     * cancelled as a link to another app (#85): nothing commits.
      */
-    internal fun mainFrameBecameDownload() {
+    internal fun mainFrameKeptPage() {
         synchronized(documentLock) {
             val kept = replacedDocument ?: return
             replacedDocument = null
