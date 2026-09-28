@@ -13,6 +13,7 @@ import kotlinx.coroutines.runBlocking
 import org.json.JSONArray
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
@@ -98,6 +99,85 @@ class OnchainAppTest {
         assertNull(OnchainAppRef.parseVirtual("http://$zswapLower-1.web3.freedom.baby/"))
         assertNull(OnchainAppRef.parseVirtual("https://$zswapLower-1.web3.freedom.baby:8443/"))
         assertTrue(OnchainAppRef.isVirtualUrl("https://${zswap}-1.WEB3.freedom.baby/"))
+    }
+
+    @Test
+    fun `userinfo doesn't hide an app's own origin`() {
+        val (app, tail) = OnchainAppRef.parseVirtual("https://a:b@$zswapLower-1.web3.freedom.baby/x?y")!!
+        assertEquals(OnchainAppRef(zswapLower, 1), app)
+        assertEquals("/x?y", tail)
+        assertNull(OnchainAppRef.parseVirtual("https://$zswapLower-1.web3.freedom.baby@evil.example/"))
+    }
+
+    @Test
+    fun `everything under the suffix is the interceptor's, apps or not`() {
+        for (url in listOf(
+            "https://$zswapLower-1.web3.freedom.baby/",
+            "https://a@$zswapLower-1.web3.freedom.baby/",
+            "https://$zswapLower-1.web3.freedom.baby:8443/",
+            "https://$zswapLower-1.web3.freedom.baby./",
+            "http://$zswapLower-1.web3.freedom.baby/",
+            "https://x.$zswapLower-1.web3.freedom.baby/",
+            "https://other.web3.freedom.baby/",
+            "https://WEB3.freedom.baby",
+            "https://u:p@web3.freedom.baby.:443?q",
+        )) assertTrue(url, OnchainAppRef.isUnderSuffix(url))
+        for (url in listOf(
+            "https://$zswapLower-1.web3.freedom.baby.evil.example/",
+            "https://evilweb3.freedom.baby/",
+            "https://freedom.baby/",
+            "https://web3.freedom.baby@evil.example/",
+            "https://evil.example/?https://web3.freedom.baby/",
+            "ftp://web3.freedom.baby/",
+        )) assertFalse(url, OnchainAppRef.isUnderSuffix(url))
+    }
+
+    private fun request(url: String, mainFrame: Boolean = true) = object : android.webkit.WebResourceRequest {
+        override fun getUrl(): android.net.Uri? = null
+        override fun isForMainFrame() = mainFrame
+        override fun isRedirect() = false
+        override fun hasGesture() = false
+        override fun getMethod() = "GET"
+        override fun getRequestHeaders(): Map<String, String> = emptyMap()
+    }
+
+    @Test
+    fun `interceptor never lets a name under the suffix reach DNS`() {
+        for (url in listOf(
+            "https://$zswapLower-1.web3.freedom.baby:8443/",
+            "https://$zswapLower-1.web3.freedom.baby./",
+            "https://other.web3.freedom.baby/",
+            "https://web3.freedom.baby/",
+        )) {
+            assertNotNull(url, interceptOnchainAppRequest(request(url), url, null))
+            assertNotNull(url, interceptOnchainAppRequest(request(url, mainFrame = false), url, null))
+        }
+        assertNull(interceptOnchainAppRequest(request("https://example.com/"), "https://example.com/", null))
+    }
+
+    @Test
+    fun `the cookie sweep covers an app's own host`() {
+        assertEquals(
+            "$zswapLower-424242.web3.freedom.baby",
+            CookieHygiene.hostToSweep("https://a@$zswapLower-424242.web3.freedom.baby/x"),
+        )
+        assertTrue(CookieHygiene.coversNavigation("https://$zswapLower-1.web3.freedom.baby/"))
+        assertFalse(CookieHygiene.coversNavigation("https://example.com/"))
+        assertFalse(CookieHygiene.coversNavigation(null))
+    }
+
+    @Test
+    fun `private approvals end with the private session, normal ones don't`() {
+        val d = doc(ChainTrust.Level.UNVERIFIED, "private-session")
+        OnchainApps.approvalsFor(private = true).add(d)
+        OnchainApps.approvalsFor(private = false).add(d)
+        OnchainApps.onPrivateSessionEnded()
+        assertFalse(OnchainApps.approvalsFor(private = true).contains(d))
+        assertTrue(
+            decideOnchainDocument(OnchainLoad.Loaded(d), OnchainApps.approvalsFor(private = true), null)
+                is OnchainDecision.Refuse,
+        )
+        assertTrue(OnchainApps.approvalsFor(private = false).contains(d))
     }
 
     @Test

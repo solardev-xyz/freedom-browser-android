@@ -39,9 +39,9 @@ object CookieHygiene {
     const val SWEEP_INTERVAL_MS: Long = 60_000L
 
     /**
-     * Asynchronously expire all cookies under the virtual suffixes, and
-     * — when [navigatedUrl] is a virtual-origin URL — under its exact
-     * host as well.
+     * Asynchronously expire all cookies under the virtual suffixes and
+     * the onchain apps' suffix, and — when [navigatedUrl] is a
+     * virtual-origin or onchain-app URL — under its exact host as well.
      */
     fun sweepAsync(navigatedUrl: String? = null) {
         executor.execute { sweepBlocking(navigatedUrl) }
@@ -62,8 +62,7 @@ object CookieHygiene {
         for (suffix in VirtualOrigin.SUFFIXES + OnchainAppRef.SUFFIX) {
             expired += expireAllFor(cm, "https://$suffix/", domain = ".$suffix")
         }
-        if (navigatedUrl != null && VirtualOrigin.isVirtualUrl(navigatedUrl)) {
-            val host = navigatedUrl.removePrefix("https://").substringBefore('/')
+        hostToSweep(navigatedUrl)?.let { host ->
             expired += expireAllFor(cm, "https://$host/", domain = null)
         }
         if (expired > 0) {
@@ -71,6 +70,20 @@ object CookieHygiene {
             runCatching { cm.flush() }
         }
     }
+
+    /**
+     * The exact host whose own cookies a navigation to [url] expires: a
+     * dweb virtual origin's, or an onchain app's (#123); `null` for
+     * anything else.
+     */
+    internal fun hostToSweep(url: String?): String? = when {
+        url == null -> null
+        VirtualOrigin.isVirtualUrl(url) -> url.removePrefix("https://").substringBefore('/')
+        else -> OnchainAppRef.parseVirtual(url)?.first?.host
+    }
+
+    /** Should a navigation to [url] sweep the jar (see [hostToSweep])? */
+    fun coversNavigation(url: String?): Boolean = hostToSweep(url) != null
 
     /**
      * Expire every cookie [CookieManager] would send to [url]. Each is

@@ -119,15 +119,46 @@ data class OnchainAppRef(
             return OnchainAppRef(m.groupValues[1].lowercase(), chainId) to tailOf(m.groupValues[3])
         }
 
-        /** The app a chain-scoped origin URL belongs to, and its tail; `null` for any other URL. */
+        /**
+         * The app a chain-scoped origin URL belongs to, and its tail;
+         * `null` for any other URL. Userinfo (`https://a@0x…-1.web3…/`)
+         * doesn't change the origin and is ignored; a port or a trailing
+         * dot does (another origin), so those aren't the app's — see
+         * [isUnderSuffix] for what the interceptor does with them.
+         */
         fun parseVirtual(url: String?): Pair<OnchainAppRef, String>? {
+            val (host, rest) = hostAndTail(url) ?: return null
+            val m = VIRTUAL_HOST.matchEntire(host) ?: return null
+            val chainId = m.groupValues[2].toLongOrNull()?.takeIf { it in 1..Chain.MAX_ID } ?: return null
+            return OnchainAppRef(m.groupValues[1], chainId) to tailOf(rest)
+        }
+
+        /**
+         * Is [url] an `http(s)` URL anywhere under [SUFFIX] — an app's own
+         * host or not, with any userinfo, port or trailing dot? None of
+         * those names exists in DNS, so the interceptor answers every one
+         * of them itself (#123, R1-F3).
+         */
+        fun isUnderSuffix(url: String?): Boolean {
+            if (url == null) return false
+            val scheme = url.substringBefore("://", "").lowercase()
+            if (scheme != "https" && scheme != "http") return false
+            val authority = url.substring(scheme.length + 3).let { r ->
+                r.substring(0, r.indexOfFirst { it == '/' || it == '?' || it == '#' || it == '\\' }.let { if (it < 0) r.length else it })
+            }
+            val host = authority.substringAfterLast('@').let { h ->
+                if (h.startsWith("[")) h else h.substringBefore(':')
+            }.lowercase().trimEnd('.')
+            return host == SUFFIX || host.endsWith(".$SUFFIX")
+        }
+
+        /** Lowercase host (userinfo dropped, port kept) and the raw tail of an `https:` URL. */
+        private fun hostAndTail(url: String?): Pair<String, String>? {
             if (url == null || !url.startsWith("https://", ignoreCase = true)) return null
             val rest = url.substring("https://".length)
             val end = rest.indexOfFirst { it == '/' || it == '?' || it == '#' }
             val authority = if (end >= 0) rest.substring(0, end) else rest
-            val m = VIRTUAL_HOST.matchEntire(authority.lowercase()) ?: return null
-            val chainId = m.groupValues[2].toLongOrNull()?.takeIf { it in 1..Chain.MAX_ID } ?: return null
-            return OnchainAppRef(m.groupValues[1], chainId) to tailOf(if (end >= 0) rest.substring(end) else "")
+            return authority.substringAfterLast('@').lowercase() to (if (end >= 0) rest.substring(end) else "")
         }
 
         fun isVirtualUrl(url: String?): Boolean = parseVirtual(url) != null
@@ -334,9 +365,10 @@ class OnchainAppLoader(
  * Documents the user chose to run despite an unverified read, and the
  * ones that loaded trusted, for this process's lifetime — never
  * persisted (desktop and iOS parity). Keyed by chain + contract + exact
- * HTML hash, so changed bytes warn again. A private tab's decisions stay
- * in [private]'s own set and end with the process like everything else
- * about them.
+ * HTML hash, so changed bytes warn again. Private tabs' decisions stay
+ * in their own set ([OnchainApps.privateApprovals]), which is emptied
+ * when the private session ends ([OnchainApps.onPrivateSessionEnded]),
+ * like everything else about it.
  */
 class OnchainApprovals(private val capacity: Int = CAPACITY) {
     private val keys = LinkedHashSet<String>()
@@ -345,6 +377,10 @@ class OnchainApprovals(private val capacity: Int = CAPACITY) {
 
     @Synchronized
     fun contains(doc: OnchainDocument): Boolean = key(doc) in keys
+
+    /** Forget every decision (the private session they belonged to ended). */
+    @Synchronized
+    fun clear() = keys.clear()
 
     @Synchronized
     fun add(doc: OnchainDocument) {
@@ -481,6 +517,12 @@ object OnchainApps {
 
     fun approvalsFor(private: Boolean) = if (private) privateApprovals else approvals
 
+    /**
+     * The last private tab closed (#86): what the user let through in
+     * private tabs goes with the session, so a new one warns again.
+     */
+    fun onPrivateSessionEnded() = privateApprovals.clear()
+
     /** Wire the loader to the app's chain-data router; idempotent. */
     fun init(context: Context) {
         if (loader != null) return
@@ -543,7 +585,12 @@ internal fun interceptOnchainAppRequest(
     tab: OnchainAppTab?,
 ): WebResourceResponse? {
     val virtual = OnchainAppRef.parseVirtual(url)
-    if (virtual == null && !OnchainAppRef.isWeb3Scheme(url)) return null
+    if (virtual == null && !OnchainAppRef.isWeb3Scheme(url) && !OnchainAppRef.isUnderSuffix(url)) return null
+    if (virtual == null && !OnchainAppRef.isWeb3Scheme(url)) {
+        // Under the suffix but not an app's own origin (another label, a
+        // port, a trailing dot, plain http): no such site, and no DNS.
+        return onchainTextResponse(404, "Not Found", "No onchain application lives at this address.")
+    }
     if (virtual == null || !req.isForMainFrame) {
         return onchainTextResponse(403, "Forbidden", "Onchain applications load as top-level documents only.")
     }
@@ -573,6 +620,15 @@ internal fun interceptOnchainAppRequest(
                 tab?.remember(it.document)
             }
         }
+    }
+    if (decision is OnchainDecision.Serve) {
+        // Apps share one registrable domain until the PSL knows the
+        // suffix, and `allow-same-origin` lets one plant a
+        // `Domain=web3.freedom.baby` cookie for every other app (cookie
+        // tossing). Expire those, and this app's own host cookies,
+        // before its document reaches the renderer — not just
+        // afterwards from onPageStarted's async sweep (R1-F1).
+        runCatching { CookieHygiene.sweepBlocking(url) }
     }
     return when (decision) {
         is OnchainDecision.Serve -> WebResourceResponse(

@@ -650,8 +650,9 @@ fun BrowserWebViewHost(
      * and site storage (its HTTP cache was cleared through the last
      * private WebView) and retire it for deletion, and drop
      * what the app itself kept for the session in memory: its
-     * site-permission answers, zoom levels, and downloads list (a
-     * private download still running is cancelled, as in Chrome).
+     * site-permission answers, zoom levels, downloads list (a private
+     * download still running is cancelled, as in Chrome) and the
+     * onchain apps let through despite a warning (#123).
      */
     fun endPrivateSession() {
         PrivateProfile.discard()
@@ -659,6 +660,7 @@ fun BrowserWebViewHost(
         Adblock.onPrivateSessionEnded()
         pageZoom.clearPrivate()
         DownloadManager.get(context).endPrivateSession()
+        OnchainApps.onPrivateSessionEnded()
     }
 
     // Per-tab navigation observers (coroutine jobs, tracked so we can cancel
@@ -2327,10 +2329,11 @@ private fun buildRefreshableWebView(
                 // have flushed it). Dropping it here is what keeps the
                 // park single-shot: it cannot survive its own navigation.
                 pendingVisit.clear()
-                // Entering a virtual origin: expire anything page JS
-                // managed to plant via document.cookie before this
-                // page gets a chance to read it.
-                if (VirtualOrigin.isVirtualUrl(url)) CookieHygiene.sweepAsync(url)
+                // Entering a virtual origin or an onchain app (#123):
+                // expire anything page JS managed to plant via
+                // document.cookie before this page gets a chance to
+                // read it.
+                if (CookieHygiene.coversNavigation(url)) CookieHygiene.sweepAsync(url)
                 val display = url?.let { displayFor(it, state) }
                 if (display != null) {
                     // For error pages, surface the URL the user was
