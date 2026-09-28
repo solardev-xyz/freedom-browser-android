@@ -479,7 +479,18 @@ class EnsResolver internal constructor(
                 // A closed read gate: readiness moved before this lookup
                 // heard (the app just went to the background, say) — fall
                 // back this once, but don't skip the light client for it.
-                is EnsLightClient.Call.Unavailable -> throw LightClientMiss(answer.reason, backOff = !answer.notReady)
+                is EnsLightClient.Call.Unavailable -> throw LightClientMiss(
+                    answer.reason,
+                    backOff = when {
+                        answer.notReady -> false
+                        // The call waited out what was left of the budget:
+                        // the same out-of-time verdict as the deadline's own,
+                        // so a slow gateway earlier in the lookup doesn't
+                        // count against the light client here either.
+                        answer.timedOut -> budget.engineOwnsTheTime()
+                        else -> true
+                    },
+                )
             }
             // A CCIP-Read callback checks the gateway's answer against the
             // state that deferred to it, as the RPC path does by pinning the

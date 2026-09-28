@@ -52,7 +52,7 @@ object MyotisLink : EnsLightClient {
             if (done.await(timeoutMs, TimeUnit.MILLISECONDS)) {
                 EnsLightClient.parse(answer.get())
             } else {
-                EnsLightClient.Call.Unavailable("no answer within ${timeoutMs}ms")
+                EnsLightClient.Call.Unavailable("no answer within ${timeoutMs}ms", timedOut = true)
             }
         } catch (e: InterruptedException) {
             Thread.currentThread().interrupt()

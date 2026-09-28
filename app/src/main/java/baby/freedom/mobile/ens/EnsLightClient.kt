@@ -45,8 +45,16 @@ interface EnsLightClient {
          * host to ask) — its readiness moved before this caller heard of
          * it, which is no sign the engine itself is struggling, so it
          * doesn't warrant backing off the way a busy or failing engine does.
+         * [timedOut]: no answer came within the call's `timeoutMs` — the
+         * caller's budget ran out while it waited, and whose fault that
+         * was (the engine's, or a slow CCIP gateway's earlier in the same
+         * lookup) is for the caller to judge, not a failure in itself.
          */
-        data class Unavailable(val reason: String, val notReady: Boolean = false) : Call()
+        data class Unavailable(
+            val reason: String,
+            val notReady: Boolean = false,
+            val timedOut: Boolean = false,
+        ) : Call()
     }
 
     companion object {

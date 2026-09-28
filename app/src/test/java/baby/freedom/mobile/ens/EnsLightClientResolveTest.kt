@@ -28,8 +28,10 @@ class EnsLightClientResolveTest {
         val answer: (to: String, data: String) -> EnsLightClient.Call,
     ) : EnsLightClient {
         val calls: MutableList<Pair<String, String>> = Collections.synchronizedList(mutableListOf())
+        @Volatile var lastTimeoutMs = 0L
         override fun readyGeneration(): Long? = generation
         override fun ethCall(to: String, data: String, timeoutMs: Long): EnsLightClient.Call {
+            lastTimeoutMs = timeoutMs
             calls += to to data
             return answer(to, data)
         }
@@ -532,6 +534,75 @@ class EnsLightClientResolveTest {
             }
         }
         val r = resolver(client, setup.http, deadlineMs = 200)
+
+        runBlocking { r.resolveContenthash("1.offchainexample.eth") }
+        val callsAfterFirst = client.calls.size
+        val other = runBlocking { r.resolveContenthash("vitalik.eth") }
+        require(other is EnsResult.Ok) { "got $other" }
+        assertFalse(other.trust.lightClient)
+        assertEquals(callsAfterFirst, client.calls.size)
+    }
+
+    /**
+     * A light client whose first call defers offchain to [revert] and
+     * whose CCIP callback needs [callbackMs]; given less than that, it
+     * waits out the call's `timeoutMs` and reports the timeout itself, as
+     * `MyotisLink`'s latch does — a little before the lookup's own
+     * deadline, so its answer, not the deadline, is what the lookup sees.
+     * Every later lookup's first call answers.
+     */
+    private fun latchClient(revert: String, callbackMs: Long): FakeLightClient {
+        var first = true
+        lateinit var client: FakeLightClient
+        client = FakeLightClient { _, data ->
+            when {
+                data.startsWith("0x9061b923") && first -> {
+                    first = false
+                    EnsLightClient.Call.Revert(revert, 21_000_000L)
+                }
+                data.startsWith("0x9061b923") -> lightClientOk
+                // The CCIP callback.
+                else -> {
+                    val timeoutMs = client.lastTimeoutMs
+                    if (callbackMs < timeoutMs) {
+                        Thread.sleep(callbackMs)
+                        lightClientOk
+                    } else {
+                        Thread.sleep((timeoutMs - 60).coerceAtLeast(0))
+                        EnsLightClient.Call.Unavailable("no answer within ${timeoutMs}ms", timedOut = true)
+                    }
+                }
+            }
+        }
+        return client
+    }
+
+    @Test
+    fun `a light-client timeout after a slow CCIP gateway does not back off`() {
+        val setup = SlowGatewaySetup(ur, listOf("https://gw.example/{sender}/{data}")) {
+            Thread.sleep(700)
+            EnsHttp.Reply(200, JSONObject().put("data", "0x01").toString())
+        }
+        // The callback needs more than the ~300ms the gateway left it.
+        val client = latchClient(setup.revert, callbackMs = 800)
+        val r = resolver(client, setup.http, deadlineMs = 1_000)
+
+        val offchain = runBlocking { r.resolveContenthash("1.offchainexample.eth") }
+        require(offchain is EnsResult.Ok) { "got $offchain" }
+        assertFalse(offchain.trust.lightClient)
+
+        val other = runBlocking { r.resolveContenthash("vitalik.eth") }
+        require(other is EnsResult.Ok) { "got $other" }
+        assertTrue(other.trust.lightClient)
+    }
+
+    @Test
+    fun `a light-client timeout on a stuck callback with a fast gateway still backs off`() {
+        val setup = SlowGatewaySetup(ur, listOf("https://gw.example/{sender}/{data}")) {
+            EnsHttp.Reply(200, JSONObject().put("data", "0x01").toString())
+        }
+        val client = latchClient(setup.revert, callbackMs = 5_000)
+        val r = resolver(client, setup.http, deadlineMs = 500)
 
         runBlocking { r.resolveContenthash("1.offchainexample.eth") }
         val callsAfterFirst = client.calls.size
