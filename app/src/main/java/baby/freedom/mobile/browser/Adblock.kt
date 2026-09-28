@@ -397,8 +397,10 @@ internal data class AdblockUpdateState(val checking: Boolean = false, val last: 
  * The ad blocker at runtime (#126): the [AdblockEngine] for the
  * categories switched on in Settings, and the per-site allowlist.
  *
- * The engine is compiled from the bundled lists off the main thread at
- * startup, and again whenever the categories change. Until the first
+ * The engine is compiled off the main thread at startup, and again
+ * whenever the categories change or a list update lands (#127) — from
+ * the applied update's lists where they are intact and newer than the
+ * bundled ones, from the bundled lists otherwise. Until the first
  * build lands (about a second), requests wait for it, bounded by
  * [FIRST_BUILD_WAIT_MS] from startup ([FirstBuildGate], #192): a tab
  * restored after process death or opened by a VIEW intent loads inside
