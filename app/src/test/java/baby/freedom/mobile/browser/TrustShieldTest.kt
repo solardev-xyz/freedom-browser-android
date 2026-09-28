@@ -4,6 +4,7 @@ import baby.freedom.mobile.ens.EnsResult
 import baby.freedom.mobile.ens.EnsTrust
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -199,7 +200,8 @@ class TrustShieldTest {
         // R3-F1: tab A let name.eth → bzz://A through on one server's
         // word; tab B's lookup then recorded ipfs://B, verified. RPCs go
         // down and tab A follows a link on the name: its re-check serves
-        // A from the tab's pin, so the bar, shield and dialog say A.
+        // A from the tab's pin, so the bar says A, and the shield
+        // doesn't borrow B's Verified.
         val origin = VirtualOrigin.originFor(ContentRoot.Ens("name.eth"))!!
         val tabA = EnsDocumentPins()
         val real = Gateways.ensLookup
@@ -222,13 +224,56 @@ class TrustShieldTest {
             val state = BrowserState(1L)
             val shown = displayFor("$origin/page2", state, tabA)
             assertEquals("bzz://name.eth/page2", shown)
-            val trust = committedNameTrust("$origin/page2", shown, NameRefusalSlot(), tabA)!!
-            assertEquals(TrustTier.Unverified, trust.tier)
-            assertEquals(unverified, trust.trust)
-            assertEquals("bzz://$REF", trust.answer)
+            // …and no shield: the session's newer answer already points
+            // elsewhere, so the session's Verified can't ride on A (R4-F1).
+            assertNull(committedNameTrust("$origin/page2", shown, NameRefusalSlot(), tabA))
             // Without the tab's pins (another tab, a service worker), the
             // session's current answer.
             assertEquals("ipfs://name.eth/page2", displayFor("$origin/page2", state))
+        } finally {
+            Gateways.ensLookup = real
+            Gateways.resetEnsLookupState()
+        }
+    }
+
+    @Test
+    fun `a fallback pin the session has seen the name leave gets no shield`() {
+        // R4-F1: tab A loaded name.eth → bzz://A, verified; tab B's
+        // re-check then recorded ipfs://B, verified. RPCs go down and tab
+        // A follows a link: the page is served from pin A, but two
+        // servers have already said the name no longer points there — no
+        // shield, the same as a raw load of hash A.
+        val origin = VirtualOrigin.originFor(ContentRoot.Ens("name.eth"))!!
+        val tabA = EnsDocumentPins()
+        val real = Gateways.ensLookup
+        Gateways.resetEnsLookupState()
+        try {
+            KnownEnsNames.record("bzz://$REF", "name.eth", verified)
+            Gateways.ensLookup = { EnsResult.Ok(it, "bzz", "bzz://$REF", REF, verified) }
+            val first = tabA.beginNavigation("$origin/")
+            assertNull(Gateways.reverifyEnsDocument("name.eth", tabA, first))
+            tabA.documentStarted("$origin/")
+            assertEquals(
+                TrustTier.Verified,
+                committedNameTrust("$origin/", "bzz://name.eth/", NameRefusalSlot(), tabA)?.tier,
+            )
+            assertFalse(ipfsLoadFor("$origin/", current = false, pins = tabA))
+
+            KnownEnsNames.record("ipfs://$CID", "name.eth", verified)
+
+            Gateways.resetEnsLookupState()
+            Gateways.ensLookup = { EnsResult.Error(it, "PROVIDER_ERROR", "down", retryable = true) }
+            val next = tabA.beginNavigation("$origin/page2")
+            assertNull(Gateways.reverifyEnsDocument("name.eth", tabA, next))
+            tabA.documentStarted("$origin/page2")
+
+            val shown = displayFor("$origin/page2", BrowserState(1L), tabA)
+            assertEquals("bzz://name.eth/page2", shown)
+            assertNull(committedNameTrust("$origin/page2", shown, NameRefusalSlot(), tabA))
+            // The IPFS phase line follows the pin the page came from, not
+            // the registry's newer IPFS answer.
+            assertFalse(ipfsLoadFor("$origin/page2", current = false, pins = tabA))
+            assertTrue(ipfsLoadFor("$origin/page2", current = false))
         } finally {
             Gateways.ensLookup = real
             Gateways.resetEnsLookupState()

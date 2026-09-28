@@ -136,6 +136,11 @@ internal fun committedNameTrust(
     // own earlier answer, not the session's newer one (R3-F1).
     val name = nameIn(displayUrl) ?: return null
     pins?.answerFor(name)?.let { (answer, trust) ->
+        // …unless the session has since recorded the name pointing at a
+        // different root (R4-F1): the fallback is content the name has
+        // already been seen leaving, the same as a raw load of a stale
+        // hash below, so it gets no shield either.
+        if (!KnownEnsNames.isCurrentRoot(name, answer)) return null
         return trust?.let { NameTrust(name, it, answer) }
     }
     val trust = nameTrustFor(displayUrl) ?: return null
@@ -2258,7 +2263,7 @@ private fun buildRefreshableWebView(
                 // …and IPFS or not by what actually committed — a link,
                 // back/forward, or a redirect can land somewhere the
                 // submit that started this load didn't name (#94).
-                if (url != null) state.ipfsLoad = ipfsLoadFor(url, state.ipfsLoad)
+                if (url != null) state.ipfsLoad = ipfsLoadFor(url, state.ipfsLoad, ensPins)
                 if (url == ABOUT_BLANK) {
                     // `about:blank` is our home sentinel — either the
                     // WebView's forced initial paint, a user-initiated
