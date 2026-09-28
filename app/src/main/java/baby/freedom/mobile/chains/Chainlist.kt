@@ -7,9 +7,9 @@ import java.io.File
 import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
+import kotlin.concurrent.thread
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.currentCoroutineContext
-import kotlinx.coroutines.job
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -25,8 +25,10 @@ import org.json.JSONObject
  * Only RPCs Freedom can use as they are, without handing anyone an API
  * key or a usage trail, survive [parse]:
  *  - key-free: no `${API_KEY}`-style placeholder, no key baked into the
- *    query (`?api_key=…`, `?token=…` — someone's key, shared with every
- *    user and tied to their account), and every other
+ *    query (`?api_key=…`, `?token=…`) or the path (Alchemy `/v2/<key>`,
+ *    Infura `/v3/<key>`, NodeReal, GetBlock, Ankr, dwellir, … — see
+ *    [hasPathKey]) — someone's key, shared with every user and tied to
+ *    their account — and every other
  *    [RpcUrls.validate] rule (https, public host, no credentials);
  *  - tracking-free: an entry chainlist marks `tracking: "yes"` or
  *    `"limited"` is dropped — only `"none"` or no claim either way stays.
@@ -71,7 +73,8 @@ object Chainlist {
      * The catalog's entries, or `null` if [json] isn't a JSON array at
      * all (an HTML error page, a truncated body). A single malformed
      * entry — the data is community-maintained — is skipped rather than
-     * failing the whole list.
+     * failing the whole list. Chain IDs are unique in the result (the
+     * first entry for an ID wins): the picker keys its rows by ID.
      */
     fun parse(json: String): List<Entry>? {
         val array = try {
@@ -80,9 +83,10 @@ object Chainlist {
             return null
         }
         val out = ArrayList<Entry>(array.length())
+        val seen = HashSet<Long>()
         for (i in 0 until array.length()) {
             val obj = array.optJSONObject(i) ?: continue
-            entry(obj)?.let(out::add)
+            entry(obj)?.takeIf { seen.add(it.id) }?.let(out::add)
         }
         return out
     }
@@ -146,7 +150,7 @@ object Chainlist {
         if (tracking != null && !tracking.trim().equals("none", ignoreCase = true)) return null
         if ('$' in url) return null
         val ok = RpcUrls.normalize(url) ?: return null
-        if (hasKeyParameter(ok)) return null
+        if (hasKeyParameter(ok) || hasPathKey(ok)) return null
         return ok.takeUnless(RpcUrls::isLoopbackUrl)
     }
 
@@ -159,6 +163,57 @@ object Chainlist {
         val query = url.substringAfter('?', "").substringBefore('#')
         if (query.isEmpty()) return false
         return query.split('&').any { it.substringBefore('=').lowercase() in KEY_PARAMETERS }
+    }
+
+    /**
+     * Hosts where every endpoint is one account's private endpoint, key or
+     * not in the path (QuickNode names each endpoint's subdomain after it).
+     */
+    private val KEYED_HOST_SUFFIXES = listOf(".quiknode.pro")
+
+    private val UUID = Regex("[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
+    private val TOKEN_CHARS = Regex("[A-Za-z0-9_.~-]+")
+
+    /**
+     * Whether [url] carries an account key in its path — Alchemy
+     * `/v2/WddzdzI2o9S3…`, Infura `/v3/9aa3d95b…`, NodeReal/4EVERLAND
+     * `/v1/<hex>`, GetBlock `/<hex>`, Ankr `/<chain>/<hex>`, Histori,
+     * dwellir/Tenderly `/<uuid>` — or points at a host whose endpoints
+     * are all per-account ([KEYED_HOST_SUFFIXES]).
+     *
+     * A path segment counts as a key if it is a UUID, or if one of its
+     * `-`/`_`/`.`/`~`-separated pieces is at least 16 characters mixing
+     * letters and digits — the shape of a generated token, which chain
+     * or version names (`polygon-zkevm-mainnet`, `v2`, `tanssi-2002`)
+     * never have. The one public identifier with that shape is an
+     * Avalanche blockchain ID in `/ext/bc/<id>/rpc`, which is exempt.
+     * Anything else of that shape is dropped: losing one public RPC to
+     * a false positive is cheap, handing out someone's key is not.
+     */
+    internal fun hasPathKey(url: String): Boolean {
+        val uri = try {
+            java.net.URI(url)
+        } catch (_: Exception) {
+            return true
+        }
+        val host = uri.host?.lowercase()?.trimEnd('.') ?: return true
+        if (KEYED_HOST_SUFFIXES.any { host.endsWith(it) || host == it.removePrefix(".") }) return true
+        val segments = (uri.rawPath ?: "").split('/').filter { it.isNotEmpty() }
+        return segments.withIndex().any { (i, segment) ->
+            val avalancheId = i >= 2 &&
+                segments[i - 2].equals("ext", ignoreCase = true) &&
+                segments[i - 1].equals("bc", ignoreCase = true)
+            !avalancheId && looksLikeKey(segment)
+        }
+    }
+
+    private fun looksLikeKey(segment: String): Boolean {
+        // A percent-encoded segment isn't a name anyone types; treat it as opaque.
+        if (!TOKEN_CHARS.matches(segment)) return segment.length >= 16
+        if (UUID.matches(segment)) return true
+        return segment.split('-', '_', '.', '~').any { piece ->
+            piece.length >= 16 && piece.any(Char::isDigit) && piece.any(Char::isLetter)
+        }
     }
 
     /**
@@ -269,43 +324,62 @@ class ChainlistService internal constructor(
             instance ?: synchronized(this) {
                 instance ?: ChainlistService(
                     File(context.applicationContext.cacheDir, "chainlist/rpcs.json"),
-                    ::download,
+                    { download() },
                 ).also { instance = it }
             }
 
         /**
-         * GET [Chainlist.URL]: no cookies, no referrer, nothing but the
-         * request itself. Cancelling the caller disconnects, so leaving
-         * the search page doesn't leave a multi-MB download running.
+         * GET [url]: no cookies, no referrer, nothing but the request
+         * itself. The blocking connect/read runs on its own thread, and
+         * the caller is resumed with the cancellation the moment it is
+         * cancelled — releasing [entries]'s mutex straight away — while
+         * the connection is disconnected from yet another thread (a
+         * blocked read may not notice a disconnect issued from its own
+         * thread until it times out). So leaving the search page neither
+         * leaves a multi-MB download running nor makes the next Add chain
+         * wait for it.
          */
-        private suspend fun download(): String = withContext(Dispatchers.IO) {
-            val conn = (URL(Chainlist.URL).openConnection() as HttpURLConnection).apply {
+        internal suspend fun download(url: String = Chainlist.URL): String {
+            val conn = (URL(url).openConnection() as HttpURLConnection).apply {
                 connectTimeout = CONNECT_TIMEOUT_MS
                 readTimeout = READ_TIMEOUT_MS
                 useCaches = false
                 setRequestProperty("Accept", "application/json")
             }
-            val handle = currentCoroutineContext().job.invokeOnCompletion { conn.disconnect() }
-            try {
-                val code = conn.responseCode
-                if (code !in 200..299) throw IOException("HTTP $code")
-                if (conn.contentLengthLong > MAX_BYTES) throw IOException("catalog too large")
-                conn.inputStream.use { input ->
-                    val out = ByteArrayOutputStream()
-                    val buf = ByteArray(64 * 1024)
-                    var total = 0L
-                    while (true) {
-                        val n = input.read(buf)
-                        if (n < 0) break
-                        total += n
-                        if (total > MAX_BYTES) throw IOException("catalog too large")
-                        out.write(buf, 0, n)
+            return suspendCancellableCoroutine { cont ->
+                thread(name = "chainlist-download", isDaemon = true) {
+                    val result = runCatching {
+                        try {
+                            read(conn)
+                        } finally {
+                            conn.disconnect()
+                        }
                     }
-                    out.toString(Charsets.UTF_8.name())
+                    // Ignored if the caller was already cancelled.
+                    cont.resumeWith(result)
                 }
-            } finally {
-                handle.dispose()
-                conn.disconnect()
+                cont.invokeOnCancellation {
+                    thread(name = "chainlist-abort", isDaemon = true) { conn.disconnect() }
+                }
+            }
+        }
+
+        private fun read(conn: HttpURLConnection): String {
+            val code = conn.responseCode
+            if (code !in 200..299) throw IOException("HTTP $code")
+            if (conn.contentLengthLong > MAX_BYTES) throw IOException("catalog too large")
+            return conn.inputStream.use { input ->
+                val out = ByteArrayOutputStream()
+                val buf = ByteArray(64 * 1024)
+                var total = 0L
+                while (true) {
+                    val n = input.read(buf)
+                    if (n < 0) break
+                    total += n
+                    if (total > MAX_BYTES) throw IOException("catalog too large")
+                    out.write(buf, 0, n)
+                }
+                out.toString(Charsets.UTF_8.name())
             }
         }
     }

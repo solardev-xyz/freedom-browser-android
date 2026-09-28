@@ -43,9 +43,14 @@ data class Chain(
 
 /**
  * The chains the browser ships with — the desktop browser's
- * `src/shared/chains.json` (Ethereum, Gnosis, Base), with its key-free
- * public RPCs from `endpoint-sources.json` (Blast API, shut down, and
- * Ankr, now keyed, left out).
+ * `src/shared/chains.json` (Ethereum, Gnosis, Base). The RPCs are held to
+ * the same bar as a catalog pick ([Chainlist.usableRpc]): key-free, and
+ * marked `tracking: "none"` (or unmarked) on chainlist.org — and each one
+ * must actually answer JSON-RPC. So desktop's `endpoint-sources.json` list
+ * minus Blast API (shut down), Ankr (now keyed), Cloudflare (chainlist
+ * marks it `tracking: "yes"`), LlamaRPC (answers with a Cloudflare
+ * challenge page) and Merkle (rate-limit errors), plus Pocket Network and
+ * 0xRPC, both `tracking: "none"`.
  */
 object BuiltInChains {
     val ETHEREUM = Chain(
@@ -58,10 +63,9 @@ object BuiltInChains {
             "https://ethereum.publicnode.com",
             "https://1rpc.io/eth",
             "https://eth.drpc.org",
-            "https://eth.merkle.io",
-            "https://cloudflare-eth.com",
             "https://rpc.flashbots.net",
-            "https://eth.llamarpc.com",
+            "https://eth.api.pocket.network",
+            "https://0xrpc.io/eth",
         ),
         builtIn = true,
     )
@@ -89,8 +93,8 @@ object BuiltInChains {
             "https://mainnet.base.org",
             "https://base-rpc.publicnode.com",
             "https://base.drpc.org",
-            "https://base.llamarpc.com",
             "https://1rpc.io/base",
+            "https://base.api.pocket.network",
         ),
         builtIn = true,
     )

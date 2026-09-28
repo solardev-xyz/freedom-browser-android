@@ -5,7 +5,12 @@ import baby.freedom.mobile.browser.WhatwgHost
 import java.io.File
 import java.io.IOException
 import java.nio.file.Files
+import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import org.json.JSONObject
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -116,6 +121,96 @@ class ChainlistTest {
         assertNull(Chainlist.usableRpc(JSONObject("""{"url":"https://a.example/${'$'}KEY"}""")))
         assertNull(Chainlist.usableRpc(JSONObject("""{"url":"https://192.168.0.2"}""")))
         assertNull(Chainlist.usableRpc(42))
+    }
+
+    @Test
+    fun keysInThePathAreDropped() {
+        // Real keyed entries from the live rpcs.json, all marked tracking "none" or unmarked.
+        for (url in listOf(
+            "https://eth-sepolia.g.alchemy.com/v2/WddzdzI2o9S3COdT73d5w6AIogbKq4X-",
+            "https://ropsten.infura.io/v3/9aa3d95b3bc440fa88ea12eaa4456161",
+            "https://rinkeby.infura.io/3/9aa3d95b3bc440fa88ea12eaa4456161",
+            "https://go.getblock.io/d7094dbd80ab474ba7042603fe912332",
+            "https://opbnb-mainnet.nodereal.io/v1/64a9df0874fb4a93b9d0a3849de012d3",
+            "https://rpc.ankr.com/somnia_testnet/6e3fd81558cf77b928b06b38e9409b4677b637118114e83364486294d5ff4811",
+            "https://node.histori.xyz/kava-mainnet/8ry9f6t9dct1se2hlagxnd9n2a",
+            "https://api.blockeden.xyz/metis/67nCBdZQSH9z3YqDDjdm",
+            "https://shido-mainnet-archive-lb-nw5es9.zeeve.net/USjg7xqUmCZ4wCsqEOOE/rpc",
+            "https://okc-mainnet.gateway.pokt.network/v1/lb/6275309bea1b320039c893ff",
+            "https://api-base-mainnet-archive.n.dwellir.com/2ccf18bf-2916-4198-8856-42172854353c",
+            "https://eth.nodebridge.xyz/assetchain/exec/b2da3d33-5708-4f61-8d1e-2c677124c35a",
+            "https://xcap-mainnet.relay.xcap.network/znzvh2ueyvm2yts5fv5gnul395jbkfb2/rpc1",
+            "https://sparkling-autumn-dinghy.worldchain-mainnet.quiknode.pro",
+        )) {
+            assertNull(url, Chainlist.usableRpc(JSONObject(mapOf("url" to url, "tracking" to "none"))))
+        }
+        // Public endpoints whose paths only name a chain, a version or a public ID.
+        for (url in listOf(
+            "https://shape-mainnet.g.alchemy.com/public",
+            "https://rpc.ankr.com/flare",
+            "https://polygon-zkevm.drpc.org",
+            "https://node.histori.xyz/polygon-zkevm-mainnet",
+            "https://services.tanssi-mainnet.network/tanssi-2002",
+            "https://filecoin-mainnet.chainstacklabs.com/rpc/v1",
+            "https://public.1rpc.io/zksync2-era",
+            "https://bombchain-testnet.ankr.com/bas_full_rpc_1",
+            "https://ethereum.public.blockpi.network/v1/rpc/public",
+            // An Avalanche blockchain ID is public, not a key.
+            "https://rpc.gunzchain.io/ext/bc/2M47TxWHGnhNtq6pM5zPXdATBtuqubxn5EPFgFmEawCQr9WFML/rpc",
+            // Host labels aren't paths: a long name with digits is just a name.
+            "https://node1.cratd2csmartchain.io",
+        )) {
+            assertEquals(url, url, Chainlist.usableRpc(url))
+        }
+    }
+
+    @Test
+    fun duplicateChainIdsKeepTheFirst() {
+        val list = Chainlist.parse(
+            """[
+              {"name": "First", "chainId": 42, "nativeCurrency": {"name": "A", "symbol": "A", "decimals": 18}},
+              {"name": "Second", "chainId": 42, "nativeCurrency": {"name": "B", "symbol": "B", "decimals": 18}},
+              {"name": "Other", "chainId": 43, "nativeCurrency": {"name": "C", "symbol": "C", "decimals": 18}}
+            ]""",
+        )!!
+        assertEquals(listOf("First", "Other"), list.map { it.name })
+    }
+
+    /**
+     * The caller is released at once, not after the stalled read's 30 s
+     * timeout. (That the connection itself is torn down too is checked on
+     * the device, in `ChainlistDownloadTest`: the desktop JDK's
+     * `HttpURLConnection.disconnect()` waits for a blocked read, Android's
+     * aborts it.)
+     */
+    @Test
+    fun cancellingTheCallerReturnsAtOnce() = runBlocking {
+        StallingServer().use { server ->
+            val job = launch(Dispatchers.Default) { ChainlistService.download(server.url) }
+            assertTrue(server.responded.await(5, TimeUnit.SECONDS))
+            delay(200)
+            job.cancel()
+            withTimeout(1_000) { job.join() }
+        }
+    }
+
+    @Test
+    fun aCancelledDownloadDoesNotHoldUpTheNextCaller() = runBlocking {
+        StallingServer().use { server ->
+            var calls = 0
+            val service = ChainlistService(File(dir, "rpcs.json"), {
+                if (++calls == 1) ChainlistService.download(server.url) else catalog
+            })
+            val first = launch(Dispatchers.Default) { service.entries() }
+            assertTrue(server.responded.await(5, TimeUnit.SECONDS))
+            delay(200)
+            first.cancel()
+            // The next Add chain gets the catalog straight away, not after
+            // the first download's 30 s read timeout.
+            val list = withTimeout(2_000) { service.entries() }
+            assertEquals(6, list.size)
+            assertEquals(2, calls)
+        }
     }
 
     @Test

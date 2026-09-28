@@ -342,6 +342,19 @@ internal fun catalogThirdLine(entry: Chainlist.Entry, added: Boolean) = listOfNo
     "Testnet".takeIf { entry.isTestnet },
 ).joinToString(" · ")
 
+/**
+ * The form's RPC list with the URL still typed in the RPC field
+ * ([pending]) appended, as Add saves it: unchanged if the field is blank,
+ * the URL is already listed or the list is full (the field is hidden
+ * then); `null` if the field holds something that isn't a valid RPC URL,
+ * so Add can't quietly drop it.
+ */
+internal fun rpcsWithPending(committed: List<String>, pending: String): List<String>? {
+    if (pending.isBlank() || committed.size >= Chain.MAX_RPC_URLS) return committed
+    val url = RpcUrls.normalize(pending) ?: return null
+    return if (url in committed) committed else committed + url
+}
+
 /** What to fix, for each reason [RpcUrls.validate] refuses a URL. */
 internal fun rpcUrlHint(rejection: RpcUrls.Rejection): String = when (rejection) {
     RpcUrls.Rejection.EMPTY, RpcUrls.Rejection.NOT_A_URL -> "Not a URL: e.g. https://rpc.example.org"
@@ -391,9 +404,12 @@ internal fun AddChainPage(
     fun setRpcs(list: List<String>) {
         rpcLines = list.joinToString("\n")
     }
-    fun currentChain() = ChainInput.build(
+    // A URL still sitting in the RPC field counts: tapping Add without
+    // first tapping + / Done must not silently drop it (and one that
+    // isn't valid keeps Add disabled, its hint showing why).
+    fun currentChain(): Chain? = ChainInput.build(
         id = id, name = name, symbol = symbol, decimals = decimals, explorer = explorer,
-        rpcUrls = currentRpcs(),
+        rpcUrls = rpcsWithPending(currentRpcs(), newRpc) ?: return null,
         // The catalog's own currency name, while the symbol is still the catalog's.
         currencyName = prefill?.currencyName?.takeIf { symbol.trim() == prefill.symbol },
         isTestnet = prefill?.isTestnet ?: false,
