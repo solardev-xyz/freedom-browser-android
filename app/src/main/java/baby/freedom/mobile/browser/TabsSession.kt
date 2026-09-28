@@ -19,8 +19,9 @@ import androidx.lifecycle.ViewModel
  *
  * A process killed in the background loses this too; for that, the
  * regular tabs' addresses and titles go into the saved instance state
- * ([TabsState.saveForProcessDeath]) and come back as tabs that load
- * their page again.
+ * ([TabsState.saveForProcessDeath], bounded to stay well inside the
+ * binder transaction limit) and come back as tabs that load their page
+ * again.
  */
 class TabsSession(homepage: String, handle: SavedStateHandle) : ViewModel() {
     val tabs = TabsState(homepage = homepage)
@@ -34,29 +35,30 @@ class TabsSession(homepage: String, handle: SavedStateHandle) : ViewModel() {
 
     private companion object {
         const val KEY = "tabs"
-        const val URLS = "urls"
+        const val COMMITTED = "committed"
         const val TITLES = "titles"
         const val ADDRESSES = "addresses"
         const val STOPPED = "stopped"
         const val ACTIVE = "active"
 
         fun bundleOf(saved: TabsState.SavedTabs) = Bundle().apply {
-            putStringArray(URLS, saved.tabs.map { it.url }.toTypedArray())
             putStringArray(TITLES, saved.tabs.map { it.title }.toTypedArray())
             putStringArray(ADDRESSES, saved.tabs.map { it.address }.toTypedArray())
+            putBooleanArray(COMMITTED, saved.tabs.map { it.committed }.toBooleanArray())
             putBooleanArray(STOPPED, saved.tabs.map { it.loadStopped }.toBooleanArray())
             putInt(ACTIVE, saved.activeIndex)
         }
 
         fun savedTabsFrom(bundle: Bundle): TabsState.SavedTabs? {
-            val urls = bundle.getStringArray(URLS) ?: return null
             val titles = bundle.getStringArray(TITLES) ?: return null
             val addresses = bundle.getStringArray(ADDRESSES) ?: return null
+            val committed = bundle.getBooleanArray(COMMITTED) ?: return null
             val stopped = bundle.getBooleanArray(STOPPED) ?: return null
-            if (titles.size != urls.size || addresses.size != urls.size || stopped.size != urls.size) return null
+            val n = addresses.size
+            if (titles.size != n || committed.size != n || stopped.size != n) return null
             return TabsState.SavedTabs(
-                tabs = urls.indices.map {
-                    TabsState.SavedTab(urls[it], titles[it], addresses[it], stopped[it])
+                tabs = addresses.indices.map {
+                    TabsState.SavedTab(titles[it], addresses[it], committed[it], stopped[it])
                 },
                 activeIndex = bundle.getInt(ACTIVE),
             )

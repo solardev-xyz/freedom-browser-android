@@ -765,10 +765,11 @@ fun BrowserWebViewHost(
             // unless the user had stopped that load) once that entry
             // has finished — any earlier and the blank entry's
             // `onPageFinished` wipes the tab's address after the submit,
-            // and the tab loads behind the home overlay. Only armed if
-            // the WebView really is on the blank entry: a restored list
-            // that ends on a real page never finishes a blank load to
-            // consume it.
+            // and the tab loads behind the home overlay. Only armed for
+            // the entry the WebView really is on: a restored list that
+            // ends on a real page never finishes a blank load, so there
+            // it waits for that page instead — for a load the tab had in
+            // flight over it (#183 R1-F2).
             tab.afterBlank = restore.afterBlank(
                 restored = restored,
                 currentEntryUrl = if (restored) {
@@ -2432,6 +2433,17 @@ private fun buildRefreshableWebView(
                 // The first page to finish after a restore consumes the
                 // pending blank-entry address too, even though it isn't
                 // the blank entry: it can't apply to a later Home.
+                // Unless it was armed for this very page (#183 R1-F2): a
+                // load the tab had in flight over it before its WebView
+                // was rebuilt goes in now — posted, so this finish has
+                // updated the tab first — unless the user stopped it.
+                state.afterBlank?.takeIf { it.overEntry != null && it.overEntry == url }?.let { after ->
+                    view?.post {
+                        if (state.loadAborted) return@post
+                        state.addressBarText = after.address
+                        onSubmitUrl(state, after.address)
+                    }
+                }
                 state.afterBlank = null
                 // Dismiss the pull-to-refresh spinner once the page has
                 // finished loading (or errored out). Happens regardless

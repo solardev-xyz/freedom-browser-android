@@ -78,6 +78,47 @@ class TabsRelaunchTest {
     }
 
     @Test
+    fun `a relaunch mid-load over a page puts the load back once that page is restored`() {
+        val tabs = threeTabs()
+        val tab = tabs.active // on b
+        tab.addressBarText = "https://next.example/" // submitted over b, not committed
+        tab.progress = 10
+        tabs.parkForRelaunch { null }
+        val restore = tab.pendingRestore!!
+        // Restored onto b: the load goes in once b has finished.
+        val after = restore.afterBlank(restored = true, currentEntryUrl = "https://b.example/")!!
+        assertEquals("https://next.example/", after.address)
+        assertTrue(after.submit)
+        assertEquals("https://b.example/", after.overEntry)
+        // Not restored: the in-flight address is what loads.
+        assertEquals("https://next.example/", restore.afterBlank(restored = false, currentEntryUrl = ABOUT_BLANK)!!.address)
+    }
+
+    @Test
+    fun `a relaunch over a page with nothing uncommitted doesn't load anything more`() {
+        val tabs = threeTabs()
+        val idle = tabs.tabs[0]
+        val stopped = tabs.tabs[1]
+        stopped.addressBarText = "https://next.example/"
+        stopped.progress = 10
+        stopped.stopProgress()
+        val following = tabs.tabs[2] // a link the page follows keeps its address
+        following.progress = 30
+        val resolving = tabs.newTab().apply { visit("d") }
+        resolving.addressBarText = "ens.eth"
+        resolving.resolving = true
+        tabs.parkForRelaunch { null }
+        for (tab in listOf(idle, stopped, following)) {
+            assertNull(tab.pendingRestore!!.afterBlank(restored = true, currentEntryUrl = tab.url))
+        }
+        // A name still being resolved over d is a load in flight too.
+        assertEquals(
+            "ens.eth",
+            resolving.pendingRestore!!.afterBlank(restored = true, currentEntryUrl = "https://d.example/")!!.address,
+        )
+    }
+
+    @Test
     fun `a relaunch drops what only mirrored the destroyed WebView`() {
         val tabs = threeTabs()
         val tab = tabs.active
@@ -138,6 +179,58 @@ class TabsRelaunchTest {
         val after = restored.active.pendingRestore!!.afterBlank(restored = false, currentEntryUrl = ABOUT_BLANK)!!
         assertEquals("https://b.example/", after.address)
         assertTrue(after.submit)
+    }
+
+    @Test
+    fun `a restored tab has no url until its page loads again`() {
+        val tabs = threeTabs()
+        // A dweb page: its fetch target is on a gateway port that dies
+        // with the process.
+        tabs.active.url = "bzz://site.eth/"
+        tabs.active.addressBarText = "bzz://site.eth/"
+        val restored = TabsState(homepage = HOME_URL)
+        restored.restoreAfterProcessDeath(tabs.saveForProcessDeath())
+        assertEquals(listOf("", "", ""), restored.tabs.map { it.url })
+        assertEquals("bzz://site.eth/", restored.active.addressBarText)
+        assertFalse(restored.active.isHome)
+        val after = restored.active.pendingRestore!!.afterBlank(restored = false, currentEntryUrl = ABOUT_BLANK)!!
+        assertEquals("bzz://site.eth/", after.address)
+        assertTrue(after.submit)
+    }
+
+    @Test
+    fun `process death leaves out a tab whose address is too long to save`() {
+        val tabs = threeTabs()
+        val huge = "https://b.example/?" + "x".repeat(600_000) // history.replaceState
+        tabs.active.url = huge
+        tabs.active.addressBarText = huge
+        tabs.tabs[2].title = "t".repeat(100_000)
+        val saved = tabs.saveForProcessDeath()
+        assertEquals(listOf("https://a.example/", "https://c.example/"), saved.tabs.map { it.address })
+        assertEquals(TabsState.MAX_SAVED_TITLE, saved.tabs[1].title.length)
+        // b was active: the kept tab before it comes back active.
+        assertEquals(0, saved.activeIndex)
+    }
+
+    @Test
+    fun `process death keeps the saved tabs inside a fixed budget, the active one first`() {
+        val tabs = TabsState(homepage = HOME_URL)
+        val long = "x".repeat(TabsState.MAX_SAVED_ADDRESS - 40)
+        tabs.tabs[0].url = "https://0.example/?$long"
+        tabs.tabs[0].addressBarText = tabs.tabs[0].url
+        repeat(19) { n ->
+            tabs.newTab().apply {
+                url = "https://${n + 1}.example/?$long"
+                addressBarText = url
+            }
+        }
+        tabs.switchTo(15)
+        val saved = tabs.saveForProcessDeath()
+        assertTrue(saved.tabs.sumOf { it.address.length + it.title.length } <= TabsState.MAX_SAVED_CHARS)
+        assertTrue(saved.tabs.size in 1 until 20)
+        assertEquals("https://15.example/?$long", saved.tabs[saved.activeIndex].address)
+        // The rest are kept in order from the first.
+        assertEquals("https://0.example/?$long", saved.tabs[0].address)
     }
 
     @Test

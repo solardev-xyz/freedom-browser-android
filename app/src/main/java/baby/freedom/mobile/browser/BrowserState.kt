@@ -341,22 +341,25 @@ class BrowserState(val id: Long, val private: Boolean = false) {
         internal set
 
     /**
-     * What a tab brought back by [TabsState.reopenClosedTab] should be
-     * rebuilt from: the closed WebView's saved state, the URL to
+     * What a tab brought back by [TabsState.reopenClosedTab] (or whose
+     * WebView was rebuilt, #183) should be rebuilt from: the closed WebView's saved state, the URL to
      * bring back afresh if that state can't be restored, and — for a
      * tab closed before its page committed — the address to put back
      * even after a successful restore ([resubmitUrl], blank otherwise).
      * [submit] is false when that first navigation was one the user
      * had stopped: the address comes back in the bar, with Reload, but
-     * isn't fetched again. Consumed (and cleared) by
-     * [BrowserWebViewHost] when it creates this tab's WebView; null for
-     * every other tab.
+     * isn't fetched again. [overPage]: the tab had a committed page
+     * with a load still in flight over it (an Activity relaunch, #183
+     * R1-F2), so [resubmitUrl] goes in once that page is restored.
+     * Consumed (and cleared) by [BrowserWebViewHost] when it creates
+     * this tab's WebView; null for every other tab.
      */
     class PendingRestore(
         val webViewState: Bundle?,
         val fallbackUrl: String,
         val resubmitUrl: String = "",
         val submit: Boolean = true,
+        val overPage: Boolean = false,
     ) {
         /**
          * What the rebuilt WebView should do once its blank entry
@@ -369,8 +372,17 @@ class BrowserState(val id: Long, val private: Boolean = false) {
          */
         fun afterBlank(restored: Boolean, currentEntryUrl: String?): AfterBlank? {
             val address = if (restored) resubmitUrl else fallbackUrl
+            if (address.isBlank()) return null
             val onBlank = currentEntryUrl == null || currentEntryUrl == ABOUT_BLANK
-            return if (address.isNotBlank() && onBlank) AfterBlank(address, submit) else null
+            return when {
+                onBlank -> AfterBlank(address, submit)
+                // A load that hadn't committed over a real page yet
+                // (#183 R1-F2): the restored list ends on that page, so
+                // the address goes in once *it* has finished — the load
+                // supersedes it as it did before the relaunch.
+                restored && overPage && submit -> AfterBlank(address, submit = true, overEntry = currentEntryUrl)
+                else -> null
+            }
         }
 
         companion object {
@@ -379,15 +391,26 @@ class BrowserState(val id: Long, val private: Boolean = false) {
              * [address] and its Stop latch ([loadStopped]) as
              * [restorableAddress] reports them. A tab whose page hadn't
              * committed yet gets its address back — submitted again,
-             * unless the user had stopped that load.
+             * unless the user had stopped that load. So does a tab with
+             * a load still [inFlight] over its committed page (see
+             * [uncommittedLoad]), once that page is back.
              */
-            fun of(url: String, address: String, loadStopped: Boolean, webViewState: Bundle?) =
-                PendingRestore(
+            fun of(
+                url: String,
+                address: String,
+                loadStopped: Boolean,
+                webViewState: Bundle?,
+                inFlight: Boolean = false,
+            ): PendingRestore {
+                val overPage = url.isNotBlank() && inFlight && !loadStopped
+                return PendingRestore(
                     webViewState = webViewState,
                     fallbackUrl = address.ifBlank { url },
-                    resubmitUrl = address.takeIf { url.isBlank() }.orEmpty(),
+                    resubmitUrl = address.takeIf { url.isBlank() || overPage }.orEmpty(),
                     submit = !(url.isBlank() && loadStopped),
+                    overPage = overPage,
                 )
+            }
         }
     }
 
@@ -403,6 +426,18 @@ class BrowserState(val id: Long, val private: Boolean = false) {
         val address = if (popupBlank && addressBarText == ABOUT_BLANK) "" else addressBarText
         return restoredUrl to address
     }
+
+    /**
+     * A navigation is under way over the committed page and hasn't
+     * committed yet: a submit still being resolved or probed, or one
+     * the WebView is fetching, whose address the bar already shows in
+     * place of the page's (#183 R1-F2). Not one the user stopped. A
+     * link the page follows itself keeps the page's address until it
+     * commits, so it doesn't count — there's no address to put back.
+     */
+    internal fun uncommittedLoad(): Boolean =
+        !loadAborted && url.isNotBlank() && addressBarText.isNotBlank() &&
+            addressBarText != url && (resolving || progress >= 0)
 
     /**
      * The [navCounter] of the last navigation the tab's WebView was
@@ -435,9 +470,12 @@ class BrowserState(val id: Long, val private: Boolean = false) {
      * [BrowserWebViewHost] for a reopened tab whose restored (or
      * unrestorable) state leaves the WebView *on* that entry, and
      * consumed by the first `onPageFinished` that follows, whichever
-     * entry it is for: only the blank one acts on it.
+     * entry it is for: only the blank one acts on it. With [overEntry]
+     * set, the restored list ends on that real page instead, under a
+     * load that hadn't committed yet (#183 R1-F2): only a finish of
+     * that page submits the address.
      */
-    class AfterBlank(val address: String, val submit: Boolean)
+    class AfterBlank(val address: String, val submit: Boolean, val overEntry: String? = null)
 
     internal var afterBlank: AfterBlank? = null
 

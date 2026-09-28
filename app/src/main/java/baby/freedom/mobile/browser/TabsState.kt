@@ -478,6 +478,7 @@ class TabsState(
                     address = address,
                     loadStopped = tab.loadAborted,
                     webViewState = saveState(tab),
+                    inFlight = tab.uncommittedLoad(),
                 )
             }
             tab.webViewLost()
@@ -486,53 +487,80 @@ class TabsState(
 
     /**
      * What survives the app's process being killed in the background
-     * (#183): each regular tab's page and title, and which of them was
-     * active. Private tabs are left out — nothing of theirs outlives
+     * (#183): each regular tab's address and title, and which of them
+     * was active. Private tabs are left out — nothing of theirs outlives
      * the process (#86). Their back/forward history and the reopen stack
      * aren't kept either: WebView state bundles are too large for the
-     * saved-instance-state transaction.
+     * saved-instance-state transaction. Neither is the tab's committed
+     * [BrowserState.url]: [committed] only says there was a page, whose
+     * [address] loads again.
      */
     class SavedTabs(val tabs: List<SavedTab>, val activeIndex: Int)
 
     class SavedTab(
-        val url: String,
         val title: String,
         val address: String,
+        val committed: Boolean,
         val loadStopped: Boolean,
     )
 
+    /**
+     * The saved instance state goes through a binder transaction with a
+     * hard limit of about 1 MB shared by the whole process, and a page
+     * can make its own URL (`history.replaceState`) or title as long as
+     * it likes. So an address longer than [MAX_SAVED_ADDRESS] isn't
+     * kept — that tab doesn't come back — a title is cut to
+     * [MAX_SAVED_TITLE] (it's only shown until the page loads again),
+     * and the whole list stops at [MAX_SAVED_CHARS], the active tab
+     * counted first (R1-F1).
+     */
     fun saveForProcessDeath(): SavedTabs {
-        val kept = tabs.filter { !it.private }
         val at = activeIndex.coerceIn(0, tabs.lastIndex)
-        val before = tabs.take(at).count { !it.private }
-        // A private tab was on screen: the regular tab before it (or the
-        // first) comes back active.
-        val activeAt = if (tabs[at].private) (before - 1).coerceAtLeast(0) else before
-        return SavedTabs(
-            tabs = kept.map { tab ->
-                val (url, address) = tab.restorableAddress()
-                SavedTab(url = url, title = tab.title, address = address, loadStopped = tab.loadAborted)
-            },
-            activeIndex = activeAt,
-        )
+        val candidates = tabs.withIndex().filter { !it.value.private }.mapNotNull { (index, tab) ->
+            val (url, address) = tab.restorableAddress()
+            val saved = SavedTab(
+                title = tab.title.take(MAX_SAVED_TITLE),
+                address = address.ifBlank { url },
+                committed = url.isNotBlank(),
+                loadStopped = tab.loadAborted,
+            )
+            if (saved.address.length > MAX_SAVED_ADDRESS) null else index to saved
+        }
+        var budget = MAX_SAVED_CHARS
+        val fits = HashSet<Int>()
+        for ((index, saved) in candidates.sortedBy { (index, _) -> if (index == at) -1 else index }) {
+            val size = saved.address.length + saved.title.length
+            if (size > budget) continue
+            budget -= size
+            fits += index
+        }
+        val kept = candidates.filter { (index, _) -> index in fits }
+        // The active tab isn't kept (private, or too long): the kept tab
+        // before it (or the first) comes back active.
+        val activeAt = kept.indexOfLast { (index, _) -> index <= at }.coerceAtLeast(0)
+        return SavedTabs(tabs = kept.map { it.second }, activeIndex = activeAt)
     }
 
     /**
      * Replace the tab list with [saved], from a process killed in the
      * background (#183). Each tab shows its page's address and title
      * from the first frame and loads that address once its WebView is
-     * up (see [BrowserState.PendingRestore]). The initial load is done:
-     * these are the tabs the user had.
+     * up (see [BrowserState.PendingRestore]). Its [BrowserState.url]
+     * stays blank until that load commits: the previous process's
+     * fetch target can be a loopback gateway URL on a port that's gone
+     * (R1-F3). The initial load is done: these are the tabs the user
+     * had.
      */
     fun restoreAfterProcessDeath(saved: SavedTabs) {
         if (saved.tabs.isEmpty()) return
         val restored = saved.tabs.map { s ->
             newBlankTab().apply {
-                url = s.url
                 title = s.title
                 addressBarText = s.address
                 pendingRestore = BrowserState.PendingRestore.of(
-                    url = s.url,
+                    // Only whether there was a page matters here: the
+                    // address is what loads.
+                    url = if (s.committed) s.address else "",
                     address = s.address,
                     loadStopped = s.loadStopped,
                     webViewState = null,
@@ -585,6 +613,17 @@ class TabsState(
     companion object {
         /** How many closed tabs [reopenClosedTab] can walk back through. */
         const val MAX_CLOSED_TABS = 20
+
+        /**
+         * Bounds on what [saveForProcessDeath] keeps, in chars (two bytes
+         * each in the parcel): 32k chars is 64 KB of the ~1 MB binder
+         * buffer. An address past 8k chars is rare (browsers and servers
+         * commonly cap URLs around there) and is what a page stuffing
+         * state into its URL produces.
+         */
+        const val MAX_SAVED_ADDRESS = 8 * 1024
+        const val MAX_SAVED_TITLE = 1024
+        const val MAX_SAVED_CHARS = 32 * 1024
 
         /**
          * Process-wide, not per [TabsState]: the process-scoped
