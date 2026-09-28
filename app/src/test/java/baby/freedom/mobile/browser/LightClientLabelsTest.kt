@@ -77,6 +77,13 @@ class LightClientLabelsTest {
         assertEquals("Synced", label(serving, gnosis))
         assertEquals("1 of 2 chains synced", label(serving, gnosis.copy(beaconState = "STALE_ANCHOR")))
         assertEquals("Syncing…", label(serving.copy(beaconState = "SYNCING"), gnosis.copy(beaconState = "SYNCING")))
+        // A parked chain never counts as syncing: alone it says why...
+        val stale = gnosis.copy(beaconState = "STALE_ANCHOR")
+        assertEquals("Checkpoint too old", label(MyotisChainStatus(1L, error = "boom"), stale))
+        assertEquals("Checkpoint too old", label(stale))
+        // ...and beside a chain that isn't serving yet it's counted, not "Syncing…".
+        assertEquals("0 of 2 chains synced", label(serving.copy(snapServingPeers = 0), stale))
+        assertEquals("0 of 2 chains synced", label(serving.copy(beaconState = "SYNCING"), stale))
         // A chain that failed to start doesn't hold the other one back...
         assertEquals("Synced", label(serving, MyotisChainStatus(100L, error = "boom")))
         // ...but nothing live at all is not "Synced".

@@ -206,6 +206,54 @@ class MyotisNodeTest {
     }
 
     @Test
+    fun `a chain on a stale anchor is paused and stays paused through foreground and polls`() {
+        val engine = FakeEngine()
+        engine.status[1L] = """{"running":true,"beaconState":"SYNCED"}"""
+        engine.status[2L] = """{"running":true,"beaconState":"STALE_ANCHOR","snapPeers":2,"currentPeriod":3692,"targetPeriod":3701,"wsBoundPeriods":3}"""
+        val node = node(engine)
+        node.start()
+        idle(node)
+        assertEquals(1, engine.calls.count { it == "pause 2" })
+        assertFalse(engine.calls.contains("pause 1"))
+
+        // Once paused the engine reports paused; the row keeps the parked state.
+        engine.status[2L] = """{"running":false,"paused":true,"beaconState":"STALE_ANCHOR"}"""
+        engine.calls.clear()
+        node.pollNow()
+        node.enterBackground()
+        node.enterForeground()
+        node.pollNow()
+        idle(node)
+        assertEquals(listOf("pause 1", "resume 1"), engine.calls.filter { it.startsWith("pause") || it.startsWith("resume") })
+        val gnosis = node.state.value.chain(MyotisNetwork.Gnosis)!!
+        assertTrue(gnosis.staleAnchor)
+        assertFalse(gnosis.paused)
+        assertEquals(9L, gnosis.targetPeriod - gnosis.currentPeriod)
+
+        // Stop → start releases the park: a fresh engine is judged afresh.
+        engine.status[2L] = """{"running":true,"beaconState":"SYNCING"}"""
+        node.stop()
+        node.start()
+        idle(node)
+        assertEquals("SYNCING", node.state.value.chain(MyotisNetwork.Gnosis)?.beaconState)
+    }
+
+    @Test
+    fun `a stale anchor seen in the background is not parked until the app is in front`() {
+        val engine = FakeEngine()
+        engine.status[2L] = """{"running":false,"paused":true,"beaconState":"STALE_ANCHOR"}"""
+        val node = node(engine)
+        node.enterBackground()
+        node.start()
+        idle(node)
+        engine.calls.clear()
+        engine.status[2L] = """{"running":true,"beaconState":"STALE_ANCHOR"}"""
+        node.enterForeground()
+        idle(node)
+        assertEquals(listOf("resume 1", "resume 2", "pause 2"), engine.calls.filter { it.startsWith("pause") || it.startsWith("resume") })
+    }
+
+    @Test
     fun `shutdown stops the engines and returns`() {
         val engine = FakeEngine()
         val node = node(engine)

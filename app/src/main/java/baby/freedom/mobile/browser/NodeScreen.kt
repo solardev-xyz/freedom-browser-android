@@ -301,12 +301,17 @@ internal fun lightClientStatusTriple(info: MyotisInfo): NodeStatusTriple = when 
     MyotisStatus.Running -> {
         val live = info.chains.filter { it.error == null }
         val ready = live.count { it.ready }
+        val parked = live.count { it.staleAnchor }
         when {
             live.isNotEmpty() && ready == live.size ->
                 NodeStatusTriple(Color(0xFF22C55E), Icons.Filled.CheckCircle, "Synced")
             // A chain parked on a stale checkpoint never catches up on its
-            // own; don't let it keep the whole line on "Syncing…".
-            ready > 0 -> NodeStatusTriple(
+            // own; don't let it keep the whole line on "Syncing…" — neither
+            // when it's the only chain left nor beside one still waiting.
+            live.isNotEmpty() && parked == live.size -> NodeStatusTriple(
+                Color(0xFFF59E0B), Icons.Filled.ErrorOutline, "Checkpoint too old",
+            )
+            ready > 0 || parked > 0 -> NodeStatusTriple(
                 Color(0xFFF59E0B), Icons.Filled.HourglassTop, "$ready of ${live.size} chains synced",
             )
             else -> NodeStatusTriple(Color(0xFFF59E0B), Icons.Filled.HourglassTop, "Syncing…")

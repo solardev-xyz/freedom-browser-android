@@ -2,6 +2,7 @@ package baby.freedom.mobile.node
 
 import android.app.Service
 import android.content.Intent
+import android.content.pm.ApplicationInfo
 import android.os.IBinder
 import android.os.RemoteCallbackList
 import android.util.Log
@@ -86,10 +87,13 @@ class MyotisService : Service() {
         }
         val node = MyotisNode(filesDir.resolve("myotis"))
         this.node = node
+        val debuggable = (applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0
         node.state
             .onEach { info ->
                 broadcast(info)
-                Log.i(
+                // Every poll (3 s in front) can publish a new state: debug
+                // builds only, so a release build doesn't fill logcat.
+                if (debuggable) Log.d(
                     TAG,
                     "myotis → ${info.status} " + info.chains.joinToString(" ") {
                         "[${it.chainId} ${it.beaconState} peers=${it.peerCount}/${it.snapPeers}/${it.snapServingPeers} " +

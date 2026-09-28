@@ -77,6 +77,15 @@ class MyotisNode internal constructor(
     // Touched only from the [ops] consumer.
     private val handles = LinkedHashMap<MyotisNetwork, Long>()
     private val startErrors = LinkedHashMap<MyotisNetwork, String>()
+
+    /**
+     * Chains parked on a stale trust anchor, with the status they reported
+     * when they parked. Nothing on Android can release that park yet
+     * (checkpoint recovery, #195), so the handle is paused — networking
+     * down, no peers held — and kept paused through foreground/background
+     * until the engines are stopped; its row keeps showing the stale state.
+     */
+    private val parked = LinkedHashMap<MyotisNetwork, MyotisChainStatus>()
     private var foreground = true
     private var polls = 0
 
@@ -174,6 +183,7 @@ class MyotisNode internal constructor(
                 foreground = false
                 polling = false
                 for ((network, handle) in handles) {
+                    if (network in parked) continue
                     val paused = engine.pause(handle)
                     Log.i(TAG, "${network.engineName}: pause → $paused")
                 }
@@ -182,6 +192,7 @@ class MyotisNode internal constructor(
             Op.Foreground -> {
                 foreground = true
                 for ((network, handle) in handles) {
+                    if (network in parked) continue
                     val resumed = engine.resume(handle)
                     Log.i(TAG, "${network.engineName}: resume → $resumed")
                 }
@@ -257,6 +268,7 @@ class MyotisNode internal constructor(
         val stopping = handles.toMap()
         handles.clear()
         startErrors.clear()
+        parked.clear()
         for ((network, handle) in stopping) {
             engine.stop(handle)
             Log.i(TAG, "${network.engineName}: stopped")
@@ -267,7 +279,7 @@ class MyotisNode internal constructor(
     private fun pausedChains(): List<Pair<MyotisNetwork, Long>> {
         val info = _state.value
         return handles.mapNotNull { (network, handle) ->
-            if (info.chain(network)?.paused == true) network to handle else null
+            if (network !in parked && info.chain(network)?.paused == true) network to handle else null
         }
     }
 
@@ -275,16 +287,28 @@ class MyotisNode internal constructor(
         val chains = networks.mapNotNull { network ->
             val handle = handles[network]
             when {
-                handle != null -> MyotisChainStatus.decode(
+                handle != null -> parked[network] ?: MyotisChainStatus.decode(
                     network.chainId,
                     engine.statusJson(handle) ?: "{}",
-                )
+                ).also { if (foreground && it.staleAnchor && !it.paused) park(network, handle, it) }
                 startErrors[network] != null ->
                     MyotisChainStatus(network.chainId, error = startErrors[network])
                 else -> null
             }
         }
         _state.value = MyotisInfo(status = MyotisStatus.Running, chains = chains)
+    }
+
+    /**
+     * [network] reported `STALE_ANCHOR`: it can't sync forward and nothing
+     * here can release it, so idle-sleep it instead of holding peers for no
+     * possible progress. Only on an actual transition — a handle that
+     * wasn't running is tried again on the next poll.
+     */
+    private fun park(network: MyotisNetwork, handle: Long, status: MyotisChainStatus) {
+        if (!engine.pause(handle)) return
+        parked[network] = status
+        Log.i(TAG, "${network.engineName}: trust anchor too old, parked (paused)")
     }
 
     private fun publish(status: MyotisStatus, error: String? = null) {
