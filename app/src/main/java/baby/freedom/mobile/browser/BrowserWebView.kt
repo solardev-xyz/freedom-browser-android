@@ -74,6 +74,7 @@ import java.io.ByteArrayInputStream
 import java.io.FilterInputStream
 import java.io.InputStream
 import java.io.IOException
+import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
 import java.util.concurrent.atomic.AtomicBoolean
@@ -2557,7 +2558,10 @@ private fun buildRefreshableWebView(
                 // navigation is over, and a same-document one (the
                 // chrome's Back to a `pushState` entry) must not be left
                 // for a later navigation of the page's own (#180, R2-F1).
-                (view as? PageWebView)?.usersNavigation?.ended()
+                // Only a step to the address it was awaited at: the page
+                // on screen's own `replaceState` while the user's
+                // navigation is in flight isn't its end (R3-F2).
+                (view as? PageWebView)?.usersNavigation?.sameDocumentStep(url)
                 // A same-document step keeps the page on screen as the
                 // load's document for the IPFS phase line (#94, R3-F2).
                 state.historyUpdated(isHome = url == ABOUT_BLANK)
@@ -2586,6 +2590,22 @@ private fun buildRefreshableWebView(
                         EnsGate.continueDestination(target, state.ensGate, view?.url)
                             ?.let { onSubmitUrl(state, it) }
                     }
+                    return true
+                }
+                // A hop of the user's navigation answered, for the other
+                // site's user agent, with a redirect — a desktop site's
+                // mobile answer sending it to an app link, or anywhere:
+                // that site never commits for `onPageStarted` to fix, so
+                // the hop is asked again with its own site's (#180,
+                // R3-F1). Before the app-link check: the redirect may be
+                // the hand-off itself. The page on screen stays until the
+                // re-fetch, as for a cancelled app-link hop (#94).
+                if (request.isForMainFrame && request.isRedirect && view is PageWebView &&
+                    !(isPopup && !documentStartedOnce) &&
+                    view.redirectAnsweredForOtherUserAgent(named = userNamedChain.asker() != null)
+                ) {
+                    pendingNavigationUrls.clear()
+                    state.mainFrameKeptPage()
                     return true
                 }
                 // A link to another app (#85): never a page load. Main
@@ -3191,17 +3211,27 @@ internal class PageWebView(context: Context) : WebView(context) {
      * with in place (#180) — before it starts: WebView reads the user
      * agent when the navigation's request goes out. True if it changed.
      */
-    fun matchUserAgentTo(url: String?): Boolean {
+    fun matchUserAgentTo(url: String?, historyStep: Boolean = false): Boolean {
         // A `javascript:` URL runs in the page on screen: no request.
         // The chrome's Back / Forward steps are ones, to the entry
         // they step to.
         when (url) {
-            HISTORY_BACK_JS -> return matchUserAgentTo(historyEntryUrl(-1) ?: return false)
-            HISTORY_FORWARD_JS -> return matchUserAgentTo(historyEntryUrl(1) ?: return false)
+            HISTORY_BACK_JS -> return matchUserAgentTo(historyEntryUrl(-1) ?: return false, historyStep = true)
+            HISTORY_FORWARD_JS -> return matchUserAgentTo(historyEntryUrl(1) ?: return false, historyStep = true)
         }
         if (url != null && url.startsWith("javascript:", ignoreCase = true)) return false
-        // Every load of the app's comes through here.
-        if (url != null) usersNavigation.started(url) else usersNavigation.ended()
+        // Every load of the app's comes through here. A history step to
+        // an entry at the address on screen steps an iframe (or reloads
+        // the same site, whose user agent is in place): no main-frame
+        // commit may end it, so it isn't followed at all — or a later
+        // `location.reload()` of the page's would take it (R3-F3).
+        if (url != null && !(historyStep && this.url?.let { sameRequestUrl(it, url) } == true)) {
+            usersNavigation.started(url)
+            usersNavigationIsApps = true
+        } else {
+            usersNavigation.ended()
+        }
+        redirectCorrection.navigationStarted(url)
         val desktop = wantsDesktop(url)
         if (desktop == userAgentSwitch.desktop) return false
         // Chromium reloads the page on screen, with the new user agent,
@@ -3227,6 +3257,13 @@ internal class PageWebView(context: Context) : WebView(context) {
      */
     val usersNavigation = UserNamedChain()
 
+    // Whether [usersNavigation] was started by a load of the app's
+    // (true) or a page's own tapped navigation (false): how a hop of it
+    // is asked again ([redirectAnsweredForOtherUserAgent]).
+    private var usersNavigationIsApps = false
+
+    private val redirectCorrection = RedirectCorrection()
+
     // The user agent the document on screen was fetched with: what its
     // later requests should keep going out with, if the navigation that
     // switched it away never leaves it (R2-F2). Null before any commit.
@@ -3234,7 +3271,53 @@ internal class PageWebView(context: Context) : WebView(context) {
 
     /** A page's own main-frame navigation to [url] started, with a user gesture or not. */
     fun navigationIsUsers(gesture: Boolean, url: String) {
-        if (gesture) usersNavigation.started(url) else usersNavigation.ended()
+        if (gesture) {
+            usersNavigation.started(url)
+            usersNavigationIsApps = false
+        } else {
+            usersNavigation.ended()
+        }
+        redirectCorrection.navigationStarted(url)
+    }
+
+    /**
+     * A main-frame redirect is about to be followed. True if it is the
+     * answer, for the other site's user agent, to a hop of the user's
+     * navigation (#180, R3-F1): the caller cancels it, and the hop is
+     * asked again with its own site's user agent, once — see
+     * [RedirectCorrection]. [named]: the navigation is a load the user
+     * named (#173), which the re-fetch stays.
+     *
+     * A load of the app's is loaded again. A page's own tapped
+     * navigation is started again by the page on screen, its initiator —
+     * `location.assign()` — so the site sees the same `Sec-Fetch-Site`,
+     * `Referer` and SameSite cookies as for the tap, and no
+     * `Sec-Fetch-User` Chromium wouldn't give it (it takes the tap's
+     * activation, if still live). A load of ours would send
+     * `Sec-Fetch-Site: none` and the site's SameSite=Strict cookies to
+     * an address a page picked (R1-F1).
+     */
+    fun redirectAnsweredForOtherUserAgent(named: Boolean): Boolean {
+        val hop = usersNavigation.asker()
+        if (!redirectCorrection.redirectAnswered(hop, ::needsOtherUserAgentFor)) return false
+        val byApp = usersNavigationIsApps
+        usersNavigation.ended()
+        // Posted: not from inside the WebView's own callback, and after
+        // the redirect's cancellation has ended the navigation — the
+        // user agent must not change while anything is loading.
+        mainHandler.post {
+            val url = redirectCorrection.issue() ?: return@post
+            when {
+                byApp && named -> loadUrlNamedByUser(url)
+                byApp -> loadUrl(url)
+                else -> {
+                    matchUserAgentTo(url)
+                    usersNavigationIsApps = false
+                    evaluateJavascript("location.assign(${JSONObject.quote(url)})", null)
+                }
+            }
+        }
+        return true
     }
 
     /**
@@ -3244,6 +3327,7 @@ internal class PageWebView(context: Context) : WebView(context) {
      */
     fun documentStarted(url: String?): Boolean {
         documentDesktop = userAgentSwitch.desktop
+        redirectCorrection.ended()
         return usersNavigation.takeCommit(url)
     }
 
@@ -3256,6 +3340,7 @@ internal class PageWebView(context: Context) : WebView(context) {
      */
     fun navigationDidNotLeave() {
         usersNavigation.ended()
+        redirectCorrection.ended()
         val desktop = documentDesktop ?: return
         if (desktop == userAgentSwitch.desktop) return
         super.stopLoading()
@@ -3462,7 +3547,7 @@ internal class PageWebView(context: Context) : WebView(context) {
         val url = historyEntryUrl(steps) ?: return
         // The entry is fetched again with whatever user agent is in
         // place: the one its site asks for now (#180).
-        matchUserAgentTo(url)
+        matchUserAgentTo(url, historyStep = true)
         documents.navigationStarted(url)
     }
 

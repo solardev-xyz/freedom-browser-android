@@ -274,4 +274,62 @@ class DesktopSiteTest {
         // The page's own location.reload() of that entry.
         assertFalse(chain.takeCommit("http://localhost:8700/p/a"))
     }
+
+    @Test
+    fun `the page on screen's own replaceState doesn't end the user's navigation`() {
+        val chain = UserNamedChain()
+        chain.started("http://127.0.0.1:8700/x")
+        // The outgoing page strips its utm parameters meanwhile (R3-F2).
+        chain.sameDocumentStep("http://localhost:8700/start")
+        assertTrue(chain.takeCommit("http://127.0.0.1:8700/x"))
+        // A same-document step to the awaited address is its end.
+        chain.started("http://localhost:8700/p/a#b")
+        chain.sameDocumentStep("http://localhost:8700/p/a#b")
+        assertFalse(chain.takeCommit("http://localhost:8700/p/a"))
+    }
+
+    // A desktop site's mobile answer that is a redirect (R3-F1).
+
+    private val desktopOn = { url: String -> url.startsWith("http://127.0.0.1") }
+
+    @Test
+    fun `a redirect answering a hop fetched with the other user agent re-fetches that hop once`() {
+        val c = RedirectCorrection()
+        c.navigationStarted("http://127.0.0.1:8700/meet")
+        assertTrue(c.redirectAnswered("http://127.0.0.1:8700/meet", desktopOn))
+        // Asked once until issued.
+        assertFalse(c.redirectAnswered("http://127.0.0.1:8700/meet", desktopOn))
+        assertEquals("http://127.0.0.1:8700/meet", c.issue())
+        assertNull(c.issue())
+        // The re-fetch starts; a desktop answer bouncing to a mobile site
+        // that bounces back gets no second one (no endless swap).
+        c.navigationStarted("http://127.0.0.1:8700/meet")
+        assertFalse(c.redirectAnswered("http://localhost:8700/bounce", { true }))
+        // A commit ends it: the next navigation has its own.
+        c.ended()
+        assertTrue(c.redirectAnswered("http://127.0.0.1:8700/meet", desktopOn))
+    }
+
+    @Test
+    fun `no re-fetch for a hop whose user agent was right, or with no user's navigation`() {
+        val c = RedirectCorrection()
+        assertFalse(c.redirectAnswered("http://localhost:8700/a", desktopOn))
+        assertFalse(c.redirectAnswered(null, desktopOn))
+    }
+
+    @Test
+    fun `a navigation or Stop before the re-fetch is issued drops it`() {
+        val c = RedirectCorrection()
+        assertTrue(c.redirectAnswered("http://127.0.0.1:8700/meet", desktopOn))
+        c.navigationStarted("http://localhost:8700/other")
+        assertNull(c.issue())
+        assertTrue(c.redirectAnswered("http://127.0.0.1:8700/meet", desktopOn))
+        c.ended()
+        assertNull(c.issue())
+        // Another navigation after the re-fetch gets its own allowance.
+        assertTrue(c.redirectAnswered("http://127.0.0.1:8700/meet", desktopOn))
+        c.issue()
+        c.navigationStarted("http://localhost:8700/other")
+        assertTrue(c.redirectAnswered("http://127.0.0.1:8700/meet", desktopOn))
+    }
 }

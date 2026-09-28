@@ -51,10 +51,81 @@ private val IPV4_LITERAL = Regex("""^\d{1,3}(\.\d{1,3}){3}$""")
  * chain (the user's navigation, see [PageWebView.usersNavigation]) was
  * awaited at, and the chain is over either way (#180, R2-F1).
  */
-internal fun UserNamedChain.takeCommit(url: String?): Boolean {
+internal fun UserNamedChain.takeCommit(url: String?): Boolean = synchronized(this) {
     val awaited = asker()
     ended()
-    return awaited != null && url != null && sameRequestUrl(awaited, url)
+    awaited != null && url != null && sameRequestUrl(awaited, url)
+}
+
+/**
+ * A same-document step to [url] (`doUpdateVisitedHistory` with no
+ * commit): the end of this chain only if it is the address the chain
+ * was awaited at — the chrome's Back to a `pushState` entry, a typed
+ * `#fragment` (R2-F1). The page on screen's own `replaceState` or hash
+ * change while the user's navigation is in flight (stripping `utm_`
+ * parameters on load) is some other address, and leaves the chain for
+ * the commit it is waiting for (R3-F2).
+ */
+internal fun UserNamedChain.sameDocumentStep(url: String?) = synchronized(this) {
+    val awaited = asker() ?: return@synchronized
+    if (url != null && sameRequestUrl(awaited, url)) ended()
+}
+
+/**
+ * The one re-fetch of a hop of the user's navigation whose answer came
+ * back, for the other site's user agent, as a redirect (#180, R3-F1).
+ *
+ * A commit with the wrong user agent is fixed by a reload
+ * ([PageWebView.documentStarted]); but a desktop site's *mobile* answer
+ * may be a redirect elsewhere — Meet's 302 to `meet.app.goo.gl` and on
+ * to an app link — and then the desktop site never commits. So the
+ * redirect is cancelled and the hop asked again, with its own site's
+ * user agent. Once per navigation: a redirect loop between a desktop
+ * and a mobile site would otherwise swap forever, each re-fetch
+ * restarting Chromium's own redirect limit.
+ */
+internal class RedirectCorrection {
+    // Scheduled, not yet issued: dropped if anything starts first.
+    private var pending: String? = null
+    // Issued: the hop asked again. Its own chain (and redirects) get no
+    // second one.
+    private var reissued: String? = null
+
+    /**
+     * The answer to [asker] — the hop the user's navigation was awaited
+     * at — is a main-frame redirect, with the user agent in place. True
+     * if the hop is to be asked again: [needsOther] says its site wants
+     * the other one, and this navigation had no re-fetch yet.
+     */
+    fun redirectAnswered(asker: String?, needsOther: (String) -> Boolean): Boolean {
+        if (asker == null || reissued != null || pending != null || !needsOther(asker)) return false
+        pending = asker
+        return true
+    }
+
+    /** The scheduled re-fetch, now issued; null if something superseded it. */
+    fun issue(): String? {
+        val hop = pending ?: return null
+        pending = null
+        reissued = hop
+        return hop
+    }
+
+    /**
+     * A navigation to [url] starts. Anything but the re-fetch itself
+     * supersedes a scheduled one and starts a fresh allowance.
+     */
+    fun navigationStarted(url: String?) {
+        pending = null
+        val hop = reissued ?: return
+        if (url == null || !sameRequestUrl(hop, url)) reissued = null
+    }
+
+    /** A document committed, or the navigation ended without one (Stop, Stay). */
+    fun ended() {
+        pending = null
+        reissued = null
+    }
 }
 
 /**
