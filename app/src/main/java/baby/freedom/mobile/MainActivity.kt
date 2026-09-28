@@ -24,6 +24,7 @@ import androidx.lifecycle.lifecycleScope
 import baby.freedom.mobile.browser.BrowserScreen
 import baby.freedom.mobile.browser.Gateways
 import baby.freedom.mobile.browser.HOME_URL
+import baby.freedom.mobile.browser.Adblock
 import baby.freedom.mobile.browser.PublicSuffixList
 import baby.freedom.mobile.browser.UnverifiedOrigins
 import baby.freedom.mobile.browser.VirtualOrigin
@@ -159,6 +160,11 @@ class MainActivity : ComponentActivity() {
         // idempotent and thread-safe, so a label that arrives first
         // just does the load itself, exactly as it does today.
         lifecycleScope.launch(Dispatchers.Default) { PublicSuffixList.warm() }
+
+        // Ad and tracker blocking (#126): compile the enabled filter
+        // lists off the main thread and follow Settings from here on.
+        // Until the first build lands, requests simply aren't filtered.
+        Adblock.start(this)
 
         // A cold start from an App Link opens straight at the shared
         // content instead of the home surface.
