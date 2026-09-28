@@ -394,11 +394,6 @@ object TorRouting {
 }
 
 /**
- * Whether [host] is an onion service name: a DNS name whose last label is
- * `onion` (any case, trailing dot allowed) with a label before it — the
- * same test the Tor side applies (freedom-mobile-ffi `is_onion_host`).
- */
-/**
  * Whether an onion page that failed with Tor down can be sent to the
  * refusal page by `reload()`. Not one reached by a form POST (or any
  * method but GET/HEAD): its reload asks `onFormResubmission`, answered
@@ -409,6 +404,11 @@ object TorRouting {
 internal fun onionRefusalByReload(method: String?): Boolean =
     method == null || method.equals("GET", ignoreCase = true) || method.equals("HEAD", ignoreCase = true)
 
+/**
+ * Whether [host] is an onion service name: a DNS name whose last label is
+ * `onion` (any case, trailing dot allowed) with a label before it — the
+ * same test the Tor side applies (freedom-mobile-ffi `is_onion_host`).
+ */
 internal fun isOnionHost(host: String?): Boolean {
     val h = host?.lowercase()?.removeSuffix(".") ?: return false
     if (!h.endsWith(".onion")) return false
