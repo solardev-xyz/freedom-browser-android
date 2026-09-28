@@ -72,17 +72,25 @@ internal fun UserNamedChain.sameDocumentStep(url: String?) = synchronized(this) 
 }
 
 /**
- * The one re-fetch of a hop of the user's navigation whose answer came
- * back, for the other site's user agent, as a redirect (#180, R3-F1).
+ * The one correction of a hop of the user's navigation that is about to
+ * go out with the other site's user agent (#180) — made *before* the
+ * hop is requested, never after: a hop the server already answered
+ * isn't asked again, since a GET can be single-use (a magic sign-in
+ * link, an email verification, an OAuth callback: the first fetch spends
+ * the token and the second shows "expired", R5-F1).
  *
- * A commit with the wrong user agent is fixed by a reload
- * ([PageWebView.documentStarted]); but a desktop site's *mobile* answer
- * may be a redirect elsewhere — Meet's 302 to `meet.app.goo.gl` and on
- * to an app link — and then the desktop site never commits. So the
- * redirect is cancelled and the hop asked again, with its own site's
- * user agent. Once per navigation: a redirect loop between a desktop
- * and a mobile site would otherwise swap forever, each re-fetch
- * restarting Chromium's own redirect limit.
+ * Two hops qualify. A redirect of a load of the app's to an address
+ * across the desktop/mobile line: the redirect is cancelled before its
+ * target is requested, and the target loaded instead with its own user
+ * agent ([PageWebView.redirectCrossesUserAgent]). And the first hop of a
+ * page's tapped navigation across the line: its request is answered by
+ * us with a `204` before it leaves the device, and the page on screen
+ * asks for it again ([PageNavigationStart], [PageWebView.pageHopRequested]).
+ *
+ * Once per navigation: a redirect loop between a desktop and a mobile
+ * site would otherwise swap forever, each re-issue restarting Chromium's
+ * own redirect limit. [issue] and [isReissue] run on the UI thread,
+ * [crossing] also on the interceptor's.
  */
 internal class RedirectCorrection {
     // Scheduled, not yet issued: dropped if anything starts first.
@@ -90,41 +98,64 @@ internal class RedirectCorrection {
     // Issued: the hop asked again. Its own chain (and redirects) get no
     // second one.
     private var reissued: String? = null
+    // Whether the issued hop's navigation has started.
+    private var started = false
+
+    /** Bumped by each [issue]: which re-issue a deadline was set for. */
+    var generation = 0
+        private set
 
     /**
-     * The answer to [asker] — the hop the user's navigation was awaited
-     * at — is a main-frame redirect, with the user agent in place. True
-     * if the hop is to be asked again: [needsOther] says its site wants
-     * the other one, and this navigation had no re-fetch yet.
+     * [hop] is about to be requested with the user agent in place. True
+     * if it is to be asked again instead: [needsOther] says its site wants
+     * the other one, and this navigation had no correction yet.
      */
-    fun redirectAnswered(asker: String?, needsOther: (String) -> Boolean): Boolean {
-        if (asker == null || reissued != null || pending != null || !needsOther(asker)) return false
-        pending = asker
+    @Synchronized
+    fun crossing(hop: String?, needsOther: (String) -> Boolean): Boolean {
+        if (hop == null || reissued != null || pending != null || !needsOther(hop)) return false
+        pending = hop
         return true
     }
 
-    /** The scheduled re-fetch, now issued; null if something superseded it. */
+    /** The scheduled re-issue, now issued; null if something superseded it. */
+    @Synchronized
     fun issue(): String? {
         val hop = pending ?: return null
         pending = null
         reissued = hop
+        started = false
+        generation++
         return hop
     }
 
-    /** Whether a navigation to [url] is the re-fetch just issued. */
+    /** Whether a navigation to [url] is the re-issue just issued. */
+    @Synchronized
     fun isReissue(url: String): Boolean = reissued?.let { sameRequestUrl(it, url) } == true
 
     /**
-     * A navigation to [url] starts. Anything but the re-fetch itself
-     * supersedes a scheduled one and starts a fresh allowance.
+     * Whether the re-issue [generation] names was issued and its
+     * navigation never started — the page cancelled it (a Navigation API
+     * `navigate` listener's `preventDefault()`), or never got the ask
+     * (R5-F2).
      */
+    @Synchronized
+    fun neverStarted(generation: Int): Boolean =
+        generation == this.generation && reissued != null && !started
+
+    /**
+     * A navigation to [url] starts. The re-issue itself is now under way;
+     * anything else supersedes a scheduled one and starts a fresh
+     * allowance.
+     */
+    @Synchronized
     fun navigationStarted(url: String?) {
         pending = null
         val hop = reissued ?: return
-        if (url == null || !sameRequestUrl(hop, url)) reissued = null
+        if (url != null && sameRequestUrl(hop, url)) started = true else reissued = null
     }
 
     /** A document committed, or the navigation ended without one (Stop, Stay). */
+    @Synchronized
     fun ended() {
         pending = null
         reissued = null
@@ -132,38 +163,46 @@ internal class RedirectCorrection {
 }
 
 /**
- * The address a page's own tapped navigation started at, and the
- * `Referer` its first request went out with (#180, R4-F1/R4-F2): what
- * decides whether a hop of it whose answer was a redirect for the other
- * user agent ([RedirectCorrection]) may be asked again *from the page on
- * screen* — the only way to keep the navigation's initiator.
+ * A page's own tapped navigation across the desktop/mobile line (#180):
+ * whether its first request may be held back — answered with a `204`
+ * before it leaves the device — and asked for again by the page on
+ * screen with the right user agent. The page is the only initiator that
+ * keeps the navigation's own `Sec-Fetch-Site` and SameSite cookies; a
+ * load of ours would send `Sec-Fetch-Site: none` and Strict cookies to an
+ * address a page picked (R1-F1).
  *
  * The page sees what it starts: its own Navigation API `navigate`
- * listener reads the full address (query and all) and can cancel it. So
- * only the address the navigation started at is ever re-issued there,
- * never a later redirect hop: that one may be a cross-origin redirect
- * target the page was never told (an OAuth `?code=`). And only when the
- * first request's `Referer` shows the initiator was of the page's own
- * origin — a cross-origin iframe's `target=_top` link isn't announced to
- * the top document either — so a request with no `Referer` at all
- * (`rel=noreferrer`, a `no-referrer` policy, a service worker's answer
- * the interceptor never saw) isn't re-issued. The re-issue then sends
- * only that origin as `Referer` ([REISSUE_REFERRER_POLICY]): never more
- * than the original request did, whatever the document's own policy.
+ * listener reads the full address and can cancel it. So only the address
+ * the navigation started at is ever re-issued there — a redirect target
+ * the page was never told (an OAuth `?code=`) isn't (R4-F1), and goes out
+ * with the user agent in place. And only when the request's `Referer`
+ * shows the initiator was of the page's own origin — a cross-origin
+ * iframe's `target=_top` link isn't announced to the top document either
+ * — so a request with no `Referer` at all (`rel=noreferrer`, a
+ * `no-referrer` policy) isn't held; nor one a service worker answers,
+ * which the interceptor never sees. The re-issue sends only that origin
+ * as `Referer` ([REISSUE_REFERRER_POLICY]): never more than the original
+ * request did (R4-F2).
  *
  * [requested] runs on the interceptor's thread, the rest on the UI
  * thread.
  */
 internal class PageNavigationStart {
     private var start: String? = null
-    private var referer: String? = null
+    private var documentOrigin: String? = null
+    private var crosses = false
     private var seen = false
 
-    /** A page's own navigation to [url] started with a user gesture. */
+    /**
+     * A page's own navigation to [url] started with a user gesture, from
+     * the document at [documentUrl]. [crosses]: its site wants the other
+     * user agent, and the page can be asked to re-issue it.
+     */
     @Synchronized
-    fun started(url: String) {
+    fun started(url: String, documentUrl: String?, crosses: Boolean) {
         start = url
-        referer = null
+        documentOrigin = documentUrl?.let(::webOrigin)
+        this.crosses = crosses
         seen = false
     }
 
@@ -171,36 +210,31 @@ internal class PageNavigationStart {
     @Synchronized
     fun ended() {
         start = null
-        referer = null
+        documentOrigin = null
+        crosses = false
         seen = false
     }
 
-    /** The WebView requests [url] for the main frame, with [headers]. */
-    @Synchronized
-    fun requested(url: String, headers: Map<String, String>?) {
-        val awaited = start ?: return
-        if (!sameRequestUrl(awaited, url)) {
-            ended()
-            return
-        }
-        // Chromium may request the first address twice (a retry on a
-        // fresh connection); both carry the same `Referer`.
-        if (seen) return
-        seen = true
-        referer = headers?.entries?.firstOrNull { it.key.equals("Referer", ignoreCase = true) }?.value
-    }
-
     /**
-     * Whether the answer to [hop] may be asked again by the page whose
-     * document is at [documentUrl], with [REISSUE_REFERRER_POLICY]: [hop]
-     * is the address this navigation started at, and its request's
-     * `Referer` was of that document's origin.
+     * The WebView is about to request [url] for the main frame, with
+     * [headers]. True if the request is to be held back and the page
+     * asked to re-issue it: the first request of the navigation that
+     * crosses the line, with a `Referer` of the document's own origin.
      */
     @Synchronized
-    fun mayReissue(hop: String, documentUrl: String?): Boolean {
+    fun requested(url: String, headers: Map<String, String>?): Boolean {
         val awaited = start ?: return false
-        if (!seen || !sameRequestUrl(awaited, hop)) return false
-        val origin = webOrigin(documentUrl ?: return false) ?: return false
+        if (!sameRequestUrl(awaited, url)) {
+            ended()
+            return false
+        }
+        // Chromium may request the first address twice (a retry on a
+        // fresh connection): only the first is ours to decide.
+        if (seen) return false
+        seen = true
+        if (!crosses) return false
+        val origin = documentOrigin ?: return false
+        val referer = headers?.entries?.firstOrNull { it.key.equals("Referer", ignoreCase = true) }?.value
         return webOrigin(referer ?: return false) == origin
     }
 }
@@ -213,16 +247,41 @@ internal class PageNavigationStart {
 internal const val REISSUE_REFERRER_POLICY = "origin"
 
 /**
- * The script that re-issues a page's own navigation to [url] from the
- * document on screen: a detached link with an explicit referrer policy
- * and target, clicked — `location.assign()` would take the document's
- * own policy (R4-F2) and a `<base target>` could send a link elsewhere.
+ * How long the page gets to start its re-issue ([PageNavigationStart])
+ * before the switch made for it is undone (R5-F2): the page on screen
+ * may cancel it, and must not keep sending its own requests with the
+ * other site's user agent.
  */
-internal fun pageReissueScript(url: String): String {
-    val quoted = org.json.JSONObject.quote(url)
-    return "(function(){var a=document.createElement('a');a.href=$quoted;" +
-        "a.referrerPolicy='$REISSUE_REFERRER_POLICY';a.target='_self';a.click()})()"
+internal const val PAGE_REISSUE_START_MS = 2_000L
+
+/**
+ * The document on screen's detector channel ([bottomUiDetectorJs]),
+ * which re-issues a page's own navigation (R5-F3): a detached link built
+ * and clicked with DOM functions saved at document start, so no function
+ * the page has wrapped since sees it. Without it — no detector in the
+ * document yet, a CSP-sandboxed one — there's no re-issue, and the
+ * request goes out as it is.
+ */
+internal interface PageReissueChannel {
+    /** Whether the current document's detector can take [url] now. */
+    fun ready(url: String): Boolean
+
+    /** Asks the current document's detector to navigate to [url]; false if it can't be asked. */
+    fun send(url: String): Boolean
 }
+
+/** The address a re-issue may name: http(s), nothing the message could split on. */
+private val REISSUE_URL = Regex("""^https?://\S+$""", RegexOption.IGNORE_CASE)
+
+/**
+ * What Kotlin sends the current document's detector (with its [token])
+ * to re-issue the page's navigation to [url]; null for an address it
+ * doesn't take (see [bottomUiDetectorJs]).
+ */
+internal fun pageReissueRequest(token: String, url: String): String? =
+    if (REISSUE_URL.matches(url)) "$PAGE_REISSUE_PREFIX$token $url" else null
+
+internal const val PAGE_REISSUE_PREFIX = "go "
 
 /** `scheme://host[:port]` of an http(s) URL, default port dropped; null otherwise. */
 internal fun webOrigin(url: String): String? {

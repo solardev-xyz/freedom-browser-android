@@ -288,121 +288,138 @@ class DesktopSiteTest {
         assertFalse(chain.takeCommit("http://localhost:8700/p/a"))
     }
 
-    // A desktop site's mobile answer that is a redirect (R3-F1).
+    // A hop crossing the desktop/mobile line, corrected before it's requested (R3-F1, R5-F1).
 
     private val desktopOn = { url: String -> url.startsWith("http://127.0.0.1") }
 
     @Test
-    fun `a redirect answering a hop fetched with the other user agent re-fetches that hop once`() {
+    fun `a hop about to go out with the other user agent is re-issued once`() {
         val c = RedirectCorrection()
-        c.navigationStarted("http://127.0.0.1:8700/meet")
-        assertTrue(c.redirectAnswered("http://127.0.0.1:8700/meet", desktopOn))
+        c.navigationStarted("http://localhost:8700/track?t=E1")
+        // Its redirect to the desktop site, before that is requested.
+        assertTrue(c.crossing("http://127.0.0.1:8700/magic?token=E1", desktopOn))
         // Asked once until issued.
-        assertFalse(c.redirectAnswered("http://127.0.0.1:8700/meet", desktopOn))
-        assertEquals("http://127.0.0.1:8700/meet", c.issue())
+        assertFalse(c.crossing("http://127.0.0.1:8700/magic?token=E1", desktopOn))
+        assertEquals("http://127.0.0.1:8700/magic?token=E1", c.issue())
         assertNull(c.issue())
-        // The re-fetch starts; a desktop answer bouncing to a mobile site
+        // The re-issue starts; a desktop answer bouncing to a mobile site
         // that bounces back gets no second one (no endless swap).
-        c.navigationStarted("http://127.0.0.1:8700/meet")
-        assertFalse(c.redirectAnswered("http://localhost:8700/bounce", { true }))
+        c.navigationStarted("http://127.0.0.1:8700/magic?token=E1")
+        assertFalse(c.crossing("http://localhost:8700/bounce", { true }))
         // A commit ends it: the next navigation has its own.
         c.ended()
-        assertTrue(c.redirectAnswered("http://127.0.0.1:8700/meet", desktopOn))
+        assertTrue(c.crossing("http://127.0.0.1:8700/meet", desktopOn))
     }
 
     @Test
-    fun `no re-fetch for a hop whose user agent was right, or with no user's navigation`() {
+    fun `no correction for a hop whose user agent is right, or no hop`() {
         val c = RedirectCorrection()
-        assertFalse(c.redirectAnswered("http://localhost:8700/a", desktopOn))
-        assertFalse(c.redirectAnswered(null, desktopOn))
+        assertFalse(c.crossing("http://localhost:8700/a", desktopOn))
+        assertFalse(c.crossing(null, desktopOn))
     }
 
     @Test
-    fun `a navigation or Stop before the re-fetch is issued drops it`() {
+    fun `a navigation or Stop before the re-issue is issued drops it`() {
         val c = RedirectCorrection()
-        assertTrue(c.redirectAnswered("http://127.0.0.1:8700/meet", desktopOn))
+        assertTrue(c.crossing("http://127.0.0.1:8700/meet", desktopOn))
         c.navigationStarted("http://localhost:8700/other")
         assertNull(c.issue())
-        assertTrue(c.redirectAnswered("http://127.0.0.1:8700/meet", desktopOn))
+        assertTrue(c.crossing("http://127.0.0.1:8700/meet", desktopOn))
         c.ended()
         assertNull(c.issue())
-        // Another navigation after the re-fetch gets its own allowance.
-        assertTrue(c.redirectAnswered("http://127.0.0.1:8700/meet", desktopOn))
+        // Another navigation after the re-issue gets its own allowance.
+        assertTrue(c.crossing("http://127.0.0.1:8700/meet", desktopOn))
         c.issue()
         c.navigationStarted("http://localhost:8700/other")
-        assertTrue(c.redirectAnswered("http://127.0.0.1:8700/meet", desktopOn))
+        assertTrue(c.crossing("http://127.0.0.1:8700/meet", desktopOn))
     }
 
-    // --- which re-fetch the page on screen may issue (R4-F1, R4-F2) ---
+    @Test
+    fun `a re-issue the page never starts is known as such, and only that one`() {
+        val c = RedirectCorrection()
+        assertTrue(c.crossing("http://127.0.0.1:8700/meet", desktopOn))
+        c.issue()
+        val first = c.generation
+        // The page cancelled it (a `navigate` listener's preventDefault()).
+        assertTrue(c.neverStarted(first))
+        // Started: the deadline has nothing to undo.
+        c.navigationStarted("http://127.0.0.1:8700/meet")
+        assertFalse(c.neverStarted(first))
+        // Another navigation instead, or a commit: nothing either.
+        c.ended()
+        assertTrue(c.crossing("http://127.0.0.1:8700/meet", desktopOn))
+        c.issue()
+        val second = c.generation
+        c.navigationStarted("http://localhost:8700/other")
+        assertFalse(c.neverStarted(second))
+        // A deadline set for an earlier re-issue doesn't speak for a later one.
+        assertTrue(c.crossing("http://127.0.0.1:8700/meet", desktopOn))
+        c.issue()
+        assertFalse(c.neverStarted(first))
+        assertTrue(c.neverStarted(c.generation))
+    }
+
+    // --- which first request the page on screen may re-issue (R4-F1, R4-F2, R5-F1) ---
 
     private val start = "http://localhost:8700/start"
+    private val meet = "http://127.0.0.1:8700/meet"
 
     @Test
-    fun `the page re-issues the address it named, asked for with its own origin as Referer`() {
+    fun `the page's crossing first request, with its own origin as Referer, is held back`() {
         val p = PageNavigationStart()
-        p.started("http://127.0.0.1:8700/meet")
-        p.requested("http://127.0.0.1:8700/meet", mapOf("referer" to "http://localhost:8700/"))
-        // A retry of the same request doesn't change it.
-        p.requested("http://127.0.0.1:8700/meet", emptyMap())
-        assertTrue(p.mayReissue("http://127.0.0.1:8700/meet", start))
+        p.started(meet, start, crosses = true)
+        assertTrue(p.requested(meet, mapOf("referer" to "http://localhost:8700/")))
+        // A retry of the same request isn't held a second time.
+        assertFalse(p.requested(meet, mapOf("referer" to "http://localhost:8700/")))
         // A full-URL Referer of the same origin: the re-issue sends less.
-        p.started("http://127.0.0.1:8700/meet")
-        p.requested("http://127.0.0.1:8700/meet", mapOf("Referer" to "http://localhost:8700/start?q"))
-        assertTrue(p.mayReissue("http://127.0.0.1:8700/meet", start))
+        p.started(meet, start, crosses = true)
+        assertTrue(p.requested(meet, mapOf("Referer" to "http://localhost:8700/start?q")))
     }
 
     @Test
-    fun `a redirect hop the page never named is not re-issued from it`() {
+    fun `a request that doesn't cross, or isn't the address the page named, goes out`() {
         val p = PageNavigationStart()
-        p.started("http://localhost:8700/authorize")
-        p.requested("http://localhost:8700/authorize", mapOf("Referer" to "http://localhost:8700/"))
-        // The hop is where /authorize 302'd: `?code=` the page mustn't read.
-        assertFalse(p.mayReissue("http://127.0.0.1:8700/cb?code=SECRET123", start))
+        p.started(meet, start, crosses = false)
+        assertFalse(p.requested(meet, mapOf("Referer" to "http://localhost:8700/")))
+        // A redirect target (`?code=` the page mustn't read) is another address.
+        p.started("http://localhost:8700/authorize", start, crosses = true)
+        assertFalse(p.requested("http://127.0.0.1:8700/cb?code=SECRET123", mapOf("Referer" to "http://localhost:8700/")))
+        assertFalse(p.requested("http://localhost:8700/authorize", mapOf("Referer" to "http://localhost:8700/")))
     }
 
     @Test
-    fun `no Referer, another origin's, or an unseen request means no re-issue`() {
+    fun `no Referer, another origin's, no document or an ended start means it goes out`() {
         val p = PageNavigationStart()
-        val meet = "http://127.0.0.1:8700/meet"
         // rel=noreferrer / no-referrer: the re-issue would add one.
-        p.started(meet)
-        p.requested(meet, mapOf("User-Agent" to "x"))
-        assertFalse(p.mayReissue(meet, start))
+        p.started(meet, start, crosses = true)
+        assertFalse(p.requested(meet, mapOf("User-Agent" to "x")))
         // A cross-origin iframe's target=_top link: the top page wasn't told.
-        p.started(meet)
-        p.requested(meet, mapOf("Referer" to "http://127.0.0.1:8700/"))
-        assertFalse(p.mayReissue(meet, start))
-        // A service worker answered it: the interceptor never saw it.
-        p.started(meet)
-        assertFalse(p.mayReissue(meet, start))
-        // A request for another address ends it.
-        p.started(meet)
-        p.requested("http://localhost:8700/elsewhere", mapOf("Referer" to "http://localhost:8700/"))
-        p.requested(meet, mapOf("Referer" to "http://localhost:8700/"))
-        assertFalse(p.mayReissue(meet, start))
+        p.started(meet, start, crosses = true)
+        assertFalse(p.requested(meet, mapOf("Referer" to "http://127.0.0.1:8700/")))
+        // A popup's first navigation: no document of its own.
+        p.started(meet, null, crosses = true)
+        assertFalse(p.requested(meet, mapOf("Referer" to "http://localhost:8700/")))
         // Ended (a commit, Stop, a load of the app's).
-        p.started(meet)
-        p.requested(meet, mapOf("Referer" to "http://localhost:8700/"))
+        p.started(meet, start, crosses = true)
         p.ended()
-        assertFalse(p.mayReissue(meet, start))
+        assertFalse(p.requested(meet, mapOf("Referer" to "http://localhost:8700/")))
     }
 
     @Test
-    fun `the re-issue script sets its own referrer policy and target, and quotes the address`() {
-        val script = pageReissueScript("http://127.0.0.1:8700/a'b\"c")
-        assertTrue(script.contains("a.referrerPolicy='origin'"))
-        assertTrue(script.contains("a.target='_self'"))
-        assertTrue(script.contains("a.href=\"http://127.0.0.1:8700/a'b\\\"c\""))
-        assertFalse(script.contains("location"))
+    fun `the re-issue ask carries the token and an http(s) address only`() {
+        assertEquals("go 0123abcd http://127.0.0.1:8700/a?b=c", pageReissueRequest("0123abcd", "http://127.0.0.1:8700/a?b=c"))
+        assertNull(pageReissueRequest("0123abcd", "javascript:alert(1)"))
+        assertNull(pageReissueRequest("0123abcd", "http://127.0.0.1:8700/a b"))
+        assertNull(pageReissueRequest("0123abcd", "intent://x#Intent;end"))
     }
 
     @Test
-    fun `the re-fetch just issued is known as such`() {
+    fun `the re-issue just issued is known as such`() {
         val c = RedirectCorrection()
-        assertTrue(c.redirectAnswered("http://127.0.0.1:8700/meet", desktopOn))
-        assertFalse(c.isReissue("http://127.0.0.1:8700/meet"))
+        assertTrue(c.crossing(meet, desktopOn))
+        assertFalse(c.isReissue(meet))
         c.issue()
-        assertTrue(c.isReissue("http://127.0.0.1:8700/meet"))
+        assertTrue(c.isReissue(meet))
         assertFalse(c.isReissue("http://127.0.0.1:8700/other"))
     }
 }
