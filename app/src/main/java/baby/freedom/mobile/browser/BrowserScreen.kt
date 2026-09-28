@@ -76,6 +76,8 @@ import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.lerp
+import androidx.lifecycle.createSavedStateHandle
+import androidx.lifecycle.viewmodel.compose.viewModel
 import baby.freedom.mobile.data.BrowsingRepository
 import baby.freedom.mobile.ui.PrivateTheme
 import baby.freedom.mobile.data.NodeSettings
@@ -406,7 +408,9 @@ fun BrowserScreen(
     ipfsCounters: () -> LongArray? = { null },
     onStatusBarTint: (Int?) -> Unit = {},
 ) {
-    val tabs = remember { TabsState(homepage = initialUrl) }
+    // Outside composition, so the tabs survive an Activity relaunch
+    // (#183, see [TabsSession]).
+    val tabs = viewModel { TabsSession(initialUrl, createSavedStateHandle()) }.tabs
     // Shared with the request interceptor (which resolves
     // `<name>.ens.…` virtual hosts) so both sides use one cache.
     val ensResolver = Gateways.ensResolver
@@ -434,14 +438,6 @@ fun BrowserScreen(
     var showHistory by rememberSaveable { mutableStateOf(false) }
     var showBookmarks by rememberSaveable { mutableStateOf(false) }
     var showDownloads by rememberSaveable { mutableStateOf(false) }
-    // Intentionally NOT `rememberSaveable`: rotation and the other
-    // declared `configChanges` don't recreate the Activity (see the
-    // manifest), but process death or an undeclared config change still
-    // does. In that case `tabs` is rebuilt as a fresh blank tab and we
-    // need to re-submit the homepage into it. If this survived
-    // recreation the load would be suppressed and the tab would render
-    // blank.
-    var didInitialLoad by remember { mutableStateOf(false) }
     var addressFocused by remember { mutableStateOf(false) }
     // Suggestions should only appear once the user has actively changed
     // the address-bar text. Tapping the pill (which select-alls the
@@ -822,6 +818,8 @@ fun BrowserScreen(
         // lifts a download block a declined offer left on it
         // ([DownloadOffers]); a page's own navigation doesn't.
         if (source == SubmitSource.User) downloads.allowOffers(target.id)
+        // Nor is it a load a restore put back over its page (#185 R4-F1).
+        if (source == SubmitSource.User) target.userNavigated()
         // And the load it schedules is theirs: its redirects may end in
         // an app link without a tap on a page (#173). Handed to that
         // load's own `loadUrl` below, never left for whichever load
@@ -1099,8 +1097,10 @@ fun BrowserScreen(
     // address bar here — the home surface should be the first thing
     // the user sees, not an already-open keyboard.
     LaunchedEffect(Unit) {
-        if (!didInitialLoad) {
-            didInitialLoad = true
+        // Once per tab list ([TabsState.initialLoadDone]): not again
+        // into the active tab of tabs that outlived a relaunch (#183).
+        if (!tabs.initialLoadDone) {
+            tabs.initialLoadDone = true
             submit(tabs.active, tabs.homepageUrl)
         }
     }

@@ -698,8 +698,10 @@ fun BrowserWebViewHost(
             },
             onCloseWindow = { tabs.closePopup(tab) },
             // Handed to Chromium by `onCreateWindow`, which needs it
-            // never to have navigated.
-            isPopup = tab.openerId != null,
+            // never to have navigated. Not a popup rebuilt after a
+            // relaunch (#183): its first navigation is the restore, not
+            // one its opener asked for.
+            isPopup = tab.openerId != null && tab.pendingRestore == null,
             popupOpener = {
                 val openerId = tab.openerId
                 val opener = tabs.tabs.firstOrNull { it.id == openerId }
@@ -744,10 +746,21 @@ fun BrowserWebViewHost(
             val wv = attach(tab)
             if (restore == null) continue
             tab.pendingRestore = null
+            // A tab that outlived its WebView (#183) keeps its mute.
+            if (tab.audioMuted) {
+                if (WebViewFeature.isFeatureSupported(WebViewFeature.MUTE_AUDIO)) {
+                    WebViewCompat.setAudioMuted(wv, true)
+                } else {
+                    tab.audioMuted = false
+                }
+            }
             val restored = restore.webViewState?.let { wv.restoreState(it) } != null
             if (restored) {
                 tab.canGoBack = wv.canGoBack()
                 tab.canGoForward = wv.canGoForward()
+                // The WebView loads the restored entry itself: a load of
+                // its own for the IPFS phase line (#94).
+                tab.beginLoad(inWebView = true)
             } else {
                 wv.loadUrl(ABOUT_BLANK)
             }
@@ -757,18 +770,19 @@ fun BrowserWebViewHost(
             // unless the user had stopped that load) once that entry
             // has finished — any earlier and the blank entry's
             // `onPageFinished` wipes the tab's address after the submit,
-            // and the tab loads behind the home overlay. Only armed if
-            // the WebView really is on the blank entry: a restored list
-            // that ends on a real page never finishes a blank load to
-            // consume it.
-            tab.afterBlank = restore.afterBlank(
+            // and the tab loads behind the home overlay. Only armed for
+            // the entry the WebView really is on: a restored list that
+            // ends on a real page never finishes a blank load, so there
+            // it waits for that page instead — for a load the tab had in
+            // flight over it (#183 R1-F2).
+            tab.armAfterRestore(restore.afterBlank(
                 restored = restored,
                 currentEntryUrl = if (restored) {
                     wv.copyBackForwardList().currentItem?.url
                 } else {
                     ABOUT_BLANK
                 },
-            )
+            ))
         }
         val toRemove = webViews.keys.filter { it !in idsNow }
         var closedPrivate = false
@@ -813,8 +827,12 @@ fun BrowserWebViewHost(
             LaunchedEffect(tab.id) {
                 snapshotFlow { tab.navCounter to tab.pendingUrl }
                     .collectLatest { (counter, pending) ->
-                        if (counter > 0 && pending.isNotEmpty()) {
+                        // Not one this tab's WebView was already handed:
+                        // a tab that outlived its WebView (#183) comes
+                        // back from its saved state instead.
+                        if (counter > tab.handedNavCounter && pending.isNotEmpty()) {
                             val wv = webViews[tab.id] ?: return@collectLatest
+                            tab.handedNavCounter = counter
                             // Abort any in-flight load first. Without this,
                             // hitting Home (or otherwise navigating) mid-
                             // load lets Chromium keep firing late
@@ -822,7 +840,12 @@ fun BrowserWebViewHost(
                             // page, which flips the top progress bar back
                             // on after navigateHome() has already cleared
                             // it to -1.
-                            wv.stopLoading()
+                            // Not under the load a restore put back over
+                            // its page, which is still coming in: that
+                            // load was in flight over a complete page,
+                            // and Chromium keeps the page loading until
+                            // the new one commits (#185 R4-F1).
+                            if (!tab.takePutBackKeepsPage()) wv.stopLoading()
                             // From here the WebView is on this load, not
                             // the one it was showing (#94).
                             tab.handLoadToWebView()
@@ -860,11 +883,7 @@ fun BrowserWebViewHost(
         // also clears the counter itself so the capsule's edge trace
         // goes out on the same frame as the tap.
         tabs.stopLoading = { tab -> webViews[tab.id]?.stopLoading() }
-        tabs.saveWebViewState = { tab ->
-            webViews[tab.id]?.let { wv ->
-                Bundle().takeIf { runCatching { wv.saveState(it) }.getOrNull() != null }
-            }
-        }
+        tabs.saveWebViewState = { tab -> webViews[tab.id]?.let(::saveWebViewState) }
         // Find in page (#83). Results come back through the WebView's
         // FindListener into the tab's [FindInPageState] (see
         // [buildRefreshableWebView]).
@@ -982,9 +1001,20 @@ fun BrowserWebViewHost(
 
     DisposableEffect(Unit) {
         onDispose {
-            // As when the last private tab closes (#86): the private
-            // cache goes through a private WebView, before they all do.
-            privateIds.firstNotNullOfOrNull { webViews[it] }?.let { runCatching { it.clearCache(true) } }
+            // The Activity is being relaunched (#183) and the tabs live
+            // on in [TabsSession] — the ViewModel store is kept on
+            // exactly this condition. Each tab keeps its WebView's state
+            // for the next host to restore it from, and anything its
+            // page had asked for is withdrawn with the page.
+            val relaunch = context.findActivity()?.isChangingConfigurations == true
+            if (relaunch) {
+                tabs.parkForRelaunch { tab -> webViews[tab.id]?.let(::saveWebViewState) }
+                for (tab in tabs.tabs) sitePermissions.onDocumentStarted(tab)
+            } else {
+                // As when the last private tab closes (#86): the private
+                // cache goes through a private WebView, before they all do.
+                privateIds.firstNotNullOfOrNull { webViews[it] }?.let { runCatching { it.clearCache(true) } }
+            }
             for (wv in webViews.values) {
                 UnverifiedOrigins.release(wv)
                 (wv as? PageWebView)?.sweptReload?.committed()
@@ -993,12 +1023,12 @@ fun BrowserWebViewHost(
             }
             webViews.clear()
             refreshLayouts.clear()
-            // The tabs don't outlive this host (a recreated screen
-            // starts from a fresh blank tab), so neither does a private
-            // session.
+            // Otherwise the tabs don't outlive this host, so neither does
+            // a private session. Across a relaunch it goes on with its
+            // tabs, whose WebViews the next host puts back on its profile.
             if (privateIds.isNotEmpty()) {
                 privateIds.clear()
-                endPrivateSession()
+                if (!relaunch) endPrivateSession()
             }
         }
     }
@@ -1166,6 +1196,7 @@ private fun buildRefreshableWebView(
 
     /** [THEME_COLOR_JS] in the page, for the read stamped [token]. */
     fun readThemeColorPageVisible(view: WebView, token: Int, onAnswer: ((Int?) -> Unit)?) {
+        if (view.isDestroyed) return
         view.evaluateJavascript(THEME_COLOR_JS) { result ->
             if (themeColor.accept(token)) {
                 val argb = themeColorArgb(result)
@@ -1191,7 +1222,9 @@ private fun buildRefreshableWebView(
      * away, which the page can see; [onAnswer] hears only such an answer.
      */
     fun readThemeColor(view: WebView?, onScreen: Boolean = false, onAnswer: ((Int?) -> Unit)? = null) {
-        view ?: return
+        // A read posted before the host destroyed the WebView (an
+        // Activity relaunch, #183) has no page to read any more.
+        if (view == null || view.isDestroyed) return
         val token = themeColor.beginRead(onScreen) ?: return
         if (themeColorFromDetector(view.url)) {
             // The detector's answer lands through the painted gate;
@@ -1986,6 +2019,9 @@ private fun buildRefreshableWebView(
         // navigation's gesture mustn't carry over to its redirects (#85).
         this.onBrowserInitiatedLoad = { url, userNamed ->
             navigationHadGesture = false
+            // …nor does an address a restore had waiting for its own
+            // load (#185 R2-F1).
+            state.restoreLoadSuperseded()
             if (url != null && userNamed) userNamedChain.started(url) else userNamedChain.ended()
         }
         // Stop (or a new load's stop first) ends the navigation in flight
@@ -1993,6 +2029,11 @@ private fun buildRefreshableWebView(
         // it carries over to a navigation the page starts next (R1-F1).
         this.onStopLoading = {
             navigationHadGesture = false
+            // The stop finishes the restored page: the address waiting
+            // for that finish mustn't go in over what comes next — the
+            // user's own navigation, or nothing if they hit Stop
+            // (#185 R2-F1).
+            state.restoreLoadSuperseded()
             userNamedChain.ended()
         }
 
@@ -2155,6 +2196,24 @@ private fun buildRefreshableWebView(
                     )
                 }
                 state.documentCommitted()
+                // A load the tab had in flight over the restored page
+                // before its WebView was rebuilt (#183 R1-F2) goes back
+                // in flight over it now, at its reload's commit —
+                // whatever URL that ended on (#185 R2-F2) — before the
+                // page can take input, so a navigation the user starts
+                // on it replaces that load as it would have before the
+                // relaunch, POST form included (#185 R3-F1). Posted, so
+                // this commit has updated the tab first, and only if
+                // nothing has superseded it by then (#185 R2-F1). Handed
+                // over without stopping the page, whose HTML and
+                // subresources are still coming in (#185 R4-F1).
+                state.afterPageCommitted()?.let { after ->
+                    view?.post {
+                        if (!state.claimAfterPage(after)) return@post
+                        state.addressBarText = after.address
+                        onSubmitUrl(state, after.address)
+                    }
+                }
                 // The main-frame document committed: its ENS pins are now
                 // the page on screen's, and subresources held waiting on
                 // the commit go ahead (#99, [EnsDocumentPins]).
@@ -2419,8 +2478,7 @@ private fun buildRefreshableWebView(
                     // the tab loads behind the home overlay. A load the
                     // user had stopped only gets its address back, and
                     // the Stop latch so the bar offers Reload.
-                    state.afterBlank?.let {
-                        state.afterBlank = null
+                    state.takeAfterBlankEntry()?.let {
                         state.addressBarText = it.address
                         if (it.submit) onSubmitUrl(state, it.address) else state.stopProgress()
                     }
@@ -2428,8 +2486,9 @@ private fun buildRefreshableWebView(
                 }
                 // The first page to finish after a restore consumes the
                 // pending blank-entry address too, even though it isn't
-                // the blank entry: it can't apply to a later Home.
-                state.afterBlank = null
+                // the blank entry: it can't apply to a later Home. (One
+                // armed over the restored page went in at its commit.)
+                state.afterPageFinished()
                 // Dismiss the pull-to-refresh spinner once the page has
                 // finished loading (or errored out). Happens regardless
                 // of whether the load was user-initiated reload or not.
@@ -2571,6 +2630,11 @@ private fun buildRefreshableWebView(
                     navigationHadGesture = request.hasGesture()
                     // The page's own navigation, not the user's load.
                     userNamedChain.ended()
+                    // A link the user tapped on a restored page is where
+                    // they're going now, not the load a restore had
+                    // waiting (#185 R2-F1). A script's redirect without a
+                    // tap is still the restored page's own load.
+                    if (request.hasGesture()) state.restoreLoadSuperseded()
                 }
                 // A popup's very first navigation: an app link there is
                 // its opener's, and the popup was opened for it alone.
@@ -3139,6 +3203,15 @@ private class GestureArmingNodeProvider(
  * protected: Chromium's unconsumed overscroll, and the scroll range.
  */
 internal class PageWebView(context: Context) : WebView(context) {
+    /** [destroy] has been called: nothing may be asked of this WebView any more. */
+    var destroyed = false
+        private set
+
+    override fun destroy() {
+        destroyed = true
+        super.destroy()
+    }
+
     /**
      * Virtual origins this tab may have a live document on — the main
      * frame's and its frames' (see [TabDocuments]). What
@@ -3546,6 +3619,17 @@ private class SearchSelectionCallback(
         return true
     }
 }
+
+/**
+ * The host has destroyed this WebView ([PageWebView.destroy]); a
+ * callback it posted earlier can still run after that.
+ */
+internal val WebView.isDestroyed: Boolean
+    get() = (this as? PageWebView)?.destroyed == true
+
+/** [WebView.saveState] into a fresh bundle, or null if the WebView won't give one. */
+private fun saveWebViewState(wv: WebView): Bundle? =
+    Bundle().takeIf { runCatching { wv.saveState(it) }.getOrNull() != null }
 
 /**
  * When [SearchSelectionCallback] asks the page for its selection: the
