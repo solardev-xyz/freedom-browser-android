@@ -284,6 +284,56 @@ internal fun webOrigin(url: String): String? {
 }
 
 /**
+ * A load a restore put back over its page (#185) that has to go out with
+ * the other user agent (#180), held until that page has finished.
+ *
+ * The put-back load normally goes in at the restored page's commit
+ * without stopping it, so the page's HTML and subresources keep coming
+ * in (#185 R4-F1). A user agent can't change under a page that is still
+ * loading — Chromium would reload it — so a load that crosses the
+ * desktop/mobile line would have to stop the page first, and leave it
+ * truncated for good if that load then never commits (a `204`, a
+ * download). It waits for the page's own finish instead.
+ *
+ * Only while nothing else has taken the tab: a load of the app's, Stop,
+ * or any document committing drops it ([dropped]); and a navigation the
+ * page started meanwhile (a tapped link, a form the user submitted,
+ * which #185 R3-F1 put the load in at the commit to leave alone) that
+ * is still in flight at the finish supersedes it there ([pageFinished]).
+ */
+internal class PutBackHold {
+    private var load: (() -> Unit)? = null
+
+    val held: Boolean get() = load != null
+
+    fun hold(load: () -> Unit) {
+        this.load = load
+    }
+
+    fun dropped() {
+        load = null
+    }
+
+    /**
+     * The page on screen finished. True if the held load is to go in
+     * now ([release]); with a main-frame navigation of the page's in
+     * flight ([navigationPending]) it is dropped instead.
+     */
+    fun pageFinished(navigationPending: Boolean): Boolean {
+        if (load == null) return false
+        if (navigationPending) load = null
+        return load != null
+    }
+
+    /** Hands the held load to the WebView, if it's still held. */
+    fun release() {
+        val go = load ?: return
+        load = null
+        go()
+    }
+}
+
+/**
  * The chrome's Back and Forward (a script step, not
  * [android.webkit.WebView.goBack], so the page's own history handling
  * sees them). [PageWebView] knows them to put the user agent of the

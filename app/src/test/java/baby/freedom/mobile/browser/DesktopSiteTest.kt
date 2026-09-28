@@ -430,4 +430,38 @@ class DesktopSiteTest {
         assertTrue(c.isReissue(meet))
         assertFalse(c.isReissue("http://127.0.0.1:8700/other"))
     }
+
+    @Test
+    fun `a put-back load that crosses the line waits for its page's finish, unless superseded`() {
+        // The restored page finishes with nothing else in flight: the
+        // load goes in then, once (#185 R4-F1 kept for the other user
+        // agent too).
+        var loads = 0
+        val h = PutBackHold()
+        h.hold { loads++ }
+        assertTrue(h.held)
+        assertEquals(0, loads)
+        assertTrue(h.pageFinished(navigationPending = false))
+        h.release()
+        h.release()
+        assertEquals(1, loads)
+        assertFalse(h.pageFinished(navigationPending = false))
+        // A navigation the page started meanwhile (a tapped link, a
+        // user's form, #185 R3-F1) is still in flight at the finish:
+        // it replaces the put-back.
+        h.hold { loads++ }
+        assertFalse(h.pageFinished(navigationPending = true))
+        h.release()
+        assertEquals(1, loads)
+        // A load of the app's, Stop, or a commit drops it — also
+        // between the finish and its posted release.
+        h.hold { loads++ }
+        h.dropped()
+        assertFalse(h.pageFinished(navigationPending = false))
+        h.hold { loads++ }
+        assertTrue(h.pageFinished(navigationPending = false))
+        h.dropped()
+        h.release()
+        assertEquals(1, loads)
+    }
 }

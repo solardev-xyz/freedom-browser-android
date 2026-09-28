@@ -852,17 +852,29 @@ fun BrowserWebViewHost(
                             // load was in flight over a complete page,
                             // and Chromium keeps the page loading until
                             // the new one commits (#185 R4-F1).
-                            if (!tab.takePutBackKeepsPage()) wv.stopLoading()
-                            // From here the WebView is on this load, not
-                            // the one it was showing (#94).
-                            tab.handLoadToWebView()
+                            val keepsPage = tab.takePutBackKeepsPage()
+                            if (!keepsPage) wv.stopLoading()
                             // The user's submit scheduled this very load?
                             // Then its redirects may end in an app link
                             // (#173) — this load's, no other's.
-                            if (tab.takeUserNamedLoad(pending) && wv is PageWebView) {
-                                wv.loadUrlNamedByUser(pending)
+                            val namedByUser = tab.takeUserNamedLoad(pending) && wv is PageWebView
+                            val load = {
+                                // From here the WebView is on this load, not
+                                // the one it was showing (#94).
+                                tab.handLoadToWebView()
+                                if (namedByUser) {
+                                    (wv as PageWebView).loadUrlNamedByUser(pending)
+                                } else {
+                                    wv.loadUrl(pending)
+                                }
+                            }
+                            // One that needs the other user agent (#180)
+                            // would stop that page after all: it waits
+                            // for the page's finish ([PutBackHold]).
+                            if (keepsPage && wv is PageWebView && wv.needsOtherUserAgentFor(pending)) {
+                                wv.putBackHold.hold(load)
                             } else {
-                                wv.loadUrl(pending)
+                                load()
                             }
                         }
                     }
@@ -2564,6 +2576,15 @@ private fun buildRefreshableWebView(
                 // and the content on screen all disagreeing until the
                 // next navigation happened to fix them (#39).
                 val isCurrent = finishedLoadIsCurrent(url, view?.url)
+                // A load put back over this restored page that needs the
+                // other user agent goes in now that the page is complete,
+                // unless a navigation of the page's is in flight (#180,
+                // [PutBackHold]). Posted, after this finish's bookkeeping.
+                if (isCurrent && view is PageWebView &&
+                    view.putBackHold.pageFinished(navigationPending = pendingNavigationUrls.isNotEmpty())
+                ) {
+                    view.post { view.putBackHold.release() }
+                }
                 if (isCurrent) {
                     state.url = uiDisplay
                     lastLoadedDisplayUrl = display
@@ -3399,6 +3420,9 @@ internal class PageWebView(context: Context) : WebView(context) {
         // would replace the navigation about to start with a reload of
         // the page it leaves. Whatever is loading is superseded by that
         // navigation anyway. Not [stopLoading]: this is no user's Stop.
+        // (The one load that mustn't stop the page on screen, one a
+        // restore put back over its still-loading page, doesn't get here
+        // until that page has finished: see [PutBackHold].)
         super.stopLoading()
         return userAgentSwitch.set(desktop)
     }
@@ -3434,6 +3458,12 @@ internal class PageWebView(context: Context) : WebView(context) {
     var pageReissue: PageReissueChannel? = null
 
     private val redirectCorrection = RedirectCorrection()
+
+    /**
+     * A load a restore put back over its page, waiting for that page to
+     * finish before the user agent changes under it (#180, #185).
+     */
+    val putBackHold = PutBackHold()
 
     /**
      * A page's own tapped navigation, while it's the user's: where it
@@ -3567,6 +3597,8 @@ internal class PageWebView(context: Context) : WebView(context) {
      * one-time token spent. The next load puts the right one back.
      */
     fun documentStarted(url: String?) {
+        // Another document took the tab: no held put-back goes in over it.
+        putBackHold.dropped()
         documentDesktop = userAgentSwitch.desktop
         documentUrl = url
         redirectCorrection.ended()
@@ -3700,6 +3732,10 @@ internal class PageWebView(context: Context) : WebView(context) {
     private var loadingNamedByUser = false
 
     private fun browserInitiatedLoad(url: String? = null) {
+        // This load, not a held put-back, is what the tab is on now.
+        // Null only while WebView's own constructor runs.
+        @Suppress("SENSELESS_COMPARISON")
+        if (putBackHold != null) putBackHold.dropped()
         // Any load but a sweep's own step supersedes its reload: a later
         // resubmission prompt is that load's, not the sweep's (R1-F1).
         sweptReload.navigationStarted()
@@ -3724,6 +3760,8 @@ internal class PageWebView(context: Context) : WebView(context) {
         onStopLoading?.invoke()
         super.stopLoading()
         // Null only while WebView's own constructor runs.
+        @Suppress("SENSELESS_COMPARISON")
+        if (putBackHold != null) putBackHold.dropped()
         @Suppress("SENSELESS_COMPARISON")
         if (usersNavigation != null) navigationDidNotLeave()
     }
