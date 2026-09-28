@@ -20,3 +20,23 @@ add_library(freedom_jni SHARED ant_jni.c freedom_ipfs_jni.c myotis_jni.c tor_jni
 target_link_options(freedom_jni PRIVATE "-Wl,-z,max-page-size=16384")
 target_link_directories(freedom_jni PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../jniLibs/${ANDROID_ABI})
 target_link_libraries(freedom_jni freedom_mobile_ffi log)
+
+# libfreedom_colibri.so — the JNI shim over corpus.core's Colibri verifier
+# (colibri_jni.c, #100), linked against the prebuilt libc4.so that
+# scripts/build-colibri.sh drops into src/main/jniLibs/<abi>/. Its own
+# library, not part of freedom_jni: the browser process loads it for name
+# resolution, and must not pull libfreedom_mobile_ffi.so in with it.
+#
+# Optional: a checkout without libc4.so still builds (with a warning) and
+# the app starts name resolution at the RPC quorum instead. Release builds
+# can't ship that way — release.yml builds libc4.so and checks each APK
+# carries the shim.
+set(C4_LIB ${CMAKE_CURRENT_SOURCE_DIR}/../jniLibs/${ANDROID_ABI}/libc4.so)
+if(EXISTS ${C4_LIB})
+    add_library(freedom_colibri SHARED colibri_jni.c)
+    target_link_options(freedom_colibri PRIVATE "-Wl,-z,max-page-size=16384")
+    target_link_directories(freedom_colibri PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../jniLibs/${ANDROID_ABI})
+    target_link_libraries(freedom_colibri c4)
+else()
+    message(WARNING "libc4.so missing for ${ANDROID_ABI}: building without Colibri (see scripts/build-colibri.sh)")
+endif()

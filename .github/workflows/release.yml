@@ -26,6 +26,12 @@
 # it's retagged.
 # The library is built with ant's `chain` feature, the Radicle node and
 # the Tor client (see the build step).
+#
+# COLIBRI_REF pins the corpus-core/colibri-stateless tag libc4.so (the
+# Colibri verifier behind proven name resolution, #100) is built from;
+# bump it with the vendored swarmnode/src/main/cpp/colibri.h. A local
+# build without libc4.so still works (names start at the RPC quorum), so
+# this workflow checks every APK carries it.
 
 name: release
 
@@ -39,6 +45,7 @@ permissions:
 
 env:
   FFI_REF: 7c363d1610c0e6c56ae9483638a44719a6baa570
+  COLIBRI_REF: v3.0.0
 
 jobs:
   release:
@@ -100,6 +107,19 @@ jobs:
           mkdir -p "$GITHUB_WORKSPACE/swarmnode/src/main/jniLibs"
           cp -r target/android/jniLibs/. "$GITHUB_WORKSPACE/swarmnode/src/main/jniLibs/"
 
+      - name: Checkout colibri-stateless
+        uses: actions/checkout@v4
+        with:
+          repository: corpus-core/colibri-stateless
+          ref: ${{ env.COLIBRI_REF }}
+          path: colibri-stateless
+          fetch-depth: 0
+
+      - name: Build libc4.so (arm64-v8a + x86_64)
+        run: |
+          export ANDROID_NDK_HOME="$ANDROID_NDK_ROOT"
+          C4_VERSION="${COLIBRI_REF#v}" scripts/build-colibri.sh colibri-stateless
+
       # The committed Kotlin bindings must match the Radicle surface this
       # .so was built with (they checksum every call at load).
       - name: Check the Radicle UniFFI bindings are current
@@ -132,6 +152,15 @@ jobs:
         run: |
           export FREEDOM_KEYSTORE_FILE="$RUNNER_TEMP/release.keystore"
           ./gradlew --no-daemon :app:testDebugUnitTest :app:assembleRelease
+
+      - name: Every APK carries Colibri
+        run: |
+          for abi in arm64-v8a x86_64; do
+            for lib in libc4.so libfreedom_colibri.so; do
+              unzip -l "app/build/outputs/apk/release/app-$abi-release.apk" | grep -q "lib/$abi/$lib" \
+                || { echo "::error::$lib missing from the $abi APK"; exit 1; }
+            done
+          done
 
       - name: Stage release assets
         run: |

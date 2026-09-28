@@ -3,6 +3,7 @@ package baby.freedom.mobile.ens
 import android.util.Log
 import java.net.URL
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.coroutines.coroutineContext
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -40,6 +41,16 @@ import org.json.JSONObject
  * another lookup. Gateway fetches are bounded (https only, 15 s, 4 MB)
  * because the URLs come from the contract, not from us; see
  * [ccipFetch].
+ *
+ * A proof comes first (#100): [EnsColibri] asks corpus.core's Colibri
+ * prover for a proof of the Universal Resolver's (or the NameNFT
+ * registry's) answer and checks it on this device against Ethereum's
+ * sync committee — the chain's own consensus, the tier above servers
+ * agreeing ([EnsTrust.Source.COLIBRI], [resolveByColibri]). Only an
+ * answer is taken from it, or a proven "no resolver"; when it can't
+ * give one — prover or network down, not in this build, switched off in
+ * Settings, a revert that proves nothing — the lookup goes on to the
+ * RPC servers below, as before.
  *
  * No single RPC server is taken at its word (#96): with three or more
  * endpoints, servers first agree on a block ([EnsQuorum]'s anchor),
@@ -86,16 +97,29 @@ class EnsResolver internal constructor(
     private val settings: suspend () -> Settings,
     private val http: EnsHttp,
     private val tezos: TezosDomainsResolver = TezosDomainsResolver(),
+    /** The proven tier (#100); `null` leaves every lookup to the quorum. */
+    private val colibri: EnsColibri? = null,
+    /** How long a lookup waits for a proof ([COLIBRI_WAIT_MS]); shorter in tests. */
+    private val colibriWaitMs: Long = COLIBRI_WAIT_MS,
+    /**
+     * How long a proven lookup's CCIP gateways have to answer, from when
+     * the first is asked ([LEG_TIMEOUT_MS], the quorum's own read
+     * budget); shorter in tests.
+     */
+    private val colibriGatewayMs: Long = LEG_TIMEOUT_MS,
+    private val clock: () -> Long = System::currentTimeMillis,
 ) {
     /**
      * What the user configured (#102): the RPC endpoints to ask, in
-     * order, and whether to follow CCIP-Read. Read afresh for every
-     * lookup, so a change in Settings applies to the next one without
-     * a restart; a change also drops the cache (see [Epoch]).
+     * order, whether to follow CCIP-Read, and whether to ask the Colibri
+     * verifier first (#100). Read afresh for every lookup, so a change
+     * in Settings applies to the next one without a restart; a change
+     * also drops the cache (see [Epoch]).
      */
     data class Settings(
         val endpoints: List<String>,
         val ccipRead: Boolean = true,
+        val colibri: Boolean = true,
     )
 
     constructor(settings: suspend () -> Settings) : this(settings, EnsHttp.Default)
@@ -110,6 +134,64 @@ class EnsResolver internal constructor(
     ) : this({ Settings(rpcEndpoints) }, http, tezos)
 
     private data class Cached(val result: EnsResult, val expiresAt: Long)
+
+    /**
+     * After a Colibri call can't reach its provers / servers
+     * ([EnsColibri.Failure.unreachable], or an unexpected error) or
+     * outlasts a lookup's wait, the verifier is skipped for
+     * [COLIBRI_BACKOFF_MS], doubling with each further such call up to
+     * [COLIBRI_BACKOFF_MAX_MS]; any proof that comes in (a background
+     * call included) resets it. Each call counts at most once — one that
+     * misses the wait and then times out in the background is one
+     * failure — and one name's proof not checking out doesn't count at
+     * all: it says nothing about the other names.
+     */
+    internal inner class ColibriBackoff {
+        private var failures = 0
+        private var until = 0L
+
+        /** How much longer to skip the verifier; `null` when it may be asked. */
+        @Synchronized
+        fun remainingMs(): Long? {
+            val left = until - clock()
+            // A clock set back mustn't stretch the back-off forever.
+            return left.takeIf { it > 0 && it <= COLIBRI_BACKOFF_MAX_MS }
+        }
+
+        @Synchronized
+        fun failed() {
+            failures = (failures + 1).coerceAtMost(16)
+            val span = (COLIBRI_BACKOFF_MS shl (failures - 1)).coerceAtMost(COLIBRI_BACKOFF_MAX_MS)
+            until = clock() + span
+        }
+
+        @Synchronized
+        fun succeeded() {
+            failures = 0
+            until = 0
+        }
+    }
+
+    internal val colibriBackoff = ColibriBackoff()
+
+    /**
+     * How long a lookup of [name] under [settings] may wait on the
+     * proven tier before it asks the RPC servers: [colibriWaitMs] when
+     * the verifier would be asked now, 0 when the lookup would skip it
+     * (a `.tez` name, which never goes to the verifier; switched off;
+     * not in this build; or backing off). A caller holding a document
+     * for a bounded re-check adds this to its own deadline, so a normal
+     * proof doesn't miss it just for taking longer than an RPC read.
+     */
+    internal fun colibriWaitFor(settings: Settings, name: String): Long {
+        if (!settings.colibri || colibri?.available != true || colibriBackoff.remainingMs() != null) return 0
+        val normalized = try {
+            EnsNormalize.fastNormalize(name.trim())
+        } catch (e: EnsNormalize.InvalidNameException) {
+            return 0
+        }
+        return if (NameSystem.forName(normalized) == NameSystem.TEZOS) 0 else colibriWaitMs
+    }
 
     /**
      * Everything a lookup learns about the servers — answer cache,
@@ -231,11 +313,13 @@ class EnsResolver internal constructor(
             }
         }
 
-        // Cross-checked across servers whenever there are enough of them
-        // to (#96); one server's word otherwise, labelled as such.
+        // Proven if the Colibri verifier can (#100); else cross-checked
+        // across servers whenever there are enough of them to (#96); one
+        // server's word otherwise, labelled as such.
         val quorumPossible = EnsQuorum.canCrossCheck(config.endpoints)
         val verdict =
-            (if (quorumPossible) resolveByQuorum(epoch, normalized, target, callData, contract) else null)
+            (if (config.colibri) resolveByColibri(config, normalized, target, callData, contract) else null)
+                ?: (if (quorumPossible) resolveByQuorum(epoch, normalized, target, callData, contract) else null)
                 ?: resolveSingleSource(epoch, normalized, target, callData, contract)
         val ttl = ttlFor(verdict)
         if (ttl > 0) cache[normalized] = Cached(verdict.result, System.currentTimeMillis() + ttl)
@@ -253,6 +337,178 @@ class EnsResolver internal constructor(
         is EnsResult.Error -> 0
         is EnsResult.Conflict -> CONFLICT_TTL_MS
         else -> if (verdict.verified) CACHE_TTL_MS else UNVERIFIED_TTL_MS
+    }
+
+    // ---- Colibri (#100) ----
+
+    /**
+     * The proven tier: the record read through [EnsColibri], labelled
+     * [EnsTrust.Source.COLIBRI]. `null` — go on to the RPC servers —
+     * whenever it can't *prove* an answer:
+     *
+     * - no verifier (not in this build), a prover / network / proof
+     *   failure, or no answer within [COLIBRI_WAIT_MS]. A call still
+     *   running then carries on in the background (up to
+     *   [COLIBRI_BACKGROUND_MS]) rather than being cut off: on a first
+     *   lookup that is the verifier bootstrapping its sync committee,
+     *   which the next lookup then needn't repeat. An unreachable
+     *   prover / server or a missed wait (counted once per call) starts
+     *   a back-off ([colibriBackoff]) during which lookups skip the
+     *   verifier outright, so unreachable provers don't cost every new
+     *   name the full wait, nor pile up background calls; a proof that
+     *   does come in ends it. A proof failure specific to this call
+     *   (the verifier rejecting it, a result that isn't return data)
+     *   falls through for this name only;
+     * - a revert other than the Universal Resolver's own "no resolver"
+     *   errors (a proven `ResolverNotFound` is a proven negative): no
+     *   data at all is ambiguous (a degraded prover hop can look like
+     *   that), and any other error proves the resolver failed, not that
+     *   the record is absent — desktop's and iOS's classification. A
+     *   NameNFT registry (`.wei`, `.gwei`) has no error vocabulary, so
+     *   any of its reverts falls through the same way;
+     * - an `OffchainLookup` whose callback can't be proven. The callback
+     *   goes through the verifier too, so the gateway's answer is only
+     *   taken once the resolver contract has accepted it under proof.
+     *   With CCIP-Read off the lookup ends here, as it would on the
+     *   servers — and so does a gateway that fails or runs out the
+     *   [COLIBRI_CCIP_BUDGET_MS] budget (`CCIP_GATEWAY_FAILED`, not
+     *   cached): the quorum would fetch the very same gateway again,
+     *   doubling the wait and showing it the name twice. The gateway
+     *   fetches themselves must be done within [LEG_TIMEOUT_MS] of the
+     *   first one's start — the quorum read's own budget, not shortened
+     *   by the proof before it — so a black-holed gateway fails the name
+     *   no later than it would without Colibri, and a pass that has given
+     *   up asks no further gateway.
+     */
+    private suspend fun resolveByColibri(
+        config: Settings,
+        name: String,
+        target: String,
+        callData: ByteArray,
+        contract: String?,
+    ): Verdict? {
+        val colibri = colibri ?: return null
+        colibriBackoff.remainingMs()?.let {
+            Log.i(TAG, "[$name] colibri: backing off for ${it}ms after a failure, asking the RPC servers")
+            return null
+        }
+        val started = System.currentTimeMillis()
+        val provers = LinkedHashSet<String>()
+        suspend fun prove(to: String, data: ByteArray, waitMs: Long): EnsColibri.Outcome? {
+            // One call is one failure at most, whichever side (a missed
+            // wait here, or the background call's own end) sees it first.
+            val counted = AtomicBoolean(false)
+            fun failed() {
+                if (counted.compareAndSet(false, true)) colibriBackoff.failed()
+            }
+            val call = io.async {
+                try {
+                    withTimeoutOrNull(COLIBRI_BACKGROUND_MS) { colibri.ethCall(to, data, config.endpoints) }
+                        .also { if (it != null) colibriBackoff.succeeded() else failed() }
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: EnsColibri.Failure) {
+                    // This call's own proof failing isn't the provers
+                    // being unreachable: other names may still prove.
+                    if (e.unreachable) failed()
+                    throw e
+                } catch (e: Throwable) {
+                    failed()
+                    throw e
+                }
+            }
+            val proven = try {
+                withTimeoutOrNull(waitMs) { call.await() }
+            } catch (e: CancellationException) {
+                call.cancel()
+                throw e
+            } catch (e: Exception) {
+                Log.i(TAG, "[$name] colibri: ${e.message}")
+                return null
+            }
+            if (proven == null) {
+                // The call runs on in the background and clears this if
+                // it does come in (a first lookup's bootstrap).
+                failed()
+                Log.i(TAG, "[$name] colibri: no proof within ${waitMs}ms, asking the RPC servers")
+                return null
+            }
+            provers += proven.provers
+            return proven.outcome
+        }
+        val first = prove(target, callData, colibriWaitMs) ?: return null
+        var offchain = false
+        val trust = {
+            EnsTrust(
+                verified = true,
+                agreed = provers.ifEmpty { setOf(hostOf(EnsColibri.PROVERS.first())) }.toList(),
+                source = EnsTrust.Source.COLIBRI,
+                offchain = offchain,
+            )
+        }
+        var outcome = when (first) {
+            is EnsColibri.Outcome.Returned -> CallOutcome(data = first.data, revertData = null)
+            is EnsColibri.Outcome.Reverted -> CallOutcome(data = null, revertData = first.data)
+        }
+        val revert = outcome.revertData
+        if (revert != null && contract == null && isOffchainLookup(revert)) {
+            if (!config.ccipRead) return Verdict(ccipDisabled(name), verified = true)
+            // Whether the pass is (or ended) at the gateway rather than
+            // at a proof: a gateway failure is the name's answer, since
+            // the quorum would only fetch the same gateway again.
+            val atGateway = AtomicBoolean(false)
+            val followed = io.async {
+                runCatchingCancellable {
+                    // The gateways get what the quorum's read would have
+                    // (its [LEG_TIMEOUT_MS]), counted from when they're
+                    // first asked rather than from this lookup's start,
+                    // so the proof that got here doesn't eat into it; a
+                    // dead gateway still fails no later than it would
+                    // there, and a proven callback still gets its wait.
+                    followOffchainLookup(revert, atGateway, gatewayMs = colibriGatewayMs) { to, data ->
+                        when (val o = prove(to, data, colibriWaitMs)) {
+                            is EnsColibri.Outcome.Returned -> CallOutcome(data = o.data, revertData = null)
+                            is EnsColibri.Outcome.Reverted -> CallOutcome(data = null, revertData = o.data)
+                            null -> throw IllegalStateException("no proof for the CCIP-Read callback")
+                        }
+                    }
+                }
+            }
+            val result = try {
+                withTimeoutOrNull(COLIBRI_CCIP_BUDGET_MS) { followed.await() }
+            } catch (e: CancellationException) {
+                followed.cancel()
+                throw e
+            }
+            if (result == null) followed.cancel()
+            outcome = result?.getOrNull() ?: run {
+                val why = result?.exceptionOrNull()?.message ?: "timed out"
+                if (atGateway.get()) {
+                    // The gateway failed (or used up the budget): end the
+                    // lookup here, as the quorum would after asking it again.
+                    Log.w(TAG, "[$name] colibri: CCIP gateway failed ($why)")
+                    return Verdict(
+                        EnsResult.Error(name = name, reason = "CCIP_GATEWAY_FAILED", error = why, retryable = true),
+                        verified = false,
+                    )
+                }
+                Log.i(TAG, "[$name] colibri: CCIP-Read failed ($why), asking the RPC servers")
+                return null
+            }
+            offchain = true
+        }
+        val verdict = when (val r = outcome.revertData) {
+            null -> {
+                if (outcome.data.isNullOrEmpty() || outcome.data == "0x") return null
+                decode(name, outcome, contract).withTrust(trust())
+            }
+            else -> (if (contract == null) mapRevert(name, r) else null)?.withTrust(trust()) ?: run {
+                Log.i(TAG, "[$name] colibri: proven revert ${r.take(10)} proves no record; asking the RPC servers")
+                return null
+            }
+        }
+        Log.i(TAG, "[$name] colibri proved it in ${System.currentTimeMillis() - started}ms via ${provers.joinToString()}")
+        return Verdict(verdict, verified = true)
     }
 
     // ---- Quorum (#96) ----
@@ -849,13 +1105,39 @@ class EnsResolver internal constructor(
      * Throws on gateway failure, a sender other than the Universal
      * Resolver, malformed revert data, or too many rounds.
      */
-    private fun followOffchainLookup(
+    private suspend fun followOffchainLookup(
         rpc: String,
         firstRevert: String,
         block: String = "latest",
         timeoutMs: Int = RPC_TIMEOUT_MS,
+    ): CallOutcome =
+        // At the same block as the call that deferred: the callback
+        // checks the gateway's answer against that state.
+        followOffchainLookup(firstRevert) { to, data -> ethCall(rpc, to, data, block, timeoutMs) }
+
+    /**
+     * [followOffchainLookup] with each callback made by [call] — one
+     * server's `eth_call`, or a proven one (#100), so the gateway's
+     * answer is only ever accepted through the same check that asked
+     * for it. Runs on an IO thread: [ccipFetch] blocks. [atGateway], if
+     * given, is `true` while a gateway is being asked and stays `true`
+     * when the gateways failed, so a caller can tell a gateway failure
+     * (or a budget spent waiting on one) from a failed callback.
+     * [gatewayMs], if given, is how long every gateway fetch of the pass
+     * has in all, counted on the monotonic clock from the first one's
+     * start; a fetch still running then fails the pass as if the
+     * gateways were down, and is told to ask no further gateway.
+     */
+    private suspend fun followOffchainLookup(
+        firstRevert: String,
+        atGateway: AtomicBoolean? = null,
+        gatewayMs: Long? = null,
+        call: suspend (to: String, data: ByteArray) -> CallOutcome,
     ): CallOutcome {
         var revert = firstRevert
+        // Monotonic, so a wall-clock step (NTP) can neither fail a
+        // working gateway at once nor lift the bound.
+        var gatewayDeadlineNs: Long? = null
         repeat(MAX_CCIP_ROUNDS) {
             val lookup = decodeOffchainLookup(revert)
                 ?: throw IllegalStateException("malformed OffchainLookup revert")
@@ -865,12 +1147,36 @@ class EnsResolver internal constructor(
             if (!lookup.sender.equals(UNIVERSAL_RESOLVER, ignoreCase = true)) {
                 throw IllegalStateException("OffchainLookup sender is not the Universal Resolver")
             }
-            val response = ccipFetch(lookup.sender, lookup.urls, lookup.callData)
-                ?: throw IllegalStateException("CCIP gateways unavailable or returned invalid data")
+            atGateway?.set(true)
+            val response = if (gatewayMs == null) {
+                ccipFetch(lookup.sender, lookup.urls, lookup.callData)
+            } else {
+                val deadlineNs = gatewayDeadlineNs
+                    ?: (System.nanoTime() + gatewayMs * 1_000_000).also { gatewayDeadlineNs = it }
+                // [ccipFetch] blocks; wait on it from here so the deadline
+                // holds even while a read is stalled inside it. Cancelling
+                // the job can't interrupt that read, so [stop] is what
+                // keeps the loop from sending the name to the next gateway
+                // once the pass has already given up on it.
+                val stop = AtomicBoolean(false)
+                val fetch = io.async { ccipFetch(lookup.sender, lookup.urls, lookup.callData) { stop.get() } }
+                val left = ((deadlineNs - System.nanoTime()) / 1_000_000).coerceAtLeast(0)
+                // Boxed, so a fetch that ended with no answer (null) isn't
+                // taken for one that ran out of time.
+                val done = try {
+                    withTimeoutOrNull(left) { Result.success(fetch.await()) }
+                } finally {
+                    if (fetch.isActive) {
+                        stop.set(true)
+                        fetch.cancel()
+                    }
+                }
+                (done ?: throw IllegalStateException("CCIP gateways didn't answer within the lookup's budget"))
+                    .getOrThrow()
+            } ?: throw IllegalStateException("CCIP gateways unavailable or returned invalid data")
+            atGateway?.set(false)
             val callbackData = lookup.callback + abiEncodeTwoBytes(response, lookup.extraData)
-            // At the same block as the call that deferred: the callback
-            // checks the gateway's answer against that state.
-            val outcome = ethCall(rpc, lookup.sender, callbackData, block, timeoutMs)
+            val outcome = call(lookup.sender, callbackData)
             val next = outcome.revertData
             if (next == null || !isOffchainLookup(next)) return outcome
             revert = next
@@ -891,12 +1197,19 @@ class EnsResolver internal constructor(
      * bare-IP / local hosts, [CCIP_TIMEOUT_MS] wall clock and
      * [CCIP_MAX_RESPONSE_BYTES] body per gateway. Non-URL entries such
      * as the Universal Resolver's `x-batch-gateway:true` hint are
-     * skipped like any other non-https string.
+     * skipped like any other non-https string. Once [stopped] says so
+     * (the caller gave up waiting), no further gateway is asked.
      */
-    internal fun ccipFetch(sender: String, urls: List<String>, callData: ByteArray): ByteArray? {
+    internal fun ccipFetch(
+        sender: String,
+        urls: List<String>,
+        callData: ByteArray,
+        stopped: () -> Boolean = { false },
+    ): ByteArray? {
         val senderLower = sender.lowercase()
         val dataHex = "0x" + callData.toHex()
         for (template in urls) {
+            if (stopped()) return null
             val url = template.replace("{sender}", senderLower).replace("{data}", dataHex)
             val parsed = runCatching { URL(url) }.getOrNull() ?: continue
             val host = parsed.host.orEmpty().trim('[', ']').trimEnd('.').lowercase()
@@ -1196,6 +1509,25 @@ class EnsResolver internal constructor(
 
         // A read's whole budget, CCIP-Read's gateway hops included.
         private const val LEG_TIMEOUT_MS = 20_000L
+
+        // #100: how long a lookup waits for a proof before asking the
+        // RPC servers. A warm verifier answers in about a second; the
+        // first call after install (or a library upgrade) bootstraps the
+        // sync committee, and a prover that's down or black-holed would
+        // otherwise hold every name up by its connect timeouts. The call
+        // itself may run on for [COLIBRI_BACKGROUND_MS], to finish that
+        // bootstrap for the next lookup.
+        private const val COLIBRI_WAIT_MS = 6_000L
+        private const val COLIBRI_BACKGROUND_MS = 60_000L
+
+        // How long the verifier is skipped after a failure or a missed
+        // wait, doubling per further failure (#100, R2-F2).
+        internal const val COLIBRI_BACKOFF_MS = 30_000L
+        internal const val COLIBRI_BACKOFF_MAX_MS = 5 * 60_000L
+
+        // A proven CCIP-Read pass, gateway hops and proven callbacks
+        // included (iOS's `provenCCIPBudget`).
+        private const val COLIBRI_CCIP_BUDGET_MS = 30_000L
 
         // Once enough heads are in for a median, how much longer the
         // rest get: a slow server shouldn't cost every cold lookup its

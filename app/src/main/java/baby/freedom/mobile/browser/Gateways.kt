@@ -1,5 +1,7 @@
 package baby.freedom.mobile.browser
 
+import baby.freedom.mobile.ens.EnsColibri
+import baby.freedom.mobile.ens.EnsHttp
 import baby.freedom.mobile.ens.EnsResolver
 import baby.freedom.mobile.ens.EnsResult
 import baby.freedom.mobile.ens.EnsRpcConfig
@@ -17,6 +19,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeoutOrNull
+import java.io.File
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.locks.ReentrantLock
@@ -145,7 +148,21 @@ object Gateways {
      * request interceptor (which resolves `<name>.ens.…` hosts) share
      * a cache and never disagree mid-session.
      */
-    val ensResolver: EnsResolver by lazy { EnsResolver { ensRpcConfig().resolverSettings } }
+    val ensResolver: EnsResolver by lazy {
+        EnsResolver(
+            settings = { ensRpcConfig().resolverSettings },
+            http = EnsHttp.Default,
+            colibri = EnsColibri(EnsColibri.NativeEngine { colibriStatesDir }),
+        )
+    }
+
+    /**
+     * Where the Colibri verifier keeps its sync-committee state (#100).
+     * `MainActivity` sets it on start; until then (and in unit tests)
+     * the proven tier stays off and names go to the RPC servers.
+     */
+    @Volatile
+    var colibriStatesDir: File? = null
 
     /**
      * Blocking ENS lookup used by the request interceptor. A seam so the
@@ -165,9 +182,29 @@ object Gateways {
      * running at the deadline carries on in the background (and warms
      * the resolver's cache for the next load); the document is served
      * from the last answer meanwhile. `internal var` for tests.
+     *
+     * This is the RPC servers' share. While the Colibri verifier would
+     * be asked first (#100), the re-check also gets its proof wait on
+     * top ([colibriAllowanceMs]): a proof takes a few seconds, and a
+     * deadline shorter than that would miss an ordinary one, serve the
+     * earlier answer and open [reverifyFailureWindowMs] for a network
+     * that is working fine. A stalled network then costs one Back up to
+     * both (~9 s) — the verifier backs off after that, and the window
+     * spares the next documents. A `.tez` name is never proven, so its
+     * re-check gets the RPC share alone.
      */
     @Volatile
     internal var reverifyDeadlineMs: Long = 3_000
+
+    /**
+     * How long a lookup of a name under these settings may spend on the
+     * proven tier first ([EnsResolver.colibriWaitFor]); 0 when it would
+     * skip it (a `.tez` name always does). A seam for tests.
+     */
+    @Volatile
+    internal var colibriAllowanceMs: (EnsResolver.Settings, String) -> Long = { settings, name ->
+        ensResolver.colibriWaitFor(settings, name)
+    }
 
     /**
      * After a re-check that failed or ran out of time, later documents
@@ -583,7 +620,7 @@ object Gateways {
                 lookupFailedAt[key]?.let {
                     System.currentTimeMillis() - it < reverifyFailureWindowMs
                 } == true -> 0L
-                else -> reverifyDeadlineMs
+                else -> reverifyDeadlineMs + (key.settings?.let { colibriAllowanceMs(it, key.name) } ?: 0L)
             }
             // [lookupWithin] keeps [lookupFailedAt] — see [reverifyFailureWindowMs].
             return lookupWithin(key, name, deadline)
