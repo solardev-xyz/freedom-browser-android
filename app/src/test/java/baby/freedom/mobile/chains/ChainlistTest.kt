@@ -14,6 +14,7 @@ import kotlinx.coroutines.withTimeout
 import org.json.JSONObject
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
@@ -141,6 +142,14 @@ class ChainlistTest {
             "https://eth.nodebridge.xyz/assetchain/exec/b2da3d33-5708-4f61-8d1e-2c677124c35a",
             "https://xcap-mainnet.relay.xcap.network/znzvh2ueyvm2yts5fv5gnul395jbkfb2/rpc1",
             "https://sparkling-autumn-dinghy.worldchain-mainnet.quiknode.pro",
+            // Alchemy-shaped keys whose separators split them into short pieces, or with no digits.
+            "https://eth-sepolia.g.alchemy.com/v2/Ab3dEfGh1jKlMn_oPqRsTuVwXy-Z0123456",
+            "https://eth-sepolia.g.alchemy.com/v2/kQxRtYpLmNbVcZsWdFgHjKaPoIuYtReW",
+            // A key doesn't pass for an Avalanche blockchain ID by sitting where one would.
+            "https://rpc.example.org/ext/bc/9aa3d95b3bc440fa88ea12eaa4456161/rpc",
+            "https://rpc.example.org/ext/bc/WddzdzI2o9S3COdT73d5w6AIogbKq4X-/rpc",
+            // …nor by being base58 of the right length with a wrong checksum.
+            "https://rpc.gunzchain.io/ext/bc/2M47TxWHGnhNtq6pM5zPXdATBtuqubxn5EPFgFmEawCQr9WFMM/rpc",
         )) {
             assertNull(url, Chainlist.usableRpc(JSONObject(mapOf("url" to url, "tracking" to "none"))))
         }
@@ -157,11 +166,39 @@ class ChainlistTest {
             "https://ethereum.public.blockpi.network/v1/rpc/public",
             // An Avalanche blockchain ID is public, not a key.
             "https://rpc.gunzchain.io/ext/bc/2M47TxWHGnhNtq6pM5zPXdATBtuqubxn5EPFgFmEawCQr9WFML/rpc",
+            "https://rpc.apertum.io/ext/bc/YDJ1r9RMkewATmA7B35q1bdV18aywzmdiXwd9zGBq3uQjsCnn/rpc",
+            "https://subnets.avax.network/defi-kingdoms/mainnet/rpc",
+            "https://mainnet.skalenodes.com/v1/honorable-steel-rasalhague",
+            "https://lb.routeme.sh/rpc/2716446429837000",
+            "https://rpc.ankr.com/blast_testnet_sepolia",
             // Host labels aren't paths: a long name with digits is just a name.
             "https://node1.cratd2csmartchain.io",
         )) {
             assertEquals(url, url, Chainlist.usableRpc(url))
         }
+    }
+
+    /** Random keys of the shapes providers hand out, well past any length a name could reach. */
+    @Test
+    fun randomKeysAreCaught() {
+        val random = java.util.Random(187)
+        fun key(alphabet: String, length: Int) = String(CharArray(length) { alphabet[random.nextInt(alphabet.length)] })
+        val base64url = ('A'..'Z').joinToString("") + ('a'..'z').joinToString("") + ('0'..'9').joinToString("") + "-_"
+        val base36 = ('a'..'z').joinToString("") + ('0'..'9').joinToString("")
+        for ((alphabet, length) in listOf(base64url to 32, "0123456789abcdef" to 32, base36 to 26, base36 to 32)) {
+            val missed = (1..20_000).count { !Chainlist.looksLikeKey(key(alphabet, length)) }
+            // Only keys with (almost) no digits in one case can pass for a name.
+            assertTrue("$alphabet × $length: $missed missed", missed <= 5)
+        }
+    }
+
+    @Test
+    fun cb58() {
+        assertTrue(Chainlist.isCb58Id("2M47TxWHGnhNtq6pM5zPXdATBtuqubxn5EPFgFmEawCQr9WFML"))
+        assertTrue(Chainlist.isCb58Id("ZG7cT4B1u3y7piZ9CzfejnTKnNAoehcifbJWUwBqgyD3RuEqK"))
+        assertFalse(Chainlist.isCb58Id("2M47TxWHGnhNtq6pM5zPXdATBtuqubxn5EPFgFmEawCQr9WFMM"))
+        assertFalse(Chainlist.isCb58Id("0M47TxWHGnhNtq6pM5zPXdATBtuqubxn5EPFgFmEawCQr9WFML"))
+        assertFalse(Chainlist.isCb58Id("zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"))
     }
 
     @Test
@@ -268,6 +305,25 @@ class ChainlistTest {
         now += 2000
         service.entries()
         assertEquals(2, net.calls)
+    }
+
+    @Test
+    fun aCacheFromTheFutureIsStale() = runBlocking {
+        val net = Net { catalog }
+        var now = 1_700_000_000_000L + 30 * Chainlist.CACHE_TTL_MS
+        val file = File(dir, "rpcs.json")
+        val service = ChainlistService(file, net::fetch) { now }
+        service.entries()
+        assertEquals(1, net.calls)
+
+        // The clock was a month ahead when that was cached, and is now corrected.
+        now -= 30 * Chainlist.CACHE_TTL_MS
+        service.entries()
+        assertEquals(2, net.calls)
+        // Nor does a new process trust the future-dated file on disk.
+        file.setLastModified(now + 30 * Chainlist.CACHE_TTL_MS)
+        ChainlistService(file, net::fetch) { now }.entries()
+        assertEquals(3, net.calls)
     }
 
     @Test

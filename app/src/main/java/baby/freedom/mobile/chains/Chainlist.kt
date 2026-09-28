@@ -173,22 +173,17 @@ object Chainlist {
 
     private val UUID = Regex("[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
     private val TOKEN_CHARS = Regex("[A-Za-z0-9_.~-]+")
+    private val SEPARATORS = charArrayOf('-', '_', '.', '~')
+    private val HEX = Regex("[0-9a-fA-F]+")
 
     /**
      * Whether [url] carries an account key in its path — Alchemy
      * `/v2/WddzdzI2o9S3…`, Infura `/v3/9aa3d95b…`, NodeReal/4EVERLAND
      * `/v1/<hex>`, GetBlock `/<hex>`, Ankr `/<chain>/<hex>`, Histori,
      * dwellir/Tenderly `/<uuid>` — or points at a host whose endpoints
-     * are all per-account ([KEYED_HOST_SUFFIXES]).
-     *
-     * A path segment counts as a key if it is a UUID, or if one of its
-     * `-`/`_`/`.`/`~`-separated pieces is at least 16 characters mixing
-     * letters and digits — the shape of a generated token, which chain
-     * or version names (`polygon-zkevm-mainnet`, `v2`, `tanssi-2002`)
-     * never have. The one public identifier with that shape is an
-     * Avalanche blockchain ID in `/ext/bc/<id>/rpc`, which is exempt.
-     * Anything else of that shape is dropped: losing one public RPC to
-     * a false positive is cheap, handing out someone's key is not.
+     * are all per-account ([KEYED_HOST_SUFFIXES]). See [looksLikeKey]
+     * for what counts as a key; it is judged the same wherever the
+     * segment sits in the path.
      */
     internal fun hasPathKey(url: String): Boolean {
         val uri = try {
@@ -198,22 +193,69 @@ object Chainlist {
         }
         val host = uri.host?.lowercase()?.trimEnd('.') ?: return true
         if (KEYED_HOST_SUFFIXES.any { host.endsWith(it) || host == it.removePrefix(".") }) return true
-        val segments = (uri.rawPath ?: "").split('/').filter { it.isNotEmpty() }
-        return segments.withIndex().any { (i, segment) ->
-            val avalancheId = i >= 2 &&
-                segments[i - 2].equals("ext", ignoreCase = true) &&
-                segments[i - 1].equals("bc", ignoreCase = true)
-            !avalancheId && looksLikeKey(segment)
-        }
+        return (uri.rawPath ?: "").split('/').any { it.isNotEmpty() && looksLikeKey(it) }
     }
 
-    private fun looksLikeKey(segment: String): Boolean {
+    /**
+     * Whether one path segment has the shape of a generated token rather
+     * than a chain or version name (`polygon-zkevm-mainnet`, `v2`,
+     * `tanssi-2002`, `bas_full_rpc_1`, `2716446429837000`). Judged on
+     * the segment with its `-`/`_`/`.`/`~` separators removed — a
+     * base64url key contains those too, so splitting on them would cut
+     * a key into short, innocent-looking pieces — once it is at least
+     * 16 characters long:
+     *  - upper *and* lower case letters: a 32-character base64url key
+     *    (Alchemy) has both all but ~1 in 10⁷ times; names are written
+     *    in one case;
+     *  - letters and 3+ digits, a 16+ character run of letters with a
+     *    digit or of hex, or any 24+ character run without a separator
+     *    (the longest name in the catalog, `assetchaintestnet`, is 17):
+     *    hex and base-36 keys (Infura, NodeReal, GetBlock, Histori).
+     * A UUID is always a key. The one public identifier of that shape is
+     * an Avalanche blockchain ID (`/ext/bc/<id>/rpc`), and it is exempt
+     * only if it *is* one — a cb58 string whose 4-byte SHA-256 checksum
+     * matches ([isCb58Id]) — so a key doesn't pass for one by being put
+     * behind `/ext/bc/`. Losing one public RPC to a false positive is
+     * cheap; handing out someone's key is not.
+     */
+    internal fun looksLikeKey(segment: String): Boolean {
         // A percent-encoded segment isn't a name anyone types; treat it as opaque.
         if (!TOKEN_CHARS.matches(segment)) return segment.length >= 16
         if (UUID.matches(segment)) return true
-        return segment.split('-', '_', '.', '~').any { piece ->
-            piece.length >= 16 && piece.any(Char::isDigit) && piece.any(Char::isLetter)
+        if (isCb58Id(segment)) return false
+        val chars = segment.filterNot { it in SEPARATORS }
+        if (chars.length < 16) return false
+        val upper = chars.any(Char::isUpperCase)
+        val lower = chars.any(Char::isLowerCase)
+        if (upper && lower) return true
+        if (!upper && !lower) return false // all digits: a chain ID, not a key
+        if (chars.count(Char::isDigit) >= 3) return true
+        return segment.split(*SEPARATORS).any { piece ->
+            piece.length >= 24 || piece.length >= 16 && (piece.any(Char::isDigit) || HEX.matches(piece))
         }
+    }
+
+    private const val BASE58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+
+    /**
+     * Whether [s] is an Avalanche ID: cb58, i.e. base58 of 32 bytes plus
+     * the last 4 bytes of their SHA-256. A random string passes the
+     * checksum 1 time in 2³².
+     */
+    internal fun isCb58Id(s: String): Boolean {
+        if (s.length !in 48..52) return false
+        var n = java.math.BigInteger.ZERO
+        val base = java.math.BigInteger.valueOf(58)
+        for (c in s) {
+            val digit = BASE58.indexOf(c)
+            if (digit < 0) return false
+            n = n.multiply(base).add(java.math.BigInteger.valueOf(digit.toLong()))
+        }
+        if (n.bitLength() > 36 * 8) return false
+        val raw = n.toByteArray().let { if (it.size > 36) it.copyOfRange(it.size - 36, it.size) else it }
+        val bytes = ByteArray(36 - raw.size) + raw
+        val digest = java.security.MessageDigest.getInstance("SHA-256").digest(bytes.copyOfRange(0, 32))
+        return digest.copyOfRange(28, 32).contentEquals(bytes.copyOfRange(32, 36))
     }
 
     /**
@@ -256,10 +298,10 @@ class ChainlistService internal constructor(
     /** The catalog; throws [IOException] only when there's neither network nor cache. */
     suspend fun entries(): List<Chainlist.Entry> = mutex.withLock {
         val now = clock()
-        memo?.let { (at, list) -> if (now - at < Chainlist.CACHE_TTL_MS) return@withLock list }
+        memo?.let { (at, list) -> if (isFresh(at, now)) return@withLock list }
 
         val cached = withContext(Dispatchers.IO) { readCache() }
-        if (cached != null && now - cached.first < Chainlist.CACHE_TTL_MS) {
+        if (cached != null && isFresh(cached.first, now)) {
             memo = cached
             return@withLock cached.second
         }
@@ -282,6 +324,14 @@ class ChainlistService internal constructor(
         }
         throw error
     }
+
+    /**
+     * Fetched less than [Chainlist.CACHE_TTL_MS] ago. A timestamp in the
+     * future — the clock was ahead when it was taken and has since been
+     * corrected — is stale, not fresh: otherwise the cache would go
+     * unrefreshed until the clock caught up, days or months later.
+     */
+    private fun isFresh(at: Long, now: Long) = now - at in 0 until Chainlist.CACHE_TTL_MS
 
     /** `(fetchedAt, entries)` from disk, or `null` if missing or unusable. */
     private fun readCache(): Pair<Long, List<Chainlist.Entry>>? = try {
