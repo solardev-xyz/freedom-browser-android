@@ -51,6 +51,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -256,6 +258,7 @@ fun WalletScreen(
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     var confirmRemove by remember { mutableStateOf(false) }
+    ReleaseCoveredFocus()
 
     // Re-read on every resume: the user may come back from setting a screen lock.
     val lifecycleState by LocalLifecycleOwner.current.lifecycle.currentStateFlow.collectAsState()
@@ -577,6 +580,25 @@ private fun ScreenLockSettingsButton() {
     }
 }
 
+/**
+ * Take focus and the keyboard away from whatever text field the page
+ * opened over. The panels underneath stay composed (Settings with its
+ * search field, the address bar), so a field focused there keeps the
+ * IME attached while hidden: without this, recovery-phrase words typed
+ * on the Import page before tapping its field would land in the covered
+ * Settings search (saved instance state, learning keyboard, no
+ * `FLAG_SECURE` once the user goes back).
+ */
+@Composable
+private fun ReleaseCoveredFocus() {
+    val focusManager = LocalFocusManager.current
+    val keyboard = LocalSoftwareKeyboardController.current
+    LaunchedEffect(Unit) {
+        focusManager.clearFocus(force = true)
+        keyboard?.hide()
+    }
+}
+
 @Composable
 private fun ErrorText(message: String) {
     Text(
@@ -603,6 +625,7 @@ private fun ImportPhrasePage(
     onBack: () -> Unit,
 ) {
     SecureWindow()
+    ReleaseCoveredFocus()
     val context = LocalContext.current
     // Plain remember: the phrase must not reach saved instance state.
     // A TextFieldValue so a paste over a selection can be told from typing.
