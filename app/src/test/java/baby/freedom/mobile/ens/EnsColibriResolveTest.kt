@@ -426,10 +426,67 @@ class EnsColibriResolveTest {
 
         require(result is EnsResult.Error) { "got $result" }
         assertEquals("CCIP_GATEWAY_FAILED", result.reason)
-        // Held to the gateway deadline (counted from the lookup's start),
-        // not to the gateway's own hang or the 30 s proven-pass budget.
+        // Held to the gateway deadline, not to the gateway's own hang or
+        // the 30 s proven-pass budget.
         assertTrue("took ${took}ms", took < 3_000)
         assertTrue(http.calls.isEmpty())
+    }
+
+    @Test
+    fun `a pass that gave up on a stalled gateway sends the name to no further gateway`() {
+        val revert = offchainLookupRevert(
+            sender = ur,
+            urls = listOf("https://gw1.example/{sender}/{data}", "https://gw2.example/{sender}/{data}"),
+            callData = "deadbeef".hexToBytes(),
+            callback = "11223344".hexToBytes(),
+            extraData = "ee".hexToBytes(),
+        )
+        val prover = Prover({ _, _ -> reverted(revert) })
+        val http = rpcAnswers().apply { gatewayDelayMs = 800 }
+
+        val result = resolve(resolver(prover, http, gatewayMs = 200), "1.offchainexample.eth")
+
+        require(result is EnsResult.Error) { "got $result" }
+        assertEquals("CCIP_GATEWAY_FAILED", result.reason)
+        // Long enough for the stalled first fetch to end and the loop to
+        // reach the second URL, had nothing stopped it.
+        Thread.sleep(1_500)
+        assertEquals(1, http.gateway.size)
+        assertTrue(http.gateway.single().startsWith("https://gw1.example/"))
+    }
+
+    @Test
+    fun `gateways that refuse in time are reported as failing, not as out of time`() {
+        val prover = Prover({ _, _ -> reverted(fixtureRevert()) })
+        val http = rpcAnswers()
+
+        val result = resolve(resolver(prover, http), "1.offchainexample.eth")
+
+        require(result is EnsResult.Error) { "got $result" }
+        assertEquals("CCIP_GATEWAY_FAILED", result.reason)
+        assertEquals("CCIP gateways unavailable or returned invalid data", result.error)
+    }
+
+    @Test
+    fun `the gateway deadline starts when the gateways are asked, not with the proof before it`() {
+        val prover = Prover({ _, data ->
+            if (data.startsWith("0x9061b923")) {
+                // A slow first proof, longer than the gateway deadline.
+                Thread.sleep(600)
+                reverted(fixtureRevert())
+            } else {
+                returned(wrapAsOuterInner("e40101fa011b20$provenRef"))
+            }
+        })
+        val http = rpcAnswers().apply {
+            gatewayReply = EnsHttp.Reply(200, """{"data":"0xcafe0042"}""")
+            gatewayDelayMs = 200
+        }
+
+        val result = resolve(resolver(prover, http, gatewayMs = 500), "1.offchainexample.eth")
+
+        require(result is EnsResult.Ok) { "got $result" }
+        assertTrue(result.trust.proven)
     }
 
     @Test

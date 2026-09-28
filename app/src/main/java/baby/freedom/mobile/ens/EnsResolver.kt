@@ -102,9 +102,9 @@ class EnsResolver internal constructor(
     /** How long a lookup waits for a proof ([COLIBRI_WAIT_MS]); shorter in tests. */
     private val colibriWaitMs: Long = COLIBRI_WAIT_MS,
     /**
-     * How long after a proven lookup starts its CCIP gateways must have
-     * answered ([LEG_TIMEOUT_MS], the quorum's own read budget); shorter
-     * in tests.
+     * How long a proven lookup's CCIP gateways have to answer, from when
+     * the first is asked ([LEG_TIMEOUT_MS], the quorum's own read
+     * budget); shorter in tests.
      */
     private val colibriGatewayMs: Long = LEG_TIMEOUT_MS,
     private val clock: () -> Long = System::currentTimeMillis,
@@ -375,8 +375,10 @@ class EnsResolver internal constructor(
      *   cached): the quorum would fetch the very same gateway again,
      *   doubling the wait and showing it the name twice. The gateway
      *   fetches themselves must be done within [LEG_TIMEOUT_MS] of the
-     *   lookup's start — the quorum read's own budget — so a black-holed
-     *   gateway fails the name no later than it would without Colibri.
+     *   first one's start — the quorum read's own budget, not shortened
+     *   by the proof before it — so a black-holed gateway fails the name
+     *   no later than it would without Colibri, and a pass that has given
+     *   up asks no further gateway.
      */
     private suspend fun resolveByColibri(
         config: Settings,
@@ -458,10 +460,12 @@ class EnsResolver internal constructor(
             val followed = io.async {
                 runCatchingCancellable {
                     // The gateways get what the quorum's read would have
-                    // (its [LEG_TIMEOUT_MS], counted from this lookup's
-                    // start), so a dead gateway fails here no later than
-                    // it would there; a proven callback still gets its wait.
-                    followOffchainLookup(revert, atGateway, gatewayDeadline = started + colibriGatewayMs) { to, data ->
+                    // (its [LEG_TIMEOUT_MS]), counted from when they're
+                    // first asked rather than from this lookup's start,
+                    // so the proof that got here doesn't eat into it; a
+                    // dead gateway still fails no later than it would
+                    // there, and a proven callback still gets its wait.
+                    followOffchainLookup(revert, atGateway, gatewayMs = colibriGatewayMs) { to, data ->
                         when (val o = prove(to, data, colibriWaitMs)) {
                             is EnsColibri.Outcome.Returned -> CallOutcome(data = o.data, revertData = null)
                             is EnsColibri.Outcome.Reverted -> CallOutcome(data = null, revertData = o.data)
@@ -1119,17 +1123,21 @@ class EnsResolver internal constructor(
      * given, is `true` while a gateway is being asked and stays `true`
      * when the gateways failed, so a caller can tell a gateway failure
      * (or a budget spent waiting on one) from a failed callback.
-     * [gatewayDeadline] (wall clock, ms), if given, is when every
-     * gateway fetch must have answered by; one still running then fails
-     * the pass as if the gateways were down.
+     * [gatewayMs], if given, is how long every gateway fetch of the pass
+     * has in all, counted on the monotonic clock from the first one's
+     * start; a fetch still running then fails the pass as if the
+     * gateways were down, and is told to ask no further gateway.
      */
     private suspend fun followOffchainLookup(
         firstRevert: String,
         atGateway: AtomicBoolean? = null,
-        gatewayDeadline: Long? = null,
+        gatewayMs: Long? = null,
         call: suspend (to: String, data: ByteArray) -> CallOutcome,
     ): CallOutcome {
         var revert = firstRevert
+        // Monotonic, so a wall-clock step (NTP) can neither fail a
+        // working gateway at once nor lift the bound.
+        var gatewayDeadlineNs: Long? = null
         repeat(MAX_CCIP_ROUNDS) {
             val lookup = decodeOffchainLookup(revert)
                 ?: throw IllegalStateException("malformed OffchainLookup revert")
@@ -1140,19 +1148,31 @@ class EnsResolver internal constructor(
                 throw IllegalStateException("OffchainLookup sender is not the Universal Resolver")
             }
             atGateway?.set(true)
-            val response = if (gatewayDeadline == null) {
+            val response = if (gatewayMs == null) {
                 ccipFetch(lookup.sender, lookup.urls, lookup.callData)
             } else {
+                val deadlineNs = gatewayDeadlineNs
+                    ?: (System.nanoTime() + gatewayMs * 1_000_000).also { gatewayDeadlineNs = it }
                 // [ccipFetch] blocks; wait on it from here so the deadline
-                // holds even while a read is stalled inside it.
-                val fetch = io.async { ccipFetch(lookup.sender, lookup.urls, lookup.callData) }
-                val left = (gatewayDeadline - System.currentTimeMillis()).coerceAtLeast(0)
-                try {
-                    withTimeoutOrNull(left) { fetch.await() }
-                        ?: throw IllegalStateException("CCIP gateways didn't answer within the lookup's budget")
+                // holds even while a read is stalled inside it. Cancelling
+                // the job can't interrupt that read, so [stop] is what
+                // keeps the loop from sending the name to the next gateway
+                // once the pass has already given up on it.
+                val stop = AtomicBoolean(false)
+                val fetch = io.async { ccipFetch(lookup.sender, lookup.urls, lookup.callData) { stop.get() } }
+                val left = ((deadlineNs - System.nanoTime()) / 1_000_000).coerceAtLeast(0)
+                // Boxed, so a fetch that ended with no answer (null) isn't
+                // taken for one that ran out of time.
+                val done = try {
+                    withTimeoutOrNull(left) { Result.success(fetch.await()) }
                 } finally {
-                    if (fetch.isActive) fetch.cancel()
+                    if (fetch.isActive) {
+                        stop.set(true)
+                        fetch.cancel()
+                    }
                 }
+                (done ?: throw IllegalStateException("CCIP gateways didn't answer within the lookup's budget"))
+                    .getOrThrow()
             } ?: throw IllegalStateException("CCIP gateways unavailable or returned invalid data")
             atGateway?.set(false)
             val callbackData = lookup.callback + abiEncodeTwoBytes(response, lookup.extraData)
@@ -1177,12 +1197,19 @@ class EnsResolver internal constructor(
      * bare-IP / local hosts, [CCIP_TIMEOUT_MS] wall clock and
      * [CCIP_MAX_RESPONSE_BYTES] body per gateway. Non-URL entries such
      * as the Universal Resolver's `x-batch-gateway:true` hint are
-     * skipped like any other non-https string.
+     * skipped like any other non-https string. Once [stopped] says so
+     * (the caller gave up waiting), no further gateway is asked.
      */
-    internal fun ccipFetch(sender: String, urls: List<String>, callData: ByteArray): ByteArray? {
+    internal fun ccipFetch(
+        sender: String,
+        urls: List<String>,
+        callData: ByteArray,
+        stopped: () -> Boolean = { false },
+    ): ByteArray? {
         val senderLower = sender.lowercase()
         val dataHex = "0x" + callData.toHex()
         for (template in urls) {
+            if (stopped()) return null
             val url = template.replace("{sender}", senderLower).replace("{data}", dataHex)
             val parsed = runCatching { URL(url) }.getOrNull() ?: continue
             val host = parsed.host.orEmpty().trim('[', ']').trimEnd('.').lowercase()
