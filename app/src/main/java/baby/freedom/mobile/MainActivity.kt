@@ -20,27 +20,42 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalView
 import androidx.core.view.WindowCompat
+import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import baby.freedom.mobile.browser.BrowserScreen
+import baby.freedom.mobile.browser.DeepLinkQueue
 import baby.freedom.mobile.browser.Gateways
 import baby.freedom.mobile.browser.HOME_URL
+import baby.freedom.mobile.browser.Adblock
 import baby.freedom.mobile.browser.PublicSuffixList
+import baby.freedom.mobile.browser.OnchainApps
+import baby.freedom.mobile.browser.RadicleControls
 import baby.freedom.mobile.browser.UnverifiedOrigins
 import baby.freedom.mobile.browser.VirtualOrigin
 import baby.freedom.mobile.browser.statusBarIconsDark
 import baby.freedom.mobile.data.NodeSettings
+import baby.freedom.mobile.ens.EnsNormalize
+import baby.freedom.mobile.node.IMyotisCallback
+import baby.freedom.mobile.node.IMyotisService
 import baby.freedom.mobile.node.INodeCallback
 import baby.freedom.mobile.node.INodeService
+import baby.freedom.mobile.node.MyotisService
 import baby.freedom.mobile.node.NodeService
 import baby.freedom.mobile.ui.FreedomTheme
 import baby.freedom.mobile.ui.isLight
 import baby.freedom.swarm.IpfsInfo
+import baby.freedom.swarm.MyotisInfo
+import baby.freedom.swarm.MyotisStatus
 import baby.freedom.swarm.NodeInfo
+import baby.freedom.swarm.RadicleInfo
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
 /**
@@ -59,14 +74,28 @@ class MainActivity : ComponentActivity() {
 
     private val infoFlow = MutableStateFlow(NodeInfo())
     private val ipfsInfoFlow = MutableStateFlow(IpfsInfo())
+    private val radicleInfoFlow = MutableStateFlow(RadicleInfo())
+
+    /**
+     * Serializes relaying the Radicle setting to `:node`: a toggle's
+     * write-then-start/stop and a bind's read-then-start each run whole,
+     * so the service hears them in the order the setting changed (#73).
+     */
+    private val radicleRelay = Mutex()
+    private val myotisInfoFlow = MutableStateFlow(MyotisInfo())
     private lateinit var settings: NodeSettings
 
     /**
-     * An App Link that arrived after the UI was already composed (see
-     * [onNewIntent]), waiting to be opened in a tab. Cold-start links
+     * App Links that arrived after the UI was already composed (see
+     * [onNewIntent]), waiting to be opened in tabs, oldest first. Cold-start links
      * don't use this — they're passed straight in as the initial URL.
      */
-    private val deepLinkFlow = MutableStateFlow<String?>(null)
+    private val deepLinkQueue = DeepLinkQueue()
+
+    /** Publishes [onNewIntent] links into [deepLinkQueue] in arrival order. */
+    private val deepLinks = OrderedDeepLinks(lifecycleScope, Dispatchers.Default) {
+        deepLinkQueue.offer(it)
+    }
 
     // The page theme colour the browser paints behind the status bar,
     // as ARGB, or null when it shows the app background there (#92).
@@ -87,6 +116,45 @@ class MainActivity : ComponentActivity() {
                 Gateways.setIpfsBase(info.gatewayUrl)
             }
         }
+
+        override fun onRadicleStateChanged(info: RadicleInfo?) {
+            if (info != null) radicleInfoFlow.value = info
+        }
+    }
+
+    // The Myotis light client (#72) lives in its own `:myotis` process,
+    // bound while [NodeSettings.myotisEnabled] is on — see [MyotisService].
+    @Volatile
+    private var myotisBinder: IMyotisService? = null
+
+    // Read by [myotisCallback] on a binder thread.
+    @Volatile
+    private var myotisBound = false
+
+    private val myotisCallback = object : IMyotisCallback.Stub() {
+        override fun onMyotisStateChanged(info: MyotisInfo?) {
+            if (info != null && myotisBound) myotisInfoFlow.value = info
+        }
+    }
+
+    private val myotisConnection = object : ServiceConnection {
+        override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
+            val b = IMyotisService.Stub.asInterface(service) ?: return
+            myotisBinder = b
+            runCatching { b.registerCallback(myotisCallback) }
+            // onStart/onStop may have run before the binding came up.
+            runCatching {
+                if (lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) b.onAppForeground()
+                else b.onAppBackground()
+            }
+        }
+
+        override fun onServiceDisconnected(name: ComponentName?) {
+            // `:myotis` died (or exited under a quick off → on); the
+            // binding brings a fresh process back up.
+            myotisBinder = null
+            myotisInfoFlow.value = MyotisInfo(status = MyotisStatus.Starting)
+        }
     }
 
     private val connection = object : ServiceConnection {
@@ -101,6 +169,17 @@ class MainActivity : ComponentActivity() {
                     Gateways.setIpfsBase(it.gatewayUrl)
                 }
             }
+            runCatching { b.radicleState?.let { radicleInfoFlow.value = it } }
+            // The Radicle on/off setting lives here, in the UI process's
+            // DataStore; a freshly (re)started `:node` hears it on bind.
+            // Under [radicleRelay], so a toggle landing at the same time
+            // can't have its stop overtaken by a start this bind read
+            // from the setting before the toggle wrote it.
+            lifecycleScope.launch {
+                radicleRelay.withLock {
+                    if (settings.radicleEnabled.first()) runCatching { b.startRadicle() }
+                }
+            }
         }
 
         override fun onServiceDisconnected(name: ComponentName?) {
@@ -109,6 +188,7 @@ class MainActivity : ComponentActivity() {
             binder = null
             infoFlow.value = NodeInfo()
             ipfsInfoFlow.value = IpfsInfo()
+            radicleInfoFlow.value = RadicleInfo()
             Gateways.setIpfsBase("")
         }
     }
@@ -125,12 +205,23 @@ class MainActivity : ComponentActivity() {
             if (settings.runNodeEnabled.first()) startAndBindService()
         }
 
+        // The Myotis light client (#72, off by default) follows its
+        // switch live, independent of the Swarm node's.
+        lifecycleScope.launch {
+            settings.myotisEnabled.distinctUntilChanged().collect { enabled ->
+                if (enabled) bindMyotis() else unbindMyotis()
+            }
+        }
+
         // External Swarm endpoint / IPFS gateway (#125), followed live
         // so switching in Settings applies to the next request. Until
         // the first value lands, the interceptor and the navigation gate
         // wait for it (so a cold-start deep link or restored tab can't
         // reach the embedded node's gateway first) — the main thread
         // doesn't.
+        // Onchain apps (#123): a restored tab's app document is read by
+        // the interceptor, which needs the chain-data router wired first.
+        OnchainApps.init(this)
         Gateways.expectExternalEndpoints()
         lifecycleScope.launch {
             withContext(Dispatchers.IO) { UnverifiedOrigins.init(this@MainActivity) }
@@ -159,11 +250,38 @@ class MainActivity : ComponentActivity() {
         // idempotent and thread-safe, so a label that arrives first
         // just does the load itself, exactly as it does today.
         lifecycleScope.launch(Dispatchers.Default) { PublicSuffixList.warm() }
+        // Same for ENSIP-15's spec tables (a few hundred ms on a cold
+        // ART): the first non-ASCII name must not decode them on Main.
+        lifecycleScope.launch(Dispatchers.Default) { EnsNormalize.warm() }
+
+        // Ad and tracker blocking (#126): compile the enabled filter
+        // lists off the main thread and follow Settings from here on.
+        // Until the first build lands, requests wait for it (bounded,
+        // see [FirstBuildGate]) — a restored tab loads straight away.
+        Adblock.start(this)
 
         // A cold start from an App Link opens straight at the shared
-        // content instead of the home surface.
-        val startUrl = displayUrlForDeepLink(intent) ?: HOME_URL
+        // content instead of the home surface. A Unicode ENS link
+        // (`xn--…` host) needs the ENSIP-15 tables to map back to its
+        // name, and the warm-up above has only just started — so parse
+        // it on Default once they're decoded and compose then, rather
+        // than decode them on Main here (every later main-thread parse
+        // is cheap once the tables are warm).
+        val link = intent
+        if (!EnsNormalize.isWarm && VirtualOrigin.needsEnsTables(deepLinkData(link))) {
+            lifecycleScope.launch {
+                val startUrl = withContext(Dispatchers.Default) {
+                    EnsNormalize.warm()
+                    displayUrlForDeepLink(link)
+                }
+                showBrowser(startUrl ?: HOME_URL)
+            }
+        } else {
+            showBrowser(displayUrlForDeepLink(link) ?: HOME_URL)
+        }
+    }
 
+    private fun showBrowser(startUrl: String) {
         setContent {
             FreedomTheme {
                 SystemBarsForScheme()
@@ -173,19 +291,35 @@ class MainActivity : ComponentActivity() {
                 ) {
                     val info by infoFlow.collectAsState()
                     val ipfsInfo by ipfsInfoFlow.collectAsState()
+                    val radicleInfo by radicleInfoFlow.collectAsState()
+                    val radicleEnabled by settings.radicleEnabled
+                        .collectAsState(initial = false)
                     val runNodeEnabled by settings.runNodeEnabled
                         .collectAsState(initial = true)
-                    val deepLink by deepLinkFlow.collectAsState()
+                    val myotisInfo by myotisInfoFlow.collectAsState()
+                    val myotisEnabled by settings.myotisEnabled
+                        .collectAsState(initial = false)
+                    val pendingLinks by deepLinkQueue.pending.collectAsState()
                     BrowserScreen(
                         nodeInfo = info,
                         ipfsInfo = ipfsInfo,
                         runNodeEnabled = runNodeEnabled,
                         onToggleRunNode = ::onToggleRunNode,
+                        myotisInfo = myotisInfo,
+                        myotisEnabled = myotisEnabled,
+                        onToggleMyotis = ::onToggleMyotis,
                         onEnsureIpfsStarted = ::onEnsureIpfsStarted,
                         onIpfsToggle = ::onIpfsToggle,
+                        radicle = RadicleControls(
+                            info = radicleInfo,
+                            enabled = radicleEnabled,
+                            onToggle = ::onRadicleToggle,
+                            onSeed = ::onRadicleSeed,
+                            onUnseed = ::onRadicleUnseed,
+                        ),
                         initialUrl = startUrl,
-                        deepLinkUrl = deepLink,
-                        onDeepLinkHandled = { deepLinkFlow.value = null },
+                        deepLink = pendingLinks.firstOrNull(),
+                        onDeepLinkHandled = deepLinkQueue::handled,
                         onRecoverNodes = ::onRecoverNodes,
                         ipfsProgressSnapshot = ::ipfsProgressSnapshot,
                         ipfsCounters = ::ipfsCounters,
@@ -242,8 +376,18 @@ class MainActivity : ComponentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
-        displayUrlForDeepLink(intent)?.let { deepLinkFlow.value = it }
+        // Same off-Main parse as a cold-start link if the ENSIP-15
+        // tables are still decoding (a link tapped right after launch);
+        // [deepLinks] keeps a later ASCII link from overtaking it.
+        val slow = !EnsNormalize.isWarm && VirtualOrigin.needsEnsTables(deepLinkData(intent))
+        deepLinks.submit(slow) {
+            if (slow) EnsNormalize.warm()
+            displayUrlForDeepLink(intent)
+        }
     }
+
+    private fun deepLinkData(intent: Intent?): String? =
+        intent?.takeIf { it.action == Intent.ACTION_VIEW }?.dataString
 
     /**
      * The user-facing display URL for an incoming `VIEW` intent, or
@@ -257,8 +401,7 @@ class MainActivity : ComponentActivity() {
      * ignored rather than loaded.
      */
     private fun displayUrlForDeepLink(intent: Intent?): String? {
-        if (intent?.action != Intent.ACTION_VIEW) return null
-        return intent.dataString?.let { VirtualOrigin.displayUrlFor(it) }
+        return deepLinkData(intent)?.let { VirtualOrigin.displayUrlFor(it) }
     }
 
     /**
@@ -272,10 +415,12 @@ class MainActivity : ComponentActivity() {
     override fun onStart() {
         super.onStart()
         runCatching { binder?.onAppForeground() }
+        runCatching { myotisBinder?.onAppForeground() }
     }
 
     override fun onStop() {
         runCatching { binder?.onAppBackground() }
+        runCatching { myotisBinder?.onAppBackground() }
         super.onStop()
     }
 
@@ -291,6 +436,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onDestroy() {
         unbindFromService()
+        unbindMyotis()
         super.onDestroy()
     }
 
@@ -338,6 +484,63 @@ class MainActivity : ComponentActivity() {
         else runCatching { binder?.stopIpfs() }
     }
 
+    /** The light-client switch on the node page (#72): persisted, and followed in [onCreate]. */
+    private fun onToggleMyotis(enabled: Boolean) {
+        lifecycleScope.launch { settings.setMyotisEnabled(enabled) }
+    }
+
+    private fun bindMyotis() {
+        if (myotisBound) return
+        myotisInfoFlow.value = MyotisInfo(status = MyotisStatus.Starting)
+        myotisBound = bindService(
+            Intent(this, MyotisService::class.java),
+            myotisConnection,
+            Context.BIND_AUTO_CREATE,
+        )
+        if (!myotisBound) {
+            runCatching { unbindService(myotisConnection) }
+            myotisInfoFlow.value = MyotisInfo(
+                status = MyotisStatus.Error,
+                errorMessage = "Couldn't start the light client service",
+            )
+        }
+    }
+
+    /** Unbinding the only client destroys [MyotisService], which stops the engines and exits `:myotis`. */
+    private fun unbindMyotis() {
+        if (!myotisBound) return
+        runCatching { myotisBinder?.unregisterCallback(myotisCallback) }
+        runCatching { unbindService(myotisConnection) }
+        myotisBinder = null
+        myotisBound = false
+        myotisInfoFlow.value = MyotisInfo()
+    }
+
+    /**
+     * The user turned the embedded Radicle node on or off (#73). Unlike
+     * IPFS this is persisted, and relayed again on every bind; the node
+     * itself lives in `:node`, so while the node service is off the
+     * setting just waits for it.
+     */
+    private fun onRadicleToggle(enabled: Boolean) {
+        lifecycleScope.launch {
+            radicleRelay.withLock {
+                settings.setRadicleEnabled(enabled)
+                runCatching { if (enabled) binder?.startRadicle() else binder?.stopRadicle() }
+            }
+        }
+    }
+
+    /** Stop seeding a repository from the Radicle page's list. */
+    private fun onRadicleUnseed(rid: String) {
+        runCatching { binder?.unseedRadicleRepo(rid) }
+    }
+
+    /** Seed-by-RID from the Radicle page; progress comes back on the callback. */
+    private fun onRadicleSeed(rid: String) {
+        runCatching { binder?.seedRadicleRepo(rid) }
+    }
+
     private fun startAndBindService() {
         NodeService.start(this)
         if (!bound) {
@@ -355,6 +558,7 @@ class MainActivity : ComponentActivity() {
         NodeService.stop(this)
         infoFlow.value = NodeInfo()
         ipfsInfoFlow.value = IpfsInfo()
+        radicleInfoFlow.value = RadicleInfo()
         Gateways.setIpfsBase("")
     }
 

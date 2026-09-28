@@ -21,7 +21,7 @@ import java.net.URLEncoder
  *  - `url`     — what to show in the body; pass the user-facing
  *                display URL (`ens://foo.eth/p` or `bzz://…`) so it
  *                matches the address bar.
- *  - `protocol` — optional hint (`swarm` | `ens` | `ipfs` | `ipns`).
+ *  - `protocol` — optional hint (`swarm` | `ens` | `ipfs` | `ipns` | `web3`).
  *                Drives the page's copy (e.g. `ens` failures render
  *                "ENS name has no content" instead of the generic
  *                Swarm not-found message).

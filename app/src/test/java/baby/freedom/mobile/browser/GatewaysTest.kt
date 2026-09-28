@@ -431,6 +431,25 @@ class GatewaysTest {
     }
 
     @Test
+    fun `a typed scheme on a tez name is held too - a web record under it is refused, not followed`() {
+        // #97 across name systems: `ipfs://alice.tez` whose website record
+        // moved to the ordinary web is the same broken assertion.
+        KnownEnsNames.record("ipfs://bafyold", "alice.tez", EnsTrust.ASSUMED)
+        val pins = EnsDocumentPins()
+        pins.pin("alice.tez", "ipfs://bafyold")
+        withLookup({ EnsResult.Ok(it, "https", "https://alice.example/", "https://alice.example/", EnsTrust.ASSUMED) }) {
+            var web: EnsResult.Ok? = null
+            assertEquals(
+                "ens_wrong_protocol",
+                Gateways.reverifyEnsDocument("alice.tez", pins, assertedProtocol = "ipfs", onWebRecord = { web = it }),
+            )
+            assertNull(web)
+            assertEquals("ipfs://bafyold", pins.uriFor("alice.tez"))
+            assertEquals("ipfs://bafyold", KnownEnsNames.uriFor("alice.tez"))
+        }
+    }
+
+    @Test
     fun `a typed scheme the answer matches is served, with the answer's trust recorded`() {
         val trust = EnsTrust(verified = true, agreed = listOf("a.test", "b.test"), block = 7L)
         withLookup({ EnsResult.Ok(it, "bzz", "bzz://$ref64", ref64, trust) }) {
@@ -487,6 +506,29 @@ class GatewaysTest {
         // With nothing earlier to lose it's the plain not-found.
         withLookup({ EnsResult.NotFound(it, "NO_RESOLVER", lone) }) {
             assertEquals("ens_not_found", Gateways.reverifyEnsDocument("fresh.eth", EnsDocumentPins()))
+        }
+    }
+
+    @Test
+    fun `reverifyEnsDocument refuses a name ENSIP-15 rejects, even with an earlier answer`() {
+        val pins = EnsDocumentPins()
+        pins.pin("ab--c.eth", "bzz://$ref64")
+        withLookup({ EnsResult.Error(it, "INVALID_NAME", "invalid label extension") }) {
+            // Not a transport failure: serving the last answer would keep
+            // a name no client can resolve alive.
+            assertEquals("ens_invalid_name", Gateways.reverifyEnsDocument("ab--c.eth", pins))
+            assertNull(pins.lastAnswerFor("ab--c.eth"))
+        }
+    }
+
+    @Test
+    fun `reverifyEnsDocument refuses a name too long to look up`() {
+        val name = "a".repeat(256) + ".eth"
+        val pins = EnsDocumentPins()
+        pins.pin(name, "bzz://$ref64")
+        withLookup({ EnsResult.Error(it, "NAME_TOO_LONG", "a label is longer than 255 bytes") }) {
+            assertEquals("ens_name_too_long", Gateways.reverifyEnsDocument(name, pins))
+            assertNull(pins.lastAnswerFor(name))
         }
     }
 
@@ -650,6 +692,74 @@ class GatewaysTest {
             assertNull(Gateways.reverifyEnsDocument("swarm.eth", pins))
             // The tab's own answer beats the session's.
             assertEquals("bzz://$otherRef", pins.uriFor("swarm.eth"))
+        }
+    }
+
+    @Test
+    fun `a Tezos provider conflict is refused like an ENS one, the last answer kept`() {
+        KnownEnsNames.record("ipfs://bafyold", "alice.tez", EnsTrust.ASSUMED)
+        val pins = EnsDocumentPins()
+        pins.pin("alice.tez", "ipfs://bafyold")
+        val conflict = { name: String ->
+            EnsResult.Conflict(
+                name,
+                EnsResult.Conflict.Subject.RECORD,
+                listOf(
+                    EnsResult.Conflict.Group("ipfs://bafyA", listOf("rpc.tzkt.io")),
+                    EnsResult.Conflict.Group("ipfs://bafyB", listOf("mainnet.tezos.ecadinfra.com")),
+                ),
+                15_133_172,
+            )
+        }
+        withLookup(conflict) {
+            assertEquals("ens_conflict", Gateways.reverifyEnsDocument("alice.tez", pins))
+            assertEquals("ipfs://bafyold", pins.lastAnswerFor("alice.tez"))
+            assertEquals("ipfs://bafyold", KnownEnsNames.uriFor("alice.tez"))
+        }
+    }
+
+    @Test
+    fun `an unverified tez answer on re-check goes through the not-cross-checked gate`() {
+        KnownEnsNames.record("ipfs://bafyold", "alice.tez", EnsTrust.ASSUMED)
+        val pins = EnsDocumentPins()
+        pins.pin("alice.tez", "ipfs://bafyold")
+        val lone = EnsTrust(verified = false, agreed = listOf("rpc.tzkt.io"))
+        withLookup({ EnsResult.Ok(it, "ipfs", "ipfs://bafynew", "bafynew", lone) }) {
+            val page = pins.beginNavigation("https://alice.tez.ens.freedom.baby/")
+            assertEquals("ens_unverified", Gateways.reverifyEnsDocument("alice.tez", pins, page))
+            assertEquals("ipfs://bafyold", pins.lastAnswerFor("alice.tez"))
+        }
+        // A lone web record isn't followed unasked either.
+        withLookup({ EnsResult.Ok(it, "https", "https://evil.example/", "https://evil.example/", lone) }) {
+            var web: EnsResult.Ok? = null
+            assertEquals(
+                "ens_unverified",
+                Gateways.reverifyEnsDocument("alice.tez", pins, onWebRecord = { web = it }),
+            )
+            assertNull(web)
+        }
+        // A verified one is served and remembered.
+        withLookup({ EnsResult.Ok(it, "ipfs", "ipfs://bafynew", "bafynew", EnsTrust.ASSUMED) }) {
+            assertNull(Gateways.reverifyEnsDocument("alice.tez", pins))
+            assertEquals("ipfs://bafynew", pins.lastAnswerFor("alice.tez"))
+        }
+    }
+
+    @Test
+    fun `a tez name whose record moved to the web sends the document there`() {
+        KnownEnsNames.record("ipfs://bafyold", "alice.tez", EnsTrust.ASSUMED)
+        val pins = EnsDocumentPins()
+        pins.pin("alice.tez", "ipfs://bafyold")
+        withLookup({ EnsResult.Ok(it, "https", "https://alice.example/", "https://alice.example/", EnsTrust.ASSUMED) }) {
+            var web: EnsResult.Ok? = null
+            assertEquals(
+                Gateways.ENS_WEB_RECORD,
+                Gateways.reverifyEnsDocument("alice.tez", pins, onWebRecord = { web = it }),
+            )
+            assertEquals("https://alice.example/", web?.uri)
+            // The old IPFS root no longer describes the name.
+            assertNull(KnownEnsNames.uriFor("alice.tez"))
+            assertNull(pins.lastAnswerFor("alice.tez"))
         }
     }
 

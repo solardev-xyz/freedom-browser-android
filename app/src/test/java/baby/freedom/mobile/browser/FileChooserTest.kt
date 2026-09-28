@@ -55,6 +55,20 @@ class FileChooserTest {
         assertNull(camera(true, "audio/*"))
     }
 
+    // The camera app refuses a capture from an app that declares CAMERA
+    // without holding it — which the browser does since the site
+    // permissions (#81) added CAMERA to the manifest. Launching anyway
+    // threw SecurityException and every `capture` input fell back to the
+    // picker (post-merge sweep, #181).
+    @Test fun `a declared but ungranted camera permission is asked for before capture`() {
+        assertEquals(CameraGate.ASK, cameraGateFor(declared = true, granted = false))
+    }
+
+    @Test fun `the camera starts at once when the permission is held or not declared`() {
+        assertEquals(CameraGate.LAUNCH, cameraGateFor(declared = true, granted = true))
+        assertEquals(CameraGate.LAUNCH, cameraGateFor(declared = false, granted = false))
+    }
+
     @Test fun `an unmappable extension widens the picker but never opens the camera by itself`() {
         // Picker is widened to anything...
         assertEquals(emptyList<String>(), mimes("application/pdf", ".xyz"))

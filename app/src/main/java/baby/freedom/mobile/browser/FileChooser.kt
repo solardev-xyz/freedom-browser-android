@@ -1,9 +1,11 @@
 package baby.freedom.mobile.browser
 
+import android.Manifest
 import android.content.ActivityNotFoundException
 import android.content.ClipData
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.provider.MediaStore
 import android.util.Log
@@ -19,6 +21,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.remember
 import androidx.compose.ui.platform.LocalContext
+import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import java.io.File
 import java.io.IOException
@@ -46,15 +49,45 @@ import java.util.Locale
  * frees the input for the next tap. (Chromium also clears an earlier
  * selection on that input, as Chrome for Android does.)
  *
- * The browser declares no `CAMERA` permission on purpose: capture is
- * delegated to the camera app, which holds its own. (Declaring the
- * permission without holding it would make `ACTION_IMAGE_CAPTURE`
- * throw `SecurityException`.)
+ * Capture is delegated to the camera app, which holds its own camera
+ * permission. But the browser declares `CAMERA` too (site permissions,
+ * #81), and Android refuses `ACTION_IMAGE_CAPTURE` /
+ * `ACTION_VIDEO_CAPTURE` with a `SecurityException` from an app that
+ * declares `CAMERA` without holding it. So, as Chrome does, a capture
+ * input asks for the permission first ([cameraGateFor]); if the user
+ * refuses, the input gets the document picker instead.
+ *
+ * That request goes through the site-permission broker's Android-dialog
+ * path ([SitePermissionBroker.requestUploadCamera]), not a launcher of
+ * its own, so it follows the same rules as a site's camera request: one
+ * system dialog at a time, only over the page that asked, and a refusal
+ * is recorded so a later permanent one is recognised. When Android has
+ * refused the camera for good, the picker opens and, once it closes,
+ * the user is told where to turn the camera back on.
+ *
+ * Nothing opens unless the requesting tab's page is on screen
+ * ([SitePermissionBroker.isOnScreen]): a page's delayed `click()` on
+ * its input must not pop a picker, camera or system dialog over
+ * Settings, the tab switcher, or another app.
  */
-internal class FileChooser(private val context: Context) {
+internal class FileChooser(
+    private val context: Context,
+    private val permissions: SitePermissionBroker,
+) {
 
     /** Set from composition; see [rememberFileChooser]. */
     var launcher: ActivityResultLauncher<Intent>? = null
+
+    /** A capture input waiting on the `CAMERA` permission dialog. */
+    private class AwaitingCamera(
+        val callback: ValueCallback<Array<Uri>>,
+        val kind: CaptureKind,
+        val pickerTypes: List<String>,
+        val multiple: Boolean,
+    )
+
+    /** The capture waiting on [SitePermissionBroker.requestUploadCamera], if any. */
+    private var awaitingCamera: AwaitingCamera? = null
 
     private class Pending(
         val callback: ValueCallback<Array<Uri>>,
@@ -62,13 +95,20 @@ internal class FileChooser(private val context: Context) {
         /** Camera output target, or null for the document picker. */
         val captureFile: File?,
         val captureUri: Uri?,
+        /**
+         * The picker stands in for a capture Android refused `CAMERA`
+         * for; say so once the picker closes.
+         */
+        val cameraRefused: Boolean = false,
     )
 
     private var pending: Pending? = null
 
     /** Entry point for `WebChromeClient.onShowFileChooser`. */
-    fun show(callback: ValueCallback<Array<Uri>>, params: FileChooserParams): Boolean {
+    fun show(tabId: Long, callback: ValueCallback<Array<Uri>>, params: FileChooserParams): Boolean {
         val launcher = launcher ?: return false
+        // Only over the page that asked (returning false frees the input).
+        if (!permissions.isOnScreen(tabId)) return false
         // WebView won't open a second chooser before the first one is
         // answered, but a WebView from another tab could; don't leave
         // the earlier page's input wedged.
@@ -81,14 +121,75 @@ internal class FileChooser(private val context: Context) {
 
         val capture = captureKindFor(params.isCaptureEnabled, accept)
         if (capture != null) {
-            val started = runCatching { launchCapture(launcher, callback, capture) }
-                .onFailure { Log.w(LOG_TAG, "camera capture unavailable, using picker", it) }
-                .getOrDefault(false)
-            if (started) return true
+            val gate = cameraGateFor(
+                declared = declaresCamera,
+                granted = ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) ==
+                    PackageManager.PERMISSION_GRANTED,
+            )
+            when (gate) {
+                CameraGate.LAUNCH -> if (tryCapture(launcher, callback, capture)) return true
+                CameraGate.ASK -> {
+                    val ask = AwaitingCamera(callback, capture, accept.pickerTypes, multiple)
+                    awaitingCamera = ask
+                    permissions.requestUploadCamera(tabId) { onCameraPermission(ask, it) }
+                    return true
+                }
+            }
         }
+        return launchPicker(launcher, callback, accept.pickerTypes, multiple)
+    }
 
-        val picker = pickerIntent(accept.pickerTypes, multiple)
-        pending = Pending(callback, multiple, captureFile = null, captureUri = null)
+    /**
+     * The `CAMERA` request [show] made for [ask] has ended: on a grant,
+     * the capture it was for; on a refusal (or if the camera can't
+     * start after all) the document picker, as for an input without
+     * `capture`; and nothing at all if the page is no longer on screen.
+     * An [ask] already cancelled (and answered) is ignored.
+     */
+    private fun onCameraPermission(ask: AwaitingCamera, outcome: AndroidPermissionAsk) {
+        if (awaitingCamera !== ask) return
+        awaitingCamera = null
+        val launcher = launcher
+        val refused = outcome == AndroidPermissionAsk.REFUSED
+        val started = launcher != null && outcome != AndroidPermissionAsk.OFF_SCREEN && (
+            (outcome == AndroidPermissionAsk.GRANTED && tryCapture(launcher, ask.callback, ask.kind)) ||
+                launchPicker(launcher, ask.callback, ask.pickerTypes, ask.multiple, cameraRefused = refused)
+            )
+        // show() already told WebView the callback is ours, so it must be answered.
+        if (!started) {
+            runCatching { ask.callback.onReceiveValue(null) }
+            if (refused) permissions.noteUploadCameraRefused()
+        }
+    }
+
+    /** Whether the manifest declares `CAMERA` (see [cameraGateFor]). */
+    private val declaresCamera: Boolean by lazy {
+        runCatching {
+            context.packageManager
+                .getPackageInfo(context.packageName, PackageManager.GET_PERMISSIONS)
+                .requestedPermissions
+                ?.contains(Manifest.permission.CAMERA) == true
+        }.getOrDefault(true)
+    }
+
+    /** Start the camera for [kind]; false (having logged why) if it can't start. */
+    private fun tryCapture(
+        launcher: ActivityResultLauncher<Intent>,
+        callback: ValueCallback<Array<Uri>>,
+        kind: CaptureKind,
+    ): Boolean = runCatching { launchCapture(launcher, callback, kind) }
+        .onFailure { Log.w(LOG_TAG, "camera capture unavailable, using picker", it) }
+        .getOrDefault(false)
+
+    private fun launchPicker(
+        launcher: ActivityResultLauncher<Intent>,
+        callback: ValueCallback<Array<Uri>>,
+        pickerTypes: List<String>,
+        multiple: Boolean,
+        cameraRefused: Boolean = false,
+    ): Boolean {
+        val picker = pickerIntent(pickerTypes, multiple)
+        pending = Pending(callback, multiple, captureFile = null, captureUri = null, cameraRefused)
         return try {
             launcher.launch(picker)
             true
@@ -169,6 +270,8 @@ internal class FileChooser(private val context: Context) {
         // while the activity was open.
         runCatching { p.callback.onReceiveValue(uris) }
             .onFailure { Log.w(LOG_TAG, "file chooser callback failed", it) }
+        // Back on the page now, where the notice can be seen.
+        if (p.cameraRefused) permissions.noteUploadCameraRefused()
     }
 
     /**
@@ -222,6 +325,10 @@ internal class FileChooser(private val context: Context) {
 
     /** Answer any open request with "nothing selected". */
     fun cancelPending() {
+        awaitingCamera?.let { ask ->
+            awaitingCamera = null
+            runCatching { ask.callback.onReceiveValue(null) }
+        }
         val p = pending ?: return
         pending = null
         p.captureUri?.let(::revokeCaptureGrant)
@@ -283,7 +390,9 @@ internal class FileChooser(private val context: Context) {
 @Composable
 internal fun rememberFileChooser(): FileChooser {
     val context = LocalContext.current
-    val chooser = remember { FileChooser(context.applicationContext) }
+    val chooser = remember {
+        FileChooser(context.applicationContext, SitePermissionBroker.get(context))
+    }
     val launcher = rememberLauncherForActivityResult(
         ActivityResultContracts.StartActivityForResult(),
     ) { chooser.onResult(it) }
@@ -298,6 +407,29 @@ internal fun rememberFileChooser(): FileChooser {
 }
 
 internal enum class CaptureKind { IMAGE, VIDEO }
+
+/** What a capture input does before the camera can start; see [cameraGateFor]. */
+internal enum class CameraGate {
+    /** Start the camera app now. */
+    LAUNCH,
+
+    /** Ask for `CAMERA` first; the camera on a grant, else the picker. */
+    ASK,
+}
+
+/**
+ * Android refuses `ACTION_IMAGE_CAPTURE` / `ACTION_VIDEO_CAPTURE` from
+ * an app that [declared] `CAMERA` in its manifest but hasn't been
+ * [granted] it (`SecurityException`, "revoked permission"). An app that
+ * doesn't declare it can start the camera app freely. So with the
+ * permission declared and not held, a capture asks for it first rather
+ * than attempting a launch that can only fail. There is no "can't ask"
+ * case here: when no screen is composed to ask with, the ask itself
+ * ends [AndroidPermissionAsk.REFUSED] ([askAndroidPermissionOnScreen])
+ * and the input gets the picker like any other refusal.
+ */
+internal fun cameraGateFor(declared: Boolean, granted: Boolean): CameraGate =
+    if (!declared || granted) CameraGate.LAUNCH else CameraGate.ASK
 
 /**
  * The upload for a finished camera capture into [file] (served to the

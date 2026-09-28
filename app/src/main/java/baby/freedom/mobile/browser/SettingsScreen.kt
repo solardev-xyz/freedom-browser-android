@@ -37,7 +37,12 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.LocationOn
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Videocam
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Cookie
+import androidx.compose.material.icons.filled.Public
+import androidx.compose.material.icons.filled.Shield
+import androidx.compose.material.icons.filled.Sync
+import androidx.compose.material.icons.filled.Update
 import androidx.compose.material.icons.filled.DeleteForever
 import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.History
@@ -72,7 +77,10 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import baby.freedom.mobile.R
+import baby.freedom.mobile.chains.Chain
+import baby.freedom.mobile.chains.BuiltInChains
 import baby.freedom.mobile.data.BrowsingRepository
+import baby.freedom.mobile.data.ChainStore
 import baby.freedom.mobile.data.NodeSettings
 import baby.freedom.mobile.ui.isLight
 import baby.freedom.swarm.IpfsInfo
@@ -88,6 +96,8 @@ import kotlinx.coroutines.launch
  *
  *  0. **Search** — the address bar's search engine: the desktop set
  *     ([SearchEngines.BUILT_IN]) or a custom template (#87).
+ *  ½. **Ad blocking** — the filter-list categories and the sites ad
+ *     blocking is off for (#126, [Adblock]).
  *  1. **Browsing data** — wipe history, bookmarks, and WebView cookies /
  *     site storage / per-tab caches. Each action is guarded by a
  *     confirmation dialog.
@@ -96,11 +106,16 @@ import kotlinx.coroutines.launch
  *     every "open <scheme>: links in another app" one (#85).
  *  3. **Nodes** — where `bzz://` and `ipfs://` content comes from: the
  *     embedded nodes, or an external Swarm endpoint / IPFS gateway the
- *     user runs (#125, [ExternalEndpoints]). The IPFS row shows only
+ *     user runs (#125, [ExternalEndpoints]); and the embedded Radicle
+ *     node's row, which opens its own page ([RadicleScreen], #73). The IPFS row shows only
  *     while advanced options are on, or once an external gateway is
  *     set — its unverified warning must stay in view while it's in use.
- *  4. **About** — app name, version, package, and a short blurb.
- *  5. **Other** — a single "Show advanced options" row. Tapping it
+ *  4. **Chains** — Ethereum, Gnosis and Base, plus the user's custom
+ *     chains, added from a chainlist.org search or by hand (#107, see
+ *     [ChainsSection]). Its Add chain pages and each chain's page (its own
+ *     RPCs and how reads are checked, #108) replace the list while open.
+ *  5. **About** — app name, version, package, and a short blurb.
+ *  6. **Other** — a single "Show advanced options" row. Tapping it
  *     flips [NodeSettings.showIpfsUi] on, which reveals an "IPFS node
  *     (experimental)" card below (status, peers, gateway URL, and
  *     routing preferences). This gate exists so IPFS support stays a
@@ -119,6 +134,8 @@ fun SettingsScreen(
     onClearHistory: () -> Unit,
     onClearWebViewData: () -> Unit,
     onDismiss: () -> Unit,
+    radicle: RadicleControls = RadicleControls(),
+    onOpenRadicle: () -> Unit = {},
 ) {
     BackHandler(onBack = onDismiss)
     // Settings search (#93). Registered after the dismiss handler so it
@@ -140,6 +157,13 @@ fun SettingsScreen(
     val externalSwarm by settings.externalSwarmEndpoint.collectAsState(initial = "")
     val externalIpfs by settings.externalIpfsGateway.collectAsState(initial = "")
     var editEndpoint by remember { mutableStateOf<NodeEndpoint?>(null) }
+    val adblockCategories by settings.adblockCategories
+        .collectAsState(initial = AdblockCategory.entries.filterTo(LinkedHashSet()) { it.enabledByDefault })
+    val adblockAllowlist by settings.adblockAllowlist.collectAsState(initial = emptyList())
+    val adblockStatus by Adblock.status.collectAsState()
+    val adblockUpdate by Adblock.updateState.collectAsState()
+    val adblockAutoUpdate by settings.adblockAutoUpdate.collectAsState(initial = true)
+    var addAllowlistSite by remember { mutableStateOf(false) }
 
     var confirmClearHistory by remember { mutableStateOf(false) }
     var confirmClearBookmarks by remember { mutableStateOf(false) }
@@ -148,6 +172,14 @@ fun SettingsScreen(
     val sitePermissions = remember(context) { SitePermissionBroker.get(context) }
     val permissionEntries by remember(sitePermissions) { sitePermissions.entries }
         .collectAsState(initial = emptyList())
+
+    val chainStore = remember(context) { ChainStore.get(context) }
+    val chains by remember(chainStore) { chainStore.chains }
+        .collectAsState(initial = BuiltInChains.ALL)
+    var chainPage by remember { mutableStateOf<ChainPage?>(null) }
+    var chainQuery by rememberSaveable { mutableStateOf("") }
+    var confirmRemoveChain by remember { mutableStateOf<Chain?>(null) }
+    var removeChainFailed by remember { mutableStateOf<Chain?>(null) }
 
     val scope = rememberCoroutineScope()
     val appVersion = remember(context) { appVersionLabel(context) }
@@ -158,6 +190,10 @@ fun SettingsScreen(
     val searchRows = visibleSettingsRows(
         query, SECTION_SEARCH, searchSectionRows(searchEngine, customSearchTemplate),
     )
+    val adblockRows = visibleSettingsRows(
+        query, SECTION_ADBLOCK,
+        adblockSectionRows(adblockCategories, adblockAllowlist, adblockStatus, adblockUpdate),
+    )
     val browsingRows = visibleSettingsRows(
         query, SECTION_BROWSING, browsingDataRows(history.size, bookmarks.size),
     )
@@ -165,8 +201,10 @@ fun SettingsScreen(
         query, SECTION_PERMISSIONS, sitePermissionRows(permissionEntries),
     )
     val nodeRows = visibleSettingsRows(
-        query, SECTION_NODES, nodeRows(externalSwarm, externalIpfs, showIpfsUi),
+        query, SECTION_NODES,
+        nodeRows(externalSwarm, externalIpfs, showIpfsUi) + radicleSettingsRow(radicle),
     )
+    val chainRows = visibleSettingsRows(query, SECTION_CHAINS, chainSettingsRows(chains))
     val aboutRows = visibleSettingsRows(
         query, SECTION_ABOUT, aboutRows(appVersion, context.packageName),
     )
@@ -175,7 +213,8 @@ fun SettingsScreen(
         visibleSettingsRows(query, SECTION_IPFS, ipfsRows(ipfsInfo))
     } else emptySet()
     val nothingMatches = listOf(
-        searchRows, browsingRows, permissionRows, nodeRows, aboutRows, otherRows, ipfsRows,
+        searchRows, adblockRows, browsingRows, permissionRows, nodeRows, chainRows, aboutRows,
+        otherRows, ipfsRows,
     ).all { it.isEmpty() }
 
     // A new query starts the results from the top, so the first match
@@ -185,7 +224,44 @@ fun SettingsScreen(
         snapshotFlow { query }.drop(1).collect { listState.scrollToItem(0) }
     }
 
-    FullScreenScaffold(
+    // The Chains sub-pages stand in for the list while open; everything
+    // above stays composed, so Back lands on the list as it was left.
+    when (val page = chainPage) {
+        ChainPage.Search -> ChainlistPage(
+            query = chainQuery,
+            onQueryChange = { chainQuery = it },
+            existingIds = chains.mapTo(HashSet()) { it.id },
+            onPick = { chainPage = ChainPage.Form(it.toChain()) },
+            onManual = { chainPage = ChainPage.Form(null) },
+            onBack = { chainPage = null },
+        )
+        is ChainPage.Form -> AddChainPage(
+            prefill = page.prefill,
+            onAdd = chainStore::add,
+            onAdded = {
+                chainPage = null
+                chainQuery = ""
+            },
+            onBack = { chainPage = if (page.prefill != null) ChainPage.Search else null },
+        )
+        is ChainPage.Detail -> {
+            val chain = chains.firstOrNull { it.id == page.chainId }
+            if (chain != null) {
+                ChainDetailPage(
+                    chain = chain,
+                    onAddRpc = { chainStore.addUserRpc(chain.id, it) },
+                    onRemoveRpc = { chainStore.removeUserRpc(chain.id, it) },
+                    onRemove = { confirmRemoveChain = chain },
+                    onBack = { chainPage = null },
+                )
+            } else {
+                // Removed (from this page's Remove): back to the list.
+                LaunchedEffect(page) { chainPage = null }
+            }
+        }
+        null -> Unit
+    }
+    if (chainPage == null) FullScreenScaffold(
         title = "Settings",
         onDismiss = onDismiss,
     ) {
@@ -205,6 +281,25 @@ fun SettingsScreen(
                         engineId = searchEngine,
                         customTemplate = customSearchTemplate,
                         onClick = { pickSearchEngine = true },
+                    )
+                }
+                if (adblockRows.isNotEmpty()) item("adblock") {
+                    AdblockSection(
+                        visible = adblockRows,
+                        enabled = adblockCategories,
+                        allowlist = adblockAllowlist,
+                        status = adblockStatus,
+                        update = adblockUpdate,
+                        autoUpdate = adblockAutoUpdate,
+                        onToggle = { category, on ->
+                            scope.launch { settings.setAdblockCategory(category, on) }
+                        },
+                        onAutoUpdate = { on -> scope.launch { settings.setAdblockAutoUpdate(on) } },
+                        onCheckUpdates = { Adblock.checkForUpdates() },
+                        onRemoveSite = { site ->
+                            Adblock.removeAllowlisted(site)
+                        },
+                        onAddSite = { addAllowlistSite = true },
                     )
                 }
                 if (browsingRows.isNotEmpty()) item("browsing") {
@@ -230,6 +325,17 @@ fun SettingsScreen(
                         externalSwarm = externalSwarm,
                         externalIpfs = externalIpfs,
                         onEdit = { editEndpoint = it },
+                        radicle = radicle,
+                        onOpenRadicle = onOpenRadicle,
+                    )
+                }
+                if (chainRows.isNotEmpty()) item("chains") {
+                    ChainsSection(
+                        visible = chainRows,
+                        chains = chains,
+                        onOpen = { chainPage = ChainPage.Detail(it.id) },
+                        onRemove = { confirmRemoveChain = it },
+                        onAdd = { chainPage = ChainPage.Search },
                     )
                 }
                 if (aboutRows.isNotEmpty()) item("about") {
@@ -294,6 +400,42 @@ fun SettingsScreen(
             onDismiss = { editEndpoint = null },
         )
     }
+    confirmRemoveChain?.let { chain ->
+        ConfirmDialog(
+            title = "Remove ${chain.name}?",
+            message = "Removes chain ${chain.id} and its RPC endpoints from this device. " +
+                "You can add it again later.",
+            confirmLabel = "Remove",
+            onConfirm = {
+                scope.launch {
+                    if (chainStore.remove(chain.id) == ChainStore.RemoveResult.FAILED) {
+                        removeChainFailed = chain
+                    }
+                }
+                confirmRemoveChain = null
+            },
+            onDismiss = { confirmRemoveChain = null },
+        )
+    }
+    removeChainFailed?.let { chain ->
+        AlertDialog(
+            onDismissRequest = { removeChainFailed = null },
+            title = { Text("Couldn't remove ${chain.name}") },
+            text = { Text("Chain ${chain.id} is still on this device. Try again.") },
+            confirmButton = {
+                TextButton(onClick = { removeChainFailed = null }) { Text("OK") }
+            },
+        )
+    }
+    if (addAllowlistSite) {
+        AllowlistSiteDialog(
+            onAdd = { site ->
+                Adblock.setAllowlisted(site, allowed = true, private = false)
+                addAllowlistSite = false
+            },
+            onDismiss = { addAllowlistSite = false },
+        )
+    }
     if (confirmClearHistory) {
         ConfirmDialog(
             title = "Clear history?",
@@ -322,7 +464,7 @@ fun SettingsScreen(
     if (confirmClearSiteData) {
         ConfirmDialog(
             title = "Clear cookies and site data?",
-            message = "Signs you out of most sites and wipes cached page data, cookies, form autofill and remembered page zoom levels from every open tab.",
+            message = "Signs you out of most sites and wipes cached page data, cookies, form autofill, remembered page zoom levels and desktop-site choices from every open tab.",
             confirmLabel = "Clear site data",
             onConfirm = {
                 onClearWebViewData()
@@ -334,6 +476,7 @@ fun SettingsScreen(
 }
 
 private const val SECTION_SEARCH = "Search"
+private const val SECTION_ADBLOCK = "Ad blocking"
 private const val SECTION_BROWSING = "Browsing data"
 private const val SECTION_PERMISSIONS = "Site permissions"
 private const val SECTION_NODES = "Nodes"
@@ -591,6 +734,8 @@ private fun NodesSection(
     externalSwarm: String,
     externalIpfs: String,
     onEdit: (NodeEndpoint) -> Unit,
+    radicle: RadicleControls,
+    onOpenRadicle: () -> Unit,
 ) {
     SectionCard(title = SECTION_NODES) {
         if (NodeEndpoint.Swarm.key in visible) {
@@ -607,6 +752,15 @@ private fun NodesSection(
                 external = externalIpfs,
                 icon = ImageVector.vectorResource(R.drawable.ic_ipfs),
                 onClick = { onEdit(NodeEndpoint.Ipfs) },
+            )
+        }
+        if (RADICLE_ROW_KEY in visible) {
+            PageRow(
+                title = RADICLE_ROW_TITLE,
+                subtitle = radicleSummary(radicle.info, radicle.enabled),
+                style = PageRowStyle.Inset,
+                leadingIcon = ImageVector.vectorResource(R.drawable.ic_radicle),
+                onClick = onOpenRadicle,
             )
         }
     }
@@ -742,10 +896,294 @@ private fun endpointHint(rejection: ExternalEndpoints.Rejection): String = when 
     ExternalEndpoints.Rejection.CREDENTIALS -> "Remove the user name or password before the host"
 }
 
+private const val ADBLOCK_ALLOWLIST_EMPTY =
+    "Sites you allow ads on — from the page menu, or with Add site — appear here. Blocking is off for them and their subdomains."
+private const val ADBLOCK_ADD_SITE = "Add site"
+private const val ADBLOCK_ADD_SITE_SUBTITLE = "Turn ad blocking off for a site"
+private const val ADBLOCK_CREDITS =
+    "Filter lists: EasyList, EasyPrivacy and Fanboy's lists (easylist.to), © their authors, used under CC BY-SA 3.0. Changes apply to pages as they next load."
+
+private const val ADBLOCK_AUTO_UPDATE = "Keep filter lists up to date"
+private const val ADBLOCK_AUTO_UPDATE_SUBTITLE = "Signed updates over Swarm"
+private const val ADBLOCK_CHECK_UPDATES = "Check for list updates"
+private const val ADBLOCK_CHECK_UPDATES_SUBTITLE = "Reads the update feed on Swarm now"
+
+/**
+ * The wrapping line under "Keep filter lists up to date": which lists
+ * the engine uses now (#127) — the applied update's version and the day
+ * it was built, and, where the bundled lists serve some categories
+ * instead (the update doesn't carry them, its copy failed its hash
+ * check, or theirs is newer), which — giving each list its own reason.
+ * (The subtitle is one ellipsised line, too short to be sure of showing
+ * the version on a phone.)
+ */
+internal fun adblockListsLine(status: AdblockStatus): String {
+    val version = status.listsVersion ?: return "Using the built-in lists"
+    if (status.updatedLists.isEmpty()) {
+        // Give each built-in list its real reason: newer than the
+        // update's copy, the update's copy failed its hash check (it's
+        // fetched again on the next check), or the update doesn't carry
+        // it (e.g. a category switched on since it applied).
+        val all = status.builtInLists
+        val newer = status.newerBuiltInLists
+        val damaged = status.damagedLists - newer.toSet()
+        val uncovered = all - newer.toSet() - damaged.toSet()
+        val reasons = listOfNotNull(
+            when {
+                newer.isEmpty() -> null
+                newer.size == all.size -> "newer than update $version"
+                else -> "${newer.joinToString(", ")} newer than update $version's"
+            },
+            when {
+                damaged.isEmpty() -> null
+                damaged.size == all.size -> "update $version's copies failed their hash check"
+                else -> "update $version's ${damaged.joinToString(", ")} failed its hash check"
+            },
+            when {
+                uncovered.isEmpty() -> null
+                uncovered.size == all.size -> "update $version doesn't include them"
+                else -> "update $version doesn't include ${uncovered.joinToString(", ")}"
+            },
+        )
+        if (reasons.isEmpty()) return "Using the built-in lists"
+        return "Using the built-in lists (${reasons.joinToString("; ")})"
+    }
+    val day = status.listsGeneratedAt?.take(10)?.takeIf { it.matches(Regex("\\d{4}-\\d{2}-\\d{2}")) }
+    val update = "Using update $version" + (day?.let { " of $it" } ?: "")
+    if (status.builtInLists.isEmpty()) return update
+    val damaged = status.damagedLists.filter { it in status.builtInLists }
+    return "$update for ${status.updatedLists.joinToString(", ")}; " +
+        "the built-in ${status.builtInLists.joinToString(", ")}" +
+        (if (damaged.isEmpty()) "" else " (update $version's ${damaged.joinToString(", ")} failed its hash check)")
+}
+
+/** The Settings name of the category [key] ("ads" → "EasyList"). */
+private fun adblockListName(key: String): String =
+    AdblockCategory.entries.firstOrNull { it.key == key }?.listName ?: key
+
+/**
+ * The wrapping line under "Check for list updates": a check under way,
+ * or how the last one ended; `null` before the first check.
+ */
+internal fun adblockUpdateLine(update: AdblockUpdateState): String? {
+    if (update.checking) return "Checking…"
+    return when (val last = update.last) {
+        null -> null
+        is AdblockUpdateOutcome.Applied ->
+            if (last.olderThanBuiltIn.isEmpty()) {
+                "Updated to version ${last.version}"
+            } else {
+                "Updated to version ${last.version}; the built-in " +
+                    last.olderThanBuiltIn.joinToString(", ") { adblockListName(it) } +
+                    if (last.olderThanBuiltIn.size == 1) " stays, it's newer" else " stay, they're newer"
+            }
+        is AdblockUpdateOutcome.BuiltInNewer ->
+            "Version ${last.version} on the feed is older than the built-in lists; they stay in use"
+        is AdblockUpdateOutcome.UpToDate ->
+            if (last.version > 0) "Up to date (version ${last.version})" else "Up to date"
+        AdblockUpdateOutcome.FeedUnavailable ->
+            "Couldn't reach the update feed on Swarm — is the Swarm node running? Tap to try again"
+        is AdblockUpdateOutcome.Rejected ->
+            "Refused an update that failed verification (${last.reason}); the current lists stay"
+        is AdblockUpdateOutcome.DownloadFailed ->
+            "Couldn't download ${adblockListName(last.category)}; the current lists stay"
+        is AdblockUpdateOutcome.HashMismatch ->
+            "${adblockListName(last.category)} didn't match its signed hash; the current lists stay"
+        AdblockUpdateOutcome.NothingEnabled -> "Every filter list is off"
+        is AdblockUpdateOutcome.Failed -> "The update failed (${last.message}); the current lists stay"
+    }
+}
+
+/** The line under a category: its list, and while it's on, how the engine is doing. */
+internal fun adblockCategorySubtitle(category: AdblockCategory, on: Boolean, status: AdblockStatus): String =
+    if (on && status.loading) "${category.listName} · loading…" else category.listName
+
+private fun adblockSectionRows(
+    enabled: Set<AdblockCategory>,
+    allowlist: List<String>,
+    status: AdblockStatus,
+    update: AdblockUpdateState,
+) = buildList {
+    for (category in AdblockCategory.entries) {
+        add(settingsRow(category, category.title, category.listName, if (category in enabled) "On" else "Off"))
+    }
+    add(settingsRow("auto-update", ADBLOCK_AUTO_UPDATE, ADBLOCK_AUTO_UPDATE_SUBTITLE, adblockListsLine(status), "filter list updates"))
+    add(settingsRow("update-check", ADBLOCK_CHECK_UPDATES, ADBLOCK_CHECK_UPDATES_SUBTITLE, adblockUpdateLine(update), "filter list updates"))
+    add(settingsRow("allowlist-add", ADBLOCK_ADD_SITE, ADBLOCK_ADD_SITE_SUBTITLE, "allowlist", "allowed sites"))
+    if (allowlist.isEmpty()) {
+        add(settingsRow("allowlist-empty", ADBLOCK_ALLOWLIST_EMPTY))
+    } else {
+        for (site in allowlist) {
+            add(settingsRow("site:$site", allowlistHostForDisplay(site), allowlistSiteSubtitle(site), "allowlist", site))
+        }
+    }
+    add(settingsRow("credits", ADBLOCK_CREDITS))
+}
+
+/**
+ * The line under an allowed site: "Ads allowed", led by the stored
+ * punycode when the title shows the Unicode name
+ * ([allowlistHostForDisplay]), so both forms are on screen.
+ */
+internal fun allowlistSiteSubtitle(site: String): String {
+    val shown = allowlistHostForDisplay(site)
+    return if (shown == site) "Ads allowed" else "$site · Ads allowed"
+}
+
+/**
+ * Ad blocking (#126): a switch per filter-list category, the sites
+ * blocking is off for (each removable, and "Add site" for one typed in),
+ * and the lists' attribution. Every string is shown whole and wraps —
+ * a site's name is never cut.
+ */
+@Composable
+private fun AdblockSection(
+    visible: Set<Any>,
+    enabled: Set<AdblockCategory>,
+    allowlist: List<String>,
+    status: AdblockStatus,
+    update: AdblockUpdateState,
+    autoUpdate: Boolean,
+    onToggle: (AdblockCategory, Boolean) -> Unit,
+    onAutoUpdate: (Boolean) -> Unit,
+    onCheckUpdates: () -> Unit,
+    onRemoveSite: (String) -> Unit,
+    onAddSite: () -> Unit,
+) {
+    SectionCard(title = SECTION_ADBLOCK) {
+        for (category in AdblockCategory.entries) {
+            if (category !in visible) continue
+            val on = category in enabled
+            PageRow(
+                title = category.title,
+                subtitle = adblockCategorySubtitle(category, on, status),
+                style = PageRowStyle.Inset,
+                leadingIcon = Icons.Filled.Shield,
+                onClick = { onToggle(category, !on) },
+                trailing = {
+                    Switch(checked = on, onCheckedChange = { onToggle(category, it) })
+                },
+            )
+        }
+        if ("auto-update" in visible) PageRow(
+            title = ADBLOCK_AUTO_UPDATE,
+            subtitle = ADBLOCK_AUTO_UPDATE_SUBTITLE,
+            thirdLine = adblockListsLine(status),
+            style = PageRowStyle.Inset,
+            leadingIcon = Icons.Filled.Update,
+            onClick = { onAutoUpdate(!autoUpdate) },
+            trailing = {
+                Switch(checked = autoUpdate, onCheckedChange = onAutoUpdate)
+            },
+        )
+        if ("update-check" in visible) PageRow(
+            title = ADBLOCK_CHECK_UPDATES,
+            subtitle = ADBLOCK_CHECK_UPDATES_SUBTITLE,
+            thirdLine = adblockUpdateLine(update),
+            style = PageRowStyle.Inset,
+            leadingIcon = Icons.Filled.Sync,
+            enabled = !update.checking,
+            onClick = onCheckUpdates,
+        )
+        if ("allowlist-add" in visible) PageRow(
+            title = ADBLOCK_ADD_SITE,
+            subtitle = ADBLOCK_ADD_SITE_SUBTITLE,
+            style = PageRowStyle.Inset,
+            leadingIcon = Icons.Filled.Add,
+            onClick = onAddSite,
+        )
+        if (allowlist.isEmpty() && "allowlist-empty" in visible) {
+            Text(
+                ADBLOCK_ALLOWLIST_EMPTY,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+            )
+        }
+        for (site in allowlist) {
+            if ("site:$site" !in visible) continue
+            val shown = allowlistHostForDisplay(site)
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(start = 12.dp, top = 2.dp, bottom = 2.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(
+                    Icons.Filled.Public,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onSurface,
+                )
+                Spacer(Modifier.width(12.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(shown, fontWeight = FontWeight.Medium)
+                    Text(
+                        allowlistSiteSubtitle(site),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                IconButton(onClick = { onRemoveSite(site) }) {
+                    Icon(
+                        Icons.Filled.Close,
+                        contentDescription = "Block ads on $shown again",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+        }
+        if ("credits" in visible) {
+            Text(
+                ADBLOCK_CREDITS,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+            )
+        }
+    }
+}
+
+/** A host or URL to allow ads on; Add stays disabled until it is one ([normalizeAllowlistHost]). */
+@Composable
+private fun AllowlistSiteDialog(onAdd: (String) -> Unit, onDismiss: () -> Unit) {
+    var draft by remember { mutableStateOf("") }
+    val host = normalizeAllowlistHost(draft)
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Allow ads on a site") },
+        text = {
+            NoSuggestionsTextInput {
+                OutlinedTextField(
+                    value = draft,
+                    onValueChange = { draft = it },
+                    label = { Text("Site") },
+                    placeholder = { Text("example.com") },
+                    isError = draft.isNotBlank() && host == null,
+                    supportingText = {
+                        Text(
+                            if (draft.isNotBlank() && host == null) "Not a site: e.g. example.com"
+                            else "Its subdomains are included.",
+                        )
+                    },
+                    singleLine = true,
+                    keyboardOptions = urlKeyboardOptions(),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = { host?.let(onAdd) }, enabled = host != null) { Text("Add") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Cancel") }
+        },
+    )
+}
+
 private const val ROW_CLEAR_HISTORY = "Clear history"
 private const val ROW_CLEAR_BOOKMARKS = "Clear bookmarks"
 private const val ROW_CLEAR_SITE_DATA = "Clear cookies & site data"
-private const val ROW_CLEAR_SITE_DATA_SUBTITLE = "Cookies, DOM storage, cache, form data, and zoom levels"
+private const val ROW_CLEAR_SITE_DATA_SUBTITLE = "Cookies, DOM storage, cache, form data, zoom levels, and desktop sites"
 
 private fun historySubtitle(count: Int) =
     if (count == 0) "Nothing to clear" else "$count visit${if (count == 1) "" else "s"}"
@@ -753,7 +1191,7 @@ private fun historySubtitle(count: Int) =
 private fun bookmarksSubtitle(count: Int) =
     if (count == 0) "Nothing to clear" else "$count bookmark${if (count == 1) "" else "s"}"
 
-private fun browsingDataRows(historyCount: Int, bookmarkCount: Int) = listOf(
+internal fun browsingDataRows(historyCount: Int, bookmarkCount: Int) = listOf(
     settingsRow("history", ROW_CLEAR_HISTORY, historySubtitle(historyCount)),
     settingsRow("bookmarks", ROW_CLEAR_BOOKMARKS, bookmarksSubtitle(bookmarkCount)),
     settingsRow("site-data", ROW_CLEAR_SITE_DATA, ROW_CLEAR_SITE_DATA_SUBTITLE),

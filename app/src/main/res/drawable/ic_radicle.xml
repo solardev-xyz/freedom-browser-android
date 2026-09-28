@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Radicle logo (the pixel-art "radicle" mark), ported from
+  freedom-browser-ios docs/logos-nodes/radicle.svg: each colour's 4x4
+  cells merged into one path, coordinates unchanged (viewBox 0 0 44 44).
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="16dp"
+    android:height="16dp"
+    android:viewportWidth="44"
+    android:viewportHeight="44">
+    <path
+        android:pathData="M8,0h4v4h-4zM32,0h4v4h-4zM12,4h4v4h-4zM28,4h4v4h-4zM12,8h4v4h-4zM20,8h4v4h-4zM28,8h4v4h-4zM8,12h4v4h-4zM12,12h4v4h-4zM16,12h4v4h-4zM20,12h4v4h-4zM24,12h4v4h-4zM28,12h4v4h-4zM32,12h4v4h-4zM4,16h4v4h-4zM8,16h4v4h-4zM20,16h4v4h-4zM24,16h4v4h-4zM36,16h4v4h-4zM4,20h4v4h-4zM8,20h4v4h-4zM20,20h4v4h-4zM24,20h4v4h-4zM36,20h4v4h-4zM16,28h4v4h-4zM24,28h4v4h-4zM16,32h4v4h-4zM24,32h4v4h-4zM16,36h4v4h-4zM24,36h4v4h-4zM12,40h4v4h-4zM16,40h4v4h-4zM24,40h4v4h-4zM28,40h4v4h-4z"
+        android:fillColor="#5555FF" />
+    <path
+        android:pathData="M16,8h4v4h-4zM24,8h4v4h-4zM0,24h4v4h-4zM4,24h4v4h-4zM8,24h4v4h-4zM12,24h4v4h-4zM16,24h4v4h-4zM20,24h4v4h-4zM24,24h4v4h-4zM28,24h4v4h-4zM32,24h4v4h-4zM36,24h4v4h-4zM40,24h4v4h-4zM8,28h4v4h-4zM32,28h4v4h-4zM8,32h4v4h-4zM32,32h4v4h-4z"
+        android:fillColor="#3333DD" />
+    <path
+        android:pathData="M12,16h4v4h-4zM16,16h4v4h-4zM28,16h4v4h-4zM32,16h4v4h-4zM12,20h4v4h-4zM28,20h4v4h-4z"
+        android:fillColor="#F4F4F4" />
+    <path
+        android:pathData="M16,20h4v4h-4zM32,20h4v4h-4z"
+        android:fillColor="#FF55FF" />
+</vector>

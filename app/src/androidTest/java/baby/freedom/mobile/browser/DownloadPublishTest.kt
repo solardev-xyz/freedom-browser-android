@@ -77,7 +77,15 @@ class DownloadPublishTest {
     }
 
     private fun startAndAccept(url: String, fileName: String) {
-        manager.start(url, null, "attachment; filename=\"$fileName\"", "text/plain", -1, null)
+        manager.start(
+            tabId = 1L,
+            url = url,
+            userAgent = null,
+            contentDisposition = "attachment; filename=\"$fileName\"",
+            mimeType = "text/plain",
+            contentLength = -1,
+            pageUrl = null,
+        )
         val offer = manager.offers.value.last { it.fileName == fileName }
         manager.accept(offer.key)
     }

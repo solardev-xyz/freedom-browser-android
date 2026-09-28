@@ -6,9 +6,12 @@ import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
+import androidx.datastore.preferences.core.stringSetPreferencesKey
+import baby.freedom.mobile.browser.AdblockCategory
 import androidx.datastore.preferences.preferencesDataStore
 import baby.freedom.mobile.browser.ExternalEndpoints
 import baby.freedom.mobile.browser.SearchEngines
+import baby.freedom.mobile.browser.normalizeAllowlistHost
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 
@@ -45,6 +48,13 @@ import kotlinx.coroutines.flow.map
  * base URL, absent for the embedded node (#125). `MainActivity`
  * mirrors them into [baby.freedom.mobile.browser.Gateways].
  *
+ * ## Ad-blocking keys
+ *
+ * `adblock_<category>` switches each [AdblockCategory] (#126), absent
+ * for its default; `adblock_allowlist` holds the sites ad blocking is
+ * off for, in [normalizeAllowlistHost] form; `adblock_auto_update` (absent
+ * for on) lets the app fetch signed filter-list updates over Swarm (#127).
+ *
  * There is no persistent "run IPFS" flag by design. The IPFS node is
  * always off at cold launch (demo-surprise requirement) and driven
  * live via AIDL: [baby.freedom.mobile.node.INodeService.ensureIpfsStarted]
@@ -68,6 +78,36 @@ class NodeSettings private constructor(
 
     suspend fun setRunNodeEnabled(enabled: Boolean) {
         store.edit { it[Keys.RUN_NODE_ENABLED] = enabled }
+    }
+
+    /**
+     * Whether the embedded Radicle node should run (#73). Off by default,
+     * as on iOS: it's a publish-capable node that creates an identity key
+     * and dials Radicle seeds, so it starts only once the user asks. The UI
+     * relays it to the `:node` process on every bind, and live from the
+     * Radicle page, through [baby.freedom.mobile.node.INodeService.startRadicle] /
+     * [baby.freedom.mobile.node.INodeService.stopRadicle].
+     */
+    val radicleEnabled: Flow<Boolean> = store.data.map { prefs ->
+        prefs[Keys.RADICLE_ENABLED] ?: false
+    }
+
+    suspend fun setRadicleEnabled(enabled: Boolean) {
+        store.edit { it[Keys.RADICLE_ENABLED] = enabled }
+    }
+
+    /**
+     * Whether the embedded Myotis Ethereum / Gnosis light client runs
+     * (#72). Off by default — opt-in, as on desktop; switched on the node
+     * page. `MainActivity` binds [baby.freedom.mobile.node.MyotisService]
+     * while it's on.
+     */
+    val myotisEnabled: Flow<Boolean> = store.data.map { prefs ->
+        prefs[Keys.MYOTIS_ENABLED] ?: false
+    }
+
+    suspend fun setMyotisEnabled(enabled: Boolean) {
+        store.edit { it[Keys.MYOTIS_ENABLED] = enabled }
     }
 
     /**
@@ -196,15 +236,60 @@ class NodeSettings private constructor(
         return true
     }
 
+    /** The ad-blocking categories switched on (#126). */
+    val adblockCategories: Flow<Set<AdblockCategory>> = store.data.map { prefs ->
+        AdblockCategory.entries.filterTo(LinkedHashSet()) { category ->
+            prefs[Keys.adblock(category)] ?: category.enabledByDefault
+        }
+    }
+
+    suspend fun setAdblockCategory(category: AdblockCategory, enabled: Boolean) {
+        store.edit { it[Keys.adblock(category)] = enabled }
+    }
+
+    /** Sites ad blocking is off for (#126), sorted. */
+    val adblockAllowlist: Flow<List<String>> = store.data.map { prefs ->
+        prefs[Keys.ADBLOCK_ALLOWLIST].orEmpty().sorted()
+    }
+
+    /**
+     * Turn ad blocking off for [site] (a host or URL) and its
+     * subdomains. Returns `false` (and changes nothing) if it isn't a host.
+     */
+    suspend fun addAdblockAllowlistHost(site: String): Boolean {
+        val host = normalizeAllowlistHost(site) ?: return false
+        store.edit { it[Keys.ADBLOCK_ALLOWLIST] = it[Keys.ADBLOCK_ALLOWLIST].orEmpty() + host }
+        return true
+    }
+
+    suspend fun removeAdblockAllowlistHost(host: String) {
+        store.edit { it[Keys.ADBLOCK_ALLOWLIST] = it[Keys.ADBLOCK_ALLOWLIST].orEmpty() - host }
+    }
+
+    /** Whether filter lists update themselves over Swarm (#127); on by default. */
+    val adblockAutoUpdate: Flow<Boolean> = store.data.map { prefs ->
+        prefs[Keys.ADBLOCK_AUTO_UPDATE] ?: true
+    }
+
+    suspend fun setAdblockAutoUpdate(enabled: Boolean) {
+        store.edit { it[Keys.ADBLOCK_AUTO_UPDATE] = enabled }
+    }
+
     private object Keys {
         val RUN_NODE_ENABLED = booleanPreferencesKey("run_node_enabled")
+        val MYOTIS_ENABLED = booleanPreferencesKey("myotis_enabled")
         val SHOW_IPFS_UI = booleanPreferencesKey("show_ipfs_ui")
+        val RADICLE_ENABLED = booleanPreferencesKey("radicle_enabled")
         val IPFS_LOW_POWER = booleanPreferencesKey("ipfs_low_power")
         val IPFS_ROUTING_MODE = stringPreferencesKey("ipfs_routing_mode")
         val SEARCH_ENGINE = stringPreferencesKey("search_engine")
         val SEARCH_CUSTOM_TEMPLATE = stringPreferencesKey("search_custom_template")
         val EXTERNAL_SWARM_ENDPOINT = stringPreferencesKey("external_swarm_endpoint")
         val EXTERNAL_IPFS_GATEWAY = stringPreferencesKey("external_ipfs_gateway")
+        val ADBLOCK_ALLOWLIST = stringSetPreferencesKey("adblock_allowlist")
+        val ADBLOCK_AUTO_UPDATE = booleanPreferencesKey("adblock_auto_update")
+        private val ADBLOCK = AdblockCategory.entries.associateWith { booleanPreferencesKey("adblock_${it.key}") }
+        fun adblock(category: AdblockCategory) = ADBLOCK.getValue(category)
     }
 
     companion object {

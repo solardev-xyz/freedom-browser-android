@@ -50,6 +50,41 @@ class TrustShieldTest {
     }
 
     @Test
+    fun `a tez name's shield speaks for Tezos Domains, base path and all`() {
+        // #176: a `.tez` website record on IPFS may carry a base path.
+        val tezos = EnsTrust(
+            verified = true,
+            agreed = listOf("rpc.tzkt.io", "mainnet.tezos.ecadinfra.com"),
+            block = 15_133_172L,
+        )
+        KnownEnsNames.record("ipfs://$CID/site", "alice.tez", tezos)
+        val trust = nameTrustFor("ipfs://alice.tez/about")!!
+        assertEquals(TrustTier.Verified, trust.tier)
+        assertEquals("ipfs://$CID/site", trust.answer)
+        assertEquals(
+            "2 independent RPC servers returned the same Tezos Domains record for alice.tez " +
+                "at block #15133172.",
+            trust.summary,
+        )
+        assertEquals("ipfs://alice.tez/about", DisplayUrl.withTransport("alice.tez/about"))
+        // One Tezos server's word is the unverified tier, as for ENS.
+        KnownEnsNames.record(
+            "ipfs://$CID/site",
+            "alice.tez",
+            EnsTrust(verified = false, agreed = listOf("rpc.tzkt.io")),
+        )
+        assertEquals(TrustTier.Unverified, nameTrustFor("alice.tez")!!.tier)
+    }
+
+    @Test
+    fun `gwei names get a shield too`() {
+        KnownEnsNames.record("bzz://$REF", "bob.gwei", verified)
+        val trust = nameTrustFor("bzz://bob.gwei/x")!!
+        assertEquals(TrustTier.Verified, trust.tier)
+        assertTrue(trust.summary, trust.summary.contains("GNS record for bob.gwei"))
+    }
+
+    @Test
     fun `every display form of a name finds its trust`() {
         KnownEnsNames.record("bzz://$REF", "swarm.eth", verified)
         for (display in listOf("swarm.eth", "swarm.eth/docs", "bzz://swarm.eth/x", "ens://SWARM.eth", "ipns://swarm.eth")) {

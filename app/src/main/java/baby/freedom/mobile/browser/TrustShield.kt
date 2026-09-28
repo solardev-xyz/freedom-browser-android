@@ -47,12 +47,18 @@ import baby.freedom.mobile.ens.NameSystem
  *   *Not cross-checked* warning, or a re-check served the answer the
  *   session already had.
  *
+ * The same two tiers cover every name system the browser resolves —
+ * ENS, WNS (`.wei`), GNS (`.gwei`) and Tezos Domains (`.tez`, #176),
+ * whose providers vote the same way ([NameTrust.system] names whose
+ * record it is).
+ *
  * iOS's other two tiers have no page to sit on here: servers that
- * *disagree* (a conflict) never load anything — the tab shows the
- * `ens_conflict` warning instead — and there is no user-configured RPC
- * endpoint yet. A page that isn't reached through a name (plain
- * `https://`, a raw `bzz://<hash>`) makes no name claim and gets no
- * shield.
+ * *disagree* (a conflict, #174's third verdict) never load anything —
+ * the tab shows the `ens_conflict` warning instead — and name
+ * resolution doesn't use the user's own RPCs (the chain settings' RPCs,
+ * #187/#189, serve dapps, not names). A page that isn't reached through
+ * a name (plain `https://`, a raw `bzz://<hash>`, a `.tez` website
+ * record on the ordinary web) makes no name claim and gets no shield.
  */
 internal enum class TrustTier(
     /** Short state, as the menu row and the dialog title say it. */
@@ -73,7 +79,7 @@ internal enum class TrustTier(
 internal data class NameTrust(val name: String, val trust: EnsTrust, val answer: String? = null) {
     val tier: TrustTier get() = if (trust.verified) TrustTier.Verified else TrustTier.Unverified
 
-    /** ENS, WNS or GNS — whose records these are. */
+    /** ENS, WNS, GNS or Tezos Domains — whose records these are. */
     val system: String get() = NameSystem.forName(name).label
 
     private val block: String get() = trust.block?.let { "block #$it" } ?: "the latest block"
