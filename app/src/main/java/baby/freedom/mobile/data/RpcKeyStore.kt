@@ -72,7 +72,8 @@ internal class AesGcmCipher(private val key: () -> SecretKey) : SecretCipher {
  */
 internal object KeystoreKey {
     private const val PROVIDER = "AndroidKeyStore"
-    private const val ALIAS = "freedom_rpc_api_keys"
+    /** Distinct from the wallet vault's `KeystoreVaultStore.KEY_ALIAS`. */
+    internal const val ALIAS = "freedom_rpc_api_keys"
 
     @Volatile
     private var cached: SecretKey? = null

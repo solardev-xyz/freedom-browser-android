@@ -37,6 +37,7 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.LocationOn
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Videocam
+import androidx.compose.material.icons.filled.AccountBalanceWallet
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Cookie
 import androidx.compose.material.icons.filled.Public
@@ -85,6 +86,7 @@ import baby.freedom.mobile.data.ChainStore
 import baby.freedom.mobile.data.NodeSettings
 import baby.freedom.mobile.ens.EnsRpcConfig
 import baby.freedom.mobile.ui.isLight
+import baby.freedom.mobile.wallet.Vault
 import baby.freedom.swarm.IpfsInfo
 import baby.freedom.swarm.IpfsStatus
 import kotlinx.coroutines.flow.drop
@@ -96,6 +98,9 @@ import kotlinx.coroutines.launch
  * [visibleSettingsRows]); Back clears a query before it closes the
  * page. Top to bottom:
  *
+ *  −. **Wallet** — the one wallet on this device (#75, #76): its state
+ *     and, until the phrase has been seen, the backup reminder. Opens
+ *     [WalletScreen].
  *  0. **Search** — the address bar's search engine: the desktop set
  *     ([SearchEngines.BUILT_IN]) or a custom template (#87).
  *  0a. **Ad blocking** — the filter-list categories and the sites ad
@@ -142,6 +147,7 @@ fun SettingsScreen(
     onDismiss: () -> Unit,
     radicle: RadicleControls = RadicleControls(),
     onOpenRadicle: () -> Unit = {},
+    onOpenWallet: () -> Unit = {},
 ) {
     BackHandler(onBack = onDismiss)
     // Settings search (#93). Registered after the dismiss handler so it
@@ -190,12 +196,16 @@ fun SettingsScreen(
     var confirmRemoveChain by remember { mutableStateOf<Chain?>(null) }
     var removeChainFailed by remember { mutableStateOf<Chain?>(null) }
 
+    val vault = remember(context) { Vault.get(context) }
+    val walletState by vault.state.collectAsState()
+
     val scope = rememberCoroutineScope()
     val appVersion = remember(context) { appVersionLabel(context) }
 
     // Each section's rows for the current query; an empty set hides the
     // section. The index is what the page shows right now (see
     // [SettingsRow]) — IPFS only while advanced options reveal it.
+    val walletRows = visibleSettingsRows(query, SECTION_WALLET, walletSettingsRows(walletState))
     val searchRows = visibleSettingsRows(
         query, SECTION_SEARCH, searchSectionRows(searchEngine, customSearchTemplate),
     )
@@ -225,7 +235,8 @@ fun SettingsScreen(
         visibleSettingsRows(query, SECTION_IPFS, ipfsRows(ipfsInfo))
     } else emptySet()
     val nothingMatches = listOf(
-        searchRows, adblockRows, ensRows, rpcRows, browsingRows, permissionRows, nodeRows, torRows,
+        walletRows, searchRows, adblockRows, ensRows, rpcRows, browsingRows, permissionRows, nodeRows,
+        torRows,
         chainRows, aboutRows, otherRows, ipfsRows,
     ).all { it.isEmpty() }
 
@@ -304,6 +315,9 @@ fun SettingsScreen(
                 contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
                 modifier = Modifier.fillMaxSize(),
             ) {
+                if (walletRows.isNotEmpty()) item("wallet") {
+                    WalletSection(state = walletState, onOpen = onOpenWallet)
+                }
                 if (searchRows.isNotEmpty()) item("search") {
                     SearchSection(
                         engineId = searchEngine,
@@ -526,6 +540,7 @@ fun SettingsScreen(
     }
 }
 
+private const val SECTION_WALLET = "Wallet"
 private const val SECTION_SEARCH = "Search"
 private const val SECTION_ADBLOCK = "Ad blocking"
 private const val SECTION_BROWSING = "Browsing data"
@@ -592,6 +607,25 @@ private fun customSearchTemplateLine(engineId: String, customTemplate: String): 
     customTemplate.takeIf {
         SearchEngines.effectiveId(engineId, customTemplate) == SearchEngines.CUSTOM_ID
     }
+
+/**
+ * Settings → Wallet: one row with the wallet's state, and the backup
+ * reminder (or no-screen-lock warning) as a line that stays under it —
+ * wrapped, never cut.
+ */
+@Composable
+private fun WalletSection(state: Vault.State, onOpen: () -> Unit) {
+    SectionCard(title = SECTION_WALLET) {
+        PageRow(
+            title = WALLET_TITLE,
+            subtitle = walletSummary(state),
+            style = PageRowStyle.Inset,
+            leadingIcon = Icons.Filled.AccountBalanceWallet,
+            thirdLine = walletAttentionLine(state),
+            onClick = onOpen,
+        )
+    }
+}
 
 @Composable
 private fun SearchSection(

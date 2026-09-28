@@ -3,6 +3,10 @@
   Android 11 and lower (`fullBackupContent`): the same exclusions as
   data_extraction_rules.xml: the encrypted RPC API keys. Backup is off
   (`allowBackup="false"`); this keeps them out should that ever change.
+  The wallet vault (KeystoreVaultStore) needs no rule: it lives in
+  `noBackupFilesDir` (`no_backup/wallet/vault.json`), which no backup
+  domain includes, under its own Keystore key (`freedom.wallet.vault`,
+  distinct from the API keys' `freedom_rpc_api_keys`).
 -->
 <full-backup-content>
     <exclude domain="file" path="datastore/freedom_rpc_secrets.preferences_pb" />

@@ -8,6 +8,10 @@
   key that never leaves this device, so a copy would be unreadable
   anyway. (Builds before that store kept them in plain text in
   `freedom_node_settings`; MainActivity moves them out on start.)
+  The wallet vault (KeystoreVaultStore) needs no rule: it lives in
+  `noBackupFilesDir` (`no_backup/wallet/vault.json`), which no backup
+  domain includes, under its own Keystore key (`freedom.wallet.vault`,
+  distinct from the API keys' `freedom_rpc_api_keys`).
 -->
 <data-extraction-rules>
     <cloud-backup>
