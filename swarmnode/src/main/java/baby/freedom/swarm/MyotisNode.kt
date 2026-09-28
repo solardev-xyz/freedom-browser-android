@@ -102,12 +102,23 @@ class MyotisNode internal constructor(
     private class Park(val status: MyotisChainStatus, val clockOffset: Long)
 
     /**
-     * Chains just released from a park, with the [upClock] time of the
-     * release: the engine needs a moment to re-judge its anchor, so a
-     * `STALE_ANCHOR` it still reports within [REJUDGE_GRACE_MS] doesn't
-     * park it again straight away.
+     * Chains just released from a park ([Release]): the engine needs a
+     * moment to re-judge its anchor, so a `STALE_ANCHOR` it still reports
+     * within [REJUDGE_GRACE_MS] doesn't park it again straight away.
      */
-    private val released = LinkedHashMap<MyotisNetwork, Long>()
+    private val released = LinkedHashMap<MyotisNetwork, Release>()
+
+    /**
+     * A park released at [upClock] time [at]. Until the engine has shown it
+     * accepted the anchor ([MyotisChainStatus.anchorAccepted]) or the grace
+     * runs out, the row keeps showing the [status] it was parked with: a
+     * resumed engine passes through `STARTING`/`SYNCING` before it
+     * concludes `STALE_ANCHOR` again, and showing that would flip the row
+     * (and the overall line) to syncing and back for a poll. The cost, when
+     * the corrected clock really did fix it, is the old row for up to
+     * [REJUDGE_GRACE_MS] while it syncs — the row it had been showing anyway.
+     */
+    private class Release(val at: Long, val status: MyotisChainStatus)
     private var foreground = true
     private var polls = 0
 
@@ -312,10 +323,7 @@ class MyotisNode internal constructor(
         val chains = networks.mapNotNull { network ->
             val handle = handles[network]
             when {
-                handle != null -> parked[network]?.status ?: MyotisChainStatus.decode(
-                    network.chainId,
-                    engine.statusJson(handle) ?: "{}",
-                ).also { if (foreground && it.staleAnchor && !it.paused) park(network, handle, it) }
+                handle != null -> parked[network]?.status ?: engineStatus(network, handle)
                 startErrors[network] != null ->
                     MyotisChainStatus(network.chainId, error = startErrors[network])
                 else -> null
@@ -324,16 +332,30 @@ class MyotisNode internal constructor(
         _state.value = MyotisInfo(status = MyotisStatus.Running, chains = chains)
     }
 
+    /** A running (unparked) chain's status as its row should show it; parks it on a stale anchor. */
+    private fun engineStatus(network: MyotisNetwork, handle: Long): MyotisChainStatus {
+        val status = MyotisChainStatus.decode(network.chainId, engine.statusJson(handle) ?: "{}")
+        if (foreground && status.staleAnchor && !status.paused) park(network, handle, status)
+        parked[network]?.let { return it.status }
+        val release = released[network] ?: return status
+        if (status.anchorAccepted || upClock() - release.at >= REJUDGE_GRACE_MS) {
+            released.remove(network)
+            return status
+        }
+        return release.status
+    }
+
     /**
-     * [network] reported `STALE_ANCHOR`: it can't sync forward and nothing
-     * here can release it, so idle-sleep it instead of holding peers for no
-     * possible progress. Only on an actual transition — a handle that
-     * wasn't running is tried again on the next poll.
+     * [network] reported `STALE_ANCHOR`: it can't sync forward, so
+     * idle-sleep it instead of holding peers for no possible progress.
+     * Nothing but a wall-clock change ([releaseParksOnClockChange]) or a
+     * stop of the engines releases it. Only on an actual transition — a
+     * handle that wasn't running is tried again on the next poll.
      */
     private fun park(network: MyotisNetwork, handle: Long, status: MyotisChainStatus) {
-        val releasedAt = released[network]
-        if (releasedAt != null) {
-            if (upClock() - releasedAt < REJUDGE_GRACE_MS) return
+        val release = released[network]
+        if (release != null) {
+            if (upClock() - release.at < REJUDGE_GRACE_MS) return
             released.remove(network)
         }
         if (!engine.pause(handle)) return
@@ -351,8 +373,8 @@ class MyotisNode internal constructor(
         val offset = clockOffset()
         val moved = parked.filterValues { abs(offset - it.clockOffset) > CLOCK_JUMP_MS }.keys
         for (network in moved) {
-            parked.remove(network)
-            released[network] = upClock()
+            val park = parked.remove(network) ?: continue
+            released[network] = Release(upClock(), park.status)
             val handle = handles[network] ?: continue
             val resumed = if (resume) " → ${engine.resume(handle)}" else ""
             Log.i(TAG, "${network.engineName}: wall clock changed since parking, resuming to re-judge the anchor$resumed")

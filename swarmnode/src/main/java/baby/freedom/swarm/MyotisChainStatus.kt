@@ -55,6 +55,12 @@ data class MyotisChainStatus(
     val staleAnchor: Boolean get() = beaconState == STALE_ANCHOR
 
     /**
+     * The engine got past judging its trust anchor: it's catching up or
+     * synced, which it never is from an anchor it refused.
+     */
+    val anchorAccepted: Boolean get() = beaconState == CATCHING_UP || beaconState == SYNCED
+
+    /**
      * Whether a verified read attempted now has a realistic chance of an
      * answer: synced, a state peer at the head, and the execution reader
      * up and not hunting — the same gate as the iOS and desktop hosts.
@@ -83,6 +89,7 @@ data class MyotisChainStatus(
 
     companion object {
         const val SYNCED = "SYNCED"
+        const val CATCHING_UP = "CATCHING_UP"
         const val STALE_ANCHOR = "STALE_ANCHOR"
 
         /**

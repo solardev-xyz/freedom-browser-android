@@ -344,6 +344,75 @@ class MyotisNodeTest {
         node.enterForeground()
         idle(node)
         assertEquals(listOf("resume 1", "resume 2"), engine.pausesAndResumes())
+        // Still re-judging: the row keeps its parked state until the engine
+        // shows it accepted the anchor.
+        assertTrue(node.state.value.chain(MyotisNetwork.Gnosis)!!.staleAnchor)
+
+        engine.status[2L] = """{"running":true,"beaconState":"CATCHING_UP"}"""
+        clocks.up += 3_000L
+        clocks.wall += 3_000L
+        node.pollNow()
+        idle(node)
+        assertEquals("CATCHING_UP", node.state.value.chain(MyotisNetwork.Gnosis)?.beaconState)
+    }
+
+    @Test
+    fun `a released chain re-judging its anchor keeps its parked row instead of flashing syncing`() {
+        val engine = FakeEngine()
+        val clocks = Clocks()
+        val parkedJson = """{"running":true,"beaconState":"STALE_ANCHOR","currentPeriod":1500,"targetPeriod":1535,"wsBoundPeriods":13}"""
+        engine.status[1L] = """{"running":true,"beaconState":"SYNCED"}"""
+        engine.status[2L] = parkedJson
+        val node = node(engine, clocks)
+        node.start()
+        idle(node)
+        val parkedRow = node.state.value.chain(MyotisNetwork.Gnosis)!!
+
+        // Clock changed: resumed, and the engine passes through SYNCING
+        // before it concludes STALE_ANCHOR again.
+        clocks.wall += 5L * 60_000L
+        engine.status[2L] = """{"running":true,"beaconState":"SYNCING"}"""
+        engine.calls.clear()
+        node.pollNow()
+        idle(node)
+        assertEquals(listOf("resume 2"), engine.pausesAndResumes())
+        assertEquals(parkedRow, node.state.value.chain(MyotisNetwork.Gnosis))
+
+        engine.status[2L] = parkedJson
+        clocks.up += 3_000L
+        clocks.wall += 3_000L
+        node.pollNow()
+        idle(node)
+        assertEquals(parkedRow, node.state.value.chain(MyotisNetwork.Gnosis))
+
+        // Grace over, still stale: parked again, the row never changed.
+        clocks.up += MyotisNode.REJUDGE_GRACE_MS
+        clocks.wall += MyotisNode.REJUDGE_GRACE_MS
+        node.pollNow()
+        idle(node)
+        assertEquals(listOf("resume 2", "pause 2"), engine.pausesAndResumes())
+        assertTrue(node.state.value.chain(MyotisNetwork.Gnosis)!!.staleAnchor)
+        assertEquals(1535L, node.state.value.chain(MyotisNetwork.Gnosis)!!.targetPeriod)
+    }
+
+    @Test
+    fun `a released chain still syncing when the grace runs out shows its real state`() {
+        val engine = FakeEngine()
+        val clocks = Clocks()
+        engine.status[2L] = """{"running":true,"beaconState":"STALE_ANCHOR"}"""
+        val node = node(engine, clocks)
+        node.start()
+        idle(node)
+        clocks.wall -= 40L * 86_400_000L
+        engine.status[2L] = """{"running":true,"beaconState":"SYNCING"}"""
+        node.pollNow()
+        idle(node)
+        assertTrue(node.state.value.chain(MyotisNetwork.Gnosis)!!.staleAnchor)
+
+        clocks.up += MyotisNode.REJUDGE_GRACE_MS
+        clocks.wall += MyotisNode.REJUDGE_GRACE_MS
+        node.pollNow()
+        idle(node)
         assertEquals("SYNCING", node.state.value.chain(MyotisNetwork.Gnosis)?.beaconState)
     }
 
