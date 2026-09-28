@@ -163,6 +163,26 @@ class AdblockCosmeticTest {
     }
 
     @Test
+    fun `an internationalised allowlist host is stored as the punycode Chromium reports`() {
+        val was = WhatwgHost.uts46
+        WhatwgHost.uts46 = Icu4jUts46
+        try {
+            assertEquals("xn--bcher-kva.de", normalizeAllowlistHost("bücher.de"))
+            assertEquals("xn--bcher-kva.de", normalizeAllowlistHost("https://www.BÜCHER.de/x"))
+            assertEquals("xn--bcher-kva.de", normalizeAllowlistHost("bücher。de"))
+            assertEquals("xn--bcher-kva.de", normalizeAllowlistHost("xn--bcher-kva.de"))
+            // Not a valid IDN (a joiner outside a joining context): refused, not stored raw.
+            assertNull(normalizeAllowlistHost("a\u200db.de"))
+            val list = setOfNotNull(normalizeAllowlistHost("bücher.de"))
+            assertTrue(isAllowlisted("xn--bcher-kva.de", list))
+            assertTrue(isAllowlisted("shop.xn--bcher-kva.de", list))
+            assertFalse(isAllowlisted("bücher.de.example", list))
+        } finally {
+            WhatwgHost.uts46 = was
+        }
+    }
+
+    @Test
     fun `the page menu's site`() {
         assertEquals("news.example", adblockSiteFor("https://www.news.example/story"))
         assertNull(adblockSiteFor(""))

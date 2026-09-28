@@ -14,7 +14,9 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.ByteArrayInputStream
@@ -41,10 +43,15 @@ enum class AdblockCategory(
 }
 
 /**
- * The allowlist's form of a site: lower-case host, no scheme, path,
- * port or trailing dot, and no leading `www.` — or `null` for input
- * that isn't a host (no dot, a space, …). Takes a URL or a bare host,
- * as the Settings field and the page menu both hand it one.
+ * The allowlist's form of a site: lower-case ASCII host, no scheme,
+ * path, port or trailing dot, and no leading `www.` — or `null` for
+ * input that isn't a host (no dot, a space, …). Takes a URL or a bare
+ * host, as the Settings field and the page menu both hand it one.
+ *
+ * An internationalised name is stored as Chromium reports it, in
+ * punycode (UTS-46, the same mapping the WebView applies — see
+ * [WhatwgHost.domainToAscii]): `bücher.de` becomes `xn--bcher-kva.de`,
+ * so the entry matches the requests it is meant for.
  */
 internal fun normalizeAllowlistHost(input: String?): String? {
     var s = input?.trim()?.lowercase() ?: return null
@@ -53,9 +60,10 @@ internal fun normalizeAllowlistHost(input: String?): String? {
     s = s.substringBefore('/').substringBefore('?').substringBefore('#')
     if (s.startsWith("[")) return null
     s = s.substringBefore(':').trimEnd('.')
+    if (s.any { it.code >= 0x80 }) s = WhatwgHost.domainToAscii(s)?.trimEnd('.') ?: return null
     if (s.startsWith("www.")) s = s.removePrefix("www.")
     if (s.isEmpty() || !s.contains('.') || s.startsWith('.')) return null
-    if (!s.all { it.isLetterOrDigit() || it == '.' || it == '-' || it == '_' }) return null
+    if (!s.all { it in 'a'..'z' || it in '0'..'9' || it == '.' || it == '-' || it == '_' }) return null
     return s
 }
 
@@ -312,10 +320,13 @@ internal object Adblock {
             }
         }
         // Its own collector, so a rebuild never holds up allowlist reads.
+        // Latest only: a newer category set abandons the build under way
+        // (it checks in every thousand lines), so quick toggles don't
+        // compile each stale set in turn before the last one applies.
         scope.launch {
-            settings.adblockCategories.distinctUntilChanged().collect { categories ->
+            settings.adblockCategories.distinctUntilChanged().collectLatest { categories ->
                 _status.value = _status.value.copy(loading = true)
-                val built = withContext(Dispatchers.IO) { build(app, categories) }
+                val built = withContext(Dispatchers.IO) { build(app, categories) { ensureActive() } }
                 // An allowlisted site is never blocked while settings load.
                 allowlistRead.await()
                 engine = built
@@ -325,17 +336,22 @@ internal object Adblock {
         }
     }
 
-    private fun build(context: Context, categories: Set<AdblockCategory>): AdblockEngine? {
+    private fun build(
+        context: Context,
+        categories: Set<AdblockCategory>,
+        checkpoint: () -> Unit,
+    ): AdblockEngine? {
         if (categories.isEmpty()) return null
         val t0 = SystemClock.elapsedRealtime()
         val texts = AdblockCategory.entries.filter { it in categories }.mapNotNull { category ->
+            checkpoint()
             // A missing or unreadable list costs its own category only.
             runCatching {
                 context.assets.open("adblock/${category.file}").bufferedReader().use { it.readText() }
             }.onFailure { Log.w(TAG, "list ${category.file} unreadable", it) }.getOrNull()
         }
         if (texts.isEmpty()) return null
-        val built = AdblockEngine.build(texts)
+        val built = AdblockEngine.build(texts, checkpoint)
         Log.i(
             TAG,
             "engine ready: ${categories.joinToString { it.key }}, ${built.filterCount} filters " +

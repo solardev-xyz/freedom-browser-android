@@ -20,10 +20,20 @@ package baby.freedom.mobile.browser
  * the posted `onPageStarted` (R3-F1). WebView reports nothing earlier
  * about a network commit, so for that window ([fetching]) a request is
  * told apart by its `Referer`: one naming the destination (its URL, or
- * its origin under the default `strict-origin-when-cross-origin`) and
- * not the page on screen is the destination's; everything else is still
- * the page on screen's. A document sending no referrer at all is judged
- * against the page on screen until its commit.
+ * — a bare origin, what the default `strict-origin-when-cross-origin`
+ * sends cross-origin — its origin) and not the page on screen is the
+ * destination's; everything else is still the page on screen's. A
+ * document sending no referrer at all is judged against the page on
+ * screen until its commit.
+ *
+ * "Not the page on screen" includes its frames (R1-F1 of the R7 round):
+ * a page with an embed from the site it links to (a video or social
+ * embed) has that frame's requests naming the destination's origin too.
+ * So every frame document seen under the page on screen — a subframe's
+ * own document request ([frameRequested]), or a full-URL `Referer` from
+ * another origin, which only a frame's same-origin requests send — is
+ * remembered until the next commit, and a `Referer` naming one of them
+ * (its URL, or its origin) stays the page on screen's.
  *
  * A navigation that never commits — it became a download, a 204, a hop
  * cancelled as a link to another app, a Stop — leaves the page on screen
@@ -39,6 +49,12 @@ internal class AdblockPage {
     private var incoming: String? = null
     private var fetching: String? = null
 
+    /** Documents (fragment-less URLs) of the page on screen's frames, oldest first. */
+    private val frameUrls = LinkedHashSet<String>()
+
+    /** Origins of [frameUrls]. */
+    private val frameOrigins = HashMap<String, Int>()
+
     /**
      * The page a subresource request now is judged against; [referer] is
      * the request's `Referer` header, if it sent one.
@@ -48,13 +64,53 @@ internal class AdblockPage {
         incoming?.let { return it }
         val destination = fetching
         if (destination != null && referer != null && namesDestination(referer, destination)) return destination
+        if (referer != null && !isBareOrigin(referer)) {
+            val origin = originOf(referer)
+            if (origin != null && origin != committed?.let(::originOf)) rememberFrame(referer)
+        }
         return committed
     }
 
+    /**
+     * A subframe's own document request, for [url], whose `Referer` is
+     * [referer]: when it is the page on screen's frame, a later request
+     * naming it is the page on screen's.
+     */
+    @Synchronized
+    fun frameRequested(url: String, referer: String?) {
+        if (incoming != null) return
+        val destination = fetching
+        if (destination != null && referer != null && namesDestination(referer, destination)) return
+        rememberFrame(url)
+    }
+
     private fun namesDestination(referer: String, destination: String): Boolean {
-        if (referer == destination) return true
+        val document = withoutFragment(referer)
+        if (document in frameUrls) return false
+        if (document == withoutFragment(destination)) return true
+        // Only a bare origin can stand for the destination; a full URL
+        // names the document that sent it, and that isn't the destination.
+        if (!isBareOrigin(referer)) return false
         val origin = originOf(referer) ?: return false
-        return origin == originOf(destination) && origin != committed?.let(::originOf)
+        return origin == originOf(destination) &&
+            origin != committed?.let(::originOf) &&
+            origin !in frameOrigins
+    }
+
+    private fun rememberFrame(url: String) {
+        val document = withoutFragment(url)
+        val origin = originOf(document) ?: return
+        if (!frameUrls.add(document)) return
+        frameOrigins[origin] = (frameOrigins[origin] ?: 0) + 1
+        // A page churning out frames can't grow this without bound.
+        if (frameUrls.size > MAX_FRAMES) {
+            val oldest = frameUrls.first()
+            frameUrls.remove(oldest)
+            originOf(oldest)?.let { o ->
+                val n = (frameOrigins[o] ?: 1) - 1
+                if (n <= 0) frameOrigins.remove(o) else frameOrigins[o] = n
+            }
+        }
     }
 
     /**
@@ -100,7 +156,22 @@ internal class AdblockPage {
         committed = url
         incoming = null
         fetching = null
+        frameUrls.clear()
+        frameOrigins.clear()
     }
+
+    private companion object {
+        const val MAX_FRAMES = 256
+    }
+}
+
+private fun withoutFragment(url: String) = url.substringBefore('#')
+
+/** Is [referer] an origin alone (`scheme://host[:port]/`), as sent cross-origin? */
+private fun isBareOrigin(referer: String): Boolean {
+    val origin = originOf(referer) ?: return false
+    return referer.length == origin.length + 1 && referer.endsWith("/") &&
+        referer.regionMatches(0, origin, 0, origin.length, ignoreCase = true)
 }
 
 /** `scheme://host[:port]` of [url], lower-case; `null` when it has none. */

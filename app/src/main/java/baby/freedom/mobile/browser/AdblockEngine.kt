@@ -226,8 +226,13 @@ internal class AdblockEngine private constructor(
          * Compile [lists] (each one list file's text) into an engine.
          * Lines that aren't filters, or use syntax this engine doesn't
          * support, are skipped — a bad line never fails the build.
+         * [checkpoint] runs every [CHECKPOINT_LINES] lines, so a caller
+         * can abandon a build that's no longer wanted by throwing from it.
          */
-        fun build(lists: List<String>): AdblockEngine = Builder().apply { lists.forEach(::addList) }.build()
+        fun build(lists: List<String>, checkpoint: () -> Unit = {}): AdblockEngine =
+            Builder().apply { lists.forEach { addList(it, checkpoint) } }.build()
+
+        private const val CHECKPOINT_LINES = 1024
 
         private const val EXEMPT_DOCUMENT = 1
         private const val EXEMPT_ELEMHIDE = 2
@@ -256,10 +261,12 @@ internal class AdblockEngine private constructor(
         val globallyUnhidden = HashSet<String>()
         var count = 0
 
-        fun addList(text: String) {
+        fun addList(text: String, checkpoint: () -> Unit) {
             var start = 0
             val n = text.length
+            var lines = 0
             while (start < n) {
+                if (++lines % CHECKPOINT_LINES == 0) checkpoint()
                 var end = text.indexOf('\n', start)
                 if (end < 0) end = n
                 val line = text.substring(start, end).trim()

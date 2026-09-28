@@ -2747,6 +2747,11 @@ private fun buildRefreshableWebView(
                 // virtual origin (see [Adblock.shouldBlock]).
                 if (!mainFrame && request != null) {
                     val url = request.url?.toString()
+                    // A frame of the page on screen: its requests aren't
+                    // a pending destination's (see [AdblockPage]).
+                    if (url != null && isDocumentRequest(false, request.requestHeaders)) {
+                        adblockPage.frameRequested(url, refererOf(request.requestHeaders))
+                    }
                     if (url != null &&
                         Adblock.shouldBlock(
                             url,

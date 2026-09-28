@@ -56,6 +56,66 @@ class AdblockPageTest {
     }
 
     @Test
+    fun `a full-URL referrer from another document of the destination's origin isn't the destination's`() {
+        val p = onA()
+        p.answered(b, replacesDocument = true, fetchedByWebView = true)
+        assertEquals(a, p.current(referer = "http://127.0.0.1:8711/frame"))
+        assertEquals(b, p.current(referer = "$b#section"))
+    }
+
+    @Test
+    fun `the page on screen's frame from the destination's site stays the page on screen's`() {
+        // R1-F1: A embeds a frame from the site it links to; while the
+        // link is still being fetched, that frame's requests are A's.
+        val p = onA()
+        val frame = "http://127.0.0.1:8711/frame"
+        p.frameRequested(frame, referer = a)
+        p.answered(b, replacesDocument = true, fetchedByWebView = true)
+        // Its same-origin requests (full URL) and cross-origin ones (origin).
+        assertEquals(a, p.current(referer = frame))
+        assertEquals(a, p.current(referer = "http://127.0.0.1:8711/"))
+        // The destination's own same-origin requests still name it exactly.
+        assertEquals(b, p.current(referer = b))
+        // A frame whose document is the destination's own URL: ambiguous,
+        // so the page on screen's until the commit.
+        p.frameRequested(b, referer = a)
+        assertEquals(a, p.current(referer = b))
+        // The commit forgets the old page's frames.
+        p.committed(b)
+        p.answered("http://127.0.0.1:8711/next", replacesDocument = true, fetchedByWebView = true)
+        assertEquals("http://127.0.0.1:8711/next", p.current(referer = "http://127.0.0.1:8711/next"))
+    }
+
+    @Test
+    fun `a frame first seen by its own requests stays the page on screen's`() {
+        // The frame loaded before anything recorded it (a restored page):
+        // its same-origin requests name it, and that's enough.
+        val p = onA()
+        val frame = "http://127.0.0.1:8711/frame"
+        assertEquals(a, p.current(referer = frame))
+        p.answered(b, replacesDocument = true, fetchedByWebView = true)
+        assertEquals(a, p.current(referer = "http://127.0.0.1:8711/"))
+    }
+
+    @Test
+    fun `a frame the destination loads is not remembered as the page on screen's`() {
+        val p = onA()
+        p.answered(b, replacesDocument = true, fetchedByWebView = true)
+        p.frameRequested("http://127.0.0.1:8711/inner", referer = b)
+        assertEquals(b, p.current(referer = "http://127.0.0.1:8711/"))
+    }
+
+    @Test
+    fun `remembered frames are bounded`() {
+        val p = onA()
+        repeat(1000) { p.frameRequested("https://churn.example/f$it", referer = a) }
+        p.answered("https://dest.example/", replacesDocument = true, fetchedByWebView = true)
+        assertEquals("https://dest.example/", p.current(referer = "https://dest.example/"))
+        p.answered("https://churn.example/x", replacesDocument = true, fetchedByWebView = true)
+        assertEquals(a, p.current(referer = "https://churn.example/"))
+    }
+
+    @Test
     fun `a fetched navigation that never commits stops claiming requests`() {
         val p = onA()
         p.answered(b, replacesDocument = true, fetchedByWebView = true)

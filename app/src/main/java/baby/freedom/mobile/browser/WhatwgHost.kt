@@ -63,7 +63,7 @@ internal object WhatwgHost {
      * WHATWG "domain to ASCII" (beStrict = false): an ASCII domain with no
      * `xn--` label is only lowercased; anything else goes through UTS-46.
      */
-    private fun domainToAscii(domain: String): String? {
+    fun domainToAscii(domain: String): String? {
         if (domain.all { it.code < 0x80 } &&
             domain.split('.').none { it.asciiLowercase().startsWith("xn--") }
         ) {
