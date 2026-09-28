@@ -51,26 +51,21 @@ object MyotisLink : EnsLightClient {
             release()
             return EnsLightClient.Call.Unavailable("light client not connected", notReady = true)
         }
-        val answer = AtomicReference<String?>()
-        val done = CountDownLatch(1)
         // `:myotis` exiting ends every call it held, answered or not.
         val binder = service.asBinder()
         val death = IBinder.DeathRecipient { release() }
+        val waiter = CallWaiter {
+            runCatching { binder.unlinkToDeath(death, 0) }
+            release()
+        }
         val result = object : IMyotisCallResult.Stub() {
-            override fun onResult(json: String?) {
-                answer.set(json)
-                done.countDown()
-                // Also after this call stopped waiting: the engine has let
-                // go of it only now.
-                runCatching { binder.unlinkToDeath(death, 0) }
-                release()
-            }
+            override fun onResult(json: String?) = waiter.deliver(json)
         }
         return try {
             runCatching { binder.linkToDeath(death, 0) }.onFailure { release() }
             service.ethCall(MyotisNetwork.Mainnet.chainId, to, data, probe, result)
-            if (done.await(timeoutMs, TimeUnit.MILLISECONDS)) {
-                EnsLightClient.parse(answer.get())
+            if (waiter.await(timeoutMs)) {
+                EnsLightClient.parse(waiter.answer)
             } else {
                 EnsLightClient.Call.Unavailable("no answer within ${timeoutMs}ms", timedOut = true)
             }
@@ -91,6 +86,28 @@ object MyotisLink : EnsLightClient {
         val once = AtomicBoolean(false)
         return { if (once.compareAndSet(false, true)) released() }
     }
+}
+
+/**
+ * One [MyotisLink.ethCall]'s wait for the engine's answer. [deliver]
+ * runs [letGo] — the engine has let go of the call — *before* it wakes
+ * the waiter, so whatever the caller does next (another probe, say)
+ * never finds this call still counted as in the engine. [letGo] runs
+ * also for an answer that comes after the waiter gave up.
+ */
+internal class CallWaiter(private val letGo: () -> Unit) {
+    private val answerRef = AtomicReference<String?>()
+    private val done = CountDownLatch(1)
+
+    val answer: String? get() = answerRef.get()
+
+    fun deliver(json: String?) {
+        answerRef.set(json)
+        letGo()
+        done.countDown()
+    }
+
+    fun await(timeoutMs: Long): Boolean = done.await(timeoutMs, TimeUnit.MILLISECONDS)
 }
 
 /**

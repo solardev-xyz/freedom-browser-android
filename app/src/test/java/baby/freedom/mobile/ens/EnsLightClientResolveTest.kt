@@ -98,7 +98,11 @@ class EnsLightClientResolveTest {
         settings: () -> EnsResolver.Settings = { EnsResolver.Settings(listOf(rpc)) },
         deadlineMs: Long = EnsResolver.LIGHT_CLIENT_DEADLINE_MS,
         backoffMs: Long = EnsResolver.LIGHT_CLIENT_BACKOFF_MS,
-    ) = EnsResolver({ settings() }, http, TezosDomainsResolver(), client, deadlineMs, backoffMs)
+        establishedMs: Long = 0,
+    ) = EnsResolver(
+        { settings() }, http, TezosDomainsResolver(), client, deadlineMs, backoffMs,
+        lightClientEstablishedMs = establishedMs,
+    )
 
     private val lightClientOk = EnsLightClient.Call.Ok(wrapAsOuterInner(ipfsContenthash), block = 21_000_000L)
 
@@ -799,7 +803,8 @@ class EnsLightClientResolveTest {
         val busy = java.util.concurrent.atomic.AtomicInteger()
         val probeAnswers: MutableList<EnsLightClient.Call> = Collections.synchronizedList(mutableListOf())
         val started: MutableList<String> = Collections.synchronizedList(mutableListOf())
-        override fun readyGeneration(): Long = 1L
+        @Volatile var generation = 1L
+        override fun readyGeneration(): Long = generation
         override fun ethCall(
             to: String,
             data: String,
@@ -891,12 +896,18 @@ class EnsLightClientResolveTest {
     fun `a burst that fills every engine slot is back-pressure, and later lookups use the light client once slots free`() {
         // Seven slow names on seven different sites fill every lookup slot
         // at once — the engine's full house, not a light client that can't serve.
+        // The sites are established ones (each answered in time before), so
+        // the fresh sites' shared slots (R2-F4) don't come into it.
         val client = SlotClient(lightClientOk) { data -> if (isSlow(data)) 2_000 else 20 }
         val http = OneServer { rpcResult(wrapAsOuterInner(ipfsContenthash)) }
         val r = resolver(client, http, deadlineMs = 200)
+        (1..SlotClient.LOOKUP_SLOTS).forEach { i ->
+            val known = runBlocking { r.resolveContenthash("s$i.eth") }
+            require(known is EnsResult.Ok && known.trust.lightClient) { "got $known" }
+        }
 
         val burst = (1..SlotClient.LOOKUP_SLOTS).map { i ->
-            Thread { runBlocking { r.resolveContenthash("slow$i.eth") } }.apply { start() }
+            Thread { runBlocking { r.resolveContenthash("slow.s$i.eth") } }.apply { start() }
         }
         val until = System.currentTimeMillis() + 2_000
         while (client.lookupsHeld.get() < SlotClient.LOOKUP_SLOTS && System.currentTimeMillis() < until) Thread.sleep(5)
@@ -974,7 +985,8 @@ class EnsLightClientResolveTest {
         assertEquals("bob.base.eth", EnsResolver.siteOf("bob.base.eth"))
         assertEquals("base.eth", EnsResolver.siteOf("base.eth"))
         assertEquals("hayden.uni.eth", EnsResolver.siteOf("hayden.uni.eth"))
-        assertEquals("alice.cb.id", EnsResolver.siteOf("a.alice.cb.id"))
+        // R2-F3: `.id` isn't a suffix the browser resolves; no registrar entry for it.
+        assertFalse(EnsResolver.ENS_SUBNAME_REGISTRARS.any { it.endsWith(".id") })
         // A DNS name: its registrable domain, not its public suffix.
         assertEquals("example.co.uk", EnsResolver.siteOf("shop.example.co.uk"))
     }
@@ -1023,6 +1035,136 @@ class EnsLightClientResolveTest {
     }
 
     @Test
+    fun `a stuck probe from an earlier generation keeps the light client skipped after a readiness flip`() {
+        // R2-F1: the engine's probe slot is per process. The gen-1 probe
+        // times out and stays in the engine; readiness then flips (a peer
+        // flap, a trip to the background) to gen 2. Lookups in gen 2 must
+        // not pay the deadline again, nor send a probe only to be told
+        // `busy` by the slot the old one still holds.
+        val client = SlotClient(lightClientOk) { 2_000 }
+        val http = OneServer { rpcResult(wrapAsOuterInner(ipfsContenthash)) }
+        val r = resolver(client, http, deadlineMs = 200, backoffMs = 300)
+
+        val first = runBlocking { r.resolveContenthash("name0.eth") }
+        require(first is EnsResult.Ok) { "got $first" }
+        Thread.sleep(300)
+        client.generation = 2L
+
+        val paid = mutableListOf<Long>()
+        val until = System.currentTimeMillis() + 1_000
+        var i = 1
+        while (System.currentTimeMillis() < until) {
+            val started = System.currentTimeMillis()
+            val result = runBlocking { r.resolveContenthash("name${i++}.eth") }
+            require(result is EnsResult.Ok) { "got $result" }
+            assertFalse(result.trust.lightClient)
+            paid += System.currentTimeMillis() - started
+            Thread.sleep(50)
+        }
+        assertTrue("lookups after the flip: $paid", paid.all { it < 150 })
+        assertEquals("lookups that reached the engine", 1, client.started.size)
+        assertTrue(client.probeAnswers.none { it is EnsLightClient.Call.Unavailable && it.busy })
+
+        // Once the engine lets go of the old probe, gen 2 asks it again.
+        client.awaitIdle(3_000)
+        client.engineMsOverride = 20
+        val after = runBlocking { r.resolveContenthash("nick.eth") }
+        require(after is EnsResult.Ok) { "got $after" }
+        assertTrue(after.trust.lightClient)
+    }
+
+    @Test
+    fun `a probe inside its wait from an earlier generation is waited for, not taken as stuck`() {
+        // R2-F1's other side: the earlier generation's probe is still
+        // within its own wait when the next one starts; that one waits for
+        // it to finish and then asks, and a healthy engine isn't backed off.
+        val probeGate = java.util.concurrent.CountDownLatch(1)
+        var probes = 0
+        val client = object : EnsLightClient {
+            @Volatile var generation = 1L
+            @Volatile var lookupFails = true
+            override fun readyGeneration() = generation
+            override fun ethCall(to: String, data: String, timeoutMs: Long, probe: Boolean, released: (() -> Unit)?): EnsLightClient.Call {
+                try {
+                    if (probe) {
+                        synchronized(this) { probes++ }
+                        if (generation == 1L) probeGate.await(timeoutMs, TimeUnit.MILLISECONDS)
+                        return lightClientOk
+                    }
+                    // An engine error: a miss that may be the light client's.
+                    return if (lookupFails) EnsLightClient.Call.Unavailable("engine error") else lightClientOk
+                } finally {
+                    released?.invoke()
+                }
+            }
+        }
+        val http = OneServer { rpcResult(wrapAsOuterInner(ipfsContenthash)) }
+        val r = resolver(client, http, deadlineMs = 1_000, backoffMs = 60_000)
+        // Gen 1 misses; its probe is held (inside its wait) until the gate opens.
+        runBlocking { r.resolveContenthash("a.eth") }
+        Thread.sleep(50)
+        client.generation = 2L
+        // Gen 2 misses too; its probe finds gen 1's still in the engine.
+        runBlocking { r.resolveContenthash("b.eth") }
+        Thread.sleep(100)
+        probeGate.countDown()
+        // Gen 2's probe waited for it, asked, and found the engine healthy.
+        client.lookupFails = false
+        val after = runBlocking { r.resolveContenthash("c.eth") }
+        require(after is EnsResult.Ok) { "got $after" }
+        assertTrue(after.trust.lightClient)
+        assertEquals(2, synchronized(client) { probes })
+    }
+
+    @Test
+    fun `a wave of fresh registrations can't fill the engine, and established names keep the rest`() {
+        // R2-F4: four fresh registrations, two slow names each, all at
+        // once — before any has outlived a lookup. Together they get
+        // LIGHT_CLIENT_FRESH_CALLS slots; a name the user has been
+        // resolving all along still gets the light client meanwhile.
+        val client = SlotClient(lightClientOk) { data -> if (hasLabel(data, "a") || hasLabel(data, "b")) 1_000 else 20 }
+        val http = OneServer { rpcResult(wrapAsOuterInner(ipfsContenthash)) }
+        val r = resolver(client, http, deadlineMs = 200, establishedMs = 300)
+        val mine = runBlocking { r.resolveContenthash("vitalik.eth") }
+        require(mine is EnsResult.Ok && mine.trust.lightClient) { "got $mine" }
+        Thread.sleep(350)
+
+        val before = client.started.size
+        val names = (1..4).flatMap { listOf("a.x$it.eth", "b.x$it.eth") }
+        val wave = names.map { n -> Thread { runBlocking { r.resolveContenthash(n) } }.apply { start() } }
+        Thread.sleep(50)
+        val during = runBlocking { r.resolveContenthash("vitalik.eth") }
+        wave.forEach { it.join(3_000) }
+        assertTrue(
+            "the wave reached the engine ${client.started.size - before - 1} times",
+            client.started.size - before - 1 <= EnsResolver.LIGHT_CLIENT_FRESH_CALLS,
+        )
+        require(during is EnsResult.Ok) { "got $during" }
+        assertTrue(during.trust.lightClient)
+        client.awaitIdle(3_000)
+    }
+
+    @Test
+    fun `a site that answered only just now isn't established yet`() {
+        // R2-F4: a registration made to answer fast once, then go slow,
+        // still counts against the fresh sites' shared slots.
+        val client = SlotClient(lightClientOk) { data -> if (hasLabel(data, "slow")) 1_000 else 20 }
+        val http = OneServer { rpcResult(wrapAsOuterInner(ipfsContenthash)) }
+        val r = resolver(client, http, deadlineMs = 200, establishedMs = 60_000)
+        (1..4).forEach { runBlocking { r.resolveContenthash("fast.x$it.eth") } }
+
+        val before = client.started.size
+        val names = (1..4).flatMap { listOf("slow.x$it.eth", "slow.a.x$it.eth") }
+        names.map { n -> Thread { runBlocking { r.resolveContenthash(n) } }.apply { start() } }
+            .forEach { it.join(3_000) }
+        assertTrue(
+            "the wave reached the engine ${client.started.size - before} times",
+            client.started.size - before <= EnsResolver.LIGHT_CLIENT_FRESH_CALLS,
+        )
+        client.awaitIdle(3_000)
+    }
+
+    @Test
     fun `with no RPC endpoints a site at its share is still asked`() {
         // R1-F2: two of evil.eth's names sit in the engine; with no RPC
         // server to fall back to, a third is asked anyway, not refused.
@@ -1045,13 +1187,15 @@ class EnsLightClientResolveTest {
     @Test
     fun `slow names from several registrations share a few engine slots once they've outlived a lookup`() {
         // R1-F3: a page loads two slow names from each of four
-        // registrations. The first wave can fill the engine (fresh sites
-        // look like any other); once they've outlived their lookups, every
+        // registrations — established ones, each answered in time before
+        // (a fresh one's wave is capped anyway, R2-F4). The first wave can
+        // fill the engine; once they've outlived their lookups, every
         // one of those sites is slow, and the next wave gets only the slow
         // sites' shared slots — the user's own names keep the rest.
         val client = SlotClient(lightClientOk) { data -> if (hasLabel(data, "a") || hasLabel(data, "b")) 1_000 else 20 }
         val http = OneServer { rpcResult(wrapAsOuterInner(ipfsContenthash)) }
         val r = resolver(client, http, deadlineMs = 200)
+        (1..4).forEach { runBlocking { r.resolveContenthash("x$it.eth") } }
         val names = (1..4).flatMap { listOf("a.x$it.eth", "b.x$it.eth") }
         fun wave() = names.map { n -> Thread { runBlocking { r.resolveContenthash(n) } }.apply { start() } }
 
