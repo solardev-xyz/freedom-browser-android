@@ -41,6 +41,8 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Cookie
 import androidx.compose.material.icons.filled.Public
 import androidx.compose.material.icons.filled.Shield
+import androidx.compose.material.icons.filled.Sync
+import androidx.compose.material.icons.filled.Update
 import androidx.compose.material.icons.filled.DeleteForever
 import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.History
@@ -156,6 +158,8 @@ fun SettingsScreen(
         .collectAsState(initial = AdblockCategory.entries.filterTo(LinkedHashSet()) { it.enabledByDefault })
     val adblockAllowlist by settings.adblockAllowlist.collectAsState(initial = emptyList())
     val adblockStatus by Adblock.status.collectAsState()
+    val adblockUpdate by Adblock.updateState.collectAsState()
+    val adblockAutoUpdate by settings.adblockAutoUpdate.collectAsState(initial = true)
     var addAllowlistSite by remember { mutableStateOf(false) }
 
     var confirmClearHistory by remember { mutableStateOf(false) }
@@ -184,7 +188,8 @@ fun SettingsScreen(
         query, SECTION_SEARCH, searchSectionRows(searchEngine, customSearchTemplate),
     )
     val adblockRows = visibleSettingsRows(
-        query, SECTION_ADBLOCK, adblockSectionRows(adblockCategories, adblockAllowlist),
+        query, SECTION_ADBLOCK,
+        adblockSectionRows(adblockCategories, adblockAllowlist, adblockStatus, adblockUpdate),
     )
     val browsingRows = visibleSettingsRows(
         query, SECTION_BROWSING, browsingDataRows(history.size, bookmarks.size),
@@ -280,9 +285,13 @@ fun SettingsScreen(
                         enabled = adblockCategories,
                         allowlist = adblockAllowlist,
                         status = adblockStatus,
+                        update = adblockUpdate,
+                        autoUpdate = adblockAutoUpdate,
                         onToggle = { category, on ->
                             scope.launch { settings.setAdblockCategory(category, on) }
                         },
+                        onAutoUpdate = { on -> scope.launch { settings.setAdblockAutoUpdate(on) } },
+                        onCheckUpdates = { Adblock.checkForUpdates() },
                         onRemoveSite = { site ->
                             Adblock.removeAllowlisted(site)
                         },
@@ -877,14 +886,112 @@ private const val ADBLOCK_ADD_SITE_SUBTITLE = "Turn ad blocking off for a site"
 private const val ADBLOCK_CREDITS =
     "Filter lists: EasyList, EasyPrivacy and Fanboy's lists (easylist.to), © their authors, used under CC BY-SA 3.0. Changes apply to pages as they next load."
 
+private const val ADBLOCK_AUTO_UPDATE = "Keep filter lists up to date"
+private const val ADBLOCK_AUTO_UPDATE_SUBTITLE = "Signed updates over Swarm"
+private const val ADBLOCK_CHECK_UPDATES = "Check for list updates"
+private const val ADBLOCK_CHECK_UPDATES_SUBTITLE = "Reads the update feed on Swarm now"
+
+/**
+ * The wrapping line under "Keep filter lists up to date": which lists
+ * the engine uses now (#127) — the applied update's version and the day
+ * it was built, and, where the bundled lists serve some categories
+ * instead (the update doesn't carry them, its copy failed its hash
+ * check, or theirs is newer), which — giving each list its own reason.
+ * (The subtitle is one ellipsised line, too short to be sure of showing
+ * the version on a phone.)
+ */
+internal fun adblockListsLine(status: AdblockStatus): String {
+    val version = status.listsVersion ?: return "Using the built-in lists"
+    if (status.updatedLists.isEmpty()) {
+        // Give each built-in list its real reason: newer than the
+        // update's copy, the update's copy failed its hash check (it's
+        // fetched again on the next check), or the update doesn't carry
+        // it (e.g. a category switched on since it applied).
+        val all = status.builtInLists
+        val newer = status.newerBuiltInLists
+        val damaged = status.damagedLists - newer.toSet()
+        val uncovered = all - newer.toSet() - damaged.toSet()
+        val reasons = listOfNotNull(
+            when {
+                newer.isEmpty() -> null
+                newer.size == all.size -> "newer than update $version"
+                else -> "${newer.joinToString(", ")} newer than update $version's"
+            },
+            when {
+                damaged.isEmpty() -> null
+                damaged.size == all.size -> "update $version's copies failed their hash check"
+                else -> "update $version's ${damaged.joinToString(", ")} failed its hash check"
+            },
+            when {
+                uncovered.isEmpty() -> null
+                uncovered.size == all.size -> "update $version doesn't include them"
+                else -> "update $version doesn't include ${uncovered.joinToString(", ")}"
+            },
+        )
+        if (reasons.isEmpty()) return "Using the built-in lists"
+        return "Using the built-in lists (${reasons.joinToString("; ")})"
+    }
+    val day = status.listsGeneratedAt?.take(10)?.takeIf { it.matches(Regex("\\d{4}-\\d{2}-\\d{2}")) }
+    val update = "Using update $version" + (day?.let { " of $it" } ?: "")
+    if (status.builtInLists.isEmpty()) return update
+    val damaged = status.damagedLists.filter { it in status.builtInLists }
+    return "$update for ${status.updatedLists.joinToString(", ")}; " +
+        "the built-in ${status.builtInLists.joinToString(", ")}" +
+        (if (damaged.isEmpty()) "" else " (update $version's ${damaged.joinToString(", ")} failed its hash check)")
+}
+
+/** The Settings name of the category [key] ("ads" → "EasyList"). */
+private fun adblockListName(key: String): String =
+    AdblockCategory.entries.firstOrNull { it.key == key }?.listName ?: key
+
+/**
+ * The wrapping line under "Check for list updates": a check under way,
+ * or how the last one ended; `null` before the first check.
+ */
+internal fun adblockUpdateLine(update: AdblockUpdateState): String? {
+    if (update.checking) return "Checking…"
+    return when (val last = update.last) {
+        null -> null
+        is AdblockUpdateOutcome.Applied ->
+            if (last.olderThanBuiltIn.isEmpty()) {
+                "Updated to version ${last.version}"
+            } else {
+                "Updated to version ${last.version}; the built-in " +
+                    last.olderThanBuiltIn.joinToString(", ") { adblockListName(it) } +
+                    if (last.olderThanBuiltIn.size == 1) " stays, it's newer" else " stay, they're newer"
+            }
+        is AdblockUpdateOutcome.BuiltInNewer ->
+            "Version ${last.version} on the feed is older than the built-in lists; they stay in use"
+        is AdblockUpdateOutcome.UpToDate ->
+            if (last.version > 0) "Up to date (version ${last.version})" else "Up to date"
+        AdblockUpdateOutcome.FeedUnavailable ->
+            "Couldn't reach the update feed on Swarm — is the Swarm node running? Tap to try again"
+        is AdblockUpdateOutcome.Rejected ->
+            "Refused an update that failed verification (${last.reason}); the current lists stay"
+        is AdblockUpdateOutcome.DownloadFailed ->
+            "Couldn't download ${adblockListName(last.category)}; the current lists stay"
+        is AdblockUpdateOutcome.HashMismatch ->
+            "${adblockListName(last.category)} didn't match its signed hash; the current lists stay"
+        AdblockUpdateOutcome.NothingEnabled -> "Every filter list is off"
+        is AdblockUpdateOutcome.Failed -> "The update failed (${last.message}); the current lists stay"
+    }
+}
+
 /** The line under a category: its list, and while it's on, how the engine is doing. */
 internal fun adblockCategorySubtitle(category: AdblockCategory, on: Boolean, status: AdblockStatus): String =
     if (on && status.loading) "${category.listName} · loading…" else category.listName
 
-private fun adblockSectionRows(enabled: Set<AdblockCategory>, allowlist: List<String>) = buildList {
+private fun adblockSectionRows(
+    enabled: Set<AdblockCategory>,
+    allowlist: List<String>,
+    status: AdblockStatus,
+    update: AdblockUpdateState,
+) = buildList {
     for (category in AdblockCategory.entries) {
         add(settingsRow(category, category.title, category.listName, if (category in enabled) "On" else "Off"))
     }
+    add(settingsRow("auto-update", ADBLOCK_AUTO_UPDATE, ADBLOCK_AUTO_UPDATE_SUBTITLE, adblockListsLine(status), "filter list updates"))
+    add(settingsRow("update-check", ADBLOCK_CHECK_UPDATES, ADBLOCK_CHECK_UPDATES_SUBTITLE, adblockUpdateLine(update), "filter list updates"))
     add(settingsRow("allowlist-add", ADBLOCK_ADD_SITE, ADBLOCK_ADD_SITE_SUBTITLE, "allowlist", "allowed sites"))
     if (allowlist.isEmpty()) {
         add(settingsRow("allowlist-empty", ADBLOCK_ALLOWLIST_EMPTY))
@@ -918,7 +1025,11 @@ private fun AdblockSection(
     enabled: Set<AdblockCategory>,
     allowlist: List<String>,
     status: AdblockStatus,
+    update: AdblockUpdateState,
+    autoUpdate: Boolean,
     onToggle: (AdblockCategory, Boolean) -> Unit,
+    onAutoUpdate: (Boolean) -> Unit,
+    onCheckUpdates: () -> Unit,
     onRemoveSite: (String) -> Unit,
     onAddSite: () -> Unit,
 ) {
@@ -937,6 +1048,26 @@ private fun AdblockSection(
                 },
             )
         }
+        if ("auto-update" in visible) PageRow(
+            title = ADBLOCK_AUTO_UPDATE,
+            subtitle = ADBLOCK_AUTO_UPDATE_SUBTITLE,
+            thirdLine = adblockListsLine(status),
+            style = PageRowStyle.Inset,
+            leadingIcon = Icons.Filled.Update,
+            onClick = { onAutoUpdate(!autoUpdate) },
+            trailing = {
+                Switch(checked = autoUpdate, onCheckedChange = onAutoUpdate)
+            },
+        )
+        if ("update-check" in visible) PageRow(
+            title = ADBLOCK_CHECK_UPDATES,
+            subtitle = ADBLOCK_CHECK_UPDATES_SUBTITLE,
+            thirdLine = adblockUpdateLine(update),
+            style = PageRowStyle.Inset,
+            leadingIcon = Icons.Filled.Sync,
+            enabled = !update.checking,
+            onClick = onCheckUpdates,
+        )
         if ("allowlist-add" in visible) PageRow(
             title = ADBLOCK_ADD_SITE,
             subtitle = ADBLOCK_ADD_SITE_SUBTITLE,

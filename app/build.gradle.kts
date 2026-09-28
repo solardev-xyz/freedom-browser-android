@@ -17,6 +17,20 @@ android {
         versionCode = 24
         versionName = "0.6.7"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
+        // Filter-list update trust anchor overrides (#127), for a build
+        // pointed at a test publisher's feed — desktop's and iOS's
+        // FREEDOM_ADBLOCK_FEED_OWNER / FREEDOM_ADBLOCK_SIG_ADDRESS. Empty
+        // (the default, and every release) means the production publisher
+        // pinned in AdblockFeed. Compile-time only: nothing at runtime can
+        // change who the app trusts.
+        fun addressProperty(name: String): String {
+            val value = (project.findProperty(name) as String?).orEmpty()
+            require(value.isEmpty() || Regex("^0x[0-9a-fA-F]{40}$").matches(value)) { "$name: not an address" }
+            return "\"$value\""
+        }
+        buildConfigField("String", "ADBLOCK_FEED_OWNER", addressProperty("freedom.adblockFeedOwner"))
+        buildConfigField("String", "ADBLOCK_SIGNER", addressProperty("freedom.adblockSigner"))
     }
 
     // Release signing comes from the environment so the same config
@@ -40,6 +54,7 @@ android {
     buildFeatures {
         compose = true
         aidl = true
+        buildConfig = true
     }
 
     buildTypes {
