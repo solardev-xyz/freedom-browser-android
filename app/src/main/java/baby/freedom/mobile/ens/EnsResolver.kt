@@ -75,7 +75,12 @@ import org.json.JSONObject
  * ([EnsTrust.lightClient]); no RPC server is asked. When it isn't ready,
  * can't answer within [LIGHT_CLIENT_DEADLINE_MS], or gives anything but
  * a record or a known "no resolver" revert, the lookup falls back to the
- * RPC servers exactly as without it.
+ * RPC servers exactly as without it. After a miss that says the light
+ * client itself can't serve right now (unavailable, busy, out of time)
+ * it's skipped for [LIGHT_CLIENT_BACKOFF_MS], so one struggling light
+ * client doesn't add its whole deadline to every lookup. Its readiness is
+ * read per lookup and is not part of [Settings]: a flapping light client
+ * never throws away the RPC epoch (cache, anchor, failed endpoints).
  *
  * Tezos Domains (`.tez`) names are delegated to [TezosDomainsResolver]
  * — a different chain entirely — so every caller of this resolver
@@ -98,6 +103,8 @@ class EnsResolver internal constructor(
     private val lightClient: EnsLightClient? = null,
     /** [LIGHT_CLIENT_DEADLINE_MS]; shorter in tests. */
     private val lightClientDeadlineMs: Long = LIGHT_CLIENT_DEADLINE_MS,
+    /** [LIGHT_CLIENT_BACKOFF_MS]; shorter in tests. */
+    private val lightClientBackoffMs: Long = LIGHT_CLIENT_BACKOFF_MS,
 ) {
     /**
      * What the user configured (#102): the RPC endpoints to ask, in
@@ -108,15 +115,6 @@ class EnsResolver internal constructor(
     data class Settings(
         val endpoints: List<String>,
         val ccipRead: Boolean = true,
-        /**
-         * The light client's [EnsLightClient.readyGeneration] when the
-         * lookup was asked for — `null` while it can't answer. Part of
-         * the settings so a transition starts a fresh [Epoch]: answers
-         * cached before the light client came up don't keep it from
-         * verifying the next visit, and ones it gave aren't reused once
-         * it's gone.
-         */
-        val lightClient: Long? = null,
     )
 
     constructor(settings: suspend () -> Settings) : this(settings, EnsHttp.Default)
@@ -133,7 +131,24 @@ class EnsResolver internal constructor(
         tezos: TezosDomainsResolver = TezosDomainsResolver(),
     ) : this({ Settings(rpcEndpoints) }, http, tezos)
 
-    private data class Cached(val result: EnsResult, val expiresAt: Long)
+    /**
+     * A cached answer. [verified]: a quorum's or the light client's, not
+     * one server's word (nor a disagreement) — with the light client
+     * ready, only a verified answer is reused, so an answer cached before
+     * it came up doesn't keep it from verifying the next visit.
+     */
+    private data class Cached(val result: EnsResult, val expiresAt: Long, val verified: Boolean)
+
+    /**
+     * When the light client last missed in a way that says it can't
+     * serve right now ([LightClientMiss.backOff]); it's skipped until
+     * [lightClientBackoffMs] has passed, or it answers again.
+     */
+    @Volatile
+    private var lightClientMissedAt: Long? = null
+
+    private fun lightClientBackingOff(now: Long): Boolean =
+        lightClientMissedAt?.let { now - it in 0 until lightClientBackoffMs } == true
 
     /**
      * Everything a lookup learns about the servers — answer cache,
@@ -224,13 +239,21 @@ class EnsResolver internal constructor(
         // TTL: a new configuration starts a new, empty epoch.
         val epoch = epochFor(config)
         val cache = epoch.cache
-        val viaLightClient = config.lightClient != null && lightClient != null
-        if (config.endpoints.isEmpty() && !viaLightClient) {
+        // Read afresh per lookup (#101), outside the settings: see the class KDoc.
+        val generation = lightClient?.readyGeneration()
+        if (config.endpoints.isEmpty() && generation == null) {
             return EnsResult.Error(normalized, "NO_RPC_ENDPOINTS", "no RPC endpoints configured")
         }
 
+        // The light client first (#101) — backing off after a miss, unless
+        // it's the only source there is.
+        val askLightClient = generation != null &&
+            (config.endpoints.isEmpty() || !lightClientBackingOff(System.currentTimeMillis()))
+
         cache[normalized]?.let {
-            if (System.currentTimeMillis() < it.expiresAt) return it.result
+            // One server's word (or a disagreement) doesn't stand in the
+            // way of the light client verifying it.
+            if (System.currentTimeMillis() < it.expiresAt && (it.verified || !askLightClient)) return it.result
         }
 
         val contract = system.contractAddress
@@ -256,12 +279,15 @@ class EnsResolver internal constructor(
             }
         }
 
-        // The light client first (#101): a proof needs no second opinion.
-        if (viaLightClient) {
-            resolveByLightClient(config.lightClient!!, normalized, target, callData, contract, config.ccipRead)
+        // A proof needs no second opinion.
+        if (generation != null && !askLightClient) {
+            Log.i(TAG, "[$normalized] light client: backing off after a recent miss; asking RPC")
+        }
+        if (askLightClient) {
+            resolveByLightClient(generation!!, normalized, target, callData, contract, config.ccipRead)
                 ?.let { verdict ->
                     val ttl = ttlFor(verdict)
-                    if (ttl > 0) cache[normalized] = Cached(verdict.result, System.currentTimeMillis() + ttl)
+                    if (ttl > 0) cache[normalized] = Cached(verdict.result, System.currentTimeMillis() + ttl, verdict.verified)
                     Log.i(TAG, "[$normalized] → ${verdict.result}")
                     return verdict.result
                 }
@@ -277,7 +303,10 @@ class EnsResolver internal constructor(
             (if (quorumPossible) resolveByQuorum(epoch, normalized, target, callData, contract) else null)
                 ?: resolveSingleSource(epoch, normalized, target, callData, contract)
         val ttl = ttlFor(verdict)
-        if (ttl > 0) cache[normalized] = Cached(verdict.result, System.currentTimeMillis() + ttl)
+        if (ttl > 0) {
+            val verified = verdict.verified && verdict.result !is EnsResult.Conflict
+            cache[normalized] = Cached(verdict.result, System.currentTimeMillis() + ttl, verified)
+        }
         Log.i(TAG, "[$normalized] → ${verdict.result}")
         return verdict.result
     }
@@ -296,8 +325,15 @@ class EnsResolver internal constructor(
 
     // ---- Light client (#101) ----
 
-    /** The light client couldn't give a usable answer: fall back to RPC. */
-    private class LightClientMiss(reason: String) : Exception(reason)
+    /**
+     * The light client couldn't give a usable answer: fall back to RPC.
+     * [backOff]: the miss is the light client's, not the name's (it was
+     * unavailable, busy, or out of time) — skip it for a while.
+     */
+    private class LightClientMiss(reason: String, val backOff: Boolean = false) : Exception(reason)
+
+    /** The verified head moved between a call and its CCIP-Read callback: run the read again. */
+    private class HeadMoved : Exception("head moved during CCIP-Read")
 
     /**
      * Resolve through [lightClient], within [lightClientDeadlineMs] in
@@ -323,15 +359,24 @@ class EnsResolver internal constructor(
             read.cancel()
         }
         val took = System.currentTimeMillis() - startedAt
+        val failure = outcome?.exceptionOrNull()
         val miss = when {
             outcome == null -> "no answer within ${lightClientDeadlineMs}ms"
-            outcome.isFailure -> outcome.exceptionOrNull()?.message ?: "failed"
+            failure != null -> failure.message ?: "failed"
             else -> null
         }
         if (miss != null) {
-            Log.i(TAG, "[$name] light client: $miss after ${took}ms; falling back to RPC")
+            // Out of time, or a miss the light client owns: back off.
+            val backOff = outcome == null || (failure as? LightClientMiss)?.backOff == true
+            if (backOff) lightClientMissedAt = System.currentTimeMillis()
+            Log.i(
+                TAG,
+                "[$name] light client: $miss after ${took}ms; falling back to RPC" +
+                    if (backOff) " (skipping it for ${lightClientBackoffMs}ms)" else "",
+            )
             return null
         }
+        lightClientMissedAt = null
         Log.i(TAG, "[$name] light client answered in ${took}ms")
         return outcome!!.getOrThrow()
     }
@@ -346,44 +391,61 @@ class EnsResolver internal constructor(
         contract: String?,
         ccipRead: Boolean,
     ): Verdict {
-        var block: Long? = null
         // Each call waits only for what's left of the lookup's budget, so
         // a read abandoned at the deadline doesn't hold a thread past it.
         val deadline = System.currentTimeMillis() + lightClientDeadlineMs
-        fun call(to: String, data: ByteArray): CallOutcome {
+        fun call(to: String, data: ByteArray, pin: Long?): Pair<CallOutcome, Long?> {
             if (client.readyGeneration() != generation) throw LightClientMiss("light client no longer ready")
             val left = deadline - System.currentTimeMillis()
-            if (left <= 0) throw LightClientMiss("out of time")
+            if (left <= 0) throw LightClientMiss("out of time", backOff = true)
             val answer = client.ethCall(to, "0x" + data.toHex(), left)
             // An answer from a light client that has since stopped or
             // restarted isn't one this lookup's epoch vouches for.
             if (client.readyGeneration() != generation) throw LightClientMiss("light client availability changed")
-            return when (answer) {
-                is EnsLightClient.Call.Ok -> CallOutcome(data = answer.resultHex, revertData = null)
-                    .also { block = answer.block ?: block }
-                is EnsLightClient.Call.Revert -> CallOutcome(data = null, revertData = answer.dataHex)
-                    .also { block = answer.block ?: block }
-                is EnsLightClient.Call.Unavailable -> throw LightClientMiss(answer.reason)
+            val (outcome, at) = when (answer) {
+                is EnsLightClient.Call.Ok -> CallOutcome(data = answer.resultHex, revertData = null) to answer.block
+                is EnsLightClient.Call.Revert -> CallOutcome(data = null, revertData = answer.dataHex) to answer.block
+                is EnsLightClient.Call.Unavailable -> throw LightClientMiss(answer.reason, backOff = true)
             }
+            // A CCIP-Read callback checks the gateway's answer against the
+            // state that deferred to it, as the RPC path does by pinning the
+            // block. The engine only runs at its verified head (a block
+            // number still means head state), so the callback can't be
+            // pinned: check it ran at the same block instead.
+            if (pin != null && at != null && at != pin) throw HeadMoved()
+            return outcome to (at ?: pin)
         }
 
-        var outcome = call(target, callData)
-        // CCIP-Read is a Universal Resolver affair; a NameNFT registry is
-        // called directly and never defers offchain.
-        val offchain = outcome.revertData
-        if (contract == null && offchain != null && isOffchainLookup(offchain)) {
-            // Settings-driven, and what every RPC server would say too.
-            if (!ccipRead) return Verdict(ccipDisabled(name), verified = false)
-            // The gateway's answer is checked by the callback, which runs
-            // on the light client like the first call.
-            outcome = try {
-                followOffchainLookup(offchain, ::call)
-            } catch (e: LightClientMiss) {
-                throw e
-            } catch (e: Exception) {
-                throw LightClientMiss("CCIP-Read: ${e.message}")
+        var attempt = 0
+        while (true) {
+            attempt++
+            val (first, block) = call(target, callData, pin = null)
+            var outcome = first
+            // CCIP-Read is a Universal Resolver affair; a NameNFT registry is
+            // called directly and never defers offchain.
+            val offchain = outcome.revertData
+            if (contract == null && offchain != null && isOffchainLookup(offchain)) {
+                // Settings-driven, and what every RPC server would say too.
+                if (!ccipRead) return Verdict(ccipDisabled(name), verified = false)
+                // The gateway's answer is checked by the callback, which runs
+                // on the light client like the first call, at the same block.
+                outcome = try {
+                    followOffchainLookup(offchain) { to, data -> call(to, data, pin = block).first }
+                } catch (e: HeadMoved) {
+                    if (attempt < LIGHT_CLIENT_CCIP_ATTEMPTS) continue
+                    throw LightClientMiss("head kept moving during CCIP-Read")
+                } catch (e: LightClientMiss) {
+                    throw e
+                } catch (e: Exception) {
+                    throw LightClientMiss("CCIP-Read: ${e.message}")
+                }
             }
+            return lightClientVerdict(name, outcome, contract, block)
         }
+    }
+
+    /** The light client's final [outcome] as a [Verdict], or [LightClientMiss] for anything but an answer. */
+    private fun lightClientVerdict(name: String, outcome: CallOutcome, contract: String?, block: Long?): Verdict {
         val trust = EnsTrust(
             verified = true,
             agreed = listOf(LIGHT_CLIENT_SOURCE),
@@ -1357,6 +1419,16 @@ class EnsResolver internal constructor(
          * Read hops included, before the RPC servers are asked instead.
          */
         internal const val LIGHT_CLIENT_DEADLINE_MS = 20_000L
+
+        /**
+         * How long the light client is skipped after it missed for its own
+         * reasons (unavailable, busy, out of time) — lookups go straight to
+         * RPC meanwhile instead of each paying its delay first.
+         */
+        internal const val LIGHT_CLIENT_BACKOFF_MS = 60_000L
+
+        /** Tries at a CCIP-Read name whose callback lands on a newer head than its first call. */
+        private const val LIGHT_CLIENT_CCIP_ATTEMPTS = 3
 
         /** How [EnsTrust.agreed] names the light client. */
         const val LIGHT_CLIENT_SOURCE = "Myotis light client (on this device)"

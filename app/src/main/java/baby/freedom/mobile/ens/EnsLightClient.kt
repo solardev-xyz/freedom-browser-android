@@ -17,15 +17,17 @@ interface EnsLightClient {
      * An id for the light client's current stretch of readiness on
      * Ethereum mainnet, or `null` while it can't serve a verified read
      * (off, still syncing, paused in the background, recovering). A new
-     * id on every transition, so an answer — or a cache — from one
-     * stretch is never mistaken for the next ([EnsResolver.Settings.lightClient]).
+     * id on every transition, so an answer from one stretch is never
+     * mistaken for the next (a read re-checks it around every call).
      */
     fun readyGeneration(): Long?
 
     /**
      * `eth_call` of [data] (0x-hex) on [to] at the light client's verified
      * head. Blocking: returns within [timeoutMs], [Call.Unavailable] if
-     * there was no answer by then.
+     * there was no answer by then. The engine can't run at an older
+     * block (a block number still means head state), so a caller needing
+     * two calls at one state compares their [Call.Ok.block]s.
      */
     fun ethCall(to: String, data: String, timeoutMs: Long): Call
 
@@ -44,7 +46,12 @@ interface EnsLightClient {
     companion object {
         /**
          * The engine's `myotis_eth_call_json` shape as a [Call]: anything
-         * but a well-formed `ok` / `revert` is [Call.Unavailable].
+         * but a well-formed `ok` / `revert` is [Call.Unavailable] — and so
+         * is one carrying a `failReason`, the engine's way of reporting a
+         * verification failure inside the normal result shape
+         * (`myotis_engine.h`). `verified` is not a failure flag: it only
+         * says whether the call ran at the finalized block rather than the
+         * verified head, and either is a proven answer.
          */
         fun parse(json: String?): Call {
             val o = try {
@@ -53,6 +60,10 @@ interface EnsLightClient {
                 return Call.Unavailable("malformed answer")
             }
             if (o.has("error")) return Call.Unavailable(o.optString("error").ifEmpty { "error" })
+            // Present at all — even empty or non-string — means the proof failed.
+            if (o.has("failReason") && !o.isNull("failReason")) {
+                return Call.Unavailable("verification failed: ${o.optString("failReason").ifEmpty { "unspecified" }}")
+            }
             val block = blockOf(o.opt("blockNumber"))
             return when (o.optString("status")) {
                 "ok" -> o.optString("resultHex").takeIf(::isHex)?.let { Call.Ok(it, block) }

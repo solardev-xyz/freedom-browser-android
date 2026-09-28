@@ -4,6 +4,7 @@ import baby.freedom.mobile.ens.EnsLightClient
 import baby.freedom.swarm.MyotisInfo
 import baby.freedom.swarm.MyotisNetwork
 import baby.freedom.swarm.MyotisStatus
+import java.util.WeakHashMap
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
@@ -12,55 +13,32 @@ import java.util.concurrent.atomic.AtomicReference
  * Name resolution's line to the Myotis light client in the `:myotis`
  * process (#101): [EnsLightClient] over [IMyotisService.ethCall].
  *
- * `MainActivity` owns the binding and reports it here — the service when
- * it connects ([connected]), every state it publishes ([onState]), and
- * the end of the binding ([disconnected]). Ready means bound, running,
- * and Ethereum mainnet [baby.freedom.swarm.MyotisChainStatus.ready] —
- * the same gate the node screen's "serving" state uses. Each time that
- * flips (or the binding is replaced) there's a new [readyGeneration].
+ * Every `MainActivity` instance owns its own binding and reports it here
+ * under its own key — the service when it connects ([connected]), every
+ * state it publishes ([onState]), and the end of the binding
+ * ([disconnected]). There can be more than one at a time (an App Link
+ * opens a second instance in the linking app's task), and one ending
+ * leaves the others' in place ([MyotisBindings]). Ready means a binding
+ * that is running with Ethereum mainnet
+ * [baby.freedom.swarm.MyotisChainStatus.ready] — the same gate the node
+ * screen's "serving" state uses. Each time that flips (or a different
+ * binding takes over) there's a new [readyGeneration].
  */
 object MyotisLink : EnsLightClient {
-    private val lock = Any()
-
-    @Volatile
-    private var service: IMyotisService? = null
-    private var info: MyotisInfo? = null
-    private var counter = 0L
-
-    @Volatile
-    private var generation: Long? = null
-
-    fun connected(service: IMyotisService) = synchronized(lock) {
-        this.service = service
-        info = null
-        refresh(rebound = true)
+    private val bindings = MyotisBindings<IMyotisService> { info ->
+        info.status == MyotisStatus.Running && info.chain(MyotisNetwork.Mainnet)?.ready == true
     }
 
-    fun onState(info: MyotisInfo) = synchronized(lock) {
-        this.info = info
-        refresh(rebound = false)
-    }
+    fun connected(owner: Any, service: IMyotisService) = bindings.connected(owner, service)
 
-    fun disconnected() = synchronized(lock) {
-        service = null
-        info = null
-        refresh(rebound = true)
-    }
+    fun onState(owner: Any, info: MyotisInfo) = bindings.onState(owner, info)
 
-    private fun refresh(rebound: Boolean) {
-        val ready = service != null && info?.status == MyotisStatus.Running &&
-            info?.chain(MyotisNetwork.Mainnet)?.ready == true
-        generation = when {
-            !ready -> null
-            rebound || generation == null -> ++counter
-            else -> generation
-        }
-    }
+    fun disconnected(owner: Any) = bindings.disconnected(owner)
 
-    override fun readyGeneration(): Long? = generation
+    override fun readyGeneration(): Long? = bindings.generation
 
     override fun ethCall(to: String, data: String, timeoutMs: Long): EnsLightClient.Call {
-        val service = service ?: return EnsLightClient.Call.Unavailable("light client not connected")
+        val service = bindings.service ?: return EnsLightClient.Call.Unavailable("light client not connected")
         val answer = AtomicReference<String?>()
         val done = CountDownLatch(1)
         val result = object : IMyotisCallResult.Stub() {
@@ -83,5 +61,67 @@ object MyotisLink : EnsLightClient {
             // DeadObjectException (`:myotis` exited) and friends.
             EnsLightClient.Call.Unavailable("light client unreachable: ${e.javaClass.simpleName}")
         }
+    }
+}
+
+/**
+ * [MyotisLink]'s bookkeeping, one entry per binding owner (a
+ * `MainActivity` instance), so one owner's unbind never clears another's
+ * still-live binding. The binding reads go to is the most recently
+ * connected one that is [ready], else the most recently connected one;
+ * [generation] is a fresh id each time readiness turns on or that
+ * binding changes, `null` while it isn't ready.
+ *
+ * Owners are held weakly: an owner that is gone without reporting
+ * [disconnected] drops out on its own (values never point back at them).
+ */
+internal class MyotisBindings<S : Any>(private val ready: (MyotisInfo) -> Boolean) {
+    private class Binding<S>(val service: S, val seq: Long) {
+        var info: MyotisInfo? = null
+    }
+
+    private val lock = Any()
+    private val byOwner = WeakHashMap<Any, Binding<S>>()
+    private var seq = 0L
+    private var counter = 0L
+    private var current: Binding<S>? = null
+
+    /** The service reads go to, whether or not it's ready. */
+    @Volatile
+    var service: S? = null
+        private set
+
+    @Volatile
+    var generation: Long? = null
+        private set
+
+    fun connected(owner: Any, service: S) = synchronized(lock) {
+        byOwner[owner] = Binding(service, ++seq)
+        refresh()
+    }
+
+    fun onState(owner: Any, info: MyotisInfo) = synchronized(lock) {
+        byOwner[owner]?.info = info
+        refresh()
+    }
+
+    fun disconnected(owner: Any) = synchronized(lock) {
+        byOwner.remove(owner)
+        refresh()
+    }
+
+    private fun isReady(b: Binding<S>) = b.info?.let(ready) == true
+
+    private fun refresh() {
+        val all = byOwner.values.sortedByDescending { it.seq }
+        val pick = all.firstOrNull(::isReady) ?: all.firstOrNull()
+        val readyNow = pick != null && isReady(pick)
+        generation = when {
+            !readyNow -> null
+            pick !== current || generation == null -> ++counter
+            else -> generation
+        }
+        current = pick
+        service = pick?.service
     }
 }

@@ -146,15 +146,13 @@ object Gateways {
      * request interceptor (which resolves `<name>.ens.…` hosts) share
      * a cache and never disagree mid-session.
      */
-    val ensResolver: EnsResolver by lazy { EnsResolver({ ensResolverSettings() }, MyotisLink) }
-
-    /**
-     * What a lookup runs under: the user's RPC settings, and whether the
-     * Myotis light client can take it first (#101) — read afresh each
-     * time, so a lookup started once the light client is ready uses it.
-     */
-    private suspend fun ensResolverSettings(): EnsResolver.Settings =
-        ensRpcConfig().resolverSettings.copy(lightClient = MyotisLink.readyGeneration())
+    val ensResolver: EnsResolver by lazy {
+        // The Myotis light client (#101) is asked first whenever it's
+        // ready; its readiness is read per lookup inside the resolver and
+        // is deliberately not part of the settings, so a flapping light
+        // client never discards the RPC epoch (cache, anchor, failures).
+        EnsResolver({ ensRpcConfig().resolverSettings }, MyotisLink)
+    }
 
     /**
      * Blocking ENS lookup used by the request interceptor. A seam so the
@@ -248,7 +246,7 @@ object Gateways {
 
     private fun lookupKey(name: String): LookupKey {
         val settings = try {
-            runBlocking { ensResolverSettings() }
+            runBlocking { ensRpcConfig().resolverSettings }
         } catch (e: Exception) {
             null // the resolver will fail the same way; still de-duplicate by name
         }

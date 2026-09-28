@@ -57,9 +57,10 @@ class EnsLightClientResolveTest {
     private fun resolver(
         client: EnsLightClient,
         http: EnsHttp,
-        settings: () -> EnsResolver.Settings = { EnsResolver.Settings(listOf(rpc), lightClient = client.readyGeneration()) },
+        settings: () -> EnsResolver.Settings = { EnsResolver.Settings(listOf(rpc)) },
         deadlineMs: Long = EnsResolver.LIGHT_CLIENT_DEADLINE_MS,
-    ) = EnsResolver({ settings() }, http, TezosDomainsResolver(), client, deadlineMs)
+        backoffMs: Long = EnsResolver.LIGHT_CLIENT_BACKOFF_MS,
+    ) = EnsResolver({ settings() }, http, TezosDomainsResolver(), client, deadlineMs, backoffMs)
 
     private val lightClientOk = EnsLightClient.Call.Ok(wrapAsOuterInner(ipfsContenthash), block = 21_000_000L)
 
@@ -180,7 +181,7 @@ class EnsLightClientResolveTest {
             lightClientOk
         }
         val http = OneServer { rpcResult(wrapAsOuterInner(ipfsContenthash)) }
-        val settings = EnsResolver.Settings(listOf(rpc), lightClient = 1L)
+        val settings = EnsResolver.Settings(listOf(rpc))
 
         val result = runBlocking { resolver(client, http, settings = { settings }).resolveContenthash("vitalik.eth") }
 
@@ -226,7 +227,7 @@ class EnsLightClientResolveTest {
 
         val result = runBlocking {
             EnsResolver(
-                { EnsResolver.Settings(listOf(rpc), lightClient = 1L) },
+                { EnsResolver.Settings(listOf(rpc)) },
                 gateway,
                 TezosDomainsResolver(),
                 client,
@@ -248,7 +249,7 @@ class EnsLightClientResolveTest {
         val http = OneServer { error("no RPC server should be asked") }
 
         val result = runBlocking {
-            resolver(client, http, settings = { EnsResolver.Settings(listOf(rpc), ccipRead = false, lightClient = 1L) })
+            resolver(client, http, settings = { EnsResolver.Settings(listOf(rpc), ccipRead = false) })
                 .resolveContenthash("1.offchainexample.eth")
         }
 
@@ -277,7 +278,7 @@ class EnsLightClientResolveTest {
         val http = OneServer { error("no RPC server should be asked") }
 
         val result = runBlocking {
-            resolver(client, http, settings = { EnsResolver.Settings(emptyList(), lightClient = 1L) })
+            resolver(client, http, settings = { EnsResolver.Settings(emptyList()) })
                 .resolveContenthash("vitalik.eth")
         }
 
@@ -291,7 +292,7 @@ class EnsLightClientResolveTest {
         val http = OneServer { error("no RPC server should be asked") }
 
         val result = runBlocking {
-            resolver(client, http, settings = { EnsResolver.Settings(emptyList(), lightClient = 1L) })
+            resolver(client, http, settings = { EnsResolver.Settings(emptyList()) })
                 .resolveContenthash("vitalik.eth")
         }
 
@@ -300,7 +301,7 @@ class EnsLightClientResolveTest {
     }
 
     @Test
-    fun `a readiness transition starts a fresh cache either way`() {
+    fun `the cache yields to the light client only where it holds one server's word`() {
         val client = FakeLightClient(generation = null) { _, _ -> lightClientOk }
         val http = OneServer { rpcResult(wrapAsOuterInner(ipfsContenthash)) }
         val r = resolver(client, http)
@@ -312,14 +313,162 @@ class EnsLightClientResolveTest {
         client.generation = 2L
         val second = runBlocking { r.resolveContenthash("vitalik.eth") } as EnsResult.Ok
         assertTrue(second.trust.lightClient)
-        // Cached under that readiness...
+        // Its verified answer is cached...
         runBlocking { r.resolveContenthash("vitalik.eth") }
         assertEquals(1, client.calls.size)
-        // ...and not once it's gone.
+        // ...and still stands once it's gone (a proven answer, within its TTL).
         client.generation = null
         val third = runBlocking { r.resolveContenthash("vitalik.eth") } as EnsResult.Ok
-        assertFalse(third.trust.lightClient)
+        assertTrue(third.trust.lightClient)
+        assertEquals(1, http.urls.size)
+    }
+
+    @Test
+    fun `readiness flapping keeps the RPC epoch and its cache`() {
+        val client = FakeLightClient(generation = null) { _, _ -> EnsLightClient.Call.Unavailable("all snap peers failed") }
+        val http = OneServer { rpcResult(wrapAsOuterInner(ipfsContenthash)) }
+        val r = resolver(client, http)
+
+        runBlocking { r.resolveContenthash("vitalik.eth") }
+        assertEquals(1, http.urls.size)
+        // Ready: asked, misses, RPC answers again.
+        client.generation = 3L
+        runBlocking { r.resolveContenthash("vitalik.eth") }
+        assertEquals(1, client.calls.size)
         assertEquals(2, http.urls.size)
+        // Not ready, ready again (backing off): that answer is still cached.
+        client.generation = null
+        runBlocking { r.resolveContenthash("vitalik.eth") }
+        client.generation = 4L
+        runBlocking { r.resolveContenthash("vitalik.eth") }
+        assertEquals(2, http.urls.size)
+        assertEquals(1, client.calls.size)
+    }
+
+    @Test
+    fun `after the light client misses for its own reasons it is skipped for a while`() {
+        val client = FakeLightClient { _, _ -> EnsLightClient.Call.Unavailable("all snap peers failed") }
+        val http = OneServer { rpcResult(wrapAsOuterInner(ipfsContenthash)) }
+        val r = resolver(client, http, backoffMs = 300)
+
+        runBlocking { r.resolveContenthash("vitalik.eth") }
+        assertEquals(1, client.calls.size)
+        // A different name straight after: RPC only, no light-client wait.
+        val second = runBlocking { r.resolveContenthash("nick.eth") } as EnsResult.Ok
+        assertFalse(second.trust.lightClient)
+        assertEquals(1, client.calls.size)
+        assertEquals(2, http.urls.size)
+        // Once the back-off has passed it's asked again.
+        Thread.sleep(400)
+        runBlocking { r.resolveContenthash("brantly.eth") }
+        assertEquals(2, client.calls.size)
+    }
+
+    @Test
+    fun `running out of time backs off too`() {
+        val client = FakeLightClient { _, _ ->
+            Thread.sleep(2_000)
+            lightClientOk
+        }
+        val http = OneServer { rpcResult(wrapAsOuterInner(ipfsContenthash)) }
+        val r = resolver(client, http, deadlineMs = 100)
+
+        runBlocking { r.resolveContenthash("vitalik.eth") }
+        runBlocking { r.resolveContenthash("nick.eth") }
+        assertEquals(1, client.calls.size)
+    }
+
+    @Test
+    fun `a name-specific miss does not back off`() {
+        val client = FakeLightClient { _, _ -> EnsLightClient.Call.Revert("0xdeadbeef", 1L) }
+        val http = OneServer { rpcResult(wrapAsOuterInner(ipfsContenthash)) }
+        val r = resolver(client, http)
+
+        runBlocking { r.resolveContenthash("vitalik.eth") }
+        runBlocking { r.resolveContenthash("nick.eth") }
+        assertEquals(2, client.calls.size)
+    }
+
+    @Test
+    fun `with no RPC endpoints the light client is asked even while backing off`() {
+        var fail = true
+        val client = FakeLightClient { _, _ -> if (fail) EnsLightClient.Call.Unavailable("busy") else lightClientOk }
+        val http = OneServer { error("no RPC server should be asked") }
+        val r = resolver(client, http, settings = { EnsResolver.Settings(emptyList()) })
+
+        runBlocking { r.resolveContenthash("vitalik.eth") }
+        fail = false
+        val result = runBlocking { r.resolveContenthash("vitalik.eth") }
+        require(result is EnsResult.Ok) { "got $result" }
+        assertTrue(result.trust.lightClient)
+        assertEquals(2, client.calls.size)
+    }
+
+    /** An offchain name whose light-client callback lands [moves] times on a newer head than its first call. */
+    private fun ccipHeadMoving(moves: Int): Triple<FakeLightClient, EnsHttp, () -> List<String>> {
+        val revert = encodeOffchainLookup(
+            sender = ur,
+            urls = listOf("https://gw.example/{sender}/{data}"),
+            callData = "deadbeef".hexToBytes(),
+            callback = "11223344".hexToBytes(),
+            extraData = "ee".hexToBytes(),
+        )
+        var attempt = 0
+        val client = FakeLightClient { _, data ->
+            if (data.startsWith("0x9061b923")) {
+                attempt++
+                EnsLightClient.Call.Revert(revert, 100L + attempt)
+            } else {
+                val block = 100L + attempt + if (attempt <= moves) 1 else 0
+                EnsLightClient.Call.Ok(wrapAsOuterInner(ipfsContenthash), block)
+            }
+        }
+        val urls = Collections.synchronizedList(mutableListOf<String>())
+        val http = object : EnsHttp {
+            override fun request(
+                method: String,
+                url: String,
+                headers: Map<String, String>,
+                body: String?,
+                timeoutMs: Int,
+                maxBytes: Long,
+                followRedirects: Boolean,
+            ): EnsHttp.Reply {
+                urls += url
+                return if (url.startsWith("https://gw.example/")) {
+                    EnsHttp.Reply(200, JSONObject().put("data", "0x01").toString())
+                } else {
+                    rpcResult(wrapAsOuterInner(ipfsContenthash))
+                }
+            }
+        }
+        return Triple(client, http) { urls.toList() }
+    }
+
+    @Test
+    fun `a CCIP-Read callback on a newer head is run again at one block`() {
+        val (client, http, urls) = ccipHeadMoving(moves = 1)
+
+        val result = runBlocking { resolver(client, http).resolveContenthash("1.offchainexample.eth") }
+
+        require(result is EnsResult.Ok) { "got $result" }
+        assertTrue(result.trust.lightClient)
+        // The second attempt's call and callback both ran at #102.
+        assertEquals(102L, result.trust.block)
+        assertEquals(4, client.calls.size)
+        assertTrue(urls().all { it.startsWith("https://gw.example/") })
+    }
+
+    @Test
+    fun `a head that keeps moving under CCIP-Read falls back to RPC`() {
+        val (client, http, urls) = ccipHeadMoving(moves = Int.MAX_VALUE)
+
+        val result = runBlocking { resolver(client, http).resolveContenthash("1.offchainexample.eth") }
+
+        require(result is EnsResult.Ok) { "got $result" }
+        assertFalse(result.trust.lightClient)
+        assertEquals(6, client.calls.size)
+        assertTrue(urls().any { it == rpc })
     }
 
     @Test
@@ -344,6 +493,19 @@ class EnsLightClientResolveTest {
         assertTrue(EnsLightClient.parse("""{"status":"ok","resultHex":"nothex"}""") is EnsLightClient.Call.Unavailable)
         assertTrue(EnsLightClient.parse("not json") is EnsLightClient.Call.Unavailable)
         assertTrue(EnsLightClient.parse(null) is EnsLightClient.Call.Unavailable)
+        // A verification failure inside the normal result shape is no answer.
+        assertEquals(
+            EnsLightClient.Call.Unavailable("verification failed: proof mismatch"),
+            EnsLightClient.parse("""{"status":"ok","resultHex":"0xabcd","blockNumber":5,"failReason":"proof mismatch"}"""),
+        )
+        assertTrue(
+            EnsLightClient.parse("""{"status":"revert","dataHex":"0x77209fe8","failReason":""}""") is EnsLightClient.Call.Unavailable,
+        )
+        // `verified` only says finalized vs. head: both are proven answers.
+        assertEquals(
+            EnsLightClient.Call.Ok("0xabcd", 5L),
+            EnsLightClient.parse("""{"status":"ok","resultHex":"0xabcd","blockNumber":5,"verified":false,"failReason":null}"""),
+        )
         assertEquals(EnsLightClient.Call.Ok("0x", null), EnsLightClient.parse("""{"status":"ok","resultHex":"0x"}"""))
     }
 }

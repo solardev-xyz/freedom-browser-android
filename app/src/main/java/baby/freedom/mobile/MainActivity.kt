@@ -142,7 +142,7 @@ class MainActivity : ComponentActivity() {
         override fun onMyotisStateChanged(info: MyotisInfo?) {
             if (info != null && myotisBound) {
                 myotisInfoFlow.value = info
-                MyotisLink.onState(info)
+                MyotisLink.onState(this@MainActivity, info)
             }
         }
     }
@@ -152,7 +152,7 @@ class MainActivity : ComponentActivity() {
             val b = IMyotisService.Stub.asInterface(service) ?: return
             myotisBinder = b
             // Before registering: the first state arrives on registration.
-            MyotisLink.connected(b)
+            MyotisLink.connected(this@MainActivity, b)
             runCatching { b.registerCallback(myotisCallback) }
             // onStart/onStop may have run before the binding came up.
             runCatching {
@@ -165,7 +165,7 @@ class MainActivity : ComponentActivity() {
             // `:myotis` died (or exited under a quick off → on); the
             // binding brings a fresh process back up.
             myotisBinder = null
-            MyotisLink.disconnected()
+            MyotisLink.disconnected(this@MainActivity)
             myotisInfoFlow.value = MyotisInfo(status = MyotisStatus.Starting)
         }
     }
@@ -565,7 +565,7 @@ class MainActivity : ComponentActivity() {
         runCatching { unbindService(myotisConnection) }
         myotisBinder = null
         myotisBound = false
-        MyotisLink.disconnected()
+        MyotisLink.disconnected(this@MainActivity)
         myotisInfoFlow.value = MyotisInfo()
     }
 
