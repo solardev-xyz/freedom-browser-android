@@ -4,6 +4,7 @@ import android.content.Context
 import android.util.Log
 import baby.freedom.mobile.browser.PublicSuffixList
 import baby.freedom.mobile.chains.Chain
+import baby.freedom.mobile.chains.RpcUrls
 import baby.freedom.mobile.data.ChainStore
 import baby.freedom.mobile.ens.Keccak256
 import baby.freedom.mobile.ens.hexToBytes
@@ -122,9 +123,14 @@ class ChainDataRouter internal constructor(
                         } else {
                             val keepLegs = policy.readOrder.getOrNull(index + 1) == ChainSource.DIRECT
                             val run = QuorumRun(members, policy.quorumM, legScope) { url ->
-                                // A leg a direct tier may reuse keeps the full
-                                // endpoint timeout, whatever the quorum waits.
-                                call(url, body, if (keepLegs) policy.timeoutMs else waitMs)
+                                // Every leg keeps the full endpoint timeout,
+                                // whatever the quorum waits: a page read's
+                                // shorter wait is ours, and a slow-but-healthy
+                                // RPC cut off by it mustn't be quarantined as
+                                // down. Legs nobody will reuse are cancelled
+                                // (never counted as failures) once the quorum
+                                // gives up.
+                                call(url, body, policy.timeoutMs)
                             }
                             quorum = run
                             when (val v = run.await(waitMs)) {
@@ -359,6 +365,9 @@ class ChainDataRouter internal constructor(
             currentCoroutineContext().ensureActive()
             return Leg.Failed("cancelled", timeout = false)
         } catch (e: Exception) {
+            // A transport that surfaces our own cancellation as an I/O
+            // error isn't the RPC failing.
+            currentCoroutineContext().ensureActive()
             failedAt[url] = clock()
             return Leg.Failed(e.message ?: e.javaClass.simpleName, timeout = e is RpcTimeoutException)
         }
@@ -405,6 +414,9 @@ class ChainDataRouter internal constructor(
             "eth_newPendingTransactionFilter", "eth_uninstallFilter", "web3_clientVersion", "web3_sha3",
         )
 
+        /** [providerOf] for every RPC on the device itself. */
+        internal const val LOOPBACK_PROVIDER = "loopback"
+
         private val ALREADY_KNOWN = Regex("already known|known transaction|already imported", RegexOption.IGNORE_CASE)
 
         /**
@@ -418,11 +430,15 @@ class ChainDataRouter internal constructor(
 
         /**
          * Who runs [url], for telling quorum voters apart: its host's
-         * registrable domain, or the host itself for an IP literal,
-         * `localhost` or a host without one. The port doesn't count —
-         * two ports on one machine are one operator.
+         * registrable domain, or the host itself for an IP literal or a
+         * host without one. The port doesn't count — two ports on one
+         * machine are one operator — and every loopback spelling
+         * (`localhost`, `*.localhost`, any `127.0.0.0/8` literal, `[::1]`)
+         * is the one device, so the user's own node added twice can never
+         * outvote a public RPC.
          */
         internal fun providerOf(url: String): String {
+            if (RpcUrls.isLoopbackUrl(url)) return LOOPBACK_PROVIDER
             val host = try {
                 URI(url).host
             } catch (_: Exception) {

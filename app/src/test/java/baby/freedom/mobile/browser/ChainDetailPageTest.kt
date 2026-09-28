@@ -19,7 +19,7 @@ class ChainDetailPageTest {
         val eth = readSteps(BuiltInChains.ETHEREUM, ChainAccessPolicy.default(1), wiredRpcsOnly)
         assertEquals(2, eth.size)
         assertEquals(
-            "RPC quorum: 2 of the first 3 RPCs (each from a different provider, yours first) " +
+            "RPC quorum: 2 of the first 3 RPCs (each from a different provider, yours among them) " +
                 "must give the same answer — verified",
             eth[0],
         )
@@ -34,7 +34,7 @@ class ChainDetailPageTest {
         )
         val withMine = lonely.copy(userRpcUrls = listOf("https://mine.example"))
         assertEquals(
-            "RPC quorum: 2 of the first 2 RPCs (each from a different provider, yours first) " +
+            "RPC quorum: 2 of the first 2 RPCs (each from a different provider, yours among them) " +
                 "must give the same answer — verified",
             readSteps(withMine, ChainAccessPolicy.default(5), wiredRpcsOnly)[0],
         )
@@ -75,7 +75,7 @@ class ChainDetailPageTest {
     @Test
     fun yourRpcsNoteSaysThePublicRpcsStillSeeReads() {
         val note = userRpcsNote(ChainAccessPolicy.default(1).sanitized(1))
-        assert("not alone" in note && "up to 3 RPCs at once" in note && "public RPCs still see your reads" in note) { note }
+        assert("not alone" in note && "up to 3 RPCs at the same time" in note && "first" !in note && "public RPCs still see your reads" in note) { note }
         val directOnly = ChainAccessPolicy(listOf(ChainSource.DIRECT), listOf(ChainSource.DIRECT))
         assert("asked before the public RPCs" in userRpcsNote(directOnly)) { userRpcsNote(directOnly) }
     }

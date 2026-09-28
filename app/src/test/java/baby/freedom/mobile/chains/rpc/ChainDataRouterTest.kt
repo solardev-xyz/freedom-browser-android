@@ -262,12 +262,38 @@ class ChainDataRouterTest {
     }
 
     @Test
+    fun theUsersNodeUnderTwoLoopbackSpellingsIsOneVote() = runBlocking {
+        val net = Net()
+        val local1 = "http://localhost:8545"
+        val local2 = "http://127.0.0.1:8545"
+        net.handlers[local1] = { ok("0x1") }
+        net.handlers[local2] = { ok("0x1") }
+        net.handlers[a] = { ok("0x2") }
+        net.handlers[b] = { ok("0x2") }
+        val eth = chain(rpcs = listOf(a, b), user = listOf(local1, local2))
+        assertEquals(listOf(local1, a, b), ChainDataRouter.quorumMembers(listOf(local1, local2, a, b), 3))
+        val r = router(net, listOf(eth)).request(137, "eth_blockNumber")
+        assertEquals("the public RPCs outvote the one local node", "0x2", r.result)
+        assertEquals(ChainTrust.Level.VERIFIED, r.trust.level)
+        assertEquals(listOf("localhost:8545", "a.example", "b.example"), r.trust.queried)
+        assertEquals(0, net.count(local2))
+
+        val onlyLocal = router(net, listOf(chain(rpcs = listOf(a), user = listOf(local1, local2))))
+            .request(137, "eth_blockNumber")
+        assertTrue("two loopback spellings never verify each other", onlyLocal.trust.level != ChainTrust.Level.VERIFIED)
+    }
+
+    @Test
     fun providersAreTellApartByRegistrableDomainOrAddress() {
         assertEquals("publicnode.com", ChainDataRouter.providerOf("https://ethereum.publicnode.com/?x"))
         assertEquals("publicnode.com", ChainDataRouter.providerOf("https://Ethereum-Rpc.PublicNode.com"))
-        assertEquals("127.0.0.1", ChainDataRouter.providerOf("http://127.0.0.1:8710/"))
-        assertEquals("::1", ChainDataRouter.providerOf("http://[::1]:8545"))
-        assertEquals("localhost", ChainDataRouter.providerOf("http://localhost:8545"))
+        for (loopback in listOf(
+            "http://localhost:8545", "http://127.0.0.1:8545", "http://127.1.2.3:9000/",
+            "http://[::1]:8545", "http://node.localhost:8545", "http://LOCALHOST.:8545",
+        )) {
+            assertEquals(loopback, ChainDataRouter.LOOPBACK_PROVIDER, ChainDataRouter.providerOf(loopback))
+        }
+        assertEquals("tracker.example", ChainDataRouter.providerOf("https://127.tracker.example"))
         assertEquals(
             listOf(a, b),
             ChainDataRouter.quorumMembers(listOf(a, "https://x.a.example", b, "https://b.example/2"), 3),
@@ -323,6 +349,34 @@ class ChainDataRouterTest {
 
         val wallet = router(net, listOf(chain()), policy).request(137, "eth_blockNumber")
         assertEquals("the wallet's own read waits the full timeout", ChainTrust.Level.VERIFIED, wallet.trust.level)
+    }
+
+    @Test
+    fun aPageReadsShortWaitDoesntQuarantineASlowButHealthyRpc() = runBlocking {
+        val net = Net()
+        listOf(a, b, c).forEach { url -> net.handlers[url] = { delay(2_600); ok("0x3") } }
+        net.handlers[d] = { ok("0x4") }
+        // The quorum isn't directly followed by direct, so its legs aren't kept.
+        val policy: (Chain) -> ChainAccessPolicy = {
+            ChainAccessPolicy(
+                listOf(ChainSource.QUORUM, ChainSource.COLIBRI, ChainSource.DIRECT),
+                listOf(ChainSource.DIRECT),
+                timeoutMs = 4_000,
+            )
+        }
+        // Colibri is in the order (Ethereum) but not wired: no answer.
+        val r = router(net, listOf(chain(id = 1)), policy)
+        val page = r.request(1, "eth_blockNumber", context = RoutingContext.forPage("https://app.example"))
+        assertEquals("direct asks the first RPC again, with the full timeout", "0x3", page.result)
+        assertEquals(listOf(2, 1, 1, 0), listOf(a, b, c, d).map(net::count))
+
+        val wallet = r.request(1, "eth_blockNumber")
+        assertEquals(
+            "RPCs the page read stopped waiting for aren't quarantined",
+            listOf("a.example", "b.example", "c.example"),
+            wallet.trust.queried,
+        )
+        assertEquals(ChainTrust.Level.VERIFIED, wallet.trust.level)
     }
 
     @Test

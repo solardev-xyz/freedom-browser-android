@@ -181,7 +181,7 @@ internal fun readSteps(chain: Chain, policy: ChainAccessPolicy, wired: (ChainSou
             ChainSource.MYOTIS, ChainSource.COLIBRI -> "${source.label}: a proof checked on this device"
             ChainSource.QUORUM -> if (providers >= policy.quorumM) {
                 "${source.label}: ${policy.quorumM} of the first ${minOf(policy.quorumK, providers)} RPCs " +
-                    "(each from a different provider, yours first) must give the same answer — verified"
+                    "(each from a different provider, yours among them) must give the same answer — verified"
             } else {
                 "${source.label}: skipped, needs RPCs from at least ${policy.quorumM} providers " +
                     "(this chain has $providers)"
@@ -216,8 +216,8 @@ internal fun trustSummary(trust: ChainTrust): String {
 internal fun userRpcsNote(policy: ChainAccessPolicy): String {
     val quorum = ChainSource.QUORUM in policy.readOrder
     return "Your own node or provider for this chain. " + if (quorum) {
-        "It's asked first, but not alone: each read goes to up to ${policy.quorumK} RPCs at once, " +
-            "yours and the chain's public ones, so the public RPCs still see your reads. "
+        "It's always in the quorum, but not alone: each read goes to up to ${policy.quorumK} RPCs " +
+            "at the same time, yours and the chain's public ones, so the public RPCs still see your reads. "
     } else {
         "It's asked before the public RPCs. "
     } + "An answer only your RPC gave is marked as yours rather than unverified."
@@ -225,7 +225,7 @@ internal fun userRpcsNote(policy: ChainAccessPolicy): String {
 
 /**
  * A chain's page (#107, #108): what it is, the user's own RPCs ("Your
- * RPCs", added and removed here, asked first), its public RPCs, and how a
+ * RPCs", added and removed here, always among those asked), its public RPCs, and how a
  * read is checked — with a Check button that reads the latest block
  * through [ChainDataRouter] and says how that answer was verified. Every
  * URL is shown in full (wrapped, never cut). A custom chain also offers
