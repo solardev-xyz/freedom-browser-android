@@ -40,6 +40,18 @@ package baby.freedom.mobile.browser
  * does exactly that — so while a navigation is fetching, one from the
  * destination's origin is not taken for a frame.
  *
+ * A frame the pending navigation's own document loads before that
+ * navigation's commit reaches the UI thread — its document request names
+ * the destination, or the incoming page is already judged the current
+ * one — is the destination's, not the page on screen's; but it is the
+ * *next* page on screen's frame from the commit on, so it is held
+ * ([pendingFrames]) and becomes one of the page's frames when the
+ * commit lands (R3-F1 of the R9 round), rather than being forgotten:
+ * otherwise a page's frame requested in that window (routinely — tens
+ * to hundreds of ms after the main document) would be unknown when a
+ * later link to that frame's site is pending, and its bare-origin
+ * requests would be taken for the destination's.
+ *
  * A navigation that never commits — it became a download, a 204, a hop
  * cancelled as a link to another app, a Stop — leaves the page on screen
  * as it was ([kept]), so the page's later requests are judged against
@@ -59,6 +71,12 @@ internal class AdblockPage {
 
     /** Origins of [frameUrls]. */
     private val frameOrigins = HashMap<String, Int>()
+
+    /**
+     * Documents of frames the pending navigation's page loaded before it
+     * committed, oldest first: [frameUrls] from its commit on.
+     */
+    private val pendingFrames = LinkedHashSet<String>()
 
     /**
      * The page a subresource request now is judged against; [referer] is
@@ -95,9 +113,16 @@ internal class AdblockPage {
      */
     @Synchronized
     fun frameRequested(url: String, referer: String?) {
-        if (incoming != null) return
         val destination = fetching
-        if (destination != null && referer != null && namesDestination(referer, destination)) return
+        if (incoming != null ||
+            destination != null && referer != null && namesDestination(referer, destination)
+        ) {
+            // The incoming page's frame: its own once it commits.
+            if (pendingFrames.add(withoutFragment(url)) && pendingFrames.size > MAX_FRAMES) {
+                pendingFrames.remove(pendingFrames.first())
+            }
+            return
+        }
         rememberFrame(url)
     }
 
@@ -141,6 +166,9 @@ internal class AdblockPage {
     @Synchronized
     fun answered(url: String, replacesDocument: Boolean, fetchedByWebView: Boolean = false) {
         if (!replacesDocument) return
+        // A new document is on its way: frames the one it supersedes
+        // loaded won't be on screen.
+        pendingFrames.clear()
         if (fetchedByWebView) {
             fetching = url
             incoming = null
@@ -165,6 +193,7 @@ internal class AdblockPage {
     fun kept(url: String? = null) {
         if (url == null || url == incoming) incoming = null
         if (url == null || url == fetching) fetching = null
+        if (incoming == null && fetching == null) pendingFrames.clear()
     }
 
     /** [url]'s document committed (or is the one on screen): it's the page now. */
@@ -175,6 +204,11 @@ internal class AdblockPage {
         fetching = null
         frameUrls.clear()
         frameOrigins.clear()
+        // The committed page's frames it requested before the commit got
+        // here (none after a Stop, a download or a superseding answer,
+        // which drop them).
+        pendingFrames.forEach(::rememberFrame)
+        pendingFrames.clear()
     }
 
     private companion object {

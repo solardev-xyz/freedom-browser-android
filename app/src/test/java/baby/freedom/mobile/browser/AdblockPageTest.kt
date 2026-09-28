@@ -121,6 +121,47 @@ class AdblockPageTest {
     }
 
     @Test
+    fun `a frame the page requested before its commit reached the UI thread is its frame after`() {
+        // R3-F1 (R9): B embeds a frame from C's site; the frame's document
+        // request (Referer: B) arrives before onPageStarted(B). Once B is
+        // on screen and a link to C is pending, the frame's bare-origin
+        // requests are still B's.
+        val c = "http://10-0-2-2.nip.io:8711/c"
+        val frame = "http://10-0-2-2.nip.io:8711/frame"
+        for (webViewFetches in listOf(true, false)) {
+            val p = onA()
+            p.answered(b, replacesDocument = true, fetchedByWebView = webViewFetches)
+            p.frameRequested(frame, referer = b)
+            p.committed(b)
+            p.answered(c, replacesDocument = true, fetchedByWebView = true)
+            assertEquals(b, p.current(referer = "http://10-0-2-2.nip.io:8711/"))
+            assertEquals(b, p.current(referer = frame))
+            assertEquals(c, p.current(referer = c))
+        }
+    }
+
+    @Test
+    fun `a pending page's frames are dropped when it never commits or is superseded`() {
+        val c = "http://10-0-2-2.nip.io:8711/c"
+        val frame = "http://10-0-2-2.nip.io:8711/frame"
+        val kept = onA()
+        kept.answered(b, replacesDocument = true, fetchedByWebView = true)
+        kept.frameRequested(frame, referer = b)
+        kept.kept()
+        kept.committed(a)
+        kept.answered(c, replacesDocument = true, fetchedByWebView = true)
+        assertEquals(c, kept.current(referer = "http://10-0-2-2.nip.io:8711/"))
+
+        val superseded = onA()
+        superseded.answered(b, replacesDocument = true, fetchedByWebView = true)
+        superseded.frameRequested(frame, referer = b)
+        superseded.answered("https://other.example/", replacesDocument = true)
+        superseded.committed("https://other.example/")
+        superseded.answered(c, replacesDocument = true, fetchedByWebView = true)
+        assertEquals(c, superseded.current(referer = "http://10-0-2-2.nip.io:8711/"))
+    }
+
+    @Test
     fun `remembered frames are bounded`() {
         val p = onA()
         repeat(1000) { p.frameRequested("https://churn.example/f$it", referer = a) }
