@@ -19,4 +19,10 @@ interface IMyotisService {
 
     /** The UI went to the background: idle-sleep the engines. */
     void onAppBackground();
+
+    /** "Retry" on a chain whose checkpoint recovery is blocked or waiting (#195). */
+    void retryRecovery(long chainId);
+
+    /** "Repair sync data" on a chain blocked on inconsistent sync data (#195). */
+    void repairSyncData(long chainId);
 }

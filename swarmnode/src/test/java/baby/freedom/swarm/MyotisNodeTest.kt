@@ -32,6 +32,10 @@ class MyotisNodeTest {
             calls += "create $network"
             return createAnswers.getValue(network)
         }
+        override fun createWithCheckpoint(network: String, dataDir: String, root: String, slot: Long): Long {
+            calls += "createWithCheckpoint $network $slot"
+            return createAnswers.getValue(network)
+        }
         override fun start(handle: Long): Boolean {
             calls += "start $handle"
             return startAnswers[handle] ?: true
@@ -55,8 +59,11 @@ class MyotisNodeTest {
         override fun drainLogs(max: Int): String = ""
     }
 
+    /** A checkpoint source that never answers: these tests are about parking, not recovery. */
+    private val silent = MyotisNode.CheckpointSource { _, _ -> kotlinx.coroutines.awaitCancellation() }
+
     private fun node(engine: FakeEngine) =
-        MyotisNode(tmp.root, engine, pollIntervalMs = 60_000L)
+        MyotisNode(tmp.root, engine, pollIntervalMs = 60_000L, checkpoints = silent)
 
     private fun idle(node: MyotisNode) = runBlocking { withTimeout(5_000) { node.awaitIdle() } }
 
@@ -256,7 +263,10 @@ class MyotisNodeTest {
     private class Clocks(var wall: Long = 1_000_000_000L, var up: Long = 1_000L)
 
     private fun node(engine: FakeEngine, clocks: Clocks) =
-        MyotisNode(tmp.root, engine, pollIntervalMs = 60_000L, wallClock = { clocks.wall }, upClock = { clocks.up })
+        MyotisNode(
+            tmp.root, engine, pollIntervalMs = 60_000L,
+            wallClock = { clocks.wall }, upClock = { clocks.up }, checkpoints = silent,
+        )
 
     private fun FakeEngine.pausesAndResumes() = calls.filter { it.startsWith("pause") || it.startsWith("resume") }
 

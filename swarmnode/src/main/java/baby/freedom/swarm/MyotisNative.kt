@@ -3,8 +3,8 @@ package baby.freedom.swarm
 /**
  * Raw JNI surface over the embedded Myotis Ethereum light client (the
  * `myotis_*` C ABI inside `libfreedom_mobile_ffi.so`), bridged by the
- * shim in `src/main/cpp/myotis_jni.c`. Only the node lifecycle is
- * bridged; see [MyotisNode] for the wrapper the app uses.
+ * shim in `src/main/cpp/myotis_jni.c`. Only the node lifecycle (and
+ * checkpoint recovery's create) is bridged; see [MyotisNode] for the wrapper the app uses.
  *
  * Handles are the engine's own `int64` ids (>= 1). Failures are the
  * engine's sentinels, not exceptions: a negative id from [create],
@@ -40,6 +40,17 @@ internal object MyotisNative {
      * [CREATE_FAILED], [UNSUPPORTED_NETWORK], [ANCHOR_MISMATCH].
      */
     external fun create(network: String, dataDir: String): Long
+
+    /**
+     * Like [create], but bootstrapping from the caller's beacon block
+     * [root] (32-byte hex) at header [slot] instead of the embedded
+     * checkpoint — stale-anchor recovery (#195). The engine doesn't
+     * authenticate the root; it pins the bootstrap to it and verifies
+     * forward from it. The first call on a directory records the anchor
+     * (`sync-anchor[-net].json`); the same root+slot later resumes it,
+     * anything else is [ANCHOR_MISMATCH]. Same sentinels as [create].
+     */
+    external fun createWithCheckpoint(network: String, dataDir: String, root: String, slot: Long): Long
 
     /** Start the sync loop. False for an unknown / already running handle. */
     external fun start(handle: Long): Boolean

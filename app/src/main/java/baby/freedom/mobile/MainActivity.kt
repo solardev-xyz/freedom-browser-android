@@ -308,6 +308,7 @@ class MainActivity : ComponentActivity() {
                         myotisInfo = myotisInfo,
                         myotisEnabled = myotisEnabled,
                         onToggleMyotis = ::onToggleMyotis,
+                        onMyotisRecovery = ::onMyotisRecovery,
                         onEnsureIpfsStarted = ::onEnsureIpfsStarted,
                         onIpfsToggle = ::onIpfsToggle,
                         radicle = RadicleControls(
@@ -487,6 +488,14 @@ class MainActivity : ComponentActivity() {
     /** The light-client switch on the node page (#72): persisted, and followed in [onCreate]. */
     private fun onToggleMyotis(enabled: Boolean) {
         lifecycleScope.launch { settings.setMyotisEnabled(enabled) }
+    }
+
+    /** A chain row's Retry / Repair sync data (#195); the service ignores it unless it applies. */
+    private fun onMyotisRecovery(chainId: Long, repair: Boolean) {
+        runCatching {
+            val binder = myotisBinder ?: return
+            if (repair) binder.repairSyncData(chainId) else binder.retryRecovery(chainId)
+        }
     }
 
     private fun bindMyotis() {

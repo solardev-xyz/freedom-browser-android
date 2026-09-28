@@ -412,6 +412,8 @@ fun BrowserScreen(
     myotisInfo: MyotisInfo = MyotisInfo(),
     myotisEnabled: Boolean = false,
     onToggleMyotis: (Boolean) -> Unit = {},
+    /** A light-client chain's Retry (`repair = false`) or Repair sync data (`true`), by chain id. */
+    onMyotisRecovery: (chainId: Long, repair: Boolean) -> Unit = { _, _ -> },
     onEnsureIpfsStarted: () -> Unit,
     onIpfsToggle: (Boolean) -> Unit,
     radicle: RadicleControls = RadicleControls(),
@@ -1966,6 +1968,7 @@ fun BrowserScreen(
             myotisInfo = myotisInfo,
             myotisEnabled = myotisEnabled,
             onToggleMyotis = onToggleMyotis,
+            onMyotisRecovery = onMyotisRecovery,
             onDismiss = { showNode = false },
         )
     }

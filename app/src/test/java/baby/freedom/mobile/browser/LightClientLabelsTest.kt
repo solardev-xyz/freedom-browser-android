@@ -2,11 +2,17 @@ package baby.freedom.mobile.browser
 
 import baby.freedom.swarm.MyotisChainStatus
 import baby.freedom.swarm.MyotisInfo
+import baby.freedom.swarm.MyotisRecovery
+import baby.freedom.swarm.MyotisRecoveryReason
 import baby.freedom.swarm.MyotisStatus
 import org.junit.Assert.assertEquals
 import org.junit.Test
 
 class LightClientLabelsTest {
+
+    private val checking = MyotisRecovery(MyotisRecovery.Phase.Checking, attempt = 1)
+    private val restarting = MyotisRecovery(MyotisRecovery.Phase.Restarting, attempt = 1)
+    private fun blocked(reason: MyotisRecoveryReason) = MyotisRecovery(MyotisRecovery.Phase.Blocked, reason = reason)
 
     private val serving = MyotisChainStatus(
         chainId = 1L,
@@ -32,6 +38,11 @@ class LightClientLabelsTest {
             Triple(running, MyotisChainStatus(1L, error = "boom"), "Failed"),
             Triple(running, serving.copy(running = false, paused = true), "Paused"),
             Triple(running, serving.copy(beaconState = "STALE_ANCHOR"), "Checkpoint too old"),
+            Triple(running, serving.copy(beaconState = "STALE_ANCHOR", recovery = checking), "Updating checkpoint"),
+            Triple(running, serving.copy(recovery = restarting), "Updating checkpoint"),
+            Triple(running, serving.copy(recovery = blocked(MyotisRecoveryReason.QuorumConflict)), "Sync paused"),
+            Triple(running, serving.copy(recovery = blocked(MyotisRecoveryReason.Stalled)), "Syncing slowly"),
+            Triple(running, MyotisChainStatus(100L, recovery = blocked(MyotisRecoveryReason.Storage)), "Sync paused"),
             Triple(running, serving, "Synced"),
             Triple(running, serving.copy(snapServingPeers = 0), "Synced, not serving yet"),
             Triple(running, serving.copy(beaconState = "CATCHING_UP"), "Catching up"),
@@ -54,14 +65,37 @@ class LightClientLabelsTest {
     fun `stale anchor explains its age against the bound`() {
         val stale = serving.copy(beaconState = "STALE_ANCHOR", currentPeriod = 3692, targetPeriod = 3701, wsBoundPeriods = 3)
         assertEquals(
-            "The built-in checkpoint is too old to sync from safely (9 sync periods old, the safe limit is 3). " +
-                "Fetching a fresh checkpoint isn't supported on Android yet.",
+            "The built-in checkpoint is too old to sync from safely (9 sync periods old, the safe limit is 3).",
             staleAnchorExplanation(stale),
         )
+        assertEquals("9 sync periods old, the safe limit is 3", anchorAge(stale))
         assertEquals(
-            "The built-in checkpoint is too old to sync from safely. Fetching a fresh checkpoint isn't supported on Android yet.",
+            "The built-in checkpoint is too old to sync from safely.",
             staleAnchorExplanation(serving.copy(beaconState = "STALE_ANCHOR")),
         )
+        assertEquals(null, anchorAge(serving))
+    }
+
+    @Test
+    fun `a recovering chain is never ready and says what it's doing`() {
+        assertEquals(false, serving.copy(recovery = restarting).ready)
+        assertEquals("", serving.copy(recovery = restarting).notServingReason)
+        assertEquals(
+            "The built-in checkpoint is too old to sync from. Asking checkpoint services for a fresh one…",
+            checking.message(0),
+        )
+        assertEquals("Fresh checkpoint agreed. Syncing from it…", restarting.message(0))
+        val waiting = MyotisRecovery(
+            MyotisRecovery.Phase.Waiting, reason = MyotisRecoveryReason.QuorumUnavailable, attempt = 1, nextRetryAt = 60_000L,
+        )
+        assertEquals(
+            "Not enough checkpoint sources could confirm a recent checkpoint. Trying again in 15s.",
+            waiting.message(45_000L),
+        )
+        assertEquals(true, waiting.canRetry)
+        assertEquals(false, waiting.canRepair)
+        assertEquals(false, checking.canRetry)
+        assertEquals(true, blocked(MyotisRecoveryReason.Storage).canRepair)
     }
 
     @Test
@@ -81,6 +115,10 @@ class LightClientLabelsTest {
         val stale = gnosis.copy(beaconState = "STALE_ANCHOR")
         assertEquals("Checkpoint too old", label(MyotisChainStatus(1L, error = "boom"), stale))
         assertEquals("Checkpoint too old", label(stale))
+        // Recovering, or stopped for the user, it says so.
+        assertEquals("Updating checkpoint", label(stale.copy(recovery = checking)))
+        assertEquals("Sync paused", label(serving.copy(recovery = restarting), stale.copy(recovery = blocked(MyotisRecoveryReason.Clock))))
+        assertEquals("1 of 2 chains synced", label(serving, gnosis.copy(recovery = restarting)))
         // ...and beside a chain that isn't serving yet it's counted, not "Syncing…".
         assertEquals("0 of 2 chains synced", label(serving.copy(snapServingPeers = 0), stale))
         assertEquals("0 of 2 chains synced", label(serving.copy(beaconState = "SYNCING"), stale))
