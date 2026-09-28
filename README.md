@@ -81,7 +81,7 @@ git clone --branch v0.12.1 https://github.com/solardev-xyz/freedom-mobile-ffi.gi
 #   adb install -r app/build/outputs/apk/debug/app-arm64-v8a-debug.apk
 ```
 
-The build produces three debug APKs — `app-arm64-v8a-debug.apk` (~157 MiB), `app-x86_64-debug.apk` (~189 MiB), and `app-universal-debug.apk` (~456 MiB, all ABIs). See [APK size](#apk-size) for what to ship.
+The build produces three debug APKs — `app-arm64-v8a-debug.apk` (~116 MiB), `app-x86_64-debug.apk` (~123 MiB), and `app-universal-debug.apk` (~170 MiB, all ABIs). See [APK size](#apk-size) for what to ship.
 
 ## Running on an emulator
 
