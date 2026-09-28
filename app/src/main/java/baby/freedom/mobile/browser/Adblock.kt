@@ -6,6 +6,7 @@ import android.util.Log
 import android.webkit.WebResourceResponse
 import baby.freedom.mobile.data.NodeSettings
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -13,7 +14,6 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -141,18 +141,30 @@ internal data class AllowlistWrite(val add: Boolean, val host: String)
  * The saved allowlist and the changes on their way to it (#126).
  * [write] applies a change in memory at once and queues it; [run]
  * writes the queue through [persist] one at a time, in order, so a
- * quick allow-then-remove can't land the other way round. [saved]
- * takes each allowlist read back from storage; [current] is that with
- * the still-pending writes on top, so a read taken before a write
- * landed never undoes it. [onChange] runs whenever [current] may have
- * changed.
+ * quick allow-then-remove can't land the other way round.
+ *
+ * [saved] takes each allowlist read back from storage; [current] is
+ * that with every write storage hasn't been seen to reflect yet on
+ * top. A write stays on top after it lands, until a read shows storage
+ * past it — so [current] never loses a landed write in the gap before
+ * storage's next read arrives, and a read taken before a write landed
+ * (reads arrive in order but can lag) never undoes it. This relies on
+ * the store being the allowlist's only writer. [onChange] runs
+ * whenever [current] may have changed.
  */
 internal class AllowlistStore(
     private val persist: suspend (AllowlistWrite) -> Unit,
     private val onChange: (Set<String>) -> Unit,
 ) {
     private val queue = Channel<AllowlistWrite>(Channel.UNLIMITED)
+
+    /** Queued or being written, in call order. */
     private val pending = ArrayList<AllowlistWrite>()
+
+    /** Written, in order, but not yet seen in a read of storage. */
+    private val landed = ArrayList<AllowlistWrite>()
+
+    /** The last read of storage. */
     private var saved: Set<String> = emptySet()
 
     @Volatile
@@ -165,26 +177,57 @@ internal class AllowlistStore(
         queue.trySend(w)
     }
 
-    fun saved(list: Collection<String>) = update { saved = list.toSet() }
+    /**
+     * A read of storage. Storage has gone through [saved] and then each
+     * [landed] write in turn; the read is one of those states, so the
+     * writes up to the earliest one it matches are in it and the rest
+     * stay on top. (Any match gives the same [current]; the earliest is
+     * the one a later, lagging read can't contradict.) A read matching
+     * none is taken as is, with every landed write kept on top.
+     */
+    fun saved(list: Collection<String>) = update {
+        val read = list.toSet()
+        var state = saved
+        var seen = if (state == read) 0 else -1
+        if (seen < 0) {
+            for ((i, w) in landed.withIndex()) {
+                state = w.applyTo(state)
+                if (state == read) {
+                    seen = i + 1
+                    break
+                }
+            }
+        }
+        saved = read
+        if (seen > 0) landed.subList(0, seen).clear()
+    }
 
     /** Drain the queue, forever. */
     suspend fun run() {
         for (w in queue) {
-            try {
+            val ok = try {
                 persist(w)
+                true
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
                 Log.w(TAG, "allowlist write failed", e)
+                false
             }
-            update { pending.remove(w) }
+            // In the same step, so [current] never goes without it.
+            update {
+                pending.remove(w)
+                if (ok) landed += w
+            }
         }
     }
+
+    private fun AllowlistWrite.applyTo(list: Set<String>) = if (add) list + host else list - host
 
     // [onChange] under the lock too, so its readers see updates in order.
     private inline fun update(change: () -> Unit) = synchronized(this) {
         change()
-        current = pending.fold(saved) { acc, w -> if (w.add) acc + w.host else acc - w.host }
+        current = (landed + pending).fold(saved) { acc, w -> w.applyTo(acc) }
         onChange(current)
     }
 }
@@ -200,15 +243,16 @@ internal data class AdblockStatus(val loading: Boolean, val filterCount: Int)
  * startup, and again whenever the categories change; until the first
  * build lands (about a second), requests go through unfiltered rather
  * than wait. The swap is atomic — a request sees the old engine or the
- * new one. The allowlist is read with the categories, and published
- * before the first engine, so an allowlisted site is never blocked
- * while settings load.
+ * new one. The allowlist is followed by its own collector, so a
+ * rebuild never delays it, and the first engine waits for the first
+ * allowlist read, so an allowlisted site is never blocked while
+ * settings load.
  *
  * Allowlist changes take effect in memory at once and are written to
  * Settings one at a time, in the order they were made, by a single
- * writer; until a write lands, the allowlist read back from Settings
- * is shown with the writes still pending on top, so a stale read never
- * undoes a newer change.
+ * writer ([AllowlistStore]); until a read of Settings shows a write,
+ * it stays on top of that read, so neither a stale read nor the gap
+ * before the next one undoes a newer change.
  *
  * Private tabs (#86) see the saved allowlist, but a site they allow is
  * kept for the private session only, in memory, like their site
@@ -260,20 +304,24 @@ internal object Adblock {
         val settings = NodeSettings.get(app)
         this.settings = settings
         scope.launch { store.run() }
+        val allowlistRead = CompletableDeferred<Unit>()
         scope.launch {
-            var builtFor: Set<AdblockCategory>? = null
-            combine(settings.adblockCategories, settings.adblockAllowlist) { c, a -> c to a }
-                .distinctUntilChanged()
-                .collect { (categories, saved) ->
-                    store.saved(saved)
-                    if (categories == builtFor) return@collect
-                    builtFor = categories
-                    _status.value = _status.value.copy(loading = true)
-                    val built = withContext(Dispatchers.IO) { build(app, categories) }
-                    engine = built
-                    _status.value = AdblockStatus(loading = false, filterCount = built?.filterCount ?: 0)
-                    _revision.value++
-                }
+            settings.adblockAllowlist.distinctUntilChanged().collect {
+                store.saved(it)
+                allowlistRead.complete(Unit)
+            }
+        }
+        // Its own collector, so a rebuild never holds up allowlist reads.
+        scope.launch {
+            settings.adblockCategories.distinctUntilChanged().collect { categories ->
+                _status.value = _status.value.copy(loading = true)
+                val built = withContext(Dispatchers.IO) { build(app, categories) }
+                // An allowlisted site is never blocked while settings load.
+                allowlistRead.await()
+                engine = built
+                _status.value = AdblockStatus(loading = false, filterCount = built?.filterCount ?: 0)
+                _revision.value++
+            }
         }
     }
 

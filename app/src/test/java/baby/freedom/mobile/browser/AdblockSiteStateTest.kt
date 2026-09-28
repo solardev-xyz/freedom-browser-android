@@ -128,4 +128,53 @@ class AdblockSiteStateTest {
         assertEquals(expected, store.current)
         runner.cancel()
     }
+
+    @Test
+    fun `a landed write stays in current before storage's next read`() = runBlocking {
+        val storage = FakeStorage { 0 }
+        storage.file += "kept.example"
+        val seen = Collections.synchronizedList(ArrayList<Set<String>>())
+        val store = AllowlistStore(storage::persist) { seen += it }
+        store.saved(storage.file.toList())
+        val runner = launch(Dispatchers.Default) { store.run() }
+        store.write(add = true, host = "news.example")
+        store.write(add = false, host = "kept.example")
+        withTimeout(5_000) { while (storage.log.size < 2) delay(5) }
+        // Both writes are in storage, but no read of it has come back yet.
+        val want = setOf("news.example")
+        assertEquals(want, store.current)
+        // And no step on the way ever dropped the landed add.
+        assertTrue(seen.drop(seen.indexOfFirst { "news.example" in it }).all { "news.example" in it })
+        store.saved(storage.file.toList())
+        assertEquals(want, store.current)
+        runner.cancel()
+    }
+
+    @Test
+    fun `reads lagging behind landed writes never undo them`() = runBlocking {
+        val storage = FakeStorage { 0 }
+        val store = AllowlistStore(storage::persist) {}
+        val runner = launch(Dispatchers.Default) { store.run() }
+        // Allow, remove, allow again: storage goes {} → {a} → {} → {a}.
+        store.write(add = true, host = "a.example")
+        store.write(add = false, host = "a.example")
+        store.write(add = true, host = "a.example")
+        withTimeout(5_000) { while (storage.log.size < 3) delay(5) }
+        // Every read storage went through, delivered late and in order.
+        for (read in listOf(emptySet(), setOf("a.example"), emptySet(), setOf("a.example"))) {
+            store.saved(read)
+            assertEquals(setOf("a.example"), store.current)
+        }
+        runner.cancel()
+    }
+
+    @Test
+    fun `a failed write is dropped`() = runBlocking {
+        val store = AllowlistStore({ error("disk full") }) {}
+        val runner = launch(Dispatchers.Default) { store.run() }
+        store.write(add = true, host = "a.example")
+        assertEquals(setOf("a.example"), store.current)
+        withTimeout(5_000) { while (store.current.isNotEmpty()) delay(5) }
+        runner.cancel()
+    }
 }
