@@ -2171,6 +2171,22 @@ private fun buildRefreshableWebView(
                     )
                 }
                 state.documentCommitted()
+                // A load the tab had in flight over the restored page
+                // before its WebView was rebuilt (#183 R1-F2) goes back
+                // in flight over it now, at its reload's commit —
+                // whatever URL that ended on (#185 R2-F2) — before the
+                // page can take input, so a navigation the user starts
+                // on it replaces that load as it would have before the
+                // relaunch, POST form included (#185 R3-F1). Posted, so
+                // this commit has updated the tab first, and only if
+                // nothing has superseded it by then (#185 R2-F1).
+                state.afterPageCommitted()?.let { after ->
+                    view?.post {
+                        if (!state.claimAfterPage(after)) return@post
+                        state.addressBarText = after.address
+                        onSubmitUrl(state, after.address)
+                    }
+                }
                 // The main-frame document committed: its ENS pins are now
                 // the page on screen's, and subresources held waiting on
                 // the commit go ahead (#99, [EnsDocumentPins]).
@@ -2439,20 +2455,9 @@ private fun buildRefreshableWebView(
                 }
                 // The first page to finish after a restore consumes the
                 // pending blank-entry address too, even though it isn't
-                // the blank entry: it can't apply to a later Home.
-                // Unless it was armed over the restored page (#183
-                // R1-F2): a load the tab had in flight over it before its
-                // WebView was rebuilt goes in now, whatever URL the
-                // reload ended on (#185 R2-F2) — posted, so this finish
-                // has updated the tab first, and only if nothing has
-                // superseded it by then (#185 R2-F1).
-                state.afterPageFinished()?.let { after ->
-                    view?.post {
-                        if (!state.claimAfterPage(after)) return@post
-                        state.addressBarText = after.address
-                        onSubmitUrl(state, after.address)
-                    }
-                }
+                // the blank entry: it can't apply to a later Home. (One
+                // armed over the restored page went in at its commit.)
+                state.afterPageFinished()
                 // Dismiss the pull-to-refresh spinner once the page has
                 // finished loading (or errored out). Happens regardless
                 // of whether the load was user-initiated reload or not.

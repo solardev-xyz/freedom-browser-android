@@ -105,39 +105,56 @@ class TabsRelaunchTest {
     }
 
     @Test
-    fun `the load put back over a restored page goes in when that page finishes, redirected or not`() {
+    fun `the load put back over a restored page goes in when that page commits, redirected or not`() {
         val tab = armedOverPage()
-        // b's reload ended on another URL (a 302): still that load's finish.
-        val after = tab.afterPageFinished()!!
+        // b's reload committed under another URL (a 302): still that load.
+        val after = tab.afterPageCommitted()!!
         assertEquals("https://next.example/", after.address)
         assertTrue(tab.claimAfterPage(after))
         // Claimed once only.
         assertFalse(tab.claimAfterPage(after))
-        assertNull(tab.afterPageFinished())
+        assertNull(tab.afterPageCommitted())
+    }
+
+    @Test
+    fun `the load put back over a restored page isn't waiting on that page's finish`() {
+        // Put back at the commit, it is in flight before the page takes
+        // input: a POST form the user submits on it (never seen by
+        // shouldOverrideUrlLoading) replaces it in the WebView, and the
+        // page's finish has nothing left to fire over the result (#185
+        // R3-F1).
+        val tab = armedOverPage()
+        val after = tab.afterPageCommitted()!!
+        assertTrue(tab.claimAfterPage(after))
+        tab.afterPageFinished()
+        assertNull(tab.afterPageCommitted())
+        // A finish with nothing committed doesn't drop it either.
+        val uncommitted = armedOverPage()
+        uncommitted.afterPageFinished()
+        assertTrue(uncommitted.claimAfterPage(uncommitted.afterPageCommitted()!!))
     }
 
     @Test
     fun `a navigation after the restore drops the load it had waiting`() {
-        // The user's submit, Home, Back, a tapped link: each stops the
-        // restored page first, and that stop's finish must not put the
-        // old address in over it (#185 R2-F1).
-        val beforeFinish = armedOverPage()
-        beforeFinish.restoreLoadSuperseded()
-        assertNull(beforeFinish.afterPageFinished())
-        // Superseded between the finish and its posted submit.
-        val afterFinish = armedOverPage()
-        val after = afterFinish.afterPageFinished()!!
-        afterFinish.restoreLoadSuperseded()
-        assertFalse(afterFinish.claimAfterPage(after))
+        // The user's submit, Home, Back / Forward, Stop before the
+        // restored page commits (#185 R2-F1).
+        val beforeCommit = armedOverPage()
+        beforeCommit.restoreLoadSuperseded()
+        assertNull(beforeCommit.afterPageCommitted())
+        // Superseded between the commit and its posted submit.
+        val afterCommit = armedOverPage()
+        val after = afterCommit.afterPageCommitted()!!
+        afterCommit.restoreLoadSuperseded()
+        assertFalse(afterCommit.claimAfterPage(after))
     }
 
     @Test
     fun `the load put back over a restored page isn't submitted from home or after a stop`() {
         val home = armedOverPage()
         assertNull(home.takeAfterBlankEntry())
-        assertNull(home.afterPageFinished())
+        assertNull(home.afterPageCommitted())
         val stopped = armedOverPage()
-        val after = stopped.afterPageFinished()!!
+        val after = stopped.afterPageCommitted()!!
         stopped.stopProgress()
         assertFalse(stopped.claimAfterPage(after))
     }

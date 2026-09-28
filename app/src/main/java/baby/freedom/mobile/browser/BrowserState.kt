@@ -473,15 +473,14 @@ class BrowserState(val id: Long, val private: Boolean = false) {
      * consumed by the first `onPageFinished` that follows, whichever
      * entry it is for: only the blank one acts on it. With [overPage]
      * set, the restored list ends on a real page instead, under a load
-     * that hadn't committed yet (#183 R1-F2): only a finish of that
-     * page's own reload submits the address.
+     * that hadn't committed yet (#183 R1-F2): the commit of that page's
+     * own reload submits the address ([afterPageCommitted]).
      *
      * Either way it belongs to the restore's own load and nothing
      * after it: any navigation handed to the WebView after the restore
      * — the user's submit, Home, Back / Forward, Reload, Stop, a link
      * the user taps on the page — drops it ([restoreLoadSuperseded],
-     * #185 R2-F1). Otherwise the stop that begins that navigation
-     * finishes the restored page and puts the old address in over it.
+     * #185 R2-F1) before it has gone in.
      */
     class AfterBlank(val address: String, val submit: Boolean, val overPage: Boolean = false)
 
@@ -512,19 +511,31 @@ class BrowserState(val id: Long, val private: Boolean = false) {
     /**
      * A real page finished. A pending blank-entry address is dropped: it
      * can't apply to a later Home. One armed over the restored page
-     * ([AfterBlank.overPage]) is returned, still armed, for the caller
-     * to [claimAfterPage] once this finish has updated the tab — the
-     * first finish after the restore is that page's reload, under
-     * whatever URL it ended on (a redirect, #185 R2-F2).
+     * ([AfterBlank.overPage]) was already taken at that page's commit
+     * ([afterPageCommitted]); if it's still here, nothing committed.
      */
-    internal fun afterPageFinished(): AfterBlank? {
-        val after = afterBlank ?: return null
-        if (!after.overPage) afterBlank = null
-        return after.takeIf { it.overPage }
+    internal fun afterPageFinished() {
+        if (afterBlank?.overPage == false) afterBlank = null
     }
 
     /**
-     * Whether [after] (from [afterPageFinished]) is still the load to
+     * A main-frame document committed. The address armed over the
+     * restored page ([AfterBlank.overPage]) is returned, still armed,
+     * for the caller to [claimAfterPage] once this commit has updated
+     * the tab: the first commit after the restore is that page's
+     * reload, under whatever URL it ended on (a redirect, #185 R2-F2).
+     * It goes in at the commit, not at the page's finish: the load was
+     * in flight over this page before the relaunch, and is again from
+     * before the page can take any input — so a navigation the user
+     * starts on it (a tapped link, a POST form, which never reaches
+     * `shouldOverrideUrlLoading`) replaces that load in the WebView
+     * itself, as it would have before, instead of being overwritten by
+     * it once the page finishes (#185 R3-F1).
+     */
+    internal fun afterPageCommitted(): AfterBlank? = afterBlank?.takeIf { it.overPage }
+
+    /**
+     * Whether [after] (from [afterPageCommitted]) is still the load to
      * submit now: nothing superseded it in between, it wasn't claimed
      * already, and the user hasn't stopped the tab. Disarms it either way.
      */
