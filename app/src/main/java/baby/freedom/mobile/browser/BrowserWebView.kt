@@ -123,6 +123,46 @@ internal fun nameResolutionErrorIn(headers: Map<String, String>?): String? =
         ?.firstOrNull { it.key.equals(NAME_RESOLUTION_ERROR_HEADER, ignoreCase = true) }
         ?.value
 
+/**
+ * The trust shield for a document that just committed at [url] (#97):
+ * the recorded check of the name its address shows ([displayUrl]), or
+ * `null` for an [ErrorPage] or a document the interceptor refused
+ * ([NameRefusalSlot]) — neither was served from the name's answer.
+ */
+internal fun committedNameTrust(
+    url: String?,
+    displayUrl: String,
+    refusal: NameRefusalSlot,
+    pins: EnsDocumentPins? = null,
+): NameTrust? {
+    if (url == null || ErrorPage.isErrorPage(url) || refusal.isRefused(url)) return null
+    // A document the tab's re-check served is described by the answer
+    // it was served from — which, when the lookup failed, is the tab's
+    // own earlier answer, not the session's newer one (R3-F1).
+    val name = nameIn(displayUrl) ?: return null
+    pins?.answerFor(name)?.let { (answer, trust) ->
+        // …unless the session has since recorded the name pointing at a
+        // different root (R4-F1): the fallback is content the name has
+        // already been seen leaving, the same as a raw load of a stale
+        // hash below, so it gets no shield either.
+        if (!KnownEnsNames.isCurrentRoot(name, answer)) return null
+        return trust?.let { NameTrust(name, it, answer) }
+    }
+    val trust = nameTrustFor(displayUrl) ?: return null
+    // A raw `bzz://<hash>` load shown as the name (name preservation)
+    // is the name's page only while the name still resolves to that
+    // hash (R1-F2): the name's trust says nothing about content it
+    // pointed at before. A document on the name's own origin with no
+    // pin (restored from the back/forward cache) gets the session's
+    // current answer, as before.
+    val loaded = Gateways.toDisplay(url)
+    val raw = CONTENT_ROOT_SCHEMES.any { loaded.startsWith(it) }
+    if (raw && !KnownEnsNames.isCurrentRoot(trust.name, loaded)) return null
+    return trust
+}
+
+private val CONTENT_ROOT_SCHEMES = listOf("bzz://", "ipfs://", "ipns://")
+
 /** Status for the interceptor's refusal of an ENS document. */
 internal fun statusForNameResolutionError(code: String): Int =
     if (code == "ens_lookup_failed") 502 else 404
@@ -187,23 +227,52 @@ internal fun refererOf(headers: Map<String, String>?): String? =
  * place, Back and Forward move past it as usual and Reload re-checks
  * the name. No script: the document is on the name's origin.
  */
-internal fun nameResolutionRefusal(name: String, code: String): WebResourceResponse =
+internal fun nameResolutionRefusal(
+    name: String,
+    code: String,
+    assertedProtocol: String? = null,
+): WebResourceResponse =
     WebResourceResponse(
         "text/html", "utf-8", statusForNameResolutionError(code), "Name Resolution Failed",
         mapOf(NAME_RESOLUTION_ERROR_HEADER to code, "Cache-Control" to "no-store"),
-        ByteArrayInputStream(nameResolutionRefusalHtml(name, code).toByteArray(Charsets.UTF_8)),
+        ByteArrayInputStream(
+            nameResolutionRefusalHtml(name, code, assertedProtocol).toByteArray(Charsets.UTF_8),
+        ),
     )
 
 /**
  * Title and description (HTML) of [nameResolutionRefusal]'s page for
  * [code] — the same wording `error.html` uses for that code.
+ * [assertedProtocol] is the typed scheme an `ens_wrong_protocol`
+ * refusal held the name to (#97).
  */
-internal fun nameResolutionRefusalCopy(name: String, code: String): Pair<String, String> {
+internal fun nameResolutionRefusalCopy(
+    name: String,
+    code: String,
+    assertedProtocol: String? = null,
+): Pair<String, String> {
     val system = NameSystem.forName(name)
     val label = system.label
     val tezos = system == NameSystem.TEZOS
     val chain = if (tezos) "Tezos" else "Ethereum"
     return when (code) {
+        // A Reload / Back under a typed `bzz://name.eth` whose name now
+        // points elsewhere (#97): the assertion holds, as it did when
+        // typed — see [Gateways.reverifyEnsDocument].
+        "ens_wrong_protocol" -> {
+            val network = when (assertedProtocol) {
+                "bzz" -> "Swarm"
+                "ipfs" -> "IPFS"
+                "ipns" -> "IPNS"
+                else -> "the network"
+            }
+            val scheme = assertedProtocol?.let { "<code>$it://</code>" } ?: "scheme"
+            "Name lives on a different network" to
+                "This $label name no longer resolves to $network content, which the $scheme " +
+                "address asks for, so nothing was loaded: Freedom doesn't switch networks " +
+                "behind the address bar. Enter the name on its own to follow wherever it " +
+                "points now."
+        }
         "ens_not_found" -> "No content for this $label name" to
             if (tezos) {
                 "This $label name doesn't point at a website any more. The owner may " +
@@ -247,8 +316,12 @@ internal fun nameResolutionRefusalCopy(name: String, code: String): Pair<String,
 }
 
 /** [nameResolutionRefusal]'s page. */
-internal fun nameResolutionRefusalHtml(name: String, code: String): String {
-    val (title, description) = nameResolutionRefusalCopy(name, code)
+internal fun nameResolutionRefusalHtml(
+    name: String,
+    code: String,
+    assertedProtocol: String? = null,
+): String {
+    val (title, description) = nameResolutionRefusalCopy(name, code, assertedProtocol)
     fun esc(t: String) = t.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
     val safeName = esc(name)
     // The spec's reason, as the address-bar path shows it in the details box.
@@ -2438,7 +2511,7 @@ private fun buildRefreshableWebView(
                 // …and IPFS or not by what actually committed — a link,
                 // back/forward, or a redirect can land somewhere the
                 // submit that started this load didn't name (#94).
-                if (url != null) state.ipfsLoad = ipfsLoadFor(url, state.ipfsLoad)
+                if (url != null) state.ipfsLoad = ipfsLoadFor(url, state.ipfsLoad, ensPins)
                 if (url == ABOUT_BLANK) {
                     // `about:blank` is our home sentinel — either the
                     // WebView's forced initial paint, a user-initiated
@@ -2460,6 +2533,8 @@ private fun buildRefreshableWebView(
                     }
                     state.title = ""
                     state.progress = -1
+                    // No name behind Home, so no shield (#97).
+                    state.nameTrust = null
                     // No page colour behind Home (#92). A popup's own
                     // blank page keeps the old one until it draws.
                     if (!state.blankIsPage) state.themeColorArgb = null
@@ -2489,7 +2564,7 @@ private fun buildRefreshableWebView(
                 // document.cookie before this page gets a chance to
                 // read it.
                 if (CookieHygiene.coversNavigation(url)) CookieHygiene.sweepAsync(url)
-                val display = url?.let { displayFor(it, state) }
+                val display = url?.let { displayFor(it, state, ensPins) }
                 if (display != null) {
                     // For error pages, surface the URL the user was
                     // actually trying to visit (`ens://…`, `bzz://…`)
@@ -2515,6 +2590,11 @@ private fun buildRefreshableWebView(
                     // content it describes.
                     state.addressBarText = uiDisplay
                 }
+                // The trust shield (#97) describes this document's
+                // answer, taken now — the interceptor recorded it before
+                // handing the document over. An error page or a name
+                // refusal was served from no answer, so it has none.
+                state.nameTrust = committedNameTrust(url, state.url, nameRefusal, ensPins)
                 // Refresh navigation flags here (as well as in
                 // onPageFinished) so the system-back hardware button
                 // works the instant a new page starts loading. If we
@@ -2652,7 +2732,7 @@ private fun buildRefreshableWebView(
                 // finished loading (or errored out). Happens regardless
                 // of whether the load was user-initiated reload or not.
                 refreshLayout.isRefreshing = false
-                val display = displayFor(url.orEmpty(), state)
+                val display = displayFor(url.orEmpty(), state, ensPins)
                 // See the companion comment in `onPageStarted` — for
                 // error pages the address bar / `state.url` show the
                 // URL the user was trying to visit, while the raw
@@ -3038,9 +3118,7 @@ private fun buildRefreshableWebView(
                 // the document's whose main-frame answer went out last
                 // (see [BrowserState.documentGeneration]).
                 val generation = if (mainFrame) {
-                    state.mainFrameRequested().also {
-                        noteMainFrameContentLoad(view, state, it, request!!.url.toString())
-                    }
+                    state.mainFrameRequested()
                 } else {
                     state.documentGeneration
                 }
@@ -3074,7 +3152,11 @@ private fun buildRefreshableWebView(
                 }
                 val work = state.gatewayWork.start(generation)
                 val response = if (heldBack) heldBackResponse() else try {
-                    interceptVirtualRequest(request, ensPins, view, state.onchain)
+                    interceptVirtualRequest(
+                        request, ensPins, view, state::assertedProtocolFor, state.onchain,
+                    ) { served ->
+                        noteMainFrameContentLoad(view, state, generation, served)
+                    }
                 } catch (t: Throwable) {
                     state.gatewayWork.finish(work)
                     throw t
@@ -4495,15 +4577,28 @@ private fun syntheticResponse(
  * cleanup page another tab's hold asks for is served to it only once
  * ([UnverifiedOrigins.takeClearFor]).
  *
+ * [assertedProtocol] is the requesting tab's typed-scheme assertion for
+ * a name, if its address makes one (#97,
+ * [BrowserState.assertedProtocolFor]); a document re-check holds the
+ * name to it.
+ *
  * [onchain] is the requesting tab's onchain-app documents (#123, see
  * [interceptOnchainAppRequest]); null for a service worker or a native
  * re-fetch, which are refused on an app's origin anyway.
+ *
+ * [onMainFrameRoot] hears, for a main-frame request on a virtual origin,
+ * the content root its document is about to be fetched from — after the
+ * name's re-check, before the fetch — or `null` when the re-check
+ * refused it (an error page is served instead). It is what the tab's
+ * IPFS phase line follows while the fetch runs (#94, #179 R5-F1).
  */
 internal fun interceptVirtualRequest(
     request: WebResourceRequest?,
     ensPins: EnsDocumentPins? = null,
     tab: Any? = null,
+    assertedProtocol: (name: String) -> String? = { null },
     onchain: OnchainAppTab? = null,
+    onMainFrameRoot: (ContentRoot?) -> Unit = {},
 ): WebResourceResponse? {
     val req = request ?: return null
     val url = req.url?.toString() ?: return null
@@ -4515,7 +4610,7 @@ internal fun interceptVirtualRequest(
     // runs.
     val response = interceptOnchainAppRequest(req, url, onchain)
         ?: siteDataCleanupFor(req, url, tab)
-        ?: interceptVirtualRequestFor(req, ensPins, incoming)
+        ?: interceptVirtualRequestFor(req, ensPins, incoming, assertedProtocol, onMainFrameRoot)
     if (incoming != null && response != null &&
         rendersInPlace(response.statusCode, response.mimeType, response.responseHeaders)
     ) {
@@ -4627,6 +4722,8 @@ private fun interceptVirtualRequestFor(
     req: WebResourceRequest,
     ensPins: EnsDocumentPins?,
     incoming: EnsDocumentPins.Page?,
+    assertedProtocol: (name: String) -> String?,
+    onMainFrameRoot: (ContentRoot?) -> Unit,
 ): WebResourceResponse? {
     val uri = req.url ?: return null
     val url = uri.toString()
@@ -4691,12 +4788,21 @@ private fun interceptVirtualRequestFor(
         isDocumentRequest(req.isForMainFrame, req.requestHeaders) &&
         (req.isForMainFrame || page?.uriFor(root.name) == null)
     ) {
+        val asserted = assertedProtocol(root.name)
         var web: EnsResult.Ok? = null
-        Gateways.reverifyEnsDocument(root.name, ensPins, page, onWebRecord = { web = it })?.let { code ->
+        Gateways.reverifyEnsDocument(
+            root.name, ensPins, page, asserted, onWebRecord = { web = it },
+        )?.let { code ->
+            if (req.isForMainFrame) onMainFrameRoot(null)
             web?.let { return nameWebRecordNavigation(it, pathAndQuery) }
-            return nameResolutionRefusal(root.name, code)
+            return nameResolutionRefusal(root.name, code, asserted)
         }
     }
+    // The root the document is fetched from, by the same precedence the
+    // fetch uses: a name's is the answer just pinned for this navigation
+    // — which a failed re-check can hold on an older answer than the
+    // session registry's (R5-F1).
+    if (req.isForMainFrame) onMainFrameRoot(Gateways.servedRootFor(root, page = page))
 
     // At a cold start the external endpoint settings (#125) are still
     // being read: a restored tab must not reach the embedded gateway
@@ -5226,8 +5332,21 @@ private fun isMediaLikeUrl(url: String): Boolean =
  * for Swarm content, or an external origin) to the friendly string for the
  * address bar.
  */
-internal fun displayFor(actualUrl: String, state: BrowserState): String =
-    DisplayUrl.forActualUrl(actualUrl, state.override)
+internal fun displayFor(
+    actualUrl: String,
+    state: BrowserState,
+    pins: EnsDocumentPins? = null,
+): String = DisplayUrl.forActualUrl(actualUrl, state.override, committedProtocolFor(pins))
+
+/**
+ * The transport a name is shown under on the page on screen: the one
+ * its document was served from ([pins], the tab's committed page), which
+ * a failed re-check can hold on an older answer than the session's
+ * (R3-F1) — else the session's current answer.
+ */
+internal fun committedProtocolFor(pins: EnsDocumentPins?): (String) -> String? = { name ->
+    pins?.uriFor(name)?.let(KnownEnsNames::protocolOf) ?: KnownEnsNames.protocolFor(name)
+}
 
 /**
  * Android's [WebView] auto-generates a title from the page URL when the
@@ -5255,15 +5374,19 @@ internal fun sanitizeTitle(rawTitle: String?, actualUrl: String?): String {
 /**
  * Re-derive [BrowserState.ipfsLoad] for a main-frame request to a
  * virtual dweb origin, before the (possibly slow) gateway fetch starts
- * (#94). Runs on the interceptor's thread.
+ * (#94). Runs on the interceptor's thread, from
+ * [interceptVirtualRequest]'s `onMainFrameRoot`.
  *
- * The submit flow resolves and records every ENS name it navigates to,
- * but a reload of a restored tab (the session-only [KnownEnsNames] is
- * empty after a process restart), back/forward, or an in-page link to
- * another name reach the WebView unresolved — [ipfsLoadFor] can't know
- * yet whether they lead to IPFS. Resolve the name here (the same lookup
- * [interceptVirtualRequest] is about to do, which then hits the registry)
- * so the phase line shows for the fetch itself, not only after commit.
+ * [served] is the content root the interceptor is about to fetch the
+ * document from (`null`: the name was refused). For an ENS name that is
+ * the answer its re-check just pinned for this navigation — not the
+ * session registry's, which another tab can have moved to a different
+ * transport while this tab's failed re-check serves its own earlier
+ * answer (R5-F1). A reload of a restored tab (the session-only
+ * [KnownEnsNames] is empty after a process restart), back/forward, or
+ * an in-page link to another name reach the WebView unresolved; the
+ * re-check resolves them first, so the phase line shows for the fetch
+ * itself, not only after commit.
  *
  * The request belongs to the navigation [generation] the WebView was last handed
  * ([BrowserState.webViewGeneration]), which is not necessarily the tab's
@@ -5276,15 +5399,18 @@ private fun noteMainFrameContentLoad(
     view: WebView?,
     state: BrowserState,
     generation: Int,
-    url: String,
+    served: ContentRoot?,
 ) {
-    val root = VirtualOrigin.parseHostOfUrl(url) ?: return
-    if (root is ContentRoot.Ens) Gateways.resolveEnsRoot(root.name)
+    val ipfs = servedFromIpfs(served)
     view?.post {
-        if (mainFrameNoteApplies(generation, state.loadGeneration)) {
-            state.ipfsLoad = ipfsLoadFor(url, state.ipfsLoad)
-        }
+        if (mainFrameNoteApplies(generation, state.loadGeneration)) state.ipfsLoad = ipfs
     }
+}
+
+/** Whether a document fetched from [served] comes from the IPFS node. */
+internal fun servedFromIpfs(served: ContentRoot?): Boolean = when (served) {
+    is ContentRoot.Ipfs, is ContentRoot.IpnsKey, is ContentRoot.IpnsName -> true
+    is ContentRoot.Bzz, is ContentRoot.Ens, null -> false
 }
 
 /**

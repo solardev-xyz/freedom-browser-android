@@ -241,7 +241,7 @@ class VirtualOriginContractTest {
         // not the session's first one. (Leaving the name's page dropped
         // this tab's pin for it.)
         testdappContent = FixtureGateway.REF_B
-        KnownEnsNames.record("bzz://${FixtureGateway.REF_A}", "testdapp.eth")
+        KnownEnsNames.record("bzz://${FixtureGateway.REF_A}", "testdapp.eth", EnsTrust.ASSUMED)
         assertEquals(null, harness.ensPins.uriFor("testdapp.eth"))
         val before = ensLookups.get()
         harness.js(

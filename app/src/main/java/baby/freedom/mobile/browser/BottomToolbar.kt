@@ -1775,9 +1775,10 @@ internal fun BottomToolbar(
                     labelCenter = labelOffset,
                     labelWidth = labelDrawnWidth,
                 )
-                Image(
-                    painter = painterResource(badge.drawableRes),
-                    contentDescription = badge.contentDescription,
+                ProtocolBadgeMark(
+                    badge = badge,
+                    // The trust shield on its corner (#97).
+                    trust = state.nameTrust,
                     modifier = Modifier
                         .align(Alignment.Center)
                         .size(AddressPillBadgeSize)
@@ -2555,9 +2556,9 @@ private fun AddressField(
                                     .collapsingControl(slotScale, towardsStart = true),
                                 verticalAlignment = Alignment.CenterVertically,
                             ) {
-                                Image(
-                                    painter = painterResource(badge.drawableRes),
-                                    contentDescription = badge.contentDescription,
+                                ProtocolBadgeMark(
+                                    badge = badge,
+                                    trust = state.nameTrust,
                                     modifier = Modifier.size(AddressPillBadgeSize),
                                 )
                                 Spacer(Modifier.width(AddressPillBadgeGap))
@@ -2933,6 +2934,9 @@ private fun OverflowMenuButton(
     onToggleAdblock: () -> Unit,
 ) {
     var menuExpanded by remember { mutableStateOf(false) }
+    // The trust shield's details (#97), opened from the menu's first row.
+    var trustShown by remember { mutableStateOf(false) }
+    val nameTrust = state.nameTrust
     // We hand-roll the anchor positioning rather than rely on
     // Material3's [DropdownMenu]: its Popup mis-anchors on the very
     // first open and only recovers on subsequent opens. Tracking the
@@ -2970,6 +2974,12 @@ private fun OverflowMenuButton(
                 modifier = Modifier.size(CapsuleFieldIconSize),
             )
         }
+        if (trustShown && nameTrust != null) {
+            TrustDetailsDialog(
+                trust = nameTrust,
+                onDismiss = { trustShown = false },
+            )
+        }
         if (menuExpanded && anchorBounds != null) {
             Popup(
                 popupPositionProvider = AnchoredAboveProvider(anchorBounds!!, popupGapPx),
@@ -2991,6 +3001,21 @@ private fun OverflowMenuButton(
                             .width(IntrinsicSize.Max)
                             .padding(vertical = 8.dp),
                     ) {
+                        // How the page's name was checked (#97) — the
+                        // shield on the protocol badge, in words, and
+                        // the way to its evidence. The badge itself is
+                        // no hit target (a tap there edits the address),
+                        // so this row is where the shield opens.
+                        if (nameTrust != null) {
+                            DropdownMenuItem(
+                                text = { MenuItemLabel(nameTrust.tier.title) },
+                                leadingIcon = { TrustShieldIcon(nameTrust) },
+                                onClick = {
+                                    menuExpanded = false
+                                    trustShown = true
+                                },
+                            )
+                        }
                         DropdownMenuItem(
                             text = {
                                 MenuItemLabel(

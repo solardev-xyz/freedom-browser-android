@@ -37,6 +37,9 @@ import java.net.URLEncoder
  *  - `continue` — optional URL a "Continue once" button navigates to:
  *                the not-cross-checked ENS warning's way on (#96,
  *                [EnsGate.continueUrl]).
+ *  - `resolved` — `ens_wrong_protocol` only: the transport the name
+ *                does resolve to (#97), for "resolves to IPFS, not
+ *                Swarm" and a button that opens it there.
  */
 object ErrorPage {
     const val URL: String = "file:///android_asset/error/error.html"
@@ -48,6 +51,12 @@ object ErrorPage {
         retryUrl: String? = null,
         detail: String? = null,
         continueUrl: String? = null,
+        /**
+         * `ens_wrong_protocol` only (#97): the transport the name does
+         * resolve to, for the page's "resolves to X, not Y" and the
+         * button that opens it there.
+         */
+        resolvedProtocol: String? = null,
     ): String {
         val params = buildList {
             add("error=${encode(errorCode)}")
@@ -56,6 +65,7 @@ object ErrorPage {
             if (retryUrl != null) add("retry=${encode(retryUrl)}")
             if (detail != null) add("detail=${encode(detail)}")
             if (continueUrl != null) add("continue=${encode(continueUrl)}")
+            if (resolvedProtocol != null) add("resolved=${encode(resolvedProtocol)}")
         }
         return "$URL?${params.joinToString("&")}"
     }

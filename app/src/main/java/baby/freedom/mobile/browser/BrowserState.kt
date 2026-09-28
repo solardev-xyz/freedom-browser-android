@@ -63,8 +63,27 @@ class BrowserState(val id: Long, val private: Boolean = false) {
      * override only catches in-manifest navigation within a tab, the
      * registry catches raw `bzz://<hash>` loads of a previously-resolved
      * hash in any tab.
+     *
+     * A bare-name [prefix] (a generic `name.eth` submit) makes no claim
+     * about the transport, so what the bar shows ([shown]) follows the
+     * name's current answer — `ipfs://vitalik.eth` (#97). A scheme
+     * prefix (`bzz://name.eth`, typed) is an assertion
+     * ([assertedProtocol]) and is shown as typed.
      */
-    data class Override(val baseUrl: String, val prefix: String)
+    data class Override(val baseUrl: String, val prefix: String) {
+        /** The prefix as the address bar shows it; see [DisplayUrl.withTransport]. */
+        val shown: String get() = DisplayUrl.withTransport(prefix)
+
+        /**
+         * `bzz` / `ipfs` / `ipns` when the prefix is a typed-scheme form
+         * — the transport this tab's address asserts, which a document
+         * re-check holds the name to ([Gateways.reverifyEnsDocument]).
+         * `null` for a bare name, which accepts any transport.
+         */
+        val assertedProtocol: String?
+            get() = prefix.substringBefore("://", "").lowercase()
+                .takeIf { it in ASSERTING_SCHEMES }
+    }
 
     var url by mutableStateOf("")
         internal set
@@ -103,6 +122,14 @@ class BrowserState(val id: Long, val private: Boolean = false) {
      */
     var resolving by mutableStateOf(false)
         internal set
+
+    /**
+     * How the name the page on screen was reached through was checked
+     * (#96) — the trust shield on the protocol badge (#97, [TrustShield]).
+     * Taken at each document's commit from the answer it was served
+     * from; `null` for a page that isn't a name's (or is an error page).
+     */
+    internal var nameTrust by mutableStateOf<NameTrust?>(null)
 
     /**
      * The "Continue once" the tab's *not cross-checked* warning offers,
@@ -796,6 +823,11 @@ class BrowserState(val id: Long, val private: Boolean = false) {
         // A new load supersedes whatever the last Stop aborted, so the
         // progress latch opens again.
         loadAborted = false
+        // For a name, the session's answer is only a first guess: the
+        // main-frame interceptor re-checks it and, before the fetch
+        // starts, sets the flag from the answer it actually serves —
+        // which a failed re-check can hold on this tab's older one
+        // (see `noteMainFrameContentLoad`, #179 R5-F1).
         ipfsLoad = ipfsLoadFor(url, ipfsLoad)
         val loadable = Gateways.toLoadable(url)
         pendingUrl = loadable
@@ -835,6 +867,24 @@ class BrowserState(val id: Long, val private: Boolean = false) {
         navCounter++
     }
 
+    /**
+     * The transport this tab's address asserts for [name] (#97): the
+     * typed scheme of the display override, if that override is the
+     * name's own origin. `null` — any transport — otherwise. Read from
+     * the interceptor's threads for a document's re-check.
+     */
+    fun assertedProtocolFor(name: String): String? {
+        val o = override ?: return null
+        if (o.baseUrl != VirtualOrigin.originFor(ContentRoot.Ens(name.lowercase()))) return null
+        return o.assertedProtocol
+    }
+
+    /** Is [url] on the display override's origin (its manifest)? */
+    fun isUnderOverride(url: String): Boolean {
+        val o = override ?: return false
+        return startsWithPrefix(url, o.baseUrl)
+    }
+
     /** Drop any active ENS display override. Call before loading a URL
      *  that the user explicitly typed (and that isn't an ENS name). */
     fun clearEnsOverride() {
@@ -860,6 +910,7 @@ class BrowserState(val id: Long, val private: Boolean = false) {
         cancelPendingProbe()
         capsuleCollapse.expand()
         override = null
+        nameTrust = null
         url = ""
         title = ""
         addressBarText = ""
@@ -894,10 +945,55 @@ class BrowserState(val id: Long, val private: Boolean = false) {
      */
     fun effectiveFetchUrl(raw: String): String {
         val o = override ?: return raw
-        if (raw.startsWith(o.prefix)) {
-            return o.baseUrl + raw.substring(o.prefix.length)
+        for (p in listOfNotNull(o.prefix, shownPrefixOf(o)).distinct()) {
+            if (startsWithPrefix(raw, p)) return o.baseUrl + raw.substring(p.length)
         }
         return raw
+    }
+
+    /**
+     * What Reload submits: the page on screen ([url]), or the pending
+     * address if nothing has committed yet.
+     *
+     * A generic ENS load shows its transport (`ipfs://vitalik.eth/p`,
+     * #97), but that scheme is the bar describing the answer, not the
+     * user asserting one — so Reload hands back the override's own
+     * bare form, which [effectiveFetchUrl] maps onto the loaded
+     * manifest, instead of re-submitting the shown string as a
+     * typed-scheme assertion.
+     *
+     * Typing the scheme the bar already shows for the name gets the
+     * same treatment: [effectiveFetchUrl] maps it through the shown
+     * prefix onto the generic override, so it doesn't assert either
+     * (R1-F4). A typed scheme asserts when it is a different one
+     * (`bzz://vitalik.eth` over a shown `ipfs://vitalik.eth/`) or
+     * when the tab isn't already on the name.
+     */
+    fun reloadUrl(): String {
+        val shown = url.ifBlank { addressBarText }
+        val o = override ?: return shown
+        val p = shownPrefixOf(o) ?: return shown
+        if (p != o.prefix && startsWithPrefix(shown, p)) {
+            return o.prefix + shown.substring(p.length)
+        }
+        return shown
+    }
+
+    /**
+     * The override's prefix in the form the bar *showed* it for the page
+     * on screen — the scheme [url] was committed with, not the one
+     * [Override.shown] would pick now. A generic name's transport is
+     * read at display time, so it can have moved since (another tab's
+     * re-check, R1-F1); what the user saw, and edits, is this form.
+     * Falls back to [Override.shown] before anything has committed.
+     */
+    private fun shownPrefixOf(o: Override): String? {
+        if (o.prefix.contains("://")) return o.prefix
+        if (url.isBlank()) return o.shown
+        val scheme = url.substringBefore("://", "")
+        if (scheme !in ASSERTING_SCHEMES) return null
+        val p = "$scheme://${o.prefix}"
+        return p.takeIf { startsWithPrefix(url, it) }
     }
 
     /** Tokens the WebView client should not treat as "new" navigations. */
@@ -913,6 +1009,17 @@ class BrowserState(val id: Long, val private: Boolean = false) {
         canGoBack = false
         canGoForward = false
         override = null
+        nameTrust = null
         thumbnail = null
     }
 }
+
+/**
+ * Does [s] start with [prefix] at an address boundary — the prefix is
+ * the whole host, not `vitalik.eth` inside `vitalik.ethx`?
+ */
+private fun startsWithPrefix(s: String, prefix: String): Boolean =
+    s.startsWith(prefix) && (s.length == prefix.length || s[prefix.length] in "/?#")
+
+/** Schemes that, typed in front of a name, assert its transport (#97). */
+private val ASSERTING_SCHEMES = setOf("bzz", "ipfs", "ipns")

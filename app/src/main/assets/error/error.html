@@ -191,6 +191,15 @@
       const retryUrl = params.get('retry') || url;
       const detail = params.get('detail');
       const continueUrl = params.get('continue');
+      const resolved = params.get('resolved');
+      // What the Try Again button says; a page can name its way on.
+      let retryLabel = null;
+      const NETWORKS = { bzz: 'Swarm', ipfs: 'IPFS', ipns: 'IPNS' };
+
+      function schemeOf(u) {
+        const m = (u || '').match(/^([a-z][a-z0-9+.-]*):\/\//i);
+        return m ? m[1].toLowerCase() : null;
+      }
       const protocolUrl = toProtocolUrl(url);
       const protocol = explicitProtocol || detectProtocol(url);
 
@@ -230,13 +239,23 @@
               : "This " + nameLabel + " name doesn't point at any content yet. The owner may not have set a " +
                 '<code>contenthash</code> record, or ' + otherCause + '.';
         } else if (error === 'ens_wrong_protocol') {
+          // #97: a typed scheme is an assertion, never silently switched.
           titleEl.textContent = 'Name lives on a different network';
-          descriptionEl.innerHTML =
-            'This ' + nameLabel + ' name resolves to content on a different network than the ' +
-            'scheme you typed asks for. Try the name on its own &mdash; the browser ' +
-            'will follow wherever its ' +
-            (nameLabel === 'Tezos Domains' ? 'website record' : '<code>contenthash</code>') +
-            ' points.';
+          const asserted = schemeOf(url);
+          if (resolved && asserted && NETWORKS[resolved] && NETWORKS[asserted]) {
+            descriptionEl.textContent =
+              'This ' + nameLabel + ' name resolves to ' + NETWORKS[resolved] + ' content, not ' +
+              NETWORKS[asserted] + '. The ' + asserted + ':// you typed asks for ' +
+              NETWORKS[asserted] + ' only, so Freedom did not switch networks for you.';
+            retryLabel = 'Open on ' + NETWORKS[resolved];
+          } else {
+            descriptionEl.innerHTML =
+              'This ' + nameLabel + ' name resolves to content on a different network than the ' +
+              'scheme you typed asks for. Try the name on its own &mdash; the browser ' +
+              'will follow wherever its ' +
+              (nameLabel === 'Tezos Domains' ? 'website record' : '<code>contenthash</code>') +
+              ' points.';
+          }
         } else if (error === 'ens_unsupported_codec') {
           titleEl.textContent = 'Unsupported content format';
           descriptionEl.innerHTML =
@@ -345,6 +364,7 @@
         }
 
         detailsEl.textContent = parts.join('\n') || 'Unknown error';
+        if (retryLabel) document.getElementById('retry-btn').textContent = retryLabel;
       }
 
       displayError();
