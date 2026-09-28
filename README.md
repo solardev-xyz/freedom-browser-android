@@ -62,15 +62,16 @@ source .envrc   # if you haven't: cp .envrc.example .envrc && edit to taste
 #    which is gitignored here and must exist before Gradle can build the app.
 #    Needs cargo-ndk and ANDROID_NDK_HOME; rustup picks the toolchain from
 #    the repo's rust-toolchain.toml.
-#    Use the FFI_REF pinned in release.yml, with ant's `chain` feature
-#    and the embedded Radicle node on (see "Building libfreedom_mobile_ffi.so"
-#    below). Chained with && so a failed step (e.g. enable-ffi-chain.sh
-#    rejecting a reshaped cargo call) stops before a chain-less .so is
-#    built or copied.
+#    Use the FFI_REF pinned in release.yml, with ant's `chain` feature,
+#    the embedded Radicle node and the Tor client on (see "Building
+#    libfreedom_mobile_ffi.so" below). Chained with && so a failed step
+#    (e.g. enable-ffi-chain.sh rejecting a reshaped cargo call) stops
+#    before a chain-less .so is built or copied.
 git clone https://github.com/solardev-xyz/freedom-mobile-ffi.git /tmp/freedom-mobile-ffi &&
-  git -C /tmp/freedom-mobile-ffi checkout 45203550b4ec1876a6a771f4d1dd32f3504b084c &&
+  git -C /tmp/freedom-mobile-ffi checkout 7c363d1610c0e6c56ae9483638a44719a6baa570 &&
   scripts/enable-ffi-chain.sh /tmp/freedom-mobile-ffi &&
   scripts/enable-ffi-radicle.sh /tmp/freedom-mobile-ffi &&
+  scripts/enable-ffi-tor.sh /tmp/freedom-mobile-ffi &&
   ( cd /tmp/freedom-mobile-ffi && ./scripts/build-android.sh ) &&
   mkdir -p swarmnode/src/main/jniLibs &&
   cp -r /tmp/freedom-mobile-ffi/target/android/jniLibs/. swarmnode/src/main/jniLibs/
@@ -91,7 +92,7 @@ git clone --branch v3.0.0 https://github.com/corpus-core/colibri-stateless.git /
 #   adb install -r app/build/outputs/apk/debug/app-arm64-v8a-debug.apk
 ```
 
-The build produces three debug APKs — `app-arm64-v8a-debug.apk` (~116 MiB), `app-x86_64-debug.apk` (~123 MiB), and `app-universal-debug.apk` (~170 MiB, all ABIs). See [APK size](#apk-size) for what to ship.
+The build produces three debug APKs — `app-arm64-v8a-debug.apk` (~115 MiB), `app-x86_64-debug.apk` (~121 MiB), and `app-universal-debug.apk` (~163 MiB, all ABIs). See [APK size](#apk-size) for what to ship.
 
 ## Running on an emulator
 
@@ -168,6 +169,16 @@ Settings → **Ad blocking** switches four filter-list categories, as on desktop
 
 Filter list data is © the list authors, dual-licensed GPLv3+ / CC BY-SA 3.0+, and redistributed under CC BY-SA (see `app/src/main/assets/adblock/README.md`).
 
+## Tor (`.onion` sites)
+
+`.onion` sites open through an embedded [Arti](https://gitlab.torproject.org/tpo/core/arti) Tor client (#143), as on desktop: **onion-only** (clearnet sites, the node gateways and the dweb protocols never touch Tor), **fail closed** (with Tor off or stopped, an onion site is refused, never resolved or dialled directly — except as a WebRTC server name a page chooses itself, see *Routing*) and **opt-in** (off by default).
+
+- **Settings → Tor**: *Tor for .onion sites* turns the integration on; *Start Tor at launch* starts the client at launch. Otherwise start and stop it with the switch in the **Tor** card of the Nodes page, which also shows the status (bootstrap progress, then *Connected*), the Arti version and the SOCKS port.
+- **Client**: Arti 0.46 in `libfreedom_mobile_ffi.so` (freedom-mobile-ffi's opt-in `tor` feature, `freedom_tor_*`, header `swarmnode/src/main/cpp/freedom_tor.h`), wrapped by `baby.freedom.swarm.TorNode`. It runs in its own `:tor` process (`TorService`, bound only while Tor runs, so a fault in it can't take the browser down) behind a SOCKS5 listener on a free loopback port. The listener only connects to `.onion` names: an IP literal or a clearnet name is refused, so a misrouted request can never leave through a Tor exit. State and directory cache are kept in `files/tor/`.
+- **Routing** (`TorRouting.kt`): the WebView's proxy override (androidx.webkit `ProxyController`) in reverse-bypass mode, so only `*.onion` uses the proxy. It is in place from launch, pointing at the Tor port while the client listens and at port 1 (nothing listens there, so the connection is refused) otherwise. Chromium's SOCKS5 sends the hostname to Tor, so an onion page or resource is never looked up in DNS. WebRTC is the exception: Chromium resolves an `RTCPeerConnection`'s STUN/TURN server names itself, past both the proxy override and the interceptor, so a page that lists a `.onion` name in its own `iceServers` sends that name to system DNS. Only the page's own chosen string leaks that way, nothing of the user's browsing, and no WebView API can gate it. On top of that, the request interceptor answers an onion page with *Tor is off* / *Tor isn't running* in place while no port is routed. Downloads and *Save image* send an onion URL through the same port, or refuse it without one. An onion RPC endpoint is refused. A typed bare `….onion` opens over `http://`.
+- **Needs** a WebView with `PROXY_OVERRIDE_REVERSE_BYPASS` (Chromium 105+). On an older one the switch stays off and onion sites are refused.
+- **Not isolated per tab**: every tab, private ones included, shares the one Tor client. Each onion service gets its own circuits, but two tabs on the same onion service may share one.
+
 ## Project layout
 
 ```
@@ -183,6 +194,7 @@ freedom-browser-android/
 │   ├── src/main/cpp/             # vendored ant.h + freedom_ipfs.h, JNI shims over both C APIs
 │   └── src/main/java/baby/freedom/swarm/
 │       ├── SwarmNode.kt          # ant lifecycle + StateFlow<NodeInfo>
+│       ├── TorNode.kt            # Arti (Tor) lifecycle + StateFlow<TorInfo>
 │       ├── AntNative.kt          # raw JNI surface over the ant C API
 │       ├── IpfsNode.kt           # freedom-ipfs lifecycle + StateFlow<IpfsInfo>
 │       ├── FreedomIpfsNative.kt  # raw JNI surface over the freedom-ipfs C API
@@ -228,7 +240,7 @@ FREEDOM_ANDROID="$PWD"
 # 1. Clone freedom-mobile-ffi at the ref release.yml pins as FFI_REF,
 #    somewhere outside this repo.
 git clone https://github.com/solardev-xyz/freedom-mobile-ffi.git /tmp/freedom-mobile-ffi &&
-  git -C /tmp/freedom-mobile-ffi checkout 45203550b4ec1876a6a771f4d1dd32f3504b084c
+  git -C /tmp/freedom-mobile-ffi checkout 7c363d1610c0e6c56ae9483638a44719a6baa570
 
 # 2. Cross-compile both ABIs. Needs cargo-ndk + ANDROID_NDK_HOME; rustup
 #    installs the pinned toolchain + targets from rust-toolchain.toml.
@@ -239,10 +251,12 @@ git clone https://github.com/solardev-xyz/freedom-mobile-ffi.git /tmp/freedom-mo
 #    feature back — the same helper release.yml calls — and fails if the
 #    script's cargo call has changed shape.
 #    scripts/enable-ffi-radicle.sh then extends that to `chain,radicle`,
-#    the embedded Radicle node (see below).
+#    the embedded Radicle node, and scripts/enable-ffi-tor.sh to
+#    `chain,radicle,tor`, the Arti client for .onion (see below).
 #    Chained with && so a failed helper stops before a chain-less build.
 "$FREEDOM_ANDROID/scripts/enable-ffi-chain.sh" /tmp/freedom-mobile-ffi &&
   "$FREEDOM_ANDROID/scripts/enable-ffi-radicle.sh" /tmp/freedom-mobile-ffi &&
+  "$FREEDOM_ANDROID/scripts/enable-ffi-tor.sh" /tmp/freedom-mobile-ffi &&
   cd /tmp/freedom-mobile-ffi &&
   ./scripts/build-android.sh
 
@@ -263,6 +277,8 @@ scripts/generate-radicle-bindings.sh /tmp/freedom-mobile-ffi           # rewrite
 scripts/generate-radicle-bindings.sh /tmp/freedom-mobile-ffi --check   # what release.yml runs: fail if stale
 ```
 
+The `tor` feature adds the Arti Tor client for `.onion` sites (#143; see [Tor](#tor-onion-sites)): freedom-mobile-ffi's own `freedom_tor_*` C surface, driven through `swarmnode/src/main/cpp/tor_jni.c` (header `freedom_tor.h`, vendored from `include/` at `FFI_REF`; refresh it with the `.so`). It adds about 7 MiB per ABI to the library. release.yml checks all five `freedom_tor_*` exports after the build, since `libfreedom_jni.so` links against them. A library built without `tor` fails that link.
+
 ## Colibri: proven name resolution
 
 ENS, WNS and GNS names are first resolved through corpus.core's [Colibri](https://github.com/corpus-core/colibri-stateless) stateless verifier (#100): a remote prover (`mainnet1.colibri-proof.tech`, then `mainnet.colibri-proof.tech`) builds a proof of the Universal Resolver's (or NameNFT registry's) answer, and the app checks it on the device against Ethereum's sync committee — the shield's top tier, *Proven name* (a seal, where the quorum's *Verified name* is a shield). Settings match desktop's and iOS's: ZK sync-committee proofs, privacy mode *basic* (the call's storage reads go to the name-resolution RPC endpoints and are checked against the proven state root), and a proof for `latest` older than 60 s is refused. When no proof arrives within 6 s — prover down, a revert that proves nothing, not in this build, or *Settings → Name resolution → Colibri proofs* off — the lookup goes on to the RPC quorum as before; a call still running carries on in the background (up to 60 s) so a first-run bootstrap isn't wasted.
@@ -271,15 +287,17 @@ ENS, WNS and GNS names are first resolved through corpus.core's [Colibri](https:
 
 ## APK size
 
-The combined node library is ~34 MiB (arm64) / ~39 MiB (x86_64) with Radicle and dominates the APK — everything else (dex, resources, the JNI shim) is under 6 MiB in a release build.
+The combined node library is ~41 MiB (arm64) / ~47 MiB (x86_64) with Radicle and Tor and dominates the APK — everything else (dex, resources, the JNI shim) is under 6 MiB in a release build.
 
 `app/build.gradle.kts` already enables per-ABI splits (`arm64-v8a` + `x86_64`) alongside a universal fallback, so every build produces:
 
 | APK | Release | Debug | Use |
 |---|---|---|---|
-| `app-arm64-v8a-*.apk` | ~43 MiB | ~107 MiB | Physical arm64 devices, Apple Silicon emulators |
-| `app-x86_64-*.apk` | ~48 MiB | ~112 MiB | x86_64 Android emulators |
-| `app-universal-*.apk` | ~82 MiB | ~147 MiB | Fallback / `:installDebug` default |
+| `app-arm64-v8a-*.apk` | ~50 MiB | ~115 MiB | Physical arm64 devices, Apple Silicon emulators |
+| `app-x86_64-*.apk` | ~56 MiB | ~121 MiB | x86_64 Android emulators |
+| `app-universal-*.apk` | ~98 MiB | ~163 MiB | Fallback / `:installDebug` default |
+
+The Tor client (#143) accounts for +6.7 MiB of the arm64 release APK and +7.8 MiB of the x86_64 one (52,170,224 vs 45,103,285 and 58,625,049 vs 50,460,382 bytes, measured against the same tree built without the `tor` feature).
 
 (For context: shipping ant and freedom-ipfs as two separate `.so`s cost ~11 MiB more per ABI in duplicated Rust std/tokio/libp2p/SQLite; the gomobile-era APKs were 157–456 MiB.)
 

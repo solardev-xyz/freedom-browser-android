@@ -10,7 +10,6 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import java.io.IOException
 import java.net.ConnectException
-import java.net.HttpURLConnection
 import java.net.SocketTimeoutException
 import java.net.URL
 import java.net.UnknownHostException
@@ -139,14 +138,13 @@ class GatewayProbe {
         return try {
             withContext(Dispatchers.IO) {
                 withTimeout(attemptTimeoutMs) {
-                    val conn = (URL(headUrl).openConnection() as HttpURLConnection).apply {
+                    // Redirects followed hop by hop through TorRouting.
+                    val conn = TorRouting.openFollowingRedirects(URL(headUrl)) {
                         requestMethod = "HEAD"
                         connectTimeout = attemptTimeoutMs.toInt().coerceAtLeast(1_000)
                         readTimeout = attemptTimeoutMs.toInt().coerceAtLeast(1_000)
-                        instanceFollowRedirects = true
                     }
                     try {
-                        conn.connect()
                         when (val status = conn.responseCode) {
                             200 -> AttemptResult.Ok
                             404, 500 -> AttemptResult.TransientHttp

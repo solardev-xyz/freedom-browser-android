@@ -482,7 +482,7 @@ internal const val LIST_DEADLINE_MS = 5 * 60_000L
  */
 private suspend fun httpGetCapped(url: String, maxBytes: Long, deadlineMs: Long): ByteArray? =
     withHardDeadline(deadlineMs) { guard ->
-        val conn = (URL(url).openConnection() as HttpURLConnection).apply {
+        val conn = (TorRouting.openConnection(URL(url)) as HttpURLConnection).apply {
             connectTimeout = 15_000
             readTimeout = 60_000
             instanceFollowRedirects = false
