@@ -65,7 +65,8 @@ internal object AdblockCosmetic {
                     // asking for good: a tab restored after process
                     // death would get no hiding at all (#192). Answer
                     // once the build lands (or its deadline passes)
-                    // instead; this is the main thread, so wait off it.
+                    // instead; this is the main thread, so suspend —
+                    // the wait holds no thread, however many frames ask.
                     if (Adblock.firstBuildPending) {
                         scope.launch {
                             Adblock.awaitFirstBuild()

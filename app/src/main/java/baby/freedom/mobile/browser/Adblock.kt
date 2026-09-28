@@ -19,6 +19,7 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.io.ByteArrayInputStream
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -284,6 +285,9 @@ internal class FirstBuildGate(
 ) {
     private val latch = CountDownLatch(1)
 
+    /** Completed with [latch], for [awaitSuspending]: waiting on it parks no thread. */
+    private val landed = CompletableDeferred<Unit>()
+
     /** When waiting stops, on [clock]; 0 before [open]. */
     @Volatile
     private var deadline = 0L
@@ -294,7 +298,10 @@ internal class FirstBuildGate(
     }
 
     /** The first build has landed. */
-    fun ready() = latch.countDown()
+    fun ready() {
+        latch.countDown()
+        landed.complete(Unit)
+    }
 
     val isReady: Boolean get() = latch.count == 0L
 
@@ -318,8 +325,19 @@ internal class FirstBuildGate(
         }
     }
 
-    /** [await], off the calling thread: for the main thread, which must never block on it. */
-    suspend fun awaitSuspending(): Boolean = if (isReady) true else withContext(Dispatchers.IO) { await() }
+    /**
+     * [await] for a coroutine (a frame's deferred cosmetic answer on the
+     * main thread): suspends instead of blocking, so however many frames
+     * wait, none holds a thread — not the main one, not one of
+     * [Dispatchers.IO]'s.
+     */
+    suspend fun awaitSuspending(): Boolean {
+        if (isReady) return true
+        if (deadline == 0L) return false
+        val left = deadline - clock()
+        if (left <= 0) return false
+        return withTimeoutOrNull(left) { landed.await() } != null
+    }
 }
 
 /** What Settings shows about the engine. */
