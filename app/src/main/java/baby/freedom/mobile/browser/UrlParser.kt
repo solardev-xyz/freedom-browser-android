@@ -4,7 +4,8 @@ package baby.freedom.mobile.browser
  * Turn whatever the user typed into an actual URL to load.
  *
  *  - keeps `http://`, `https://`, `bzz://`, `about:`, `file:`, `data:` as-is
- *  - bare hosts like `example.com` or `1.1.1.1:8080` → prepend `https://`
+ *  - bare hosts like `example.com` or `1.1.1.1:8080` → prepend `https://`,
+ *    except a `.onion` host, which gets `http://` as on desktop (#143)
  *  - a host with a port, `localhost:8700/x` or `example.com:8080/x`,
  *    which the scheme check would take for a `localhost:` scheme →
  *    prepend `http://`, the address the WebView fixes it up to and
@@ -37,7 +38,13 @@ object UrlParser {
         if (trimmed.isEmpty()) return "about:blank"
         if (isHostPort(trimmed)) return "http://$trimmed"
         if (schemeRegex.containsMatchIn(trimmed)) return trimmed
-        if (isBareHost(trimmed)) return "https://$trimmed"
+        if (isBareHost(trimmed)) {
+            // Onion services are addressed over plain http: the onion
+            // address itself authenticates and encrypts (#143), and few
+            // carry a certificate.
+            val host = trimmed.substringBefore('/').substringBefore('?').substringBefore('#')
+            return if (isOnionHost(host)) "http://$trimmed" else "https://$trimmed"
+        }
         return searchUrl(trimmed, searchTemplate)
     }
 

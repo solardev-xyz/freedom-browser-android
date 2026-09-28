@@ -19,10 +19,13 @@
 # that here (this workflow refuses to build otherwise) and reports it on
 # every PR (ffi-ref.yml — a status check only, since main has no branch
 # protection).
-# UNRELEASED: pinned to the alan/compose-tracing-layers commit that adds
-# freedom_mobile_init_logging (#156) until freedom-mobile-ffi tags it, so
-# that check fails (and this workflow refuses to build) until it's retagged.
-# The library is built with ant's `chain` feature (see the build step).
+# UNRELEASED: pinned to the alan/arti-tor commit that adds the Tor client
+# (#143, freedom-mobile-ffi#4), one commit on top of v0.12.2 (tag-pinned
+# ant v0.5.47 / freedom-ipfs v0.4.4), until freedom-mobile-ffi merges and
+# tags it, so that check fails (and this workflow refuses to build) until
+# it's retagged.
+# The library is built with ant's `chain` feature, the Radicle node and
+# the Tor client (see the build step).
 
 name: release
 
@@ -35,7 +38,7 @@ permissions:
   contents: write
 
 env:
-  FFI_REF: v0.12.2
+  FFI_REF: 7c363d1610c0e6c56ae9483638a44719a6baa570
 
 jobs:
   release:
@@ -74,15 +77,26 @@ jobs:
           export ANDROID_NDK_HOME="$ANDROID_NDK_ROOT"
           cd freedom-mobile-ffi
           # build-android.sh passes --no-default-features, which drops
-          # both `chain` and `radicle`. Put `chain` back (ant's on-chain
-          # /wallet, /stamps, /chequebook gateway surfaces), then extend
-          # it to `chain,radicle` (the embedded Radicle node). The helpers
-          # fail the job if the script's cargo call ever changes shape
-          # under a new FFI_REF; they're the same ones the README's local
-          # build uses.
+          # `chain` and `radicle` (and `tor` is opt-in). Put `chain` back
+          # (ant's on-chain /wallet, /stamps, /chequebook gateway
+          # surfaces), then extend it to `chain,radicle` (the embedded
+          # Radicle node) and `chain,radicle,tor` (the Arti client for
+          # .onion, #143). The helpers fail the job if the script's cargo
+          # call ever changes shape under a new FFI_REF; they're the same
+          # ones the README's local build uses.
           "$GITHUB_WORKSPACE/scripts/enable-ffi-chain.sh" .
           "$GITHUB_WORKSPACE/scripts/enable-ffi-radicle.sh" .
+          "$GITHUB_WORKSPACE/scripts/enable-ffi-tor.sh" .
           ./scripts/build-android.sh
+          # build-android.sh checks the node exports but not Tor's; the
+          # JNI shim links against these, so fail here, not at link time.
+          NM="$(ls "$ANDROID_NDK_HOME"/toolchains/llvm/prebuilt/*/bin/llvm-nm | head -1)"
+          for so in target/android/jniLibs/*/libfreedom_mobile_ffi.so; do
+            syms="$("$NM" -D "$so")"
+            for sym in freedom_tor_start freedom_tor_stop freedom_tor_status_json freedom_tor_version freedom_tor_string_free; do
+              grep -q " T $sym\$" <<<"$syms" || { echo "::error::$so is missing $sym"; exit 1; }
+            done
+          done
           mkdir -p "$GITHUB_WORKSPACE/swarmnode/src/main/jniLibs"
           cp -r target/android/jniLibs/. "$GITHUB_WORKSPACE/swarmnode/src/main/jniLibs/"
 

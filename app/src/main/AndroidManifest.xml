@@ -123,5 +123,16 @@
             android:exported="false"
             android:process=":myotis" />
 
+        <!--
+          The embedded Tor client (#143, Arti) runs in its own `:tor`
+          process: independent of the Swarm toggle, exited when the user
+          stops Tor, and a fault in it can't take the browser down.
+          Bound-only — see TorService.
+        -->
+        <service
+            android:name=".node.TorService"
+            android:exported="false"
+            android:process=":tor" />
+
     </application>
 </manifest>

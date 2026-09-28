@@ -280,6 +280,9 @@ internal object BootnodeSeeder {
             conn.connectTimeout = timeoutMs.toInt()
             conn.readTimeout = timeoutMs.toInt()
             conn.setRequestProperty("Accept", "application/dns-json")
+            // A DoH answer never redirects; don't let a hop go anywhere
+            // (an onion name would be resolved through the system DNS).
+            conn.instanceFollowRedirects = false
             if (conn.responseCode != 200) return null
             parseDohTxt(conn.inputStream.bufferedReader().use { it.readText() })
         } catch (t: Exception) {

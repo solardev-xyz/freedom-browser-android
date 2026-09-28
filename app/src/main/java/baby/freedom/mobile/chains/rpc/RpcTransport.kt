@@ -1,5 +1,6 @@
 package baby.freedom.mobile.chains.rpc
 
+import baby.freedom.mobile.browser.isOnionHost
 import baby.freedom.mobile.chains.RpcUrls
 import java.io.BufferedInputStream
 import java.io.ByteArrayOutputStream
@@ -130,6 +131,9 @@ internal class PinnedHttpTransport(
         }
 
         fun run(target: Target, body: String, timeoutMs: Long): String {
+            // Never resolved here, where the name would go to DNS (#143):
+            // an onion RPC would need Tor, which this transport doesn't use.
+            if (isOnionHost(target.host)) throw IOException("${target.host}: .onion RPCs aren't supported")
             val addresses = resolve(target.host)
             if (addresses.isEmpty()) throw IOException("${target.host} has no address")
             val bad = addresses.firstOrNull { !allowed(it, target.loopback) }
