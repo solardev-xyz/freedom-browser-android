@@ -40,11 +40,14 @@ import baby.freedom.swarm.MyotisStatus
 import baby.freedom.swarm.NodeInfo
 import baby.freedom.swarm.NodeStatus
 import baby.freedom.swarm.SwarmNode
+import baby.freedom.swarm.TorInfo
+import baby.freedom.swarm.TorStatus
 import java.util.Locale
 
 /**
  * Full-screen node-details page: the Swarm node's live status, peer
- * count, gateway URL and run-node on/off toggle, then the Myotis
+ * count, gateway URL and run-node on/off toggle, the Tor client (#143)
+ * with its start/stop switch, status and version, then the Myotis
  * Ethereum / Gnosis light client (#72) with its own switch and per-chain
  * sync state. Shares the same [FullScreenScaffold] chrome as Settings /
  * History / Bookmarks.
@@ -58,6 +61,7 @@ fun NodeScreen(
     myotisEnabled: Boolean,
     onToggleMyotis: (Boolean) -> Unit,
     onDismiss: () -> Unit,
+    tor: TorControls = TorControls(),
 ) {
     BackHandler(onBack = onDismiss)
     val triple = nodeStatusTriple(nodeInfo.status)
@@ -87,6 +91,9 @@ fun NodeScreen(
             }
             item("gateway") {
                 GatewaySection(externalSwarm = externalSwarm)
+            }
+            item("tor") {
+                TorSection(tor)
             }
             item("myotis") {
                 LightClientSection(
@@ -317,4 +324,77 @@ internal fun lightClientStatusTriple(info: MyotisInfo): NodeStatusTriple = when 
             else -> NodeStatusTriple(Color(0xFFF59E0B), Icons.Filled.HourglassTop, "Syncing…")
         }
     }
+}
+
+/**
+ * What the UI knows about the embedded Tor client (#143) and what it can
+ * ask of it: its state as broadcast from `:tor`, Settings → Tor, whether
+ * the user has it running (the node page's switch), and whether this
+ * WebView can route only `.onion` through it.
+ */
+data class TorControls(
+    val info: TorInfo = TorInfo(),
+    val enabled: Boolean = false,
+    val running: Boolean = false,
+    val supported: Boolean = true,
+    val onRun: (Boolean) -> Unit = {},
+)
+
+@Composable
+private fun TorSection(tor: TorControls) {
+    val info = if (tor.enabled && (tor.running || tor.info.status == TorStatus.Error)) {
+        tor.info
+    } else {
+        TorInfo(version = tor.info.version)
+    }
+    val triple = torStatusTriple(info)
+    SectionCard(title = "Tor") {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(triple.icon, contentDescription = null, tint = triple.color)
+            Spacer(Modifier.width(12.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(triple.label, fontWeight = FontWeight.Medium)
+                Text(
+                    torSubtitle(tor),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Switch(
+                checked = tor.enabled && tor.running,
+                onCheckedChange = tor.onRun,
+                enabled = tor.enabled && tor.supported,
+            )
+        }
+        if (info.version.isNotBlank()) DetailRow("Version", "Arti ${info.version}", mono = true)
+        if (info.status == TorStatus.Starting && info.summary.isNotBlank()) {
+            DetailRow("Bootstrap", info.summary, singleLine = false)
+        }
+        if (info.socksPort > 0) DetailRow("SOCKS proxy", "127.0.0.1:${info.socksPort}", mono = true)
+        val err = info.errorMessage
+        if (!err.isNullOrBlank()) DetailRow("Error", err, singleLine = false)
+    }
+}
+
+/** The line under the Tor status: what it does, or why it can't be switched on. */
+internal fun torSubtitle(tor: TorControls): String = when {
+    !tor.supported -> "This WebView can't route only .onion sites through Tor; update Android System WebView"
+    !tor.enabled -> "Turn on Tor in Settings to open .onion sites"
+    else -> "Opens .onion sites over Tor (Arti). Every other site connects directly."
+}
+
+/** The Tor client's status line: grey off, amber bootstrapping (with its progress), green connected. */
+internal fun torStatusTriple(info: TorInfo): NodeStatusTriple = when (info.status) {
+    TorStatus.Stopped -> NodeStatusTriple(Color(0xFF94A3B8), Icons.Filled.PowerSettingsNew, "Off")
+    TorStatus.Starting -> NodeStatusTriple(
+        Color(0xFFF59E0B), Icons.Filled.HourglassTop,
+        if (info.progress > 0) "Connecting… ${info.progress}%" else "Starting…",
+    )
+    TorStatus.Running -> NodeStatusTriple(Color(0xFF22C55E), Icons.Filled.CheckCircle, "Connected")
+    TorStatus.Error -> NodeStatusTriple(Color(0xFFEF4444), Icons.Filled.ErrorOutline, "Error")
 }

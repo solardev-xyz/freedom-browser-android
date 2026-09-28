@@ -139,7 +139,7 @@ class GatewayProbe {
         return try {
             withContext(Dispatchers.IO) {
                 withTimeout(attemptTimeoutMs) {
-                    val conn = (URL(headUrl).openConnection() as HttpURLConnection).apply {
+                    val conn = (TorRouting.openConnection(URL(headUrl)) as HttpURLConnection).apply {
                         requestMethod = "HEAD"
                         connectTimeout = attemptTimeoutMs.toInt().coerceAtLeast(1_000)
                         readTimeout = attemptTimeoutMs.toInt().coerceAtLeast(1_000)

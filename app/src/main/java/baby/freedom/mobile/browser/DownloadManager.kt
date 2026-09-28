@@ -625,7 +625,7 @@ class DownloadManager private constructor(context: Context) {
             if (delayMs > 0) delay(delayMs)
             currentCoroutineContext().ensureActive()
             val conn = try {
-                (URL(gatewayUrl).openConnection() as HttpURLConnection).apply {
+                (TorRouting.openConnection(URL(gatewayUrl)) as HttpURLConnection).apply {
                     track(AutoCloseable { disconnect() })
                     connectTimeout = 5_000
                     readTimeout = 60_000
@@ -697,7 +697,7 @@ class DownloadManager private constructor(context: Context) {
         var current = url
         repeat(MAX_REDIRECTS + 1) {
             currentCoroutineContext().ensureActive()
-            val conn = (URL(current).openConnection() as HttpURLConnection).apply {
+            val conn = (TorRouting.openConnection(URL(current)) as HttpURLConnection).apply {
                 track(AutoCloseable { disconnect() })
                 connectTimeout = 15_000
                 readTimeout = 60_000

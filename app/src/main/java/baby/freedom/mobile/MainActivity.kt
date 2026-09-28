@@ -30,6 +30,8 @@ import baby.freedom.mobile.browser.Adblock
 import baby.freedom.mobile.browser.PublicSuffixList
 import baby.freedom.mobile.browser.OnchainApps
 import baby.freedom.mobile.browser.RadicleControls
+import baby.freedom.mobile.browser.TorControls
+import baby.freedom.mobile.browser.TorRouting
 import baby.freedom.mobile.browser.UnverifiedOrigins
 import baby.freedom.mobile.browser.VirtualOrigin
 import baby.freedom.mobile.browser.statusBarIconsDark
@@ -41,6 +43,9 @@ import baby.freedom.mobile.node.INodeCallback
 import baby.freedom.mobile.node.INodeService
 import baby.freedom.mobile.node.MyotisService
 import baby.freedom.mobile.node.NodeService
+import baby.freedom.mobile.node.ITorCallback
+import baby.freedom.mobile.node.ITorService
+import baby.freedom.mobile.node.TorService
 import baby.freedom.mobile.ui.FreedomTheme
 import baby.freedom.mobile.ui.isLight
 import baby.freedom.swarm.IpfsInfo
@@ -48,6 +53,8 @@ import baby.freedom.swarm.MyotisInfo
 import baby.freedom.swarm.MyotisStatus
 import baby.freedom.swarm.NodeInfo
 import baby.freedom.swarm.RadicleInfo
+import baby.freedom.swarm.TorInfo
+import baby.freedom.swarm.TorStatus
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.combine
@@ -83,6 +90,7 @@ class MainActivity : ComponentActivity() {
      */
     private val radicleRelay = Mutex()
     private val myotisInfoFlow = MutableStateFlow(MyotisInfo())
+    private val torInfoFlow = MutableStateFlow(TorInfo())
     private lateinit var settings: NodeSettings
 
     /**
@@ -157,6 +165,45 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    // The Tor client (#143) lives in its own `:tor` process, bound while
+    // Tor should run — see [TorService]. [torRunning] is what the node
+    // page's switch shows; its state reaches [TorRouting], which owns the
+    // `.onion` proxy override.
+    @Volatile
+    private var torBinder: ITorService? = null
+    private var torBound = false
+    private var torRunning by mutableStateOf(false)
+
+    private val torCallback = object : ITorCallback.Stub() {
+        override fun onTorStateChanged(info: TorInfo?) {
+            info ?: return
+            // Binder thread → main, where [TorRouting] is driven; a state
+            // from a binding already let go is dropped there.
+            runOnUiThread { if (torBound) publishTor(info) }
+        }
+    }
+
+    private val torConnection = object : ServiceConnection {
+        override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
+            val b = ITorService.Stub.asInterface(service) ?: return
+            torBinder = b
+            runCatching { b.registerCallback(torCallback) }
+        }
+
+        override fun onServiceDisconnected(name: ComponentName?) {
+            // `:tor` died (or exited under a quick off → on): its port is
+            // gone, so stop routing to it at once; the binding brings a
+            // fresh process back up, which reports its new port.
+            torBinder = null
+            publishTor(TorInfo(status = TorStatus.Starting))
+        }
+    }
+
+    private fun publishTor(info: TorInfo) {
+        torInfoFlow.value = info
+        TorRouting.onState(this, info)
+    }
+
     private val connection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
             val b = INodeService.Stub.asInterface(service) ?: return
@@ -210,6 +257,19 @@ class MainActivity : ComponentActivity() {
         lifecycleScope.launch {
             settings.myotisEnabled.distinctUntilChanged().collect { enabled ->
                 if (enabled) bindMyotis() else unbindMyotis()
+            }
+        }
+
+        // Tor (#143): the `.onion` proxy override goes in before any page
+        // loads, refusing onion hosts until Tor listens. Settings → Tor is
+        // followed live (off stops Tor); Tor itself starts at launch only
+        // with "Start Tor at launch", else from the node page.
+        TorRouting.init(this)
+        lifecycleScope.launch {
+            if (settings.torEnabled.first() && settings.torStartOnLaunch.first()) bindTor()
+            settings.torEnabled.distinctUntilChanged().collect { enabled ->
+                TorRouting.setEnabled(this@MainActivity, enabled)
+                if (!enabled) unbindTor()
             }
         }
 
@@ -300,6 +360,8 @@ class MainActivity : ComponentActivity() {
                     val myotisEnabled by settings.myotisEnabled
                         .collectAsState(initial = false)
                     val pendingLinks by deepLinkQueue.pending.collectAsState()
+                    val torInfo by torInfoFlow.collectAsState()
+                    val torEnabled by settings.torEnabled.collectAsState(initial = false)
                     BrowserScreen(
                         nodeInfo = info,
                         ipfsInfo = ipfsInfo,
@@ -316,6 +378,13 @@ class MainActivity : ComponentActivity() {
                             onToggle = ::onRadicleToggle,
                             onSeed = ::onRadicleSeed,
                             onUnseed = ::onRadicleUnseed,
+                        ),
+                        tor = TorControls(
+                            info = torInfo,
+                            enabled = torEnabled,
+                            running = torRunning,
+                            supported = TorRouting.supported != false,
+                            onRun = ::onToggleTor,
                         ),
                         initialUrl = startUrl,
                         deepLink = pendingLinks.firstOrNull(),
@@ -437,6 +506,7 @@ class MainActivity : ComponentActivity() {
     override fun onDestroy() {
         unbindFromService()
         unbindMyotis()
+        unbindTor()
         super.onDestroy()
     }
 
@@ -504,6 +574,53 @@ class MainActivity : ComponentActivity() {
                 errorMessage = "Couldn't start the light client service",
             )
         }
+    }
+
+    /**
+     * The node page's Tor switch (#143). Not persisted: Tor runs from
+     * here until switched off (or Settings → Tor is turned off), and at
+     * launch only with Settings → Tor → Start Tor at launch.
+     */
+    private fun onToggleTor(run: Boolean) {
+        if (run) {
+            lifecycleScope.launch { if (settings.torEnabled.first()) bindTor() }
+        } else {
+            unbindTor()
+        }
+    }
+
+    private fun bindTor() {
+        if (torBound) return
+        torBound = bindService(
+            Intent(this, TorService::class.java),
+            torConnection,
+            Context.BIND_AUTO_CREATE,
+        )
+        if (torBound) {
+            torRunning = true
+            publishTor(TorInfo(status = TorStatus.Starting))
+        } else {
+            runCatching { unbindService(torConnection) }
+            publishTor(TorInfo(status = TorStatus.Error, errorMessage = "Couldn't start the Tor service"))
+        }
+    }
+
+    /**
+     * Unbinding the only client destroys [TorService], which stops the
+     * client and exits `:tor`. Routing stops first: the port is about to
+     * close.
+     */
+    private fun unbindTor() {
+        torRunning = false
+        if (!torBound) {
+            if (torInfoFlow.value.status == TorStatus.Error) publishTor(TorInfo())
+            return
+        }
+        torBound = false
+        publishTor(TorInfo(version = torInfoFlow.value.version))
+        runCatching { torBinder?.unregisterCallback(torCallback) }
+        runCatching { unbindService(torConnection) }
+        torBinder = null
     }
 
     /** Unbinding the only client destroys [MyotisService], which stops the engines and exits `:myotis`. */

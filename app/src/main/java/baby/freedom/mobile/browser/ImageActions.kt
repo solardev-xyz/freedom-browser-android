@@ -186,7 +186,7 @@ private fun fetchHttpImage(
         val remaining = (deadline - System.currentTimeMillis()).toInt()
         if (remaining <= 0) return null
         sameSiteChain = sameSiteChain && sendsCookiesTo(pageUrl, current)
-        val conn = (URL(current).openConnection() as HttpURLConnection).apply {
+        val conn = (TorRouting.openConnection(URL(current)) as HttpURLConnection).apply {
             connectTimeout = minOf(10_000, remaining)
             readTimeout = minOf(20_000, remaining)
             instanceFollowRedirects = false

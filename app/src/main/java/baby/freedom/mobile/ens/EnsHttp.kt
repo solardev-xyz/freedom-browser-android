@@ -1,5 +1,6 @@
 package baby.freedom.mobile.ens
 
+import baby.freedom.mobile.browser.TorRouting
 import java.io.ByteArrayOutputStream
 import java.io.IOException
 import java.net.HttpURLConnection
@@ -38,7 +39,7 @@ internal interface EnsHttp {
             maxBytes: Long,
             followRedirects: Boolean,
         ): Reply {
-            val conn = (URL(url).openConnection() as HttpURLConnection).apply {
+            val conn = (TorRouting.openConnection(URL(url)) as HttpURLConnection).apply {
                 requestMethod = method
                 connectTimeout = minOf(timeoutMs, 8_000)
                 readTimeout = timeoutMs

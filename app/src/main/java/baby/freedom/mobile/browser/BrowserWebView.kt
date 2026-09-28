@@ -331,7 +331,18 @@ internal fun nameResolutionRefusalHtml(
     } else {
         ""
     }
-    return """<!doctype html><html lang="en"><head><meta charset="utf-8">
+    return inPlaceErrorPageHtml(title, description, "ens://$safeName\n\n$code$reason")
+}
+
+/**
+ * A self-contained error page served *as* a refused document's own
+ * response (no script, nothing fetched): [title], [descriptionHtml], and
+ * [detailsHtml] in the details box (both already escaped), with a
+ * Try again link that reloads the entry. [nameResolutionRefusal]'s and
+ * [TorRouting]'s refusals.
+ */
+internal fun inPlaceErrorPageHtml(title: String, descriptionHtml: String, detailsHtml: String): String =
+    """<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'">
 <title>$title</title><style>
@@ -347,11 +358,8 @@ a{display:inline-block;padding:12px 22px;background:#2c2c2c;color:#fff;border:1p
 border-radius:8px;font-size:15px;text-decoration:none}
 @media (prefers-color-scheme:light){body{background:#fff;color:#24292f}h1{color:#cf222e}
 p{color:#57606a}.d{background:#f6f8fa;color:#cf222e}a{background:#f6f8fa;border-color:#d0d7de;color:#24292f}}
-</style></head><body><div class="c"><h1>$title</h1><p>$description</p>
-<div class="d">ens://$safeName
-
-$code$reason</div><a href="">Try again</a></div></body></html>"""
-}
+</style></head><body><div class="c"><h1>$title</h1><p>$descriptionHtml</p>
+<div class="d">$detailsHtml</div><a href="">Try again</a></div></body></html>"""
 
 /** Where [nameWebRecordNavigation] sends a request for [pathAndQuery] on the name's origin. */
 internal fun webRecordTarget(result: EnsResult.Ok, pathAndQuery: String): String =
@@ -3197,6 +3205,16 @@ private fun buildRefreshableWebView(
                 val failed = req.url?.toString() ?: return
                 // Already on the error page? Don't loop.
                 if (ErrorPage.isErrorPage(failed)) return
+                // An onion page whose Tor went away mid-load (#143): the
+                // proxy refused it. Reloading lands on the interceptor's
+                // "Tor isn't running" page in place, which can't fail
+                // again — nor loop, as the reload only happens while no
+                // Tor port is routed.
+                if (isOnionHost(req.url?.host) && TorRouting.port == 0 && view != null) {
+                    Log.i(LOG_TAG, "main-frame ${error?.errorCode} for $failed with Tor down → refusal page")
+                    view.post { view.reload() }
+                    return
+                }
                 if (!isDwebPageUrl(failed)) return
 
                 if (autoRecoveredUrl != failed && view != null) {
@@ -4602,6 +4620,9 @@ internal fun interceptVirtualRequest(
 ): WebResourceResponse? {
     val req = request ?: return null
     val url = req.url?.toString() ?: return null
+    // A `.onion` request with no Tor port routed is refused before
+    // anything else looks at it (#143, fail closed).
+    TorRouting.refusalFor(req)?.let { return it }
     val incoming = if (req.isForMainFrame) ensPins?.beginNavigation(url) else null
     // A contract-hosted app's origin (#123) is answered by its own rules.
     // Then an origin an unverified external IPFS gateway served before
@@ -4983,7 +5004,7 @@ private fun tryLoadMediaBody(
     targetUrl: String,
 ): MediaLoadResult {
     val conn = try {
-        (URL(targetUrl).openConnection() as HttpURLConnection).apply {
+        (TorRouting.openConnection(URL(targetUrl)) as HttpURLConnection).apply {
             requestMethod = "GET"
             connectTimeout = 5_000
             readTimeout = 60_000
@@ -5161,7 +5182,7 @@ private fun fetchOnce(
     targetUrl: String,
 ): FetchAttempt {
     return try {
-        val conn = (URL(targetUrl).openConnection() as HttpURLConnection).apply {
+        val conn = (TorRouting.openConnection(URL(targetUrl)) as HttpURLConnection).apply {
             requestMethod = if (req.method == "HEAD") "HEAD" else "GET"
             connectTimeout = 5_000
             readTimeout = 10_000

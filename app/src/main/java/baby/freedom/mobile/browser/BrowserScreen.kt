@@ -415,6 +415,7 @@ fun BrowserScreen(
     onEnsureIpfsStarted: () -> Unit,
     onIpfsToggle: (Boolean) -> Unit,
     radicle: RadicleControls = RadicleControls(),
+    tor: TorControls = TorControls(),
     initialUrl: String = HOME_URL,
     deepLink: DeepLink? = null,
     onDeepLinkHandled: (DeepLink) -> Unit = {},
@@ -1966,6 +1967,7 @@ fun BrowserScreen(
             myotisInfo = myotisInfo,
             myotisEnabled = myotisEnabled,
             onToggleMyotis = onToggleMyotis,
+            tor = tor,
             onDismiss = { showNode = false },
         )
     }

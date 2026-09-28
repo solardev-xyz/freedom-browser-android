@@ -1,5 +1,6 @@
 package baby.freedom.mobile.chains
 
+import baby.freedom.mobile.browser.TorRouting
 import android.content.Context
 import android.util.Log
 import java.io.ByteArrayOutputStream
@@ -517,7 +518,7 @@ class ChainlistService internal constructor(
          * a stale cache isn't tied to the page, and runs to completion.)
          */
         internal suspend fun download(url: String = Chainlist.URL): String {
-            val conn = (URL(url).openConnection() as HttpURLConnection).apply {
+            val conn = (TorRouting.openConnection(URL(url)) as HttpURLConnection).apply {
                 connectTimeout = CONNECT_TIMEOUT_MS
                 readTimeout = READ_TIMEOUT_MS
                 useCaches = false
