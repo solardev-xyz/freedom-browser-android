@@ -207,6 +207,19 @@ class EnsColibriTest {
     }
 
     @Test
+    fun `a keyed endpoint's API key never reaches the error the core and logcat get`() {
+        val keyed = "https://mainnet.infura.io/v3/0123456789abcdef0123456789abcdef"
+        val engine = ScriptEngine(rounds = listOf(listOf(request(1, "eth_rpc"))), final = success)
+        val http = ScriptHttp { s -> throw IOException("failed to connect to ${s.url} after 8000ms") }
+
+        runBlocking { EnsColibri(engine, http).ethCall("0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe", byteArrayOf(1), listOf(keyed)) }
+
+        val error = engine.errors.getValue(1L)
+        assertFalse(error, "0123456789abcdef" in error)
+        assertTrue(error, "mainnet.infura.io" in error)
+    }
+
+    @Test
     fun `a req_ptr above Long MAX_VALUE (an arm64 tagged heap pointer) is still answered`() {
         // 0xb400007a1c2d3e40, as the core prints it: unsigned decimal.
         val tagged = "12970367451285765696"

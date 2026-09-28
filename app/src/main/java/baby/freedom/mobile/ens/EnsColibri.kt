@@ -210,7 +210,13 @@ internal class EnsColibri(
                 if (reply.code in 200..299) return Served.Ok(reply.body, index, url)
                 lastError = "HTTP ${reply.code} from ${hostOf(url)}"
             } catch (e: IOException) {
-                lastError = "${hostOf(url)}: ${e.message}"
+                // An exception's message can quote the URL, and a keyed
+                // endpoint's URL carries the user's API key (#169): this
+                // text goes to logcat and back into the core's own error.
+                val message = listOf(url, server).fold(e.message.orEmpty()) { text, u ->
+                    text.replace(u, EnsRpcConfig.redact(u))
+                }
+                lastError = "${hostOf(url)}: $message"
             }
         }
         Log.i(TAG, "colibri ${request.optString("type")} request failed: $lastError")

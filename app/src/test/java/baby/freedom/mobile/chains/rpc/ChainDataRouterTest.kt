@@ -496,8 +496,12 @@ class ChainDataRouterTest {
     fun anRpcThatJustFailedMovesToTheBackOfThePool() = runBlocking {
         val net = Net()
         var now = 1_000_000L
-        net.handlers[a] = { throw IOException("down") }
-        listOf(b, c, d).forEach { url -> net.handlers[url] = { ok("0x1") } }
+        val aFailed = kotlinx.coroutines.CompletableDeferred<Unit>()
+        net.handlers[a] = { aFailed.complete(Unit); throw IOException("down") }
+        // The others answer only after a has failed (and a moment more for
+        // the router to record it): agreeing first would cancel a's leg,
+        // and a cancelled leg's failure is — rightly — never counted.
+        listOf(b, c, d).forEach { url -> net.handlers[url] = { aFailed.await(); kotlinx.coroutines.delay(100); ok("0x1") } }
         val r = router(net, listOf(chain()), clock = { now })
         r.request(137, "eth_blockNumber")
         assertEquals(1, net.count(a))
