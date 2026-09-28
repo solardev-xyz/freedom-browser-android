@@ -336,13 +336,18 @@ class EnsLightClientResolveTest {
         runBlocking { r.resolveContenthash("vitalik.eth") }
         assertEquals(1, client.calls.size)
         assertEquals(2, http.urls.size)
-        // Not ready, ready again (backing off): that answer is still cached.
+        // Not ready: that answer is still cached.
         client.generation = null
-        runBlocking { r.resolveContenthash("vitalik.eth") }
-        client.generation = 4L
         runBlocking { r.resolveContenthash("vitalik.eth") }
         assertEquals(2, http.urls.size)
         assertEquals(1, client.calls.size)
+        // Ready again as a new generation: the old one's back-off doesn't
+        // carry over, so it's asked again; one server's cached word doesn't
+        // stand in the way.
+        client.generation = 4L
+        runBlocking { r.resolveContenthash("vitalik.eth") }
+        assertEquals(2, client.calls.size)
+        assertEquals(3, http.urls.size)
     }
 
     @Test
@@ -361,6 +366,51 @@ class EnsLightClientResolveTest {
         // Once the back-off has passed it's asked again.
         Thread.sleep(400)
         runBlocking { r.resolveContenthash("brantly.eth") }
+        assertEquals(2, client.calls.size)
+    }
+
+    @Test
+    fun `a closed read gate falls back once without backing off`() {
+        // The app went to the background (or the service's gate hadn't
+        // reopened yet) while this side still thought it ready.
+        var gateOpen = false
+        val client = FakeLightClient { _, _ ->
+            if (gateOpen) lightClientOk else EnsLightClient.parse(baby.freedom.swarm.MyotisNode.NOT_READY_JSON)
+        }
+        val http = OneServer { rpcResult(wrapAsOuterInner(ipfsContenthash)) }
+        val r = resolver(client, http)
+
+        val first = runBlocking { r.resolveContenthash("vitalik.eth") } as EnsResult.Ok
+        assertFalse(first.trust.lightClient)
+        assertEquals(1, http.urls.size)
+        // The very next lookup asks the light client again.
+        gateOpen = true
+        val second = runBlocking { r.resolveContenthash("nick.eth") }
+        require(second is EnsResult.Ok) { "got $second" }
+        assertTrue(second.trust.lightClient)
+        assertEquals(2, client.calls.size)
+        assertEquals(1, http.urls.size)
+    }
+
+    @Test
+    fun `a back-off ends when the light client comes back as a new generation`() {
+        var failing = true
+        val client = FakeLightClient { _, _ -> if (failing) EnsLightClient.Call.Unavailable("busy") else lightClientOk }
+        val http = OneServer { rpcResult(wrapAsOuterInner(ipfsContenthash)) }
+        val r = resolver(client, http)
+
+        runBlocking { r.resolveContenthash("vitalik.eth") }
+        assertEquals(1, client.calls.size)
+        // Same generation: still backing off.
+        runBlocking { r.resolveContenthash("nick.eth") }
+        assertEquals(1, client.calls.size)
+        // Restarted (or toggled off and on): a new stretch of readiness,
+        // asked straight away rather than after the old window.
+        failing = false
+        client.generation = 2L
+        val result = runBlocking { r.resolveContenthash("brantly.eth") }
+        require(result is EnsResult.Ok) { "got $result" }
+        assertTrue(result.trust.lightClient)
         assertEquals(2, client.calls.size)
     }
 
@@ -484,6 +534,11 @@ class EnsLightClientResolveTest {
         assertEquals(
             EnsLightClient.Call.Unavailable("no verified head"),
             EnsLightClient.parse("""{"status":"unavailable","reason":"no verified head","verified":false}"""),
+        )
+        // The host's closed read gate, as opposed to the engine's own "unavailable".
+        assertEquals(
+            EnsLightClient.Call.Unavailable("light client not ready", notReady = true),
+            EnsLightClient.parse(baby.freedom.swarm.MyotisNode.NOT_READY_JSON),
         )
         assertEquals(
             EnsLightClient.Call.Unavailable("native execution busy"),

@@ -140,15 +140,20 @@ class EnsResolver internal constructor(
     private data class Cached(val result: EnsResult, val expiresAt: Long, val verified: Boolean)
 
     /**
-     * When the light client last missed in a way that says it can't
-     * serve right now ([LightClientMiss.backOff]); it's skipped until
-     * [lightClientBackoffMs] has passed, or it answers again.
+     * The light client's last miss that says it can't serve right now
+     * ([LightClientMiss.backOff]): when, and in which of its
+     * [EnsLightClient.readyGeneration]s. It's skipped until
+     * [lightClientBackoffMs] has passed, it answers again, or it comes
+     * back as a new generation (a restart, an off/on) — a miss from one
+     * stretch of readiness says nothing about the next.
      */
-    @Volatile
-    private var lightClientMissedAt: Long? = null
+    private class LightClientBackoff(val generation: Long, val at: Long)
 
-    private fun lightClientBackingOff(now: Long): Boolean =
-        lightClientMissedAt?.let { now - it in 0 until lightClientBackoffMs } == true
+    @Volatile
+    private var lightClientMiss: LightClientBackoff? = null
+
+    private fun lightClientBackingOff(generation: Long, now: Long): Boolean =
+        lightClientMiss?.let { it.generation == generation && now - it.at in 0 until lightClientBackoffMs } == true
 
     /**
      * Everything a lookup learns about the servers — answer cache,
@@ -248,7 +253,7 @@ class EnsResolver internal constructor(
         // The light client first (#101) — backing off after a miss, unless
         // it's the only source there is.
         val askLightClient = generation != null &&
-            (config.endpoints.isEmpty() || !lightClientBackingOff(System.currentTimeMillis()))
+            (config.endpoints.isEmpty() || !lightClientBackingOff(generation, System.currentTimeMillis()))
 
         cache[normalized]?.let {
             // One server's word (or a disagreement) doesn't stand in the
@@ -368,7 +373,7 @@ class EnsResolver internal constructor(
         if (miss != null) {
             // Out of time, or a miss the light client owns: back off.
             val backOff = outcome == null || (failure as? LightClientMiss)?.backOff == true
-            if (backOff) lightClientMissedAt = System.currentTimeMillis()
+            if (backOff) lightClientMiss = LightClientBackoff(generation, System.currentTimeMillis())
             Log.i(
                 TAG,
                 "[$name] light client: $miss after ${took}ms; falling back to RPC" +
@@ -376,7 +381,7 @@ class EnsResolver internal constructor(
             )
             return null
         }
-        lightClientMissedAt = null
+        lightClientMiss = null
         Log.i(TAG, "[$name] light client answered in ${took}ms")
         return outcome!!.getOrThrow()
     }
@@ -405,7 +410,10 @@ class EnsResolver internal constructor(
             val (outcome, at) = when (answer) {
                 is EnsLightClient.Call.Ok -> CallOutcome(data = answer.resultHex, revertData = null) to answer.block
                 is EnsLightClient.Call.Revert -> CallOutcome(data = null, revertData = answer.dataHex) to answer.block
-                is EnsLightClient.Call.Unavailable -> throw LightClientMiss(answer.reason, backOff = true)
+                // A closed read gate: readiness moved before this lookup
+                // heard (the app just went to the background, say) — fall
+                // back this once, but don't skip the light client for it.
+                is EnsLightClient.Call.Unavailable -> throw LightClientMiss(answer.reason, backOff = !answer.notReady)
             }
             // A CCIP-Read callback checks the gateway's answer against the
             // state that deferred to it, as the RPC path does by pinning the

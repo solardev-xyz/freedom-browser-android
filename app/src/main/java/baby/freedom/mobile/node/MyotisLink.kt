@@ -38,7 +38,7 @@ object MyotisLink : EnsLightClient {
     override fun readyGeneration(): Long? = bindings.generation
 
     override fun ethCall(to: String, data: String, timeoutMs: Long): EnsLightClient.Call {
-        val service = bindings.service ?: return EnsLightClient.Call.Unavailable("light client not connected")
+        val service = bindings.service ?: return EnsLightClient.Call.Unavailable("light client not connected", notReady = true)
         val answer = AtomicReference<String?>()
         val done = CountDownLatch(1)
         val result = object : IMyotisCallResult.Stub() {

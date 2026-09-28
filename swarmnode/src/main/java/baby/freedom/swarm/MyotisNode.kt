@@ -557,9 +557,14 @@ class MyotisNode internal constructor(
                     return@mapNotNull MyotisChainStatus(network.chainId, error = startErrors[network])
                 else -> return@mapNotNull null
             }
-            row.copy(recovery = recovery[network]?.snapshot()).also {
-                // In the background the engines are paused, whatever
-                // the status read just before the pause landed says.
+            val shown = row.copy(recovery = recovery[network]?.snapshot())
+            // In the background the engines are paused, whatever the
+            // status read just before the pause landed says — and a row
+            // that would still claim [MyotisChainStatus.ready] says so too,
+            // so a client judging readiness by the published state sees the
+            // same closed gate [ethCall] does, rather than a "ready" chain
+            // that answers "not ready".
+            (if (!foreground && handle != null && shown.ready) shown.copy(paused = true) else shown).also {
                 if (foreground && handle != null && network !in parked && it.ready) ready[network] = handle
             }
         }
@@ -956,8 +961,13 @@ class MyotisNode internal constructor(
             MyotisRecoveryReason.Stale,
         )
 
-        /** [ethCall]'s answer while the chain isn't ready: the engine's own "unavailable" shape. */
-        const val NOT_READY_JSON = """{"status":"unavailable","reason":"light client not ready"}"""
+        /**
+         * [ethCall]'s answer while the chain isn't ready: the engine's own
+         * "unavailable" shape, flagged `notReady` — the host's read gate
+         * was closed, which says nothing about the engine being busy or
+         * failing, so a caller shouldn't back off on it.
+         */
+        const val NOT_READY_JSON = """{"status":"unavailable","reason":"light client not ready","notReady":true}"""
 
         private const val LOG_DRAIN_EVERY = 5
         private const val LOG_DRAIN_MAX = 50

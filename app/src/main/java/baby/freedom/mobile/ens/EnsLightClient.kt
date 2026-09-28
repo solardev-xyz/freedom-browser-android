@@ -39,8 +39,14 @@ interface EnsLightClient {
         /** The call reverted with [dataHex] — itself a verified answer. */
         data class Revert(val dataHex: String, val block: Long?) : Call()
 
-        /** No verified answer: not ready, busy, an engine or transport error. */
-        data class Unavailable(val reason: String) : Call()
+        /**
+         * No verified answer: not ready, busy, an engine or transport error.
+         * [notReady]: the host's read gate was closed (or there was no
+         * host to ask) — its readiness moved before this caller heard of
+         * it, which is no sign the engine itself is struggling, so it
+         * doesn't warrant backing off the way a busy or failing engine does.
+         */
+        data class Unavailable(val reason: String, val notReady: Boolean = false) : Call()
     }
 
     companion object {
@@ -70,7 +76,10 @@ interface EnsLightClient {
                     ?: Call.Unavailable("malformed result")
                 "revert" -> o.optString("dataHex").takeIf(::isHex)?.let { Call.Revert(it, block) }
                     ?: Call.Unavailable("malformed revert")
-                "unavailable" -> Call.Unavailable(o.optString("reason").ifEmpty { "unavailable" })
+                "unavailable" -> Call.Unavailable(
+                    o.optString("reason").ifEmpty { "unavailable" },
+                    notReady = o.optBoolean("notReady", false),
+                )
                 else -> Call.Unavailable("unknown status")
             }
         }

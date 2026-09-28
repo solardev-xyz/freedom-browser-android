@@ -631,13 +631,23 @@ class MyotisNodeTest {
         idle(node)
         assertTrue(node.ethCall(MyotisNetwork.Mainnet, "0xaa", "0x01").contains("\"ok\""))
 
+        assertTrue(node.state.value.chain(MyotisNetwork.Mainnet)!!.ready)
+
         node.enterBackground()
         idle(node)
         assertEquals(MyotisNode.NOT_READY_JSON, node.ethCall(MyotisNetwork.Mainnet, "0xaa", "0x01"))
+        // The published state agrees with the closed gate, even though the
+        // engine's last status (read before its pause landed) still says ready.
+        assertFalse(node.state.value.chain(MyotisNetwork.Mainnet)!!.ready)
+        assertTrue(node.state.value.chain(MyotisNetwork.Mainnet)!!.paused)
+        node.pollNow()
+        idle(node)
+        assertFalse(node.state.value.chain(MyotisNetwork.Mainnet)!!.ready)
 
         node.enterForeground()
         idle(node)
         assertTrue(node.ethCall(MyotisNetwork.Mainnet, "0xaa", "0x01").contains("\"ok\""))
+        assertTrue(node.state.value.chain(MyotisNetwork.Mainnet)!!.ready)
 
         node.stop()
         idle(node)
