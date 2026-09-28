@@ -2,6 +2,7 @@ package baby.freedom.mobile.node;
 
 import baby.freedom.swarm.MyotisInfo;
 import baby.freedom.mobile.node.IMyotisCallback;
+import baby.freedom.mobile.node.IMyotisCallResult;
 
 /**
  * Cross-process interface to [MyotisService], the embedded Myotis
@@ -25,4 +26,19 @@ interface IMyotisService {
 
     /** "Repair sync data" on a chain blocked on inconsistent sync data (#195). */
     void repairSyncData(long chainId);
+
+    /**
+     * A verified `eth_call` of `data` (0x-hex) on `to` at chain `chainId`'s
+     * verified head, run by the light client against proven state (name
+     * resolution, #101). Returns at once; the answer arrives on `result`
+     * — `{"status":"unavailable",…}` straight away while the chain isn't
+     * ready, `{"status":"unavailable","reason":"busy","busy":true}` while
+     * every slot is taken. The caller bounds its own wait: the engine may
+     * take up to ~90 s, and a dying process never answers at all. `result`
+     * is answered even after the caller stopped waiting — that is how it
+     * learns the engine let go of an abandoned call. `probe`: the
+     * resolver's health probe, which has a slot of its own that lookups
+     * can't take.
+     */
+    oneway void ethCall(long chainId, String to, String data, boolean probe, IMyotisCallResult result);
 }

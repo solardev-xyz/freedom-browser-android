@@ -42,7 +42,9 @@ import baby.freedom.mobile.ens.NameSystem
  * the tiers this browser's resolver can produce (#96, #100):
  *
  * - [Proven]: the Colibri verifier checked a proof of the record
- *   against Ethereum's sync committee on this device — the chain's own
+ *   against Ethereum's sync committee on this device, or the Myotis
+ *   light client ran the lookup itself against state proven to that
+ *   committee ([EnsTrust.lightClient], #101) — the chain's own
  *   consensus, not servers agreeing. A seal rather than a shield, as on
  *   iOS, so the two verified tiers are told apart at a glance.
  * - [Verified]: at least [baby.freedom.mobile.ens.EnsQuorum.M]
@@ -56,7 +58,7 @@ import baby.freedom.mobile.ens.NameSystem
  * ENS, WNS (`.wei`), GNS (`.gwei`) and Tezos Domains (`.tez`, #176),
  * whose providers vote the same way ([NameTrust.system] names whose
  * record it is). [Proven] is Ethereum's alone: `.tez` records live on
- * Tezos, which Colibri doesn't cover.
+ * Tezos, which neither Colibri nor Myotis covers.
  *
  * iOS's other two tiers have no page to sit on here: servers that
  * *disagree* (a conflict, #174's third verdict) never load anything —
@@ -99,7 +101,11 @@ internal data class NameTrust(val name: String, val trust: EnsTrust, val answer:
     /** One sentence on what the tier means for this answer. */
     val summary: String
         get() = when (tier) {
-            TrustTier.Proven -> {
+            TrustTier.Proven -> if (trust.lightClient) {
+                "The Myotis light client on this device read the $system record for $name " +
+                    "at $block and checked it against Ethereum state proofs signed off by the " +
+                    "chain's sync committee. No RPC server's word was involved."
+            } else {
                 val prover = trust.agreed.joinToString(" and ").ifEmpty { "the Colibri prover" }
                 if (trust.offchain) {
                     "$name's $system record comes from an off-chain gateway (CCIP-Read). This device " +
@@ -237,7 +243,7 @@ internal fun TrustDetailsDialog(
                     if (trust.trust.agreed.isNotEmpty()) {
                         TrustFact(
                             when (trust.tier) {
-                                TrustTier.Proven -> "Proof from"
+                                TrustTier.Proven -> if (trust.trust.lightClient) "Verified by" else "Proof from"
                                 TrustTier.Verified -> "Agreed (${trust.trust.agreed.size})"
                                 TrustTier.Unverified -> "Answered by"
                             },

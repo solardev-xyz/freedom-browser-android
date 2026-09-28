@@ -3,8 +3,9 @@ package baby.freedom.swarm
 /**
  * Raw JNI surface over the embedded Myotis Ethereum light client (the
  * `myotis_*` C ABI inside `libfreedom_mobile_ffi.so`), bridged by the
- * shim in `src/main/cpp/myotis_jni.c`. Only the node lifecycle (and
- * checkpoint recovery's create) is bridged; see [MyotisNode] for the wrapper the app uses.
+ * shim in `src/main/cpp/myotis_jni.c`. The node lifecycle (and
+ * checkpoint recovery's create) is bridged, plus one verified read,
+ * [ethCall] (name resolution, #101); see [MyotisNode] for the wrapper the app uses.
  *
  * Handles are the engine's own `int64` ids (>= 1). Failures are the
  * engine's sentinels, not exceptions: a negative id from [create],
@@ -72,4 +73,15 @@ internal object MyotisNative {
 
     /** Up to [max] buffered engine tracing lines, newline-joined, as UTF-8 bytes. */
     external fun drainLogs(max: Int): ByteArray?
+
+    /**
+     * `myotis_eth_call_json`, anonymous and with zero value: a call of
+     * [data] (0x-hex calldata) on [to] at [block] (`latest` = the
+     * verified head), executed locally against proven state. The engine's
+     * JSON as UTF-8 bytes — `{"status":"ok","resultHex"}`,
+     * `{"status":"revert","dataHex"}`, `{"status":"unavailable","reason"}`
+     * or `{"error"}`, each with `blockNumber` and `verified` (finalized).
+     * Blocks for up to the engine's ~90 s budget.
+     */
+    external fun ethCall(handle: Long, to: String, data: String, block: String): ByteArray?
 }

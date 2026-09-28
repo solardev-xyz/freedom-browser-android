@@ -111,12 +111,13 @@ sealed class EnsResult {
  *
  * [verified]: either proven — the Colibri verifier checked a proof of
  * the record against Ethereum's sync committee on this device
- * ([Source.COLIBRI]) — or cross-checked: at least [EnsQuorum.M]
- * independent RPC servers returned byte-identical answers at a block
- * whose hash a majority of them agreed on ([Source.RPC]). Otherwise only
- * one server's word stands behind it — because only one answered, or
- * because too few servers were reachable to agree on a block at all —
- * and the browser asks before loading it.
+ * ([Source.COLIBRI]), or the Myotis light client ran the lookup itself
+ * against state proven to that committee ([Source.MYOTIS], #101) — or
+ * cross-checked: at least [EnsQuorum.M] independent RPC servers returned
+ * byte-identical answers at a block whose hash a majority of them agreed
+ * on ([Source.RPC]). Otherwise only one server's word stands behind it —
+ * because only one answered, or because too few servers were reachable
+ * to agree on a block at all — and the browser asks before loading it.
  */
 data class EnsTrust(
     val verified: Boolean,
@@ -137,7 +138,8 @@ data class EnsTrust(
     val tooFewServers: Boolean = false,
     /**
      * What stands behind the answer. Defaults to [Source.RPC], the
-     * weaker claim: only the Colibri path says [Source.COLIBRI].
+     * weaker claim: only the Colibri path says [Source.COLIBRI], only
+     * the Myotis path [Source.MYOTIS].
      */
     val source: Source = Source.RPC,
     /**
@@ -154,10 +156,24 @@ data class EnsTrust(
 
         /** A Colibri proof, checked on this device (#100). Always [verified]. */
         COLIBRI,
+
+        /**
+         * The embedded Myotis light client (#101) ran the call on this
+         * device against state proven to the sync committee, at its
+         * verified head [block]; [agreed] names the light client alone.
+         * Always [verified].
+         */
+        MYOTIS,
     }
 
-    /** Proven by the Colibri verifier, not just agreed on by servers. */
-    val proven: Boolean get() = verified && source == Source.COLIBRI
+    /**
+     * Proven on this device — by a Colibri proof or by the Myotis light
+     * client — not just agreed on by servers.
+     */
+    val proven: Boolean get() = verified && source != Source.RPC
+
+    /** Answered by the Myotis light client (#101). */
+    val lightClient: Boolean get() = source == Source.MYOTIS
 
     companion object {
         /**

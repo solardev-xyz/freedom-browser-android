@@ -47,6 +47,7 @@ import baby.freedom.mobile.node.IMyotisCallback
 import baby.freedom.mobile.node.IMyotisService
 import baby.freedom.mobile.node.INodeCallback
 import baby.freedom.mobile.node.INodeService
+import baby.freedom.mobile.node.MyotisLink
 import baby.freedom.mobile.node.MyotisService
 import baby.freedom.mobile.node.NodeService
 import baby.freedom.mobile.node.ITorCallback
@@ -151,7 +152,10 @@ class MainActivity : ComponentActivity() {
 
     private val myotisCallback = object : IMyotisCallback.Stub() {
         override fun onMyotisStateChanged(info: MyotisInfo?) {
-            if (info != null && myotisBound) myotisInfoFlow.value = info
+            if (info != null && myotisBound) {
+                myotisInfoFlow.value = info
+                MyotisLink.onState(this@MainActivity, info)
+            }
         }
     }
 
@@ -159,6 +163,8 @@ class MainActivity : ComponentActivity() {
         override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
             val b = IMyotisService.Stub.asInterface(service) ?: return
             myotisBinder = b
+            // Before registering: the first state arrives on registration.
+            MyotisLink.connected(this@MainActivity, b)
             runCatching { b.registerCallback(myotisCallback) }
             // onStart/onStop may have run before the binding came up.
             runCatching {
@@ -171,6 +177,7 @@ class MainActivity : ComponentActivity() {
             // `:myotis` died (or exited under a quick off → on); the
             // binding brings a fresh process back up.
             myotisBinder = null
+            MyotisLink.disconnected(this@MainActivity)
             myotisInfoFlow.value = MyotisInfo(status = MyotisStatus.Starting)
         }
     }
@@ -720,6 +727,7 @@ class MainActivity : ComponentActivity() {
         runCatching { unbindService(myotisConnection) }
         myotisBinder = null
         myotisBound = false
+        MyotisLink.disconnected(this@MainActivity)
         myotisInfoFlow.value = MyotisInfo()
     }
 
