@@ -76,6 +76,29 @@ class TrustShieldTest {
     }
 
     @Test
+    fun `a Myotis light-client answer gets the proven seal and says it ran on this device`() {
+        val myotis = EnsTrust(
+            verified = true,
+            agreed = listOf(baby.freedom.mobile.ens.EnsResolver.LIGHT_CLIENT_SOURCE),
+            block = 21_000_000L,
+            source = EnsTrust.Source.MYOTIS,
+        )
+        assertTrue(myotis.lightClient)
+        assertTrue(myotis.proven)
+        KnownEnsNames.record("ipfs://$CID", "vitalik.eth", myotis)
+        val trust = nameTrustFor("ipfs://vitalik.eth")!!
+        assertEquals(TrustTier.Proven, trust.tier)
+        assertEquals(
+            "The Myotis light client on this device read the ENS record for vitalik.eth at block #21000000 " +
+                "and checked it against Ethereum state proofs signed off by the chain's sync committee. " +
+                "No RPC server's word was involved.",
+            trust.summary,
+        )
+        // An unverified Myotis label can't exist, but mustn't pass for proven either.
+        assertFalse(myotis.copy(verified = false).proven)
+    }
+
+    @Test
     fun `one server's answer gets the unverified shield and names the server`() {
         KnownEnsNames.record("bzz://$REF", "alice.wei", unverified)
         val trust = nameTrustFor("bzz://alice.wei")!!

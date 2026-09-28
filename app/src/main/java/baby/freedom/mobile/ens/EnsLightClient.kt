@@ -28,8 +28,25 @@ interface EnsLightClient {
      * there was no answer by then. The engine can't run at an older
      * block (a block number still means head state), so a caller needing
      * two calls at one state compares their [Call.Ok.block]s.
+     *
+     * A call the engine has started can't be cancelled (the engine ABI
+     * only drains started work, within its own ~90 s budget), so one the
+     * caller gave up on at [timeoutMs] still holds an engine slot until
+     * the engine returns. [released], if given, is called exactly once
+     * when that happens — or at once, if the call never reached the
+     * engine — so the caller can keep an abandoned call counted where it
+     * belongs ([EnsResolver]'s per-site cap) until it truly ends.
+     * [probe]: the caller's name-independent health probe, served from a
+     * slot lookups can't take, so lookups filling the engine can't make
+     * a healthy light client look broken.
      */
-    fun ethCall(to: String, data: String, timeoutMs: Long): Call
+    fun ethCall(
+        to: String,
+        data: String,
+        timeoutMs: Long,
+        probe: Boolean = false,
+        released: (() -> Unit)? = null,
+    ): Call
 
     /** One verified call's outcome. */
     sealed class Call {
@@ -49,11 +66,16 @@ interface EnsLightClient {
          * caller's budget ran out while it waited, and whose fault that
          * was (the engine's, or a slow CCIP gateway's earlier in the same
          * lookup) is for the caller to judge, not a failure in itself.
+         * [busy]: every engine slot was taken — back-pressure from calls
+         * already running (possibly abandoned ones, see [ethCall]), not a
+         * sign the light client can't serve; worth falling back once for,
+         * never backing off for.
          */
         data class Unavailable(
             val reason: String,
             val notReady: Boolean = false,
             val timedOut: Boolean = false,
+            val busy: Boolean = false,
         ) : Call()
     }
 
@@ -73,7 +95,12 @@ interface EnsLightClient {
             } catch (e: Exception) {
                 return Call.Unavailable("malformed answer")
             }
-            if (o.has("error")) return Call.Unavailable(o.optString("error").ifEmpty { "error" })
+            if (o.has("error")) {
+                val error = o.optString("error").ifEmpty { "error" }
+                // The engine's own full house (`myotis_engine.h`: "native
+                // execution busy") is back-pressure, like the host's.
+                return Call.Unavailable(error, busy = error.contains("execution busy", ignoreCase = true))
+            }
             // Present at all — even empty or non-string — means the proof failed.
             if (o.has("failReason") && !o.isNull("failReason")) {
                 return Call.Unavailable("verification failed: ${o.optString("failReason").ifEmpty { "unspecified" }}")
@@ -84,10 +111,14 @@ interface EnsLightClient {
                     ?: Call.Unavailable("malformed result")
                 "revert" -> o.optString("dataHex").takeIf(::isHex)?.let { Call.Revert(it, block) }
                     ?: Call.Unavailable("malformed revert")
-                "unavailable" -> Call.Unavailable(
-                    o.optString("reason").ifEmpty { "unavailable" },
-                    notReady = o.optBoolean("notReady", false),
-                )
+                "unavailable" -> {
+                    val reason = o.optString("reason").ifEmpty { "unavailable" }
+                    Call.Unavailable(
+                        reason,
+                        notReady = o.optBoolean("notReady", false),
+                        busy = o.optBoolean("busy", reason == "busy"),
+                    )
+                }
                 else -> Call.Unavailable("unknown status")
             }
         }

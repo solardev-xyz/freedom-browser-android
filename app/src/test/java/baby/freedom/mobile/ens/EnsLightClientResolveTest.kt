@@ -38,9 +38,16 @@ class EnsLightClientResolveTest {
         val probes: MutableList<Long> = Collections.synchronizedList(mutableListOf())
         @Volatile var lastTimeoutMs = 0L
         override fun readyGeneration(): Long? = generation
-        override fun ethCall(to: String, data: String, timeoutMs: Long): EnsLightClient.Call {
+        override fun ethCall(
+            to: String,
+            data: String,
+            timeoutMs: Long,
+            probe: Boolean,
+            released: (() -> Unit)?,
+        ): EnsLightClient.Call {
             lastTimeoutMs = timeoutMs
-            if (to == EnsResolver.ENS_REGISTRY && data == EnsResolver.PROBE_CALL_DATA) {
+            if (probe) {
+                assertTrue(to == EnsResolver.ENS_REGISTRY && data == EnsResolver.PROBE_CALL_DATA)
                 probes += timeoutMs
                 val task = FutureTask { answer(to, data) }
                 Thread(task).apply { isDaemon = true }.start()
@@ -51,7 +58,11 @@ class EnsLightClientResolveTest {
                 }
             }
             calls += to to data
-            return answer(to, data)
+            return try {
+                answer(to, data)
+            } finally {
+                released?.invoke()
+            }
         }
     }
 
@@ -129,7 +140,7 @@ class EnsLightClientResolveTest {
 
     @Test
     fun `an unavailable answer falls back to RPC`() {
-        val client = FakeLightClient { _, _ -> EnsLightClient.Call.Unavailable("busy") }
+        val client = FakeLightClient { _, _ -> EnsLightClient.Call.Unavailable("engine error") }
         val http = OneServer { rpcResult(wrapAsOuterInner(ipfsContenthash)) }
 
         val result = runBlocking { resolver(client, http).resolveContenthash("vitalik.eth") }
@@ -309,7 +320,7 @@ class EnsLightClientResolveTest {
 
     @Test
     fun `with no RPC endpoints a light-client miss is still NO_RPC_ENDPOINTS`() {
-        val client = FakeLightClient { _, _ -> EnsLightClient.Call.Unavailable("busy") }
+        val client = FakeLightClient { _, _ -> EnsLightClient.Call.Unavailable("engine error") }
         val http = OneServer { error("no RPC server should be asked") }
 
         val result = runBlocking {
@@ -418,7 +429,7 @@ class EnsLightClientResolveTest {
     @Test
     fun `a back-off ends when the light client comes back as a new generation`() {
         var failing = true
-        val client = FakeLightClient { _, _ -> if (failing) EnsLightClient.Call.Unavailable("busy") else lightClientOk }
+        val client = FakeLightClient { _, _ -> if (failing) EnsLightClient.Call.Unavailable("engine error") else lightClientOk }
         val http = OneServer { rpcResult(wrapAsOuterInner(ipfsContenthash)) }
         val r = resolver(client, http)
 
@@ -513,7 +524,7 @@ class EnsLightClientResolveTest {
     @Test
     fun `with no RPC endpoints the light client is asked even while backing off`() {
         var fail = true
-        val client = FakeLightClient { _, _ -> if (fail) EnsLightClient.Call.Unavailable("busy") else lightClientOk }
+        val client = FakeLightClient { _, _ -> if (fail) EnsLightClient.Call.Unavailable("engine error") else lightClientOk }
         val http = OneServer { error("no RPC server should be asked") }
         val r = resolver(client, http, settings = { EnsResolver.Settings(emptyList()) })
 
@@ -767,6 +778,191 @@ class EnsLightClientResolveTest {
         assertTrue(urls().any { it == rpc })
     }
 
+    /**
+     * `MyotisService` as the resolver meets it (R6-F1): [LOOKUP_SLOTS]
+     * engine slots for lookups and one for the probe, anything more
+     * answered `busy` at once. Each call runs on its own thread and keeps
+     * its slot until the "engine" returns after [engineMs] — the app
+     * stops waiting at `timeoutMs`, as `MyotisLink` does, but can't
+     * cancel it — and only then is `released` called.
+     */
+    private class SlotClient(private val ok: EnsLightClient.Call, private val engineMs: (String) -> Long) : EnsLightClient {
+        val lookupsHeld = java.util.concurrent.atomic.AtomicInteger()
+        val probesHeld = java.util.concurrent.atomic.AtomicInteger()
+        val busy = java.util.concurrent.atomic.AtomicInteger()
+        val probeAnswers: MutableList<EnsLightClient.Call> = Collections.synchronizedList(mutableListOf())
+        val started: MutableList<String> = Collections.synchronizedList(mutableListOf())
+        override fun readyGeneration(): Long = 1L
+        override fun ethCall(
+            to: String,
+            data: String,
+            timeoutMs: Long,
+            probe: Boolean,
+            released: (() -> Unit)?,
+        ): EnsLightClient.Call {
+            val slots = if (probe) probesHeld else lookupsHeld
+            if (slots.incrementAndGet() > (if (probe) 1 else LOOKUP_SLOTS)) {
+                slots.decrementAndGet()
+                released?.invoke()
+                busy.incrementAndGet()
+                return EnsLightClient.parse("""{"status":"unavailable","reason":"busy","busy":true}""")
+                    .also { if (probe) probeAnswers += it }
+            }
+            if (!probe) started += data
+            val task = FutureTask {
+                try {
+                    Thread.sleep(engineMs(data))
+                    ok
+                } finally {
+                    slots.decrementAndGet()
+                    released?.invoke()
+                }
+            }
+            Thread(task).apply { isDaemon = true }.start()
+            val answer = try {
+                task.get(timeoutMs, TimeUnit.MILLISECONDS)
+            } catch (e: TimeoutException) {
+                EnsLightClient.Call.Unavailable("no answer within ${timeoutMs}ms", timedOut = true)
+            }
+            if (probe) probeAnswers += answer
+            return answer
+        }
+
+        fun awaitIdle(withinMs: Long) {
+            val until = System.currentTimeMillis() + withinMs
+            while ((lookupsHeld.get() > 0 || probesHeld.get() > 0) && System.currentTimeMillis() < until) Thread.sleep(20)
+            assertEquals("engine still busy after ${withinMs}ms", 0, lookupsHeld.get() + probesHeld.get())
+        }
+
+        companion object {
+            const val LOOKUP_SLOTS = 7
+        }
+    }
+
+    /** Whether [data] asks about a name with a `slow`-prefixed label (`slow3.eth`). */
+    private fun isSlow(data: String) = data.startsWith("0x9061b923") && "736c6f77" in data
+
+    @Test
+    fun `one site's slow subnames, one after another, can't take every engine slot or back the light client off`() {
+        // R6-F1: a page asks for a1.evil.eth, a2.evil.eth, … in turn; each
+        // one's engine call outlives the lookup (4 s of engine time against
+        // a 200 ms deadline, standing in for ~90 s against 20 s) and keeps
+        // its slot after the resolver gave up on it.
+        val client = SlotClient(lightClientOk) { data -> if (isEvil(data) || "046576696c0365746800" in data) 2_000 else 20 }
+        val http = OneServer { rpcResult(wrapAsOuterInner(ipfsContenthash)) }
+        val r = resolver(client, http, deadlineMs = 200)
+
+        for (i in 1..8) {
+            val evil = runBlocking { r.resolveContenthash("a$i.evil.eth") }
+            require(evil is EnsResult.Ok) { "got $evil" }
+            assertFalse(evil.trust.lightClient)
+            assertTrue(r.lightClientCallsHeld("evil.eth") <= EnsResolver.LIGHT_CLIENT_CALLS_PER_SITE)
+        }
+        // evil.eth got only its share of the engine; the rest went to RPC unasked.
+        assertEquals(EnsResolver.LIGHT_CLIENT_CALLS_PER_SITE, client.started.size)
+        assertEquals(0, client.busy.get())
+
+        // The user's own name, while evil.eth's calls are still in the engine.
+        val during = runBlocking { r.resolveContenthash("vitalik.eth") }
+        require(during is EnsResult.Ok) { "got $during" }
+        assertTrue(during.trust.lightClient)
+        // Every probe the misses asked for was answered: nothing backed off.
+        assertTrue(client.probeAnswers.isNotEmpty())
+        assertTrue(client.probeAnswers.all { it is EnsLightClient.Call.Ok })
+
+        client.awaitIdle(5_000)
+        assertEquals(0, r.lightClientCallsHeld("evil.eth"))
+        val after = runBlocking { r.resolveContenthash("nick.eth") }
+        require(after is EnsResult.Ok) { "got $after" }
+        assertTrue(after.trust.lightClient)
+        // Its slots came back: evil.eth may use the light client again.
+        val again = r.lightClientCallsHeld("evil.eth")
+        assertEquals(0, again)
+    }
+
+    @Test
+    fun `a burst that fills every engine slot is back-pressure, and later lookups use the light client once slots free`() {
+        // Seven slow names on seven different sites fill every lookup slot
+        // at once — the engine's full house, not a light client that can't serve.
+        val client = SlotClient(lightClientOk) { data -> if (isSlow(data)) 2_000 else 20 }
+        val http = OneServer { rpcResult(wrapAsOuterInner(ipfsContenthash)) }
+        val r = resolver(client, http, deadlineMs = 200)
+
+        val burst = (1..SlotClient.LOOKUP_SLOTS).map { i ->
+            Thread { runBlocking { r.resolveContenthash("slow$i.eth") } }.apply { start() }
+        }
+        val until = System.currentTimeMillis() + 2_000
+        while (client.lookupsHeld.get() < SlotClient.LOOKUP_SLOTS && System.currentTimeMillis() < until) Thread.sleep(5)
+        assertEquals(SlotClient.LOOKUP_SLOTS, client.lookupsHeld.get())
+
+        // Busy: this lookup goes to RPC — once.
+        val during = runBlocking { r.resolveContenthash("vitalik.eth") }
+        require(during is EnsResult.Ok) { "got $during" }
+        assertFalse(during.trust.lightClient)
+        assertTrue(client.busy.get() >= 1)
+        burst.forEach { it.join(5_000) }
+        // The probes the slow misses asked for (run after each miss
+        // returned) had their own slot throughout.
+        val probed = System.currentTimeMillis() + 2_000
+        while (client.probeAnswers.isEmpty() && System.currentTimeMillis() < probed) Thread.sleep(10)
+        assertTrue(client.probeAnswers.isNotEmpty())
+        assertTrue(client.probeAnswers.none { it is EnsLightClient.Call.Unavailable })
+
+        client.awaitIdle(5_000)
+        val after = runBlocking { r.resolveContenthash("nick.eth") }
+        require(after is EnsResult.Ok) { "got $after" }
+        assertTrue("busy must not have backed the light client off", after.trust.lightClient)
+    }
+
+    @Test
+    fun `a busy probe is inconclusive and backs nothing off`() {
+        // Engine errors on the lookup make it a suspect miss; the probe finds
+        // its slot taken (an earlier probe still in the engine) and says busy.
+        var lookupFails = true
+        val client = FakeLightClient { to, _ ->
+            when {
+                to == EnsResolver.ENS_REGISTRY -> EnsLightClient.parse("""{"status":"unavailable","reason":"busy","busy":true}""")
+                lookupFails -> EnsLightClient.Call.Unavailable("engine error")
+                else -> lightClientOk
+            }
+        }
+        val http = OneServer { rpcResult(wrapAsOuterInner(ipfsContenthash)) }
+        val r = resolver(client, http)
+
+        runBlocking { r.resolveContenthash("vitalik.eth") }
+        lookupFails = false
+        val next = runBlocking { r.resolveContenthash("nick.eth") }
+        require(next is EnsResult.Ok) { "got $next" }
+        assertTrue(next.trust.lightClient)
+        assertEquals(1, client.probes.size)
+    }
+
+    @Test
+    fun `a busy lookup is not a light-client miss`() {
+        var busy = true
+        val client = FakeLightClient { _, _ ->
+            if (busy) EnsLightClient.parse("""{"error":"native execution busy"}""") else lightClientOk
+        }
+        val http = OneServer { rpcResult(wrapAsOuterInner(ipfsContenthash)) }
+        val r = resolver(client, http)
+
+        val first = runBlocking { r.resolveContenthash("vitalik.eth") }
+        require(first is EnsResult.Ok) { "got $first" }
+        assertFalse(first.trust.lightClient)
+        assertTrue("busy is no reason to probe", client.probes.isEmpty())
+        busy = false
+        val next = runBlocking { r.resolveContenthash("nick.eth") }
+        require(next is EnsResult.Ok) { "got $next" }
+        assertTrue(next.trust.lightClient)
+    }
+
+    @Test
+    fun `siteOf charges a name to its registration`() {
+        assertEquals("evil.eth", EnsResolver.siteOf("a1.b.evil.eth"))
+        assertEquals("evil.eth", EnsResolver.siteOf("evil.eth"))
+        assertEquals("alice.wei", EnsResolver.siteOf("x.alice.wei"))
+    }
+
     @Test
     fun `parse reads the engine's eth_call shapes`() {
         assertEquals(
@@ -786,9 +982,22 @@ class EnsLightClientResolveTest {
             EnsLightClient.Call.Unavailable("light client not ready", notReady = true),
             EnsLightClient.parse(baby.freedom.swarm.MyotisNode.NOT_READY_JSON),
         )
+        // A full engine, the engine's own and the host's, is back-pressure.
         assertEquals(
-            EnsLightClient.Call.Unavailable("native execution busy"),
+            EnsLightClient.Call.Unavailable("native execution busy", busy = true),
             EnsLightClient.parse("""{"error":"native execution busy"}"""),
+        )
+        assertEquals(
+            EnsLightClient.Call.Unavailable("busy", busy = true),
+            EnsLightClient.parse("""{"status":"unavailable","reason":"busy","busy":true}"""),
+        )
+        assertEquals(
+            EnsLightClient.Call.Unavailable("busy", busy = true),
+            EnsLightClient.parse("""{"status":"unavailable","reason":"busy"}"""),
+        )
+        assertEquals(
+            EnsLightClient.Call.Unavailable("state unavailable"),
+            EnsLightClient.parse("""{"error":"state unavailable"}"""),
         )
         assertTrue(EnsLightClient.parse("""{"status":"ok","resultHex":"0xabc"}""") is EnsLightClient.Call.Unavailable)
         assertTrue(EnsLightClient.parse("""{"status":"ok","resultHex":"nothex"}""") is EnsLightClient.Call.Unavailable)

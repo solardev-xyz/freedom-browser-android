@@ -42,7 +42,9 @@ import org.json.JSONObject
  * because the URLs come from the contract, not from us; see
  * [ccipFetch].
  *
- * A proof comes first (#100): [EnsColibri] asks corpus.core's Colibri
+ * A proof comes first. The Myotis light client, when it's ready, is
+ * asked before anything else (#101, below); then, or when it has no
+ * answer, [EnsColibri] (#100) asks corpus.core's Colibri
  * prover for a proof of the Universal Resolver's (or the NameNFT
  * registry's) answer and checks it on this device against Ethereum's
  * sync committee — the chain's own consensus, the tier above servers
@@ -50,7 +52,8 @@ import org.json.JSONObject
  * answer is taken from it, or a proven "no resolver"; when it can't
  * give one — prover or network down, not in this build, switched off in
  * Settings, a revert that proves nothing — the lookup goes on to the
- * RPC servers below, as before.
+ * RPC servers below, as before. Both proven sources earn the same
+ * *Proven name* tier ([EnsTrust.proven]).
  *
  * No single RPC server is taken at its word (#96): with three or more
  * endpoints, servers first agree on a block ([EnsQuorum]'s anchor),
@@ -82,17 +85,24 @@ import org.json.JSONObject
  * With the Myotis light client on and ready ([EnsLightClient], #101),
  * an Ethereum name is resolved through it first: the same call, run on
  * this device against state proven to the chain's sync committee, CCIP-
- * Read callbacks included. Its answer is verified on its own
- * ([EnsTrust.lightClient]); no RPC server is asked. When it isn't ready,
+ * Read callbacks included. Its answer is proven on its own
+ * ([EnsTrust.Source.MYOTIS]); neither Colibri nor any RPC server is asked. When it isn't ready,
  * can't answer within [LIGHT_CLIENT_DEADLINE_MS], or gives anything but
  * a record or a known "no resolver" revert, the lookup falls back to the
- * RPC servers exactly as without it. After a miss that may be the light
- * client's own (unavailable, busy, an engine error, out of time with the
+ * Colibri and the RPC servers exactly as without it. After a miss that may be the light
+ * client's own (unavailable, an engine error, out of time with the
  * engine — not a name's CCIP-Read gateway — using most of it), and only
  * if a name-independent probe call then fails too (a name's own resolver
  * can fail the engine's call for that name alone), it's skipped for
  * [LIGHT_CLIENT_BACKOFF_MS], so one struggling light client doesn't add
- * its whole deadline to every lookup. Its readiness is
+ * its whole deadline to every lookup. `busy` (every engine slot taken)
+ * is back-pressure, never a miss of the light client's: that lookup
+ * goes to RPC and the next one tries again. A started engine call can't
+ * be cancelled, so one a lookup gave up on keeps its slot until the
+ * engine returns; those are charged to the name's site ([siteOf]),
+ * which may hold at most [LIGHT_CLIENT_CALLS_PER_SITE] engine calls at
+ * once — one page's slow names can't take every slot — and the probe
+ * has an engine slot of its own. Its readiness is
  * read per lookup and is not part of [Settings]: a flapping light client
  * never throws away the RPC epoch (cache, anchor, failed endpoints).
  *
@@ -190,6 +200,41 @@ class EnsResolver internal constructor(
 
     @Volatile
     private var lightClientProbe: LightClientProbe? = null
+
+    /**
+     * Light-client calls each site ([siteOf]) still has in the engine —
+     * running ones, and ones a lookup has given up on that the engine
+     * hasn't let go of yet (a started call can't be cancelled; see
+     * [EnsLightClient.ethCall]). At [LIGHT_CLIENT_CALLS_PER_SITE] a
+     * site's further lookups go straight to RPC: a page whose own slow
+     * names pin engine slots fills only its own share, not every slot the
+     * user's other names need. Guarded by itself.
+     */
+    private val lightClientHeld = HashMap<String, Int>()
+
+    /**
+     * Take one of [site]'s [lightClientHeld] slots; the returned release
+     * gives it back (once). `null` when the site has none left.
+     */
+    private fun holdLightClientSlot(site: String): (() -> Unit)? {
+        synchronized(lightClientHeld) {
+            val held = lightClientHeld[site] ?: 0
+            if (held >= LIGHT_CLIENT_CALLS_PER_SITE) return null
+            lightClientHeld[site] = held + 1
+        }
+        val once = AtomicBoolean(false)
+        return {
+            if (once.compareAndSet(false, true)) {
+                synchronized(lightClientHeld) {
+                    val left = (lightClientHeld[site] ?: 1) - 1
+                    if (left <= 0) lightClientHeld.remove(site) else lightClientHeld[site] = left
+                }
+            }
+        }
+    }
+
+    /** [lightClientHeld] for [site] now; for tests. */
+    internal fun lightClientCallsHeld(site: String): Int = synchronized(lightClientHeld) { lightClientHeld[site] ?: 0 }
 
     /**
      * After a Colibri call can't reach its provers / servers
@@ -437,7 +482,7 @@ class EnsResolver internal constructor(
     /**
      * The light client couldn't give a usable answer: fall back to RPC.
      * [backOff]: the miss may be the light client's, not the name's (it
-     * was unavailable, busy, erroring, or out of time) — skip it for a
+     * was unavailable, erroring, or out of time) — skip it for a
      * while if a name-independent probe fails too ([probeLightClient]).
      */
     private class LightClientMiss(reason: String, val backOff: Boolean = false) : Exception(reason)
@@ -567,8 +612,10 @@ class EnsResolver internal constructor(
      * turn the light client off for every other name, again every
      * [lightClientBackoffMs]. So the engine is asked one call no name
      * has any say in ([PROBE_CALL_DATA] on [ENS_REGISTRY]: one account,
-     * one slot) and only backed off if that fails too — unavailable,
-     * busy, erroring, or unanswered within [LIGHT_CLIENT_PROBE_TIMEOUT_MS].
+     * one slot, on an engine slot lookups can't take) and only backed off
+     * if that fails too — unavailable, erroring, or unanswered within
+     * [LIGHT_CLIENT_PROBE_TIMEOUT_MS]. A busy probe (an earlier one still
+     * in the engine) proves nothing either way and backs nothing off.
      * One probe per generation at a time; the lookup that missed doesn't
      * wait for it, later ones do ([resolve]).
      */
@@ -579,7 +626,7 @@ class EnsResolver internal constructor(
             val timeoutMs = minOf(LIGHT_CLIENT_PROBE_TIMEOUT_MS, lightClientDeadlineMs)
             val healthy = io.async {
                 val answer = try {
-                    client.ethCall(ENS_REGISTRY, PROBE_CALL_DATA, timeoutMs)
+                    client.ethCall(ENS_REGISTRY, PROBE_CALL_DATA, timeoutMs, probe = true)
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Throwable) {
@@ -587,7 +634,9 @@ class EnsResolver internal constructor(
                 }
                 // A new stretch of readiness isn't this probe's to judge.
                 if (client.readyGeneration() != generation) return@async true
-                val ok = answer !is EnsLightClient.Call.Unavailable || answer.notReady
+                // Busy — even the probe's own slot still held by an earlier
+                // probe the engine hasn't finished — says nothing about health.
+                val ok = answer !is EnsLightClient.Call.Unavailable || answer.notReady || answer.busy
                 if (!ok) {
                     lightClientMiss = LightClientBackoff(generation, System.currentTimeMillis())
                     Log.i(TAG, "light client: probe failed too (${(answer as EnsLightClient.Call.Unavailable).reason}); skipping it for ${lightClientBackoffMs}ms")
@@ -611,13 +660,17 @@ class EnsResolver internal constructor(
         ccipRead: Boolean,
         budget: LightClientBudget,
     ): Verdict {
+        val site = siteOf(name)
         // Each call waits only for what's left of the lookup's budget, so
         // a read abandoned at the deadline doesn't hold a thread past it.
         fun call(to: String, data: ByteArray, pin: Long?): Pair<CallOutcome, Long?> {
             if (client.readyGeneration() != generation) throw LightClientMiss("light client no longer ready")
             val left = budget.left()
             if (left <= 0) throw LightClientMiss("out of time", backOff = budget.engineOwnsTheTime())
-            val answer = budget.engine { client.ethCall(to, "0x" + data.toHex(), left) }
+            // The name's own site pays for its slow calls, not the light client.
+            val release = holdLightClientSlot(site)
+                ?: throw LightClientMiss("$site already has $LIGHT_CLIENT_CALLS_PER_SITE light-client calls in the engine")
+            val answer = budget.engine { client.ethCall(to, "0x" + data.toHex(), left, released = release) }
             // An answer from a light client that has since stopped or
             // restarted isn't one this lookup's epoch vouches for.
             if (client.readyGeneration() != generation) throw LightClientMiss("light client availability changed")
@@ -631,6 +684,11 @@ class EnsResolver internal constructor(
                     answer.reason,
                     backOff = when {
                         answer.notReady -> false
+                        // Every slot taken is back-pressure (other names'
+                        // calls, abandoned ones included), not a light
+                        // client that can't serve: RPC this once, and the
+                        // next lookup tries it again.
+                        answer.busy -> false
                         // The call waited out what was left of the budget:
                         // the same out-of-time verdict as the deadline's own,
                         // so a slow gateway earlier in the lookup doesn't
@@ -1923,7 +1981,7 @@ class EnsResolver internal constructor(
 
         /**
          * How long the light client is skipped after it missed for its own
-         * reasons (unavailable, busy, out of time in the engine) — lookups go straight to
+         * reasons (unavailable, erroring, out of time in the engine) — lookups go straight to
          * RPC meanwhile instead of each paying its delay first.
          */
         internal const val LIGHT_CLIENT_BACKOFF_MS = 60_000L
@@ -1940,6 +1998,22 @@ class EnsResolver internal constructor(
 
         /** `owner(bytes32(0))` — the root node's owner: one storage slot, no name involved. */
         internal const val PROBE_CALL_DATA = "0x02571be3" + "0000000000000000000000000000000000000000000000000000000000000000"
+
+        /**
+         * Light-client calls one site ([siteOf]) may have in the engine at
+         * once, abandoned ones included ([lightClientHeld]) — of the
+         * engine's eight, one of which only the probe can use.
+         */
+        internal const val LIGHT_CLIENT_CALLS_PER_SITE = 2
+
+        /**
+         * Whose resolver a light-client call's cost is charged to: the
+         * name's registered second-level name (`evil.eth` for
+         * `a1.b.evil.eth`), the eTLD+1 of a name — subnames are free to
+         * mint, a new registration isn't, and every name under one
+         * registration answers to the same owner.
+         */
+        internal fun siteOf(name: String): String = name.split('.').takeLast(2).joinToString(".")
 
         /** Tries at a CCIP-Read name whose callback lands on a newer head than its first call. */
         private const val LIGHT_CLIENT_CCIP_ATTEMPTS = 3

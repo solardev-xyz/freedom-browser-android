@@ -1,5 +1,6 @@
 package baby.freedom.mobile.node
 
+import android.os.IBinder
 import baby.freedom.mobile.ens.EnsLightClient
 import baby.freedom.swarm.MyotisInfo
 import baby.freedom.swarm.MyotisNetwork
@@ -7,6 +8,7 @@ import baby.freedom.swarm.MyotisStatus
 import java.util.WeakHashMap
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 
 /**
@@ -37,18 +39,36 @@ object MyotisLink : EnsLightClient {
 
     override fun readyGeneration(): Long? = bindings.generation
 
-    override fun ethCall(to: String, data: String, timeoutMs: Long): EnsLightClient.Call {
-        val service = bindings.service ?: return EnsLightClient.Call.Unavailable("light client not connected", notReady = true)
+    override fun ethCall(
+        to: String,
+        data: String,
+        timeoutMs: Long,
+        probe: Boolean,
+        released: (() -> Unit)?,
+    ): EnsLightClient.Call {
+        val release = releaseOnce(released)
+        val service = bindings.service ?: run {
+            release()
+            return EnsLightClient.Call.Unavailable("light client not connected", notReady = true)
+        }
         val answer = AtomicReference<String?>()
         val done = CountDownLatch(1)
+        // `:myotis` exiting ends every call it held, answered or not.
+        val binder = service.asBinder()
+        val death = IBinder.DeathRecipient { release() }
         val result = object : IMyotisCallResult.Stub() {
             override fun onResult(json: String?) {
                 answer.set(json)
                 done.countDown()
+                // Also after this call stopped waiting: the engine has let
+                // go of it only now.
+                runCatching { binder.unlinkToDeath(death, 0) }
+                release()
             }
         }
         return try {
-            service.ethCall(MyotisNetwork.Mainnet.chainId, to, data, result)
+            runCatching { binder.linkToDeath(death, 0) }.onFailure { release() }
+            service.ethCall(MyotisNetwork.Mainnet.chainId, to, data, probe, result)
             if (done.await(timeoutMs, TimeUnit.MILLISECONDS)) {
                 EnsLightClient.parse(answer.get())
             } else {
@@ -58,9 +78,18 @@ object MyotisLink : EnsLightClient {
             Thread.currentThread().interrupt()
             EnsLightClient.Call.Unavailable("interrupted")
         } catch (e: Exception) {
-            // DeadObjectException (`:myotis` exited) and friends.
+            // DeadObjectException (`:myotis` exited) and friends: the call
+            // never reached the engine, or the engine is gone with it.
+            runCatching { binder.unlinkToDeath(death, 0) }
+            release()
             EnsLightClient.Call.Unavailable("light client unreachable: ${e.javaClass.simpleName}")
         }
+    }
+
+    private fun releaseOnce(released: (() -> Unit)?): () -> Unit {
+        if (released == null) return {}
+        val once = AtomicBoolean(false)
+        return { if (once.compareAndSet(false, true)) released() }
     }
 }
 
