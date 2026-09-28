@@ -84,6 +84,7 @@ import baby.freedom.mobile.data.NodeSettings
 import baby.freedom.mobile.ens.EnsInput
 import baby.freedom.mobile.ens.EnsResult
 import baby.freedom.swarm.IpfsInfo
+import baby.freedom.swarm.MyotisInfo
 import baby.freedom.swarm.IpfsStatus
 import baby.freedom.swarm.NodeInfo
 import baby.freedom.swarm.NodeStatus
@@ -398,6 +399,9 @@ fun BrowserScreen(
     ipfsInfo: IpfsInfo,
     runNodeEnabled: Boolean,
     onToggleRunNode: (Boolean) -> Unit,
+    myotisInfo: MyotisInfo = MyotisInfo(),
+    myotisEnabled: Boolean = false,
+    onToggleMyotis: (Boolean) -> Unit = {},
     onEnsureIpfsStarted: () -> Unit,
     onIpfsToggle: (Boolean) -> Unit,
     initialUrl: String = HOME_URL,
@@ -1776,6 +1780,9 @@ fun BrowserScreen(
             nodeInfo = nodeInfo,
             runNodeEnabled = runNodeEnabled,
             onToggleRunNode = onToggleRunNode,
+            myotisInfo = myotisInfo,
+            myotisEnabled = myotisEnabled,
+            onToggleMyotis = onToggleMyotis,
             onDismiss = { showNode = false },
         )
     }
