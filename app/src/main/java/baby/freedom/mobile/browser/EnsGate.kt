@@ -15,6 +15,11 @@ import java.security.SecureRandom
  * which re-submits [retryUrl] with [uri] let through. [token] is random
  * and lives only in the tab and in that page's URL, so a website can't
  * wave its own navigation past the warning by linking to a continue URL.
+ *
+ * An onchain app's warning (#123, `error=web3_unverified`) uses the same
+ * gate: [name] is then the app's `web3://` address and [uri] the
+ * keccak256 of the code the one server returned — "Continue once" runs
+ * exactly that code ([OnchainAppTab.takePending]).
  */
 internal class EnsGate(
     val token: String,
@@ -27,6 +32,9 @@ internal class EnsGate(
 ) {
     companion object {
         private const val CONTINUE_PREFIX = "freedom-ens-continue:"
+
+        /** The warnings a gate is made for: an ENS answer's, and an onchain app's code (#123). */
+        private val UNVERIFIED_ERRORS = setOf("ens_unverified", "web3_unverified")
         private val random = SecureRandom()
 
         fun create(name: String, uri: String, retryUrl: String): EnsGate {
@@ -69,7 +77,8 @@ internal class EnsGate(
          * when its token is still [gate]'s. A warning the tab no longer
          * holds a gate for — reached again via Back, or restored with the
          * tab — would otherwise do nothing; if the page tapped on
-         * ([pageUrl]) is our not-cross-checked warning, its navigation is
+         * ([pageUrl]) is one of our not-cross-checked warnings (an ENS
+         * answer's, or an onchain app's, #123), its navigation is
          * run again instead, unapproved, so the user gets a fresh warning
          * (or the page, if the servers now agree). `null`: drop it — a
          * continue URL from anywhere else is a page trying its luck.
@@ -77,7 +86,7 @@ internal class EnsGate(
         fun continueDestination(continueUrl: String, gate: EnsGate?, pageUrl: String?): String? {
             val token = continueToken(continueUrl) ?: return null
             if (gate != null && gate.token == token) return continueUrl
-            if (ErrorPage.paramFor(pageUrl, "error") != "ens_unverified") return null
+            if (ErrorPage.paramFor(pageUrl, "error") !in UNVERIFIED_ERRORS) return null
             return ErrorPage.paramFor(pageUrl, "retry")?.takeIf { continueToken(it) == null }
         }
 
@@ -88,6 +97,7 @@ internal class EnsGate(
                 when (result.subject) {
                     EnsResult.Conflict.Subject.RECORD -> "Answers at block $block:"
                     EnsResult.Conflict.Subject.BLOCK -> "Hashes reported for block $block:"
+                    EnsResult.Conflict.Subject.HEAD -> "Chain heads reported:"
                 },
             )
             for (group in result.groups) {

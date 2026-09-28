@@ -83,6 +83,7 @@ import baby.freedom.mobile.ui.PrivateTheme
 import baby.freedom.mobile.data.NodeSettings
 import baby.freedom.mobile.ens.EnsInput
 import baby.freedom.mobile.ens.EnsResult
+import baby.freedom.mobile.ens.TezosDomainsResolver
 import baby.freedom.swarm.IpfsInfo
 import baby.freedom.swarm.MyotisInfo
 import baby.freedom.swarm.IpfsStatus
@@ -459,6 +460,7 @@ fun BrowserScreen(
     // text lives here until it is submitted.
     var addressQuery by remember { mutableStateOf("") }
     val snackbarHostState = remember { SnackbarHostState() }
+
     val sitePermissions = remember(context) { SitePermissionBroker.get(context) }
     SitePermissionAndroidBridge(sitePermissions, snackbarHostState)
     // Any full-screen panel over the browser (they're all opaque).
@@ -776,6 +778,106 @@ fun BrowserScreen(
         }
     }
 
+    /**
+     * The submit flow's `web3://` branch (#123, ERC-8244): read the
+     * app's `html()` through the chain-data router and load it — at once
+     * when the read was verified (a proof or an RPC quorum) or came from
+     * the user's own RPC, or when these exact bytes were already let
+     * through this session. Code only one public RPC returned gets the
+     * *not cross-checked* warning, whose "Continue once" comes back here
+     * with its hash as [approvedUri] and runs exactly the bytes the
+     * warning described, without another read; code the RPCs disagreed
+     * about gets a warning with no way on.
+     */
+    fun submitOnchainApp(
+        target: BrowserState,
+        input: String,
+        source: SubmitSource,
+        approvedUri: String?,
+        namedByUser: Boolean,
+    ) {
+        target.clearEnsOverride()
+        target.ipfsLoad = false
+        val parsed = OnchainAppRef.parse(input)
+        if (parsed == null) {
+            target.addressBarText = pendingAddressBarText(target.addressBarText, input.trim(), source)
+            target.loadUrl(
+                ErrorPage.url(
+                    errorCode = "web3_invalid",
+                    displayUrl = input.trim(),
+                    protocol = "web3",
+                    detail = "Expected web3://<contract address>[:<chain ID>]/",
+                ),
+            )
+            return
+        }
+        val (app, tail) = parsed
+        val display = app.displayUrl(tail)
+        target.addressBarText = pendingAddressBarText(target.addressBarText, display, source)
+        target.resolving = true
+
+        fun onchainError(code: String, detail: String, continueUrl: String? = null) {
+            target.loadUrl(
+                ErrorPage.url(
+                    errorCode = code,
+                    displayUrl = display,
+                    protocol = "web3",
+                    // A form Chromium lets the page navigate to
+                    // ([OnchainAppRef.linkUrl]).
+                    retryUrl = app.linkUrl(tail),
+                    detail = detail,
+                    continueUrl = continueUrl,
+                ),
+            )
+        }
+
+        val probe = scope.launch {
+            try {
+                val pending = approvedUri?.let { target.onchain.takePending(app, it) }
+                val load = if (pending != null) {
+                    OnchainLoad.Loaded(pending)
+                } else {
+                    OnchainApps.init(context)
+                    // Off the main thread: decoding and hashing a
+                    // document of megabytes is real work.
+                    withContext(Dispatchers.Default) { OnchainApps.loader!!.load(app) }
+                }
+                // As in the ENS branch: a superseded read writes nothing.
+                ensureActive()
+                when (load) {
+                    is OnchainLoad.Failed -> onchainError(load.code, load.detail)
+                    is OnchainLoad.Loaded -> {
+                        val doc = load.document
+                        val approvals = OnchainApps.approvalsFor(target.private)
+                        val approved = approvedUri != null && doc.hash.equals(approvedUri, ignoreCase = true)
+                        when {
+                            doc.conflict -> onchainError("web3_conflict", doc.conflictDetail())
+                            doc.trusted || approved || approvals.contains(doc) -> {
+                                approvals.add(doc)
+                                target.onchain.handOff(doc)
+                                target.loadUrl(app.virtualUrl(tail), namedByUser = namedByUser)
+                            }
+                            else -> {
+                                target.onchain.offer(doc)
+                                val gate = EnsGate.create(display, doc.hash, app.linkUrl(tail))
+                                target.ensGate = gate
+                                onchainError(
+                                    "web3_unverified",
+                                    doc.unverifiedDetail(),
+                                    continueUrl = EnsGate.continueUrl(gate),
+                                )
+                            }
+                        }
+                    }
+                }
+            } finally {
+                target.resolving = false
+                target.finishPendingProbe(coroutineContext.job)
+            }
+        }
+        target.beginPendingProbe(probe, source, target = app.virtualUrl(tail))
+    }
+
     fun submit(
         target: BrowserState,
         raw: String,
@@ -923,11 +1025,14 @@ fun BrowserScreen(
                             )
                         }
                         is EnsResult.Ok -> {
+                            val webRecord = result.protocol == "http" || result.protocol == "https"
                             // Remember hash/cid → name for the whole session
                             // (cross-tab address-bar preservation). Safe for
                             // every protocol — bzz, ipfs, and ipns all round-
-                            // trip through [Gateways] + [DisplayUrl] now.
-                            KnownEnsNames.record(result.uri, name)
+                            // trip through [Gateways] + [DisplayUrl] now. A
+                            // `.tez` name's http(s) website is not content
+                            // the name's origin serves, so it isn't recorded.
+                            if (!webRecord) KnownEnsNames.record(result.uri, name)
                             if (requiredProtocol != null && result.protocol != requiredProtocol) {
                                 // Retry with the generic ens:// form: the
                                 // same constrained URL would fail forever,
@@ -938,6 +1043,21 @@ fun BrowserScreen(
                                         "not $requiredProtocol://",
                                     retryUrl = "ens://$name$suffix",
                                 )
+                            } else if (webRecord) {
+                                // A `.tez` website record on the ordinary
+                                // web: navigate there directly, as desktop
+                                // does. A redirect record is the whole
+                                // destination; a content URL keeps the
+                                // typed path.
+                                val web = if (result.redirect) {
+                                    result.uri
+                                } else {
+                                    TezosDomainsResolver.appendWebsiteSuffix(result.uri, suffix)
+                                }
+                                target.clearEnsOverride()
+                                target.addressBarText =
+                                    pendingAddressBarText(target.addressBarText, web, source)
+                                target.loadUrl(web)
                             } else if (result.protocol == "bzz" ||
                                 result.protocol == "ipfs" ||
                                 result.protocol == "ipns"
@@ -972,10 +1092,19 @@ fun BrowserScreen(
                         is EnsResult.Unsupported ->
                             ensError(
                                 "ens_unsupported_codec",
-                                detail = EnsGate.withTrustNote("codec ${result.codec}", result.trust),
+                                // A `.tez` record's "codec" is the reason
+                                // its website URI was refused.
+                                detail = EnsGate.withTrustNote(
+                                    if (name.endsWith(".tez")) result.codec else "codec ${result.codec}",
+                                    result.trust,
+                                ),
                             )
                         is EnsResult.Error ->
-                            ensError("ens_lookup_failed", detail = result.reason)
+                            ensError(
+                                "ens_lookup_failed",
+                                // `.tez` says what failed.
+                                detail = if (name.endsWith(".tez")) "${result.reason}: ${result.error}" else result.reason,
+                            )
                         // RPC servers disagreed (#96): nothing to load.
                         is EnsResult.Conflict ->
                             ensError("ens_conflict", detail = EnsGate.conflictDetail(result))
@@ -989,6 +1118,14 @@ fun BrowserScreen(
             // so its own commit isn't mistaken for the navigation that
             // superseded it (#54, see [commitCancelsPendingProbe]).
             target.beginPendingProbe(ensProbe, source, target = "ens://$name$suffix")
+            return
+        }
+
+        // A contract-hosted app (#123): its document is read from the
+        // chain here, gated on how it was read, and handed to the
+        // interceptor with the navigation.
+        if (OnchainAppRef.isWeb3Scheme(canonical)) {
+            submitOnchainApp(target, canonical, source, approvedUri, namedByUser)
             return
         }
 

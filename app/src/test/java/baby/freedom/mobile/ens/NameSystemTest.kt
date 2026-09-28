@@ -55,7 +55,7 @@ class NameSystemTest {
         assertEquals(NameSystem.GNS, NameSystem.forName("apoorv.gwei"))
         assertEquals(NameSystem.ENS, NameSystem.forName("vitalik.eth"))
         assertEquals(NameSystem.ENS, NameSystem.forName("foo.box"))
-        assertEquals(listOf(".eth", ".box", ".wei", ".gwei"), NameSystem.navigableSuffixes)
+        assertEquals(listOf(".eth", ".box", ".wei", ".gwei", ".tez"), NameSystem.navigableSuffixes)
     }
 
     @Test

@@ -69,6 +69,9 @@ import androidx.webkit.WebMessageCompat
 import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
 import baby.freedom.mobile.data.BrowsingRepository
+import baby.freedom.mobile.ens.EnsResult
+import baby.freedom.mobile.ens.NameSystem
+import baby.freedom.mobile.ens.TezosDomainsResolver
 import kotlinx.coroutines.flow.collectLatest
 import java.io.ByteArrayInputStream
 import java.io.FilterInputStream
@@ -183,13 +186,30 @@ internal fun refererOf(headers: Map<String, String>?): String? =
  * place, Back and Forward move past it as usual and Reload re-checks
  * the name. No script: the document is on the name's origin.
  */
-internal fun nameResolutionRefusal(name: String, code: String): WebResourceResponse {
+internal fun nameResolutionRefusal(name: String, code: String): WebResourceResponse =
+    WebResourceResponse(
+        "text/html", "utf-8", statusForNameResolutionError(code), "Name Resolution Failed",
+        mapOf(NAME_RESOLUTION_ERROR_HEADER to code, "Cache-Control" to "no-store"),
+        ByteArrayInputStream(nameResolutionRefusalHtml(name, code).toByteArray(Charsets.UTF_8)),
+    )
+
+/** [nameResolutionRefusal]'s page. */
+internal fun nameResolutionRefusalHtml(name: String, code: String): String {
+    val system = NameSystem.forName(name)
+    val label = system.label
+    val tezos = system == NameSystem.TEZOS
+    val chain = if (tezos) "Tezos" else "Ethereum"
     val (title, description) = when (code) {
-        "ens_not_found" -> "No content for this ENS name" to
-            "This ENS name doesn't point at any content any more. The owner may " +
-            "have removed its <code>contenthash</code> record, or the name has no resolver."
+        "ens_not_found" -> "No content for this $label name" to
+            if (tezos) {
+                "This $label name doesn't point at a website any more. The owner may " +
+                    "have removed its <code>web:content_url</code> record, or the name has expired."
+            } else {
+                "This $label name doesn't point at any content any more. The owner may " +
+                    "have removed its <code>contenthash</code> record, or the name has no resolver."
+            }
         "ens_unsupported_codec" -> "Unsupported content format" to
-            "This ENS name now resolves to a content format Freedom Browser " +
+            "This $label name now resolves to a content format Freedom Browser " +
             "cannot load yet on mobile."
         // [Gateways.reverifyEnsDocument] lands here for one server's
         // record that isn't what this tab or session had — including when
@@ -199,20 +219,20 @@ internal fun nameResolutionRefusal(name: String, code: String): WebResourceRespo
         // content" as "No content" with a trust note, so the copy neither
         // promises an answer to review nor claims an earlier one.
         "ens_unverified" -> "Not cross-checked" to
-            "Only one Ethereum RPC server answered for this name, so Freedom " +
+            "Only one $chain RPC server answered for this name, so Freedom " +
             "couldn't check its answer against another server. An answer only " +
             "one server gave is loaded here only if it matches one already " +
             "loaded in this session, so nothing was loaded. Try again, or " +
             "enter the name in the address bar to see what that server answered."
         "ens_conflict" -> "RPC servers disagreed" to
-            "The Ethereum RPC servers Freedom asked gave different answers for " +
+            "The $chain RPC servers Freedom asked gave different answers for " +
             "this name. At least one of them is wrong, so nothing was loaded."
-        else -> "ENS lookup failed" to
-            "Couldn't reach an Ethereum RPC endpoint to resolve this name. " +
+        else -> "$label lookup failed" to
+            "Couldn't reach ${if (tezos) "a Tezos" else "an Ethereum"} RPC endpoint to resolve this name. " +
             "Check your connection and try again."
     }
     val safeName = name.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-    val html = """<!doctype html><html lang="en"><head><meta charset="utf-8">
+    return """<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'">
 <title>$title</title><style>
@@ -232,9 +252,39 @@ p{color:#57606a}.d{background:#f6f8fa;color:#cf222e}a{background:#f6f8fa;border-
 <div class="d">ens://$safeName
 
 $code</div><a href="">Try again</a></div></body></html>"""
+}
+
+/** Where [nameWebRecordNavigation] sends a request for [pathAndQuery] on the name's origin. */
+internal fun webRecordTarget(result: EnsResult.Ok, pathAndQuery: String): String =
+    if (result.redirect) {
+        result.uri
+    } else {
+        // The origin's bare `/` is no path: keep the record's own.
+        TezosDomainsResolver.appendWebsiteSuffix(result.uri, pathAndQuery.takeUnless { it == "/" }.orEmpty())
+    }
+
+/**
+ * The interceptor's answer to a `.tez` document whose website record is
+ * now on the ordinary web (`http(s)`): a page that sends the frame
+ * there, as a typed `.tez` navigation does. A content URL keeps the
+ * requested [pathAndQuery]; a redirect record is the whole destination.
+ * A zero-delay meta refresh replaces the name's history entry, so Back
+ * doesn't land on it again; no script, as for [nameResolutionRefusal].
+ * It carries [NAME_RESOLUTION_ERROR_HEADER] only to stay out of history.
+ */
+internal fun nameWebRecordNavigation(result: EnsResult.Ok, pathAndQuery: String): WebResourceResponse {
+    val target = webRecordTarget(result, pathAndQuery)
+    val safe = target.replace("&", "&amp;").replace("\"", "&quot;")
+        .replace("<", "&lt;").replace(">", "&gt;")
+    val html = """<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="referrer" content="no-referrer">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'">
+<meta http-equiv="refresh" content="0;url=$safe">
+<title>${result.name.replace("<", "&lt;")}</title></head>
+<body><a href="$safe">$safe</a></body></html>"""
     return WebResourceResponse(
-        "text/html", "utf-8", statusForNameResolutionError(code), "Name Resolution Failed",
-        mapOf(NAME_RESOLUTION_ERROR_HEADER to code, "Cache-Control" to "no-store"),
+        "text/html", "utf-8", 200, "OK",
+        mapOf(NAME_RESOLUTION_ERROR_HEADER to Gateways.ENS_WEB_RECORD, "Cache-Control" to "no-store"),
         ByteArrayInputStream(html.toByteArray(Charsets.UTF_8)),
     )
 }
@@ -617,18 +667,6 @@ fun BrowserWebViewHost(
         Unit
     }
 
-    // Periodic cookie sweep (defense in depth against cookie tossing
-    // across virtual origins until the PSL entry propagates — and kept
-    // afterwards; see [CookieHygiene]). The on-navigation sweep in
-    // onPageStarted handles the common case; this catches long-lived
-    // pages that write document.cookie while sitting idle.
-    LaunchedEffect(Unit) {
-        while (true) {
-            CookieHygiene.sweepAsync()
-            kotlinx.coroutines.delay(CookieHygiene.SWEEP_INTERVAL_MS)
-        }
-    }
-
     val frame = remember {
         FrameLayout(context).apply {
             layoutParams = ViewGroup.LayoutParams(
@@ -647,13 +685,37 @@ fun BrowserWebViewHost(
     // The ids in [webViews] of private tabs (#86).
     val privateIds = remember { mutableSetOf<Long>() }
 
+    // Periodic cookie sweep (defense in depth against cookie tossing
+    // across virtual origins until the PSL entry propagates — and kept
+    // afterwards; see [CookieHygiene]). The on-navigation sweep in
+    // onPageStarted handles the common case; this catches long-lived
+    // pages that write document.cookie while sitting idle, including
+    // one in a background tab re-planting a cookie after another app's
+    // document loaded (R3-F2). It reads at every open tab's current
+    // path, since a cookie tossed with a non-root `Path` is only
+    // visible there (R3-F1). Runs on the main thread: `WebView.url`.
+    LaunchedEffect(Unit) {
+        while (true) {
+            CookieHygiene.sweepAsync(webViews.values.mapNotNull { it.url })
+            kotlinx.coroutines.delay(CookieHygiene.SWEEP_INTERVAL_MS)
+        }
+    }
+    // A tab brought to the front: sweep at its document's path before
+    // the user interacts with it — it may have sat in the background
+    // while another tab planted cookies (R3-F2).
+    LaunchedEffect(tabs.active.id) {
+        val url = webViews[tabs.active.id]?.url
+        if (CookieHygiene.coversNavigation(url)) CookieHygiene.sweepAsync(url)
+    }
+
     /**
      * No private tab is left (#86): wipe the private profile's cookies
      * and site storage (its HTTP cache was cleared through the last
      * private WebView) and retire it for deletion, and drop
      * what the app itself kept for the session in memory: its
-     * site-permission answers, zoom levels, and downloads list (a
-     * private download still running is cancelled, as in Chrome).
+     * site-permission answers, zoom levels, downloads list (a private
+     * download still running is cancelled, as in Chrome) and the
+     * onchain apps let through despite a warning (#123).
      */
     fun endPrivateSession() {
         PrivateProfile.discard()
@@ -662,6 +724,7 @@ fun BrowserWebViewHost(
         pageZoom.clearPrivate()
         desktopSites.clearPrivate()
         DownloadManager.get(context).endPrivateSession()
+        OnchainApps.onPrivateSessionEnded()
     }
 
     // Per-tab navigation observers (coroutine jobs, tracked so we can cancel
@@ -2395,10 +2458,11 @@ private fun buildRefreshableWebView(
                 // have flushed it). Dropping it here is what keeps the
                 // park single-shot: it cannot survive its own navigation.
                 pendingVisit.clear()
-                // Entering a virtual origin: expire anything page JS
-                // managed to plant via document.cookie before this
-                // page gets a chance to read it.
-                if (VirtualOrigin.isVirtualUrl(url)) CookieHygiene.sweepAsync(url)
+                // Entering a virtual origin or an onchain app (#123):
+                // expire anything page JS managed to plant via
+                // document.cookie before this page gets a chance to
+                // read it.
+                if (CookieHygiene.coversNavigation(url)) CookieHygiene.sweepAsync(url)
                 val display = url?.let { displayFor(it, state) }
                 if (display != null) {
                     // For error pages, surface the URL the user was
@@ -2690,6 +2754,10 @@ private fun buildRefreshableWebView(
                 // A same-document step keeps the page on screen as the
                 // load's document for the IPFS phase line (#94, R3-F2).
                 state.historyUpdated(isHome = url == ABOUT_BLANK)
+                // A same-document move (`pushState`) to a new path on a
+                // virtual origin or onchain app can bring cookies tossed
+                // at that path into view (R3-F1): sweep there too.
+                if (CookieHygiene.coversNavigation(url)) CookieHygiene.sweepAsync(url)
                 if (view == null || !bottomUiApplies(url)) return
                 // An SPA route can bring its own theme colour (#92). Only
                 // once the document has painted: before that, this is the
@@ -2980,7 +3048,7 @@ private fun buildRefreshableWebView(
                 }
                 val work = state.gatewayWork.start(generation)
                 val response = if (heldBack) heldBackResponse() else try {
-                    interceptVirtualRequest(request, ensPins, view)
+                    interceptVirtualRequest(request, ensPins, view, state.onchain)
                 } catch (t: Throwable) {
                     state.gatewayWork.finish(work)
                     throw t
@@ -4293,7 +4361,9 @@ internal fun submitDetourForNavigation(url: String, isForMainFrame: Boolean): Bo
     if (!isForMainFrame) return false
     val schemeEnd = url.indexOf("://")
     if (schemeEnd <= 0) return false
-    return url.substring(0, schemeEnd).lowercase() in CONTENT_SCHEMES
+    val scheme = url.substring(0, schemeEnd).lowercase()
+    // A `web3://` app (#123) is read, and gated, by the submit flow too.
+    return scheme in CONTENT_SCHEMES || scheme == OnchainAppRef.SCHEME
 }
 
 /**
@@ -4398,19 +4468,27 @@ private fun syntheticResponse(
  * [tab] is the requesting tab's WebView (null for a service worker): a
  * cleanup page another tab's hold asks for is served to it only once
  * ([UnverifiedOrigins.takeClearFor]).
+ *
+ * [onchain] is the requesting tab's onchain-app documents (#123, see
+ * [interceptOnchainAppRequest]); null for a service worker or a native
+ * re-fetch, which are refused on an app's origin anyway.
  */
 internal fun interceptVirtualRequest(
     request: WebResourceRequest?,
     ensPins: EnsDocumentPins? = null,
     tab: Any? = null,
+    onchain: OnchainAppTab? = null,
 ): WebResourceResponse? {
     val req = request ?: return null
     val url = req.url?.toString() ?: return null
     val incoming = if (req.isForMainFrame) ensPins?.beginNavigation(url) else null
-    // An origin an unverified external IPFS gateway served before the
-    // user switched away from it (#125): its next document first clears
-    // what that gateway's pages left there, before anything else runs.
-    val response = siteDataCleanupFor(req, url, tab)
+    // A contract-hosted app's origin (#123) is answered by its own rules.
+    // Then an origin an unverified external IPFS gateway served before
+    // the user switched away from it (#125): its next document first
+    // clears what that gateway's pages left there, before anything else
+    // runs.
+    val response = interceptOnchainAppRequest(req, url, onchain)
+        ?: siteDataCleanupFor(req, url, tab)
         ?: interceptVirtualRequestFor(req, ensPins, incoming)
     if (incoming != null && response != null &&
         rendersInPlace(response.statusCode, response.mimeType, response.responseHeaders)
@@ -4587,7 +4665,9 @@ private fun interceptVirtualRequestFor(
         isDocumentRequest(req.isForMainFrame, req.requestHeaders) &&
         (req.isForMainFrame || page?.uriFor(root.name) == null)
     ) {
-        Gateways.reverifyEnsDocument(root.name, ensPins, page)?.let { code ->
+        var web: EnsResult.Ok? = null
+        Gateways.reverifyEnsDocument(root.name, ensPins, page, onWebRecord = { web = it })?.let { code ->
+            web?.let { return nameWebRecordNavigation(it, pathAndQuery) }
             return nameResolutionRefusal(root.name, code)
         }
     }

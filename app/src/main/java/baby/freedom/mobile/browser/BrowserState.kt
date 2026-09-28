@@ -112,6 +112,13 @@ class BrowserState(val id: Long, val private: Boolean = false) {
     internal var ensGate: EnsGate? = null
 
     /**
+     * The tab's onchain-app documents (#123): the one its submit flow
+     * hands the interceptor, what it served last per app, and the one a
+     * not-cross-checked warning is asking about ([OnchainAppTab]).
+     */
+    val onchain = OnchainAppTab(private)
+
+    /**
      * This tab's current (or pending) load is content the embedded IPFS
      * node serves — an `ipfs://` / `ipns://` page, or an ENS name whose
      * contenthash points there. While it is and the tab is busy, the
