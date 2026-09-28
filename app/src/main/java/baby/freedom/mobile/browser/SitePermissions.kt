@@ -1,10 +1,13 @@
 package baby.freedom.mobile.browser
 
 import android.Manifest
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 /**
  * Site permissions (#81): which powerful web capabilities a site may
@@ -340,6 +343,53 @@ suspend fun awaitTabOnScreen(
         else -> null
     }
 }.filterNotNull().first()
+
+/** How [askAndroidPermissionOnScreen] ended. */
+enum class AndroidPermissionAsk {
+    /** The app holds the permission (already, or the user just allowed it). */
+    GRANTED,
+
+    /** Android refused it, or there was no way to ask. */
+    REFUSED,
+
+    /** The tab's page wasn't on screen once the dialog's turn came; nothing was shown. */
+    OFF_SCREEN,
+}
+
+/**
+ * Ask Android for an app permission on behalf of tab [tabId] *right now*
+ * — no waiting for the tab to come back, unlike a site's request: the
+ * caller is answering a tap (an upload's `capture` input) that is only
+ * still meaningful while its page is on screen.
+ *
+ * Shares the site-permission path's rules for Android's dialog: one at
+ * a time ([lock]; a request arriving while another dialog is up waits
+ * its turn instead of being refused at once by Android), only over the
+ * page that asked ([onScreenTab], which is `null` while a full-screen
+ * panel covers the page or the app isn't resumed), with [dialogUp]
+ * raised while it shows. [launch] is the bridge's launcher (which also
+ * records a refusal so a later permanent one can be recognised); `null`
+ * means no screen is composed to ask with.
+ */
+suspend fun askAndroidPermissionOnScreen(
+    lock: Mutex,
+    onScreenTab: StateFlow<Long?>,
+    tabId: Long,
+    dialogUp: MutableStateFlow<Boolean>,
+    held: () -> Boolean,
+    launch: (suspend () -> Unit)?,
+): AndroidPermissionAsk = lock.withLock {
+    if (onScreenTab.value != tabId) return@withLock AndroidPermissionAsk.OFF_SCREEN
+    if (held()) return@withLock AndroidPermissionAsk.GRANTED
+    if (launch == null) return@withLock AndroidPermissionAsk.REFUSED
+    dialogUp.value = true
+    try {
+        runCatching { launch() }
+    } finally {
+        dialogUp.value = false
+    }
+    if (held()) AndroidPermissionAsk.GRANTED else AndroidPermissionAsk.REFUSED
+}
 
 /** Which modal prompt the on-screen tab shows now; see [modalPromptTurn]. */
 enum class PromptTurn { None, SitePermission, DownloadOffer }

@@ -2916,7 +2916,7 @@ private fun buildRefreshableWebView(
                 fileChooserParams: FileChooserParams?,
             ): Boolean {
                 if (filePathCallback == null || fileChooserParams == null) return false
-                return fileChooser?.show(filePathCallback, fileChooserParams) ?: false
+                return fileChooser?.show(state.id, filePathCallback, fileChooserParams) ?: false
             }
 
             // A new window the page asked for (`target=_blank`,
