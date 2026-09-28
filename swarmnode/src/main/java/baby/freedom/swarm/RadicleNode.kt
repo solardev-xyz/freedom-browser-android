@@ -80,6 +80,13 @@ class RadicleNode internal constructor(
         fun unseedRepo(rid: String): String
         fun shutdown(): String
 
+        /**
+         * One of the browser's reads or writes ([BROWSER_CALLS], #124) by
+         * name, its arguments taken from [args]. Only [Native] reaches the
+         * library; a fake that doesn't override this answers an error.
+         */
+        fun call(method: String, args: JSONObject): String = errorJson("unsupported call: $method")
+
         object Native : Ops {
             override fun setSocketPath(path: String) =
                 android.system.Os.setenv("RAD_SOCKET", path, true)
@@ -104,6 +111,37 @@ class RadicleNode internal constructor(
             override fun cancelClone(rid: String) = uniffi.libradicle_uniffi.cancelClone(rid)
             override fun unseedRepo(rid: String) = uniffi.libradicle_uniffi.unseedRepo(rid)
             override fun shutdown() = uniffi.libradicle_uniffi.shutdown()
+
+            override fun call(method: String, args: JSONObject): String {
+                fun s(key: String): String = args.getString(key)
+                fun u(key: String): UInt = args.getLong(key).coerceIn(0, UInt.MAX_VALUE.toLong()).toUInt()
+                return when (method) {
+                    "identity" -> uniffi.libradicle_uniffi.identity()
+                    "status" -> uniffi.libradicle_uniffi.status()
+                    "listSeededRepos" -> uniffi.libradicle_uniffi.listSeededRepos()
+                    "repoInfo" -> uniffi.libradicle_uniffi.repoInfo(s("rid"))
+                    "seeders" -> uniffi.libradicle_uniffi.seeders(s("rid"))
+                    "treeAt" -> uniffi.libradicle_uniffi.treeAt(s("rid"), s("revision"), s("path"))
+                    "blobAt" -> uniffi.libradicle_uniffi.blobAt(s("rid"), s("revision"), s("path"))
+                    "commit" -> uniffi.libradicle_uniffi.commit(s("rid"), s("revision"))
+                    "commits" -> uniffi.libradicle_uniffi.commits(s("rid"), s("parent"), u("page"), u("perPage"))
+                    "repoStats" -> uniffi.libradicle_uniffi.repoStats(s("rid"), s("revision"))
+                    "remotes" -> uniffi.libradicle_uniffi.remotes(s("rid"))
+                    "issues" -> uniffi.libradicle_uniffi.issues(s("rid"))
+                    "issue" -> uniffi.libradicle_uniffi.issue(s("rid"), s("issueId"))
+                    "patches" -> uniffi.libradicle_uniffi.patches(s("rid"))
+                    "patch" -> uniffi.libradicle_uniffi.patch(s("rid"), s("patchId"))
+                    "createIssue" -> uniffi.libradicle_uniffi.createIssue(
+                        s("rid"), s("title"), s("description"), s("labelsJson"),
+                    )
+                    "commentIssue" -> uniffi.libradicle_uniffi.commentIssue(
+                        s("rid"), s("issueId"), s("body"), args.optString("replyTo").ifEmpty { null },
+                    )
+                    "editIssueState" -> uniffi.libradicle_uniffi.editIssueState(s("rid"), s("issueId"), s("state"))
+                    "commentPatch" -> uniffi.libradicle_uniffi.commentPatch(s("rid"), s("revisionId"), s("body"))
+                    else -> errorJson("unsupported call: $method")
+                }
+            }
         }
     }
 
@@ -537,6 +575,32 @@ class RadicleNode internal constructor(
     }
 
     /**
+     * One read or write for the browser (#124): the `rad://` repository
+     * browser's reads and the `window.radicle` provider's identity and
+     * COB writes. [method] must be one of [BROWSER_CALLS] — seeding,
+     * unseeding and the lifecycle stay on their own entry points, so this
+     * path can never start or stop the node or change what it seeds —
+     * and [args] its arguments by name. Blocking; the caller runs it off
+     * the main thread.
+     *
+     * Answers the library's JSON, or `{"error": …, "reason": …}` with a
+     * machine-readable reason: `node-stopped` / `node-not-ready` while the
+     * node isn't Running, `unsupported` for a method not on the list,
+     * `native-failed` if the call itself threw (a missing argument, a
+     * panic the bindings surfaced).
+     */
+    fun call(method: String, args: JSONObject): String {
+        if (method !in BROWSER_CALLS) return errorJson("unsupported call: $method", "unsupported")
+        when (_state.value.status) {
+            RadicleStatus.Running -> {}
+            RadicleStatus.Starting -> return errorJson("Radicle node is starting", "node-not-ready")
+            else -> return errorJson("Radicle node is not running", "node-stopped")
+        }
+        return runCatching { ops.call(method, args) }
+            .getOrElse { errorJson(it.message ?: it.javaClass.simpleName, "native-failed") }
+    }
+
+    /**
      * Dial the seed book for generation [gen]. Skipped only while a dial
      * for that same generation is still going; a dial left over from an
      * earlier boot never holds up a newer one.
@@ -604,6 +668,21 @@ class RadicleNode internal constructor(
         const val PHASE_DONE = "done"
         const val PHASE_FAILED = "failed"
         const val PHASE_CANCELLED = "cancelled"
+
+        /**
+         * What [call] lets the browser reach: public repository reads,
+         * the node's identity / status / seeding list, and the four COB
+         * writes. Nothing that seeds, fetches, imports or stops.
+         */
+        val BROWSER_CALLS: Set<String> = setOf(
+            "identity", "status", "listSeededRepos",
+            "repoInfo", "seeders", "treeAt", "blobAt", "commit", "commits", "repoStats", "remotes",
+            "issues", "issue", "patches", "patch",
+            "createIssue", "commentIssue", "editIssueState", "commentPatch",
+        )
+
+        internal fun errorJson(message: String, reason: String? = null): String =
+            JSONObject().put("error", message).apply { if (reason != null) put("reason", reason) }.toString()
 
         private val BARE_RID = Regex("^z[1-9A-HJ-NP-Za-km-z]{20,60}$")
 

@@ -13,6 +13,7 @@ import android.net.NetworkCapabilities
 import android.net.NetworkRequest
 import android.os.Build
 import android.os.IBinder
+import android.os.ParcelFileDescriptor
 import android.os.RemoteCallbackList
 import android.util.Log
 import baby.freedom.mobile.R
@@ -34,6 +35,7 @@ import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.launch
 import kotlin.system.exitProcess
+import org.json.JSONObject
 
 /**
  * Holds the embedded Swarm + IPFS (+ Radicle, while on) nodes for the lifetime of the `:node`
@@ -139,6 +141,21 @@ class NodeService : Service() {
         override fun unseedRadicleRepo(rid: String?) {
             rid ?: return
             scope.launch { radicleNode.unseed(rid) }
+        }
+
+        override fun radicleCall(method: String?, argsJson: String?): ParcelFileDescriptor {
+            val (read, write) = ParcelFileDescriptor.createPipe()
+            scope.launch(Dispatchers.IO) {
+                val answer = runCatching {
+                    radicleNode.call(method.orEmpty(), JSONObject(argsJson ?: "{}"))
+                }.getOrElse { JSONObject().put("error", it.message ?: "bad call").toString() }
+                // The reader may have given up (its deadline, a closed
+                // page): the write then fails, which ends this job.
+                runCatching {
+                    ParcelFileDescriptor.AutoCloseOutputStream(write).use { it.write(answer.toByteArray()) }
+                }
+            }
+            return read
         }
     }
 

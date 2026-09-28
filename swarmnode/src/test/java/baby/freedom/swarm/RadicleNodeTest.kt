@@ -132,6 +132,24 @@ class RadicleNodeTest {
     private val rid = "rad:z3gqcJUoA1n9HaHKufZs5FCSGazv5"
 
     @Test
+    fun browserCallsNeedARunningNodeAndStayOnTheList() {
+        val ops = object : RadicleNode.Ops by FakeOps() {
+            override fun call(method: String, args: org.json.JSONObject) = """{"ok":"$method"}"""
+        }
+        val node = RadicleNode(config, ops)
+        val stopped = org.json.JSONObject(node.call("issues", org.json.JSONObject()))
+        assertEquals("node-stopped", stopped.getString("reason"))
+        node.start()
+        await("running", node) { it.status == RadicleStatus.Running }
+        assertEquals("""{"ok":"issues"}""", node.call("issues", org.json.JSONObject()))
+        // Seeding, importing and the lifecycle never go through this path.
+        for (m in listOf("cloneRepo", "unseedRepo", "importRepo", "shutdown", "start")) {
+            assertEquals("unsupported", org.json.JSONObject(node.call(m, org.json.JSONObject())).getString("reason"))
+        }
+        node.dispose()
+    }
+
+    @Test
     fun startShowsIdentityAndPeers() {
         val ops = FakeOps()
         val node = RadicleNode(config, ops)

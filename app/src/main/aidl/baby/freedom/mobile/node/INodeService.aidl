@@ -4,6 +4,7 @@ import baby.freedom.swarm.NodeInfo;
 import baby.freedom.swarm.IpfsInfo;
 import baby.freedom.swarm.RadicleInfo;
 import baby.freedom.mobile.node.INodeCallback;
+import android.os.ParcelFileDescriptor;
 
 /**
  * Cross-process interface to the node service running in the `:node`
@@ -94,4 +95,16 @@ interface INodeService {
      * list); it drops out of [RadicleInfo.seededRepos].
      */
     void unseedRadicleRepo(String rid);
+
+    /**
+     * One of the browser's Radicle reads or writes (#124): `method` is a
+     * name in RadicleNode.BROWSER_CALLS, `argsJson` its arguments as a
+     * JSON object. Returns the read end of a pipe the answer (the
+     * library's JSON, or `{"error": …, "reason": …}`) is written to and
+     * then closed — a pipe, not a String, because a repository's issue
+     * list or a blob can outgrow a binder transaction. Returns at once;
+     * the call runs on the service's own threads, and closing the read
+     * end early abandons it.
+     */
+    ParcelFileDescriptor radicleCall(String method, String argsJson);
 }
