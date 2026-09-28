@@ -284,7 +284,7 @@ internal fun formatBytes(bytes: Long): String {
  */
 internal fun downloadRefererOrigin(pageUrl: String?): String? {
     if (pageUrl.isNullOrBlank() || VirtualOrigin.isVirtualUrl(pageUrl)) return null
-    return originOf(pageUrl)?.let { "$it/" }
+    return webOrigin(pageUrl)?.let { "$it/" }
 }
 
 /**
@@ -303,7 +303,7 @@ internal fun downloadRefererOrigin(pageUrl: String?): String? {
  */
 internal fun downloadReferer(refererOrigin: String?, requestUrl: String): String? {
     val origin = refererOrigin?.removeSuffix("/") ?: return null
-    return if (originOf(requestUrl) == origin) "$origin/" else null
+    return if (webOrigin(requestUrl) == origin) "$origin/" else null
 }
 
 /**
@@ -322,21 +322,11 @@ internal fun downloadRequester(pageUrl: String?, gatewayDisplay: (String) -> Str
         val prefix = display.removeSuffix(rest)
         return prefix + rest.substringBefore('/').substringBefore('?').substringBefore('#')
     }
-    originOf(pageUrl)?.let { return it }
+    webOrigin(pageUrl)?.let { return it }
     val scheme = pageUrl.substringBefore(':', "").lowercase()
     return if (scheme.isNotEmpty() && scheme.all { it.isLetterOrDigit() || it in "+-." }) "$scheme:" else "a page"
 }
 
-/** `scheme://host[:port]` of an http(s) URL, default port dropped; null otherwise. */
-private fun originOf(url: String): String? {
-    val uri = runCatching { java.net.URI(url) }.getOrNull() ?: return null
-    val scheme = uri.scheme?.lowercase() ?: return null
-    if (scheme != "http" && scheme != "https") return null
-    val host = uri.host?.lowercase()?.takeIf { it.isNotEmpty() } ?: return null
-    val defaultPort = if (scheme == "https") 443 else 80
-    val port = uri.port.takeIf { it != -1 && it != defaultPort }
-    return "$scheme://$host" + (port?.let { ":$it" } ?: "")
-}
 
 /** Where a web download's redirect hop leads, or why it can't be followed. */
 internal sealed class DownloadRedirect {

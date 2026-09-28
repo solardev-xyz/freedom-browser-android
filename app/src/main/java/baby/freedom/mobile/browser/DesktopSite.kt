@@ -111,6 +111,9 @@ internal class RedirectCorrection {
         return hop
     }
 
+    /** Whether a navigation to [url] is the re-fetch just issued. */
+    fun isReissue(url: String): Boolean = reissued?.let { sameRequestUrl(it, url) } == true
+
     /**
      * A navigation to [url] starts. Anything but the re-fetch itself
      * supersedes a scheduled one and starts a fresh allowance.
@@ -126,6 +129,110 @@ internal class RedirectCorrection {
         pending = null
         reissued = null
     }
+}
+
+/**
+ * The address a page's own tapped navigation started at, and the
+ * `Referer` its first request went out with (#180, R4-F1/R4-F2): what
+ * decides whether a hop of it whose answer was a redirect for the other
+ * user agent ([RedirectCorrection]) may be asked again *from the page on
+ * screen* — the only way to keep the navigation's initiator.
+ *
+ * The page sees what it starts: its own Navigation API `navigate`
+ * listener reads the full address (query and all) and can cancel it. So
+ * only the address the navigation started at is ever re-issued there,
+ * never a later redirect hop: that one may be a cross-origin redirect
+ * target the page was never told (an OAuth `?code=`). And only when the
+ * first request's `Referer` shows the initiator was of the page's own
+ * origin — a cross-origin iframe's `target=_top` link isn't announced to
+ * the top document either — so a request with no `Referer` at all
+ * (`rel=noreferrer`, a `no-referrer` policy, a service worker's answer
+ * the interceptor never saw) isn't re-issued. The re-issue then sends
+ * only that origin as `Referer` ([REISSUE_REFERRER_POLICY]): never more
+ * than the original request did, whatever the document's own policy.
+ *
+ * [requested] runs on the interceptor's thread, the rest on the UI
+ * thread.
+ */
+internal class PageNavigationStart {
+    private var start: String? = null
+    private var referer: String? = null
+    private var seen = false
+
+    /** A page's own navigation to [url] started with a user gesture. */
+    @Synchronized
+    fun started(url: String) {
+        start = url
+        referer = null
+        seen = false
+    }
+
+    /** No page's tapped navigation is in flight (anything else started, or it ended). */
+    @Synchronized
+    fun ended() {
+        start = null
+        referer = null
+        seen = false
+    }
+
+    /** The WebView requests [url] for the main frame, with [headers]. */
+    @Synchronized
+    fun requested(url: String, headers: Map<String, String>?) {
+        val awaited = start ?: return
+        if (!sameRequestUrl(awaited, url)) {
+            ended()
+            return
+        }
+        // Chromium may request the first address twice (a retry on a
+        // fresh connection); both carry the same `Referer`.
+        if (seen) return
+        seen = true
+        referer = headers?.entries?.firstOrNull { it.key.equals("Referer", ignoreCase = true) }?.value
+    }
+
+    /**
+     * Whether the answer to [hop] may be asked again by the page whose
+     * document is at [documentUrl], with [REISSUE_REFERRER_POLICY]: [hop]
+     * is the address this navigation started at, and its request's
+     * `Referer` was of that document's origin.
+     */
+    @Synchronized
+    fun mayReissue(hop: String, documentUrl: String?): Boolean {
+        val awaited = start ?: return false
+        if (!seen || !sameRequestUrl(awaited, hop)) return false
+        val origin = webOrigin(documentUrl ?: return false) ?: return false
+        return webOrigin(referer ?: return false) == origin
+    }
+}
+
+/**
+ * The referrer policy the page's re-issue of its own navigation uses
+ * ([PageNavigationStart]): the document's origin, which the original
+ * request's `Referer` held at least.
+ */
+internal const val REISSUE_REFERRER_POLICY = "origin"
+
+/**
+ * The script that re-issues a page's own navigation to [url] from the
+ * document on screen: a detached link with an explicit referrer policy
+ * and target, clicked — `location.assign()` would take the document's
+ * own policy (R4-F2) and a `<base target>` could send a link elsewhere.
+ */
+internal fun pageReissueScript(url: String): String {
+    val quoted = org.json.JSONObject.quote(url)
+    return "(function(){var a=document.createElement('a');a.href=$quoted;" +
+        "a.referrerPolicy='$REISSUE_REFERRER_POLICY';a.target='_self';a.click()})()"
+}
+
+/** `scheme://host[:port]` of an http(s) URL, default port dropped; null otherwise. */
+internal fun webOrigin(url: String): String? {
+    val uri = runCatching { java.net.URI(url) }.getOrNull() ?: return null
+    val scheme = uri.scheme?.lowercase() ?: return null
+    if (scheme != "http" && scheme != "https") return null
+    val host = uri.host?.lowercase()?.takeIf { it.isNotEmpty() } ?: return null
+    val defaultPort = if (scheme == "https") 443 else 80
+    val port = uri.port.takeIf { it != -1 && it != defaultPort }
+    return "$scheme://$host" + (port?.let { ":$it" } ?: "")
 }
 
 /**

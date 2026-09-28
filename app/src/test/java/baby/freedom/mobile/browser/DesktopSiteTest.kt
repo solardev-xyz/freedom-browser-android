@@ -332,4 +332,77 @@ class DesktopSiteTest {
         c.navigationStarted("http://localhost:8700/other")
         assertTrue(c.redirectAnswered("http://127.0.0.1:8700/meet", desktopOn))
     }
+
+    // --- which re-fetch the page on screen may issue (R4-F1, R4-F2) ---
+
+    private val start = "http://localhost:8700/start"
+
+    @Test
+    fun `the page re-issues the address it named, asked for with its own origin as Referer`() {
+        val p = PageNavigationStart()
+        p.started("http://127.0.0.1:8700/meet")
+        p.requested("http://127.0.0.1:8700/meet", mapOf("referer" to "http://localhost:8700/"))
+        // A retry of the same request doesn't change it.
+        p.requested("http://127.0.0.1:8700/meet", emptyMap())
+        assertTrue(p.mayReissue("http://127.0.0.1:8700/meet", start))
+        // A full-URL Referer of the same origin: the re-issue sends less.
+        p.started("http://127.0.0.1:8700/meet")
+        p.requested("http://127.0.0.1:8700/meet", mapOf("Referer" to "http://localhost:8700/start?q"))
+        assertTrue(p.mayReissue("http://127.0.0.1:8700/meet", start))
+    }
+
+    @Test
+    fun `a redirect hop the page never named is not re-issued from it`() {
+        val p = PageNavigationStart()
+        p.started("http://localhost:8700/authorize")
+        p.requested("http://localhost:8700/authorize", mapOf("Referer" to "http://localhost:8700/"))
+        // The hop is where /authorize 302'd: `?code=` the page mustn't read.
+        assertFalse(p.mayReissue("http://127.0.0.1:8700/cb?code=SECRET123", start))
+    }
+
+    @Test
+    fun `no Referer, another origin's, or an unseen request means no re-issue`() {
+        val p = PageNavigationStart()
+        val meet = "http://127.0.0.1:8700/meet"
+        // rel=noreferrer / no-referrer: the re-issue would add one.
+        p.started(meet)
+        p.requested(meet, mapOf("User-Agent" to "x"))
+        assertFalse(p.mayReissue(meet, start))
+        // A cross-origin iframe's target=_top link: the top page wasn't told.
+        p.started(meet)
+        p.requested(meet, mapOf("Referer" to "http://127.0.0.1:8700/"))
+        assertFalse(p.mayReissue(meet, start))
+        // A service worker answered it: the interceptor never saw it.
+        p.started(meet)
+        assertFalse(p.mayReissue(meet, start))
+        // A request for another address ends it.
+        p.started(meet)
+        p.requested("http://localhost:8700/elsewhere", mapOf("Referer" to "http://localhost:8700/"))
+        p.requested(meet, mapOf("Referer" to "http://localhost:8700/"))
+        assertFalse(p.mayReissue(meet, start))
+        // Ended (a commit, Stop, a load of the app's).
+        p.started(meet)
+        p.requested(meet, mapOf("Referer" to "http://localhost:8700/"))
+        p.ended()
+        assertFalse(p.mayReissue(meet, start))
+    }
+
+    @Test
+    fun `the re-issue script sets its own referrer policy and target, and quotes the address`() {
+        val script = pageReissueScript("http://127.0.0.1:8700/a'b\"c")
+        assertTrue(script.contains("a.referrerPolicy='origin'"))
+        assertTrue(script.contains("a.target='_self'"))
+        assertTrue(script.contains("a.href=\"http://127.0.0.1:8700/a'b\\\"c\""))
+        assertFalse(script.contains("location"))
+    }
+
+    @Test
+    fun `the re-fetch just issued is known as such`() {
+        val c = RedirectCorrection()
+        assertTrue(c.redirectAnswered("http://127.0.0.1:8700/meet", desktopOn))
+        assertFalse(c.isReissue("http://127.0.0.1:8700/meet"))
+        c.issue()
+        assertTrue(c.isReissue("http://127.0.0.1:8700/meet"))
+        assertFalse(c.isReissue("http://127.0.0.1:8700/other"))
+    }
 }

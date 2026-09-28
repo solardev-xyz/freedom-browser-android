@@ -2777,6 +2777,7 @@ private fun buildRefreshableWebView(
                         // navigation, for the user agent (#180, R2-F1).
                         userNamedChain.mainFrameRequested(it)
                         (view as? PageWebView)?.usersNavigation?.mainFrameRequested(it)
+                        (view as? PageWebView)?.run { pageNavigationStart.requested(it, request.requestHeaders) }
                     }
                 }
                 // Tagged with the load it belongs to, and open until
@@ -2948,7 +2949,12 @@ private fun buildRefreshableWebView(
             // navigation that asked without a commit, and nothing else
             // tells (#180, R2-F2 — see [PageWebView.navigationDidNotLeave]).
             override fun onJsBeforeUnload(view: WebView?, url: String?, message: String?, result: JsResult?): Boolean =
-                result != null &&
+                result != null && if ((view as? PageWebView)?.takeReissueBeforeUnload() == true) {
+                    // The page's re-issue of a navigation the user
+                    // already left for (#180, R4-F3): not asked twice.
+                    result.confirm()
+                    true
+                } else {
                     showPrivateJsDialog(
                         context, JsDialogKind.BEFORE_UNLOAD, url, message, null, result,
                         secure = state.private,
@@ -2969,6 +2975,7 @@ private fun buildRefreshableWebView(
                             }
                         },
                     )
+                }
 
             // HTML5 fullscreen (`element.requestFullscreen()`, and the
             // native `<video>` fullscreen button). Without these two
@@ -3232,6 +3239,8 @@ internal class PageWebView(context: Context) : WebView(context) {
             usersNavigation.ended()
         }
         redirectCorrection.navigationStarted(url)
+        pageNavigationStart.ended()
+        reissueSkipsBeforeUnload = false
         val desktop = wantsDesktop(url)
         if (desktop == userAgentSwitch.desktop) return false
         // Chromium reloads the page on screen, with the new user agent,
@@ -3264,6 +3273,30 @@ internal class PageWebView(context: Context) : WebView(context) {
 
     private val redirectCorrection = RedirectCorrection()
 
+    /**
+     * A page's own tapped navigation, while it's the user's: where it
+     * started, and with what `Referer` (R4-F1/F2). The interceptor feeds
+     * it the main-frame requests.
+     */
+    val pageNavigationStart = PageNavigationStart()
+
+    // The page's re-issue of its own navigation is running: the
+    // `beforeunload` prompt it raises is one the user already answered
+    // Leave (or never got) for the navigation it repeats, so it isn't
+    // asked again (R4-F3). Set only for the script's own synchronous run.
+    private var reissueSkipsBeforeUnload = false
+
+    /**
+     * Whether a `beforeunload` prompt is the page's re-issue of the
+     * navigation the user already left for ([redirectAnsweredForOtherUserAgent]):
+     * answered Leave without asking again. Once.
+     */
+    fun takeReissueBeforeUnload(): Boolean = reissueSkipsBeforeUnload.also { reissueSkipsBeforeUnload = false }
+
+    // The document on screen's address, as it committed: the origin a
+    // page's re-issue is checked against.
+    private var documentUrl: String? = null
+
     // The user agent the document on screen was fetched with: what its
     // later requests should keep going out with, if the navigation that
     // switched it away never leaves it (R2-F2). Null before any commit.
@@ -3271,11 +3304,14 @@ internal class PageWebView(context: Context) : WebView(context) {
 
     /** A page's own main-frame navigation to [url] started, with a user gesture or not. */
     fun navigationIsUsers(gesture: Boolean, url: String) {
+        reissueSkipsBeforeUnload = false
         if (gesture) {
             usersNavigation.started(url)
             usersNavigationIsApps = false
+            if (!redirectCorrection.isReissue(url)) pageNavigationStart.started(url)
         } else {
             usersNavigation.ended()
+            if (!redirectCorrection.isReissue(url)) pageNavigationStart.ended()
         }
         redirectCorrection.navigationStarted(url)
     }
@@ -3289,18 +3325,22 @@ internal class PageWebView(context: Context) : WebView(context) {
      * named (#173), which the re-fetch stays.
      *
      * A load of the app's is loaded again. A page's own tapped
-     * navigation is started again by the page on screen, its initiator —
-     * `location.assign()` — so the site sees the same `Sec-Fetch-Site`,
-     * `Referer` and SameSite cookies as for the tap, and no
-     * `Sec-Fetch-User` Chromium wouldn't give it (it takes the tap's
-     * activation, if still live). A load of ours would send
-     * `Sec-Fetch-Site: none` and the site's SameSite=Strict cookies to
-     * an address a page picked (R1-F1).
+     * navigation is started again by the page on screen, its initiator,
+     * so the site sees the same `Sec-Fetch-Site` and SameSite cookies as
+     * for the tap, and no `Sec-Fetch-User` Chromium wouldn't give it (it
+     * takes the tap's activation, if still live). A load of ours would
+     * send `Sec-Fetch-Site: none` and the site's SameSite=Strict cookies
+     * to an address a page picked (R1-F1). But the page sees the
+     * address it starts, so only when [PageNavigationStart] says it's
+     * the one it named itself, asked for with a `Referer` of its own
+     * origin (R4-F1); the re-issue sends that origin and no more
+     * (R4-F2). Otherwise the redirect goes on as it is.
      */
     fun redirectAnsweredForOtherUserAgent(named: Boolean): Boolean {
-        val hop = usersNavigation.asker()
-        if (!redirectCorrection.redirectAnswered(hop, ::needsOtherUserAgentFor)) return false
+        val hop = usersNavigation.asker() ?: return false
         val byApp = usersNavigationIsApps
+        if (!byApp && !pageNavigationStart.mayReissue(hop, documentUrl)) return false
+        if (!redirectCorrection.redirectAnswered(hop, ::needsOtherUserAgentFor)) return false
         usersNavigation.ended()
         // Posted: not from inside the WebView's own callback, and after
         // the redirect's cancellation has ended the navigation — the
@@ -3313,7 +3353,10 @@ internal class PageWebView(context: Context) : WebView(context) {
                 else -> {
                     matchUserAgentTo(url)
                     usersNavigationIsApps = false
-                    evaluateJavascript("location.assign(${JSONObject.quote(url)})", null)
+                    // The page's `beforeunload` runs again for it, inside
+                    // the click; its prompt was answered for the tap.
+                    reissueSkipsBeforeUnload = true
+                    evaluateJavascript(pageReissueScript(url)) { reissueSkipsBeforeUnload = false }
                 }
             }
         }
@@ -3327,7 +3370,10 @@ internal class PageWebView(context: Context) : WebView(context) {
      */
     fun documentStarted(url: String?): Boolean {
         documentDesktop = userAgentSwitch.desktop
+        documentUrl = url
         redirectCorrection.ended()
+        pageNavigationStart.ended()
+        reissueSkipsBeforeUnload = false
         return usersNavigation.takeCommit(url)
     }
 
@@ -3341,6 +3387,8 @@ internal class PageWebView(context: Context) : WebView(context) {
     fun navigationDidNotLeave() {
         usersNavigation.ended()
         redirectCorrection.ended()
+        pageNavigationStart.ended()
+        reissueSkipsBeforeUnload = false
         val desktop = documentDesktop ?: return
         if (desktop == userAgentSwitch.desktop) return
         super.stopLoading()
