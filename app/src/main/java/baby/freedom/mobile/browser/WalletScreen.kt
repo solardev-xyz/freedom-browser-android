@@ -1,6 +1,8 @@
 package baby.freedom.mobile.browser
 
 import android.content.ActivityNotFoundException
+import android.content.ClipboardManager
+import android.content.Context
 import android.content.Intent
 import android.provider.Settings
 import androidx.activity.compose.BackHandler
@@ -71,7 +73,7 @@ import kotlinx.coroutines.launch
 
 internal const val WALLET_ROW_KEY = "wallet"
 internal const val WALLET_TITLE = "Wallet"
-internal const val BACKUP_REMINDER = "Back up your recovery phrase"
+internal const val BACKUP_REMINDER = "Recovery phrase not backed up yet"
 private const val NO_SCREEN_LOCK_LINE = "No screen lock protects this wallet"
 
 /** The Wallet row's one-line state, for Settings and its search. */
@@ -104,7 +106,7 @@ internal fun walletAttentionLine(state: Vault.State): String? {
 internal fun walletSettingsRows(state: Vault.State) = listOf(
     settingsRow(
         WALLET_ROW_KEY, WALLET_TITLE, walletSummary(state), walletAttentionLine(state),
-        "Recovery phrase", "Identity",
+        "Recovery phrase", "Identity", "Back up",
     ),
 )
 
@@ -144,19 +146,55 @@ internal fun importHint(phrase: String): ImportHint {
     }
 }
 
+/**
+ * Whether [clip] holds the recovery phrase [words], alone or inside other
+ * text (a note it was copied from), so a successful import can take it
+ * off the clipboard without wiping something unrelated the user copied.
+ */
+internal fun clipHoldsPhrase(clip: CharSequence?, words: List<String>): Boolean {
+    if (clip.isNullOrBlank() || words.isEmpty()) return false
+    val tokens = clip.toString().lowercase().split(Regex("[^\\p{L}]+")).filter { it.isNotEmpty() }
+    return (0..tokens.size - words.size).any { start -> tokens.subList(start, start + words.size) == words }
+}
+
+/**
+ * Takes an imported recovery phrase off the clipboard if it's still there
+ * (#75). Only called when the user pasted into the import field, so the
+ * clipboard isn't read (and Android's "pasted from your clipboard" notice
+ * doesn't show) for a phrase that was typed.
+ */
+private fun clearPhraseFromClipboard(context: Context, words: List<String>) {
+    val clipboard = context.getSystemService(ClipboardManager::class.java) ?: return
+    runCatching {
+        val clip = clipboard.primaryClip ?: return
+        val holds = (0 until clip.itemCount).any { clipHoldsPhrase(clip.getItemAt(it).coerceToText(context), words) }
+        if (holds) clipboard.clearPrimaryClip()
+    }
+}
+
 private val bip39Words: Set<String> by lazy { baby.freedom.mobile.wallet.Bip39English.words.toHashSet() }
 
-/** What to tell the user about a failed create, import or unlock; null when they cancelled. */
-internal fun walletErrorMessage(e: Throwable, action: String): String? = when (e) {
+/**
+ * What to tell the user about a failed create, import or unlock; null
+ * when they cancelled. [phraseBackedUp] is whether the user can have the
+ * recovery phrase at all: false for a wallet created here whose phrase
+ * has never been shown (#78), so a dead wallet isn't met with "import
+ * your recovery phrase" they never had.
+ */
+internal fun walletErrorMessage(e: Throwable, action: String, phraseBackedUp: Boolean): String? = when (e) {
     is VaultAuthCancelledException -> null
     is CancellationException -> null
     is VaultAuthFailedException -> "Couldn’t $action: ${e.message}"
-    is VaultKeyLostException ->
-        "Android has erased this wallet’s key. That happens when the screen lock is removed. " +
-            "Remove the wallet and import your recovery phrase to get it back."
-    is VaultUnreadableException ->
-        "This wallet can’t be read. Remove it and import your recovery phrase to get it back."
+    is VaultKeyLostException -> "Android has erased this wallet’s key. That happens when the screen lock is removed. " +
+        lostWalletAdvice(phraseBackedUp)
+    is VaultUnreadableException -> "This wallet can’t be read. " + lostWalletAdvice(phraseBackedUp)
     else -> "Couldn’t $action (${e.javaClass.simpleName})"
+}
+
+private fun lostWalletAdvice(phraseBackedUp: Boolean) = if (phraseBackedUp) {
+    "Remove the wallet and import your recovery phrase to get it back."
+} else {
+    "Its recovery phrase was never shown, so it can’t be restored: remove it and set up a new wallet."
 }
 
 /**
@@ -192,6 +230,15 @@ fun WalletScreen(
     val lifecycleState by LocalLifecycleOwner.current.lifecycle.currentStateFlow.collectAsState()
     val deviceSecure = remember(lifecycleState) { vault.deviceSecure() }
 
+    // Whether the user can have the phrase: false for a created wallet
+    // whose phrase was never shown (#78), which the copy must not send
+    // them to re-import.
+    val phraseBackedUp = when (val s = state) {
+        is Vault.State.Locked -> s.info.backedUp
+        is Vault.State.Unlocked -> s.info.backedUp
+        else -> true
+    }
+
     // A feature asked for the wallet: hand it back as soon as it's open.
     LaunchedEffect(request, state) {
         if (request != null && state is Vault.State.Unlocked) request.finish(true)
@@ -205,7 +252,7 @@ fun WalletScreen(
             try {
                 block()
             } catch (e: Throwable) {
-                error = walletErrorMessage(e, action)
+                error = walletErrorMessage(e, action, phraseBackedUp)
                 if (e is CancellationException) throw e
             } finally {
                 busy = false
@@ -285,7 +332,8 @@ fun WalletScreen(
                             color = Color(0xFFEF4444),
                             title = "Can’t be read",
                             detail = "The wallet file on this phone isn’t one this version can open. " +
-                                "Remove it and import your recovery phrase to get your wallet back.",
+                                "If you have its recovery phrase, remove it and import the phrase to " +
+                                "get your wallet back.",
                         )
                     }
                 }
@@ -294,14 +342,20 @@ fun WalletScreen(
                 item("error") { ErrorText(message) }
             }
             val info = (state as? Vault.State.Locked)?.info ?: (state as? Vault.State.Unlocked)?.info
-            if (info != null && !info.backedUp) item("backup") { BackupReminder() }
+            if (info != null && !info.backedUp) item("backup") { BackupReminder(info.protection) }
             if (info?.protection == VaultProtection.DEVICE_ONLY) item("no-lock") {
                 SectionCard(title = "No screen lock") {
                     NoScreenLockWarning(
                         text = "This wallet was made when the phone had no screen lock, so nothing " +
                             "asks who you are before it opens: anyone holding the phone can use it. " +
-                            "To protect it, set a screen lock, then remove the wallet and import " +
-                            "your recovery phrase again.",
+                            if (info.backedUp) {
+                                "To protect it, set a screen lock, then remove the wallet and import " +
+                                    "your recovery phrase again."
+                            } else {
+                                "Its recovery phrase can’t be shown yet, so it can’t be moved to a " +
+                                    "protected wallet: set a screen lock and set up a new wallet if " +
+                                    "you need that protection."
+                            },
                     )
                     ScreenLockSettingsButton()
                 }
@@ -347,8 +401,10 @@ private fun SetupSection(
         )
         Spacer(Modifier.height(8.dp))
         Text(
-            "It stays on this phone only — nothing is backed up to the cloud. Once it’s made, " +
-                "write the recovery phrase down: it’s the only way to restore the wallet.",
+            "It stays on this phone only — nothing is backed up to the cloud. This version can’t " +
+                "show a new wallet’s recovery phrase yet, so a wallet created here can’t be " +
+                "restored if the phone is lost, broken or reset. Import a phrase you already " +
+                "have if you need to be able to restore it.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -442,14 +498,20 @@ private fun StatusLine(
     }
 }
 
-/** The persistent "Back up your recovery phrase" card (maintainer decision 3), until the phrase is seen (#78). */
+/**
+ * The persistent backup-reminder card (maintainer decision 3), until the
+ * phrase is seen (#78). This version can't show the phrase yet, so the
+ * card says what's at stake rather than asking the user to write down
+ * words no screen shows.
+ */
 @Composable
-private fun BackupReminder() {
+private fun BackupReminder(protection: VaultProtection) {
     SectionCard(title = BACKUP_REMINDER) {
         NoScreenLockWarning(
-            text = "This wallet exists only on this phone. If the phone is lost, broken or reset, " +
-                "or its screen lock is removed, the recovery phrase is the only way back in. " +
-                "Write it down and keep it somewhere safe and offline.",
+            text = "This wallet exists only on this phone, and this version can’t show its " +
+                "recovery phrase yet. Until you’ve written the phrase down, the wallet is gone " +
+                "for good if the phone is lost, broken or reset" +
+                (if (protection == VaultProtection.SCREEN_LOCK) ", or its screen lock is removed." else "."),
         )
     }
 }
@@ -505,8 +567,12 @@ private fun ImportPhrasePage(
     onBack: () -> Unit,
 ) {
     SecureWindow()
+    val context = LocalContext.current
     // Plain remember: the phrase must not reach saved instance state.
     var phrase by remember { mutableStateOf("") }
+    // Something was pasted in (more than one character at once): the
+    // phrase may still be on the clipboard after the import.
+    var pasted by remember { mutableStateOf(false) }
     val back = {
         phrase = ""
         onBack()
@@ -515,7 +581,13 @@ private fun ImportPhrasePage(
     val hint = importHint(phrase)
     val submit = {
         if (!busy && hint is ImportHint.Valid) {
-            runCatching { Mnemonic.parse(phrase) }.getOrNull()?.let { onImport(it) { phrase = "" } }
+            runCatching { Mnemonic.parse(phrase) }.getOrNull()?.let { mnemonic ->
+                onImport(mnemonic) {
+                    if (pasted) clearPhraseFromClipboard(context, mnemonic.words)
+                    phrase = ""
+                    pasted = false
+                }
+            }
         }
     }
     FullScreenScaffold(title = "Import wallet", onDismiss = back) {
@@ -528,7 +600,8 @@ private fun ImportPhrasePage(
                 SectionCard(title = "Recovery phrase") {
                     Text(
                         "Type or paste the words, separated by spaces. They’re encrypted on this " +
-                            "phone only and never sent anywhere.",
+                            "phone only and never sent anywhere. A pasted phrase is taken off the " +
+                            "clipboard once it’s imported.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -536,7 +609,10 @@ private fun ImportPhrasePage(
                     TabTextInput(private = true) {
                         OutlinedTextField(
                             value = phrase,
-                            onValueChange = { phrase = it },
+                            onValueChange = {
+                                if (it.length - phrase.length > 1) pasted = true
+                                phrase = it
+                            },
                             enabled = !busy,
                             minLines = 4,
                             textStyle = MaterialTheme.typography.bodyLarge.copy(fontFamily = FontFamily.Monospace),

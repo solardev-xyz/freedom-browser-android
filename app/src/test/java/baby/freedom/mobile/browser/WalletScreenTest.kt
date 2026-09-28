@@ -4,7 +4,9 @@ import baby.freedom.mobile.wallet.Vault
 import baby.freedom.mobile.wallet.VaultAuthCancelledException
 import baby.freedom.mobile.wallet.VaultKeyLostException
 import baby.freedom.mobile.wallet.VaultProtection
+import baby.freedom.mobile.wallet.VaultUnreadableException
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -49,7 +51,29 @@ class WalletScreenTest {
 
     @Test
     fun `a cancelled prompt says nothing, a lost key says what to do`() {
-        assertNull(walletErrorMessage(VaultAuthCancelledException(), "unlock the wallet"))
-        assertTrue(walletErrorMessage(VaultKeyLostException(), "unlock the wallet")!!.contains("import your recovery phrase"))
+        assertNull(walletErrorMessage(VaultAuthCancelledException(), "unlock the wallet", phraseBackedUp = true))
+        assertTrue(
+            walletErrorMessage(VaultKeyLostException(), "unlock the wallet", phraseBackedUp = true)!!
+                .contains("import your recovery phrase"),
+        )
+        // A created wallet whose phrase was never shown: no phrase to re-import.
+        val neverShown = walletErrorMessage(VaultKeyLostException(), "unlock the wallet", phraseBackedUp = false)!!
+        assertFalse(neverShown.contains("import"))
+        assertTrue(neverShown.contains("can’t be restored"))
+        assertFalse(walletErrorMessage(VaultUnreadableException(IllegalStateException()), "unlock the wallet", false)!!.contains("import"))
+    }
+
+    @Test
+    fun `an imported phrase is found on the clipboard, and nothing else is`() {
+        val words = twelve.split(" ")
+        assertTrue(clipHoldsPhrase(twelve, words))
+        assertTrue(clipHoldsPhrase("  ${twelve.uppercase()}\n", words))
+        assertTrue(clipHoldsPhrase("My phrase: $twelve. Keep it safe!", words))
+        assertTrue(clipHoldsPhrase(twelve.replace(" ", "\n"), words))
+        assertFalse(clipHoldsPhrase("https://example.com", words))
+        assertFalse(clipHoldsPhrase(twelve.substringBeforeLast(" "), words))
+        assertFalse(clipHoldsPhrase(twelve.replace("about", "abandon"), words))
+        assertFalse(clipHoldsPhrase(null, words))
+        assertFalse(clipHoldsPhrase("", words))
     }
 }

@@ -7,8 +7,11 @@ import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyPermanentlyInvalidatedException
 import android.security.keystore.KeyProperties
 import android.security.keystore.StrongBoxUnavailableException
+import android.security.keystore.UserNotAuthenticatedException
 import java.io.File
+import java.security.InvalidKeyException
 import java.security.KeyStore
+import java.security.UnrecoverableKeyException
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
@@ -20,6 +23,38 @@ class SealingCipher(val cipher: Cipher, val strongBox: Boolean)
 /** The vault's key is gone for good (the screen lock was removed, or the key was deleted). */
 class VaultKeyLostException(cause: Throwable? = null) :
     IllegalStateException("the wallet's Keystore key is no longer usable", cause)
+
+/**
+ * Opens the vault's cipher with [init], reporting a key that is gone for
+ * good as [VaultKeyLostException], however this phone's Keystore says so:
+ * no key at all, [UnrecoverableKeyException] from [loadKey] (some Keystore
+ * versions answer an invalidated key that way), or an [InvalidKeyException]
+ * from [init] — [KeyPermanentlyInvalidatedException] on most phones. A
+ * plain [InvalidKeyException] only counts if [keyStillWorks] agrees the
+ * key is dead, so a one-off refusal doesn't tell the user to remove their
+ * wallet; [UserNotAuthenticatedException] never does.
+ */
+internal fun openCipherOrKeyLost(
+    loadKey: () -> SecretKey?,
+    init: (SecretKey) -> Cipher,
+    keyStillWorks: (SecretKey) -> Boolean,
+): Cipher {
+    val key = try {
+        loadKey()
+    } catch (e: UnrecoverableKeyException) {
+        throw VaultKeyLostException(e)
+    } ?: throw VaultKeyLostException()
+    return try {
+        init(key)
+    } catch (e: KeyPermanentlyInvalidatedException) {
+        throw VaultKeyLostException(e)
+    } catch (e: UserNotAuthenticatedException) {
+        throw e
+    } catch (e: InvalidKeyException) {
+        if (keyStillWorks(key)) throw e
+        throw VaultKeyLostException(e)
+    }
+}
 
 /**
  * Where [Vault] keeps its sealed phrase and gets its ciphers from. The
@@ -65,8 +100,8 @@ interface VaultStore {
  *    (`setInvalidatedByBiometricEnrollment(false)`). Removing the screen
  *    lock does still destroy it (Android does that to every
  *    authentication-bound key); [openingCipher] reports that as
- *    [VaultKeyLostException] and the wallet page explains the recovery
- *    phrase is the way back.
+ *    [VaultKeyLostException] and the wallet page explains what's left:
+ *    re-import the recovery phrase, if the user was ever shown it.
  *
  * On a phone with no screen lock the key is made without the
  * authentication requirement ([VaultProtection.DEVICE_ONLY]), which is
@@ -113,16 +148,20 @@ class KeystoreVaultStore(context: Context) : VaultStore {
         return SealingCipher(cipher, strongBox)
     }
 
-    override fun openingCipher(record: VaultRecord): Cipher {
-        val key = key() ?: throw VaultKeyLostException()
-        return try {
+    override fun openingCipher(record: VaultRecord): Cipher = openCipherOrKeyLost(
+        loadKey = ::key,
+        init = { key ->
             Cipher.getInstance(TRANSFORMATION).apply {
                 init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(GCM_TAG_BITS, record.iv))
             }
-        } catch (e: KeyPermanentlyInvalidatedException) {
-            throw VaultKeyLostException(e)
-        }
-    }
+        },
+        // Opening a cipher to *encrypt* needs no authentication even for
+        // an authentication-bound key, so it tells a dead key apart from
+        // one that merely refused this decryption.
+        keyStillWorks = { key ->
+            runCatching { Cipher.getInstance(TRANSFORMATION).init(Cipher.ENCRYPT_MODE, key) }.isSuccess
+        },
+    )
 
     override fun wipe() {
         file.delete()

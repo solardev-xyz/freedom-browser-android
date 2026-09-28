@@ -339,21 +339,36 @@ class Vault internal constructor(
     // ---- Lazy setup (maintainer decision 1) ----
 
     /**
-     * A feature's request for an unlocked wallet, while the wallet page is
-     * up for it. [reason] says who is asking and why, in the page's banner.
+     * The features waiting for an unlocked wallet, while the wallet page
+     * is up for them. [reasons] says who is asking and why, one line per
+     * distinct caller, in the page's banner. Every concurrent
+     * [requireUnlocked] shares one answer; a caller that joins with a new
+     * reason gets a fresh [SetupRequest] over the same answer, so the
+     * banner names it too.
      */
-    class SetupRequest internal constructor(val reason: String) {
-        internal val result = CompletableDeferred<Boolean>()
+    class SetupRequest internal constructor(
+        val reasons: List<String>,
+        internal val waiting: Waiting,
+    ) {
+        /** The reasons as the banner shows them. */
+        val reason: String get() = reasons.joinToString("\n")
 
         /** The wallet page is done: [unlocked] if the user created, imported or unlocked one. */
         fun finish(unlocked: Boolean) {
-            result.complete(unlocked)
+            waiting.result.complete(unlocked)
         }
     }
 
+    /** One shared answer, and how many [requireUnlocked] calls still await it (guarded by the vault's setup lock). */
+    internal class Waiting {
+        val result = CompletableDeferred<Boolean>()
+        var callers = 0
+    }
+
+    private val setupLock = Any()
     private val _setupRequest = MutableStateFlow<SetupRequest?>(null)
 
-    /** The pending [requireUnlocked] call the browser should open the wallet page for, if any. */
+    /** The pending [requireUnlocked] calls the browser should open the wallet page for, if any. */
     val setupRequest: StateFlow<SetupRequest?> = _setupRequest.asStateFlow()
 
     /**
@@ -361,14 +376,34 @@ class Vault internal constructor(
      * otherwise after the user creates, imports or unlocks one on the
      * wallet page opened for [reason]. False if they chose Not now.
      * Callers then carry on without an identity.
+     *
+     * Concurrent callers share the page and its answer. One of them being
+     * cancelled doesn't close the page on the others: it stays up until
+     * it's answered or the last caller still waiting goes away.
      */
     suspend fun requireUnlocked(reason: String): Boolean {
         if (_state.value is State.Unlocked) return true
-        val request = _setupRequest.value ?: SetupRequest(reason).also { _setupRequest.value = it }
+        val waiting = synchronized(setupLock) {
+            val current = _setupRequest.value?.takeIf { !it.waiting.result.isCompleted }
+            val next = when {
+                current == null -> SetupRequest(listOf(reason), Waiting())
+                reason in current.reasons -> current
+                else -> SetupRequest(current.reasons + reason, current.waiting)
+            }
+            next.waiting.callers++
+            _setupRequest.value = next
+            next.waiting
+        }
         return try {
-            request.result.await()
+            waiting.result.await()
         } finally {
-            _setupRequest.compareAndSet(request, null)
+            synchronized(setupLock) {
+                waiting.callers--
+                val current = _setupRequest.value
+                if (current?.waiting === waiting && (waiting.callers == 0 || waiting.result.isCompleted)) {
+                    _setupRequest.value = null
+                }
+            }
         }
     }
 

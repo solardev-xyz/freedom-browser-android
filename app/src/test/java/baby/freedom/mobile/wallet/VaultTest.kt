@@ -307,6 +307,52 @@ class VaultTest {
     }
 
     @Test
+    fun `requireUnlocked - a cancelled caller doesn't strand another, and both reasons show`() = runBlocking {
+        val v = vault()
+        val first = async(Dispatchers.Unconfined) { v.requireUnlocked("Publishing needs a wallet") }
+        val second = async(Dispatchers.Unconfined) { v.requireUnlocked("Payments need a wallet") }
+        yield()
+        assertEquals(listOf("Publishing needs a wallet", "Payments need a wallet"), v.setupRequest.value!!.reasons)
+        // The same reason again joins without repeating the line.
+        val third = async(Dispatchers.Unconfined) { v.requireUnlocked("Payments need a wallet") }
+        yield()
+        assertEquals(2, v.setupRequest.value!!.reasons.size)
+
+        first.cancel()
+        yield()
+        // The page stays up for the callers still waiting…
+        val request = v.setupRequest.value!!
+        assertFalse(second.isCompleted)
+        // …and its answer reaches them.
+        v.create(phrase, auth, imported = false)
+        request.finish(true)
+        assertTrue(second.await())
+        assertTrue(third.await())
+        assertNull(v.setupRequest.value)
+    }
+
+    @Test
+    fun `requireUnlocked - the page closes once every caller is gone`() = runBlocking {
+        val v = vault()
+        val a = async(Dispatchers.Unconfined) { v.requireUnlocked("A") }
+        val b = async(Dispatchers.Unconfined) { v.requireUnlocked("B") }
+        yield()
+        a.cancel()
+        yield()
+        assertEquals(listOf("A", "B"), v.setupRequest.value!!.reasons)
+        b.cancel()
+        yield()
+        assertNull(v.setupRequest.value)
+        // A later call starts afresh, with only its own reason.
+        val c = async(Dispatchers.Unconfined) { v.requireUnlocked("C") }
+        yield()
+        assertEquals(listOf("C"), v.setupRequest.value!!.reasons)
+        v.setupRequest.value!!.finish(false)
+        assertFalse(c.await())
+        assertNull(v.setupRequest.value)
+    }
+
+    @Test
     fun `record round-trips and rejects other versions`() {
         val r = VaultRecord(VaultProtection.SCREEN_LOCK, true, byteArrayOf(1, 2, 3), byteArrayOf(4, 5), backedUp = false)
         val back = VaultRecord.decode(r.encode())!!
