@@ -90,12 +90,15 @@ private const val LAST_ENDPOINT_HELP = "At least one endpoint has to stay on."
 
 /**
  * The warning under the lists when the quorum (#96) can't run: fewer
- * than [EnsQuorum.MIN_PROVIDERS] endpoints enabled leaves every answer
- * one server's word, which the browser then asks about each time.
- * `null` when there are enough.
+ * than [EnsQuorum.MIN_PROVIDERS] different providers ([enabled],
+ * [EnsRpcConfig.providerCount]) among the [endpoints] that are on leaves
+ * every answer one server's word, which the browser then asks about each
+ * time. `null` when there are enough.
  */
-internal fun tooFewEndpointsHint(enabled: Int): String? = when {
+internal fun tooFewEndpointsHint(enabled: Int, endpoints: Int = enabled): String? = when {
     enabled >= EnsQuorum.MIN_PROVIDERS -> null
+    endpoints > enabled ->
+        "The $endpoints endpoints that are on come from only $enabled ${if (enabled == 1) "provider" else "different providers"}, and a provider's answer counts once. Cross-checking needs ${EnsQuorum.MIN_PROVIDERS} different providers (to agree on a block), so answers aren't cross-checked: you'll be asked before each name loads."
     enabled == 1 ->
         "Only one endpoint is on, so answers can't be cross-checked: you'll be asked before each name loads. Turn on ${EnsQuorum.MIN_PROVIDERS} or more to cross-check."
     else ->
@@ -114,7 +117,7 @@ internal fun ensSectionRows(config: EnsRpcConfig) = listOf(
         "order",
         ROW_ORDER,
         ORDER_HELP,
-        tooFewEndpointsHint(config.sources.size),
+        tooFewEndpointsHint(config.providerCount, config.sources.size),
         *config.sources.map(::sourceLine).toTypedArray(),
     ),
     settingsRow("ccip", ROW_CCIP, if (config.ccipRead) "On" else "Off", CCIP_HELP, "EIP-3668"),
@@ -176,7 +179,7 @@ internal fun NameResolutionSection(
                     )
                 }
             }
-            tooFewEndpointsHint(config.sources.size)?.let {
+            tooFewEndpointsHint(config.providerCount, config.sources.size)?.let {
                 Spacer(Modifier.height(6.dp))
                 WarningText(it)
             }
@@ -306,6 +309,13 @@ internal fun RpcProvidersSection(
                             fontFamily = FontFamily.Monospace,
                             style = MaterialTheme.typography.bodySmall,
                         )
+                        config.publicSkippedFor(url)?.takeIf { on }?.let { twin ->
+                            Text(
+                                publicSkippedHelp(twin),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
                         if (locked) {
                             Text(
                                 LAST_ENDPOINT_HELP,
@@ -326,7 +336,7 @@ internal fun RpcProvidersSection(
                     )
                 }
             }
-            tooFewEndpointsHint(config.sources.size)?.let {
+            tooFewEndpointsHint(config.providerCount, config.sources.size)?.let {
                 Spacer(Modifier.height(6.dp))
                 WarningText(it)
             }
@@ -348,7 +358,7 @@ internal fun RpcProvidersSection(
                             null
                         }
                         NodeSettings.AddEndpointResult.DUPLICATE -> "Not added: already in your endpoints"
-                        NodeSettings.AddEndpointResult.PUBLIC -> "Not added: $PUBLIC_ENDPOINT_HINT"
+                        NodeSettings.AddEndpointResult.PUBLIC -> "Not added: ${publicEndpointHint(url)}"
                         NodeSettings.AddEndpointResult.FULL ->
                             "Not added: at most ${EnsRpcConfig.MAX_CUSTOM_ENDPOINTS} endpoints"
                         NodeSettings.AddEndpointResult.INVALID -> "Not added: not a valid endpoint URL"
@@ -493,8 +503,30 @@ private fun EndpointTestRow(url: String?) {
     }
 }
 
-/** Why a built-in public endpoint isn't taken as one of yours. */
-private const val PUBLIC_ENDPOINT_HINT = "already one of the built-in public endpoints; turn it on or off under $SUB_PUBLIC"
+/**
+ * Why [url] isn't taken as one of yours: it's on the host of a built-in
+ * public endpoint ([EnsRpcConfig.publicEndpointHost]), whatever its path
+ * or query — the same server, already asked under its own switch.
+ */
+internal fun publicEndpointHint(url: String): String {
+    val host = (EnsRpcConfig.normalizeEndpoint(url) ?: url).let(EnsRpcConfig::publicEndpointHost)
+    val by = host?.let { "already provided by $it" } ?: "already provided"
+    return "$by, one of the built-in public endpoints; turn it on or off under $SUB_PUBLIC"
+}
+
+/**
+ * Under a public endpoint's switch, when [twin] — one of yours or a
+ * keyed provider, run by the same provider — takes its place
+ * ([EnsRpcConfig.publicSkippedFor]): one provider is one vote.
+ */
+internal fun publicSkippedHelp(twin: EnsRpcConfig.Source): String {
+    val what = if (twin.kind == EnsRpcConfig.Kind.KEYED) {
+        "your ${twin.label} key"
+    } else {
+        "your endpoint ${EnsRpcConfig.redact(twin.url)}"
+    }
+    return "Not asked: same provider as $what, which is asked in its place"
+}
 
 @Composable
 private fun AddEndpointDialog(
@@ -524,7 +556,7 @@ private fun AddEndpointDialog(
                         Text(
                             when {
                                 duplicate -> "Already in your endpoints"
-                                public -> PUBLIC_ENDPOINT_HINT.replaceFirstChar { it.uppercase() }
+                                public -> publicEndpointHint(validation.url).replaceFirstChar { it.uppercase() }
                                 draft.isNotBlank() && validation.rejection != null ->
                                     endpointHint(validation.rejection)
                                 url != null && url.startsWith("http://", ignoreCase = true) ->

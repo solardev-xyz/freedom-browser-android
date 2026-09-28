@@ -546,6 +546,46 @@ class EnsQuorumResolveTest {
     }
 
     @Test
+    fun `endpoints on one host are one provider, so not cross-checked`() {
+        // Three spellings one server answers alike (R6-F1): they'd be
+        // three votes if counted by URL.
+        val servers = Servers(
+            listOf("https://eth.drpc.org/?x=1", "https://eth.drpc.org", "https://eth.drpc.org//")
+                .zip(listOf(honest(), honest(), honest())).toMap(LinkedHashMap()),
+        )
+
+        val result = resolve(servers)
+
+        require(result is EnsResult.Ok) { "got $result" }
+        assertFalse(result.trust.verified)
+        assertTrue(result.trust.tooFewServers)
+        assertEquals(0, servers.count("eth_blockNumber"))
+    }
+
+    @Test
+    fun `a second endpoint of a provider gets no second vote`() {
+        // drpc twice (a keyed and a public one) says one thing, the two
+        // other providers another: by URL drpc would carry the vote.
+        val liar = honest(ref = otherRef)
+        val servers = Servers(
+            listOf(
+                "https://lb.drpc.live/ethereum/KEY",
+                "https://eth.drpc.org",
+                "https://rpc2.test/",
+                "https://rpc3.test/",
+            ).zip(listOf(liar, liar, honest(), honest())).toMap(LinkedHashMap()),
+        )
+
+        val result = resolve(servers)
+
+        require(result is EnsResult.Ok) { "got $result" }
+        assertEquals("bzz://$honestRef", result.uri)
+        assertTrue(result.trust.verified)
+        // The public twin is never asked: DRPC already has its seat.
+        assertEquals(0, servers.log.count { it.url == "https://eth.drpc.org" })
+    }
+
+    @Test
     fun `too few servers reachable is not the same as too few enabled`() {
         val silent = Server(head = null, hashOf = { null }, record = { _, _ -> null })
         val servers = serversOf(honest(), silent, Server(null, { null }, { _, _ -> null }))

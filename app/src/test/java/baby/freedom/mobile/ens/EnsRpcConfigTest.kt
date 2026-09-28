@@ -1,6 +1,10 @@
 package baby.freedom.mobile.ens
 
+import baby.freedom.mobile.browser.publicEndpointHint
+import baby.freedom.mobile.browser.tooFewEndpointsHint
 import baby.freedom.mobile.chains.RpcUrls
+import baby.freedom.mobile.chains.rpc.ChainDataRouter
+import baby.freedom.mobile.data.ChainStore
 import java.io.IOException
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -150,6 +154,105 @@ class EnsRpcConfigTest {
         val c = EnsRpcConfig(customEndpoints = listOf("https://eth.drpc.org:443"))
         assertTrue(c.isPublicEndpoint("https://eth.drpc.org:443"))
         assertEquals(1, c.sources.count { it.url.contains("eth.drpc.org") })
+    }
+
+    // ---- one provider, one voter (R6-F1) ----
+
+    /** The four spellings the R6 review got a second quorum vote with. */
+    private val r6Spellings = listOf(
+        "https://eth.drpc.org/?x=1",
+        "https://1rpc.io//eth",
+        "https://1rpc.io/eth?x=1",
+        "https://ethereum.publicnode.com/?a",
+    )
+
+    @Test
+    fun `any URL on a built-in public endpoint's host is that endpoint`() {
+        val c = EnsRpcConfig()
+        for (url in r6Spellings) {
+            assertTrue(url, c.isPublicEndpoint(url))
+            assertTrue(url, ChainStore.isNameResolutionPublic(1, url))
+        }
+        assertEquals("eth.drpc.org", EnsRpcConfig.publicEndpointHost("https://ETH.drpc.org./anything?at=all"))
+        assertEquals("1rpc.io", EnsRpcConfig.publicEndpointHost("https://1rpc.io/arb"))
+        // Another host is not a built-in, even of the same provider…
+        assertEquals(null, EnsRpcConfig.publicEndpointHost("https://lb.drpc.org/ogrpc?network=ethereum"))
+        assertFalse(c.isPublicEndpoint("https://rpc.flashbots.net"))
+        // …and only mainnet's own RPCs are name resolution's.
+        assertFalse(ChainStore.isNameResolutionPublic(10, "https://1rpc.io/op"))
+    }
+
+    @Test
+    fun `refused as yours with the host it is already provided by`() {
+        assertTrue(
+            publicEndpointHint("https://eth.drpc.org/?x=1"),
+            publicEndpointHint("https://eth.drpc.org/?x=1").startsWith("already provided by eth.drpc.org"),
+        )
+        assertTrue(publicEndpointHint("https://1rpc.io//eth").startsWith("already provided by 1rpc.io"))
+    }
+
+    @Test
+    fun `each R6 spelling next to its built-in twin is one voter per host`() {
+        for (url in r6Spellings) {
+            // Stored anyway (an old install's list, or a write that
+            // predates the refusal): it takes its provider's one seat.
+            val c = EnsRpcConfig(customEndpoints = listOf(url))
+            val host = java.net.URI(url).host
+            assertEquals(url, 1, c.endpoints.count { java.net.URI(it).host == host })
+            assertEquals(url, c.endpoints.first())
+            assertEquals(url, 1, EnsQuorum.voters(c.endpoints).count { java.net.URI(it).host == host })
+            // Even a pool that lists both spellings gives the host one vote.
+            val pool = listOf(url) + EnsRpcConfig.PUBLIC_ENDPOINTS
+            assertEquals(url, 1, EnsQuorum.voters(pool).count { java.net.URI(it).host == host })
+            assertEquals(url, 1, EnsQuorum.waveOrder(pool, pool).count { java.net.URI(it).host == host })
+            assertEquals(url, 5, EnsQuorum.voters(pool).size)
+        }
+    }
+
+    @Test
+    fun `a keyed DRPC and the public DRPC are one voter`() {
+        val c = EnsRpcConfig(apiKeys = mapOf("drpc" to "KEY"))
+        val keyed = "https://lb.drpc.live/ethereum/KEY"
+        assertEquals(ChainDataRouter.providerOf("https://eth.drpc.org"), ChainDataRouter.providerOf(keyed))
+        // Your key takes DRPC's seat; the public DRPC isn't asked.
+        assertTrue(keyed in c.endpoints)
+        assertFalse("https://eth.drpc.org" in c.endpoints)
+        assertEquals(keyed, c.publicSkippedFor("https://eth.drpc.org")?.url)
+        assertEquals(null, c.publicSkippedFor("https://eth.merkle.io"))
+        assertEquals(1, EnsQuorum.voters(listOf(keyed, "https://eth.drpc.org")).size)
+        assertEquals(5, c.providerCount)
+    }
+
+    @Test
+    fun `your own endpoint on another host of a public provider takes its seat`() {
+        val mine = "https://lb.drpc.org/ogrpc?network=ethereum"
+        val c = EnsRpcConfig(customEndpoints = listOf(mine))
+        assertEquals(mine, c.endpoints.first())
+        assertFalse("https://eth.drpc.org" in c.endpoints)
+        assertEquals(EnsRpcConfig.PUBLIC_ENDPOINTS.size, c.providerCount)
+    }
+
+    @Test
+    fun `same-host endpoints only are not cross-checked`() {
+        val sameHost = listOf("https://my.node/a", "https://my.node/b", "https://rpc.my.node/c")
+        assertFalse(EnsQuorum.canCrossCheck(sameHost))
+        assertEquals(1, EnsQuorum.voters(sameHost).size)
+        val c = EnsRpcConfig(customEndpoints = sameHost, disabledPublicEndpoints = EnsRpcConfig.PUBLIC_ENDPOINTS.toSet())
+        assertEquals(3, c.endpoints.size)
+        assertEquals(1, c.providerCount)
+        val hint = tooFewEndpointsHint(c.providerCount, c.endpoints.size)!!
+        assertTrue(hint, hint.contains("only 1 provider") && hint.contains("aren't cross-checked"))
+        // Three spellings of one on-device node are one device.
+        assertFalse(EnsQuorum.canCrossCheck(listOf("http://localhost:8545", "http://127.0.0.1:8545", "http://[::1]:8545")))
+        assertTrue(EnsQuorum.canCrossCheck(listOf("https://my.node/a", "https://eth.drpc.org", "https://1rpc.io/eth")))
+    }
+
+    @Test
+    fun `runs of slashes are one slash`() {
+        val key = EnsRpcConfig::endpointKey
+        assertEquals(key("https://1rpc.io/eth"), key("https://1rpc.io//eth"))
+        assertEquals(key("https://1rpc.io/eth"), key("https://1rpc.io///eth//"))
+        assertEquals(key("https://1rpc.io/eth"), key("https://1rpc.io//x/..//eth"))
     }
 
     @Test

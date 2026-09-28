@@ -56,8 +56,9 @@ import org.json.JSONObject
  * reported one form the first wave, and the rest widen it in the same
  * order ([EnsQuorum.waveOrder]) — so the user's own node always gets a
  * vote, but never decides alone: [EnsQuorum.M] stays 2 however the
- * pool is ordered. With fewer than [EnsQuorum.MIN_PROVIDERS] endpoints
- * enabled no cross-check is possible at all, and every answer is one
+ * pool is ordered. Servers are counted by provider ([EnsQuorum.voters]):
+ * two endpoints one operator runs are one vote. With fewer than
+ * [EnsQuorum.MIN_PROVIDERS] different providers enabled no cross-check is possible at all, and every answer is one
  * server's word, labelled [EnsTrust.tooFewServers].
  *
  * WNS (`.wei`) and GNS (`.gwei`) names take the same path with a
@@ -231,7 +232,7 @@ class EnsResolver internal constructor(
 
         // Cross-checked across servers whenever there are enough of them
         // to (#96); one server's word otherwise, labelled as such.
-        val quorumPossible = config.endpoints.size >= EnsQuorum.MIN_PROVIDERS
+        val quorumPossible = EnsQuorum.canCrossCheck(config.endpoints)
         val verdict =
             (if (quorumPossible) resolveByQuorum(epoch, normalized, target, callData, contract) else null)
                 ?: resolveSingleSource(epoch, normalized, target, callData, contract)
@@ -298,7 +299,9 @@ class EnsResolver internal constructor(
 
     private suspend fun newAnchorRound(epoch: Epoch): AnchorRound? {
         val startedAt = System.currentTimeMillis()
-        val pool = epoch.settings.endpoints
+        // One server per provider ([EnsQuorum.voters]): a second endpoint
+        // of the same operator would count its head, and its hash, twice.
+        val pool = EnsQuorum.voters(epoch.settings.endpoints)
         val probes = pool.associateWith { rpc -> io.async { blockNumber(rpc) } }
         // Every server, not just a wave's worth: the more heads, the
         // harder the median is to move. Waits for all of them — or,
@@ -598,9 +601,9 @@ class EnsResolver internal constructor(
     ): Verdict {
         val config = epoch.settings
         val failedAt = epoch.failedAt
-        // Too few endpoints enabled for any cross-check (#102) — as
+        // Too few providers enabled for any cross-check (#102) — as
         // opposed to too few of them reachable right now.
-        val tooFew = config.endpoints.size < EnsQuorum.MIN_PROVIDERS
+        val tooFew = !EnsQuorum.canCrossCheck(config.endpoints)
         fun trustOf(rpc: String) = EnsTrust(verified = false, agreed = listOf(hostOf(rpc)), tooFewServers = tooFew)
         var lastError: EnsResult.Error? = null
         // Each endpoint once, in the configured order — except that the

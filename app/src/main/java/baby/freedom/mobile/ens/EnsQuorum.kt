@@ -1,5 +1,7 @@
 package baby.freedom.mobile.ens
 
+import baby.freedom.mobile.chains.rpc.ChainDataRouter
+
 /**
  * The vote counting behind [EnsResolver]'s cross-check (#96), kept pure
  * so every rule is unit-tested on its own. Same algorithm as desktop's
@@ -48,6 +50,23 @@ internal object EnsQuorum {
     }
 
     /**
+     * The servers of [pool] that each get a vote, in order: the first
+     * endpoint of every provider ([ChainDataRouter.providerOf] —
+     * registrable domain, every loopback spelling as one device, a
+     * keyed provider as its public twin's operator). Two URLs one
+     * operator answers (`https://eth.drpc.org/?x=1` and
+     * `https://eth.drpc.org`, `https://1rpc.io//eth` and
+     * `https://1rpc.io/eth`, a keyed DRPC and the public one) are one
+     * voter, whatever the spelling: the one listed first — yours ahead
+     * of a built-in twin — takes the seat and the rest are skipped.
+     * [MIN_PROVIDERS], [K] and [M] all count these.
+     */
+    fun voters(pool: List<String>): List<String> = pool.distinctBy(ChainDataRouter::providerOf)
+
+    /** Whether [pool] has enough different providers ([voters]) to cross-check at all. */
+    fun canCrossCheck(pool: List<String>): Boolean = voters(pool).size >= MIN_PROVIDERS
+
+    /**
      * The order the record is read in (#102): the user's [pool] order
      * (own endpoints, keyed providers, public ones — see `EnsRpcConfig`),
      * keeping only the servers that [reported] a head for the anchor.
@@ -56,11 +75,12 @@ internal object EnsQuorum {
      * fastest crowd the user's own node out of the first wave; the vote
      * itself is unchanged — [M] identical answers whatever the order, so
      * a single server, however high the user ranks it, never decides
-     * alone.
+     * alone. One server per provider ([voters]), so no spelling of an
+     * endpoint gets its operator a second vote.
      */
     fun waveOrder(pool: List<String>, reported: Collection<String>): List<String> {
         val set = reported.toSet()
-        return pool.distinct().filter { it in set }
+        return voters(pool).filter { it in set }
     }
 
     sealed class HashVote {
@@ -84,11 +104,11 @@ internal object EnsQuorum {
      *
      * Decided early (before [settled]) once a hash has a strict majority
      * of everyone *asked*: no answers still to come can outvote it. `null`
-     * = not decided yet.
+     * = not decided yet. A provider counts once ([onePerProvider]).
      */
     fun hashVote(answers: Map<String, String>, asked: Int, settled: Boolean): HashVote? {
         val byHash = LinkedHashMap<String, MutableList<String>>()
-        for ((host, hash) in answers) byHash.getOrPut(hash.lowercase()) { mutableListOf() } += host
+        for ((host, hash) in onePerProvider(answers)) byHash.getOrPut(hash.lowercase()) { mutableListOf() } += host
         val leader = byHash.maxByOrNull { it.value.size }
         if (leader != null && leader.value.size >= maxOf(M, asked / 2 + 1)) {
             return HashVote.Agreed(leader.key, leader.value)
@@ -174,9 +194,19 @@ internal object EnsQuorum {
         is WaveVote.Agreed -> false
     }
 
+    /**
+     * [votes] with only the first server of each provider ([voters]).
+     * The resolver already asks one server per provider; this keeps a
+     * second one from ever being counted if it didn't.
+     */
+    private fun <V> onePerProvider(votes: Map<String, V>): Map<String, V> {
+        val seen = HashSet<String>()
+        return votes.filterKeys { seen.add(ChainDataRouter.providerOf(it)) }
+    }
+
     private fun bucketsOf(legs: Map<String, Leg>): Map<String, List<String>> {
         val buckets = LinkedHashMap<String, MutableList<String>>()
-        for ((host, leg) in legs) {
+        for ((host, leg) in onePerProvider(legs)) {
             if (leg is Leg.Answer) buckets.getOrPut(leg.key) { mutableListOf() } += host
         }
         return buckets

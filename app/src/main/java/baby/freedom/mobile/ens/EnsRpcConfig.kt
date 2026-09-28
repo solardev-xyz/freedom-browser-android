@@ -2,6 +2,7 @@ package baby.freedom.mobile.ens
 
 import baby.freedom.mobile.chains.Chain
 import baby.freedom.mobile.chains.RpcUrls
+import baby.freedom.mobile.chains.rpc.ChainDataRouter
 import java.net.URI
 import org.json.JSONArray
 import org.json.JSONObject
@@ -63,11 +64,17 @@ data class EnsRpcConfig(
     val enabledPublicEndpoints: List<String>
         get() = PUBLIC_ENDPOINTS.filter { it !in disabledPublicEndpoints }
 
-    /** Every endpoint the resolver will try, in order, each once. */
+    /**
+     * Every endpoint the resolver will try, in order, each once. Yours
+     * and keyed ones are de-duplicated by [endpointKey]
+     * (`https://eth.drpc.org/` is `https://eth.drpc.org`); a public one
+     * is skipped altogether when one of yours or a keyed one is already
+     * run by the same provider ([ChainDataRouter.providerOf]) — yours
+     * takes that provider's seat ([publicSkippedFor]). The quorum counts
+     * one vote per provider anyway ([EnsQuorum.voters]).
+     */
     val sources: List<Source>
         get() {
-            // Keyed by [endpointKey]: `https://eth.drpc.org/` is the
-            // same endpoint as the built-in `https://eth.drpc.org`.
             val seen = HashSet<String>()
             val out = ArrayList<Source>()
             for (url in customEndpoints) {
@@ -79,13 +86,32 @@ data class EnsRpcConfig(
                 val url = provider.urlFor(key)
                 if (seen.add(endpointKey(url))) out += Source(Kind.KEYED, provider.name, url)
             }
+            val yours = out.map { ChainDataRouter.providerOf(it.url) }.toSet()
             for (url in enabledPublicEndpoints) {
+                if (ChainDataRouter.providerOf(url) in yours) continue
                 if (seen.add(endpointKey(url))) out += Source(Kind.PUBLIC, "Public", url)
             }
             return out
         }
 
     val endpoints: List<String> get() = sources.map { it.url }
+
+    /**
+     * How many different providers [endpoints] come from
+     * ([EnsQuorum.voters]) — what the cross-check counts, not the
+     * number of URLs.
+     */
+    val providerCount: Int get() = EnsQuorum.voters(endpoints).size
+
+    /**
+     * The one of your endpoints, or keyed providers, that public
+     * endpoint [url] is skipped for ([sources]): run by the same
+     * provider. `null` when it isn't skipped for one.
+     */
+    fun publicSkippedFor(url: String): Source? {
+        val provider = ChainDataRouter.providerOf(url)
+        return sources.firstOrNull { it.kind != Kind.PUBLIC && ChainDataRouter.providerOf(it.url) == provider }
+    }
 
     /** What [EnsResolver] needs from this, compared to spot a change. */
     val resolverSettings: EnsResolver.Settings
@@ -117,14 +143,12 @@ data class EnsRpcConfig(
     }
 
     /**
-     * Whether [url] is one of the built-in [PUBLIC_ENDPOINTS]
-     * ([endpointKey]): the resolver already asks it, under its own
-     * switch, so it isn't taken as one of yours.
+     * Whether [url] is on the host of one of the built-in
+     * [PUBLIC_ENDPOINTS] ([publicEndpointHost]): the resolver already
+     * asks that server, under its own switch, so it isn't taken as one
+     * of yours.
      */
-    fun isPublicEndpoint(url: String): Boolean {
-        val key = endpointKey(url)
-        return PUBLIC_ENDPOINTS.any { endpointKey(it) == key }
-    }
+    fun isPublicEndpoint(url: String): Boolean = publicEndpointHost(url) != null
 
     companion object {
         /** The built-in public mainnet endpoints, tried in this order. */
@@ -178,7 +202,8 @@ data class EnsRpcConfig(
          * an unreserved character (`/%65th`) is that character and other
          * escapes compare case-insensitively; `.`/`..` path segments are
          * then resolved — escaped ones (`/%2e%2e/`) too, since the HTTP
-         * client sends those resolved as well; a trailing `/` on the
+         * client sends those resolved as well; a run of `/` is one `/`
+         * (`//eth`); a trailing `/` on the
          * path, an empty `?` query, and any `#fragment` (never sent),
          * make no difference.
          */
@@ -193,8 +218,10 @@ data class EnsRpcConfig(
                 else -> -1
             }
             val port = if (uri.port >= 0 && uri.port != defaultPort) ":${uri.port}" else ""
-            // Decode first, then resolve: `%2e%2e` is only a `..` segment once decoded.
-            val path = removeDotSegments(canonicalEscapes(uri.rawPath.orEmpty())).trimEnd('/')
+            // Decode first, then resolve: `%2e%2e` is only a `..` segment
+            // once decoded. Runs of `/` are one (`//eth` is `/eth`), as
+            // most servers read them.
+            val path = removeDotSegments(canonicalEscapes(uri.rawPath.orEmpty()).replace(SLASHES, "/")).trimEnd('/')
             val query = uri.rawQuery?.takeIf { it.isNotEmpty() }?.let { "?" + canonicalEscapes(it) }.orEmpty()
             return "$scheme://$host$port$path$query"
         }
@@ -253,7 +280,29 @@ data class EnsRpcConfig(
             return out.toString()
         }
 
+        private val SLASHES = Regex("/{2,}")
+
         private fun Char.isHex() = this in '0'..'9' || this in 'a'..'f' || this in 'A'..'F'
+
+        /**
+         * The host [url] shares with one of the built-in
+         * [PUBLIC_ENDPOINTS], or `null`. Compared by host, not by the
+         * whole URL: what path, query or slashes a server answers the
+         * same is up to the server (`https://eth.drpc.org/?x=1`,
+         * `https://1rpc.io//eth` are the built-ins), so any URL on a
+         * built-in's host is that built-in. Such a URL is refused as one
+         * of yours ("already provided by <host>"); another host of the
+         * same provider (`lb.drpc.org`) is taken, and then counts as that
+         * provider's one vote ([EnsQuorum.voters]) in place of the
+         * built-in ([sources]).
+         */
+        fun publicEndpointHost(url: String): String? {
+            val host = hostKey(url) ?: return null
+            return host.takeIf { h -> PUBLIC_ENDPOINTS.any { hostKey(it) == h } }
+        }
+
+        private fun hostKey(url: String): String? =
+            runCatching { URI(url.trim()).host }.getOrNull()?.lowercase()?.trimEnd('.')?.takeIf { it.isNotEmpty() }
 
         /** `null` if [validateEndpoint] refuses [raw]. */
         fun normalizeEndpoint(raw: String): String? = RpcUrls.normalize(raw)

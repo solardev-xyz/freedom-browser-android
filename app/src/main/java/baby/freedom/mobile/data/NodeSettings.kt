@@ -373,10 +373,11 @@ class NodeSettings private constructor(
     /**
      * Add [url] to your own mainnet RPCs (after the ones already there),
      * unless it isn't a valid endpoint, is already listed
-     * ([EnsRpcConfig.endpointKey]), is one of name resolution's own
-     * built-in public endpoints ([EnsRpcConfig.isPublicEndpoint] —
-     * already asked, under its own switch; taking it as yours would
-     * label a third party's lone answer as your RPC's) or the list is
+     * ([EnsRpcConfig.endpointKey]), is on the host of one of name
+     * resolution's own built-in public endpoints, whatever its path or
+     * query ([EnsRpcConfig.isPublicEndpoint] — already asked, under its
+     * own switch; taking it as yours would label a third party's lone
+     * answer as your RPC's, and give it a second vote) or the list is
      * full. One of the Ethereum chain page's *other* public RPCs is
      * taken: name resolution never asks those, so adding it here is the
      * only way to have it resolve names, and it becomes yours on the

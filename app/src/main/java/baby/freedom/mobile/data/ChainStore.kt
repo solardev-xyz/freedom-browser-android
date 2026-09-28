@@ -296,14 +296,11 @@ class ChainStore internal constructor(
         /**
          * Whether [url] may never be one of chain [id]'s own RPCs: on
          * Ethereum mainnet, whose own RPCs are name resolution's "your
-         * endpoints", one of name resolution's built-in public endpoints
-         * ([EnsRpcConfig.isPublicEndpoint]).
+         * endpoints", any URL on the host of one of name resolution's
+         * built-in public endpoints ([EnsRpcConfig.publicEndpointHost]).
          */
         fun isNameResolutionPublic(id: Long, url: String): Boolean =
-            id == BuiltInChains.ETHEREUM.id &&
-                EnsRpcConfig.endpointKey(url).let { key ->
-                    EnsRpcConfig.PUBLIC_ENDPOINTS.any { EnsRpcConfig.endpointKey(it) == key }
-                }
+            id == BuiltInChains.ETHEREUM.id && EnsRpcConfig.publicEndpointHost(url) != null
 
         private fun keyOf(id: Long) = stringPreferencesKey("$PREFIX$id")
         private fun rpcsKeyOf(id: Long) = stringPreferencesKey("$RPCS_PREFIX$id")
