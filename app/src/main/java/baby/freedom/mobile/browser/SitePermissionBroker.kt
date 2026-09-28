@@ -487,6 +487,54 @@ class SitePermissionBroker private constructor(
         return false
     }
 
+    /**
+     * Whether tab [tabId]'s page is what's on screen now ([onScreenTab]):
+     * the gate for anything a page's tap opens over it, e.g. an upload's
+     * picker or camera ([FileChooser]).
+     */
+    fun isOnScreen(tabId: Long): Boolean = onScreenTab.value == tabId
+
+    /**
+     * An upload's `capture` input needs `CAMERA` before the camera app
+     * can start ([FileChooser]). Asked through the same Android dialog
+     * path as a site's camera request — [requestAndroidPermissions], one
+     * dialog at a time, only over the tab that asked — so a refusal here
+     * is recorded like any other and a later permanent one gets the
+     * "Turn it on in Android settings" notice. [done] runs on the main
+     * thread.
+     */
+    fun requestUploadCamera(tabId: Long, done: (AndroidPermissionAsk) -> Unit) {
+        val permission = android.Manifest.permission.CAMERA
+        scope.launch {
+            val outcome = try {
+                askAndroidPermissionOnScreen(
+                    lock = androidDialogLock,
+                    onScreenTab = onScreenTab,
+                    tabId = tabId,
+                    dialogUp = androidDialogUp,
+                    held = {
+                        ContextCompat.checkSelfPermission(appContext, permission) ==
+                            PackageManager.PERMISSION_GRANTED
+                    },
+                    launch = requestAndroidPermissions?.let { request -> { request(listOf(permission)) } },
+                )
+            } catch (e: Exception) {
+                Log.w(TAG, "camera permission request for upload failed", e)
+                AndroidPermissionAsk.REFUSED
+            }
+            done(outcome)
+        }
+    }
+
+    /**
+     * Tell the user Android has refused the app the camera for good, if
+     * it has ([onAndroidPermissionMissing] checks) — an upload's capture
+     * input fell back to the picker because of it.
+     */
+    fun noteUploadCameraRefused() {
+        onAndroidPermissionMissing?.invoke(listOf(SitePermission.CAMERA))
+    }
+
     private fun withdraw(tabId: Long, match: (Pending) -> Boolean) {
         for (p in pending.toList()) {
             if (p.tabId != tabId || !match(p)) continue
