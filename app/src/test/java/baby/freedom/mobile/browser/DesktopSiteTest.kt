@@ -433,35 +433,56 @@ class DesktopSiteTest {
 
     @Test
     fun `a put-back load that crosses the line waits for its page's finish, unless superseded`() {
-        // The restored page finishes with nothing else in flight: the
-        // load goes in then, once (#185 R4-F1 kept for the other user
-        // agent too).
+        // The restored page finishes: the load goes in then, once
+        // (#185 R4-F1 kept for the other user agent too).
         var loads = 0
         val h = PutBackHold()
         h.hold { loads++ }
         assertTrue(h.held)
         assertEquals(0, loads)
-        assertTrue(h.pageFinished(navigationPending = false))
+        assertTrue(h.pageFinished())
         h.release()
         h.release()
         assertEquals(1, loads)
-        assertFalse(h.pageFinished(navigationPending = false))
-        // A navigation the page started meanwhile (a tapped link, a
-        // user's form, #185 R3-F1) is still in flight at the finish:
-        // it replaces the put-back.
-        h.hold { loads++ }
-        assertFalse(h.pageFinished(navigationPending = true))
-        h.release()
-        assertEquals(1, loads)
-        // A load of the app's, Stop, or a commit drops it — also
-        // between the finish and its posted release.
+        assertFalse(h.pageFinished())
+        // A load of the app's, Stop, a commit, or a navigation the user
+        // started on the page drops it — also between the finish and its
+        // posted release.
         h.hold { loads++ }
         h.dropped()
-        assertFalse(h.pageFinished(navigationPending = false))
+        assertFalse(h.pageFinished())
         h.hold { loads++ }
-        assertTrue(h.pageFinished(navigationPending = false))
+        assertTrue(h.pageFinished())
         h.dropped()
         h.release()
         assertEquals(1, loads)
+    }
+
+    @Test
+    fun `a put-back hold goes in at its deadline if the page never finishes, only its own`() {
+        // R2-F1: a page whose load event never fires still gets the load.
+        var loads = 0
+        val h = PutBackHold()
+        val first = h.hold { loads++ }
+        h.deadline(first)
+        assertEquals(1, loads)
+        assertFalse(h.held)
+        // Already released at the finish: the deadline does nothing.
+        val second = h.hold { loads++ }
+        assertTrue(h.pageFinished())
+        h.release()
+        h.deadline(second)
+        assertEquals(2, loads)
+        // Dropped: nothing at the deadline either.
+        val third = h.hold { loads++ }
+        h.dropped()
+        h.deadline(third)
+        assertEquals(2, loads)
+        // An earlier hold's deadline doesn't release a later hold early.
+        val fourth = h.hold { loads++ }
+        h.deadline(third)
+        assertTrue(h.held)
+        h.deadline(fourth)
+        assertEquals(3, loads)
     }
 }

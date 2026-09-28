@@ -296,18 +296,32 @@ internal fun webOrigin(url: String): String? {
  * download). It waits for the page's own finish instead.
  *
  * Only while nothing else has taken the tab: a load of the app's, Stop,
- * or any document committing drops it ([dropped]); and a navigation the
- * page started meanwhile (a tapped link, a form the user submitted,
- * which #185 R3-F1 put the load in at the commit to leave alone) that
- * is still in flight at the finish supersedes it there ([pageFinished]).
+ * any document committing, or a navigation the user started on the page
+ * meanwhile (a tapped link, a form they submitted — where they're going
+ * now, #185 R2-F1) drops it ([dropped]). A navigation the page starts
+ * without a gesture (a script's redirect, a `location.href` beacon
+ * answered `204`) doesn't: the load was in flight over it before the
+ * relaunch, and a stale one that never commits mustn't cost the user
+ * their load (R2-F2).
+ *
+ * Nor for longer than [PUT_BACK_HOLD_MS] ([deadline], R2-F1): a page
+ * whose `load` event is slow (a trickling image) or never comes (a live
+ * stream, a long poll) would otherwise keep the typed address in the bar
+ * over it indefinitely. Past that the load goes in anyway, stopping the
+ * page, as any load that crosses the line does.
  */
 internal class PutBackHold {
     private var load: (() -> Unit)? = null
 
+    // Bumped by each [hold]: a deadline acts only on the hold it was set for.
+    private var generation = 0
+
     val held: Boolean get() = load != null
 
-    fun hold(load: () -> Unit) {
+    /** Holds [load]; returns the generation its [deadline] is to name. */
+    fun hold(load: () -> Unit): Int {
         this.load = load
+        return ++generation
     }
 
     fun dropped() {
@@ -316,13 +330,13 @@ internal class PutBackHold {
 
     /**
      * The page on screen finished. True if the held load is to go in
-     * now ([release]); with a main-frame navigation of the page's in
-     * flight ([navigationPending]) it is dropped instead.
+     * now ([release]).
      */
-    fun pageFinished(navigationPending: Boolean): Boolean {
-        if (load == null) return false
-        if (navigationPending) load = null
-        return load != null
+    fun pageFinished(): Boolean = load != null
+
+    /** The deadline set for hold [generation] passed: its load goes in, if still held. */
+    fun deadline(generation: Int) {
+        if (generation == this.generation) release()
     }
 
     /** Hands the held load to the WebView, if it's still held. */
@@ -332,6 +346,12 @@ internal class PutBackHold {
         go()
     }
 }
+
+/** The longest a [PutBackHold] waits for its page's finish (R2-F1). */
+internal const val PUT_BACK_HOLD_MS = 5_000L
+
+/** What the capsule shows while a [PutBackHold] waits: busy, not idle over the old page (R2-F1). */
+internal const val PUT_BACK_HOLD_PROGRESS = 10
 
 /**
  * The chrome's Back and Forward (a script step, not

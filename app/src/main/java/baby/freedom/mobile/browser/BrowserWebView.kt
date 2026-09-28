@@ -872,7 +872,10 @@ fun BrowserWebViewHost(
                             // would stop that page after all: it waits
                             // for the page's finish ([PutBackHold]).
                             if (keepsPage && wv is PageWebView && wv.needsOtherUserAgentFor(pending)) {
-                                wv.putBackHold.hold(load)
+                                wv.holdPutBack(load)
+                                // The tab is busy with it: not the page's
+                                // Reload under the typed address (R2-F1).
+                                if (tab.progress == -1 && !tab.loadAborted) tab.progress = PUT_BACK_HOLD_PROGRESS
                             } else {
                                 load()
                             }
@@ -2578,11 +2581,10 @@ private fun buildRefreshableWebView(
                 val isCurrent = finishedLoadIsCurrent(url, view?.url)
                 // A load put back over this restored page that needs the
                 // other user agent goes in now that the page is complete,
-                // unless a navigation of the page's is in flight (#180,
-                // [PutBackHold]). Posted, after this finish's bookkeeping.
-                if (isCurrent && view is PageWebView &&
-                    view.putBackHold.pageFinished(navigationPending = pendingNavigationUrls.isNotEmpty())
-                ) {
+                // unless the user started one of their own on the page
+                // meanwhile, which dropped it (#180, [PutBackHold]).
+                // Posted, after this finish's bookkeeping.
+                if (isCurrent && view is PageWebView && view.putBackHold.pageFinished()) {
                     view.post { view.putBackHold.release() }
                 }
                 if (isCurrent) {
@@ -2728,7 +2730,10 @@ private fun buildRefreshableWebView(
                     // they're going now, not the load a restore had
                     // waiting (#185 R2-F1). A script's redirect without a
                     // tap is still the restored page's own load.
-                    if (request.hasGesture()) state.restoreLoadSuperseded()
+                    if (request.hasGesture()) {
+                        state.restoreLoadSuperseded()
+                        (view as? PageWebView)?.putBackHold?.dropped()
+                    }
                 }
                 // A popup's very first navigation: an app link there is
                 // its opener's, and the popup was opened for it alone.
@@ -2911,6 +2916,12 @@ private fun buildRefreshableWebView(
                         // navigation, for the user agent (#180, R2-F1).
                         userNamedChain.mainFrameRequested(it)
                         (view as? PageWebView)?.usersNavigation?.mainFrameRequested(it)
+                        // A form the user submitted (a POST never reaches
+                        // shouldOverrideUrlLoading) supersedes a held
+                        // put-back as a tapped link does (R2-F2).
+                        if (request.hasGesture() && request.method.equals("POST", ignoreCase = true)) {
+                            (view as? PageWebView)?.let { v -> v.post { v.putBackHold.dropped() } }
+                        }
                         heldBack = (view as? PageWebView)?.pageHopRequested(it, request.requestHeaders) == true
                     }
                 }
@@ -3074,11 +3085,16 @@ private fun buildRefreshableWebView(
                 // carrying the percentage it died at, and no callback
                 // ever after it, so adopting it would leave the capsule
                 // lit and stuck on Stop for good (#41).
-                state.progress = progressForCallback(
+                val progress = progressForCallback(
                     newProgress = newProgress,
                     isHomeSentinel = view?.url == ABOUT_BLANK,
                     aborted = state.loadAborted,
                 )
+                // The restored page finishing under a held put-back
+                // leaves the tab busy with that load, not idle (R2-F1).
+                val holding = progress == -1 && !state.loadAborted && view?.url != ABOUT_BLANK &&
+                    (view as? PageWebView)?.putBackHold?.held == true
+                state.progress = if (holding) PUT_BACK_HOLD_PROGRESS else progress
             }
 
             override fun onReceivedTitle(view: WebView?, title: String?) {
@@ -3422,7 +3438,8 @@ internal class PageWebView(context: Context) : WebView(context) {
         // navigation anyway. Not [stopLoading]: this is no user's Stop.
         // (The one load that mustn't stop the page on screen, one a
         // restore put back over its still-loading page, doesn't get here
-        // until that page has finished: see [PutBackHold].)
+        // until that page has finished, or its hold's deadline passed:
+        // see [PutBackHold].)
         super.stopLoading()
         return userAgentSwitch.set(desktop)
     }
@@ -3464,6 +3481,12 @@ internal class PageWebView(context: Context) : WebView(context) {
      * finish before the user agent changes under it (#180, #185).
      */
     val putBackHold = PutBackHold()
+
+    /** Holds [load] in [putBackHold], until its page's finish or [PUT_BACK_HOLD_MS] (R2-F1). */
+    fun holdPutBack(load: () -> Unit) {
+        val generation = putBackHold.hold(load)
+        postDelayed({ putBackHold.deadline(generation) }, PUT_BACK_HOLD_MS)
+    }
 
     /**
      * A page's own tapped navigation, while it's the user's: where it
