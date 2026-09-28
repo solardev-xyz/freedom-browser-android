@@ -68,7 +68,7 @@ source .envrc   # if you haven't: cp .envrc.example .envrc && edit to taste
 #    rejecting a reshaped cargo call) stops before a chain-less .so is
 #    built or copied.
 git clone https://github.com/solardev-xyz/freedom-mobile-ffi.git /tmp/freedom-mobile-ffi &&
-  git -C /tmp/freedom-mobile-ffi checkout 45203550b4ec1876a6a771f4d1dd32f3504b084c &&
+  git -C /tmp/freedom-mobile-ffi checkout v0.12.2 &&
   scripts/enable-ffi-chain.sh /tmp/freedom-mobile-ffi &&
   scripts/enable-ffi-radicle.sh /tmp/freedom-mobile-ffi &&
   ( cd /tmp/freedom-mobile-ffi && ./scripts/build-android.sh ) &&
@@ -221,7 +221,7 @@ FREEDOM_ANDROID="$PWD"
 # 1. Clone freedom-mobile-ffi at the ref release.yml pins as FFI_REF,
 #    somewhere outside this repo.
 git clone https://github.com/solardev-xyz/freedom-mobile-ffi.git /tmp/freedom-mobile-ffi &&
-  git -C /tmp/freedom-mobile-ffi checkout 45203550b4ec1876a6a771f4d1dd32f3504b084c
+  git -C /tmp/freedom-mobile-ffi checkout v0.12.2
 
 # 2. Cross-compile both ABIs. Needs cargo-ndk + ANDROID_NDK_HOME; rustup
 #    installs the pinned toolchain + targets from rust-toolchain.toml.

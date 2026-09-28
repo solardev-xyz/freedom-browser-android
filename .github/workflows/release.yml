@@ -35,7 +35,7 @@ permissions:
   contents: write
 
 env:
-  FFI_REF: 45203550b4ec1876a6a771f4d1dd32f3504b084c
+  FFI_REF: v0.12.2
 
 jobs:
   release:
