@@ -20,10 +20,10 @@
 # every PR (ffi-ref.yml — a status check only, since main has no branch
 # protection).
 # UNRELEASED: pinned to the alan/arti-tor commit that adds the Tor client
-# (#143, freedom-mobile-ffi#4), stacked on the alan/compose-tracing-layers
-# commit that adds freedom_mobile_init_logging (#156), until
-# freedom-mobile-ffi tags them, so that check fails (and this workflow
-# refuses to build) until it's retagged.
+# (#143, freedom-mobile-ffi#4), one commit on top of v0.12.2 (tag-pinned
+# ant v0.5.47 / freedom-ipfs v0.4.4), until freedom-mobile-ffi merges and
+# tags it, so that check fails (and this workflow refuses to build) until
+# it's retagged.
 # The library is built with ant's `chain` feature, the Radicle node and
 # the Tor client (see the build step).
 
@@ -38,7 +38,7 @@ permissions:
   contents: write
 
 env:
-  FFI_REF: b9ebef6b4542f704bc0dde4c91281f5267436483
+  FFI_REF: 7c363d1610c0e6c56ae9483638a44719a6baa570
 
 jobs:
   release:
