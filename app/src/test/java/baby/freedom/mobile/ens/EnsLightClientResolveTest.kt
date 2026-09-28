@@ -414,6 +414,32 @@ class EnsLightClientResolveTest {
     }
 
     @Test
+    fun `a re-check's light-client allowance is its deadline, only while a lookup would ask it`() {
+        val on = EnsResolver.Settings(listOf(rpc))
+        val client = FakeLightClient { _, _ -> EnsLightClient.Call.Unavailable("all snap peers failed") }
+        val http = OneServer { rpcResult(wrapAsOuterInner(ipfsContenthash)) }
+        val r = resolver(client, http, deadlineMs = 1_234, backoffMs = 60_000)
+        assertEquals(1_234L, r.lightClientWaitFor(on, "vitalik.eth"))
+        assertEquals(1_234L, r.lightClientWaitFor(on, "name.wei"))
+        // The only source there is: asked even while backing off.
+        assertEquals(1_234L, r.lightClientWaitFor(EnsResolver.Settings(emptyList()), "vitalik.eth"))
+        // `.tez` never goes to it; not ready isn't asked.
+        assertEquals(0L, r.lightClientWaitFor(on, "name.tez"))
+        client.generation = null
+        assertEquals(0L, r.lightClientWaitFor(on, "vitalik.eth"))
+        client.generation = 1L
+        // A miss whose probe fails too: skipped, so no wait for it.
+        runBlocking { r.resolveContenthash("vitalik.eth") }
+        runBlocking { r.resolveContenthash("nick.eth") } // waits the probe out
+        assertEquals(1, client.probes.size)
+        assertEquals(0L, r.lightClientWaitFor(on, "brantly.eth"))
+        // Until it comes back as a new stretch of readiness.
+        client.generation = 2L
+        assertEquals(1_234L, r.lightClientWaitFor(on, "brantly.eth"))
+        assertEquals(0L, EnsResolver(listOf(rpc), http).lightClientWaitFor(on, "vitalik.eth"))
+    }
+
+    @Test
     fun `a closed read gate falls back once without backing off`() {
         // The app went to the background (or the service's gate hadn't
         // reopened yet) while this side still thought it ready.

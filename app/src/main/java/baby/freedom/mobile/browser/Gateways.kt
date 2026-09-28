@@ -198,6 +198,16 @@ object Gateways {
      * both (~9 s) — the verifier backs off after that, and the window
      * spares the next documents. A `.tez` name is never proven, so its
      * re-check gets the RPC share alone.
+     *
+     * The Myotis light client (#101) runs before both, for up to
+     * `EnsResolver.LIGHT_CLIENT_DEADLINE_MS`, so while a lookup would ask
+     * it the re-check waits that out too ([lightClientAllowanceMs]): an
+     * answer it gives after a few seconds — or a miss it falls back from
+     * to a quick RPC answer — must not time out onto the earlier answer
+     * either. A stalled engine can then cost one Back its whole budget
+     * (~20 s, plus a probe's 5 s wait if one is running, on top of the
+     * above); the miss makes it probe the engine and skip it while that
+     * fails, which drops the allowance to 0 for the next documents.
      */
     @Volatile
     internal var reverifyDeadlineMs: Long = 3_000
@@ -210,6 +220,16 @@ object Gateways {
     @Volatile
     internal var colibriAllowanceMs: (EnsResolver.Settings, String) -> Long = { settings, name ->
         ensResolver.colibriWaitFor(settings, name)
+    }
+
+    /**
+     * How long a lookup of a name under these settings may spend on the
+     * light client first ([EnsResolver.lightClientWaitFor]); 0 when it
+     * would skip it. A seam for tests.
+     */
+    @Volatile
+    internal var lightClientAllowanceMs: (EnsResolver.Settings, String) -> Long = { settings, name ->
+        ensResolver.lightClientWaitFor(settings, name)
     }
 
     /**
@@ -626,7 +646,9 @@ object Gateways {
                 lookupFailedAt[key]?.let {
                     System.currentTimeMillis() - it < reverifyFailureWindowMs
                 } == true -> 0L
-                else -> reverifyDeadlineMs + (key.settings?.let { colibriAllowanceMs(it, key.name) } ?: 0L)
+                else -> reverifyDeadlineMs + (
+                    key.settings?.let { lightClientAllowanceMs(it, key.name) + colibriAllowanceMs(it, key.name) } ?: 0L
+                )
             }
             // [lookupWithin] keeps [lookupFailedAt] — see [reverifyFailureWindowMs].
             return lookupWithin(key, name, deadline)

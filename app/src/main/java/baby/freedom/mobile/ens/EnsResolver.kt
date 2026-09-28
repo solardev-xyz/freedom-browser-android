@@ -454,6 +454,33 @@ class EnsResolver internal constructor(
     }
 
     /**
+     * How long a lookup of [name] under [settings] may spend on the
+     * light client (#101) before it gets to the Colibri/RPC tiers:
+     * [lightClientDeadlineMs], plus [LIGHT_CLIENT_PROBE_TIMEOUT_MS] while
+     * a probe of the current readiness is still judging an earlier miss
+     * (the lookup waits for it first, see [resolve]); 0 when the lookup
+     * would skip it (no light client, not ready, backing off with RPC
+     * servers to fall back on, or a `.tez` name). The re-check's
+     * counterpart of [colibriWaitFor]: an ordinary answer from the light
+     * client takes seconds, and a deadline that doesn't allow for it
+     * serves the earlier answer and opens the caller's failure window
+     * on a network that is working fine.
+     */
+    internal fun lightClientWaitFor(settings: Settings, name: String): Long {
+        val generation = lightClient?.readyGeneration() ?: return 0
+        val normalized = try {
+            EnsNormalize.fastNormalize(name.trim())
+        } catch (e: EnsNormalize.InvalidNameException) {
+            return 0
+        }
+        if (NameSystem.forName(normalized) == NameSystem.TEZOS) return 0
+        if (settings.endpoints.isEmpty()) return lightClientDeadlineMs
+        val probing = lightClientProbe?.takeIf { it.generation == generation && it.healthy.isActive } != null
+        if (!probing && lightClientBackingOff(generation, System.currentTimeMillis())) return 0
+        return lightClientDeadlineMs + if (probing) LIGHT_CLIENT_PROBE_TIMEOUT_MS else 0
+    }
+
+    /**
      * Everything a lookup learns about the servers — answer cache,
      * anchor block, recent failures — together with the [settings] it
      * was learnt under. A settings change swaps in a fresh [Epoch]
