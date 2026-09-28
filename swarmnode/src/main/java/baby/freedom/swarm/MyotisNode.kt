@@ -770,9 +770,13 @@ class MyotisNode internal constructor(
         if (status.paused || status.staleAnchor) return
         val rec = recovery[network]
         val checkpoint = generations[network]?.checkpoint
-        if ((rec == null || rec.phase == MyotisRecovery.Phase.Restarting) &&
-            MyotisRecoveryPolicy.isAnchorMismatch(status, checkpoint)
-        ) {
+        // A stalled restart's engine keeps running and may still sync: it
+        // is judged against the checkpoint exactly like one still restarting.
+        val awaitingSync = rec != null && (
+            rec.phase == MyotisRecovery.Phase.Restarting ||
+                (rec.phase == MyotisRecovery.Phase.Blocked && rec.reason == MyotisRecoveryReason.Stalled)
+            )
+        if ((rec == null || awaitingSync) && MyotisRecoveryPolicy.isAnchorMismatch(status, checkpoint)) {
             // The engine's own BLS-verified finalized root isn't the one the
             // quorum agreed on. Recorded on the generation, so a restart
             // can't boot it again once it has synced past the checkpoint
@@ -790,8 +794,7 @@ class MyotisNode internal constructor(
         rec ?: return
         val finished = MyotisRecoveryPolicy.canFinish(status, checkpoint)
         when {
-            (rec.phase == MyotisRecovery.Phase.Restarting ||
-                (rec.phase == MyotisRecovery.Phase.Blocked && rec.reason == MyotisRecoveryReason.Stalled)) && finished -> {
+            awaitingSync && finished -> {
                 recovery.remove(network)
                 attempts.remove(network)
                 Log.i(TAG, "${network.engineName}: recovery complete — synced from ${generations[network]?.describe()}")

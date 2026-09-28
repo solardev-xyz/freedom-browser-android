@@ -311,6 +311,34 @@ class MyotisRecoveryTest {
     }
 
     @Test
+    fun `a stalled restart that then syncs on a contradicting root blocks as a mismatch, not ready`() {
+        recoverOnce()
+        clocks.advance(MyotisRecoveryPolicy.STALL_MS)
+        poll()
+        assertEquals(MyotisRecoveryReason.Stalled, recovery?.reason)
+
+        // The engine keeps running and syncs at the checkpoint slot on a different root.
+        engine.status[12L] = synced(slot, "ab".repeat(32))
+        poll()
+        assertEquals(MyotisRecovery.Phase.Blocked, recovery?.phase)
+        assertEquals(MyotisRecoveryReason.AnchorMismatch, recovery?.reason)
+        assertFalse(gnosisRow.ready)
+
+        // Once finality moves past the slot the check can't see it any more: still blocked, and recorded.
+        engine.status[12L] = synced(slot + 16, "cd".repeat(32))
+        poll()
+        assertEquals(MyotisRecoveryReason.AnchorMismatch, recovery?.reason)
+        assertFalse(gnosisRow.ready)
+        node.stop()
+        idle()
+        engine.calls.clear()
+        node.start()
+        idle()
+        assertFalse(engine.calls.any { it.startsWith("createWithCheckpoint gnosis") })
+        assertEquals(MyotisRecoveryReason.AnchorMismatch, recovery?.reason)
+    }
+
+    @Test
     fun `a checkpoint acquired while backgrounded relaunches paused`() {
         startStale()
         node.enterBackground()

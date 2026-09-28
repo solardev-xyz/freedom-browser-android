@@ -333,6 +333,14 @@ class MyotisNodeTest {
         idle(node)
         node.pollNow()
         idle(node)
+        // The acquisition runs off the node's queue: wait for its failure to land.
+        val deadline = System.currentTimeMillis() + 5_000
+        while (node.state.value.chain(MyotisNetwork.Mainnet)?.recovery?.phase != MyotisRecovery.Phase.Blocked &&
+            System.currentTimeMillis() < deadline
+        ) {
+            Thread.sleep(5)
+            idle(node)
+        }
         val blocked = node.state.value.chain(MyotisNetwork.Mainnet)!!.recovery
         assertEquals(MyotisRecovery.Phase.Blocked, blocked?.phase)
         assertEquals(reason, blocked?.reason)
