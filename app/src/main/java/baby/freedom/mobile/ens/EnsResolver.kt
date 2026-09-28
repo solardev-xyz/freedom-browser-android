@@ -500,8 +500,12 @@ class EnsResolver internal constructor(
      * provider still counts once. Not after a CCIP-Read failure: that
      * was the name's gateway, which the twin would ask too. The stand-in
      * starts the moment its seat fails — not once the slowest seat is
-     * in — with its read and its block hash asked side by side, so it
-     * costs a lookup one read's time at most, alongside the others.
+     * in — with its read and its block hash asked side by side, so each
+     * stand-in adds at most one read's time (its own [LEG_TIMEOUT_MS])
+     * after the server it replaces, alongside the others. They chain: a
+     * provider with more servers that reported a head can go through
+     * one stand-in after another, one read's time each, until one
+     * answers or none is left.
      */
     private suspend fun collectLegs(
         calls: Map<String, Deferred<CallOutcome>>,
