@@ -75,8 +75,12 @@ object CookieHygiene {
         // it covers every URL asked for since. A sweep that takes longer
         // than [SWEEP_INTERVAL_MS] can then never build a backlog that
         // pushes a navigation's sweep minutes into the future (R4-F1).
+        // The waiting set is bounded too (R5-F2): a page pushStating
+        // distinct URLs in a loop only ever keeps the newest
+        // [MAX_PENDING]; anything dropped that is still open comes back
+        // with the next periodic sweep over every tab.
         val schedule = synchronized(pending) {
-            pending += urls
+            addPending(pending, urls)
             (!queued).also { queued = true }
         }
         if (schedule) executor.execute {
@@ -89,6 +93,19 @@ object CookieHygiene {
     }
 
     private val pending = LinkedHashSet<String>()
+
+    /** Add [urls] to [set] as the newest entries, keeping at most [MAX_PENDING]. */
+    internal fun addPending(set: LinkedHashSet<String>, urls: Collection<String>) {
+        for (u in urls) {
+            set.remove(u)
+            set += u
+        }
+        val it = set.iterator()
+        while (set.size > MAX_PENDING && it.hasNext()) {
+            it.next()
+            it.remove()
+        }
+    }
     private var queued = false
 
     internal fun sweepBlocking(navigatedUrl: String? = null) =
@@ -109,8 +126,10 @@ object CookieHygiene {
         // `Path=/` read misses a cookie tossed at `/swap` (R3-F1). With
         // no enumeration API, read at every path a covered document is
         // on — that is exactly the set of cookies those documents can see.
-        val covered = urls.filter { hostToSweep(it) != null }
-        val paths = (listOf("/") + covered.map(::pathOf)).distinct().take(MAX_PATHS)
+        // One host pass per distinct (host, path), capped like the paths.
+        val covered = urls.mapNotNull { u -> hostToSweep(u)?.let { it to pathOf(u) } }
+            .distinct().take(MAX_PATHS)
+        val paths = (listOf("/") + covered.map { it.second }).distinct().take(MAX_PATHS)
         var expired = 0
         // Onchain apps' origins (#123) sit under the same base domain.
         for (suffix in VirtualOrigin.SUFFIXES + OnchainAppRef.SUFFIX) {
@@ -134,9 +153,8 @@ object CookieHygiene {
                 hostScoped = false,
             )
         }
-        for (url in covered) {
-            val host = hostToSweep(url) ?: continue
-            expired += expireAllFor(cm, "https://$host", pathOf(url), domain = null)
+        for ((host, path) in covered) {
+            expired += expireAllFor(cm, "https://$host", path, domain = null)
         }
         if (expired > 0) {
             Log.i(TAG, "expired $expired cookie(s) under virtual origins")
@@ -160,6 +178,9 @@ object CookieHygiene {
 
     /** Upper bound on distinct document paths one sweep reads at. */
     private const val MAX_PATHS = 64
+
+    /** Upper bound on URLs waiting for the next coalesced sweep. */
+    internal const val MAX_PENDING = 256
 
     /** The path of [url] (no query or fragment), `/` when it has none. */
     internal fun pathOf(url: String): String {
@@ -258,11 +279,18 @@ object CookieHygiene {
         search(-1, ends.lastIndex)
         for ((j, names) in found) {
             val p = path.substring(0, ends[j])
-            for (name in names) {
+            // A nameless cookie (`document.cookie = 'X'` or `'=k=v'`) is
+            // serialized as just its value, so its token reads like a
+            // name (`X`, or `k` of `k=v`) and a `X=; Max-Age=0` rewrite
+            // targets a different key (R5-F1). The cookie key is (name,
+            // domain, path) and the value is irrelevant to an overwrite,
+            // so one nameless `=x` rewrite per path expires whichever
+            // nameless cookie sits there. (A both-empty `=` is rejected.)
+            for (pair in names.map { "$it=" } + "=x") {
                 runCatching {
-                    if (hostScoped) cm.setCookie(url, "$name=; Path=$p; Max-Age=0")
+                    if (hostScoped) cm.setCookie(url, "$pair; Path=$p; Max-Age=0")
                     if (domain != null) {
-                        cm.setCookie(url, "$name=; Domain=$domain; Path=$p; Max-Age=0")
+                        cm.setCookie(url, "$pair; Domain=$domain; Path=$p; Max-Age=0")
                     }
                 }
             }

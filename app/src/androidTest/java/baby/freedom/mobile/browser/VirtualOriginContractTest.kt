@@ -564,6 +564,27 @@ class VirtualOriginContractTest {
     }
 
     @Test
+    fun namelessTossedCookiesAreSwept() {
+        // R5-F1: a nameless cookie serializes as just its value, so the
+        // sweep read 'NAMELESS_FB' (or 'k' of '=k=v') as a name and
+        // expired a different key, leaving the tossed cookie in place.
+        val cm = CookieManager.getInstance()
+        val app = "https://0x${"4".repeat(40)}-1.web3.freedom.baby/"
+        harness.load(originA)
+        harness.awaitJsTrue("window.results && window.results.loaded === true")
+        harness.js("document.cookie = 'NAMELESS_FB; domain=freedom.baby; path=/';")
+        harness.js("document.cookie = '=k=v; domain=bzz.freedom.baby; path=/';")
+        harness.js("document.cookie = '=deep; domain=freedom.baby; path=/swap';")
+        assertTrue(cm.getCookie(app).orEmpty().contains("NAMELESS_FB"))
+        assertTrue(cm.getCookie(originB).orEmpty().contains("k=v"))
+        CookieHygiene.sweepBlocking(listOf(originA, "${app}swap"))
+        assertEquals("", cm.getCookie("${app}swap").orEmpty())
+        harness.load(originB)
+        harness.awaitJsTrue("window.results && window.results.loaded === true")
+        assertEquals("", harness.js("document.cookie").trim('"'))
+    }
+
+    @Test
     fun deepPathSweepIsBoundedByCookiesNotDepth() {
         // R4-F1: expiring every name at every candidate path took ~35 s
         // for 50 cookies under '/a' x 4000. The sweep now bisects the

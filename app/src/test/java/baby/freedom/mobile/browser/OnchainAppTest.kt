@@ -194,6 +194,22 @@ class OnchainAppTest {
     }
 
     @Test
+    fun `the coalesced sweep queue keeps only the newest URLs`() {
+        // R5-F2: a pushState loop during a running sweep can't grow the
+        // waiting set without bound.
+        val set = LinkedHashSet<String>()
+        CookieHygiene.addPending(set, (0 until 10_000).map { "https://a.bzz.freedom.baby/p$it" })
+        assertEquals(CookieHygiene.MAX_PENDING, set.size)
+        assertEquals("https://a.bzz.freedom.baby/p9999", set.last())
+        // Re-asking for an old URL moves it to the newest end, so it
+        // survives the next overflow.
+        val old = set.first()
+        CookieHygiene.addPending(set, listOf(old, "https://b.bzz.freedom.baby/"))
+        assertEquals(CookieHygiene.MAX_PENDING, set.size)
+        assertEquals(listOf(old, "https://b.bzz.freedom.baby/"), set.toList().takeLast(2))
+    }
+
+    @Test
     fun `private approvals end with the private session, normal ones don't`() {
         val d = doc(ChainTrust.Level.UNVERIFIED, "private-session")
         OnchainApps.approvalsFor(private = true).add(d)
