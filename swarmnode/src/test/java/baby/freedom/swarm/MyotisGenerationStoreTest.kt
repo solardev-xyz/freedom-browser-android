@@ -169,4 +169,48 @@ class MyotisGenerationStoreTest {
         assertEquals(minted.takeLast(1 + MyotisGenerationStore.KEEP_RETIRED).map { it.id }.toSet(), left)
         assertEquals(minted.last(), store.load(net))
     }
+
+    @Test
+    fun `a generation a repair backed up survives later prunes`() {
+        val store = store()
+        val backedUp = store.replace(net, record, now)
+        File(backedUp.directory, "anchor.json").setLastModified(1_000_000L)
+        store.repair(net)
+        // Well past KEEP_RETIRED more mints after the repair.
+        repeat(MyotisGenerationStore.KEEP_RETIRED + 3) { i ->
+            store.replace(net, record.copy(verifiedAt = now + i), now + i).also {
+                File(it.directory, "anchor.json").setLastModified(2_000_000L + i * 1_000L)
+            }
+        }
+        assertTrue(backedUp.directory.isDirectory)
+        assertTrue(File(backedUp.directory, "anchor.json").isFile)
+        val left = File(chainDir, "verified-sync").listFiles()!!.map { it.name }.toSet()
+        // The backed-up one, the current one and KEEP_RETIRED others.
+        assertEquals(2 + MyotisGenerationStore.KEEP_RETIRED, left.size)
+    }
+
+    @Test
+    fun `a rejected generation never loads again, and a replacement does`() {
+        val store = store()
+        val rejected = store.replace(net, record, now)
+        store.reject(rejected)
+        try {
+            MyotisGenerationStore(tmp.root).load(net)
+            fail("expected a mismatch")
+        } catch (e: MyotisCheckpointException) {
+            assertEquals(MyotisCheckpointError.Mismatch, e.error)
+        }
+        val fresh = store.replace(net, record.copy(verifiedAt = now + 1), now + 1)
+        assertEquals(fresh, store.load(net))
+    }
+
+    @Test
+    fun `only a verified generation can be rejected`() {
+        val store = store()
+        store.reject(store.load(net)) // the implicit bundled one: nothing to contradict
+        assertEquals(null, store.load(net).id)
+        val bundled = store.repair(net)
+        store.reject(bundled)
+        assertEquals(bundled, store.load(net))
+    }
 }

@@ -285,7 +285,7 @@ private fun RecoveryRows(
         recovery.message(now),
         singleLine = false,
     )
-    anchorAge(chain)?.let { DetailRow("Built-in checkpoint", it, singleLine = false) }
+    anchorAge(chain)?.let { DetailRow("Trust checkpoint", it, singleLine = false) }
     if (recovery.canRetry) {
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             OutlinedButton(onClick = { onRecovery(chain.chainId, false) }) { Text("Retry") }
@@ -324,7 +324,9 @@ internal fun myotisChainLabel(nodeStatus: MyotisStatus, chain: MyotisChainStatus
  */
 internal fun staleAnchorExplanation(chain: MyotisChainStatus): String {
     val detail = anchorAge(chain)?.let { " ($it)" } ?: ""
-    return "The built-in checkpoint is too old to sync from safely$detail."
+    // The refused anchor is the embedded one or a previously verified
+    // generation's checkpoint; the status doesn't say which.
+    return "This chain's checkpoint is too old to sync from safely$detail."
 }
 
 /** How old a refused anchor is against the engine's limit, or null when it isn't a stale anchor. */

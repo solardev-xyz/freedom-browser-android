@@ -405,4 +405,57 @@ class MyotisRecoveryTest {
         idle()
         assertFalse(engine.calls.any { it.startsWith("createWithCheckpoint") })
     }
+
+    @Test
+    fun `a mismatch survives a restart instead of booting the contradicted generation again`() {
+        recoverOnce()
+        engine.status[12L] = synced(slot, "ab".repeat(32))
+        clocks.advance(3_000)
+        poll()
+        assertEquals(MyotisRecoveryReason.Mismatch, recovery?.reason)
+
+        // Force-stop and relaunch: by now the engine would be past the checkpoint slot.
+        node.stop()
+        idle()
+        engine.calls.clear()
+        node.start()
+        idle()
+        assertFalse(engine.calls.any { it.startsWith("createWithCheckpoint gnosis") })
+        assertTrue("create mainnet" in engine.calls)
+        assertEquals(MyotisRecovery(MyotisRecovery.Phase.Blocked, reason = MyotisRecoveryReason.Mismatch), recovery)
+        assertFalse(gnosisRow.ready)
+
+        // Retry asks for a fresh checkpoint (with the mismatch still named) and boots a new generation.
+        node.retryRecovery(MyotisNetwork.Gnosis)
+        eventually { checkpoints.asked.size == 2 }
+        assertEquals(MyotisRecovery.Phase.Checking, recovery?.phase)
+        assertTrue(recovery!!.message(0).startsWith("The synced chain didn't match"))
+        val next = record.copy(verifiedAt = record.verifiedAt + 1)
+        clocks.wall = next.verifiedAt
+        checkpoints.succeed(next)
+        eventually { engine.calls.count { it.startsWith("createWithCheckpoint gnosis") } == 1 }
+        assertEquals(MyotisRecovery.Phase.Restarting, recovery?.phase)
+        engine.status[22L] = synced(slot, rootHex)
+        poll()
+        assertNull(recovery)
+        assertTrue(gnosisRow.ready)
+    }
+
+    @Test
+    fun `a clock-blocked recovery asks again when the chain re-parks after a clock change`() {
+        startStale()
+        checkpoints.fail(MyotisCheckpointError.Clock)
+        eventually { recovery?.phase == MyotisRecovery.Phase.Blocked }
+        assertEquals(MyotisRecoveryReason.Clock, recovery?.reason)
+        // The user fixes the clock; the park is released and the engine re-judges...
+        clocks.wall -= 2L * 3_600_000L
+        engine.status[2L] = stale
+        poll()
+        assertTrue("resume 2" in engine.calls)
+        // ...still stale by the corrected clock: it parks again after the grace, and asks.
+        clocks.advance(MyotisNode.REJUDGE_GRACE_MS)
+        poll()
+        eventually { checkpoints.asked.size == 2 }
+        assertEquals(MyotisRecovery.Phase.Checking, recovery?.phase)
+    }
 }

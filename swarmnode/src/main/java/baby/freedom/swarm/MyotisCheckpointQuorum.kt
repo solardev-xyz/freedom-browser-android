@@ -49,7 +49,18 @@ import java.util.concurrent.atomic.AtomicInteger
  */
 fun interface MyotisCheckpointFetcher {
     suspend fun get(url: String, limit: Int): ByteArray
+
+    /**
+     * [get], plus the server's clock from the response's HTTP `Date`
+     * header when it sent a parsable one. Only a hint for telling a wrong
+     * device clock from a really stale checkpoint — never a vote.
+     */
+    suspend fun fetch(url: String, limit: Int): MyotisCheckpointResponse =
+        MyotisCheckpointResponse(get(url, limit), serverDateMs = null)
 }
+
+/** A fetched body and the server's `Date` header (ms since the epoch), if any. */
+class MyotisCheckpointResponse(val body: ByteArray, val serverDateMs: Long?)
 
 /**
  * [HttpURLConnection]-backed [MyotisCheckpointFetcher]: no redirects, no
@@ -65,7 +76,9 @@ fun interface MyotisCheckpointFetcher {
  * read.
  */
 class HttpCheckpointFetcher(private val requestMs: Long = REQUEST_MS) : MyotisCheckpointFetcher {
-    override suspend fun get(url: String, limit: Int): ByteArray {
+    override suspend fun get(url: String, limit: Int): ByteArray = fetch(url, limit).body
+
+    override suspend fun fetch(url: String, limit: Int): MyotisCheckpointResponse {
         val connection = (URL(url).openConnection() as HttpURLConnection).apply {
             instanceFollowRedirects = false
             useCaches = false
@@ -73,7 +86,7 @@ class HttpCheckpointFetcher(private val requestMs: Long = REQUEST_MS) : MyotisCh
             readTimeout = requestMs.toInt()
             setRequestProperty("Accept", "application/json")
         }
-        val result = CompletableDeferred<ByteArray>()
+        val result = CompletableDeferred<MyotisCheckpointResponse>()
         val work = workers.submit {
             try {
                 result.complete(read(connection, limit))
@@ -98,7 +111,7 @@ class HttpCheckpointFetcher(private val requestMs: Long = REQUEST_MS) : MyotisCh
         }
     }
 
-    private fun read(connection: HttpURLConnection, limit: Int): ByteArray {
+    private fun read(connection: HttpURLConnection, limit: Int): MyotisCheckpointResponse {
         try {
             val status = connection.responseCode
             if (status != 200) throw MyotisCheckpointException.transport(MyotisTransportFailure.Http, status)
@@ -114,7 +127,8 @@ class HttpCheckpointFetcher(private val requestMs: Long = REQUEST_MS) : MyotisCh
                     out.write(buffer, 0, n)
                 }
             }
-            return out.toByteArray()
+            val date = connection.getHeaderFieldDate("Date", 0L).takeIf { it > 0L }
+            return MyotisCheckpointResponse(out.toByteArray(), date)
         } finally {
             connection.disconnect()
         }
@@ -132,6 +146,12 @@ class HttpCheckpointFetcher(private val requestMs: Long = REQUEST_MS) : MyotisCh
         private val aborter = Executors.newCachedThreadPool(daemon("myotis-checkpoint-abort"))
     }
 }
+
+/**
+ * One authority's proposed slot, and [clockSkewMs] — this device's clock
+ * minus the authority's HTTP `Date` when it answered — if it sent one.
+ */
+data class MyotisCheckpointProposal(val slot: Long, val clockSkewMs: Long?)
 
 /** What a quorum endorsed for one slot. */
 data class MyotisCheckpointObservation(
@@ -156,11 +176,20 @@ class MyotisCheckpointQuorum(
     /** One authority's vote. */
     data class Vote(val source: String, val slot: Long, val root: String, val finalizedEpoch: Long)
 
-    private suspend fun metadata(source: String, path: String, stage: MyotisCheckpointStage): JSONObject {
+    private suspend fun metadata(source: String, path: String, stage: MyotisCheckpointStage): JSONObject =
+        timedMetadata(source, path, stage).first
+
+    /** [metadata], plus this device's clock minus the server's `Date` (ms), when it sent one. */
+    private suspend fun timedMetadata(
+        source: String,
+        path: String,
+        stage: MyotisCheckpointStage,
+    ): Pair<JSONObject, Long?> {
         try {
-            val bytes = fetcher.get(source + path, MAX_METADATA_BYTES)
+            val response = fetcher.fetch(source + path, MAX_METADATA_BYTES)
+            val skew = response.serverDateMs?.let { nowMs() - it }
             return try {
-                JSONObject(bytes.toString(Charsets.UTF_8))
+                JSONObject(response.body.toString(Charsets.UTF_8)) to skew
             } catch (_: JSONException) {
                 throw MyotisCheckpointException.transport(MyotisTransportFailure.InvalidJson)
             } catch (_: StackOverflowError) {
@@ -296,7 +325,7 @@ class MyotisCheckpointQuorum(
      * the quorum — the proposing authority's say-so is worth one vote,
      * cast in [quorum] like everyone else's.
      */
-    suspend fun propose(source: String): Long {
+    suspend fun propose(source: String): MyotisCheckpointProposal {
         val started = nowMs()
         try {
             return proposeSlot(source)
@@ -306,9 +335,9 @@ class MyotisCheckpointQuorum(
         }
     }
 
-    private suspend fun proposeSlot(source: String): Long {
+    private suspend fun proposeSlot(source: String): MyotisCheckpointProposal {
         val stage = MyotisCheckpointStage.Proposal
-        val finality = metadata(source, "/eth/v1/beacon/states/head/finality_checkpoints", stage)
+        val (finality, skew) = timedMetadata(source, "/eth/v1/beacon/states/head/finality_checkpoints", stage)
         val finalized = finality.optJSONObject("data")?.optJSONObject("finalized")
         val epoch = MyotisHex.uint(finalized?.opt("epoch")) ?: fail(MyotisCheckpointError.Unavailable)
         val root = MyotisHex.root(finalized?.opt("root")) ?: fail(MyotisCheckpointError.Unavailable)
@@ -329,7 +358,7 @@ class MyotisCheckpointQuorum(
                 ?.let { MyotisHex.uint(it.opt("slot")) }
         } ?: fail(MyotisCheckpointError.Unavailable)
         if (slot < 1 || slot > epochSlot) fail(MyotisCheckpointError.Unavailable)
-        return slot
+        return MyotisCheckpointProposal(slot, skew)
     }
 
     private fun diagnostic(source: String, slot: Long, started: Long, error: MyotisCheckpointException?) {
@@ -405,13 +434,13 @@ class MyotisCheckpointAcquirer(
         var quorumError: MyotisCheckpointException? = null
         val proposalErrors = mutableListOf<MyotisCheckpointError>()
         for (source in config.sources) {
-            val slot = try {
+            val proposal = try {
                 quorum.propose(source)
             } catch (e: MyotisCheckpointException) {
                 proposalErrors += e.error
                 continue
             }
-            if (!tried.add(slot)) continue
+            val slot = proposal.slot
             // Don't spend a quorum on a proposal that couldn't be used anyway.
             val now = nowMs()
             val slotTime = config.slotTimeMs(slot)
@@ -420,9 +449,10 @@ class MyotisCheckpointAcquirer(
                 continue
             }
             if (now - slotTime > MyotisCheckpointRecord.MAX_AGE_MS) {
-                proposalErrors += MyotisCheckpointError.Stale
+                proposalErrors += staleOrClock(now - slotTime, proposal.clockSkewMs)
                 continue
             }
+            if (!tried.add(slot)) continue
             val observation = try {
                 quorum.quorum(slot)
             } catch (e: MyotisCheckpointException) {
@@ -442,16 +472,46 @@ class MyotisCheckpointAcquirer(
             ).validated(config.chainId, verifiedAt, fresh = true)
         }
         quorumError?.let { throw it }
+        val clockVotes = proposalErrors.count { it == MyotisCheckpointError.Clock }
         val error = when {
-            proposalErrors.isNotEmpty() && proposalErrors.all { it == MyotisCheckpointError.Clock } -> MyotisCheckpointError.Clock
+            proposalErrors.isNotEmpty() && clockVotes == proposalErrors.size -> MyotisCheckpointError.Clock
+            // The device's clock is one fact: `threshold` authorities
+            // independently placing it wrong is quorum-level evidence, even
+            // with another one down or lagging.
+            clockVotes >= config.threshold -> MyotisCheckpointError.Clock
             MyotisCheckpointError.Stale in proposalErrors -> MyotisCheckpointError.Stale
             else -> MyotisCheckpointError.QuorumUnavailable
         }
         throw MyotisCheckpointException(error)
     }
 
+    /**
+     * A proposal [ageMs] old by this device's clock, past
+     * [MyotisCheckpointRecord.MAX_AGE_MS]. The finalized checkpoint an
+     * authority serves is normally minutes old, so an "old" one is either a
+     * chain-wide finality stall — [MyotisCheckpointError.Stale], and the
+     * ladder asks again — or a device clock set ahead, which no amount of
+     * asking fixes. The authority's HTTP `Date` tells them apart: when by
+     * *its* clock the checkpoint is fresh and this device is more than
+     * [CLOCK_SKEW_MS] ahead of it, it's [MyotisCheckpointError.Clock].
+     * Only the classification of a proposal already refused — the `Date`
+     * header never makes a checkpoint usable.
+     */
+    private fun staleOrClock(ageMs: Long, clockSkewMs: Long?): MyotisCheckpointError {
+        clockSkewMs ?: return MyotisCheckpointError.Stale
+        val ageByServer = ageMs - clockSkewMs
+        return if (clockSkewMs > CLOCK_SKEW_MS && ageByServer in 0..MyotisCheckpointRecord.MAX_AGE_MS) {
+            MyotisCheckpointError.Clock
+        } else {
+            MyotisCheckpointError.Stale
+        }
+    }
+
     companion object {
         /** Whole-attempt deadline (desktop / iOS: 90 s). */
         const val DEADLINE_MS = 90_000L
+
+        /** How far ahead of an authority's `Date` this device must be to call a stale proposal a clock error. */
+        const val CLOCK_SKEW_MS = 10L * 60_000L
     }
 }

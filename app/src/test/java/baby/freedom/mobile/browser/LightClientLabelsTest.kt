@@ -65,12 +65,12 @@ class LightClientLabelsTest {
     fun `stale anchor explains its age against the bound`() {
         val stale = serving.copy(beaconState = "STALE_ANCHOR", currentPeriod = 3692, targetPeriod = 3701, wsBoundPeriods = 3)
         assertEquals(
-            "The built-in checkpoint is too old to sync from safely (9 sync periods old, the safe limit is 3).",
+            "This chain's checkpoint is too old to sync from safely (9 sync periods old, the safe limit is 3).",
             staleAnchorExplanation(stale),
         )
         assertEquals("9 sync periods old, the safe limit is 3", anchorAge(stale))
         assertEquals(
-            "The built-in checkpoint is too old to sync from safely.",
+            "This chain's checkpoint is too old to sync from safely.",
             staleAnchorExplanation(serving.copy(beaconState = "STALE_ANCHOR")),
         )
         assertEquals(null, anchorAge(serving))
@@ -81,7 +81,7 @@ class LightClientLabelsTest {
         assertEquals(false, serving.copy(recovery = restarting).ready)
         assertEquals("", serving.copy(recovery = restarting).notServingReason)
         assertEquals(
-            "The built-in checkpoint is too old to sync from. Asking checkpoint services for a fresh one…",
+            "This chain's checkpoint is too old to sync from. Asking checkpoint services for a fresh one…",
             checking.message(0),
         )
         assertEquals("Fresh checkpoint agreed. Syncing from it…", restarting.message(0))

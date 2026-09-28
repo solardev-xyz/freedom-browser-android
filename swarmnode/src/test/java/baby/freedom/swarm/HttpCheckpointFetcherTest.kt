@@ -73,6 +73,23 @@ class HttpCheckpointFetcherTest {
     }
 
     @Test
+    fun `the server's Date header comes back with the body`() {
+        serve(
+            "HTTP/1.1 200 OK\r\nDate: Sun, 27 Sep 2026 10:00:00 GMT\r\nContent-Type: application/json\r\nConnection: close",
+            listOf("{}"),
+        )
+        val response = runBlocking { HttpCheckpointFetcher().fetch(url, 1024) }
+        assertEquals("{}", response.body.toString(Charsets.UTF_8))
+        assertEquals(1_790_503_200_000L, response.serverDateMs)
+    }
+
+    @Test
+    fun `no Date header is no server time`() {
+        serve("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close", listOf("{}"))
+        assertEquals(null, runBlocking { HttpCheckpointFetcher().fetch(url, 1024) }.serverDateMs)
+    }
+
+    @Test
     fun `a redirect is refused, not followed`() {
         serve("HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:1/elsewhere\r\nContent-Length: 0\r\nConnection: close")
         val e = failure { HttpCheckpointFetcher().get(url, 1024) }

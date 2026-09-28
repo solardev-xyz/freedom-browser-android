@@ -43,6 +43,7 @@ data class MyotisGeneration(
  *     verified-sync.json                 pointer {schemaVersion, chainId, generation}
  *     verified-sync-backup-<uuid>.json   the old pointer, byte for byte (repair only)
  *     verified-sync/<uuid>/anchor.json   {origin: bundled|verified, checkpoint?}
+ *     verified-sync/<uuid>/rejected.json the engine contradicted its checkpoint
  *     verified-sync/<uuid>/…             that generation's engine files, incl. the
  *                                        engine's own sync-anchor[-net].json marker
  *
@@ -56,7 +57,7 @@ data class MyotisGeneration(
  * edited; the host never writes the engine's marker, it only refuses a
  * generation whose existing marker disagrees with its record ([MyotisCheckpointError.Storage]
  * → Repair). Retired generations are kept for a while (the last
- * [KEEP_RETIRED]) and then deleted: a Gnosis install that sits closed for
+ * [KEEP_RETIRED], plus any a repair backup points at) and then deleted: a Gnosis install that sits closed for
  * more than ~34 h mints one on every return, so keeping them all, as iOS
  * does, would grow without bound.
  */
@@ -77,6 +78,15 @@ class MyotisGenerationStore(private val baseDir: File) {
      * intact — never a guess at some other directory.
      */
     fun load(network: MyotisNetwork): MyotisGeneration {
+        val generation = loadIntact(network)
+        // A generation the engine contradicted ([reject]) never boots again.
+        if (generation.id != null && exists(File(generation.directory, REJECTED))) {
+            throw MyotisCheckpointException(MyotisCheckpointError.Mismatch)
+        }
+        return generation
+    }
+
+    private fun loadIntact(network: MyotisNetwork): MyotisGeneration {
         val pointer = pointerFile(network)
         if (!exists(pointer)) {
             return MyotisGeneration(null, chainDirectory(network), MyotisGeneration.Origin.Bundled, null)
@@ -113,6 +123,24 @@ class MyotisGenerationStore(private val baseDir: File) {
         }
     }
 
+    /**
+     * The engine's own verified finalized root contradicted [generation]'s
+     * checkpoint: mark it so [load] refuses it with
+     * [MyotisCheckpointError.Mismatch] from now on, across restarts, until
+     * a recovery mints a replacement. Only a verified generation carries a
+     * checkpoint to contradict.
+     */
+    fun reject(generation: MyotisGeneration) {
+        if (generation.id == null || generation.origin != MyotisGeneration.Origin.Verified) return
+        try {
+            writeAtomic(File(generation.directory, REJECTED), JSONObject().put("reason", "mismatch").toString())
+        } catch (e: IOException) {
+            throw map(e)
+        } catch (e: SecurityException) {
+            throw map(e)
+        }
+    }
+
     /** Mint a verified generation for [checkpoint] and point at it; the previous one is retired. */
     fun replace(network: MyotisNetwork, checkpoint: MyotisCheckpointRecord, nowMs: Long): MyotisGeneration {
         val valid = checkpoint.validated(network.chainId, nowMs, fresh = true)
@@ -128,7 +156,7 @@ class MyotisGenerationStore(private val baseDir: File) {
         val pointer = pointerFile(network)
         if (exists(pointer)) {
             try {
-                pointer.copyTo(File(chainDirectory(network), "verified-sync-backup-${newId()}.json"))
+                pointer.copyTo(File(chainDirectory(network), "$BACKUP_PREFIX${newId()}.json"))
             } catch (e: IOException) {
                 throw map(e)
             }
@@ -208,14 +236,27 @@ class MyotisGenerationStore(private val baseDir: File) {
         }
     }
 
-    /** Delete retired generations beyond the [KEEP_RETIRED] most recent. Best effort. */
+    /**
+     * Delete retired generations beyond the [KEEP_RETIRED] most recent.
+     * One a repair backup points at is never deleted: Repair promises the
+     * old data is kept. Best effort.
+     */
     private fun pruneRetired(network: MyotisNetwork, keep: String) {
+        val backedUp = backedUpGenerations(network)
         val retired = generationsDirectory(network).listFiles()
-            ?.filter { it.isDirectory && it.name != keep && isGenerationId(it.name) }
+            ?.filter { it.isDirectory && it.name != keep && it.name !in backedUp && isGenerationId(it.name) }
             ?.sortedByDescending { File(it, ANCHOR).lastModified() }
             ?: return
         for (dir in retired.drop(KEEP_RETIRED)) runCatching { dir.deleteRecursively() }
     }
+
+    /** Generations named by a `verified-sync-backup-*.json` repair left behind. */
+    private fun backedUpGenerations(network: MyotisNetwork): Set<String> =
+        chainDirectory(network).listFiles()
+            ?.filter { it.name.startsWith(BACKUP_PREFIX) && it.name.endsWith(".json") }
+            ?.mapNotNull { (readJson(it)?.opt("generation") as? String)?.takeIf(::isGenerationId) }
+            ?.toSet()
+            ?: emptySet()
 
     private fun readJson(file: File): JSONObject? {
         if (!isRegular(file) || file.length() > MAX_RECORD_BYTES) return null
@@ -272,6 +313,10 @@ class MyotisGenerationStore(private val baseDir: File) {
         private const val POINTER = "verified-sync.json"
         private const val GENERATIONS = "verified-sync"
         private const val ANCHOR = "anchor.json"
+        private const val BACKUP_PREFIX = "verified-sync-backup-"
+
+        /** Written into a generation the engine contradicted ([reject]). */
+        private const val REJECTED = "rejected.json"
 
         /** The engine's marker for a caller-supplied anchor (`persistence_suffix`). */
         fun nativeMarkerName(network: MyotisNetwork) =

@@ -407,6 +407,17 @@ class MyotisNode internal constructor(
             val generation = try {
                 store.load(network).also { store.checkNativeMarker(it, network) }
             } catch (e: MyotisCheckpointException) {
+                if (e.error == MyotisCheckpointError.Mismatch) {
+                    // The engine once contradicted this generation's checkpoint:
+                    // blocked until Retry fetches a fresh one.
+                    recovery[network] = Recovery(
+                        MyotisRecovery.Phase.Blocked,
+                        reason = MyotisRecoveryReason.Mismatch,
+                        forStaleAnchor = false,
+                    )
+                    Log.w(TAG, "${network.engineName}: current generation was rejected, not booting it")
+                    continue
+                }
                 // Offers Repair: a fresh generation, the old data kept.
                 recovery[network] = Recovery(MyotisRecovery.Phase.Blocked, reason = MyotisRecoveryReason.of(e.error))
                 Log.w(TAG, "${network.engineName}: saved sync data unusable (${e.error.code})")
@@ -574,6 +585,10 @@ class MyotisNode internal constructor(
                 failRecovery(network, MyotisRecoveryReason.Stale, retry = true)
             rec.phase == MyotisRecovery.Phase.Blocked && rec.reason == MyotisRecoveryReason.Stalled ->
                 beginRecovery(network, reset = true)
+            // Blocked on this device's clock, and parked again after a
+            // clock-change release: the clock moved, so ask again.
+            rec.phase == MyotisRecovery.Phase.Blocked && rec.reason == MyotisRecoveryReason.Clock ->
+                beginRecovery(network, reset = true)
             else -> Unit
         }
     }
@@ -609,7 +624,14 @@ class MyotisNode internal constructor(
         val attempt = (attempts[network] ?: 0) + 1
         attempts[network] = attempt
         val token = ++tokens
-        val rec = Recovery(MyotisRecovery.Phase.Checking, attempt = attempt, token = token, forStaleAnchor = forStaleAnchor)
+        val rec = Recovery(
+            MyotisRecovery.Phase.Checking,
+            // Replacing an anchor the engine contradicted, not an expired one: say so on the row.
+            reason = if (forStaleAnchor) null else MyotisRecoveryReason.Mismatch,
+            attempt = attempt,
+            token = token,
+            forStaleAnchor = forStaleAnchor,
+        )
         recovery[network] = rec
         Log.i(TAG, "${network.engineName}: asking the checkpoint quorum for a fresh anchor (attempt $attempt)")
         rec.job = scope.launch {
@@ -751,7 +773,17 @@ class MyotisNode internal constructor(
         if ((rec == null || rec.phase == MyotisRecovery.Phase.Restarting) &&
             MyotisRecoveryPolicy.isAnchorMismatch(status, checkpoint)
         ) {
-            // The engine's own BLS-verified finalized root isn't the one the quorum agreed on.
+            // The engine's own BLS-verified finalized root isn't the one the
+            // quorum agreed on. Recorded on the generation, so a restart
+            // can't boot it again once it has synced past the checkpoint
+            // slot, where this check can no longer see the contradiction.
+            generations[network]?.let { generation ->
+                try {
+                    store.reject(generation)
+                } catch (e: MyotisCheckpointException) {
+                    Log.w(TAG, "${network.engineName}: couldn't record the rejected generation (${e.error.code})")
+                }
+            }
             failRecovery(network, MyotisRecoveryReason.Mismatch, retry = false)
             return
         }

@@ -45,6 +45,12 @@ class MyotisCheckpointTest {
     private class Fetcher : MyotisCheckpointFetcher {
         val answers = mutableMapOf<String, Any>()
         val asked: MutableList<String> = Collections.synchronizedList(mutableListOf())
+
+        /** Host → the `Date` its responses carry; none by default. */
+        val dates = mutableMapOf<String, Long>()
+        override suspend fun fetch(url: String, limit: Int): MyotisCheckpointResponse =
+            MyotisCheckpointResponse(get(url, limit), dates.entries.firstOrNull { url.startsWith(it.key) }?.value)
+
         override suspend fun get(url: String, limit: Int): ByteArray {
             asked += url
             return when (val a = answers[url]) {
@@ -365,6 +371,45 @@ class MyotisCheckpointTest {
         expect(MyotisCheckpointError.Clock) {
             acquirer(f, clock = { now - 86_400_000L }).acquire(MyotisNetwork.Gnosis)
         }
+    }
+
+    @Test
+    fun `a device clock set ahead is clock by the authorities' Date, not a stale checkpoint`() {
+        val ahead = now + 2 * 3_600_000L
+        val f = Fetcher().apply {
+            checkpointz(gc)
+            checkpointz(dn)
+            beacon(pn)
+            // The authorities' own clocks: a minute after their finalized checkpoint.
+            for (s in listOf(gc, dn, pn)) dates[s] = now
+        }
+        expect(MyotisCheckpointError.Clock) { acquirer(f, clock = { ahead }).acquire(MyotisNetwork.Gnosis) }
+        // One authority down doesn't hide it: two still place the clock wrong.
+        f.answers["$pn/eth/v1/beacon/states/head/finality_checkpoints"] = down()
+        expect(MyotisCheckpointError.Clock) { acquirer(f, clock = { ahead }).acquire(MyotisNetwork.Gnosis) }
+        // Without a Date there's no telling: the ladder asks again.
+        f.dates.clear()
+        expect(MyotisCheckpointError.Stale) { acquirer(f, clock = { ahead }).acquire(MyotisNetwork.Gnosis) }
+    }
+
+    @Test
+    fun `finality really stalled for hours is stale, whatever the Date says`() {
+        val later = now + 2 * 3_600_000L
+        val f = Fetcher().apply {
+            checkpointz(gc)
+            checkpointz(dn)
+            beacon(pn)
+            // The authorities agree with this device: it's the checkpoint that's old.
+            for (s in listOf(gc, dn, pn)) dates[s] = later
+        }
+        expect(MyotisCheckpointError.Stale) { acquirer(f, clock = { later }).acquire(MyotisNetwork.Gnosis) }
+        // A few minutes' drift on top of a stall isn't a clock error either.
+        for (s in listOf(gc, dn, pn)) f.dates[s] = later - 5 * 60_000L
+        expect(MyotisCheckpointError.Stale) { acquirer(f, clock = { later }).acquire(MyotisNetwork.Gnosis) }
+        // One authority alone saying the clock is wrong isn't enough.
+        f.dates.clear()
+        f.dates[gc] = now
+        expect(MyotisCheckpointError.Stale) { acquirer(f, clock = { later }).acquire(MyotisNetwork.Gnosis) }
     }
 
     @Test

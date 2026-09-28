@@ -120,7 +120,12 @@ data class MyotisRecovery(
 
     /** The chain row's explanation; [nowElapsed] on the same clock as [nextRetryAt]. */
     fun message(nowElapsed: Long): String = when (phase) {
-        Phase.Checking -> "The built-in checkpoint is too old to sync from. Asking checkpoint services for a fresh one…"
+        Phase.Checking ->
+            if (reason == MyotisRecoveryReason.Mismatch) {
+                "The synced chain didn't match the agreed checkpoint. Asking checkpoint services for a fresh one…"
+            } else {
+                "This chain's checkpoint is too old to sync from. Asking checkpoint services for a fresh one…"
+            }
         Phase.Restarting ->
             if (mode == Mode.Restart) "Restarting the light client…" else "Fresh checkpoint agreed. Syncing from it…"
         Phase.Waiting -> {
