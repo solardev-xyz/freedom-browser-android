@@ -65,9 +65,8 @@ source .envrc   # if you haven't: cp .envrc.example .envrc && edit to taste
 #    Use the FFI_REF tag pinned in release.yml, with ant's `chain` feature
 #    on (see "Building libfreedom_mobile_ffi.so" below).
 git clone --branch v0.12.1 https://github.com/solardev-xyz/freedom-mobile-ffi.git /tmp/freedom-mobile-ffi
-( cd /tmp/freedom-mobile-ffi \
-  && sed -i 's/--no-default-features --crate-type/--no-default-features --features chain --crate-type/' scripts/build-android.sh \
-  && ./scripts/build-android.sh )
+scripts/enable-ffi-chain.sh /tmp/freedom-mobile-ffi
+( cd /tmp/freedom-mobile-ffi && ./scripts/build-android.sh )
 mkdir -p swarmnode/src/main/jniLibs
 cp -r /tmp/freedom-mobile-ffi/target/android/jniLibs/. swarmnode/src/main/jniLibs/
 
@@ -195,10 +194,12 @@ git clone --branch v0.12.1 https://github.com/solardev-xyz/freedom-mobile-ffi.gi
 #    installs the pinned toolchain + targets from rust-toolchain.toml.
 #    The script also verifies both C ABIs are exported and stages the
 #    matching headers under target/android/headers/. It builds with
-#    --no-default-features (no `chain`, no `radicle`); the sed puts ant's
-#    `chain` feature back, the same way release.yml does.
+#    --no-default-features (no `chain`, no `radicle`);
+#    scripts/enable-ffi-chain.sh (run from this repo) puts ant's `chain`
+#    feature back — the same helper release.yml calls — and fails if the
+#    script's cargo call has changed shape.
+<freedom-browser-android>/scripts/enable-ffi-chain.sh /tmp/freedom-mobile-ffi
 cd /tmp/freedom-mobile-ffi
-sed -i 's/--no-default-features --crate-type/--no-default-features --features chain --crate-type/' scripts/build-android.sh
 ./scripts/build-android.sh
 
 # 3. Copy the results into Freedom.

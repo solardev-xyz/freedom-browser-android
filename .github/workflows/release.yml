@@ -65,11 +65,10 @@ jobs:
           # build-android.sh passes --no-default-features, which drops
           # both `chain` and `radicle`. Put `chain` back (ant's on-chain
           # /wallet, /stamps, /chequebook gateway surfaces); radicle
-          # stays off until it has Kotlin bindings. Fail loudly if the
-          # script's invocation ever changes shape under a new FFI_REF.
-          sed -i 's/--no-default-features --crate-type/--no-default-features --features chain --crate-type/' scripts/build-android.sh
-          grep -q -- '--features chain' scripts/build-android.sh \
-            || { echo "build-android.sh: could not enable the chain feature" >&2; exit 1; }
+          # stays off until it has Kotlin bindings. The helper fails the
+          # job if the script's cargo call ever changes shape under a new
+          # FFI_REF; it's the same one the README's local build uses.
+          "$GITHUB_WORKSPACE/scripts/enable-ffi-chain.sh" .
           ./scripts/build-android.sh
           mkdir -p "$GITHUB_WORKSPACE/swarmnode/src/main/jniLibs"
           cp -r target/android/jniLibs/. "$GITHUB_WORKSPACE/swarmnode/src/main/jniLibs/"
