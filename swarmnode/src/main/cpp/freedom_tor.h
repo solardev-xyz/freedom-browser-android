@@ -4,6 +4,11 @@
  * CONNECT to an IP literal or a clearnet name is refused (SOCKS reply 0x02),
  * so a misrouted request never leaves through a Tor exit. src/tor.rs.
  *
+ * The loopback port is reachable by any app on the device (Chromium's
+ * SOCKS5 can't authenticate); what it offers is .onion-only. A client must
+ * finish the SOCKS handshake within 10 s, and at most 256 connections are
+ * served at once. A CONNECT that fails or exceeds 120 s gets reply 0x04.
+ *
  * One client per process. Strings returned as `char *` are freed with
  * freedom_tor_string_free.
  */
@@ -33,7 +38,8 @@ void freedom_tor_stop(void);
 /*
  * {"state":"stopped"} or {"state":"bootstrapping"|"running","port":N,
  * "progress":0..1,"summary":"...","blocked":"..."|null,"error":"..."|null}.
- * "running" = ready for traffic. Never null.
+ * "running" = ready for traffic; "error" is a background bootstrap failure,
+ * cleared once the client is ready. Never null.
  */
 char *freedom_tor_status_json(void);
 
