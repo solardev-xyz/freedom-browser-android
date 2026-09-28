@@ -333,16 +333,34 @@ object Gateways {
         pathAndQuery: String,
         pins: EnsDocumentPins? = null,
         page: EnsDocumentPins.Page? = null,
-    ): String? = when (root) {
-        is ContentRoot.Bzz -> "$swarmBase/bzz/${root.ref}$pathAndQuery"
-        is ContentRoot.Ipfs -> ipfsBase.ifEmpty { null }?.let { "$it/ipfs/${root.cid}$pathAndQuery" }
-        is ContentRoot.IpnsKey -> ipfsBase.ifEmpty { null }?.let { "$it/ipns/${root.key}$pathAndQuery" }
-        is ContentRoot.IpnsName -> ipfsBase.ifEmpty { null }?.let { "$it/ipns/${root.name}$pathAndQuery" }
+    ): String? = when (val served = servedRootFor(root, pins, page)) {
+        is ContentRoot.Bzz -> "$swarmBase/bzz/${served.ref}$pathAndQuery"
+        is ContentRoot.Ipfs -> ipfsBase.ifEmpty { null }?.let { "$it/ipfs/${served.cid}$pathAndQuery" }
+        is ContentRoot.IpnsKey -> ipfsBase.ifEmpty { null }?.let { "$it/ipns/${served.key}$pathAndQuery" }
+        is ContentRoot.IpnsName -> ipfsBase.ifEmpty { null }?.let { "$it/ipns/${served.name}$pathAndQuery" }
+        // Only from an ENS [root] whose answer is itself a name.
+        is ContentRoot.Ens -> gatewayUrlFor(served, pathAndQuery)
+        null -> null
+    }
+
+    /**
+     * The content root [gatewayUrlFor] serves [root] from: an ENS name's
+     * answer by the same precedence (the incoming [page]'s pin, then the
+     * tab's [pins], then the session registry — resolving if it has
+     * none), any other root itself. `null` when the name doesn't resolve.
+     * The main-frame IPFS phase line reads it too, so it describes the
+     * answer the fetch is actually made from (#179 R5-F1).
+     */
+    internal fun servedRootFor(
+        root: ContentRoot,
+        pins: EnsDocumentPins? = null,
+        page: EnsDocumentPins.Page? = null,
+    ): ContentRoot? = when (root) {
         is ContentRoot.Ens ->
             ((page?.uriFor(root.name) ?: pins?.uriFor(root.name))
                 ?.let { VirtualOrigin.parseContentUrl(it)?.first }
                 ?: resolveEnsRoot(root.name))
-                ?.let { gatewayUrlFor(it, pathAndQuery) }
+        else -> root
     }
 
     /**

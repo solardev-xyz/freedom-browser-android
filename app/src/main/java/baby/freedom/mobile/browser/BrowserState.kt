@@ -618,6 +618,11 @@ class BrowserState(val id: Long, val private: Boolean = false) {
         // A new load supersedes whatever the last Stop aborted, so the
         // progress latch opens again.
         loadAborted = false
+        // For a name, the session's answer is only a first guess: the
+        // main-frame interceptor re-checks it and, before the fetch
+        // starts, sets the flag from the answer it actually serves —
+        // which a failed re-check can hold on this tab's older one
+        // (see `noteMainFrameContentLoad`, #179 R5-F1).
         ipfsLoad = ipfsLoadFor(url, ipfsLoad)
         val loadable = Gateways.toLoadable(url)
         pendingUrl = loadable

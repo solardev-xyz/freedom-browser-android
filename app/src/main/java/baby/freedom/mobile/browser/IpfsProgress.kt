@@ -464,13 +464,13 @@ internal class GatewayWork(
  * this session resolved its contenthash to IPFS ([KnownEnsNames] — the
  * submit flow records every resolution before the WebView is handed
  * the name) — or, for a committed document whose tab ([pins]) served it
- * from a pinned answer, when that pin is IPFS. One not resolved yet — a tab restored after a process
- * restart, a link to another name — is not IPFS *yet*: it is not
+ * from a pinned answer, when that pin is IPFS. One not resolved yet —
+ * a tab restored after a process restart, a link to another name — is not IPFS *yet*: it is not
  * allowed to inherit [current], which may be a previous IPFS page's
  * (back from an IPFS page into a Swarm-hosted name must not poll the
- * IPFS node). The WebView's main-frame interceptor resolves the name
- * before fetching it and re-derives the flag then (see
- * `noteMainFrameContentLoad`). A `javascript:` URL leaves [current]
+ * IPFS node). The WebView's main-frame interceptor re-checks the name
+ * before fetching it and sets the flag from the answer it serves then
+ * (see `noteMainFrameContentLoad`). A `javascript:` URL leaves [current]
  * alone — it runs in the current page, it isn't a navigation.
  *
  * Everything else — Swarm, the web, the error page, home — is not IPFS.

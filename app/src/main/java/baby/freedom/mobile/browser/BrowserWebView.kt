@@ -2766,9 +2766,7 @@ private fun buildRefreshableWebView(
                 // the document's whose main-frame answer went out last
                 // (see [BrowserState.documentGeneration]).
                 val generation = if (mainFrame) {
-                    state.mainFrameRequested().also {
-                        noteMainFrameContentLoad(view, state, it, request!!.url.toString())
-                    }
+                    state.mainFrameRequested()
                 } else {
                     state.documentGeneration
                 }
@@ -2780,7 +2778,9 @@ private fun buildRefreshableWebView(
                 }
                 val work = state.gatewayWork.start(generation)
                 val response = try {
-                    interceptVirtualRequest(request, ensPins, view, state::assertedProtocolFor)
+                    interceptVirtualRequest(request, ensPins, view, state::assertedProtocolFor) { served ->
+                        noteMainFrameContentLoad(view, state, generation, served)
+                    }
                 } catch (t: Throwable) {
                     state.gatewayWork.finish(work)
                     throw t
@@ -3849,12 +3849,19 @@ private fun syntheticResponse(
  * a name, if its address makes one (#97,
  * [BrowserState.assertedProtocolFor]); a document re-check holds the
  * name to it.
+ *
+ * [onMainFrameRoot] hears, for a main-frame request on a virtual origin,
+ * the content root its document is about to be fetched from — after the
+ * name's re-check, before the fetch — or `null` when the re-check
+ * refused it (an error page is served instead). It is what the tab's
+ * IPFS phase line follows while the fetch runs (#94, #179 R5-F1).
  */
 internal fun interceptVirtualRequest(
     request: WebResourceRequest?,
     ensPins: EnsDocumentPins? = null,
     tab: Any? = null,
     assertedProtocol: (name: String) -> String? = { null },
+    onMainFrameRoot: (ContentRoot?) -> Unit = {},
 ): WebResourceResponse? {
     val req = request ?: return null
     val url = req.url?.toString() ?: return null
@@ -3863,7 +3870,7 @@ internal fun interceptVirtualRequest(
     // user switched away from it (#125): its next document first clears
     // what that gateway's pages left there, before anything else runs.
     val response = siteDataCleanupFor(req, url, tab)
-        ?: interceptVirtualRequestFor(req, ensPins, incoming, assertedProtocol)
+        ?: interceptVirtualRequestFor(req, ensPins, incoming, assertedProtocol, onMainFrameRoot)
     if (incoming != null && response != null &&
         rendersInPlace(response.statusCode, response.mimeType, response.responseHeaders)
     ) {
@@ -3976,6 +3983,7 @@ private fun interceptVirtualRequestFor(
     ensPins: EnsDocumentPins?,
     incoming: EnsDocumentPins.Page?,
     assertedProtocol: (name: String) -> String?,
+    onMainFrameRoot: (ContentRoot?) -> Unit,
 ): WebResourceResponse? {
     val uri = req.url ?: return null
     val url = uri.toString()
@@ -4042,9 +4050,15 @@ private fun interceptVirtualRequestFor(
     ) {
         val asserted = assertedProtocol(root.name)
         Gateways.reverifyEnsDocument(root.name, ensPins, page, asserted)?.let { code ->
+            if (req.isForMainFrame) onMainFrameRoot(null)
             return nameResolutionRefusal(root.name, code, asserted)
         }
     }
+    // The root the document is fetched from, by the same precedence the
+    // fetch uses: a name's is the answer just pinned for this navigation
+    // — which a failed re-check can hold on an older answer than the
+    // session registry's (R5-F1).
+    if (req.isForMainFrame) onMainFrameRoot(Gateways.servedRootFor(root, page = page))
 
     // At a cold start the external endpoint settings (#125) are still
     // being read: a restored tab must not reach the embedded gateway
@@ -4616,15 +4630,19 @@ internal fun sanitizeTitle(rawTitle: String?, actualUrl: String?): String {
 /**
  * Re-derive [BrowserState.ipfsLoad] for a main-frame request to a
  * virtual dweb origin, before the (possibly slow) gateway fetch starts
- * (#94). Runs on the interceptor's thread.
+ * (#94). Runs on the interceptor's thread, from
+ * [interceptVirtualRequest]'s `onMainFrameRoot`.
  *
- * The submit flow resolves and records every ENS name it navigates to,
- * but a reload of a restored tab (the session-only [KnownEnsNames] is
- * empty after a process restart), back/forward, or an in-page link to
- * another name reach the WebView unresolved — [ipfsLoadFor] can't know
- * yet whether they lead to IPFS. Resolve the name here (the same lookup
- * [interceptVirtualRequest] is about to do, which then hits the registry)
- * so the phase line shows for the fetch itself, not only after commit.
+ * [served] is the content root the interceptor is about to fetch the
+ * document from (`null`: the name was refused). For an ENS name that is
+ * the answer its re-check just pinned for this navigation — not the
+ * session registry's, which another tab can have moved to a different
+ * transport while this tab's failed re-check serves its own earlier
+ * answer (R5-F1). A reload of a restored tab (the session-only
+ * [KnownEnsNames] is empty after a process restart), back/forward, or
+ * an in-page link to another name reach the WebView unresolved; the
+ * re-check resolves them first, so the phase line shows for the fetch
+ * itself, not only after commit.
  *
  * The request belongs to the navigation [generation] the WebView was last handed
  * ([BrowserState.webViewGeneration]), which is not necessarily the tab's
@@ -4637,15 +4655,18 @@ private fun noteMainFrameContentLoad(
     view: WebView?,
     state: BrowserState,
     generation: Int,
-    url: String,
+    served: ContentRoot?,
 ) {
-    val root = VirtualOrigin.parseHostOfUrl(url) ?: return
-    if (root is ContentRoot.Ens) Gateways.resolveEnsRoot(root.name)
+    val ipfs = servedFromIpfs(served)
     view?.post {
-        if (mainFrameNoteApplies(generation, state.loadGeneration)) {
-            state.ipfsLoad = ipfsLoadFor(url, state.ipfsLoad)
-        }
+        if (mainFrameNoteApplies(generation, state.loadGeneration)) state.ipfsLoad = ipfs
     }
+}
+
+/** Whether a document fetched from [served] comes from the IPFS node. */
+internal fun servedFromIpfs(served: ContentRoot?): Boolean = when (served) {
+    is ContentRoot.Ipfs, is ContentRoot.IpnsKey, is ContentRoot.IpnsName -> true
+    is ContentRoot.Bzz, is ContentRoot.Ens, null -> false
 }
 
 /**

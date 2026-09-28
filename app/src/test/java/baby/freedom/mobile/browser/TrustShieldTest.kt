@@ -281,6 +281,57 @@ class TrustShieldTest {
     }
 
     @Test
+    fun `the phase line during the fetch follows the answer the document is served from`() {
+        // R5-F1: tab A's pin is bzz://A, another tab moved the registry
+        // to ipfs://B, and A's re-check fails — the fetch is from pin A,
+        // so no IPFS phase line during it. And the reverse: pin IPFS,
+        // registry Swarm → the phase line shows.
+        val name = ContentRoot.Ens("name.eth")
+        val real = Gateways.ensLookup
+        Gateways.resetEnsLookupState()
+        try {
+            for ((pinned, registry, ipfs) in listOf(
+                Triple("bzz://$REF", "ipfs://$CID", false),
+                Triple("ipfs://$CID", "bzz://$REF", true),
+            )) {
+                val tab = EnsDocumentPins()
+                KnownEnsNames.record(pinned, "name.eth", verified)
+                Gateways.ensLookup = { EnsResult.Ok(it, pinned.substringBefore("://"), pinned, REF, verified) }
+                val first = tab.beginNavigation("https://x/")
+                assertNull(Gateways.reverifyEnsDocument("name.eth", tab, first))
+                tab.documentStarted("https://x/")
+
+                KnownEnsNames.record(registry, "name.eth", verified)
+                Gateways.resetEnsLookupState()
+                Gateways.ensLookup = { EnsResult.Error(it, "PROVIDER_ERROR", "down", retryable = true) }
+                val next = tab.beginNavigation("https://x/page2")
+                assertNull(Gateways.reverifyEnsDocument("name.eth", tab, next))
+
+                // What the interceptor hands `noteMainFrameContentLoad`
+                // before the fetch — the same root the fetch uses.
+                val served = Gateways.servedRootFor(name, page = next)
+                assertEquals(VirtualOrigin.parseContentUrl(pinned)!!.first, served)
+                assertEquals(ipfs, servedFromIpfs(served))
+                // The session's answer alone would have said the opposite.
+                assertEquals(!ipfs, servedFromIpfs(Gateways.servedRootFor(name)))
+                KnownEnsNames.clear()
+                Gateways.resetEnsLookupState()
+            }
+        } finally {
+            Gateways.ensLookup = real
+            Gateways.resetEnsLookupState()
+        }
+    }
+
+    @Test
+    fun `a refused or unresolved document is not an IPFS fetch`() {
+        assertFalse(servedFromIpfs(null))
+        assertFalse(servedFromIpfs(ContentRoot.Bzz(REF)))
+        assertTrue(servedFromIpfs(ContentRoot.Ipfs(CID)))
+        assertTrue(servedFromIpfs(ContentRoot.IpnsName("docs.ipfs.tech")))
+    }
+
+    @Test
     fun `a pin with no known check gets no shield`() {
         val origin = VirtualOrigin.originFor(ContentRoot.Ens("name.eth"))!!
         KnownEnsNames.record("bzz://$REF", "name.eth", verified)
