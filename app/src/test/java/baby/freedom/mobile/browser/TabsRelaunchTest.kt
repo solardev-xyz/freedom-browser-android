@@ -135,6 +135,38 @@ class TabsRelaunchTest {
     }
 
     @Test
+    fun `the load put back over a restored page doesn't stop that page loading`() {
+        // Handed to the WebView at the page's commit, while its HTML and
+        // subresources are still coming in: no stop in front of it, or
+        // the page is left truncated (#185 R4-F1). One handoff's worth.
+        val tab = armedOverPage()
+        assertTrue(tab.claimAfterPage(tab.afterPageCommitted()!!))
+        assertTrue(tab.takePutBackKeepsPage())
+        assertFalse(tab.takePutBackKeepsPage())
+        // Not claimed (stopped first): the next handoff stops as usual.
+        val stopped = armedOverPage()
+        val after = stopped.afterPageCommitted()!!
+        stopped.stopProgress()
+        assertFalse(stopped.claimAfterPage(after))
+        assertFalse(stopped.takePutBackKeepsPage())
+        // Superseded before its handoff — a browser-initiated load, a
+        // Stop, the user's own submit or Home, the page finishing by
+        // itself: the next handoff stops as usual.
+        val supersede = listOf<(BrowserState) -> Unit>(
+            { it.restoreLoadSuperseded() },
+            { it.userNavigated() },
+            { it.navigateHome() },
+            { it.afterPageFinished() },
+        )
+        for (by in supersede) {
+            val tab2 = armedOverPage()
+            assertTrue(tab2.claimAfterPage(tab2.afterPageCommitted()!!))
+            by(tab2)
+            assertFalse(tab2.takePutBackKeepsPage())
+        }
+    }
+
+    @Test
     fun `a navigation after the restore drops the load it had waiting`() {
         // The user's submit, Home, Back / Forward, Stop before the
         // restored page commits (#185 R2-F1).

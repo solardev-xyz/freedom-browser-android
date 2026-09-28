@@ -835,7 +835,12 @@ fun BrowserWebViewHost(
                             // page, which flips the top progress bar back
                             // on after navigateHome() has already cleared
                             // it to -1.
-                            wv.stopLoading()
+                            // Not under the load a restore put back over
+                            // its page, which is still coming in: that
+                            // load was in flight over a complete page,
+                            // and Chromium keeps the page loading until
+                            // the new one commits (#185 R4-F1).
+                            if (!tab.takePutBackKeepsPage()) wv.stopLoading()
                             // From here the WebView is on this load, not
                             // the one it was showing (#94).
                             tab.handLoadToWebView()
@@ -2179,7 +2184,9 @@ private fun buildRefreshableWebView(
                 // on it replaces that load as it would have before the
                 // relaunch, POST form included (#185 R3-F1). Posted, so
                 // this commit has updated the tab first, and only if
-                // nothing has superseded it by then (#185 R2-F1).
+                // nothing has superseded it by then (#185 R2-F1). Handed
+                // over without stopping the page, whose HTML and
+                // subresources are still coming in (#185 R4-F1).
                 state.afterPageCommitted()?.let { after ->
                     view?.post {
                         if (!state.claimAfterPage(after)) return@post

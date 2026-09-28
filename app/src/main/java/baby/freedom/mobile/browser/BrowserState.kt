@@ -498,6 +498,40 @@ class BrowserState(val id: Long, val private: Boolean = false) {
      */
     internal fun restoreLoadSuperseded() {
         afterBlank = null
+        putBackOverLoadingPage = false
+    }
+
+    /**
+     * The load put back over the restored page ([claimAfterPage]) is on
+     * its way to the WebView, which is still loading that page: it goes
+     * in without stopping it first (#185 R4-F1). The restored page's own
+     * reload committed a moment ago and its HTML and subresources are
+     * still coming in — a stop would leave it truncated, for good if the
+     * put-back load then doesn't commit (a Stop, a 204, a download).
+     * Before the relaunch the load was in flight over a complete page;
+     * Chromium keeps that page loading until the new one commits.
+     *
+     * One handoff's worth, taken by the WebView's nav observer
+     * ([takePutBackKeepsPage]), and dropped by whatever supersedes the
+     * put-back before it gets there — the same things that drop
+     * [afterBlank] ([restoreLoadSuperseded]), the user's own submit or
+     * Home ([userNavigated]) — or by the restored page finishing, when
+     * there is nothing left to cut.
+     */
+    private var putBackOverLoadingPage = false
+
+    /** Whether the load being handed to the WebView now is the put-back one (see [putBackOverLoadingPage]). */
+    internal fun takePutBackKeepsPage(): Boolean =
+        putBackOverLoadingPage.also { putBackOverLoadingPage = false }
+
+    /**
+     * The user named a navigation of their own (a submit, Home): a load
+     * put back over the restored page and not yet handed to the WebView
+     * isn't the next one any more, so what's handed next stops the page
+     * first as usual.
+     */
+    internal fun userNavigated() {
+        putBackOverLoadingPage = false
     }
 
     /**
@@ -516,6 +550,7 @@ class BrowserState(val id: Long, val private: Boolean = false) {
      */
     internal fun afterPageFinished() {
         if (afterBlank?.overPage == false) afterBlank = null
+        putBackOverLoadingPage = false
     }
 
     /**
@@ -538,11 +573,14 @@ class BrowserState(val id: Long, val private: Boolean = false) {
      * Whether [after] (from [afterPageCommitted]) is still the load to
      * submit now: nothing superseded it in between, it wasn't claimed
      * already, and the user hasn't stopped the tab. Disarms it either way.
+     * A claimed load goes to the WebView without stopping the restored
+     * page ([takePutBackKeepsPage]).
      */
     internal fun claimAfterPage(after: AfterBlank): Boolean {
         if (afterBlank !== after) return false
         afterBlank = null
-        return !loadAborted
+        putBackOverLoadingPage = !loadAborted
+        return putBackOverLoadingPage
     }
 
     /**
@@ -808,6 +846,7 @@ class BrowserState(val id: Long, val private: Boolean = false) {
     fun navigateHome() {
         // Home is home, even for a popup whose opener left it blank.
         blankIsPage = false
+        userNavigated()
         cancelPendingProbe()
         capsuleCollapse.expand()
         override = null

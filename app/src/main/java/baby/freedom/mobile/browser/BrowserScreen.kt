@@ -818,6 +818,8 @@ fun BrowserScreen(
         // lifts a download block a declined offer left on it
         // ([DownloadOffers]); a page's own navigation doesn't.
         if (source == SubmitSource.User) downloads.allowOffers(target.id)
+        // Nor is it a load a restore put back over its page (#185 R4-F1).
+        if (source == SubmitSource.User) target.userNavigated()
         // And the load it schedules is theirs: its redirects may end in
         // an app link without a tap on a page (#173). Handed to that
         // load's own `loadUrl` below, never left for whichever load
