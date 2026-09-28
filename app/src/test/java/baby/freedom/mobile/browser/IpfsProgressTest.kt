@@ -579,6 +579,54 @@ class IpfsProgressTest {
     }
 
     @Test
+    fun `the event tail only counts events after the floor`() {
+        val json = """{"active":[],"events":[
+            {"event_id":7,"kind":"gateway_request","phase":"fetching_bitswap","status":"active"},
+            {"event_id":8,"kind":"gateway_request","phase":"provider_lookup","status":"active"}
+        ]}"""
+        assertEquals("IPFS: Fetching from peers…", IpfsProgress.message(json))
+        assertEquals("IPFS: Finding providers…", IpfsProgress.message(json, afterEventId = 7))
+        assertNull(IpfsProgress.message(json, afterEventId = 8))
+        // Active targets are live, whatever their age.
+        val active = """{"active":[{"kind":"gateway_request","phase":"retrying","status":"active"}],"events":[]}"""
+        assertEquals("IPFS: Retrying slow provider…", IpfsProgress.message(active, afterEventId = 99))
+    }
+
+    @Test
+    fun `a load doesn't show the phases the node logged before it started (#156)`() {
+        // The previous page finished: its early events still read as
+        // running, and they are all the node's tail has.
+        val previousPage = """{"active":[],"events":[
+            {"event_id":40,"kind":"gateway_request","phase":"fetching_bitswap","status":"active"},
+            {"event_id":41,"kind":"gateway_request","phase":"first_byte","status":"active"},
+            {"event_id":42,"kind":"gateway_request","phase":"completed","status":"completed"}
+        ]}"""
+        val meter = IpfsProgress.LoadMeter()
+        val start = counters(0, 0, 0, 0, 0, 3, 2, 0, 0, 0, 0)
+        assertEquals("IPFS: Looking up content…", meter.poll(previousPage, start, supersededActive = false))
+        // This load's own request came and went between polls: its
+        // events are past the floor and read through.
+        val own = """{"active":[],"events":[
+            {"event_id":41,"kind":"gateway_request","phase":"first_byte","status":"active"},
+            {"event_id":42,"kind":"gateway_request","phase":"completed","status":"completed"},
+            {"event_id":43,"kind":"gateway_request","phase":"dht_fallback_started","status":"active"}
+        ]}"""
+        assertEquals("IPFS: Searching the DHT…", meter.poll(own, start, supersededActive = false))
+    }
+
+    @Test
+    fun `a superseded load's events stay below the floor once it closes (#156)`() {
+        val meter = IpfsProgress.LoadMeter()
+        val c = counters(0, 0, 0, 0, 0, 3, 2, 0, 0, 0, 0)
+        meter.poll("""{"active":[],"events":[{"event_id":5,"phase":"started","status":"active"}]}""", c, supersededActive = true)
+        // The old load logs more while its request is still open…
+        val oldTail = """{"active":[],"events":[{"event_id":9,"kind":"gateway_request","phase":"retrying","status":"active"}]}"""
+        meter.poll(oldTail, c, supersededActive = false, supersededOpen = true)
+        // …and once it has closed, that tail is not this load's.
+        assertEquals("IPFS: Looking up content…", meter.poll(oldTail, c, supersededActive = false, supersededOpen = false))
+    }
+
+    @Test
     fun `the snapshot wins over the counters when it has a phase`() {
         val snapshot = """{"active":[{"kind":"gateway_request","phase":"retrying","status":"active"}]}"""
         val now = counters(0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0)

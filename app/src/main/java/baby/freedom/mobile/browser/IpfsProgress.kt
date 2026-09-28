@@ -17,15 +17,15 @@ import org.json.JSONObject
  * targets, and fall back to the tail of its recent events when none
  * are open.
  *
- * The snapshot is fed by a `tracing` layer freedom-ipfs installs as the
- * process's global subscriber — and in the combined
- * `libfreedom_mobile_ffi.so` ant has already claimed that slot by the
- * time IPFS starts (both use `try_init`, first one wins), so today the
- * snapshot comes back empty on Android. [fromCounters] reads the same
- * phases off the node's retrieval / routing counters instead, which are
- * plain atomics and always tick; [line] prefers the snapshot and falls
- * back to the counters, so a native fix lights up the finer-grained
- * phases with no change here (tracked as issue #156).
+ * The snapshot is fed by a `tracing` layer of freedom-ipfs's on the
+ * process's one subscriber, which the JNI shims install through
+ * `freedom_mobile_init_logging` before either node starts (#156: left to
+ * the nodes, ant's log subscriber claimed the slot first and the
+ * snapshot was always empty). [fromCounters] reads the same phases off
+ * the node's retrieval / routing counters, which are plain atomics;
+ * [line] prefers the snapshot and falls back to the counters whenever
+ * the snapshot has nothing for this load — before its first event, and
+ * while a load it superseded still has a request open (see [LoadMeter]).
  */
 object IpfsProgress {
     /** How often the chrome re-reads the snapshot while a load runs. */
@@ -83,11 +83,17 @@ object IpfsProgress {
      * The status line for [snapshotJson], or null when the node has
      * nothing in flight (or the snapshot is empty / unparseable) — the
      * chrome hides the line rather than showing a stale phase.
+     *
+     * The event-tail fallback only looks at events with an `event_id`
+     * above [afterEventId]. The node keeps its last 512 events whatever
+     * load they belong to, and a finished request's early events still
+     * read as running, so without a floor a load would show the phases of
+     * whatever the node fetched before it (see [LoadMeter]).
      */
-    fun message(snapshotJson: String?): String? {
+    fun message(snapshotJson: String?, afterEventId: Long = -1): String? {
         if (snapshotJson.isNullOrBlank()) return null
         val snapshot = runCatching { JSONObject(snapshotJson) }.getOrNull() ?: return null
-        val candidates = candidates(snapshot)
+        val candidates = candidates(snapshot, afterEventId)
         if (candidates.isEmpty()) return null
 
         var best: JSONObject? = null
@@ -117,8 +123,9 @@ object IpfsProgress {
         baseline: Counters?,
         now: Counters?,
         carried: Counters? = null,
+        afterEventId: Long = -1,
     ): String? =
-        message(snapshotJson)
+        message(snapshotJson, afterEventId)
             ?: if (baseline != null && now != null) fromCounters(baseline, now, carried) else null
 
     /**
@@ -131,8 +138,9 @@ object IpfsProgress {
      * the path / queueing the request.
      *
      * The counters are node-wide, so a second IPFS tab loading at the
-     * same time blends in — the price of a signal that works today; the
-     * snapshot [message] reads is per-request. The one blend we can see
+     * same time blends in (so does the snapshot [message] reads: its
+     * entries are per request, but it lists every request the node has
+     * open, and they can't be matched to a load by path). The one blend we can see
      * coming — this load superseding one on the same tab that is still
      * running in the node — is handled by [carried] (see [LoadMeter]):
      * the growth that happened while the old load was still busy in the
@@ -242,12 +250,21 @@ object IpfsProgress {
      * load (R4-F1). Its entries can't be matched to a load by path: an
      * ENS site's is its resolved CID, and the node's spelling of a CID
      * needn't be ours.
+     *
+     * Its `events` are node-wide history, kept whether their request is
+     * still running or not, so the event-tail fallback of [message] reads
+     * only events newer than [eventFloor]: the newest event id in the
+     * load's first snapshot, raised at every poll while a superseded
+     * request is still open. What the node did before this load, or for
+     * a load it superseded, can't lend it a phase that way. (A request
+     * still running shows up in `active`, which isn't floored.)
      */
     class LoadMeter {
         private var baseline: Counters? = null
         private var last: Counters? = null
         private var carried = Counters()
         private var overlapping = false
+        private var eventFloor: Long? = null
 
         /**
          * Record a poll ([now] null when the node didn't answer) and
@@ -273,15 +290,29 @@ object IpfsProgress {
                 last = now
                 overlapping = supersededActive
             }
-            val snapshot = if (supersededOpen || supersededActive) null else snapshotJson
-            return line(snapshot, baseline, now, carried)
+            val superseded = supersededOpen || supersededActive
+            if (eventFloor == null || superseded) {
+                latestEventId(snapshotJson)?.let { eventFloor = maxOf(eventFloor ?: it, it) }
+            }
+            val snapshot = if (superseded) null else snapshotJson
+            return line(snapshot, baseline, now, carried, eventFloor ?: -1)
         }
     }
 
-    private fun candidates(snapshot: JSONObject): List<JSONObject> {
+    /** The highest `event_id` in [snapshotJson]'s events (-1 for none), or null if unreadable. */
+    internal fun latestEventId(snapshotJson: String?): Long? {
+        if (snapshotJson.isNullOrBlank()) return null
+        val snapshot = runCatching { JSONObject(snapshotJson) }.getOrNull() ?: return null
+        return snapshot.optJSONArray("events").objects().maxOfOrNull { it.optLong("event_id", -1) } ?: -1
+    }
+
+    private fun candidates(snapshot: JSONObject, afterEventId: Long): List<JSONObject> {
         val active = snapshot.optJSONArray("active").objects()
         if (active.isNotEmpty()) return active.filter(::isActive)
-        return snapshot.optJSONArray("events").objects().filter(::isActive).takeLast(EVENT_TAIL)
+        return snapshot.optJSONArray("events").objects()
+            .filter { afterEventId < 0 || it.optLong("event_id", -1) > afterEventId }
+            .filter(::isActive)
+            .takeLast(EVENT_TAIL)
     }
 
     private fun JSONArray?.objects(): List<JSONObject> {

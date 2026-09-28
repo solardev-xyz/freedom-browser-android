@@ -11,9 +11,11 @@
 # forever — Android ties updates to the signing certificate, so the
 # keystore must never be rotated casually.
 #
-# FFI_REF pins which freedom-mobile-ffi tag supplies the embedded
-# nodes; bump it together with the vendored headers in
+# FFI_REF pins which freedom-mobile-ffi tag (or commit) supplies the
+# embedded nodes; bump it together with the vendored headers in
 # swarmnode/src/main/cpp/ (see README § Building libfreedom_mobile_ffi.so).
+# UNRELEASED: pinned to the alan/compose-tracing-layers commit that adds
+# freedom_mobile_init_logging (#156) until freedom-mobile-ffi tags it.
 # The library is built with ant's `chain` feature (see the build step).
 
 name: release
@@ -27,7 +29,7 @@ permissions:
   contents: write
 
 env:
-  FFI_REF: v0.12.1
+  FFI_REF: 45203550b4ec1876a6a771f4d1dd32f3504b084c
 
 jobs:
   release:

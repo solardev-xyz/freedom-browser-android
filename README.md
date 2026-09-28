@@ -62,12 +62,13 @@ source .envrc   # if you haven't: cp .envrc.example .envrc && edit to taste
 #    which is gitignored here and must exist before Gradle can build the app.
 #    Needs cargo-ndk and ANDROID_NDK_HOME; rustup picks the toolchain from
 #    the repo's rust-toolchain.toml.
-#    Use the FFI_REF tag pinned in release.yml, with ant's `chain` feature
+#    Use the FFI_REF pinned in release.yml, with ant's `chain` feature
 #    and the embedded Radicle node on (see "Building libfreedom_mobile_ffi.so"
 #    below). Chained with && so a failed step (e.g. enable-ffi-chain.sh
 #    rejecting a reshaped cargo call) stops before a chain-less .so is
 #    built or copied.
-git clone --branch v0.12.1 https://github.com/solardev-xyz/freedom-mobile-ffi.git /tmp/freedom-mobile-ffi &&
+git clone https://github.com/solardev-xyz/freedom-mobile-ffi.git /tmp/freedom-mobile-ffi &&
+  git -C /tmp/freedom-mobile-ffi checkout 45203550b4ec1876a6a771f4d1dd32f3504b084c &&
   scripts/enable-ffi-chain.sh /tmp/freedom-mobile-ffi &&
   scripts/enable-ffi-radicle.sh /tmp/freedom-mobile-ffi &&
   ( cd /tmp/freedom-mobile-ffi && ./scripts/build-android.sh ) &&
@@ -209,9 +210,10 @@ $ANDROID_HOME/build-tools/36.0.0/aapt2 dump badging app/build/outputs/apk/debug/
 # 0. Run from the root of this repo; later steps cd away and come back.
 FREEDOM_ANDROID="$PWD"
 
-# 1. Clone freedom-mobile-ffi at the tag release.yml pins as FFI_REF,
+# 1. Clone freedom-mobile-ffi at the ref release.yml pins as FFI_REF,
 #    somewhere outside this repo.
-git clone --branch v0.12.1 https://github.com/solardev-xyz/freedom-mobile-ffi.git /tmp/freedom-mobile-ffi
+git clone https://github.com/solardev-xyz/freedom-mobile-ffi.git /tmp/freedom-mobile-ffi &&
+  git -C /tmp/freedom-mobile-ffi checkout 45203550b4ec1876a6a771f4d1dd32f3504b084c
 
 # 2. Cross-compile both ABIs. Needs cargo-ndk + ANDROID_NDK_HOME; rustup
 #    installs the pinned toolchain + targets from rust-toolchain.toml.
@@ -235,7 +237,7 @@ mkdir -p swarmnode/src/main/jniLibs
 cp -r /tmp/freedom-mobile-ffi/target/android/jniLibs/. swarmnode/src/main/jniLibs/
 ```
 
-The Kotlin side talks to it through the hand-written JNI shims in `swarmnode/src/main/cpp/` (built into `libfreedom_jni.so` by the module's CMake step): `ant_jni.c` wraps the ant C API (`ant_init`, `ant_start_gateway` — the bee-shaped HTTP gateway on `127.0.0.1:1633` —, `ant_peer_count`, `ant_shutdown`) and `freedom_ipfs_jni.c` wraps the freedom-ipfs loopback-gateway surface. When upgrading, refresh the vendored `swarmnode/src/main/cpp/{ant.h,freedom_ipfs.h}` from the build's `target/android/headers/` along with the `.so`s, and bump the pinned (ant, freedom-ipfs) tags in freedom-mobile-ffi's `Cargo.toml` — the same aggregator also feeds the iOS xcframework, so both platforms move versions together.
+The Kotlin side talks to it through the hand-written JNI shims in `swarmnode/src/main/cpp/` (built into `libfreedom_jni.so` by the module's CMake step): `ant_jni.c` wraps the ant C API (`ant_init`, `ant_start_gateway` — the bee-shaped HTTP gateway on `127.0.0.1:1633` —, `ant_peer_count`, `ant_shutdown`) and `freedom_ipfs_jni.c` wraps the freedom-ipfs loopback-gateway surface. Both shims call `freedom_mobile_init_logging()` (header `freedom_mobile.h`, freedom-mobile-ffi's own export) before starting their node: the `tracing` subscriber is process-wide and the first node to claim it wins, so without it ant's log subscriber would keep freedom-ipfs's progress recorder out and `freedom_ipfs_node_progress_snapshot_json` would stay empty (#156). When upgrading, refresh the vendored `swarmnode/src/main/cpp/{ant.h,freedom_ipfs.h,freedom_mobile.h}` from the build's `target/android/headers/` along with the `.so`s, and bump the pinned (ant, freedom-ipfs) tags in freedom-mobile-ffi's `Cargo.toml` — the same aggregator also feeds the iOS xcframework, so both platforms move versions together.
 
 Since freedom-mobile-ffi v0.12 the library also links the Myotis Ethereum light client (`myotis_*` exports; not optional upstream). The app drives it through `swarmnode/src/main/cpp/myotis_jni.c` (header `myotis_engine.h`, vendored from the myotis tag freedom-mobile-ffi pins — v0.1.12, engine ABI 32; refresh it with `FFI_REF`) from its own `:myotis` process, off by default and switched on from the node page (#72). The library is built with ant's `chain` feature so the gateway's `/wallet`, `/stamps`, `/chequebook` and `/chainstate` read Gnosis whenever `SwarmNode.Config.rpcEndpoint` is set. The app leaves that empty today (ultra-light, no chain traffic), so those endpoints answer bee's zero-stubs until a node-mode switch supplies an RPC.
 
