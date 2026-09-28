@@ -178,6 +178,50 @@ class ChainlistTest {
         }
     }
 
+    @Test
+    fun keysInTheQueryOrHostAreDropped() {
+        for (url in listOf(
+            // Real keyed entries from the live rpcs.json.
+            "https://api-gateway.skymavis.com/rpc?apikey=9aqYLBbxSC6LROynQJBvKkEIsioqwHmr",
+            "https://rpc.chain49.com/ethereum?api_key=14d1a8b86d8a4b4797938332394203dc",
+            // Keys under names the old fixed list didn't know.
+            "https://lb.drpc.org/ogrpc?network=sepolia&dkey=Ak80gSCleU8Hkq2Jp0fX4bRFsJvGnqQR8KqPrhesZmuN",
+            "https://rpc.example.org/?x-api-key=abc",
+            "https://rpc.example.org/?projectId=abc",
+            // …or under any name at all, judged by the value alone.
+            "https://rpc.example.org/?n=sepolia&whatever=9aa3d95b3bc440fa88ea12eaa4456161",
+            "https://rpc.example.org/?q=WddzdzI2o9S3COdT73d5w6AIogbKq4X-",
+            // Subdomain-keyed providers.
+            "https://9aa3d95b3bc440fa88ea12eaa4456161.eth.rpc.rivet.cloud/",
+            "https://2ccf18bf-2916-4198-8856-42172854353c.rpc.example.org/",
+        )) {
+            assertNull(url, Chainlist.usableRpc(JSONObject(mapOf("url" to url, "tracking" to "none"))))
+        }
+        // Public query parameters and generated-looking public host labels from the live catalog.
+        for (url in listOf(
+            "https://andromeda.metis.io/?owner=1088",
+            "https://api.uniblock.dev/uni/v1/json-rpc?chainId=151",
+            "https://rpc-astra-9on2f72wzn.t.conduit.xyz",
+            "https://fraa-flashbox-2800-rpc.a.stagenet.tanssi.network",
+            "https://dchain-2716446429837000-1.jsonrpc.sagarpc.io",
+            "https://studiochain-cf4a1621.calderachain.xyz",
+            "https://tsub360890-eth-rpc.thetatoken.org/rpc",
+        )) {
+            assertEquals(url, url, Chainlist.usableRpc(url))
+        }
+    }
+
+    /**
+     * A deeply nested body is "not a list". (This org.json caps nesting
+     * itself; Android's recurses until the stack overflows — see
+     * ChainlistParseTest on the device.)
+     */
+    @Test
+    fun deeplyNestedBodyIsNull() {
+        assertNull(Chainlist.parse("[".repeat(200_000)))
+        assertNull(Chainlist.parse("[".repeat(200_000) + "]".repeat(200_000)))
+    }
+
     /** Random keys of the shapes providers hand out, well past any length a name could reach. */
     @Test
     fun randomKeysAreCaught() {

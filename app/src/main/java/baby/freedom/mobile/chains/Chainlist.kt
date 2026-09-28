@@ -81,6 +81,11 @@ object Chainlist {
             JSONArray(json)
         } catch (_: Exception) {
             return null
+        } catch (_: StackOverflowError) {
+            // JSONTokener recurses once per nesting level: a body nested
+            // tens of thousands deep ('[[[[…') would otherwise crash the
+            // app instead of falling back to the cache.
+            return null
         }
         val out = ArrayList<Entry>(array.length())
         val seen = HashSet<Long>()
@@ -154,15 +159,26 @@ object Chainlist {
         return ok.takeUnless(RpcUrls::isLoopbackUrl)
     }
 
-    private val KEY_PARAMETERS = setOf(
-        "key", "apikey", "api_key", "api-key", "token", "access_token", "accesstoken", "auth", "secret",
-    )
+    /**
+     * Fragments of a query parameter's name that mark it as a credential
+     * (`key`, `apikey`, dRPC's `dkey`, `x-api-key`, `token`, `projectId`, …).
+     */
+    private val KEY_NAME_PARTS = listOf("key", "token", "secret", "auth", "pass", "cred", "project", "session")
 
-    /** Whether [url]'s query carries a credential-looking parameter. */
+    /**
+     * Whether [url]'s query carries a credential: a parameter whose name
+     * says so ([KEY_NAME_PARTS]), or whose value has the shape of a
+     * generated token ([looksLikeKey]) whatever it's called — a provider
+     * can name its key parameter anything.
+     */
     internal fun hasKeyParameter(url: String): Boolean {
         val query = url.substringAfter('?', "").substringBefore('#')
         if (query.isEmpty()) return false
-        return query.split('&').any { it.substringBefore('=').lowercase() in KEY_PARAMETERS }
+        return query.split('&').any { param ->
+            val name = param.substringBefore('=').lowercase()
+            val value = param.substringAfter('=', "")
+            KEY_NAME_PARTS.any { it in name } || (value.isNotEmpty() && looksLikeKey(value))
+        }
     }
 
     /**
@@ -170,6 +186,23 @@ object Chainlist {
      * not in the path (QuickNode names each endpoint's subdomain after it).
      */
     private val KEYED_HOST_SUFFIXES = listOf(".quiknode.pro")
+
+    /**
+     * Whether one host label carries a key (Rivet's
+     * `<32 hex>.eth.rpc.rivet.cloud`). Hosts are one case and full of
+     * short generated-looking public IDs (conduit's `rpc-astra-9on2f72wzn`,
+     * tanssi's `fraa-flashbox-2800-rpc`, zeeve's `…-6h42j7`), so this is
+     * stricter than [looksLikeKey]: a UUID label, or a `-`-separated piece
+     * mixing letters and digits that is 16+ characters of hex or 24+ of
+     * anything. None of the ~7600 RPCs in today's catalog trips it.
+     */
+    internal fun looksLikeHostKey(label: String): Boolean {
+        if (UUID.matches(label)) return true
+        return label.split('-').any { piece ->
+            piece.any(Char::isDigit) && piece.any(Char::isLetter) &&
+                (piece.length >= 24 || piece.length >= 16 && HEX.matches(piece))
+        }
+    }
 
     private val UUID = Regex("[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
     private val TOKEN_CHARS = Regex("[A-Za-z0-9_.~-]+")
@@ -181,7 +214,8 @@ object Chainlist {
      * `/v2/WddzdzI2o9S3…`, Infura `/v3/9aa3d95b…`, NodeReal/4EVERLAND
      * `/v1/<hex>`, GetBlock `/<hex>`, Ankr `/<chain>/<hex>`, Histori,
      * dwellir/Tenderly `/<uuid>` — or points at a host whose endpoints
-     * are all per-account ([KEYED_HOST_SUFFIXES]). See [looksLikeKey]
+     * are all per-account ([KEYED_HOST_SUFFIXES]) or has a key as a
+     * subdomain ([looksLikeHostKey]). See [looksLikeKey]
      * for what counts as a key; it is judged the same wherever the
      * segment sits in the path.
      */
@@ -193,6 +227,7 @@ object Chainlist {
         }
         val host = uri.host?.lowercase()?.trimEnd('.') ?: return true
         if (KEYED_HOST_SUFFIXES.any { host.endsWith(it) || host == it.removePrefix(".") }) return true
+        if (host.split('.').any(::looksLikeHostKey)) return true
         return (uri.rawPath ?: "").split('/').any { it.isNotEmpty() && looksLikeKey(it) }
     }
 
