@@ -16,3 +16,6 @@
 -keep class * implements com.sun.jna.** { *; }
 -keep class uniffi.libradicle_uniffi.** { *; }
 -dontwarn java.awt.**
+-keepclasseswithmembernames class baby.freedom.swarm.MyotisNative {
+    native <methods>;
+}

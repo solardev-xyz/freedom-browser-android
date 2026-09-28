@@ -111,5 +111,15 @@
             android:foregroundServiceType="dataSync"
             android:process=":node" />
 
+        <!--
+          The Myotis light client (#72) runs in its own `:myotis` process:
+          independent of the Swarm toggle that kills `:node`, and exited
+          when the user switches it off. Bound-only — see MyotisService.
+        -->
+        <service
+            android:name=".node.MyotisService"
+            android:exported="false"
+            android:process=":myotis" />
+
     </application>
 </manifest>
