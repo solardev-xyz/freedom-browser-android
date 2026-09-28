@@ -663,15 +663,35 @@ internal fun bottomUiProbeRequest(token: String): String = "probe $token"
  * style or global of ours — the platform's channel object included,
  * see above — and history methods are not patched.
  *
- * **Not invisible once started.** The probe and the start still call
- * DOM methods the page can replace: `addEventListener`,
- * `MutationObserver.prototype.observe`, `elementFromPoint`,
- * `querySelector`, `getBoundingClientRect`. For those the detector only
- * saves the constructors and `getComputedStyle` at document start (the
- * theme-colour read saves all of its own, see above). A page that
- * wraps these methods before first paint can see the detector's calls,
- * and the listener it registers (whose source it can read). What stays
- * hidden is the channel object, and with it any way to talk to Kotlin.
+ * **Nothing the page wraps later sees it** (#146). Every function the
+ * detector calls after document start — once started, and in its media,
+ * `contextmenu` and input listeners — was saved at document start,
+ * before any page script, and is called through a `Function.prototype.call`
+ * bound then: `addEventListener` (window's, the document's,
+ * `EventTarget`'s), `elementFromPoint`, `querySelector`,
+ * `getBoundingClientRect` and the `DOMRect` getters, the `Document`/`Node`/
+ * `Element` getters it reads (`documentElement`, `body`, `compatMode`,
+ * `scrollingElement`, `parentElement`, `nodeName`, `clientWidth`/`Height`,
+ * `scrollHeight`, `innerWidth`/`Height`), `getComputedStyle` and
+ * `CSSStyleDeclaration.getPropertyValue`, `observe`/`disconnect` of the
+ * three observers, the `MutationRecord` and `NodeList.length` getters,
+ * the `Event` getters (`target`, `currentTarget`, `type`,
+ * `defaultPrevented`, `timeStamp`, `PageTransitionEvent.persisted`,
+ * `MessageEvent.data`), the `HTMLMediaElement` getters,
+ * and `Math.round`. No `Array` method runs (the media list is a
+ * prototype-less object), and the report is built as text rather than by
+ * `JSON.stringify`, which would ask `Object.prototype` for a `toJSON`.
+ * `MutationObserver.observe`'s options are built at document start with
+ * no prototype (the platform reads every option it knows, and a missing
+ * one would be looked up on `Object.prototype`), and its attribute filter
+ * is its own iterable rather than an array (a sequence is read through
+ * `Array.prototype[Symbol.iterator]`, seen called on the AVD). So a page
+ * that wraps any of these before first paint catches no call and never
+ * gets hold of one of the detector's listeners or callbacks. The channel
+ * object's own methods are called as they are (the page can't reach
+ * that object), and its listeners get a plain object whose own `data` is
+ * read directly. What a page can still notice is indirect: the
+ * style and layout work a probe forces.
  */
 internal fun bottomUiDetectorJs(channel: String, debounceMs: Int = BOTTOM_UI_DEBOUNCE_MS): String {
     require(CHANNEL_SAFE.matches(channel)) { "channel must be lower-case letters" }
@@ -682,22 +702,48 @@ internal fun bottomUiDetectorJs(channel: String, debounceMs: Int = BOTTOM_UI_DEB
   try { delete w[N]; } catch (e) {}
   if (!port || typeof port.postMessage !== 'function') return;
   var setT = w.setTimeout;
+  // Natives, saved now, before any page script (#146): un(f)(o, …) is
+  // f.call(o, …) through a `call` bound now, so neither a wrapped method
+  // or getter nor a wrapped `Function.prototype.call` sees a call made
+  // after the page has run. Where the platform has no such native (never
+  // in Chromium) the live property is used instead.
+  var fcall = Function.prototype.call, fbind = Function.prototype.bind, gopd = Object.getOwnPropertyDescriptor,
+      gpo = Object.getPrototypeOf, round = Math.round;
+  var un = function (f) { return typeof f === 'function' ? fbind.call(fcall, f) : null; };
+  var method = function (proto, n) {
+    return (proto && un(proto[n])) || function (o, a, b, c, e) { return o[n](a, b, c, e); };
+  };
+  var prop = function (proto, n, set) {
+    var x = null;
+    for (var p = proto; p && !x; p = gpo(p)) x = gopd(p, n);
+    var f = x && un(set ? x.set : x.get);
+    return f || (set ? function (o, v) { o[n] = v; } : function (o) { return o[n]; });
+  };
+  var proto = function (C) { return C && C.prototype; };
+  var EvP = proto(w.Event), evTarget = prop(EvP, 'target'), evCurrent = prop(EvP, 'currentTarget'),
+      evType = prop(EvP, 'type'), evPrevented = prop(EvP, 'defaultPrevented');
   w.addEventListener('contextmenu', function (e) {
     if (!e.isTrusted) return;
-    setT(function () { port.postMessage(e.defaultPrevented ? '$CONTEXT_MENU_KEPT' : '$CONTEXT_MENU_ALLOWED'); }, 0);
+    setT(function () { port.postMessage(evPrevented(e) ? '$CONTEXT_MENU_KEPT' : '$CONTEXT_MENU_ALLOWED'); }, 0);
   }, true);
-  var ET = w.EventTarget, onEl = ET && ET.prototype && ET.prototype.addEventListener, media = [], loud = false, recheck = 0, tries = 0;
-  var HM = w.HTMLMediaElement, adb = HM && HM.prototype && Object.getOwnPropertyDescriptor(HM.prototype, 'webkitAudioDecodedByteCount'), adbOf = adb && adb.get;
+  var ET = w.EventTarget, onEl = un(ET && ET.prototype && ET.prototype.addEventListener), loud = false, recheck = 0, tries = 0;
+  // Media being heard: a list with no prototype, so no Array method runs.
+  var media = Object.create(null), nm = 0;
+  function slot(m) { for (var i = 0; i < nm; i++) if (media[i] === m) return i; return -1; }
+  function drop(i) { for (; i < nm - 1; i++) media[i] = media[i + 1]; delete media[--nm]; }
+  var MP = proto(w.HTMLMediaElement), adb = MP && gopd(MP, 'webkitAudioDecodedByteCount'), adbOf = un(adb && adb.get),
+      paused = prop(MP, 'paused'), ended = prop(MP, 'ended'), muted = prop(MP, 'muted'), volume = prop(MP, 'volume'),
+      ready = prop(MP, 'readyState');
   function sound(m) {
     if (!adbOf) return true;
-    try { return !(adbOf.call(m) === 0); } catch (e) { return true; }
+    try { return !(adbOf(m) === 0); } catch (e) { return true; }
   }
   function hear(beat) {
     var now = false, unsure = false;
-    for (var i = media.length - 1; i >= 0; i--) {
+    for (var i = nm - 1; i >= 0; i--) {
       var m = media[i];
-      if (m.paused || m.ended) media.splice(i, 1);
-      else if (!m.muted && m.volume > 0 && m.readyState > 2) { if (sound(m)) now = true; else unsure = true; }
+      if (paused(m) || ended(m)) drop(i);
+      else if (!muted(m) && volume(m) > 0 && ready(m) > 2) { if (sound(m)) now = true; else unsure = true; }
     }
     if (now !== loud || (beat && now)) { loud = now; port.postMessage(now ? '$AUDIO_AUDIBLE' : '$AUDIO_SILENT'); }
     if (!recheck && (loud || (unsure && tries < $AUDIO_SOUND_TRIES))) {
@@ -705,32 +751,34 @@ internal fun bottomUiDetectorJs(channel: String, debounceMs: Int = BOTTOM_UI_DEB
     }
   }
   function heard(e) {
-    var m = e.currentTarget;
+    var m = evCurrent(e);
     tries = 0;
-    if (e.type === 'playing' && e.isTrusted && media.indexOf(m) < 0) media.push(m);
+    if (evType(e) === 'playing' && e.isTrusted && slot(m) < 0) media[nm++] = m;
     hear();
   }
   if (onEl) {
     w.addEventListener('playing', function (e) {
-      var m = e.target;
-      if (!e.isTrusted || !m || typeof m.paused !== 'boolean') return;
-      if (media.indexOf(m) < 0) {
-        media.push(m);
-        for (var i = 0; i < AUDIO_EVENTS.length; i++) onEl.call(m, AUDIO_EVENTS[i], heard);
+      if (!e.isTrusted) return;
+      var m = evTarget(e);
+      try { if (!m || typeof paused(m) !== 'boolean') return; } catch (x) { return; }
+      if (slot(m) < 0) {
+        media[nm++] = m;
+        for (var i = 0; i < AUDIO_EVENTS.length; i++) onEl(m, AUDIO_EVENTS[i], heard);
       }
       tries = 0;
       hear();
     }, true);
     w.addEventListener('pagehide', function () { if (loud) { loud = false; port.postMessage('$AUDIO_SILENT'); } }, true);
-    w.addEventListener('pageshow', function (e) { if (e.persisted) hear(); }, true);
+    var persisted = prop(proto(w.PageTransitionEvent), 'persisted');
+    w.addEventListener('pageshow', function (e) { if (persisted(e)) hear(); }, true);
   }
   if (w.top !== w) return;
-  var P = w.performance, pnow = P && P.now && P.now.bind(P), EP = w.Event && w.Event.prototype,
-      tsd = EP && Object.getOwnPropertyDescriptor(EP, 'timeStamp'), tsOf = tsd && tsd.get;
+  var P = w.performance, pnow = P && P.now && P.now.bind(P), tsOf = prop(EvP, 'timeStamp');
+  if (!(EvP && gopd(EvP, 'timeStamp'))) tsOf = null;
   var said = function (t) {
     w.addEventListener(t, function (e) {
       if (!e.isTrusted || !pnow || !tsOf) return;
-      var age = Math.round(pnow() - tsOf.call(e));
+      var age = round(pnow() - tsOf(e));
       port.postMessage('$TOP_DOCUMENT_INPUT ' + t + ' ' + (age > 0 ? age : 0));
     }, true);
   };
@@ -740,38 +788,67 @@ internal fun bottomUiDetectorJs(channel: String, debounceMs: Int = BOTTOM_UI_DEB
   var T = null, started = false, ASK = /^probe ([0-9a-f]{1,64})$/, THEME_ASK = /^theme ([0-9a-f]{1,64})$/,
       GO = /^$PAGE_REISSUE_PREFIX([0-9a-f]{1,64}) (https?:\/\/\S+)$/i, SEL = 'a, button, [role="button"], [role="tab"], [role="link"]';
   var gcs = w.getComputedStyle, MO = w.MutationObserver,
-      RO = w.ResizeObserver, IO = w.IntersectionObserver, str = JSON.stringify;
+      RO = w.ResizeObserver, IO = w.IntersectionObserver;
   var timer = 0, last = null, owed = false, mo = null, watched = null, ro = null, io = null, fullW = -1, fullH = 0, ctx = null,
       metaDirty = false;
-  // The theme-colour read's natives, saved before the page runs (#92):
-  // un(f)(o, …) is f.call(o, …) through a `call` bound now, so neither a
-  // wrapped method nor a wrapped `Function.prototype.call` sees a read.
+  // What the probe, the start and the observers use once started (#146).
+  var DP = proto(w.Document), EP = proto(w.Element), NP = proto(w.Node), RP = proto(w.DOMRect) || proto(w.DOMRectReadOnly),
+      CSP = proto(w.CSSStyleDeclaration), MR = proto(w.MutationRecord);
+  var dom = {
+    add: un(w.addEventListener) || method(null, 'addEventListener'),
+    docAdd: d.addEventListener ? un(d.addEventListener) || method(null, 'addEventListener') : null,
+    html: prop(DP, 'documentElement'), body: prop(DP, 'body'), mode: prop(DP, 'compatMode'), scroller: prop(DP, 'scrollingElement'),
+    at: un(d.elementFromPoint) || method(null, 'elementFromPoint'),
+    innerW: prop(w, 'innerWidth'), innerH: prop(w, 'innerHeight'),
+    cw: prop(EP, 'clientWidth'), ch: prop(EP, 'clientHeight'), sh: prop(EP, 'scrollHeight'),
+    rect: method(EP, 'getBoundingClientRect'), has: method(EP, 'querySelector'),
+    up: prop(NP, 'parentElement'), name: prop(NP, 'nodeName'),
+    bottom: prop(RP, 'bottom'), height: prop(RP, 'height'), width: prop(RP, 'width'),
+    css: CSP && un(CSP.getPropertyValue),
+    moObserve: method(proto(MO), 'observe'),
+    roObserve: method(proto(RO), 'observe'), roOff: method(proto(RO), 'disconnect'),
+    ioObserve: method(proto(IO), 'observe'), ioOff: method(proto(IO), 'disconnect'),
+    recType: prop(MR, 'type'), recTarget: prop(MR, 'target'), added: prop(MR, 'addedNodes'), removed: prop(MR, 'removedNodes'),
+    count: prop(proto(w.NodeList), 'length'), data: prop(proto(w.MessageEvent), 'data')
+  };
+  // observe()'s options, built now and with no prototype: the platform
+  // reads every option it knows, and one this object lacks would
+  // otherwise be looked up on Object.prototype, where a page's getter
+  // would see the call.
+  // The attribute filter is a sequence, which the platform reads by
+  // iterating: an array would be walked through Array.prototype's
+  // iterator, which the page can replace. So it is its own iterable,
+  // and its iterator is built now too: iterating calls nothing but
+  // these closures (a fresh Object.create at observe() time would call
+  // whatever the page has put there since).
+  var moOpts = Object.create(null), FILTER = ['class', 'style', 'hidden', 'open', 'content', 'media', 'name'],
+      ITER = typeof Symbol === 'function' ? Symbol.iterator : null;
+  moOpts.childList = true; moOpts.subtree = true; moOpts.attributes = true;
+  if (ITER) {
+    var fi = 0, fit = Object.create(null);
+    fit.next = function () { return fi < FILTER.length ? { value: FILTER[fi++], done: false } : { value: undefined, done: true }; };
+    moOpts.attributeFilter = Object.create(null);
+    moOpts.attributeFilter[ITER] = function () { fi = 0; return fit; };
+  } else moOpts.attributeFilter = FILTER;
+  function style(n, name, camel) { var s = gcs(n); return dom.css ? dom.css(s, name) : s[camel]; }
+  // The theme-colour read's natives, saved before the page runs (#92).
   var tc = null, go = null;
   try {
-    var fcall = Function.prototype.call, fbind = Function.prototype.bind, gopd = Object.getOwnPropertyDescriptor;
-    var un = function (f) { return typeof f === 'function' ? fbind.call(fcall, f) : null; };
-    var method = function (proto, n) {
-      return (proto && un(proto[n])) || function (o, a, b, c, e) { return o[n](a, b, c, e); };
-    };
-    var prop = function (proto, n, set) {
-      var x = proto && gopd(proto, n), f = x && un(set ? x.set : x.get);
-      return f || (set ? function (o, v) { o[n] = v; } : function (o) { return o[n]; });
-    };
-    var C2 = w.CanvasRenderingContext2D && w.CanvasRenderingContext2D.prototype;
+    var C2 = proto(w.CanvasRenderingContext2D);
     tc = {
       qsa: un(d.querySelectorAll), mkEl: un(d.createElement),
-      attr: method(w.Element && w.Element.prototype, 'getAttribute'),
-      len: prop(w.NodeList && w.NodeList.prototype, 'length'),
-      mm: un(w.matchMedia), mqMatches: prop(w.MediaQueryList && w.MediaQueryList.prototype, 'matches'),
-      getCtx: method(w.HTMLCanvasElement && w.HTMLCanvasElement.prototype, 'getContext'),
+      attr: method(EP, 'getAttribute'),
+      len: dom.count,
+      mm: un(w.matchMedia), mqMatches: prop(proto(w.MediaQueryList), 'matches'),
+      getCtx: method(proto(w.HTMLCanvasElement), 'getContext'),
       getFS: prop(C2, 'fillStyle'), setFS: prop(C2, 'fillStyle', true),
       clear: method(C2, 'clearRect'), fill: method(C2, 'fillRect'), pixels: method(C2, 'getImageData'),
-      data: prop(w.ImageData && w.ImageData.prototype, 'data'),
-      exec: un(RegExp.prototype.exec), pInt: w.parseInt, pFloat: w.parseFloat, round: Math.round
+      data: prop(proto(w.ImageData), 'data'),
+      exec: un(RegExp.prototype.exec), pInt: w.parseInt, pFloat: w.parseFloat, round: round
     };
     // The re-issue of the page's own navigation (#180): a detached
     // link, built and clicked through natives saved now, or not at all.
-    var AP = w.HTMLAnchorElement && w.HTMLAnchorElement.prototype, HP = w.HTMLElement && w.HTMLElement.prototype;
+    var AP = proto(w.HTMLAnchorElement), HP = proto(w.HTMLElement);
     var setter = function (proto, n) { var x = proto && gopd(proto, n); return x ? un(x.set) : null; };
     go = { mk: tc.mkEl, href: setter(AP, 'href'), policy: setter(AP, 'referrerPolicy'),
            target: setter(AP, 'target'), click: HP ? un(HP.click) : null };
@@ -779,7 +856,7 @@ internal fun bottomUiDetectorJs(channel: String, debounceMs: Int = BOTTOM_UI_DEB
   } catch (e) { tc = null; go = null; }
   // Without them there is no theme-colour read; the probe still runs.
   var live = !tc;
-  if (live) tc = { exec: function (r, s) { return r.exec(s); }, pFloat: w.parseFloat, round: Math.round };
+  if (live) tc = { exec: function (r, s) { return r.exec(s); }, pFloat: w.parseFloat, round: round };
   var RGBA = /^rgba?\(\s*([\d.]+)[\s,]+([\d.]+)[\s,]+([\d.]+)\s*(?:[,\/]\s*([\d.]+)(%?)\s*)?\)$/,
       HEX = /^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i, CURRENT = /currentcolor/i;
   function rgb(r, g, b) { return 'rgb(' + r + ', ' + g + ', ' + b + ')'; }
@@ -820,39 +897,46 @@ internal fun bottomUiDetectorJs(channel: String, debounceMs: Int = BOTTOM_UI_DEB
     return null;
   }
   function reportTheme() { port.postMessage('$THEME_COLOR_PREFIX' + T + ' ' + (themeColor() || 'none')); }
-  function pinned(n) {
-    for (; n && n !== d.documentElement; n = n.parentElement) {
-      var p = gcs(n).position;
+  function pinned(n, de) {
+    for (; n && n !== de; n = dom.up(n)) {
+      var p = style(n, 'position', 'position');
       if (p === 'fixed' || p === 'sticky') return true;
     }
     return false;
   }
   function probe() {
-    var de = d.documentElement, b = d.body;
+    var de = dom.html(d), b = dom.body(d);
     if (!de || !b) return null;
-    var std = d.compatMode === 'CSS1Compat';
-    var vw = (std && de.clientWidth) || w.innerWidth, vh = (std && de.clientHeight) || w.innerHeight;
+    var std = dom.mode(d) === 'CSS1Compat';
+    var vw = (std && dom.cw(de)) || dom.innerW(w), vh = (std && dom.ch(de)) || dom.innerH(w);
     if (!vw || !vh) return null;
     if (vw !== fullW) { fullW = vw; fullH = vh; } else if (vh > fullH) fullH = vh;
-    var nav = null, se = d.scrollingElement || de, scrolls = se.scrollHeight > vh + 1;
-    for (var n = d.elementFromPoint(vw / 2, vh - 30); n && n !== b && n !== de; n = n.parentElement) {
-      var r = n.getBoundingClientRect();
-      if (r.bottom >= vh - 60 && r.bottom <= vh + 20 && r.height >= 40 && r.height <= fullH * 0.25 &&
-          r.width >= vw * 0.5 && n.querySelector(SEL) && !(scrolls && !pinned(n))) { nav = n; break; }
+    var nav = null, scrolls = dom.sh(dom.scroller(d) || de) > vh + 1;
+    for (var n = dom.at(d, vw / 2, vh - 30); n && n !== b && n !== de; n = dom.up(n)) {
+      var r = dom.rect(n), bottom = dom.bottom(r), height = dom.height(r);
+      if (bottom >= vh - 60 && bottom <= vh + 20 && height >= 40 && height <= fullH * 0.25 &&
+          dom.width(r) >= vw * 0.5 && dom.has(n, SEL) && !(scrolls && !pinned(n, de))) { nav = n; break; }
     }
     if (!nav) return { nav: null, color: null };
     var c = null;
-    for (var m = nav; m && m !== b && m !== de && !c; m = m.parentElement) c = paint(gcs(m).backgroundColor);
-    return { nav: nav, color: c || themeColor() || paint(gcs(b).backgroundColor) || paint(gcs(de).backgroundColor) };
+    for (var m = nav; m && m !== b && m !== de && !c; m = dom.up(m)) c = paint(style(m, 'background-color', 'backgroundColor'));
+    return { nav: nav, color: c || themeColor() || paint(style(b, 'background-color', 'backgroundColor')) ||
+        paint(style(de, 'background-color', 'backgroundColor')) };
   }
   function watch(el) {
     if (el === watched) return;
-    if (ro) ro.disconnect();
-    if (io) io.disconnect();
+    if (ro) dom.roOff(ro);
+    if (io) dom.ioOff(io);
     ro = io = null; watched = el;
     if (!el) return;
-    if (RO) { ro = new RO(soon); ro.observe(el); }
-    if (IO) { io = new IO(soon); io.observe(el); }
+    if (RO) { ro = new RO(soon); dom.roObserve(ro, el); }
+    if (IO) { io = new IO(soon); dom.ioObserve(io, el); }
+  }
+  // Not JSON.stringify: it asks the object (and Object.prototype, which
+  // the page can extend) for a `toJSON`. Every part is our own text: a
+  // hex token and rgb().
+  function report(has, color) {
+    return '{"token":"' + T + '","hasBottomUI":' + (has ? 'true' : 'false') + ',"color":' + (color ? '"' + color + '"' : 'null') + '}';
   }
   function run(force) {
     timer = 0;
@@ -864,35 +948,39 @@ internal fun bottomUiDetectorJs(channel: String, debounceMs: Int = BOTTOM_UI_DEB
     var key = !!p.nav + ' ' + p.color;
     if (!force && !owed && key === last) return;
     last = key; owed = false;
-    port.postMessage(str({ token: T, hasBottomUI: !!p.nav, color: p.color }));
+    port.postMessage(report(!!p.nav, p.color));
   }
   function soon() { if (!timer) timer = setT(function () { run(false); }, $debounceMs); }
-  function isMeta(n) { return !!n && (n.nodeName === 'META' || n.nodeName === 'HEAD'); }
+  function isMeta(n) { if (!n) return false; var t = dom.name(n); return t === 'META' || t === 'HEAD'; }
+  function anyMeta(list) { for (var k = 0, n = list ? dom.count(list) : 0; k < n; k++) if (isMeta(list[k])) return true; return false; }
   function metaTouched(recs) {
     for (var i = 0; recs && i < recs.length; i++) {
       var r = recs[i];
-      if (r.type === 'attributes') { if (isMeta(r.target)) return true; continue; }
-      var lists = [r.addedNodes, r.removedNodes];
-      for (var j = 0; j < 2; j++) for (var k = 0; lists[j] && k < lists[j].length; k++) if (isMeta(lists[j][k])) return true;
+      if (dom.recType(r) === 'attributes') { if (isMeta(dom.recTarget(r))) return true; continue; }
+      if (anyMeta(dom.added(r)) || anyMeta(dom.removed(r))) return true;
     }
     return false;
   }
   function attach() {
-    if (mo || !MO || !d.documentElement) return;
+    var de = dom.html(d);
+    if (mo || !MO || !de) return;
     mo = new MO(function (recs) { if (metaTouched(recs)) metaDirty = true; soon(); });
-    mo.observe(d.documentElement, {
-      childList: true, subtree: true, attributes: true,
-      attributeFilter: ['class', 'style', 'hidden', 'open', 'content', 'media', 'name']
-    });
+    dom.moObserve(mo, de, moOpts);
   }
   function start() {
     started = true;
-    w.addEventListener('resize', soon);
-    if (d.addEventListener) d.addEventListener('readystatechange', function () { attach(); soon(); });
+    dom.add(w, 'resize', soon);
+    if (dom.docAdd) dom.docAdd(d, 'readystatechange', function () { attach(); soon(); });
     attach();
   }
   port.addEventListener('message', function (e) {
-    var g = go && e && typeof e.data === 'string' ? tc.exec(GO, e.data) : null;
+    // The platform hands the channel's listeners a plain object with its
+    // own `data`, not a MessageEvent; read that as it is (an own property
+    // runs nothing of the page's), and a real event through the getter.
+    var data = null;
+    try { var own = e ? gopd(e, 'data') : null; data = own ? own.value : e ? dom.data(e) : null; } catch (x) {}
+    if (typeof data !== 'string') return;
+    var g = go ? tc.exec(GO, data) : null;
     if (g) {
       if (started && g[1] === T) {
         var a = go.mk(d, 'a');
@@ -900,9 +988,9 @@ internal fun bottomUiDetectorJs(channel: String, debounceMs: Int = BOTTOM_UI_DEB
       }
       return;
     }
-    var m = e && typeof e.data === 'string' ? tc.exec(ASK, e.data) : null;
+    var m = tc.exec(ASK, data);
     if (!m) {
-      var t = e && typeof e.data === 'string' ? tc.exec(THEME_ASK, e.data) : null;
+      var t = tc.exec(THEME_ASK, data);
       if (t && started && t[1] === T) reportTheme();
       return;
     }
