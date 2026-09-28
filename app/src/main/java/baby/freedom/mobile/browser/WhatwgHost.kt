@@ -93,6 +93,16 @@ internal object WhatwgHost {
          */
         fun toUnicode(domain: String): String? = null
 
+        /**
+         * The UTS-46 *mapping* of [domain] (nontransitional: case fold,
+         * NFC, fullwidth → ASCII, `。` → `.`, U+FE0F and other ignored
+         * characters dropped) — the processing half of ToUnicode, with
+         * validation errors (hyphens, bidi, joiners) ignored — or `null`
+         * if a label holds a character UTS-46 disallows outright (ICU
+         * puts U+FFFD there). `null` too where there's no ICU.
+         */
+        fun map(domain: String): String? = null
+
         companion object {
             /** Chromium's `url_idna_icu` options: nontransitional, CheckBidi, (and WHATWG's) CheckJoiners. */
             const val OPTIONS = IDNA.NONTRANSITIONAL_TO_ASCII or IDNA.CHECK_BIDI or IDNA.CHECK_CONTEXTJ
@@ -123,6 +133,12 @@ internal object WhatwgHost {
             idna.nameToUnicode(domain, out, info)
             if (info.hasErrors()) return null
             return out.toString()
+        }
+
+        override fun map(domain: String): String? {
+            val out = StringBuilder()
+            idna.nameToUnicode(domain, out, IDNA.Info())
+            return out.toString().takeIf { '\uFFFD' !in it }
         }
     }
 

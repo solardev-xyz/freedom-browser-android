@@ -4,7 +4,11 @@ import java.util.zip.GZIPInputStream
 import org.json.JSONArray
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
+import org.junit.After
+import org.junit.Before
 import org.junit.Test
+import baby.freedom.mobile.browser.Icu4jUts46
+import baby.freedom.mobile.browser.WhatwgHost
 
 /**
  * The official ENSIP-15 validation vectors, every one of them.
@@ -18,6 +22,13 @@ import org.junit.Test
  * normalize to `norm` (or to itself when `norm` is absent).
  */
 class EnsNormalizeVectorsTest {
+
+    private val uts46Was = WhatwgHost.uts46
+
+    // As on device: a name UTS-46 maps to `.tez` would leave ENSIP-15.
+    @Before fun useIcu4j() { WhatwgHost.uts46 = Icu4jUts46 }
+
+    @After fun restoreUts46() { WhatwgHost.uts46 = uts46Was }
 
     private fun vectors(): JSONArray {
         val stream = javaClass.getResourceAsStream("/ensip15/tests.json.gz")

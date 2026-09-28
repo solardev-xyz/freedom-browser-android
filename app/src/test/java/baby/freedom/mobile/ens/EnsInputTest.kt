@@ -2,9 +2,20 @@ package baby.freedom.mobile.ens
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.After
+import org.junit.Before
 import org.junit.Test
+import baby.freedom.mobile.browser.Icu4jUts46
+import baby.freedom.mobile.browser.WhatwgHost
 
 class EnsInputTest {
+
+    private val uts46Was = WhatwgHost.uts46
+
+    // `.tez` names get UTS-46 (ICU): icu4j here, android.icu on device.
+    @Before fun useIcu4j() { WhatwgHost.uts46 = Icu4jUts46 }
+
+    @After fun restoreUts46() { WhatwgHost.uts46 = uts46Was }
 
     @Test
     fun `bare name parses`() {

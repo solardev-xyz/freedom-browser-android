@@ -5,7 +5,11 @@ import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import org.junit.After
+import org.junit.Before
 import org.junit.Test
+import baby.freedom.mobile.browser.Icu4jUts46
+import baby.freedom.mobile.browser.WhatwgHost
 
 /**
  * ENSIP-15 normalization where the browser uses it: the resolver hashes
@@ -15,6 +19,13 @@ import org.junit.Test
  * `@adraffy/ens-normalize` 1.11.1's output — what desktop computes.
  */
 class EnsNormalizeTest {
+
+    private val uts46Was = WhatwgHost.uts46
+
+    // `.tez` names get UTS-46 (ICU): icu4j here, android.icu on device.
+    @Before fun useIcu4j() { WhatwgHost.uts46 = Icu4jUts46 }
+
+    @After fun restoreUts46() { WhatwgHost.uts46 = uts46Was }
 
     private val rpc = "https://rpc.test/"
 
@@ -186,8 +197,9 @@ class EnsNormalizeTest {
     @Test
     fun `tez names are not ENS - ENSIP-15 neither rewrites nor refuses them`() {
         // Refused by ENSIP-15 (`--` at 3-4, a mid-label `_`, mixed
-        // digits), or mapped by it (decomposed é, fullwidth letter).
-        for (name in listOf("Ab--C.tez", "a_b.tez", "a\u0661b.tez", "cafe\u0301.tez", "ａlice.tez")) {
+        // digits); ASCII ones are only lowercased, and the Unicode one
+        // UTS-46 accepts as-is (bar its bidi check) comes back as typed.
+        for (name in listOf("Ab--C.tez", "a_b.tez", "a\u0661b.tez")) {
             assertEquals(name, name.lowercase(), EnsNormalize.normalizeOrNull(name))
             assertEquals(name, name.lowercase(), EnsNormalize.fastNormalize(name))
             assertTrue(name, EnsNormalize.isFastPath(name))
@@ -195,6 +207,36 @@ class EnsNormalizeTest {
         }
         // An Ethereum name still gets the full pass.
         assertNull(EnsNormalize.normalizeOrNull("a_b.eth"))
+    }
+
+    @Test
+    fun `tez names get Tezos Domains' own UTS-46 normalization`() {
+        // developers.tezos.domains: UTS-46 ToUnicode, nontransitional.
+        // NFC, fullwidth → ASCII, U+FE0F dropped (the form the registry
+        // holds, and the one Chromium leaves in the virtual host).
+        val cases = mapOf(
+            "cafe\u0301.tez" to "caf\u00e9.tez",
+            "ａlice.tez" to "alice.tez",
+            "\u2764\uFE0F.tez" to "\u2764.tez",
+            "\u2764.tez" to "\u2764.tez",
+            "Ⓜ.tez" to "m.tez",
+            // A fullwidth / non-ASCII suffix is still `.tez` (R1-F2):
+            // mapped as Tezos Domains, never ENSIP-15-refused.
+            "cafe\u0301.ｔｅｚ" to "caf\u00e9.tez",
+            "a_b.ｔｅｚ" to "a_b.tez",
+            "ALICE.ＴＥＺ" to "alice.tez",
+            "alice。tez" to "alice.tez",
+        )
+        for ((typed, key) in cases) {
+            assertEquals(typed, key, EnsNormalize.normalizeOrNull(typed))
+            assertEquals(typed, key, EnsNormalize.fastNormalize(typed))
+            assertTrue(typed, EnsNormalize.isFastPath(typed))
+            assertTrue(typed, !EnsNormalize.appliesTo(typed))
+            assertEquals(typed, EnsInput.Parsed(key, "/x"), EnsInput.parse("$typed/x"))
+        }
+        // Not `.tez` after mapping either: ENSIP-15 as before.
+        assertEquals("caf\u00e9.eth", EnsNormalize.normalizeOrNull("cafe\u0301.ｅｔｈ"))
+        assertTrue(EnsNormalize.appliesTo("\u2764\uFE0F.eth"))
     }
 
     @Test

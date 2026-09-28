@@ -4,10 +4,19 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import org.junit.After
+import org.junit.Before
 import org.junit.Test
 import java.util.Random
 
 class VirtualOriginTest {
+
+    private val uts46Was = WhatwgHost.uts46
+
+    // `.tez` names get UTS-46 (ICU): icu4j here, android.icu on device.
+    @Before fun useIcu4j() { WhatwgHost.uts46 = Icu4jUts46 }
+
+    @After fun restoreUts46() { WhatwgHost.uts46 = uts46Was }
 
     private val ref64 = "8f1d385f2493d4bcd4d3b2c1e3c1b8f7d1a09876543210fedcba98765432abcd"
     private val ref128 = ref64 + "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
@@ -441,10 +450,11 @@ class VirtualOriginTest {
     }
 
     @Test
-    fun `a unicode tez name round-trips as typed, without ENSIP-15`() {
-        // ENSIP-15 would refuse this (mixed scripts) and NFC-compose the
-        // other; Tezos Domains isn't ENS, so both stay as they are.
-        for (name in listOf("a\u0661b.tez", "cafe\u0301.tez", "🦊.tez")) {
+    fun `a unicode tez name round-trips in its Tezos Domains form, without ENSIP-15`() {
+        // ENSIP-15 would refuse this (mixed scripts); Tezos Domains isn't
+        // ENS, so it stays as it is. The others are already in the UTS-46
+        // form Tezos Domains keys on (what EnsInput hands over).
+        for (name in listOf("a\u0661b.tez", "caf\u00e9.tez", "🦊.tez", "\u2764.tez")) {
             val host = VirtualOrigin.hostFor(ContentRoot.Ens(name))!!
             assertTrue(host, host.startsWith("xn--"))
             assertEquals(name, ContentRoot.Ens(name), VirtualOrigin.parseHost(host))
@@ -452,6 +462,24 @@ class VirtualOriginTest {
         assertEquals(
             ContentRoot.Ens("a\u0661b.tez") to "",
             VirtualOrigin.parseContentUrl("ens://A%D9%A1b.tez"),
+        )
+    }
+
+    @Test
+    fun `a tez name typed with U+FE0F is the same key in the bar and the virtual host`() {
+        // R1-F1: the emoji keyboard's `❤️.tez` (with U+FE0F). Chromium
+        // drops FE0F from a host, so the name the host decodes back to
+        // must be the one submit resolved — both `❤.tez`.
+        val typed = "\u2764\uFE0F.tez"
+        val submitted = baby.freedom.mobile.ens.EnsInput.parse(typed)!!.name
+        assertEquals("\u2764.tez", submitted)
+        val host = VirtualOrigin.hostFor(ContentRoot.Ens(submitted))!!
+        assertEquals(host, VirtualOrigin.hostFor(ContentRoot.Ens(typed)))
+        assertEquals(ContentRoot.Ens(submitted), VirtualOrigin.parseHost(host))
+        // And via `ens://`, percent-encoded as WebView hands it over.
+        assertEquals(
+            ContentRoot.Ens(submitted) to "",
+            VirtualOrigin.parseContentUrl("ens://%E2%9D%A4%EF%B8%8F.tez"),
         )
     }
 }

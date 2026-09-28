@@ -1,5 +1,6 @@
 package baby.freedom.mobile.ens
 
+import baby.freedom.mobile.browser.WhatwgHost
 import io.github.adraffy.ens.ENSNormalize
 import io.github.adraffy.ens.InvalidLabelException
 
@@ -52,25 +53,57 @@ object EnsNormalize {
 
     /**
      * Is ENSIP-15 the rule for [name]? Not for a Tezos Domains (`.tez`)
-     * name: that registry isn't ENS, keys a name by its own bytes and
-     * has its own label rules, so ENSIP-15 would both rewrite names it
-     * owns (a mapped character → a different key, a different name) and
-     * refuse ones it allows (`ab--c.tez`). A `.tez` name stays lowercased
-     * only, as [TezosDomainsResolver] has always taken it.
+     * name ([tezosForm]): that registry isn't ENS and has its own
+     * normalization, so ENSIP-15 would both rewrite names it owns and
+     * refuse ones it allows (`ab--c.tez`).
      */
-    fun appliesTo(name: String): Boolean = NameSystem.forName(name) != NameSystem.TEZOS
+    fun appliesTo(name: String): Boolean = tezosForm(name) == null
+
+    /**
+     * [name] normalized the way Tezos Domains keys it, or `null` if it
+     * isn't a `.tez` name. Tezos Domains' own rule
+     * (developers.tezos.domains, *Name Resolution*) is UTS-46 ToUnicode,
+     * nontransitional — not ENSIP-15 — so a non-ASCII name gets the
+     * UTS-46 mapping ([WhatwgHost.Uts46.map]): case fold, NFC, fullwidth
+     * → ASCII (`café.ｔｅｚ` is a `.tez` name) and U+FE0F dropped
+     * (`❤️.tez` → `❤.tez`, the only form the registry can hold, and the
+     * one Chromium leaves in the name's virtual host — so the typed name
+     * and the host's name are one key). A pure-ASCII name is only
+     * lowercased, as [TezosDomainsResolver] has always taken it.
+     *
+     * Never refuses: a name Tezos Domains' validation would reject
+     * (`ab--c.tez`, bidi or joiner errors) keeps its mapped form, and one
+     * with a character UTS-46 disallows outright stays lowercased as
+     * typed (less any U+FE0F) — either way the registry answers "not
+     * found".
+     */
+    fun tezosForm(name: String): String? {
+        val lower = name.lowercase()
+        if (lower.all { it.code < 0x80 }) return lower.takeIf { it.endsWith(TEZ) }
+        val mapped = try {
+            WhatwgHost.uts46.map(name)
+        } catch (_: RuntimeException) {
+            null
+        }
+        return mapped?.takeIf { it.endsWith(TEZ) }
+            ?: lower.replace("\uFE0F", "").takeIf { it.endsWith(TEZ) }
+    }
+
+    private const val TEZ = ".tez"
 
     /**
      * Desktop's `fastNormalize` (`src/main/ens-resolver.js`): a name that
      * lowercases to `[a-z0-9.-]` only is taken as-is, anything else gets
-     * the full [normalize]. Throws [InvalidNameException] like [normalize].
+     * the full [normalize]. A `.tez` name gets [tezosForm] instead.
+     * Throws [InvalidNameException] like [normalize].
      */
     fun fastNormalize(name: String): String =
-        if (isFastPath(name)) name.lowercase() else normalize(name)
+        tezosForm(name) ?: if (pureAsciiHost.matches(name.lowercase())) name.lowercase() else normalize(name)
 
     /**
-     * Does [fastNormalize] take [name] as-is (lowercased), without the
-     * spec tables? Also true of every `.tez` name ([appliesTo]).
+     * Does [fastNormalize] get by without the ENSIP-15 spec tables? True
+     * of a name that lowercases to `[a-z0-9.-]` and of every `.tez` name
+     * ([appliesTo]).
      */
     fun isFastPath(name: String): Boolean =
         pureAsciiHost.matches(name.lowercase()) || !appliesTo(name)
@@ -105,10 +138,10 @@ object EnsNormalize {
 
     /**
      * [normalize], or `null` when ENSIP-15 rejects [name]. A `.tez` name
-     * ([appliesTo]) comes back lowercased, never refused.
+     * comes back in its [tezosForm], never refused.
      */
     fun normalizeOrNull(name: String): String? {
-        if (!appliesTo(name)) return name.lowercase()
+        tezosForm(name)?.let { return it }
         return try {
             normalize(name)
         } catch (_: InvalidNameException) {

@@ -21,4 +21,10 @@ object Icu4jUts46 : WhatwgHost.Uts46 {
         if (info.hasErrors()) return null
         return out.toString()
     }
+
+    override fun map(domain: String): String? {
+        val out = StringBuilder()
+        idna.nameToUnicode(domain, out, IDNA.Info())
+        return out.toString().takeIf { '\uFFFD' !in it }
+    }
 }
