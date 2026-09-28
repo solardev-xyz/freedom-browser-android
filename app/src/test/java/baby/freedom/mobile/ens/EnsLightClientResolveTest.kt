@@ -1219,6 +1219,46 @@ class EnsLightClientResolveTest {
     }
 
     @Test
+    fun `established registrations answering slowly but in time can't hold every engine slot`() {
+        // R3-F1: four established registrations whose resolvers take most
+        // of the budget but answer inside it; the page keeps two fresh
+        // subnames per site in flight. None ever outlives its wait, but
+        // once the engine says busy the sites holding a full share are
+        // slow, and the user's own name gets the light client again.
+        val client = SlotClient(lightClientOk) { data -> if (hasLabel(data, "lagging")) 300 else 20 }
+        val http = OneServer { rpcResult(wrapAsOuterInner(ipfsContenthash)) }
+        val r = resolver(client, http, deadlineMs = 400)
+        (1..4).forEach { runBlocking { r.resolveContenthash("x$it.eth") } }
+        val mine = runBlocking { r.resolveContenthash("vitalik.eth") }
+        require(mine is EnsResult.Ok && mine.trust.lightClient) { "got $mine" }
+
+        val stop = java.util.concurrent.atomic.AtomicBoolean(false)
+        val counter = java.util.concurrent.atomic.AtomicInteger()
+        val attackers = (1..4).flatMap { site ->
+            (1..2).map {
+                Thread {
+                    while (!stop.get()) {
+                        runBlocking { r.resolveContenthash("lagging.n${counter.incrementAndGet()}.x$site.eth") }
+                    }
+                }.apply { isDaemon = true; start() }
+            }
+        }
+        Thread.sleep(800)
+        val verified = (1..10).count {
+            val result = runBlocking { r.resolveContenthash("vitalik.eth") }
+            require(result is EnsResult.Ok) { "got $result" }
+            Thread.sleep(50)
+            result.trust.lightClient
+        }
+        stop.set(true)
+        attackers.forEach { it.join(3_000) }
+        assertTrue("user lookups on the light client: $verified of 10", verified >= 9)
+        assertTrue("some site marked slow", (1..4).any { r.lightClientSlowSite("x$it.eth") })
+        assertFalse(r.lightClientSlowSite("vitalik.eth"))
+        client.awaitIdle(3_000)
+    }
+
+    @Test
     fun `parse reads the engine's eth_call shapes`() {
         assertEquals(
             EnsLightClient.Call.Ok("0xabcd", 123L),

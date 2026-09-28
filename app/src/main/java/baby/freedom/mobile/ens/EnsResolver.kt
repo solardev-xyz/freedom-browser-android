@@ -104,7 +104,8 @@ import org.json.JSONObject
  * engine returns; those are charged to the name's site ([siteOf]),
  * which may hold at most [LIGHT_CLIENT_CALLS_PER_SITE] engine calls at
  * once — one page's slow names can't take every slot — and a site whose
- * call outlived its lookup shares [LIGHT_CLIENT_SLOW_CALLS] slots with
+ * call outlived its lookup, or that held its full share when the engine
+ * said `busy`, shares [LIGHT_CLIENT_SLOW_CALLS] slots with
  * every other such site for a while, so several registrations can't
  * either; nor can a wave of fresh ones, which with the slow sites share
  * [LIGHT_CLIENT_FRESH_CALLS] slots until they've answered in time for a
@@ -253,8 +254,10 @@ class EnsResolver internal constructor(
 
     /**
      * Sites whose light-client call outlived the lookup that made it (it
-     * was still in the engine when the lookup gave up), and when that
-     * last happened; guarded by [lightClientHeld]. The per-site cap
+     * was still in the engine when the lookup gave up), or that held a
+     * full per-site share when the engine said `busy`
+     * ([markCrowdingSites]), and when that last happened; guarded by
+     * [lightClientHeld]. The per-site cap
      * bounds one registration, not one page: a page can load slow names
      * from several registrations, 2 slots each, and fill every lookup
      * slot. So for [LIGHT_CLIENT_SLOW_SITE_MS] after, every such site
@@ -317,6 +320,21 @@ class EnsResolver internal constructor(
             while (lightClientSlowSites.size > LIGHT_CLIENT_SLOW_SITES_MAX) {
                 lightClientSlowSites.remove(lightClientSlowSites.keys.first())
             }
+        }
+    }
+
+    /**
+     * Mark every site holding a full [LIGHT_CLIENT_CALLS_PER_SITE] share
+     * of [lightClientHeld] slow ([lightClientSlowSites]) — called when the
+     * engine says `busy`. A call that outlives its wait isn't the only way
+     * to pin the engine: established registrations whose resolvers answer
+     * slowly but in time, a fresh subname after each, can hold every slot
+     * without one ever doing so. Holding a full share while the engine is
+     * full is what that looks like, whatever each call's own duration.
+     */
+    private fun markCrowdingSites() {
+        synchronized(lightClientHeld) {
+            lightClientHeld.filterValues { it >= LIGHT_CLIENT_CALLS_PER_SITE }.keys.forEach(::markSlowSite)
         }
     }
 
@@ -889,6 +907,15 @@ class EnsResolver internal constructor(
             val release = { if (inEngine.compareAndSet(true, false)) slot() }
             val answer = budget.engine { client.ethCall(to, "0x" + data.toHex(), left, released = release) }
             if (answer is EnsLightClient.Call.Unavailable && answer.timedOut && inEngine.get()) markSlowSite(site)
+            // Every engine slot taken: whoever holds a full share of them
+            // right now is crowding the rest out, however quickly each of
+            // its calls answers, and joins the slow sites. This call's own
+            // slot is let go of first, so a site asking for its second is
+            // never the one marked for it.
+            if (answer is EnsLightClient.Call.Unavailable && answer.busy && capped) {
+                release()
+                markCrowdingSites()
+            }
             // An answer from a light client that has since stopped or
             // restarted isn't one this lookup's epoch vouches for.
             if (client.readyGeneration() != generation) throw LightClientMiss("light client availability changed")
