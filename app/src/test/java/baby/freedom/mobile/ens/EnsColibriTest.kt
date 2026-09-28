@@ -441,4 +441,18 @@ class EnsColibriTest {
         assertEquals(rpcs, colibri.serversFor(JSONObject().put("type", "eth_rpc"), rpcs))
         assertEquals(rpcs, colibri.serversFor(JSONObject(), rpcs))
     }
+
+    @Test
+    fun `an onion eth_rpc goes through TorRouting and is refused without Tor, never dialled`() {
+        // Tor isn't running in a unit test: TorRouting refuses the onion
+        // before any DNS lookup or connection (#143).
+        val onion = "http://" + "a".repeat(56) + ".onion/"
+        var opened = 0
+        try {
+            EnsColibri.Http.Default.request("POST", onion, emptyMap(), ByteArray(1)) { opened++ }
+            fail("reached $onion")
+        } catch (_: baby.freedom.mobile.browser.TorRouting.RefusedException) {
+        }
+        assertEquals(0, opened)
+    }
 }
