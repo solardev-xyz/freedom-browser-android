@@ -265,4 +265,47 @@ class AdblockPageTest {
         normalised.answered("https://ads.example/x", replacesDocument = true, fetchedByWebView = true)
         assertEquals("$b?", normalised.current(referer = "https://ads.example/"))
     }
+
+    @Test
+    fun `a service worker's page adopts the frames it requested before its commit`() {
+        val sw = "http://localhost:8712/a"
+        val embed = "http://10-0-2-2.nip.io:8711/embed"
+        val nested = "https://ads.example/inner"
+        val dest = "http://10-0-2-2.nip.io:8711/stall"
+        // A reload the SW answers: no answer reaches the interceptor, and
+        // the frame's own request lands before onPageStarted.
+        val page = AdblockPage().apply { committed(sw) }
+        page.frameRequested(embed, referer = "http://localhost:8712/")
+        page.frameRequested(nested, referer = "http://10-0-2-2.nip.io:8711/")
+        page.committed(sw)
+        page.answered(dest, replacesDocument = true, fetchedByWebView = true)
+        assertEquals(sw, page.current(referer = "http://10-0-2-2.nip.io:8711/"))
+        assertEquals(sw, page.current(referer = "https://ads.example/"))
+
+        // A link the SW answers, to another page of its site.
+        val link = AdblockPage().apply { committed("http://localhost:8712/start") }
+        link.frameRequested(embed, referer = "http://localhost:8712/")
+        link.committed(sw)
+        link.answered(dest, replacesDocument = true, fetchedByWebView = true)
+        assertEquals(sw, link.current(referer = "http://10-0-2-2.nip.io:8711/"))
+    }
+
+    @Test
+    fun `a page restored from the back-forward cache doesn't adopt the outgoing page's frames`() {
+        val back = "https://p.example/"
+        val page = onA()
+        page.frameRequested("https://ads.example/frame", referer = a)
+        page.committed(back)
+        page.answered("https://ads.example/x", replacesDocument = true, fetchedByWebView = true)
+        assertEquals("https://ads.example/x", page.current(referer = "https://ads.example/"))
+
+        // Nor frames from before an answered navigation.
+        val answered = onA()
+        answered.frameRequested("https://ads.example/frame", referer = a)
+        answered.answered(b, replacesDocument = true)
+        answered.committed(b)
+        answered.committed(a)
+        answered.answered("https://ads.example/x", replacesDocument = true, fetchedByWebView = true)
+        assertEquals("https://ads.example/x", answered.current(referer = "https://ads.example/"))
+    }
 }

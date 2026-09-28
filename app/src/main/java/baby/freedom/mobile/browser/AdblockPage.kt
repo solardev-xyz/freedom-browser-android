@@ -58,6 +58,18 @@ package baby.freedom.mobile.browser
  * its origin) adopts the held frames; a Back restored from the
  * back/forward cache while a link loads doesn't.
  *
+ * A page a service worker answers never goes through [answered] (its
+ * main-frame request doesn't reach the interceptor), so nothing is
+ * pending while it loads, and the frames it requests before its commit
+ * reaches the UI thread look like the page on screen's (R5-F1 of the
+ * R10 round). So a frame document requested while no navigation is
+ * pending is also held with its `Referer` ([unansweredFrames]); a commit
+ * no answer announced adopts those whose `Referer` names the committed
+ * page (its URL or its origin) or a frame already adopted — the
+ * committed page's own frames (and theirs), but not the outgoing page's
+ * on another site, which a Back restored from the back/forward cache
+ * would otherwise inherit.
+ *
  * A navigation that never commits — it became a download, a 204, a hop
  * cancelled as a link to another app, a Stop — leaves the page on screen
  * as it was ([kept]), so the page's later requests are judged against
@@ -83,6 +95,13 @@ internal class AdblockPage {
      * committed, oldest first: [frameUrls] from its commit on.
      */
     private val pendingFrames = LinkedHashSet<String>()
+
+    /**
+     * Frame document → its `Referer`, for frames requested while no
+     * navigation was pending, oldest first: a page answered without the
+     * interceptor (a service worker's) may have requested them.
+     */
+    private val unansweredFrames = LinkedHashMap<String, String>()
 
     /**
      * The page a subresource request now is judged against; [referer] is
@@ -128,6 +147,14 @@ internal class AdblockPage {
             return
         }
         rememberFrame(url)
+        if (destination == null && referer != null) {
+            val document = withoutFragment(url)
+            unansweredFrames.remove(document)
+            unansweredFrames[document] = referer
+            if (unansweredFrames.size > MAX_FRAMES) {
+                unansweredFrames.remove(unansweredFrames.keys.first())
+            }
+        }
         // A bare origin that is the destination's but can't be told for
         // it — the page on screen (a same-site link, a reload) or one of
         // its frames has that origin too — may be either page's frame
@@ -189,6 +216,7 @@ internal class AdblockPage {
         // A new document is on its way: frames the one it supersedes
         // loaded won't be on screen.
         pendingFrames.clear()
+        unansweredFrames.clear()
         if (fetchedByWebView) {
             fetching = url
             incoming = null
@@ -238,6 +266,20 @@ internal class AdblockPage {
             pendingFrames.forEach(::rememberFrame)
         }
         pendingFrames.clear()
+        // A commit no answer announced (a service worker's page): its
+        // frames requested before the commit got here, known by a
+        // referrer naming it or one of its frames — in request order, so
+        // a frame's parent comes first.
+        if (pending == null && url != null) {
+            for ((frame, referer) in unansweredFrames) {
+                if (isSameNavigation(url, referer) || withoutFragment(referer) in frameUrls ||
+                    isBareOrigin(referer) && originOf(referer) in frameOrigins
+                ) {
+                    rememberFrame(frame)
+                }
+            }
+        }
+        unansweredFrames.clear()
     }
 
     private companion object {
