@@ -63,12 +63,14 @@ source .envrc   # if you haven't: cp .envrc.example .envrc && edit to taste
 #    Needs cargo-ndk and ANDROID_NDK_HOME; rustup picks the toolchain from
 #    the repo's rust-toolchain.toml.
 #    Use the FFI_REF tag pinned in release.yml, with ant's `chain` feature
-#    on (see "Building libfreedom_mobile_ffi.so" below).
-git clone --branch v0.12.1 https://github.com/solardev-xyz/freedom-mobile-ffi.git /tmp/freedom-mobile-ffi
-scripts/enable-ffi-chain.sh /tmp/freedom-mobile-ffi
-( cd /tmp/freedom-mobile-ffi && ./scripts/build-android.sh )
-mkdir -p swarmnode/src/main/jniLibs
-cp -r /tmp/freedom-mobile-ffi/target/android/jniLibs/. swarmnode/src/main/jniLibs/
+#    on (see "Building libfreedom_mobile_ffi.so" below). Chained with && so
+#    a failed step (e.g. enable-ffi-chain.sh rejecting a reshaped cargo
+#    call) stops before a chain-less .so is built or copied.
+git clone --branch v0.12.1 https://github.com/solardev-xyz/freedom-mobile-ffi.git /tmp/freedom-mobile-ffi &&
+  scripts/enable-ffi-chain.sh /tmp/freedom-mobile-ffi &&
+  ( cd /tmp/freedom-mobile-ffi && ./scripts/build-android.sh ) &&
+  mkdir -p swarmnode/src/main/jniLibs &&
+  cp -r /tmp/freedom-mobile-ffi/target/android/jniLibs/. swarmnode/src/main/jniLibs/
 
 # 3. Build the debug APK.
 ./gradlew :app:assembleDebug
