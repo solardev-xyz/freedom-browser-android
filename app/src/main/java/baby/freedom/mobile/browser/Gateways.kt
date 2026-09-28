@@ -340,9 +340,11 @@ object Gateways {
         is ContentRoot.IpnsName -> ipfsBase.ifEmpty { null }?.let { "$it/ipns/${root.name}$pathAndQuery" }
         is ContentRoot.Ens ->
             ((page?.uriFor(root.name) ?: pins?.uriFor(root.name))
-                ?.let { VirtualOrigin.parseContentUrl(it)?.first }
-                ?: resolveEnsRoot(root.name))
-                ?.let { gatewayUrlFor(it, pathAndQuery) }
+                ?.let { VirtualOrigin.parseContentUrl(it) }
+                ?: resolveEnsContent(root.name))
+                // A `.tez` website record may publish a base path
+                // (`ipfs://<cid>/site`); ENS contenthashes never carry one.
+                ?.let { (target, basePath) -> gatewayUrlFor(target, basePath.trimEnd('/') + pathAndQuery) }
     }
 
     /**
@@ -356,19 +358,26 @@ object Gateways {
      * uses the resolver's own TTL cache after the first call. Blocking
      * is fine — the interceptor never runs on the UI thread.
      */
-    internal fun resolveEnsRoot(name: String): ContentRoot? {
+    internal fun resolveEnsRoot(name: String): ContentRoot? = resolveEnsContent(name)?.first
+
+    /** [resolveEnsRoot] plus the base path the resolved URI carries (`""` for ENS). */
+    private fun resolveEnsContent(name: String): Pair<ContentRoot, String>? {
         KnownEnsNames.uriFor(name)?.let { uri ->
-            VirtualOrigin.parseContentUrl(uri)?.let { return it.first }
+            VirtualOrigin.parseContentUrl(uri)?.let { return it }
         }
         val result = ensLookup(name)
         // One server's word isn't served unasked (#96); the submit flow
         // records what the user let through.
         if (result is EnsResult.Ok && result.trust.verified) {
+            val content = VirtualOrigin.parseContentUrl(result.uri) ?: return null
             KnownEnsNames.record(result.uri, name)
-            return VirtualOrigin.parseContentUrl(result.uri)?.first
+            return content
         }
         return null
     }
+
+    /** [reverifyEnsDocument]'s answer for a `.tez` name whose website is now on the web. */
+    const val ENS_WEB_RECORD = "ens_web_record"
 
     /**
      * Resolve [name] again for a document on its `<name>.ens.…` host
@@ -427,11 +436,19 @@ object Gateways {
      * answers, so neither the address bar's protocol badge / hash-to-name
      * mapping nor a later failed lookup describes content the name no
      * longer points at. Pages already on screen keep their own pins.
+     *
+     * A `.tez` name whose website record is now on the ordinary web
+     * (`http(s)`) returns [ENS_WEB_RECORD] after handing the answer to
+     * [onWebRecord]: the document can't be served on the name's origin,
+     * so the caller sends the frame there instead. An unverified one is
+     * refused like any other (`ens_unverified`) unless the typed flow
+     * already let it through.
      */
     fun reverifyEnsDocument(
         name: String,
         pins: EnsDocumentPins? = null,
         page: EnsDocumentPins.Page? = null,
+        onWebRecord: (EnsResult.Ok) -> Unit = {},
     ): String? {
         val key = name.lowercase()
         val last = (pins?.lastAnswerFor(name) ?: KnownEnsNames.uriFor(name))
@@ -461,7 +478,8 @@ object Gateways {
             if (!trust.verified && last != null) "ens_unverified" else gone(code)
         return when (result) {
             is EnsResult.Ok -> {
-                if (VirtualOrigin.parseContentUrl(result.uri) == null) {
+                val web = result.protocol == "http" || result.protocol == "https"
+                if (!web && VirtualOrigin.parseContentUrl(result.uri) == null) {
                     noContent("ens_unsupported_codec", result.trust)
                 } else if (!result.trust.verified &&
                     result.uri != pins?.lastAnswerFor(name) &&
@@ -471,6 +489,12 @@ object Gateways {
                     // tab or the session already had — cross-checked
                     // then, or let through by the user (#96).
                     "ens_unverified"
+                } else if (web) {
+                    // A `.tez` website on the ordinary web: not content
+                    // this origin serves, so drop the old root, as for any
+                    // answer that no longer loads here.
+                    onWebRecord(result)
+                    gone(ENS_WEB_RECORD)
                 } else {
                     KnownEnsNames.record(result.uri, name)
                     pins?.pin(name, result.uri, page)

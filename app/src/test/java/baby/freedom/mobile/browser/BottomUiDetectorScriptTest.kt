@@ -865,4 +865,80 @@ class BottomUiDetectorScriptTest {
         // Not one of the page's functions saw either read.
         assertEquals("", Context.toString(eval("Function.prototype.call = realCall; seen.join(',')")))
     }
+
+    // A page's re-issue of its own navigation (#180, R5-F3).
+
+    private val anchors = """
+        function HTMLElement() {}
+        HTMLElement.prototype.click = function () { clicked.push({ href: this._href, policy: this._policy, target: this._target, connected: false }); };
+        function HTMLAnchorElement() {}
+        HTMLAnchorElement.prototype = Object.create(HTMLElement.prototype);
+        ['href', 'referrerPolicy', 'target'].forEach(function (n) {
+          Object.defineProperty(HTMLAnchorElement.prototype, n, { configurable: true,
+            get: function () { return this['_' + ({ href: 'href', referrerPolicy: 'policy', target: 'target' })[n]]; },
+            set: function (v) { this['_' + ({ href: 'href', referrerPolicy: 'policy', target: 'target' })[n]] = v; } });
+        });
+        var clicked = [];
+        var fakeCreate = document.createElement;
+        document.createElement = function (t) { return t === 'a' ? new HTMLAnchorElement() : fakeCreate(t); };
+    """
+
+    @Test
+    fun `Kotlin's re-issue ask clicks a detached link, with the current token only`() = page {
+        eval(anchors)
+        eval("hit = tab")
+        documentStart()
+        val ask = pageReissueRequest(token, "http://127.0.0.1:8700/meet?x=1")!!
+        // Before the start at first paint: nothing.
+        eval("kotlinSays('$ask')")
+        assertEquals(0, num("clicked.length"))
+        firstPaint()
+        eval("kotlinSays('$ask')")
+        assertEquals(1, num("clicked.length"))
+        assertEquals(
+            "http://127.0.0.1:8700/meet?x=1 origin _self",
+            Context.toString(eval("[clicked[0].href, clicked[0].policy, clicked[0].target].join(' ')")),
+        )
+        // Another document's token, or a non-http address: nothing.
+        eval("kotlinSays('${pageReissueRequest("ffff", "http://127.0.0.1:8700/meet")}')")
+        eval("kotlinSays('go $token javascript:alert(1)')")
+        assertEquals(1, num("clicked.length"))
+        // Nor is anything posted back for it.
+        assertEquals(1, sent)
+    }
+
+    @Test
+    fun `the re-issue goes only through functions saved at document start`() = page {
+        eval(anchors)
+        eval("hit = tab")
+        documentStart()
+        // Then the page wraps everything the re-issue uses.
+        eval(
+            """
+            var seen = [];
+            function spy(o, n) { var f = o[n]; o[n] = function () { seen.push(n); return f.apply(this, arguments); }; }
+            spy(document, 'createElement'); spy(HTMLElement.prototype, 'click'); spy(RegExp.prototype, 'exec');
+            ['href', 'referrerPolicy', 'target'].forEach(function (n) {
+              Object.defineProperty(HTMLAnchorElement.prototype, n, { configurable: true,
+                get: function () { seen.push('get ' + n); }, set: function () { seen.push('set ' + n); } });
+            });
+            var realCall = Function.prototype.call;
+            Function.prototype.call = function () { seen.push('call'); return realCall.apply(this, arguments); };
+            """,
+        )
+        firstPaint()
+        eval("seen = []")
+        eval("kotlinSays('${pageReissueRequest(token, "http://127.0.0.1:8700/meet")}')")
+        assertEquals("http://127.0.0.1:8700/meet", Context.toString(eval("clicked[clicked.length - 1].href")))
+        assertEquals("", Context.toString(eval("Function.prototype.call = realCall; seen.join(',')")))
+    }
+
+    @Test
+    fun `without the natives it needs, there is no re-issue`() = page {
+        // No HTMLAnchorElement: nothing to build the link from untouched.
+        eval("hit = tab")
+        install()
+        eval("kotlinSays('${pageReissueRequest(token, "http://127.0.0.1:8700/meet")}')")
+        assertEquals(1, sent)
+    }
 }

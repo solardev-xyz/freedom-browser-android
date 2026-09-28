@@ -77,7 +77,10 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import baby.freedom.mobile.R
+import baby.freedom.mobile.chains.Chain
+import baby.freedom.mobile.chains.BuiltInChains
 import baby.freedom.mobile.data.BrowsingRepository
+import baby.freedom.mobile.data.ChainStore
 import baby.freedom.mobile.data.NodeSettings
 import baby.freedom.mobile.ui.isLight
 import baby.freedom.swarm.IpfsInfo
@@ -106,8 +109,12 @@ import kotlinx.coroutines.launch
  *     user runs (#125, [ExternalEndpoints]). The IPFS row shows only
  *     while advanced options are on, or once an external gateway is
  *     set — its unverified warning must stay in view while it's in use.
- *  4. **About** — app name, version, package, and a short blurb.
- *  5. **Other** — a single "Show advanced options" row. Tapping it
+ *  4. **Chains** — Ethereum, Gnosis and Base, plus the user's custom
+ *     chains, added from a chainlist.org search or by hand (#107, see
+ *     [ChainsSection]). Its Add chain pages and each chain's page (its own
+ *     RPCs and how reads are checked, #108) replace the list while open.
+ *  5. **About** — app name, version, package, and a short blurb.
+ *  6. **Other** — a single "Show advanced options" row. Tapping it
  *     flips [NodeSettings.showIpfsUi] on, which reveals an "IPFS node
  *     (experimental)" card below (status, peers, gateway URL, and
  *     routing preferences). This gate exists so IPFS support stays a
@@ -163,6 +170,14 @@ fun SettingsScreen(
     val permissionEntries by remember(sitePermissions) { sitePermissions.entries }
         .collectAsState(initial = emptyList())
 
+    val chainStore = remember(context) { ChainStore.get(context) }
+    val chains by remember(chainStore) { chainStore.chains }
+        .collectAsState(initial = BuiltInChains.ALL)
+    var chainPage by remember { mutableStateOf<ChainPage?>(null) }
+    var chainQuery by rememberSaveable { mutableStateOf("") }
+    var confirmRemoveChain by remember { mutableStateOf<Chain?>(null) }
+    var removeChainFailed by remember { mutableStateOf<Chain?>(null) }
+
     val scope = rememberCoroutineScope()
     val appVersion = remember(context) { appVersionLabel(context) }
 
@@ -185,6 +200,7 @@ fun SettingsScreen(
     val nodeRows = visibleSettingsRows(
         query, SECTION_NODES, nodeRows(externalSwarm, externalIpfs, showIpfsUi),
     )
+    val chainRows = visibleSettingsRows(query, SECTION_CHAINS, chainSettingsRows(chains))
     val aboutRows = visibleSettingsRows(
         query, SECTION_ABOUT, aboutRows(appVersion, context.packageName),
     )
@@ -193,7 +209,8 @@ fun SettingsScreen(
         visibleSettingsRows(query, SECTION_IPFS, ipfsRows(ipfsInfo))
     } else emptySet()
     val nothingMatches = listOf(
-        searchRows, adblockRows, browsingRows, permissionRows, nodeRows, aboutRows, otherRows, ipfsRows,
+        searchRows, adblockRows, browsingRows, permissionRows, nodeRows, chainRows, aboutRows,
+        otherRows, ipfsRows,
     ).all { it.isEmpty() }
 
     // A new query starts the results from the top, so the first match
@@ -203,7 +220,44 @@ fun SettingsScreen(
         snapshotFlow { query }.drop(1).collect { listState.scrollToItem(0) }
     }
 
-    FullScreenScaffold(
+    // The Chains sub-pages stand in for the list while open; everything
+    // above stays composed, so Back lands on the list as it was left.
+    when (val page = chainPage) {
+        ChainPage.Search -> ChainlistPage(
+            query = chainQuery,
+            onQueryChange = { chainQuery = it },
+            existingIds = chains.mapTo(HashSet()) { it.id },
+            onPick = { chainPage = ChainPage.Form(it.toChain()) },
+            onManual = { chainPage = ChainPage.Form(null) },
+            onBack = { chainPage = null },
+        )
+        is ChainPage.Form -> AddChainPage(
+            prefill = page.prefill,
+            onAdd = chainStore::add,
+            onAdded = {
+                chainPage = null
+                chainQuery = ""
+            },
+            onBack = { chainPage = if (page.prefill != null) ChainPage.Search else null },
+        )
+        is ChainPage.Detail -> {
+            val chain = chains.firstOrNull { it.id == page.chainId }
+            if (chain != null) {
+                ChainDetailPage(
+                    chain = chain,
+                    onAddRpc = { chainStore.addUserRpc(chain.id, it) },
+                    onRemoveRpc = { chainStore.removeUserRpc(chain.id, it) },
+                    onRemove = { confirmRemoveChain = chain },
+                    onBack = { chainPage = null },
+                )
+            } else {
+                // Removed (from this page's Remove): back to the list.
+                LaunchedEffect(page) { chainPage = null }
+            }
+        }
+        null -> Unit
+    }
+    if (chainPage == null) FullScreenScaffold(
         title = "Settings",
         onDismiss = onDismiss,
     ) {
@@ -269,6 +323,15 @@ fun SettingsScreen(
                         onEdit = { editEndpoint = it },
                     )
                 }
+                if (chainRows.isNotEmpty()) item("chains") {
+                    ChainsSection(
+                        visible = chainRows,
+                        chains = chains,
+                        onOpen = { chainPage = ChainPage.Detail(it.id) },
+                        onRemove = { confirmRemoveChain = it },
+                        onAdd = { chainPage = ChainPage.Search },
+                    )
+                }
                 if (aboutRows.isNotEmpty()) item("about") {
                     AboutSection(visible = aboutRows, version = appVersion)
                 }
@@ -331,6 +394,33 @@ fun SettingsScreen(
             onDismiss = { editEndpoint = null },
         )
     }
+    confirmRemoveChain?.let { chain ->
+        ConfirmDialog(
+            title = "Remove ${chain.name}?",
+            message = "Removes chain ${chain.id} and its RPC endpoints from this device. " +
+                "You can add it again later.",
+            confirmLabel = "Remove",
+            onConfirm = {
+                scope.launch {
+                    if (chainStore.remove(chain.id) == ChainStore.RemoveResult.FAILED) {
+                        removeChainFailed = chain
+                    }
+                }
+                confirmRemoveChain = null
+            },
+            onDismiss = { confirmRemoveChain = null },
+        )
+    }
+    removeChainFailed?.let { chain ->
+        AlertDialog(
+            onDismissRequest = { removeChainFailed = null },
+            title = { Text("Couldn't remove ${chain.name}") },
+            text = { Text("Chain ${chain.id} is still on this device. Try again.") },
+            confirmButton = {
+                TextButton(onClick = { removeChainFailed = null }) { Text("OK") }
+            },
+        )
+    }
     if (addAllowlistSite) {
         AllowlistSiteDialog(
             onAdd = { site ->
@@ -368,7 +458,7 @@ fun SettingsScreen(
     if (confirmClearSiteData) {
         ConfirmDialog(
             title = "Clear cookies and site data?",
-            message = "Signs you out of most sites and wipes cached page data, cookies, form autofill and remembered page zoom levels from every open tab.",
+            message = "Signs you out of most sites and wipes cached page data, cookies, form autofill, remembered page zoom levels and desktop-site choices from every open tab.",
             confirmLabel = "Clear site data",
             onConfirm = {
                 onClearWebViewData()
@@ -1076,7 +1166,7 @@ private fun AllowlistSiteDialog(onAdd: (String) -> Unit, onDismiss: () -> Unit) 
 private const val ROW_CLEAR_HISTORY = "Clear history"
 private const val ROW_CLEAR_BOOKMARKS = "Clear bookmarks"
 private const val ROW_CLEAR_SITE_DATA = "Clear cookies & site data"
-private const val ROW_CLEAR_SITE_DATA_SUBTITLE = "Cookies, DOM storage, cache, form data, and zoom levels"
+private const val ROW_CLEAR_SITE_DATA_SUBTITLE = "Cookies, DOM storage, cache, form data, zoom levels, and desktop sites"
 
 private fun historySubtitle(count: Int) =
     if (count == 0) "Nothing to clear" else "$count visit${if (count == 1) "" else "s"}"
@@ -1084,7 +1174,7 @@ private fun historySubtitle(count: Int) =
 private fun bookmarksSubtitle(count: Int) =
     if (count == 0) "Nothing to clear" else "$count bookmark${if (count == 1) "" else "s"}"
 
-private fun browsingDataRows(historyCount: Int, bookmarkCount: Int) = listOf(
+internal fun browsingDataRows(historyCount: Int, bookmarkCount: Int) = listOf(
     settingsRow("history", ROW_CLEAR_HISTORY, historySubtitle(historyCount)),
     settingsRow("bookmarks", ROW_CLEAR_BOOKMARKS, bookmarksSubtitle(bookmarkCount)),
     settingsRow("site-data", ROW_CLEAR_SITE_DATA, ROW_CLEAR_SITE_DATA_SUBTITLE),

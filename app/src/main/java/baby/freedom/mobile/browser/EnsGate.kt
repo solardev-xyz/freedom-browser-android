@@ -88,6 +88,7 @@ internal class EnsGate(
                 when (result.subject) {
                     EnsResult.Conflict.Subject.RECORD -> "Answers at block $block:"
                     EnsResult.Conflict.Subject.BLOCK -> "Hashes reported for block $block:"
+                    EnsResult.Conflict.Subject.HEAD -> "Chain heads reported:"
                 },
             )
             for (group in result.groups) {

@@ -76,12 +76,16 @@ import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.lerp
+import androidx.lifecycle.createSavedStateHandle
+import androidx.lifecycle.viewmodel.compose.viewModel
 import baby.freedom.mobile.data.BrowsingRepository
 import baby.freedom.mobile.ui.PrivateTheme
 import baby.freedom.mobile.data.NodeSettings
 import baby.freedom.mobile.ens.EnsInput
 import baby.freedom.mobile.ens.EnsResult
+import baby.freedom.mobile.ens.TezosDomainsResolver
 import baby.freedom.swarm.IpfsInfo
+import baby.freedom.swarm.MyotisInfo
 import baby.freedom.swarm.IpfsStatus
 import baby.freedom.swarm.NodeInfo
 import baby.freedom.swarm.NodeStatus
@@ -396,6 +400,9 @@ fun BrowserScreen(
     ipfsInfo: IpfsInfo,
     runNodeEnabled: Boolean,
     onToggleRunNode: (Boolean) -> Unit,
+    myotisInfo: MyotisInfo = MyotisInfo(),
+    myotisEnabled: Boolean = false,
+    onToggleMyotis: (Boolean) -> Unit = {},
     onEnsureIpfsStarted: () -> Unit,
     onIpfsToggle: (Boolean) -> Unit,
     initialUrl: String = HOME_URL,
@@ -406,13 +413,16 @@ fun BrowserScreen(
     ipfsCounters: () -> LongArray? = { null },
     onStatusBarTint: (Int?) -> Unit = {},
 ) {
-    val tabs = remember { TabsState(homepage = initialUrl) }
+    // Outside composition, so the tabs survive an Activity relaunch
+    // (#183, see [TabsSession]).
+    val tabs = viewModel { TabsSession(initialUrl, createSavedStateHandle()) }.tabs
     // Shared with the request interceptor (which resolves
     // `<name>.ens.…` virtual hosts) so both sides use one cache.
     val ensResolver = Gateways.ensResolver
     val gatewayProbe = remember { GatewayProbe() }
     val context = LocalContext.current
     val pageZoom = remember(context) { PageZoom.get(context) }
+    val desktopSites = remember(context) { DesktopSites.get(context) }
     val repo = remember(context) { BrowsingRepository.get(context) }
     // The search engine chosen in Settings (#87). Read at submit time
     // through the State, so a change in Settings applies to the next
@@ -434,14 +444,6 @@ fun BrowserScreen(
     var showHistory by rememberSaveable { mutableStateOf(false) }
     var showBookmarks by rememberSaveable { mutableStateOf(false) }
     var showDownloads by rememberSaveable { mutableStateOf(false) }
-    // Intentionally NOT `rememberSaveable`: rotation and the other
-    // declared `configChanges` don't recreate the Activity (see the
-    // manifest), but process death or an undeclared config change still
-    // does. In that case `tabs` is rebuilt as a fresh blank tab and we
-    // need to re-submit the homepage into it. If this survived
-    // recreation the load would be suppressed and the tab would render
-    // blank.
-    var didInitialLoad by remember { mutableStateOf(false) }
     var addressFocused by remember { mutableStateOf(false) }
     // Suggestions should only appear once the user has actively changed
     // the address-bar text. Tapping the pill (which select-alls the
@@ -456,6 +458,7 @@ fun BrowserScreen(
     // text lives here until it is submitted.
     var addressQuery by remember { mutableStateOf("") }
     val snackbarHostState = remember { SnackbarHostState() }
+
     val sitePermissions = remember(context) { SitePermissionBroker.get(context) }
     SitePermissionAndroidBridge(sitePermissions, snackbarHostState)
     // Any full-screen panel over the browser (they're all opaque).
@@ -631,7 +634,7 @@ fun BrowserScreen(
             BackAction.History -> {
                 // A navigation of its own (#94, see [BrowserState.loadGeneration]).
                 state.beginLoad()
-                state.loadUrl("javascript:history.back();void(0);")
+                state.loadUrl(HISTORY_BACK_JS)
             }
             BackAction.Home -> {
                 state.cancelPendingProbe()
@@ -822,6 +825,8 @@ fun BrowserScreen(
         // lifts a download block a declined offer left on it
         // ([DownloadOffers]); a page's own navigation doesn't.
         if (source == SubmitSource.User) downloads.allowOffers(target.id)
+        // Nor is it a load a restore put back over its page (#185 R4-F1).
+        if (source == SubmitSource.User) target.userNavigated()
         // And the load it schedules is theirs: its redirects may end in
         // an app link without a tap on a page (#173). Handed to that
         // load's own `loadUrl` below, never left for whichever load
@@ -918,11 +923,14 @@ fun BrowserScreen(
                             )
                         }
                         is EnsResult.Ok -> {
+                            val webRecord = result.protocol == "http" || result.protocol == "https"
                             // Remember hash/cid → name for the whole session
                             // (cross-tab address-bar preservation). Safe for
                             // every protocol — bzz, ipfs, and ipns all round-
-                            // trip through [Gateways] + [DisplayUrl] now.
-                            KnownEnsNames.record(result.uri, name)
+                            // trip through [Gateways] + [DisplayUrl] now. A
+                            // `.tez` name's http(s) website is not content
+                            // the name's origin serves, so it isn't recorded.
+                            if (!webRecord) KnownEnsNames.record(result.uri, name)
                             if (requiredProtocol != null && result.protocol != requiredProtocol) {
                                 // Retry with the generic ens:// form: the
                                 // same constrained URL would fail forever,
@@ -933,6 +941,21 @@ fun BrowserScreen(
                                         "not $requiredProtocol://",
                                     retryUrl = "ens://$name$suffix",
                                 )
+                            } else if (webRecord) {
+                                // A `.tez` website record on the ordinary
+                                // web: navigate there directly, as desktop
+                                // does. A redirect record is the whole
+                                // destination; a content URL keeps the
+                                // typed path.
+                                val web = if (result.redirect) {
+                                    result.uri
+                                } else {
+                                    TezosDomainsResolver.appendWebsiteSuffix(result.uri, suffix)
+                                }
+                                target.clearEnsOverride()
+                                target.addressBarText =
+                                    pendingAddressBarText(target.addressBarText, web, source)
+                                target.loadUrl(web)
                             } else if (result.protocol == "bzz" ||
                                 result.protocol == "ipfs" ||
                                 result.protocol == "ipns"
@@ -967,10 +990,19 @@ fun BrowserScreen(
                         is EnsResult.Unsupported ->
                             ensError(
                                 "ens_unsupported_codec",
-                                detail = EnsGate.withTrustNote("codec ${result.codec}", result.trust),
+                                // A `.tez` record's "codec" is the reason
+                                // its website URI was refused.
+                                detail = EnsGate.withTrustNote(
+                                    if (name.endsWith(".tez")) result.codec else "codec ${result.codec}",
+                                    result.trust,
+                                ),
                             )
                         is EnsResult.Error ->
-                            ensError("ens_lookup_failed", detail = result.reason)
+                            ensError(
+                                "ens_lookup_failed",
+                                // `.tez` says what failed.
+                                detail = if (name.endsWith(".tez")) "${result.reason}: ${result.error}" else result.reason,
+                            )
                         // RPC servers disagreed (#96): nothing to load.
                         is EnsResult.Conflict ->
                             ensError("ens_conflict", detail = EnsGate.conflictDetail(result))
@@ -1099,8 +1131,10 @@ fun BrowserScreen(
     // address bar here — the home surface should be the first thing
     // the user sees, not an already-open keyboard.
     LaunchedEffect(Unit) {
-        if (!didInitialLoad) {
-            didInitialLoad = true
+        // Once per tab list ([TabsState.initialLoadDone]): not again
+        // into the active tab of tabs that outlived a relaunch (#183).
+        if (!tabs.initialLoadDone) {
+            tabs.initialLoadDone = true
             submit(tabs.active, tabs.homepageUrl)
         }
     }
@@ -1598,7 +1632,7 @@ fun BrowserScreen(
                     onBack = goBack,
                     onForward = {
                         state.beginLoad()
-                        state.loadUrl("javascript:history.forward();void(0);")
+                        state.loadUrl(HISTORY_FORWARD_JS)
                     },
                     onHome = {
                         submit(state, tabs.homepageUrl)
@@ -1662,6 +1696,20 @@ fun BrowserScreen(
                         ?.takeIf { state.url.isNotBlank() }
                         ?.let { pageZoom.levelFor(it, state.private) },
                     onZoom = { action -> state.zoomSite?.let { pageZoom.apply(it, action, state.private) } },
+                    // Request desktop site (#180): per site, like zoom,
+                    // but never for a dweb page (no key). Toggling asks
+                    // for the page again, as Reload does, and the load
+                    // picks the user agent for its site.
+                    desktopSite = desktopSiteOf(state.zoomSite)
+                        ?.takeIf { state.url.isNotBlank() }
+                        ?.let { desktopSites.isDesktop(it, state.private) },
+                    onToggleDesktopSite = {
+                        desktopSiteOf(state.zoomSite)?.let { site ->
+                            desktopSites.toggle(site, state.private)
+                            val url = state.url.ifBlank { state.addressBarText }
+                            if (url.isNotBlank()) submit(state, url)
+                        }
+                    },
                     onPrint = { tabs.printPage?.invoke(state) },
                     adblockState = adblockState,
                     onToggleAdblock = {
@@ -1669,6 +1717,7 @@ fun BrowserScreen(
                         val current = Adblock.siteState(state.url, state.private) ?: return@BottomToolbar
                         if (!current.toggleable) return@BottomToolbar
                         Adblock.setAllowlisted(site, allowed = current.checked, private = state.private)
+                        if (dropsMemoryCache(current)) tabs.dropMemoryCache?.invoke(state)
                         // Already-loaded ads (or already-blocked content)
                         // only change with the next load of the page.
                         val url = state.url.ifBlank { state.addressBarText }
@@ -1760,6 +1809,9 @@ fun BrowserScreen(
             nodeInfo = nodeInfo,
             runNodeEnabled = runNodeEnabled,
             onToggleRunNode = onToggleRunNode,
+            myotisInfo = myotisInfo,
+            myotisEnabled = myotisEnabled,
+            onToggleMyotis = onToggleMyotis,
             onDismiss = { showNode = false },
         )
     }

@@ -141,7 +141,7 @@ dependencies {
     // Service-worker request interception (feature-gated at runtime via
     // WebViewFeature) so SW fetches on virtual dweb origins route
     // through the same interceptor as everything else.
-    implementation("androidx.webkit:webkit:1.13.0")
+    implementation("androidx.webkit:webkit:1.15.0")
 
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.1")
 

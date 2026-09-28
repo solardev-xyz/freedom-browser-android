@@ -8,3 +8,7 @@
 -keepclasseswithmembernames class baby.freedom.swarm.FreedomIpfsNative {
     native <methods>;
 }
+
+-keepclasseswithmembernames class baby.freedom.swarm.MyotisNative {
+    native <methods>;
+}
