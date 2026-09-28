@@ -98,6 +98,21 @@ class AdblockPageTest {
     }
 
     @Test
+    fun `the destination's stylesheet subresources don't make its origin a frame of the page on screen`() {
+        // R2-F1 (R8): B's site.css loads a font, sending the stylesheet's
+        // full URL. That request is judged against A, but must not file
+        // B's origin under A's frames, or B's later cross-origin requests
+        // (bare origin) would be A's until the commit.
+        val p = onA()
+        p.answered(b, replacesDocument = true, fetchedByWebView = true)
+        assertEquals(a, p.current(referer = "http://127.0.0.1:8711/site.css"))
+        assertEquals(b, p.current(referer = "http://127.0.0.1:8711/"))
+        // A stylesheet from any other origin is still remembered as before.
+        assertEquals(a, p.current(referer = "https://cdn.example/a.css"))
+        assertEquals(a, p.current(referer = "https://cdn.example/"))
+    }
+
+    @Test
     fun `a frame the destination loads is not remembered as the page on screen's`() {
         val p = onA()
         p.answered(b, replacesDocument = true, fetchedByWebView = true)

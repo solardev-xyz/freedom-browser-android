@@ -177,6 +177,14 @@ class AdblockCosmeticTest {
             assertTrue(isAllowlisted("xn--bcher-kva.de", list))
             assertTrue(isAllowlisted("shop.xn--bcher-kva.de", list))
             assertFalse(isAllowlisted("bücher.de.example", list))
+            // Settings shows the Unicode name, with the stored form on the sub-line (R2-F2).
+            assertEquals("bücher.de", allowlistHostForDisplay("xn--bcher-kva.de"))
+            assertEquals("shop.bücher.de", allowlistHostForDisplay("shop.xn--bcher-kva.de"))
+            assertEquals("xn--bcher-kva.de · Ads allowed", allowlistSiteSubtitle("xn--bcher-kva.de"))
+            assertEquals("news.example", allowlistHostForDisplay("news.example"))
+            assertEquals("Ads allowed", allowlistSiteSubtitle("news.example"))
+            // An xn-- label that doesn't decode cleanly is shown as stored.
+            assertEquals("xn--zz.de", allowlistHostForDisplay("xn--zz.de"))
         } finally {
             WhatwgHost.uts46 = was
         }

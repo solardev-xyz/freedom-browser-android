@@ -799,9 +799,21 @@ private fun adblockSectionRows(enabled: Set<AdblockCategory>, allowlist: List<St
     if (allowlist.isEmpty()) {
         add(settingsRow("allowlist-empty", ADBLOCK_ALLOWLIST_EMPTY))
     } else {
-        for (site in allowlist) add(settingsRow("site:$site", site, "Ads allowed", "allowlist"))
+        for (site in allowlist) {
+            add(settingsRow("site:$site", allowlistHostForDisplay(site), allowlistSiteSubtitle(site), "allowlist", site))
+        }
     }
     add(settingsRow("credits", ADBLOCK_CREDITS))
+}
+
+/**
+ * The line under an allowed site: "Ads allowed", led by the stored
+ * punycode when the title shows the Unicode name
+ * ([allowlistHostForDisplay]), so both forms are on screen.
+ */
+internal fun allowlistSiteSubtitle(site: String): String {
+    val shown = allowlistHostForDisplay(site)
+    return if (shown == site) "Ads allowed" else "$site · Ads allowed"
 }
 
 /**
@@ -852,6 +864,7 @@ private fun AdblockSection(
         }
         for (site in allowlist) {
             if ("site:$site" !in visible) continue
+            val shown = allowlistHostForDisplay(site)
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -865,9 +878,9 @@ private fun AdblockSection(
                 )
                 Spacer(Modifier.width(12.dp))
                 Column(modifier = Modifier.weight(1f)) {
-                    Text(site, fontWeight = FontWeight.Medium)
+                    Text(shown, fontWeight = FontWeight.Medium)
                     Text(
-                        "Ads allowed",
+                        allowlistSiteSubtitle(site),
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -875,7 +888,7 @@ private fun AdblockSection(
                 IconButton(onClick = { onRemoveSite(site) }) {
                     Icon(
                         Icons.Filled.Close,
-                        contentDescription = "Block ads on $site again",
+                        contentDescription = "Block ads on $shown again",
                         tint = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }

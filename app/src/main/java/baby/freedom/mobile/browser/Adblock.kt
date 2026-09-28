@@ -68,6 +68,22 @@ internal fun normalizeAllowlistHost(input: String?): String? {
 }
 
 /**
+ * How Settings names allowlist entry [host] (stored in punycode, see
+ * [normalizeAllowlistHost]): its Unicode form when it has an `xn--`
+ * label that decodes cleanly and maps back to exactly [host], else
+ * [host] itself. `xn--bcher-kva.de` reads `bücher.de`.
+ *
+ * Display only — matching always uses the stored form. Where this
+ * differs from [host], Settings shows [host] too, on the sub-line, so
+ * a lookalike name can't pass for another site.
+ */
+internal fun allowlistHostForDisplay(host: String): String {
+    if (host.split('.').none { it.startsWith("xn--") }) return host
+    val unicode = WhatwgHost.uts46.toUnicode(host) ?: return host
+    return if (WhatwgHost.domainToAscii(unicode) == host) unicode else host
+}
+
+/**
  * Is [host] on the [allowlist] — an entry itself or a subdomain of one?
  * `m.news.example` is covered by `news.example`; `badnews.example` is not.
  */

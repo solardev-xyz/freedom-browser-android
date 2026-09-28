@@ -87,6 +87,12 @@ internal object WhatwgHost {
     fun interface Uts46 {
         fun toAscii(domain: String): String?
 
+        /**
+         * UTS-46 ToUnicode of an ASCII (punycode) domain, for display only,
+         * or `null` on any error.
+         */
+        fun toUnicode(domain: String): String? = null
+
         companion object {
             /** Chromium's `url_idna_icu` options: nontransitional, CheckBidi, (and WHATWG's) CheckJoiners. */
             const val OPTIONS = IDNA.NONTRANSITIONAL_TO_ASCII or IDNA.CHECK_BIDI or IDNA.CHECK_CONTEXTJ
@@ -108,6 +114,14 @@ internal object WhatwgHost {
             val info = IDNA.Info()
             idna.nameToASCII(domain, out, info)
             if (info.errors.any { it.name !in Uts46.IGNORED_ERRORS }) return null
+            return out.toString()
+        }
+
+        override fun toUnicode(domain: String): String? {
+            val out = StringBuilder()
+            val info = IDNA.Info()
+            idna.nameToUnicode(domain, out, info)
+            if (info.hasErrors()) return null
             return out.toString()
         }
     }

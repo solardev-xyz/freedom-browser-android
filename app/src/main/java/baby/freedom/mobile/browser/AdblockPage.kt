@@ -31,9 +31,14 @@ package baby.freedom.mobile.browser
  * embed) has that frame's requests naming the destination's origin too.
  * So every frame document seen under the page on screen — a subframe's
  * own document request ([frameRequested]), or a full-URL `Referer` from
- * another origin, which only a frame's same-origin requests send — is
- * remembered until the next commit, and a `Referer` naming one of them
- * (its URL, or its origin) stays the page on screen's.
+ * another origin — is remembered until the next commit, and a `Referer`
+ * naming one of them (its URL, or its origin) stays the page on
+ * screen's. A full-URL cross-origin `Referer` is a frame's same-origin
+ * request *or* a subresource of a cross-origin stylesheet (which sends
+ * the stylesheet's URL); the latter is harmless to remember for any
+ * origin but the pending destination's, where the destination's own CSS
+ * does exactly that — so while a navigation is fetching, one from the
+ * destination's origin is not taken for a frame.
  *
  * A navigation that never commits — it became a download, a 204, a hop
  * cancelled as a link to another app, a Stop — leaves the page on screen
@@ -66,7 +71,19 @@ internal class AdblockPage {
         if (destination != null && referer != null && namesDestination(referer, destination)) return destination
         if (referer != null && !isBareOrigin(referer)) {
             val origin = originOf(referer)
-            if (origin != null && origin != committed?.let(::originOf)) rememberFrame(referer)
+            // A full URL from the destination's own origin is ambiguous
+            // while it's pending: the destination's stylesheet sends its
+            // own URL to the fonts and images it loads (R2-F1 of the R8
+            // round), so it can't be taken for a frame of the page on
+            // screen — that would make the destination's later bare-origin
+            // requests look like the page on screen's too. A real frame
+            // from there is still known by its own document request
+            // ([frameRequested]).
+            if (origin != null && origin != committed?.let(::originOf) &&
+                (destination == null || origin != originOf(destination))
+            ) {
+                rememberFrame(referer)
+            }
         }
         return committed
     }
