@@ -520,4 +520,141 @@ class VirtualOriginContractTest {
         harness.awaitJsTrue("window.results && window.results.loaded === true")
         assertFalse(harness.js("document.cookie").contains("tossed"))
     }
+
+    @Test
+    fun tossedBaseDomainCookieIsSweptButTheRealSitesHostCookieStays() {
+        val cm = CookieManager.getInstance()
+        InstrumentationRegistry.getInstrumentation().runOnMainSync {
+            cm.setCookie("https://freedom.baby/", "own=keep; Path=/")
+        }
+        harness.load(originA)
+        harness.awaitJsTrue("window.results && window.results.loaded === true")
+        // One level above the per-protocol suffix: reaches every dweb
+        // origin and every onchain app (web3.freedom.baby) alike.
+        harness.js("document.cookie = 'toss=fromA; domain=freedom.baby; path=/';")
+        assertTrue(cm.getCookie("https://0x1-1.web3.freedom.baby/").orEmpty().contains("toss"))
+        CookieHygiene.sweepBlocking(originA)
+        harness.load(originB)
+        harness.awaitJsTrue("window.results && window.results.loaded === true")
+        assertFalse(harness.js("document.cookie").contains("toss"))
+        assertFalse(cm.getCookie("https://0x1-1.web3.freedom.baby/").orEmpty().contains("toss"))
+        // The real freedom.baby site's own host-only cookie is untouched.
+        assertTrue(cm.getCookie("https://freedom.baby/").orEmpty().contains("own=keep"))
+    }
+
+    @Test
+    fun cookiesTossedAtANonRootPathAreSweptAtThatPath() {
+        // R3-F1: a `Path=/swap` cookie is invisible to a `/` read, so a
+        // root-only sweep left it for every other app at /swap.
+        val cm = CookieManager.getInstance()
+        val appA = "https://0x${"1".repeat(40)}-1.web3.freedom.baby/"
+        val appB = "https://0x${"2".repeat(40)}-1.web3.freedom.baby/swap"
+        InstrumentationRegistry.getInstrumentation().runOnMainSync {
+            cm.setCookie(appA, "tossw3=1; Domain=.web3.freedom.baby; Path=/swap")
+            cm.setCookie(appA, "tossfb=1; Domain=.freedom.baby; Path=/swap/")
+            cm.setCookie(originA, "tossbzz=1; Domain=.bzz.freedom.baby; Path=/swap")
+        }
+        assertTrue(cm.getCookie(appB).orEmpty().contains("tossw3"))
+        assertTrue(cm.getCookie("$appB/deep").orEmpty().contains("tossfb"))
+        CookieHygiene.sweepBlocking("$appB/deep")
+        val left = cm.getCookie("$appB/deep").orEmpty()
+        assertFalse(left, left.contains("tossw3"))
+        assertFalse(left, left.contains("tossfb"))
+        assertFalse(cm.getCookie("${originA}swap").orEmpty().contains("tossbzz"))
+    }
+
+    @Test
+    fun namelessTossedCookiesAreSwept() {
+        // R5-F1: a nameless cookie serializes as just its value, so the
+        // sweep read 'NAMELESS_FB' (or 'k' of '=k=v') as a name and
+        // expired a different key, leaving the tossed cookie in place.
+        val cm = CookieManager.getInstance()
+        val app = "https://0x${"4".repeat(40)}-1.web3.freedom.baby/"
+        harness.load(originA)
+        harness.awaitJsTrue("window.results && window.results.loaded === true")
+        harness.js("document.cookie = 'NAMELESS_FB; domain=freedom.baby; path=/';")
+        harness.js("document.cookie = '=k=v; domain=bzz.freedom.baby; path=/';")
+        harness.js("document.cookie = '=deep; domain=freedom.baby; path=/swap';")
+        assertTrue(cm.getCookie(app).orEmpty().contains("NAMELESS_FB"))
+        assertTrue(cm.getCookie(originB).orEmpty().contains("k=v"))
+        CookieHygiene.sweepBlocking(listOf(originA, "${app}swap"))
+        assertEquals("", cm.getCookie("${app}swap").orEmpty())
+        harness.load(originB)
+        harness.awaitJsTrue("window.results && window.results.loaded === true")
+        assertEquals("", harness.js("document.cookie").trim('"'))
+    }
+
+    @Test
+    fun prefixedAndPartitionedTossedCookiesAreSwept() {
+        // R6-F1: Chromium drops a `__Secure-`/`__Host-` cookie written
+        // without `Secure` — the `Max-Age=0` rewrite included — so an
+        // unsecured expiry left prefixed tossed cookies in place.
+        val cm = CookieManager.getInstance()
+        val app = "https://0x${"5".repeat(40)}-1.web3.freedom.baby/"
+        val elsewhere = "https://example.com/"
+        InstrumentationRegistry.getInstrumentation().runOnMainSync {
+            // Outside the covered origins: must survive the sweep.
+            cm.setCookie(elsewhere, "__Secure-other=1; Domain=example.com; Path=/; Secure")
+            cm.setCookie(elsewhere, "__Host-other=1; Path=/; Secure")
+            cm.setCookie(elsewhere, "otherPart=1; Path=/; Secure; SameSite=None; Partitioned")
+            cm.setCookie("https://freedom.baby/", "__Host-own=keep; Path=/; Secure")
+            // Planted from an onchain app's origin, one level down.
+            cm.setCookie(app, "__Secure-w3=1; Domain=web3.freedom.baby; Path=/; Secure")
+        }
+        harness.load(originA)
+        harness.awaitJsTrue("window.results && window.results.loaded === true")
+        harness.js("document.cookie = '__Secure-toss=1; domain=freedom.baby; path=/; Secure';")
+        harness.js("document.cookie = '__Host-h=1; path=/; Secure';")
+        harness.js("document.cookie = 'plain=1; domain=freedom.baby; path=/';")
+        harness.js(
+            "document.cookie = 'part=1; domain=freedom.baby; path=/; Secure; SameSite=None; Partitioned';",
+        )
+        harness.js("document.cookie = 'hostPart=1; path=/; Secure; SameSite=None; Partitioned';")
+        val planted = harness.js("document.cookie")
+        for (n in listOf("__Secure-toss", "__Host-h", "plain", "part", "hostPart")) {
+            assertTrue("$n not planted: $planted", planted.contains("$n=1"))
+        }
+        assertTrue(cm.getCookie(app).orEmpty().contains("__Secure-w3"))
+
+        CookieHygiene.sweepBlocking(listOf(originA, app))
+
+        assertEquals("", cm.getCookie(originA).orEmpty())
+        assertEquals("", cm.getCookie(app).orEmpty())
+        harness.load(originB)
+        harness.awaitJsTrue("window.results && window.results.loaded === true")
+        assertEquals("", harness.js("document.cookie").trim('"'))
+        harness.load(originA)
+        harness.awaitJsTrue("window.results && window.results.loaded === true")
+        assertEquals("", harness.js("document.cookie").trim('"'))
+        // Untouched elsewhere.
+        val other = cm.getCookie(elsewhere).orEmpty()
+        assertTrue(other, other.contains("__Secure-other=1"))
+        assertTrue(other, other.contains("__Host-other=1"))
+        assertTrue(other, other.contains("otherPart=1"))
+        assertTrue(cm.getCookie("https://freedom.baby/").orEmpty().contains("__Host-own=keep"))
+    }
+
+    @Test
+    fun deepPathSweepIsBoundedByCookiesNotDepth() {
+        // R4-F1: expiring every name at every candidate path took ~35 s
+        // for 50 cookies under '/a' x 4000. The sweep now bisects the
+        // candidate chain, so it stays fast — and still finds a cookie
+        // tossed at a deep path and one at the root.
+        val cm = CookieManager.getInstance()
+        val app = "https://0x${"3".repeat(40)}-1.web3.freedom.baby"
+        val deepPath = "/a".repeat(4000)
+        val mid = "/a".repeat(1234) + "/"
+        InstrumentationRegistry.getInstrumentation().runOnMainSync {
+            for (n in 0 until 50) cm.setCookie("$app/", "h$n=1; Path=/")
+            cm.setCookie("$app/", "tossmid=1; Domain=.web3.freedom.baby; Path=$mid")
+            cm.setCookie("$app/", "tossdeep=1; Domain=.freedom.baby; Path=$deepPath")
+        }
+        assertTrue(cm.getCookie("$app$deepPath").orEmpty().contains("tossmid"))
+        val started = System.nanoTime()
+        CookieHygiene.sweepBlocking("$app$deepPath")
+        val ms = (System.nanoTime() - started) / 1_000_000
+        val left = cm.getCookie("$app$deepPath").orEmpty()
+        assertTrue("sweep took $ms ms", ms < 3_000)
+        assertEquals("", left)
+    }
 }

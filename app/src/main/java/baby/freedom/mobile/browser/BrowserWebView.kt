@@ -667,18 +667,6 @@ fun BrowserWebViewHost(
         Unit
     }
 
-    // Periodic cookie sweep (defense in depth against cookie tossing
-    // across virtual origins until the PSL entry propagates — and kept
-    // afterwards; see [CookieHygiene]). The on-navigation sweep in
-    // onPageStarted handles the common case; this catches long-lived
-    // pages that write document.cookie while sitting idle.
-    LaunchedEffect(Unit) {
-        while (true) {
-            CookieHygiene.sweepAsync()
-            kotlinx.coroutines.delay(CookieHygiene.SWEEP_INTERVAL_MS)
-        }
-    }
-
     val frame = remember {
         FrameLayout(context).apply {
             layoutParams = ViewGroup.LayoutParams(
@@ -697,13 +685,37 @@ fun BrowserWebViewHost(
     // The ids in [webViews] of private tabs (#86).
     val privateIds = remember { mutableSetOf<Long>() }
 
+    // Periodic cookie sweep (defense in depth against cookie tossing
+    // across virtual origins until the PSL entry propagates — and kept
+    // afterwards; see [CookieHygiene]). The on-navigation sweep in
+    // onPageStarted handles the common case; this catches long-lived
+    // pages that write document.cookie while sitting idle, including
+    // one in a background tab re-planting a cookie after another app's
+    // document loaded (R3-F2). It reads at every open tab's current
+    // path, since a cookie tossed with a non-root `Path` is only
+    // visible there (R3-F1). Runs on the main thread: `WebView.url`.
+    LaunchedEffect(Unit) {
+        while (true) {
+            CookieHygiene.sweepAsync(webViews.values.mapNotNull { it.url })
+            kotlinx.coroutines.delay(CookieHygiene.SWEEP_INTERVAL_MS)
+        }
+    }
+    // A tab brought to the front: sweep at its document's path before
+    // the user interacts with it — it may have sat in the background
+    // while another tab planted cookies (R3-F2).
+    LaunchedEffect(tabs.active.id) {
+        val url = webViews[tabs.active.id]?.url
+        if (CookieHygiene.coversNavigation(url)) CookieHygiene.sweepAsync(url)
+    }
+
     /**
      * No private tab is left (#86): wipe the private profile's cookies
      * and site storage (its HTTP cache was cleared through the last
      * private WebView) and retire it for deletion, and drop
      * what the app itself kept for the session in memory: its
-     * site-permission answers, zoom levels, and downloads list (a
-     * private download still running is cancelled, as in Chrome).
+     * site-permission answers, zoom levels, downloads list (a private
+     * download still running is cancelled, as in Chrome) and the
+     * onchain apps let through despite a warning (#123).
      */
     fun endPrivateSession() {
         PrivateProfile.discard()
@@ -712,6 +724,7 @@ fun BrowserWebViewHost(
         pageZoom.clearPrivate()
         desktopSites.clearPrivate()
         DownloadManager.get(context).endPrivateSession()
+        OnchainApps.onPrivateSessionEnded()
     }
 
     // Per-tab navigation observers (coroutine jobs, tracked so we can cancel
@@ -2445,10 +2458,11 @@ private fun buildRefreshableWebView(
                 // have flushed it). Dropping it here is what keeps the
                 // park single-shot: it cannot survive its own navigation.
                 pendingVisit.clear()
-                // Entering a virtual origin: expire anything page JS
-                // managed to plant via document.cookie before this
-                // page gets a chance to read it.
-                if (VirtualOrigin.isVirtualUrl(url)) CookieHygiene.sweepAsync(url)
+                // Entering a virtual origin or an onchain app (#123):
+                // expire anything page JS managed to plant via
+                // document.cookie before this page gets a chance to
+                // read it.
+                if (CookieHygiene.coversNavigation(url)) CookieHygiene.sweepAsync(url)
                 val display = url?.let { displayFor(it, state) }
                 if (display != null) {
                     // For error pages, surface the URL the user was
@@ -2740,6 +2754,10 @@ private fun buildRefreshableWebView(
                 // A same-document step keeps the page on screen as the
                 // load's document for the IPFS phase line (#94, R3-F2).
                 state.historyUpdated(isHome = url == ABOUT_BLANK)
+                // A same-document move (`pushState`) to a new path on a
+                // virtual origin or onchain app can bring cookies tossed
+                // at that path into view (R3-F1): sweep there too.
+                if (CookieHygiene.coversNavigation(url)) CookieHygiene.sweepAsync(url)
                 if (view == null || !bottomUiApplies(url)) return
                 // An SPA route can bring its own theme colour (#92). Only
                 // once the document has painted: before that, this is the
@@ -3030,7 +3048,7 @@ private fun buildRefreshableWebView(
                 }
                 val work = state.gatewayWork.start(generation)
                 val response = if (heldBack) heldBackResponse() else try {
-                    interceptVirtualRequest(request, ensPins, view)
+                    interceptVirtualRequest(request, ensPins, view, state.onchain)
                 } catch (t: Throwable) {
                     state.gatewayWork.finish(work)
                     throw t
@@ -4343,7 +4361,9 @@ internal fun submitDetourForNavigation(url: String, isForMainFrame: Boolean): Bo
     if (!isForMainFrame) return false
     val schemeEnd = url.indexOf("://")
     if (schemeEnd <= 0) return false
-    return url.substring(0, schemeEnd).lowercase() in CONTENT_SCHEMES
+    val scheme = url.substring(0, schemeEnd).lowercase()
+    // A `web3://` app (#123) is read, and gated, by the submit flow too.
+    return scheme in CONTENT_SCHEMES || scheme == OnchainAppRef.SCHEME
 }
 
 /**
@@ -4448,19 +4468,27 @@ private fun syntheticResponse(
  * [tab] is the requesting tab's WebView (null for a service worker): a
  * cleanup page another tab's hold asks for is served to it only once
  * ([UnverifiedOrigins.takeClearFor]).
+ *
+ * [onchain] is the requesting tab's onchain-app documents (#123, see
+ * [interceptOnchainAppRequest]); null for a service worker or a native
+ * re-fetch, which are refused on an app's origin anyway.
  */
 internal fun interceptVirtualRequest(
     request: WebResourceRequest?,
     ensPins: EnsDocumentPins? = null,
     tab: Any? = null,
+    onchain: OnchainAppTab? = null,
 ): WebResourceResponse? {
     val req = request ?: return null
     val url = req.url?.toString() ?: return null
     val incoming = if (req.isForMainFrame) ensPins?.beginNavigation(url) else null
-    // An origin an unverified external IPFS gateway served before the
-    // user switched away from it (#125): its next document first clears
-    // what that gateway's pages left there, before anything else runs.
-    val response = siteDataCleanupFor(req, url, tab)
+    // A contract-hosted app's origin (#123) is answered by its own rules.
+    // Then an origin an unverified external IPFS gateway served before
+    // the user switched away from it (#125): its next document first
+    // clears what that gateway's pages left there, before anything else
+    // runs.
+    val response = interceptOnchainAppRequest(req, url, onchain)
+        ?: siteDataCleanupFor(req, url, tab)
         ?: interceptVirtualRequestFor(req, ensPins, incoming)
     if (incoming != null && response != null &&
         rendersInPlace(response.statusCode, response.mimeType, response.responseHeaders)

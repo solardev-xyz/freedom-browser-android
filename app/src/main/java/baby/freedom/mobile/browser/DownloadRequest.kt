@@ -279,11 +279,16 @@ internal fun formatBytes(bytes: Long): String {
 /**
  * The origin (`https://host[:port]/`) of the page a web download came
  * from, if it's one worth naming at all: an ordinary http(s) page, not
- * a virtual dweb origin, home or `about:`. This — never the page's
- * path or query — is all a download remembers about its page.
+ * a virtual dweb origin, an onchain app's (#123), home or `about:`.
+ * This — never the page's path or query — is all a download remembers
+ * about its page.
  */
 internal fun downloadRefererOrigin(pageUrl: String?): String? {
-    if (pageUrl.isNullOrBlank() || VirtualOrigin.isVirtualUrl(pageUrl)) return null
+    if (pageUrl.isNullOrBlank() || VirtualOrigin.isVirtualUrl(pageUrl) ||
+        OnchainAppRef.isVirtualUrl(pageUrl)
+    ) {
+        return null
+    }
     return webOrigin(pageUrl)?.let { "$it/" }
 }
 
