@@ -81,7 +81,7 @@ class MyotisGenerationStore(private val baseDir: File) {
         val generation = loadIntact(network)
         // A generation the engine contradicted ([reject]) never boots again.
         if (generation.id != null && exists(File(generation.directory, REJECTED))) {
-            throw MyotisCheckpointException(MyotisCheckpointError.Mismatch)
+            throw MyotisCheckpointException(MyotisCheckpointError.AnchorMismatch)
         }
         return generation
     }
@@ -126,7 +126,7 @@ class MyotisGenerationStore(private val baseDir: File) {
     /**
      * The engine's own verified finalized root contradicted [generation]'s
      * checkpoint: mark it so [load] refuses it with
-     * [MyotisCheckpointError.Mismatch] from now on, across restarts, until
+     * [MyotisCheckpointError.AnchorMismatch] from now on, across restarts, until
      * a recovery mints a replacement. Only a verified generation carries a
      * checkpoint to contradict.
      */

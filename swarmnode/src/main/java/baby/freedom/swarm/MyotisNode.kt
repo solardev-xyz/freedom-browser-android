@@ -195,7 +195,7 @@ class MyotisNode internal constructor(
         /**
          * This recovery answers a stale anchor, so it's moot once the
          * engine accepts its own (a corrected wall clock). False for one
-         * retrying a [MyotisRecoveryReason.Mismatch], whose engine is up and
+         * retrying a [MyotisRecoveryReason.AnchorMismatch], whose engine is up and
          * synced — on the anchor that contradicted the quorum.
          */
         val forStaleAnchor: Boolean = true,
@@ -407,12 +407,12 @@ class MyotisNode internal constructor(
             val generation = try {
                 store.load(network).also { store.checkNativeMarker(it, network) }
             } catch (e: MyotisCheckpointException) {
-                if (e.error == MyotisCheckpointError.Mismatch) {
+                if (e.error == MyotisCheckpointError.AnchorMismatch) {
                     // The engine once contradicted this generation's checkpoint:
                     // blocked until Retry fetches a fresh one.
                     recovery[network] = Recovery(
                         MyotisRecovery.Phase.Blocked,
-                        reason = MyotisRecoveryReason.Mismatch,
+                        reason = MyotisRecoveryReason.AnchorMismatch,
                         forStaleAnchor = false,
                     )
                     Log.w(TAG, "${network.engineName}: current generation was rejected, not booting it")
@@ -627,7 +627,7 @@ class MyotisNode internal constructor(
         val rec = Recovery(
             MyotisRecovery.Phase.Checking,
             // Replacing an anchor the engine contradicted, not an expired one: say so on the row.
-            reason = if (forStaleAnchor) null else MyotisRecoveryReason.Mismatch,
+            reason = if (forStaleAnchor) null else MyotisRecoveryReason.AnchorMismatch,
             attempt = attempt,
             token = token,
             forStaleAnchor = forStaleAnchor,
@@ -726,7 +726,7 @@ class MyotisNode internal constructor(
             reason = reason,
             attempt = attempt,
             nextRetryAt = delay?.let { upClock() + it },
-            forStaleAnchor = reason != MyotisRecoveryReason.Mismatch && previous?.forStaleAnchor != false,
+            forStaleAnchor = reason != MyotisRecoveryReason.AnchorMismatch && previous?.forStaleAnchor != false,
         )
         if (delay != null) {
             Log.i(TAG, "${network.engineName}: recovery attempt $attempt failed (${reason.code}), retrying in ${delay / 1000} s")
@@ -784,7 +784,7 @@ class MyotisNode internal constructor(
                     Log.w(TAG, "${network.engineName}: couldn't record the rejected generation (${e.error.code})")
                 }
             }
-            failRecovery(network, MyotisRecoveryReason.Mismatch, retry = false)
+            failRecovery(network, MyotisRecoveryReason.AnchorMismatch, retry = false)
             return
         }
         rec ?: return

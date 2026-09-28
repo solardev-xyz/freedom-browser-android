@@ -223,6 +223,20 @@ class MyotisRecoveryTest {
     }
 
     @Test
+    fun `checkpoint evidence failing verification is not told as the chain disagreeing`() {
+        startStale()
+        checkpoints.fail(MyotisCheckpointError.Mismatch)
+        eventually { recovery?.phase == MyotisRecovery.Phase.Blocked }
+        assertEquals(MyotisRecoveryReason.Mismatch, recovery?.reason)
+        assertEquals("The checkpoint evidence didn't pass verification.", recovery!!.message(0))
+        node.retryRecovery(MyotisNetwork.Gnosis)
+        eventually { checkpoints.asked.size == 2 }
+        // Still a stale-anchor recovery: the checking line doesn't claim a chain contradiction.
+        assertEquals(MyotisRecovery(MyotisRecovery.Phase.Checking, attempt = 1), recovery)
+        assertTrue(recovery!!.message(0).startsWith("This chain's checkpoint is too old"))
+    }
+
+    @Test
     fun `a terminal failure blocks until the user retries`() {
         startStale()
         checkpoints.fail(MyotisCheckpointError.QuorumConflict)
@@ -264,7 +278,8 @@ class MyotisRecoveryTest {
         clocks.advance(3_000)
         poll()
         assertEquals(MyotisRecovery.Phase.Blocked, recovery?.phase)
-        assertEquals(MyotisRecoveryReason.Mismatch, recovery?.reason)
+        assertEquals(MyotisRecoveryReason.AnchorMismatch, recovery?.reason)
+        assertEquals("The synced chain didn't match the agreed checkpoint.", recovery!!.message(0))
         assertFalse(gnosisRow.ready)
         // Retry fetches a fresh checkpoint rather than trusting this one.
         node.retryRecovery(MyotisNetwork.Gnosis)
@@ -412,7 +427,7 @@ class MyotisRecoveryTest {
         engine.status[12L] = synced(slot, "ab".repeat(32))
         clocks.advance(3_000)
         poll()
-        assertEquals(MyotisRecoveryReason.Mismatch, recovery?.reason)
+        assertEquals(MyotisRecoveryReason.AnchorMismatch, recovery?.reason)
 
         // Force-stop and relaunch: by now the engine would be past the checkpoint slot.
         node.stop()
@@ -422,8 +437,10 @@ class MyotisRecoveryTest {
         idle()
         assertFalse(engine.calls.any { it.startsWith("createWithCheckpoint gnosis") })
         assertTrue("create mainnet" in engine.calls)
-        assertEquals(MyotisRecovery(MyotisRecovery.Phase.Blocked, reason = MyotisRecoveryReason.Mismatch), recovery)
+        assertEquals(MyotisRecovery(MyotisRecovery.Phase.Blocked, reason = MyotisRecoveryReason.AnchorMismatch), recovery)
         assertFalse(gnosisRow.ready)
+        // The same story blocked as while checking again: the chain disagreed, not the evidence.
+        assertEquals("The synced chain didn't match the agreed checkpoint.", recovery!!.message(0))
 
         // Retry asks for a fresh checkpoint (with the mismatch still named) and boots a new generation.
         node.retryRecovery(MyotisNetwork.Gnosis)

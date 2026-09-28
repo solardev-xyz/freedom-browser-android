@@ -84,6 +84,40 @@ class HttpCheckpointFetcherTest {
     }
 
     @Test
+    fun `a cache's Age header moves the server time forward`() {
+        // Stored by a shared cache for two hours: its Date is the origin's, from when it was stored.
+        serve(
+            "HTTP/1.1 200 OK\r\nDate: Sun, 27 Sep 2026 10:00:00 GMT\r\nAge: 7200\r\n" +
+                "Content-Type: application/json\r\nConnection: close",
+            listOf("{}"),
+        )
+        assertEquals(1_790_503_200_000L + 7_200_000L, runBlocking { HttpCheckpointFetcher().fetch(url, 1024) }.serverDateMs)
+    }
+
+    @Test
+    fun `a malformed Age header is no server time`() {
+        serve(
+            "HTTP/1.1 200 OK\r\nDate: Sun, 27 Sep 2026 10:00:00 GMT\r\nAge: -5\r\n" +
+                "Content-Type: application/json\r\nConnection: close",
+            listOf("{}"),
+        )
+        assertEquals(null, runBlocking { HttpCheckpointFetcher().fetch(url, 1024) }.serverDateMs)
+    }
+
+    @Test
+    fun `the server clock adds Age to Date`() {
+        val date = 1_790_503_200_000L
+        assertEquals(date, MyotisCheckpointResponse.serverClock(date, null))
+        assertEquals(date, MyotisCheckpointResponse.serverClock(date, "0"))
+        assertEquals(date + 60_000L, MyotisCheckpointResponse.serverClock(date, " 060 "))
+        assertEquals(date + 2_147_483_648_000L, MyotisCheckpointResponse.serverClock(date, "99999999999999999999"))
+        assertEquals(null, MyotisCheckpointResponse.serverClock(date, "1.5"))
+        assertEquals(null, MyotisCheckpointResponse.serverClock(date, ""))
+        assertEquals(null, MyotisCheckpointResponse.serverClock(null, "60"))
+        assertEquals(null, MyotisCheckpointResponse.serverClock(0L, "60"))
+    }
+
+    @Test
     fun `no Date header is no server time`() {
         serve("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close", listOf("{}"))
         assertEquals(null, runBlocking { HttpCheckpointFetcher().fetch(url, 1024) }.serverDateMs)

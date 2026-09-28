@@ -198,7 +198,7 @@ class MyotisGenerationStoreTest {
             MyotisGenerationStore(tmp.root).load(net)
             fail("expected a mismatch")
         } catch (e: MyotisCheckpointException) {
-            assertEquals(MyotisCheckpointError.Mismatch, e.error)
+            assertEquals(MyotisCheckpointError.AnchorMismatch, e.error)
         }
         val fresh = store.replace(net, record.copy(verifiedAt = now + 1), now + 1)
         assertEquals(fresh, store.load(net))

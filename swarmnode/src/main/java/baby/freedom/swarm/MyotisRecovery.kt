@@ -16,7 +16,16 @@ enum class MyotisRecoveryReason(val code: String) {
     Unavailable("unavailable"),
     QuorumUnavailable("quorum-unavailable"),
     QuorumConflict("quorum-conflict"),
+    /** Checkpoint evidence that didn't pass verification (acquisition or a saved record). */
     Mismatch("mismatch"),
+
+    /**
+     * The engine's own BLS-verified finalized root contradicted the agreed
+     * checkpoint — seen at runtime, or recorded on the generation
+     * (`rejected.json`) and found again at startup. Not the evidence
+     * failing: the checkpoint passed, the chain disagreed with it.
+     */
+    AnchorMismatch("anchor-mismatch"),
     Clock("clock"),
     Storage("storage"),
     StorageIO("storage-io"),
@@ -43,6 +52,7 @@ enum class MyotisRecoveryReason(val code: String) {
             QuorumUnavailable -> MyotisCheckpointError.QuorumUnavailable.message
             QuorumConflict -> MyotisCheckpointError.QuorumConflict.message
             Mismatch -> MyotisCheckpointError.Mismatch.message
+            AnchorMismatch -> MyotisCheckpointError.AnchorMismatch.message
             Clock -> MyotisCheckpointError.Clock.message
             Storage -> MyotisCheckpointError.Storage.message
             StorageIO -> MyotisCheckpointError.StorageIO.message
@@ -56,6 +66,7 @@ enum class MyotisRecoveryReason(val code: String) {
             MyotisCheckpointError.QuorumUnavailable -> QuorumUnavailable
             MyotisCheckpointError.QuorumConflict -> QuorumConflict
             MyotisCheckpointError.Mismatch -> Mismatch
+            MyotisCheckpointError.AnchorMismatch -> AnchorMismatch
             MyotisCheckpointError.Clock -> Clock
             MyotisCheckpointError.Storage -> Storage
             MyotisCheckpointError.StorageIO -> StorageIO
@@ -121,8 +132,8 @@ data class MyotisRecovery(
     /** The chain row's explanation; [nowElapsed] on the same clock as [nextRetryAt]. */
     fun message(nowElapsed: Long): String = when (phase) {
         Phase.Checking ->
-            if (reason == MyotisRecoveryReason.Mismatch) {
-                "The synced chain didn't match the agreed checkpoint. Asking checkpoint services for a fresh one…"
+            if (reason == MyotisRecoveryReason.AnchorMismatch) {
+                "${MyotisCheckpointError.AnchorMismatch.message} Asking checkpoint services for a fresh one…"
             } else {
                 "This chain's checkpoint is too old to sync from. Asking checkpoint services for a fresh one…"
             }

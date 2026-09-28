@@ -41,6 +41,13 @@ enum class MyotisCheckpointError(val code: String, val message: String) {
     /** The checkpoint evidence didn't pass verification. */
     Mismatch("CHECKPOINT_MISMATCH", "The checkpoint evidence didn't pass verification."),
 
+    /**
+     * The engine's own verified finalized root contradicted the agreed
+     * checkpoint — at runtime, or recorded on the generation and refused
+     * at load. The evidence passed; the chain disagreed with it.
+     */
+    AnchorMismatch("CHECKPOINT_ANCHOR_MISMATCH", "The synced chain didn't match the agreed checkpoint."),
+
     /** The checkpoint is too old (over an hour). Retryable: the next attempt asks for a fresher one. */
     Stale("CHECKPOINT_STALE", "The checkpoint is too old."),
 

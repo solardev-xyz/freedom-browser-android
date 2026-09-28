@@ -51,16 +51,49 @@ fun interface MyotisCheckpointFetcher {
     suspend fun get(url: String, limit: Int): ByteArray
 
     /**
-     * [get], plus the server's clock from the response's HTTP `Date`
-     * header when it sent a parsable one. Only a hint for telling a wrong
-     * device clock from a really stale checkpoint — never a vote.
+     * [get], plus the server's clock when it answered — the response's
+     * HTTP `Date` plus its `Age` (see [MyotisCheckpointResponse]) — when
+     * it sent a parsable one. Only a hint for telling a wrong device clock
+     * from a really stale checkpoint — never a vote.
      */
     suspend fun fetch(url: String, limit: Int): MyotisCheckpointResponse =
         MyotisCheckpointResponse(get(url, limit), serverDateMs = null)
 }
 
-/** A fetched body and the server's `Date` header (ms since the epoch), if any. */
-class MyotisCheckpointResponse(val body: ByteArray, val serverDateMs: Long?)
+/**
+ * A fetched body and the server's clock when it was served (ms since the
+ * epoch), if known: the HTTP `Date` header plus the `Age` header. A shared
+ * cache (RFC 9111 §5.1) serves a stored response with its origin's
+ * original `Date` and says how long it has held it in `Age`, so `Date`
+ * alone can be hours behind the real time and read as this device's
+ * clock being ahead.
+ */
+class MyotisCheckpointResponse(val body: ByteArray, val serverDateMs: Long?) {
+    companion object {
+        /** `Age` values past this are capped (RFC 9111 §1.2.2). */
+        private const val MAX_AGE_SECONDS = 2_147_483_648L
+
+        /**
+         * The server's clock from its [dateMs] (`Date`, null or ≤ 0 if
+         * missing/unparsable) and raw [age] header. An `Age` that isn't a
+         * plain non-negative integer drops the hint altogether: the
+         * response came through a cache whose holding time is unknown.
+         */
+        fun serverClock(dateMs: Long?, age: String?): Long? {
+            val date = dateMs?.takeIf { it > 0L } ?: return null
+            age ?: return date
+            val trimmed = age.trim()
+            if (trimmed.isEmpty() || !trimmed.all { it in '0'..'9' }) return null
+            val digits = trimmed.trimStart('0')
+            val seconds = when {
+                digits.isEmpty() -> 0L
+                digits.length > 10 -> MAX_AGE_SECONDS
+                else -> digits.toLong().coerceAtMost(MAX_AGE_SECONDS)
+            }
+            return date + seconds * 1000L
+        }
+    }
+}
 
 /**
  * [HttpURLConnection]-backed [MyotisCheckpointFetcher]: no redirects, no
@@ -127,7 +160,10 @@ class HttpCheckpointFetcher(private val requestMs: Long = REQUEST_MS) : MyotisCh
                     out.write(buffer, 0, n)
                 }
             }
-            val date = connection.getHeaderFieldDate("Date", 0L).takeIf { it > 0L }
+            val date = MyotisCheckpointResponse.serverClock(
+                connection.getHeaderFieldDate("Date", 0L),
+                connection.getHeaderField("Age"),
+            )
             return MyotisCheckpointResponse(out.toByteArray(), date)
         } finally {
             connection.disconnect()
@@ -149,7 +185,8 @@ class HttpCheckpointFetcher(private val requestMs: Long = REQUEST_MS) : MyotisCh
 
 /**
  * One authority's proposed slot, and [clockSkewMs] — this device's clock
- * minus the authority's HTTP `Date` when it answered — if it sent one.
+ * minus the authority's clock when it answered (HTTP `Date` + `Age`) — if
+ * it sent one.
  */
 data class MyotisCheckpointProposal(val slot: Long, val clockSkewMs: Long?)
 
@@ -179,7 +216,7 @@ class MyotisCheckpointQuorum(
     private suspend fun metadata(source: String, path: String, stage: MyotisCheckpointStage): JSONObject =
         timedMetadata(source, path, stage).first
 
-    /** [metadata], plus this device's clock minus the server's `Date` (ms), when it sent one. */
+    /** [metadata], plus this device's clock minus the server's (`Date` + `Age`, ms), when it sent one. */
     private suspend fun timedMetadata(
         source: String,
         path: String,
@@ -491,7 +528,9 @@ class MyotisCheckpointAcquirer(
      * authority serves is normally minutes old, so an "old" one is either a
      * chain-wide finality stall — [MyotisCheckpointError.Stale], and the
      * ladder asks again — or a device clock set ahead, which no amount of
-     * asking fixes. The authority's HTTP `Date` tells them apart: when by
+     * asking fixes. The authority's clock (HTTP `Date` plus any `Age` a
+     * cache added, so a stored response doesn't look like a fast device
+     * clock) tells them apart: when by
      * *its* clock the checkpoint is fresh and this device is more than
      * [CLOCK_SKEW_MS] ahead of it, it's [MyotisCheckpointError.Clock].
      * Only the classification of a proposal already refused — the `Date`

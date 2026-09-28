@@ -387,6 +387,10 @@ class MyotisCheckpointTest {
         // One authority down doesn't hide it: two still place the clock wrong.
         f.answers["$pn/eth/v1/beacon/states/head/finality_checkpoints"] = down()
         expect(MyotisCheckpointError.Clock) { acquirer(f, clock = { ahead }).acquire(MyotisNetwork.Gnosis) }
+        // A cached finality response two hours old: Date + Age (what the fetcher reports) agrees
+        // with this device, so the checkpoint really is stale and the ladder asks again.
+        for (s in listOf(gc, dn, pn)) f.dates[s] = ahead
+        expect(MyotisCheckpointError.Stale) { acquirer(f, clock = { ahead }).acquire(MyotisNetwork.Gnosis) }
         // Without a Date there's no telling: the ladder asks again.
         f.dates.clear()
         expect(MyotisCheckpointError.Stale) { acquirer(f, clock = { ahead }).acquire(MyotisNetwork.Gnosis) }
