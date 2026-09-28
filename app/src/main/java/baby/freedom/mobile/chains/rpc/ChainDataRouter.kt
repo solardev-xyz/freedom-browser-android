@@ -6,6 +6,7 @@ import baby.freedom.mobile.browser.PublicSuffixList
 import baby.freedom.mobile.chains.Chain
 import baby.freedom.mobile.chains.RpcUrls
 import baby.freedom.mobile.data.ChainStore
+import baby.freedom.mobile.ens.EnsRpcConfig
 import baby.freedom.mobile.ens.Keccak256
 import baby.freedom.mobile.ens.hexToBytes
 import baby.freedom.mobile.ens.toHex
@@ -246,7 +247,10 @@ class ChainDataRouter internal constructor(
      */
     private fun pool(chain: Chain): List<String> {
         val now = clock()
-        val all = (chain.userRpcUrls + chain.rpcUrls).distinct()
+        // One entry per endpoint ([EnsRpcConfig.endpointKey]), the user's
+        // own spelling kept: `https://eth.drpc.org:443` is the listed
+        // `https://eth.drpc.org`, asked once and labelled as the user's.
+        val all = (chain.userRpcUrls + chain.rpcUrls).distinctBy(EnsRpcConfig::endpointKey)
         return all.sortedWith(
             compareBy<String> { it !in chain.userRpcUrls }
                 .thenBy { url -> failedAt[url]?.let { now - it in 0 until QUARANTINE_MS } == true },

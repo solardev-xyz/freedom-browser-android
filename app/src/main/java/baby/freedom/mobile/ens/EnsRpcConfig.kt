@@ -171,19 +171,64 @@ data class EnsRpcConfig(
 
         /**
          * What two endpoint URLs are compared by to tell whether they
-         * are the same endpoint: scheme and host are case-insensitive,
-         * and a trailing `/` on the path makes no difference.
+         * are the same endpoint — the request the app would actually
+         * send, not the spelling: scheme and host are case-insensitive
+         * and a host's trailing `.` is dropped; a scheme's default port
+         * (`https://eth.drpc.org:443`) is no port; `.`/`..` path
+         * segments are resolved; a percent-escape of an unreserved
+         * character (`/%65th`) is that character and other escapes
+         * compare case-insensitively; a trailing `/` on the path, and
+         * any `#fragment` (never sent), make no difference.
          */
         fun endpointKey(url: String): String {
-            val uri = runCatching { URI(url.trim()) }.getOrNull()
-            val scheme = uri?.scheme
-            val host = uri?.host
+            val uri = runCatching { URI(url.trim()).normalize() }.getOrNull()
+            val scheme = uri?.scheme?.lowercase()
+            val host = uri?.host?.lowercase()?.trimEnd('.')
             if (uri == null || scheme == null || host == null) return url.trim().trimEnd('/')
-            val port = if (uri.port >= 0) ":${uri.port}" else ""
-            val path = uri.rawPath.orEmpty().trimEnd('/')
-            val query = uri.rawQuery?.let { "?$it" }.orEmpty()
-            return "${scheme.lowercase()}://${host.lowercase()}$port$path$query"
+            val defaultPort = when (scheme) {
+                "https" -> 443
+                "http" -> 80
+                else -> -1
+            }
+            val port = if (uri.port >= 0 && uri.port != defaultPort) ":${uri.port}" else ""
+            val path = canonicalEscapes(uri.rawPath.orEmpty()).trimEnd('/')
+            val query = uri.rawQuery?.let { "?" + canonicalEscapes(it) }.orEmpty()
+            return "$scheme://$host$port$path$query"
         }
+
+        /**
+         * [raw] with each `%XX` of an unreserved character (RFC 3986:
+         * letters, digits, `-._~`) decoded and every other escape's hex
+         * upper-cased — the forms a server can't tell apart.
+         */
+        private fun canonicalEscapes(raw: String): String {
+            if ('%' !in raw) return raw
+            val out = StringBuilder(raw.length)
+            var i = 0
+            while (i < raw.length) {
+                val c = raw[i]
+                val hex = if (c == '%' && i + 2 < raw.length && raw[i + 1].isHex() && raw[i + 2].isHex()) {
+                    raw.substring(i + 1, i + 3).toInt(16)
+                } else {
+                    null
+                }
+                if (hex == null) {
+                    out.append(c)
+                    i++
+                    continue
+                }
+                val ch = hex.toChar()
+                if (ch.isLetterOrDigit() && ch.code < 0x80 || ch in "-._~") {
+                    out.append(ch)
+                } else {
+                    out.append('%').append(raw.substring(i + 1, i + 3).uppercase())
+                }
+                i += 3
+            }
+            return out.toString()
+        }
+
+        private fun Char.isHex() = this in '0'..'9' || this in 'a'..'f' || this in 'A'..'F'
 
         /** `null` if [validateEndpoint] refuses [raw]. */
         fun normalizeEndpoint(raw: String): String? = RpcUrls.normalize(raw)

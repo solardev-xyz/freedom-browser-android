@@ -105,6 +105,31 @@ class EnsRpcConfigTest {
     }
 
     @Test
+    fun `an endpoint key is the request, not the spelling`() {
+        val key = EnsRpcConfig::endpointKey
+        assertEquals(key("https://eth.drpc.org"), key("https://eth.drpc.org:443"))
+        assertEquals(key("https://eth.drpc.org"), key("https://eth.drpc.org.:443/"))
+        assertEquals(key("https://eth.drpc.org"), key("https://eth.drpc.org#x"))
+        assertEquals(key("http://localhost/rpc"), key("http://LOCALHOST:80/rpc"))
+        assertEquals(key("https://1rpc.io/eth"), key("https://1rpc.io/%65%74%68"))
+        assertEquals(key("https://1rpc.io/eth"), key("https://1rpc.io/./x/../eth"))
+        assertEquals(key("https://a.example/p?k=v"), key("https://a.example/p?%6B=%76"))
+        assertEquals(key("https://a.example/a%2fb"), key("https://a.example/a%2Fb"))
+        // Still different endpoints:
+        assertFalse(key("https://eth.drpc.org") == key("https://eth.drpc.org:8443"))
+        assertFalse(key("http://localhost/rpc") == key("http://localhost:443/rpc"))
+        assertFalse(key("https://a.example/a%2Fb") == key("https://a.example/a/b"))
+        assertFalse(key("https://1rpc.io/eth") == key("https://1rpc.io/ETH"))
+    }
+
+    @Test
+    fun `the default port doesn't make a public endpoint yours`() {
+        val c = EnsRpcConfig(customEndpoints = listOf("https://eth.drpc.org:443"))
+        assertTrue(c.isPublicEndpoint("https://eth.drpc.org:443"))
+        assertEquals(1, c.sources.count { it.url.contains("eth.drpc.org") })
+    }
+
+    @Test
     fun `endpoint validation is the chains' RPC validation`() {
         assertEquals("https://my.node:8545/rpc", EnsRpcConfig.normalizeEndpoint("  https://my.node:8545/rpc "))
         // Your endpoints are mainnet's own RPCs: http only to this device.

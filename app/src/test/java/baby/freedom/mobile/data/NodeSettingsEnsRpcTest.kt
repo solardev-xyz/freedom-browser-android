@@ -162,6 +162,11 @@ class NodeSettingsEnsRpcTest {
             ChainStore.RpcAddResult.NAME_RESOLUTION_PUBLIC,
             chains.addUserRpc(1, "https://ETH.drpc.org/", allowPublic = true),
         )
+        // …as is one with the default port or an escaped path spelled out.
+        for (url in listOf("https://eth.drpc.org:443", "https://eth.merkle.io:443/", "https://1rpc.io/%65th", "https://1rpc.io/x/../eth")) {
+            assertEquals(url, ChainStore.RpcAddResult.NAME_RESOLUTION_PUBLIC, chains.addUserRpc(1, url, allowPublic = true))
+            assertEquals(url, NodeSettings.AddEndpointResult.PUBLIC, settings.addEnsRpcEndpoint(url))
+        }
         assertEquals(emptyList<String>(), mainnetRpcs())
         assertEquals(emptyList<String>(), config().customEndpoints)
         // Other chains are name resolution's business not at all.
