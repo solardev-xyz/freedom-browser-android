@@ -47,6 +47,17 @@ fun desktopSiteOf(zoomSite: String?): String? {
 private val IPV4_LITERAL = Regex("""^\d{1,3}(\.\d{1,3}){3}$""")
 
 /**
+ * A main-frame document at [url] committed: whether it is the one this
+ * chain (the user's navigation, see [PageWebView.usersNavigation]) was
+ * awaited at, and the chain is over either way (#180, R2-F1).
+ */
+internal fun UserNamedChain.takeCommit(url: String?): Boolean {
+    val awaited = asker()
+    ended()
+    return awaited != null && url != null && sameRequestUrl(awaited, url)
+}
+
+/**
  * The chrome's Back and Forward (a script step, not
  * [android.webkit.WebView.goBack], so the page's own history handling
  * sees them). [PageWebView] knows them to put the user agent of the

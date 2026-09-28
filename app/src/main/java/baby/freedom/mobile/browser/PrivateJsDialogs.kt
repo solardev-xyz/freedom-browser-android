@@ -45,6 +45,10 @@ internal fun jsDialogTitle(kind: JsDialogKind, url: String?): String {
  * Cancel. Always handles the dialog (returns true), so the default one
  * never appears for a private tab: with no Activity to show it in, the
  * page's call is cancelled.
+ *
+ * A regular tab's `beforeunload` prompt comes through here too, with
+ * [secure] off: [onAnswered] (true for Leave) is how the tab hears that
+ * Stay ended its navigation without a commit (#180, R2-F2).
  */
 internal fun showPrivateJsDialog(
     context: Context,
@@ -53,10 +57,13 @@ internal fun showPrivateJsDialog(
     message: String?,
     defaultValue: String?,
     result: JsResult,
+    secure: Boolean = true,
+    onAnswered: (confirmed: Boolean) -> Unit = {},
 ): Boolean {
     val activity = context.findHostActivity()
     if (activity == null || activity.isFinishing || activity.isDestroyed) {
         result.cancel()
+        onAnswered(false)
         return true
     }
     var answered = false
@@ -72,7 +79,13 @@ internal fun showPrivateJsDialog(
     } else null
     val builder = AlertDialog.Builder(activity)
         .setTitle(jsDialogTitle(kind, url))
-        .setOnDismissListener { if (!answered) result.cancel() }
+        .setOnDismissListener {
+            if (!answered) {
+                answered = true
+                result.cancel()
+                onAnswered(false)
+            }
+        }
     if (kind == JsDialogKind.BEFORE_UNLOAD) {
         builder.setMessage("Changes you made may not be saved.")
     } else if (!message.isNullOrEmpty()) {
@@ -89,17 +102,19 @@ internal fun showPrivateJsDialog(
         answered = true
         if (input != null && result is JsPromptResult) result.confirm(input.text.toString())
         else result.confirm()
+        onAnswered(true)
     }
     if (kind != JsDialogKind.ALERT) {
         builder.setNegativeButton(if (kind == JsDialogKind.BEFORE_UNLOAD) "Stay" else "Cancel") { _, _ ->
             answered = true
             result.cancel()
+            onAnswered(false)
         }
     }
     val dialog = builder.create()
     dialog.window?.apply {
         // Before show(): the window's first frame must already be secure.
-        addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        if (secure) addFlags(WindowManager.LayoutParams.FLAG_SECURE)
         if (input != null) setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_VISIBLE)
     }
     dialog.show()

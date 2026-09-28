@@ -226,4 +226,52 @@ class DesktopSiteTest {
         assertFalse(h.sites.isDesktop("p.com", private = true))
         assertEquals(1, h.clears)
     }
+
+    // The user's navigation (R2-F1): only its own commit gets the
+    // correction reload, never a later script navigation's.
+
+    @Test
+    fun `the user's load, and its redirect hops, are the user's commit`() {
+        val chain = UserNamedChain()
+        chain.started("http://LOCALHOST:8700")
+        chain.mainFrameRequested("http://localhost:8700/")
+        chain.redirected("http://127.0.0.1:8700/x")
+        assertTrue(chain.takeCommit("http://127.0.0.1:8700/x"))
+        // Taken: the next commit is nobody's.
+        assertFalse(chain.takeCommit("http://127.0.0.1:8700/x"))
+    }
+
+    @Test
+    fun `a load that ends with no commit leaves nothing for a later script navigation`() {
+        // A typed address answered 204: loading stops with its URL while
+        // /x is on screen. The page's own history.back() then commits.
+        val chain = UserNamedChain()
+        chain.started("http://localhost:8700/204")
+        chain.loadFinished("http://localhost:8700/204", "http://localhost:8700/hb")
+        assertFalse(chain.takeCommit("http://127.0.0.1:8700/x"))
+        // Even without the load-stop: a commit of another address isn't it.
+        chain.started("http://localhost:8700/204")
+        assertFalse(chain.takeCommit("http://127.0.0.1:8700/x"))
+    }
+
+    @Test
+    fun `a page's own request for another address ends the user's navigation before its redirects`() {
+        val chain = UserNamedChain()
+        chain.started("http://localhost:8700/204")
+        // history.back() to /x, which now redirects to /y.
+        chain.mainFrameRequested("http://127.0.0.1:8700/x")
+        chain.redirected("http://127.0.0.1:8700/y")
+        assertFalse(chain.takeCommit("http://127.0.0.1:8700/y"))
+    }
+
+    @Test
+    fun `a same-document step or Stay ends it, so a later reload of that address isn't the user's`() {
+        val chain = UserNamedChain()
+        // The chrome's Back to a pushState entry: no onPageStarted, only
+        // doUpdateVisitedHistory, which ends the chain.
+        chain.started("http://localhost:8700/p/a")
+        chain.ended()
+        // The page's own location.reload() of that entry.
+        assertFalse(chain.takeCommit("http://localhost:8700/p/a"))
+    }
 }
