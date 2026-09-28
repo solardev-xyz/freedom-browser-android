@@ -6,6 +6,8 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.io.File
+import java.nio.file.Files
 import java.util.Collections
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -20,6 +22,8 @@ class RadicleNodeTest {
         @Volatile var peers = 3
         @Volatile var repos = "[]"
         val releaseClone = CountDownLatch(1)
+        /** Progress events sent after the fetch is released (i.e. after a cancel). */
+        @Volatile var lateProgress: String? = null
         @Volatile var cloneResult = """{"ok":true}"""
         @Volatile var movedSocket: String? = null
         @Volatile var running = false
@@ -57,6 +61,7 @@ class RadicleNodeTest {
             if (listed.none { it.rid == rid }) repos = reposJson(listed + RadicleRepo(rid, ""))
             onProgress("""{"phase":"connecting","nid":"z6MkSeed","addr":"seed.example:8776","index":1,"total":2}""")
             releaseClone.await(5, TimeUnit.SECONDS)
+            lateProgress?.let(onProgress)
             return cloneResult
         }
         override fun cancelClone(rid: String): String {
@@ -66,6 +71,8 @@ class RadicleNodeTest {
         }
         override fun unseedRepo(rid: String): String {
             calls += "unseed:$rid"
+            // Like libradicle: nothing to talk to once the node is shut down.
+            if (!running) return """{"error":"node not started"}"""
             repos = reposJson(RadicleNode.parseRepos(repos).orEmpty().filter { it.rid != rid })
             return """{"unseeded":true}"""
         }
@@ -78,7 +85,9 @@ class RadicleNodeTest {
         }
     }
 
-    private val config = RadicleNode.Config(home = "/data/user/0/app/files/radicle", shortSocketDir = "/tmp")
+    private val home: File = Files.createTempDirectory("radicle-home").toFile().apply { deleteOnExit() }
+    private val config = RadicleNode.Config(home = home.absolutePath, shortSocketDir = "/tmp")
+    private val pendingFile get() = File(home, RadicleNode.PENDING_UNSEED_FILE)
 
     private fun await(what: String, node: RadicleNode, cond: (RadicleInfo) -> Boolean) {
         val until = System.currentTimeMillis() + 5_000
@@ -258,6 +267,26 @@ class RadicleNodeTest {
     }
 
     @Test
+    fun unseedingAnInFlightSeedLeavesNoStaleOutcomeLine() {
+        val ops = FakeOps().apply {
+            cloneResult = """{"cancelled":true}"""
+            // Progress still trickling in after the cancel lands.
+            lateProgress = """{"phase":"fetching","nid":"z6MkLate"}"""
+        }
+        val node = RadicleNode(config, ops)
+        node.start()
+        await("running", node) { it.status == RadicleStatus.Running }
+        node.seed(rid)
+        await("connecting", node) { it.seed?.phase == "connecting" }
+        node.unseed(rid)
+        await("rolled back", node) { ops.calls.toList().count { it == "unseed:$rid" } == 2 && it.seededRepos.isEmpty() }
+        Thread.sleep(200)
+        // Neither the late progress nor "cancelled" repaints the removed RID.
+        assertNull(node.state.value.seed)
+        node.dispose()
+    }
+
+    @Test
     fun unseedDropsARepoFromTheList() {
         val ops = FakeOps().apply { repos = """[{"rid":"$rid","name":null}]""" }
         val node = RadicleNode(config, ops)
@@ -296,6 +325,56 @@ class RadicleNodeTest {
         // The stopped node's page doesn't show the old fetch's outcome.
         Thread.sleep(200)
         assertNull(node.state.value.seed)
+    }
+
+    @Test
+    fun stopMidFetchRollsTheSeedBackBeforeShuttingDown() {
+        val ops = FakeOps().apply { cloneResult = """{"cancelled":true}""" }
+        val node = RadicleNode(config, ops)
+        node.start()
+        await("running", node) { it.status == RadicleStatus.Running }
+        node.seed(rid)
+        await("connecting", node) { it.seed?.phase == "connecting" }
+        assertEquals("pending rollback recorded while fetching", listOf(rid), pendingFile.readLines())
+        node.stop()
+        await("stopped", node) { it.status == RadicleStatus.Stopped && "shutdown" in ops.calls }
+        val calls = ops.calls.toList()
+        val unseedAt = calls.indexOf("unseed:$rid")
+        assertTrue("rolled back on a live node: $calls", unseedAt in 0 until calls.indexOf("shutdown"))
+        assertEquals("[]", ops.repos)
+        assertFalse("nothing left to replay", pendingFile.exists())
+        // Back on: the RID isn't listed as "Awaiting first fetch".
+        node.start()
+        await("running", node) { it.status == RadicleStatus.Running }
+        assertTrue(node.state.value.seededRepos.isEmpty())
+        node.dispose()
+    }
+
+    @Test
+    fun aRollbackTheNodeMissedIsReplayedOnTheNextBoot() {
+        // A previous process died mid-fetch: the policy stayed, the note too.
+        pendingFile.writeText("$rid\n")
+        val ops = FakeOps().apply { repos = """[{"rid":"$rid","name":null}]""" }
+        val node = RadicleNode(config, ops)
+        node.start()
+        await("running", node) { it.status == RadicleStatus.Running }
+        assertTrue("unseed:$rid" in ops.calls)
+        assertTrue("dropped before it's shown", node.state.value.seededRepos.isEmpty())
+        assertFalse(pendingFile.exists())
+        node.dispose()
+    }
+
+    @Test
+    fun aSuccessfulSeedClearsItsPendingRollback() {
+        val ops = FakeOps().apply { releaseClone.countDown() }
+        val node = RadicleNode(config, ops)
+        node.start()
+        await("running", node) { it.status == RadicleStatus.Running }
+        node.seed(rid)
+        await("done", node) { it.seed?.phase == "done" }
+        assertFalse(pendingFile.exists())
+        assertFalse("unseed:$rid" in ops.calls)
+        node.dispose()
     }
 
     @Test
