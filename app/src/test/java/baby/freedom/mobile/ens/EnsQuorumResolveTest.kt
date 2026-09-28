@@ -581,8 +581,55 @@ class EnsQuorumResolveTest {
         require(result is EnsResult.Ok) { "got $result" }
         assertEquals("bzz://$honestRef", result.uri)
         assertTrue(result.trust.verified)
-        // The public twin is never asked: DRPC already has its seat.
-        assertEquals(0, servers.log.count { it.url == "https://eth.drpc.org" })
+        // The public twin is probed for a head but gets no vote: DRPC's
+        // keyed endpoint answered first in order and holds the seat.
+        assertEquals(0, servers.log.count { it.url == "https://eth.drpc.org" && it.method != "eth_blockNumber" })
+    }
+
+    @Test
+    fun `a provider whose keyed endpoint is down votes through its public twin`() {
+        // A mistyped or expired DRPC key (every request refused) with only
+        // three providers on: without the public DRPC standing in, two
+        // heads are too few for a median (PR #169 R1-F1).
+        val badKey = Server(head = null, hashOf = { null }, record = { _, _ -> null })
+        val servers = Servers(
+            listOf(
+                "https://lb.drpc.live/ethereum/BADKEY",
+                "https://eth.drpc.org",
+                "https://rpc2.test/",
+                "https://rpc3.test/",
+            ).zip(listOf(badKey, honest(), honest(), honest())).toMap(LinkedHashMap()),
+        )
+
+        val result = resolve(servers)
+
+        require(result is EnsResult.Ok) { "got $result" }
+        assertEquals("bzz://$honestRef", result.uri)
+        assertTrue(result.trust.verified)
+        assertEquals(anchor, result.trust.block)
+        assertTrue(servers.log.any { it.url == "https://eth.drpc.org" && it.method == "eth_getBlockByNumber" })
+        assertEquals(0, servers.calls("https://lb.drpc.live/ethereum/BADKEY").size)
+    }
+
+    @Test
+    fun `two endpoints of one provider still count one head each provider`() {
+        // Both DRPC endpoints report a head; only three providers — the
+        // median is over three heads, and DRPC's keyed one alone reads.
+        val servers = Servers(
+            listOf(
+                "https://lb.drpc.live/ethereum/KEY",
+                "https://eth.drpc.org",
+                "https://rpc2.test/",
+                "https://rpc3.test/",
+            ).zip(listOf(honest(), honest(), honest(), honest())).toMap(LinkedHashMap()),
+        )
+
+        val result = resolve(servers)
+
+        require(result is EnsResult.Ok) { "got $result" }
+        assertTrue(result.trust.verified)
+        assertEquals(0, servers.calls("https://eth.drpc.org").size)
+        assertFalse("eth.drpc.org" in result.trust.agreed)
     }
 
     @Test

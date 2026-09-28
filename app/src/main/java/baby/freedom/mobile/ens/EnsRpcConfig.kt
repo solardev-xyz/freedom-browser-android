@@ -67,11 +67,14 @@ data class EnsRpcConfig(
     /**
      * Every endpoint the resolver will try, in order, each once. Yours
      * and keyed ones are de-duplicated by [endpointKey]
-     * (`https://eth.drpc.org/` is `https://eth.drpc.org`); a public one
-     * is skipped altogether when one of yours or a keyed one is already
-     * run by the same provider ([ChainDataRouter.providerOf]) — yours
-     * takes that provider's seat ([publicSkippedFor]). The quorum counts
-     * one vote per provider anyway ([EnsQuorum.voters]).
+     * (`https://eth.drpc.org/` is `https://eth.drpc.org`), and a public
+     * one on the very host of one of yours is that server. A public one
+     * run by the same provider ([ChainDataRouter.providerOf]) as one of
+     * yours or a keyed one stays in, after it ([publicTwinOf]): the
+     * quorum gives that provider one vote, cast by the first of its
+     * servers that answers ([EnsQuorum.waveOrder]), and the single-server
+     * fallback tries both — so a mistyped or expired key doesn't take a
+     * working public twin out with it.
      */
     val sources: List<Source>
         get() {
@@ -86,9 +89,12 @@ data class EnsRpcConfig(
                 val url = provider.urlFor(key)
                 if (seen.add(endpointKey(url))) out += Source(Kind.KEYED, provider.name, url)
             }
-            val yours = out.map { ChainDataRouter.providerOf(it.url) }.toSet()
+            // One of yours on a built-in's very host (an old install's
+            // list — such a URL is refused now, [isPublicEndpoint]) is
+            // that server already.
+            val yourHosts = out.mapNotNull { hostKey(it.url) }.toSet()
             for (url in enabledPublicEndpoints) {
-                if (ChainDataRouter.providerOf(url) in yours) continue
+                if (hostKey(url) in yourHosts) continue
                 if (seen.add(endpointKey(url))) out += Source(Kind.PUBLIC, "Public", url)
             }
             return out
@@ -105,10 +111,11 @@ data class EnsRpcConfig(
 
     /**
      * The one of your endpoints, or keyed providers, that public
-     * endpoint [url] is skipped for ([sources]): run by the same
-     * provider. `null` when it isn't skipped for one.
+     * endpoint [url] shares its provider's one vote with ([sources]):
+     * run by the same provider and asked ahead of it. `null` when there
+     * is none.
      */
-    fun publicSkippedFor(url: String): Source? {
+    fun publicTwinOf(url: String): Source? {
         val provider = ChainDataRouter.providerOf(url)
         return sources.firstOrNull { it.kind != Kind.PUBLIC && ChainDataRouter.providerOf(it.url) == provider }
     }

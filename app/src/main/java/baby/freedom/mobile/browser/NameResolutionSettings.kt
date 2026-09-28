@@ -74,7 +74,7 @@ private const val ENS_ABOUT =
     "How ENS (.eth), WNS (.wei) and GNS (.gwei) names are resolved. Every answer is cross-checked: it's only trusted when at least two RPC endpoints return exactly the same one. An answer only one endpoint gave is shown to you before anything loads."
 private const val ROW_ORDER = "Resolution order"
 private const val ORDER_HELP =
-    "The first three in this order that are reachable read each name, so the order decides who answers; the rest are asked, in order, when those can't agree or don't answer. Change it under RPC providers."
+    "The first three providers in this order that are reachable read each name, so the order decides who answers; the rest are asked, in order, when those can't agree or don't answer. Two endpoints of one provider count once: the first that answers. Change it under RPC providers."
 private const val ROW_CCIP = "Off-chain lookups (CCIP-Read)"
 private const val CCIP_HELP =
     "Some names (base.eth and cb.id subnames, NameStone names) are answered by a gateway their resolver names. The gateway sees the name you look up. Off: those names don't resolve."
@@ -309,9 +309,9 @@ internal fun RpcProvidersSection(
                             fontFamily = FontFamily.Monospace,
                             style = MaterialTheme.typography.bodySmall,
                         )
-                        config.publicSkippedFor(url)?.takeIf { on }?.let { twin ->
+                        config.publicTwinOf(url)?.takeIf { on }?.let { twin ->
                             Text(
-                                publicSkippedHelp(twin),
+                                publicTwinHelp(twin, asked = url in config.endpoints),
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
@@ -516,16 +516,20 @@ internal fun publicEndpointHint(url: String): String {
 
 /**
  * Under a public endpoint's switch, when [twin] — one of yours or a
- * keyed provider, run by the same provider — takes its place
- * ([EnsRpcConfig.publicSkippedFor]): one provider is one vote.
+ * keyed provider, run by the same provider — is asked ahead of it
+ * ([EnsRpcConfig.publicTwinOf]): one provider is one vote, cast by
+ * whichever of the two answers first in that order. [asked] false: the
+ * public one isn't asked at all, [twin] being on its very host.
  */
-internal fun publicSkippedHelp(twin: EnsRpcConfig.Source): String {
+internal fun publicTwinHelp(twin: EnsRpcConfig.Source, asked: Boolean = true): String {
     val what = if (twin.kind == EnsRpcConfig.Kind.KEYED) {
         "your ${twin.label} key"
     } else {
         "your endpoint ${EnsRpcConfig.redact(twin.url)}"
     }
-    return "Not asked: same provider as $what, which is asked in its place"
+    // Not [asked]: [twin] is on this very host, the same server.
+    if (!asked) return "Not asked: same server as $what, which is asked in its place"
+    return "Same provider as $what: one vote between them, this one's only if that one doesn't answer"
 }
 
 @Composable

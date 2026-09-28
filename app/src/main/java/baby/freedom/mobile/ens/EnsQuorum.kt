@@ -76,11 +76,14 @@ internal object EnsQuorum {
      * itself is unchanged — [M] identical answers whatever the order, so
      * a single server, however high the user ranks it, never decides
      * alone. One server per provider ([voters]), so no spelling of an
-     * endpoint gets its operator a second vote.
+     * endpoint gets its operator a second vote — the first of that
+     * provider's servers *that reported*: a keyed endpoint whose key is
+     * wrong (HTTP 401) hands the seat to its public twin rather than
+     * taking its provider's vote down with it.
      */
     fun waveOrder(pool: List<String>, reported: Collection<String>): List<String> {
         val set = reported.toSet()
-        return voters(pool).filter { it in set }
+        return voters(pool.filter { it in set })
     }
 
     sealed class HashVote {

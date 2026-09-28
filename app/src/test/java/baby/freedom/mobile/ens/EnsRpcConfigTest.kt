@@ -214,13 +214,33 @@ class EnsRpcConfigTest {
         val c = EnsRpcConfig(apiKeys = mapOf("drpc" to "KEY"))
         val keyed = "https://lb.drpc.live/ethereum/KEY"
         assertEquals(ChainDataRouter.providerOf("https://eth.drpc.org"), ChainDataRouter.providerOf(keyed))
-        // Your key takes DRPC's seat; the public DRPC isn't asked.
+        // Your key is asked first; the public DRPC stays in behind it,
+        // for the fallback and in case the key doesn't answer (R1-F1),
+        // but the two are one vote.
         assertTrue(keyed in c.endpoints)
-        assertFalse("https://eth.drpc.org" in c.endpoints)
-        assertEquals(keyed, c.publicSkippedFor("https://eth.drpc.org")?.url)
-        assertEquals(null, c.publicSkippedFor("https://eth.merkle.io"))
+        assertTrue("https://eth.drpc.org" in c.endpoints)
+        assertTrue(c.endpoints.indexOf(keyed) < c.endpoints.indexOf("https://eth.drpc.org"))
+        assertEquals(keyed, c.publicTwinOf("https://eth.drpc.org")?.url)
+        assertEquals(null, c.publicTwinOf("https://eth.merkle.io"))
         assertEquals(1, EnsQuorum.voters(listOf(keyed, "https://eth.drpc.org")).size)
         assertEquals(5, c.providerCount)
+    }
+
+    @Test
+    fun `a keyed endpoint that doesn't answer hands its provider's seat to the public twin`() {
+        val keyed = "https://lb.drpc.live/ethereum/BADKEY"
+        val c = EnsRpcConfig(
+            apiKeys = mapOf("drpc" to "BADKEY"),
+            disabledPublicEndpoints = setOf("https://1rpc.io/eth", "https://eth-mainnet.public.blastapi.io"),
+        )
+        assertEquals(3, c.providerCount)
+        val reported = c.endpoints - keyed
+        val order = EnsQuorum.waveOrder(c.endpoints, reported)
+        assertTrue("https://eth.drpc.org" in order)
+        assertEquals(3, order.size)
+        // Both answering: the keyed one, first in order, holds the seat.
+        assertEquals(keyed, EnsQuorum.waveOrder(c.endpoints, c.endpoints).first())
+        assertFalse("https://eth.drpc.org" in EnsQuorum.waveOrder(c.endpoints, c.endpoints))
     }
 
     @Test
@@ -228,7 +248,9 @@ class EnsRpcConfigTest {
         val mine = "https://lb.drpc.org/ogrpc?network=ethereum"
         val c = EnsRpcConfig(customEndpoints = listOf(mine))
         assertEquals(mine, c.endpoints.first())
-        assertFalse("https://eth.drpc.org" in c.endpoints)
+        assertTrue("https://eth.drpc.org" in c.endpoints)
+        assertEquals(mine, EnsQuorum.voters(c.endpoints).first())
+        assertFalse("https://eth.drpc.org" in EnsQuorum.voters(c.endpoints))
         assertEquals(EnsRpcConfig.PUBLIC_ENDPOINTS.size, c.providerCount)
     }
 

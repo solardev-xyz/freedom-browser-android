@@ -299,9 +299,13 @@ class EnsResolver internal constructor(
 
     private suspend fun newAnchorRound(epoch: Epoch): AnchorRound? {
         val startedAt = System.currentTimeMillis()
-        // One server per provider ([EnsQuorum.voters]): a second endpoint
-        // of the same operator would count its head, and its hash, twice.
-        val pool = EnsQuorum.voters(epoch.settings.endpoints)
+        // Every endpoint is probed, but each provider's head is counted
+        // once ([EnsQuorum.waveOrder]): its first server, in the user's
+        // order, that reported one. A second endpoint of the same operator
+        // would otherwise count its head, and its hash, twice — and a
+        // provider whose first endpoint is down (a wrong key) keeps its
+        // vote through its twin.
+        val pool = epoch.settings.endpoints
         val probes = pool.associateWith { rpc -> io.async { blockNumber(rpc) } }
         // Every server, not just a wave's worth: the more heads, the
         // harder the median is to move. Waits for all of them — or,
@@ -311,16 +315,19 @@ class EnsResolver internal constructor(
             tasks = probes.mapValues { (_, probe) -> suspend { probe.await() } },
             timeoutMs = QUORUM_TIMEOUT_MS.toLong(),
             graceMs = HEAD_GRACE_MS,
-            graceFrom = { got -> got.values.count { it != null } >= EnsQuorum.MIN_PROVIDERS },
+            graceFrom = { got ->
+                EnsQuorum.waveOrder(pool, got.filterValues { it != null }.keys).size >= EnsQuorum.MIN_PROVIDERS
+            },
         ).filterValues { it != null }.mapValues { it.value!! }
-        val number = EnsQuorum.anchorNumber(heads.values.toList())
+        // The user's order, not arrival order (#102), one server per
+        // provider: see [EnsQuorum.waveOrder].
+        val order = EnsQuorum.waveOrder(pool, heads.keys)
+        val number = EnsQuorum.anchorNumber(order.map { heads.getValue(it) })
         if (number == null) {
-            Log.w(TAG, "anchor infeasible: ${heads.size} of ${pool.size} servers reported a head")
+            Log.w(TAG, "anchor infeasible: ${order.size} of ${EnsQuorum.voters(pool).size} providers reported a head")
             return null
         }
         val tag = "0x" + number.toString(16)
-        // The user's order, not arrival order (#102): see [EnsQuorum.waveOrder].
-        val order = EnsQuorum.waveOrder(pool, heads.keys)
         val hashes = order.associateWith { rpc -> io.async { blockHash(rpc, tag) } }
         val vote = io.async {
             var decided: EnsQuorum.HashVote? = null
