@@ -255,8 +255,15 @@ object IpfsProgress {
      * still running or not, so the event-tail fallback of [message] reads
      * only events newer than [eventFloor]: the newest event id in the
      * load's first snapshot, raised at every poll while a superseded
-     * request is still open. What the node did before this load, or for
-     * a load it superseded, can't lend it a phase that way. (A request
+     * request is still open. What the node did before this load can't
+     * lend it a phase that way, nor can what it did for a superseded
+     * load while that load's requests were open app-side. The floor
+     * stops rising once they close, though, and the node doesn't stop
+     * with them: it goes on fetching (and logging) a request Chromium
+     * has abandoned. Those later events land above the floor, and once
+     * their request leaves `active` they can become this load's
+     * event-tail phase — the same limit as the counters above, since
+     * the node's events don't say which load they belong to. (A request
      * still running shows up in `active`, which isn't floored.)
      */
     class LoadMeter {
