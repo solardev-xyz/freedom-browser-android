@@ -396,12 +396,12 @@ class EnsResolver internal constructor(
         var vote = EnsQuorum.waveVote(legs)
         val rest = round.order.drop(EnsQuorum.K)
         if (EnsQuorum.worthWidening(vote, asked = first.size) && rest.isNotEmpty()) {
-            Log.i(TAG, "[$name] widening the wave to ${rest.map(::hostOf)} after ${scrub(vote, round.order)}")
+            Log.i(TAG, "[$name] widening the wave to ${rest.map(::hostOf)} after ${scrub(vote, round.reported)}")
             val more = rest.associateWith { startCall(it, target, callData, contract, round.tag, ccipRead) }
             collectLegs(more, round, hash, legs, outcomes, target, callData, contract, ccipRead)
             vote = EnsQuorum.waveVote(legs)
         }
-        Log.i(TAG, "[$name] block #${round.number}: ${scrub(vote, round.order)}")
+        Log.i(TAG, "[$name] block #${round.number}: ${scrub(vote, round.reported)}")
         return when (vote) {
             is EnsQuorum.WaveVote.Agreed -> Verdict(
                 decode(name, outcomes.getValue(vote.agreed.first()), contract).withTrust(
