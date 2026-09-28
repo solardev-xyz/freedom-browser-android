@@ -84,10 +84,13 @@ class ChainDetailPageTest {
         val eth = BuiltInChains.ETHEREUM
         val none = userRpcsNote(eth, policy)
         assert("up to 3 RPCs from different providers at the same time" in none && "all the chain's public RPCs" in none) { none }
+        // No RPC of yours: nothing claims a first seat for one, and nothing reads as timing.
+        assert("yours first" !in none && "first" !in none) { none }
 
         val one = userRpcsNote(eth.copy(userRpcUrls = listOf("https://mine.example")), policy)
         assert("in the quorum, but not alone" in one && "public RPCs fill the other 2 seats and see the same read" in one) { one }
         assert("isn't in the quorum" !in one) { one }
+        assert("takes a seat ahead of public RPCs" in one && "first" !in one) { one }
 
         // Three providers of the user's own fill every seat: no public RPC is in the quorum.
         val three = eth.copy(userRpcUrls = listOf("https://m1.example", "https://m2.example", "https://m3.example"))
@@ -105,10 +108,13 @@ class ChainDetailPageTest {
 
         // No quorum can form on a chain with one provider: yours is simply asked first.
         val lonely = Chain(id = 5, name = "X", symbol = "X", rpcUrls = listOf("https://a.example"))
-        assert("asked before the public RPCs" in userRpcsNote(lonely, ChainAccessPolicy.default(5))) { userRpcsNote(lonely, ChainAccessPolicy.default(5)) }
+        val lonelyNote = userRpcsNote(lonely, ChainAccessPolicy.default(5))
+        assert("One you add is asked before the public RPCs" in lonelyNote) { lonelyNote }
 
         val directOnly = ChainAccessPolicy(listOf(ChainSource.DIRECT), listOf(ChainSource.DIRECT))
-        assert("asked before the public RPCs" in userRpcsNote(eth, directOnly)) { userRpcsNote(eth, directOnly) }
+        assert("One you add is asked before the public RPCs" in userRpcsNote(eth, directOnly)) { userRpcsNote(eth, directOnly) }
+        val directMine = userRpcsNote(eth.copy(userRpcUrls = listOf("https://mine.example")), directOnly)
+        assert("It's asked before the public RPCs" in directMine) { directMine }
     }
 
     @Test

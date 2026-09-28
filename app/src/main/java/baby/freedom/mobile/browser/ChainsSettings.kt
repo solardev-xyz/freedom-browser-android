@@ -218,8 +218,10 @@ internal fun trustSummary(trust: ChainTrust): String {
 /**
  * What the "Your RPCs" section says about how [chain]'s own RPCs are
  * used — true of [ChainDataRouter] for the RPCs the user has now: they
- * lead the pool, so the quorum's K seats (one per provider) go to them
- * first and public RPCs fill the rest, asked at the same time. Once the
+ * lead the pool, so the quorum's K seats (one per provider) are handed to
+ * them ahead of public RPCs, which fill the rest; every seat is asked at
+ * the same time, so "ahead" is about who gets a seat, never timing. With
+ * no RPCs of the user's own the note claims no seat for one. Once the
  * user's providers fill every seat, no public RPC is in the quorum; an
  * RPC sharing a provider with an earlier one (every loopback spelling is
  * one) or past the first K takes no seat and is only asked if the quorum
@@ -232,17 +234,20 @@ internal fun userRpcsNote(chain: Chain, policy: ChainAccessPolicy): String {
     val pool = (chain.userRpcUrls + chain.rpcUrls).distinct()
     val providers = ChainDataRouter.quorumMembers(pool).size
     if (ChainSource.QUORUM !in policy.readOrder || providers < policy.quorumM) {
-        return lead + "It's asked before the public RPCs. " + tail
+        val order = if (chain.userRpcUrls.isEmpty()) "One you add is asked before the public RPCs. "
+        else "It's asked before the public RPCs. "
+        return lead + order + tail
     }
     val members = ChainDataRouter.quorumMembers(pool, k)
     val seats = members.count { it in chain.userRpcUrls }
     val publicSeats = members.size - seats
-    val howReadsGo = "Each read goes to up to $k RPCs from different providers at the same time, yours first. "
+    val howReadsGo = "Each read goes to up to $k RPCs from different providers at the same time. "
     val who = when {
-        seats == 0 -> "Until you add one, those are all the chain's public RPCs. "
+        seats == 0 -> "Until you add one, those are all the chain's public RPCs; " +
+            "one you add takes a seat ahead of them. "
         publicSeats == 0 -> "Your RPCs fill every seat, so the quorum is only yours: " +
             "a public RPC is asked only if it falls short. "
-        else -> "Yours ${if (seats == 1) "is" else "are"} in the quorum, but not alone: " +
+        else -> "Yours ${if (seats == 1) "takes a seat" else "take seats"} ahead of public RPCs, so ${if (seats == 1) "it's" else "they're"} in the quorum, but not alone: " +
             "public RPCs fill ${if (publicSeats == 1) "the other seat" else "the other $publicSeats seats"} and see the same read. "
     }
     val spare = chain.userRpcUrls.size - seats
@@ -257,7 +262,8 @@ private fun plural(n: Int, word: String) = if (n == 1) "1 $word" else "$n ${word
 
 /**
  * A chain's page (#107, #108): what it is, the user's own RPCs ("Your
- * RPCs", added and removed here, asked first), its public RPCs, and how a
+ * RPCs", added and removed here, given quorum seats ahead of public
+ * ones), its public RPCs, and how a
  * read is checked — with a Check button that reads the latest block
  * through [ChainDataRouter] and says how that answer was verified. Every
  * URL is shown in full (wrapped, never cut). A custom chain also offers
