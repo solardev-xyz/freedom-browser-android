@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
@@ -32,20 +33,30 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import baby.freedom.swarm.MyotisChainStatus
+import baby.freedom.swarm.MyotisInfo
+import baby.freedom.swarm.MyotisNetwork
+import baby.freedom.swarm.MyotisStatus
 import baby.freedom.swarm.NodeInfo
 import baby.freedom.swarm.NodeStatus
 import baby.freedom.swarm.SwarmNode
+import java.util.Locale
 
 /**
- * Full-screen node-details page: live status, peer count, wallet,
- * gateway URL, and the run-node on/off toggle. Shares the same
- * [FullScreenScaffold] chrome as Settings / History / Bookmarks.
+ * Full-screen node-details page: the Swarm node's live status, peer
+ * count, gateway URL and run-node on/off toggle, then the Myotis
+ * Ethereum / Gnosis light client (#72) with its own switch and per-chain
+ * sync state. Shares the same [FullScreenScaffold] chrome as Settings /
+ * History / Bookmarks.
  */
 @Composable
 fun NodeScreen(
     nodeInfo: NodeInfo,
     runNodeEnabled: Boolean,
     onToggleRunNode: (Boolean) -> Unit,
+    myotisInfo: MyotisInfo,
+    myotisEnabled: Boolean,
+    onToggleMyotis: (Boolean) -> Unit,
     onDismiss: () -> Unit,
 ) {
     BackHandler(onBack = onDismiss)
@@ -55,7 +66,7 @@ fun NodeScreen(
         .collectAsState(initial = "")
 
     FullScreenScaffold(
-        title = "Swarm node",
+        title = "Nodes",
         onDismiss = onDismiss,
     ) {
         LazyColumn(
@@ -77,6 +88,13 @@ fun NodeScreen(
             item("gateway") {
                 GatewaySection(externalSwarm = externalSwarm)
             }
+            item("myotis") {
+                LightClientSection(
+                    info = myotisInfo,
+                    enabled = myotisEnabled,
+                    onToggle = onToggleMyotis,
+                )
+            }
         }
     }
 }
@@ -88,7 +106,7 @@ private fun StatusSection(
     external: Boolean,
     onToggleRunNode: (Boolean) -> Unit,
 ) {
-    SectionCard(title = "Status") {
+    SectionCard(title = "Swarm node") {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -163,4 +181,135 @@ internal fun nodeStatusTriple(status: NodeStatus): NodeStatusTriple = when (stat
     NodeStatus.Error -> NodeStatusTriple(
         Color(0xFFEF4444), Icons.Filled.ErrorOutline, "Error",
     )
+}
+
+@Composable
+private fun LightClientSection(
+    info: MyotisInfo,
+    enabled: Boolean,
+    onToggle: (Boolean) -> Unit,
+) {
+    val triple = lightClientStatusTriple(if (enabled) info else MyotisInfo())
+    SectionCard(title = "Ethereum light client") {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(triple.icon, contentDescription = null, tint = triple.color)
+            Spacer(Modifier.width(12.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(triple.label, fontWeight = FontWeight.Medium)
+                Text(
+                    "Verifies Ethereum and Gnosis peer-to-peer on this device (Myotis)",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Switch(checked = enabled, onCheckedChange = onToggle)
+        }
+        if (enabled) {
+            val err = info.errorMessage
+            if (!err.isNullOrBlank()) DetailRow("Error", err, singleLine = false)
+            for (network in MyotisNetwork.entries) {
+                ChainRows(network, info.status, info.chain(network))
+            }
+        }
+    }
+}
+
+@Composable
+private fun ChainRows(network: MyotisNetwork, nodeStatus: MyotisStatus, chain: MyotisChainStatus?) {
+    Spacer(Modifier.height(8.dp))
+    DetailRow(network.displayName, myotisChainLabel(nodeStatus, chain))
+    if (chain == null || nodeStatus != MyotisStatus.Running) return
+    chain.error?.let {
+        DetailRow("Error", it, singleLine = false)
+        return
+    }
+    if (chain.staleAnchor) {
+        DetailRow("Not syncing", staleAnchorExplanation(chain), singleLine = false)
+        return
+    }
+    DetailRow("Beacon peers", chain.peerCount.toString())
+    DetailRow("State peers", statePeersLabel(chain))
+    if (chain.headBlock > 0) DetailRow("Head block", formatBlock(chain.headBlock), mono = true)
+    if (chain.finalizedBlock > 0) {
+        DetailRow("Finalized block", formatBlock(chain.finalizedBlock), mono = true)
+    }
+    val reason = chain.notServingReason
+    if (reason.isNotEmpty()) DetailRow("Not serving", reason, singleLine = false)
+}
+
+/** One-line state for a chain row: what the light client is doing on that chain. */
+internal fun myotisChainLabel(nodeStatus: MyotisStatus, chain: MyotisChainStatus?): String =
+    when (nodeStatus) {
+        MyotisStatus.Stopped -> "Off"
+        MyotisStatus.Starting -> "Starting…"
+        MyotisStatus.Error -> if (chain?.error != null) "Failed" else "Off"
+        MyotisStatus.Running -> when {
+            chain == null -> "Off"
+            chain.error != null -> "Failed"
+            chain.paused -> "Paused"
+            chain.staleAnchor -> "Checkpoint too old"
+            chain.ready -> "Synced"
+            chain.synced -> "Synced, not serving yet"
+            chain.beaconState == "CATCHING_UP" -> "Catching up"
+            chain.beaconState == "SYNCING" -> "Syncing"
+            else -> "Starting…"
+        }
+    }
+
+/**
+ * Why a chain parked on a stale trust anchor isn't syncing. The engine
+ * refuses to sync forward from a checkpoint older than the weak-subjectivity
+ * bound; desktop and iOS then fetch a fresh one (checkpoint recovery),
+ * which Android doesn't do yet — the chain stays parked, never unverified.
+ */
+internal fun staleAnchorExplanation(chain: MyotisChainStatus): String {
+    val age = (chain.targetPeriod - chain.currentPeriod).coerceAtLeast(0)
+    val detail = if (chain.wsBoundPeriods > 0) {
+        " (${plural(age, "sync period")} old, the safe limit is ${chain.wsBoundPeriods})"
+    } else ""
+    return "The built-in checkpoint is too old to sync from safely$detail. " +
+        "Fetching a fresh checkpoint isn't supported on Android yet."
+}
+
+private fun plural(n: Long, noun: String) = if (n == 1L) "1 $noun" else "$n ${noun}s"
+
+/** Pooled execution-layer peers, and how many of them can serve at the head. */
+internal fun statePeersLabel(chain: MyotisChainStatus): String =
+    if (chain.snapPeers > 0) "${chain.snapPeers} · ${chain.snapServingPeers} at head" else "0"
+
+internal fun formatBlock(number: Long): String = String.format(Locale.US, "%,d", number)
+
+/**
+ * The light client's overall line: green once every chain that came up
+ * serves verified reads, amber (with how many do) until then.
+ */
+internal fun lightClientStatusTriple(info: MyotisInfo): NodeStatusTriple = when (info.status) {
+    MyotisStatus.Stopped -> NodeStatusTriple(
+        Color(0xFF94A3B8), Icons.Filled.PowerSettingsNew, "Off",
+    )
+    MyotisStatus.Starting -> NodeStatusTriple(
+        Color(0xFFF59E0B), Icons.Filled.HourglassTop, "Starting…",
+    )
+    MyotisStatus.Error -> NodeStatusTriple(
+        Color(0xFFEF4444), Icons.Filled.ErrorOutline, "Error",
+    )
+    MyotisStatus.Running -> {
+        val live = info.chains.filter { it.error == null }
+        val ready = live.count { it.ready }
+        when {
+            live.isNotEmpty() && ready == live.size ->
+                NodeStatusTriple(Color(0xFF22C55E), Icons.Filled.CheckCircle, "Synced")
+            // A chain parked on a stale checkpoint never catches up on its
+            // own; don't let it keep the whole line on "Syncing…".
+            ready > 0 -> NodeStatusTriple(
+                Color(0xFFF59E0B), Icons.Filled.HourglassTop, "$ready of ${live.size} chains synced",
+            )
+            else -> NodeStatusTriple(Color(0xFFF59E0B), Icons.Filled.HourglassTop, "Syncing…")
+        }
+    }
 }
