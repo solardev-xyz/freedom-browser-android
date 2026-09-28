@@ -14,6 +14,7 @@
 # FFI_REF pins which freedom-mobile-ffi tag supplies the embedded
 # nodes; bump it together with the vendored headers in
 # swarmnode/src/main/cpp/ (see README § Building libfreedom_mobile_ffi.so).
+# The library is built with ant's `chain` feature (see the build step).
 
 name: release
 
@@ -26,7 +27,7 @@ permissions:
   contents: write
 
 env:
-  FFI_REF: v0.7.4
+  FFI_REF: v0.12.1
 
 jobs:
   release:
@@ -61,6 +62,14 @@ jobs:
           # matching the locally-verified toolchain; LATEST_HOME floats.
           export ANDROID_NDK_HOME="$ANDROID_NDK_ROOT"
           cd freedom-mobile-ffi
+          # build-android.sh passes --no-default-features, which drops
+          # both `chain` and `radicle`. Put `chain` back (ant's on-chain
+          # /wallet, /stamps, /chequebook gateway surfaces); radicle
+          # stays off until it has Kotlin bindings. Fail loudly if the
+          # script's invocation ever changes shape under a new FFI_REF.
+          sed -i 's/--no-default-features --crate-type/--no-default-features --features chain --crate-type/' scripts/build-android.sh
+          grep -q -- '--features chain' scripts/build-android.sh \
+            || { echo "build-android.sh: could not enable the chain feature" >&2; exit 1; }
           ./scripts/build-android.sh
           mkdir -p "$GITHUB_WORKSPACE/swarmnode/src/main/jniLibs"
           cp -r target/android/jniLibs/. "$GITHUB_WORKSPACE/swarmnode/src/main/jniLibs/"

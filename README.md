@@ -62,8 +62,12 @@ source .envrc   # if you haven't: cp .envrc.example .envrc && edit to taste
 #    which is gitignored here and must exist before Gradle can build the app.
 #    Needs cargo-ndk and ANDROID_NDK_HOME; rustup picks the toolchain from
 #    the repo's rust-toolchain.toml.
-git clone https://github.com/solardev-xyz/freedom-mobile-ffi.git /tmp/freedom-mobile-ffi
-( cd /tmp/freedom-mobile-ffi && ./scripts/build-android.sh )
+#    Use the FFI_REF tag pinned in release.yml, with ant's `chain` feature
+#    on (see "Building libfreedom_mobile_ffi.so" below).
+git clone --branch v0.12.1 https://github.com/solardev-xyz/freedom-mobile-ffi.git /tmp/freedom-mobile-ffi
+( cd /tmp/freedom-mobile-ffi \
+  && sed -i 's/--no-default-features --crate-type/--no-default-features --features chain --crate-type/' scripts/build-android.sh \
+  && ./scripts/build-android.sh )
 mkdir -p swarmnode/src/main/jniLibs
 cp -r /tmp/freedom-mobile-ffi/target/android/jniLibs/. swarmnode/src/main/jniLibs/
 
@@ -183,14 +187,18 @@ $ANDROID_HOME/build-tools/36.0.0/aapt2 dump badging app/build/outputs/apk/debug/
 `libfreedom_mobile_ffi.so` is both embedded nodes in one Rust cdylib — the ant Swarm light-node plus the freedom-ipfs reader, compiled per ABI from [`solardev-xyz/freedom-mobile-ffi`](https://github.com/solardev-xyz/freedom-mobile-ffi). Combining them in a single compilation graph dedupes everything the two dependency trees share (std, tokio, hyper/axum, libp2p, ring, SQLite, …), which is ~7 MiB per ABI versus shipping two separate `.so`s. It's **not checked in**; every fresh clone builds it once:
 
 ```bash
-# 1. Clone freedom-mobile-ffi somewhere outside this repo.
-git clone https://github.com/solardev-xyz/freedom-mobile-ffi.git /tmp/freedom-mobile-ffi
+# 1. Clone freedom-mobile-ffi at the tag release.yml pins as FFI_REF,
+#    somewhere outside this repo.
+git clone --branch v0.12.1 https://github.com/solardev-xyz/freedom-mobile-ffi.git /tmp/freedom-mobile-ffi
 
 # 2. Cross-compile both ABIs. Needs cargo-ndk + ANDROID_NDK_HOME; rustup
 #    installs the pinned toolchain + targets from rust-toolchain.toml.
 #    The script also verifies both C ABIs are exported and stages the
-#    matching headers under target/android/headers/.
+#    matching headers under target/android/headers/. It builds with
+#    --no-default-features (no `chain`, no `radicle`); the sed puts ant's
+#    `chain` feature back, the same way release.yml does.
 cd /tmp/freedom-mobile-ffi
+sed -i 's/--no-default-features --crate-type/--no-default-features --features chain --crate-type/' scripts/build-android.sh
 ./scripts/build-android.sh
 
 # 3. Copy the results into Freedom.
@@ -201,17 +209,19 @@ cp -r /tmp/freedom-mobile-ffi/target/android/jniLibs/. swarmnode/src/main/jniLib
 
 The Kotlin side talks to it through the hand-written JNI shims in `swarmnode/src/main/cpp/` (built into `libfreedom_jni.so` by the module's CMake step): `ant_jni.c` wraps the ant C API (`ant_init`, `ant_start_gateway` — the bee-shaped HTTP gateway on `127.0.0.1:1633` —, `ant_peer_count`, `ant_shutdown`) and `freedom_ipfs_jni.c` wraps the freedom-ipfs loopback-gateway surface. When upgrading, refresh the vendored `swarmnode/src/main/cpp/{ant.h,freedom_ipfs.h}` from the build's `target/android/headers/` along with the `.so`s, and bump the pinned (ant, freedom-ipfs) tags in freedom-mobile-ffi's `Cargo.toml` — the same aggregator also feeds the iOS xcframework, so both platforms move versions together.
 
+Since freedom-mobile-ffi v0.12 the library also links the Myotis Ethereum light client (`myotis_*` exports; not optional upstream, and not yet wired to Kotlin — see issue #72), and it is built with ant's `chain` feature so the gateway's `/wallet`, `/stamps`, `/chequebook` and `/chainstate` read Gnosis whenever `SwarmNode.Config.rpcEndpoint` is set. The app leaves that empty today (ultra-light, no chain traffic), so those endpoints answer bee's zero-stubs until a node-mode switch supplies an RPC.
+
 ## APK size
 
-The combined node library is ~20 MiB (arm64) / ~23 MiB (x86_64) and dominates the APK — everything else (dex, resources, the JNI shim) is under 6 MiB in a release build.
+The combined node library is ~27 MiB (arm64) / ~31 MiB (x86_64) and dominates the APK — everything else (dex, resources, the JNI shim) is under 6 MiB in a release build.
 
 `app/build.gradle.kts` already enables per-ABI splits (`arm64-v8a` + `x86_64`) alongside a universal fallback, so every build produces:
 
 | APK | Release | Debug | Use |
 |---|---|---|---|
-| `app-arm64-v8a-*.apk` | ~25 MiB | ~94 MiB | Physical arm64 devices, Apple Silicon emulators |
-| `app-x86_64-*.apk` | ~28 MiB | ~98 MiB | x86_64 Android emulators |
-| `app-universal-*.apk` | ~48 MiB | ~127 MiB | Fallback / `:installDebug` default |
+| `app-arm64-v8a-*.apk` | ~33 MiB | ~116 MiB | Physical arm64 devices, Apple Silicon emulators |
+| `app-x86_64-*.apk` | ~37 MiB | ~123 MiB | x86_64 Android emulators |
+| `app-universal-*.apk` | ~64 MiB | ~170 MiB | Fallback / `:installDebug` default |
 
 (For context: shipping ant and freedom-ipfs as two separate `.so`s cost ~11 MiB more per ABI in duplicated Rust std/tokio/libp2p/SQLite; the gomobile-era APKs were 157–456 MiB.)
 
