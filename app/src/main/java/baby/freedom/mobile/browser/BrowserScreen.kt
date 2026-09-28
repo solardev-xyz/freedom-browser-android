@@ -76,6 +76,8 @@ import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.lerp
+import androidx.lifecycle.createSavedStateHandle
+import androidx.lifecycle.viewmodel.compose.viewModel
 import baby.freedom.mobile.data.BrowsingRepository
 import baby.freedom.mobile.ui.PrivateTheme
 import baby.freedom.mobile.data.NodeSettings
@@ -406,7 +408,9 @@ fun BrowserScreen(
     ipfsCounters: () -> LongArray? = { null },
     onStatusBarTint: (Int?) -> Unit = {},
 ) {
-    val tabs = remember { TabsState(homepage = initialUrl) }
+    // Outside composition, so the tabs survive an Activity relaunch
+    // (#183, see [TabsSession]).
+    val tabs = viewModel { TabsSession(initialUrl, createSavedStateHandle()) }.tabs
     // Shared with the request interceptor (which resolves
     // `<name>.ens.…` virtual hosts) so both sides use one cache.
     val ensResolver = Gateways.ensResolver
@@ -435,14 +439,6 @@ fun BrowserScreen(
     var showHistory by rememberSaveable { mutableStateOf(false) }
     var showBookmarks by rememberSaveable { mutableStateOf(false) }
     var showDownloads by rememberSaveable { mutableStateOf(false) }
-    // Intentionally NOT `rememberSaveable`: rotation and the other
-    // declared `configChanges` don't recreate the Activity (see the
-    // manifest), but process death or an undeclared config change still
-    // does. In that case `tabs` is rebuilt as a fresh blank tab and we
-    // need to re-submit the homepage into it. If this survived
-    // recreation the load would be suppressed and the tab would render
-    // blank.
-    var didInitialLoad by remember { mutableStateOf(false) }
     var addressFocused by remember { mutableStateOf(false) }
     // Suggestions should only appear once the user has actively changed
     // the address-bar text. Tapping the pill (which select-alls the
@@ -823,6 +819,8 @@ fun BrowserScreen(
         // lifts a download block a declined offer left on it
         // ([DownloadOffers]); a page's own navigation doesn't.
         if (source == SubmitSource.User) downloads.allowOffers(target.id)
+        // Nor is it a load a restore put back over its page (#185 R4-F1).
+        if (source == SubmitSource.User) target.userNavigated()
         // And the load it schedules is theirs: its redirects may end in
         // an app link without a tap on a page (#173). Handed to that
         // load's own `loadUrl` below, never left for whichever load
@@ -1100,8 +1098,10 @@ fun BrowserScreen(
     // address bar here — the home surface should be the first thing
     // the user sees, not an already-open keyboard.
     LaunchedEffect(Unit) {
-        if (!didInitialLoad) {
-            didInitialLoad = true
+        // Once per tab list ([TabsState.initialLoadDone]): not again
+        // into the active tab of tabs that outlived a relaunch (#183).
+        if (!tabs.initialLoadDone) {
+            tabs.initialLoadDone = true
             submit(tabs.active, tabs.homepageUrl)
         }
     }
@@ -1499,6 +1499,14 @@ fun BrowserScreen(
         // asks for and strictly better at "no layout shifts" — an
         // overlay on fixed geometry can't move anything, whereas the
         // strip's reserved slot was 14 dp of permanently dead band.
+        // The page menu's per-site ad-blocking switch (#126): whether
+        // blocking is really on for the page — not allowlisted, an
+        // engine loaded, no list exempting it — re-read whenever the
+        // allowlist or the engine changes.
+        val adblockRevision by Adblock.revision.collectAsState()
+        val adblockState = remember(adblockRevision, state.url, state.private) {
+            Adblock.siteState(state.url, state.private)
+        }
         Box(modifier = Modifier.align(Alignment.BottomCenter)) {
             // Tap-to-dismiss catcher for the whole chrome band — the
             // capsule's own gutters, the side margins and the padding
@@ -1670,6 +1678,17 @@ fun BrowserScreen(
                         }
                     },
                     onPrint = { tabs.printPage?.invoke(state) },
+                    adblockState = adblockState,
+                    onToggleAdblock = {
+                        val site = adblockSiteFor(state.url) ?: return@BottomToolbar
+                        val current = Adblock.siteState(state.url, state.private) ?: return@BottomToolbar
+                        if (!current.toggleable) return@BottomToolbar
+                        Adblock.setAllowlisted(site, allowed = current.checked, private = state.private)
+                        // Already-loaded ads (or already-blocked content)
+                        // only change with the next load of the page.
+                        val url = state.url.ifBlank { state.addressBarText }
+                        if (url.isNotBlank()) submit(state, url)
+                    },
                     modifier = Modifier
                         .widthIn(max = CHROME_MAX_WIDTH)
                         .fillMaxWidth(),

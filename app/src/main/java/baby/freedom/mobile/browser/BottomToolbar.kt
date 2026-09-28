@@ -46,6 +46,7 @@ import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Print
+import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Remove
 import androidx.compose.material.icons.filled.Search
@@ -64,6 +65,7 @@ import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -80,6 +82,7 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.drawWithCache
+import androidx.compose.ui.draw.scale
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
@@ -1421,6 +1424,9 @@ internal fun BottomToolbar(
     onStop: () -> Unit,
     onNewTab: () -> Unit,
     onPrint: () -> Unit,
+    /** The page menu's ad-blocking switch (#126), or null to leave it out. */
+    adblockState: AdblockSiteState? = null,
+    onToggleAdblock: () -> Unit = {},
     /** "New private tab" (#86); null where private tabs can't run, and the menu doesn't offer it. */
     onNewPrivateTab: (() -> Unit)? = null,
     onExpandCapsule: () -> Unit,
@@ -1709,6 +1715,8 @@ internal fun BottomToolbar(
                     desktopSite = desktopSite,
                     onToggleDesktopSite = onToggleDesktopSite,
                     onPrint = onPrint,
+                    adblockState = adblockState,
+                    onToggleAdblock = onToggleAdblock,
                 )
             },
             modifier = Modifier
@@ -2921,6 +2929,8 @@ private fun OverflowMenuButton(
     desktopSite: Boolean?,
     onToggleDesktopSite: () -> Unit,
     onPrint: () -> Unit,
+    adblockState: AdblockSiteState?,
+    onToggleAdblock: () -> Unit,
 ) {
     var menuExpanded by remember { mutableStateOf(false) }
     // We hand-roll the anchor positioning rather than rely on
@@ -3089,6 +3099,48 @@ private fun OverflowMenuButton(
                                 onPrint()
                             },
                         )
+                        // Ad blocking on this site (#126): the switch is on
+                        // only where filters really apply; a tap allowlists
+                        // the site (or lifts that) and reloads the page.
+                        // Where nothing is filtered for another reason (no
+                        // lists on, still loading, a list exempts the page)
+                        // it is off and disabled, and says why in a
+                        // sub-line. Only on a web page.
+                        if (adblockState != null) {
+                            DropdownMenuItem(
+                                text = {
+                                    Column(modifier = Modifier.padding(end = 32.dp)) {
+                                        Text("Block ads on this site")
+                                        adblockState.note?.let { note ->
+                                            Text(
+                                                text = note,
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            )
+                                        }
+                                    }
+                                },
+                                leadingIcon = { Icon(Icons.Filled.Shield, contentDescription = null) },
+                                trailingIcon = {
+                                    Switch(
+                                        checked = adblockState.checked,
+                                        onCheckedChange = null,
+                                        enabled = adblockState.toggleable,
+                                        modifier = Modifier.scale(0.8f),
+                                    )
+                                },
+                                enabled = adblockState.toggleable,
+                                onClick = {
+                                    menuExpanded = false
+                                    onToggleAdblock()
+                                },
+                                // Read out as the switch it looks like.
+                                modifier = Modifier.semantics {
+                                    role = Role.Switch
+                                    toggleableState = ToggleableState(adblockState.checked)
+                                },
+                            )
+                        }
                         DropdownMenuItem(
                             text = { MenuItemLabel("History") },
                             leadingIcon = { Icon(Icons.Filled.History, contentDescription = null) },

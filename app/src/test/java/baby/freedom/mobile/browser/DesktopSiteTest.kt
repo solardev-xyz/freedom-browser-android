@@ -227,8 +227,16 @@ class DesktopSiteTest {
         assertEquals(1, h.clears)
     }
 
-    // The user's navigation (R2-F1): only its own commit gets the
-    // correction reload, never a later script navigation's.
+    // The user's navigation (R2-F1): which commit is the one it awaits,
+    // and that it's over once taken. The app no longer acts on the commit
+    // (R5 corrects hops before they're requested), so this observer lives
+    // here: it reads the chain the way a commit would, through [asker].
+
+    private fun UserNamedChain.takeCommit(url: String?): Boolean = synchronized(this) {
+        val awaited = asker()
+        ended()
+        awaited != null && url != null && sameRequestUrl(awaited, url)
+    }
 
     @Test
     fun `the user's load, and its redirect hops, are the user's commit`() {
