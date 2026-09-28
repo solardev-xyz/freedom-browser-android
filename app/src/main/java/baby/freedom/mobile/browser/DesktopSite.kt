@@ -85,10 +85,15 @@ object DesktopUserAgent {
      * with [string], built from the WebView's own [mobile] ones: the same
      * engine versions, minus the `Android WebView` brand (desktop
      * Chromium's list is just `Chromium` and the GREASE brand), as a
-     * non-mobile 64-bit x86 Linux with no device model. [kernel] is the
-     * platform version desktop Chrome reports on Linux: the kernel's.
+     * non-mobile 64-bit x86 Linux with no device model, whose form
+     * factor (`Sec-CH-UA-Form-Factors`) is `Desktop` — WebView's own says
+     * `Mobile`, which `mobile ?0` on Linux would contradict. Only where
+     * the WebView can take a form factor ([setFormFactors], the
+     * `USER_AGENT_METADATA_FORM_FACTORS` feature): the builder throws
+     * elsewhere. [kernel] is the platform version desktop Chrome reports
+     * on Linux: the kernel's.
      */
-    fun metadata(mobile: UserAgentMetadata, kernel: String): UserAgentMetadata =
+    fun metadata(mobile: UserAgentMetadata, kernel: String, setFormFactors: Boolean): UserAgentMetadata =
         UserAgentMetadata.Builder(mobile)
             .setBrandVersionList(mobile.brandVersionList.filter { it.brand != WEBVIEW_BRAND })
             .setPlatform("Linux")
@@ -98,6 +103,7 @@ object DesktopUserAgent {
             .setModel("")
             .setMobile(false)
             .setWow64(false)
+            .apply { if (setFormFactors) setFormFactors(listOf(UserAgentMetadata.FORM_FACTOR_DESKTOP)) }
             .build()
 
     /**
@@ -158,7 +164,11 @@ internal class UserAgentSwitch(private val webView: WebView) {
         if (hintsSupported) runCatching { WebSettingsCompat.getUserAgentMetadata(settings) }.getOrNull() else null
     private val desktopString = DesktopUserAgent.string(mobileString)
     private val desktopHints: UserAgentMetadata? = mobileHints?.let {
-        DesktopUserAgent.metadata(it, DesktopUserAgent.kernelVersion(System.getProperty("os.version")))
+        DesktopUserAgent.metadata(
+            it,
+            DesktopUserAgent.kernelVersion(System.getProperty("os.version")),
+            setFormFactors = WebViewFeature.isFeatureSupported(WebViewFeature.USER_AGENT_METADATA_FORM_FACTORS),
+        )
     }
 
     /** Whether the WebView currently sends the desktop user agent. */

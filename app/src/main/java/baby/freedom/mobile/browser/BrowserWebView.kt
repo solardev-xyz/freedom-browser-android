@@ -1973,10 +1973,6 @@ private fun buildRefreshableWebView(
         // R2-F1), and by a main-frame request of the page's own
         // ([UserNamedChain]).
         val userNamedChain = UserNamedChain()
-        // The last main-frame request's URL and method (#180): a document
-        // committed with the wrong user agent is only fetched again if it
-        // was a GET. Written from WebView's network thread.
-        val lastMainFrameRequest = java.util.concurrent.atomic.AtomicReference<Pair<String, String>?>(null)
         // The URL of the document on screen, as last committed (or moved
         // by history.pushState): tells the page's own `load` event from
         // the end of a navigation that never commits
@@ -2206,15 +2202,23 @@ private fun buildRefreshableWebView(
                 val zoomSite = zoomSiteKey(url)
                 state.zoomSite = zoomSite
                 // …and asked for with its site's user agent (#180). A
-                // navigation nothing of ours saw start — the page's own
-                // `history.back()` or `location.reload()`, or a page from
-                // before the remembered sites were read — can commit with
-                // the other one: it is fetched again, with the right one,
-                // if that is safe to repeat (a GET). Only for a site; the
-                // next load puts the right one back for anything else.
-                if (view is PageWebView && url != null && desktopSiteOf(zoomSite) != null &&
-                    view.needsOtherUserAgentFor(url) &&
-                    lastMainFrameRequest.get().let { it == null || (it.first == url && it.second.equals("GET", true)) }
+                // page's own navigation keeps the user agent it started
+                // with (see `shouldOverrideUrlLoading`), and so does one
+                // that committed before the remembered sites were read:
+                // either can commit with the other one. It is fetched
+                // again, with the right one, by a reload — which Chromium
+                // sends with the original navigation's initiator, so the
+                // site sees the same `Sec-Fetch-Site`, `Referer` and
+                // SameSite cookies it just did (R1-F1) — but only when
+                // the navigation was the user's: a reload always says
+                // `Sec-Fetch-User: ?1`, which a page's script navigation
+                // must never gain. A reload of a POST result resends
+                // nothing ([onFormResubmission] says don't), whether or
+                // not a service worker answered it (R1-F4). Only for a
+                // site; the next load puts the right one back otherwise.
+                val usersNavigation = (view as? PageWebView)?.takeUsersNavigation() == true
+                if (usersNavigation && view is PageWebView && url != null &&
+                    desktopSiteOf(zoomSite) != null && view.needsOtherUserAgentFor(url)
                 ) {
                     view.post { if (view.url == url && view.needsOtherUserAgentFor(url)) view.reload() }
                 }
@@ -2696,24 +2700,20 @@ private fun buildRefreshableWebView(
                     onSubmitUrl(state, target)
                     return true
                 }
-                // A site on the other side of "Desktop site" (#180) than
-                // the page's (a link, or a redirect, between a desktop
-                // site and a mobile one): WebView can't swap the user
-                // agent under a navigation it has started, so it goes
-                // again as a load of ours, with the right one — keeping
-                // what the page's own navigation carried for the app-link
-                // checks (#85, #173). A GET: WebView never asks about a
-                // POST, which keeps the user agent it started with.
-                if (request.isForMainFrame && view is PageWebView && view.needsOtherUserAgentFor(target)) {
-                    val gesture = request.hasGesture() || (request.isRedirect && navigationHadGesture)
-                    val userNamed = userNamedAsker != null
-                    // Posted: not from inside the callback of the
-                    // navigation being cancelled.
-                    view.post {
-                        if (userNamed) view.loadUrlNamedByUser(target) else view.loadUrl(target)
-                        navigationHadGesture = gesture
-                    }
-                    return true
+                // A page's own navigation — a link, a script's
+                // `location` change, or a redirect of either — goes on
+                // with the user agent in place, even across "Desktop
+                // site" (#180): WebView can't swap it under a navigation
+                // it has started, and cancelling it to start it again as
+                // a load of ours would lose its initiator (Chromium would
+                // send `Sec-Fetch-Site: none`, a forged `Sec-Fetch-User`,
+                // no `Referer` and SameSite=Strict cookies — R1-F1) and
+                // turn a `location.replace()` into a new history entry
+                // (R1-F2). `onPageStarted` fixes the user agent once it
+                // commits, if a user's tap started it. A redirect hop is
+                // the navigation it continues: it keeps its start's say.
+                if (request.isForMainFrame && !request.isRedirect && view is PageWebView) {
+                    view.navigationIsUsers(request.hasGesture())
                 }
                 // The WebView follows it: a page a service worker answers
                 // commits with no answer the interceptor saw, and prunes
@@ -2734,7 +2734,6 @@ private fun buildRefreshableWebView(
                 val mainFrame = request?.isForMainFrame == true
                 if (mainFrame) {
                     request!!.url?.toString()?.let {
-                        lastMainFrameRequest.set(it to request.method.orEmpty())
                         pendingNavigationUrls.add(it)
                         // Not a hop of the user's named load: the page's
                         // own navigation (R1-F1).
@@ -3160,6 +3159,8 @@ internal class PageWebView(context: Context) : WebView(context) {
             HISTORY_FORWARD_JS -> return matchUserAgentTo(historyEntryUrl(1) ?: return false)
         }
         if (url != null && url.startsWith("javascript:", ignoreCase = true)) return false
+        // Every load of the app's comes through here.
+        usersNavigation = true
         val desktop = wantsDesktop(url)
         if (desktop == userAgentSwitch.desktop) return false
         // Chromium reloads the page on screen, with the new user agent,
@@ -3171,12 +3172,29 @@ internal class PageWebView(context: Context) : WebView(context) {
         return userAgentSwitch.set(desktop)
     }
 
+    // Whether the navigation last started is the user's: a load of the
+    // app's, or a page's own navigation started by a user gesture. A
+    // navigation nothing of ours sees start (the page's own
+    // `history.back()` or `location.reload()`) leaves what was there
+    // before its commit: nothing, once the last one committed.
+    private var usersNavigation = false
+
+    /** A page's own main-frame navigation started, with a user gesture or not. */
+    fun navigationIsUsers(gesture: Boolean) {
+        usersNavigation = gesture
+    }
+
     /**
-     * Whether a main-frame navigation to [url] the page started needs a
-     * different user agent than the one in place (#180). WebView can't
-     * change it under a navigation already started (see
-     * [matchUserAgentTo]), so such a navigation is cancelled and started
-     * again as this app's own load.
+     * Whether the navigation that just committed was the user's (see
+     * [navigationIsUsers]); the next one starts from "no".
+     */
+    fun takeUsersNavigation(): Boolean = usersNavigation.also { usersNavigation = false }
+
+    /**
+     * Whether a page at [url] needs a different user agent than the one
+     * in place (#180). WebView can't change it under a navigation
+     * already started (see [matchUserAgentTo]): a page that committed
+     * with the wrong one is reloaded with the right one.
      */
     fun needsOtherUserAgentFor(url: String): Boolean = wantsDesktop(url) != userAgentSwitch.desktop
 

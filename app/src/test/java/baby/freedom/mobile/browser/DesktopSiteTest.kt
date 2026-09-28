@@ -103,7 +103,7 @@ class DesktopSiteTest {
 
     @Test
     fun `client hints say desktop Linux, with the WebView's engine versions`() {
-        val hints = DesktopUserAgent.metadata(webViewHints, kernel = "6.6.66")
+        val hints = DesktopUserAgent.metadata(webViewHints, kernel = "6.6.66", setFormFactors = false)
         assertEquals(
             listOf("Not(A:Brand" to "99", "Chromium" to "133"),
             hints.brandVersionList.map { it.brand to it.majorVersion },
@@ -117,6 +117,16 @@ class DesktopSiteTest {
         assertEquals("", hints.model)
         assertFalse(hints.isMobile)
         assertFalse(hints.isWow64)
+    }
+
+    @Test
+    fun `form factor is left alone where the WebView can't take one`() {
+        // The builder's setFormFactors throws on a WebView without
+        // USER_AGENT_METADATA_FORM_FACTORS (and on the JVM, which has
+        // none): building without it must not call it (R1-F3). The
+        // device check covers the "Desktop" value itself.
+        val hints = DesktopUserAgent.metadata(webViewHints, kernel = "6.6.66", setFormFactors = false)
+        assertEquals(webViewHints.formFactors, hints.formFactors)
     }
 
     @Test
