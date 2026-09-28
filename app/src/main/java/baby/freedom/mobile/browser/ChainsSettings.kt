@@ -385,10 +385,10 @@ internal fun ChainDetailPage(
             }
             SectionCard(title = "Public RPCs") {
                 Text(
-                    rpcCountLabel(chain.rpcUrls.size),
+                    rpcCountLabel(chain.publicRpcUrls.size),
                     style = MaterialTheme.typography.labelLarge,
                 )
-                for (url in chain.rpcUrls) {
+                for (url in chain.publicRpcUrls) {
                     Text(
                         url,
                         style = MaterialTheme.typography.bodySmall,

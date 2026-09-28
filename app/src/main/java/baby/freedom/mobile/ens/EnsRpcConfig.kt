@@ -116,6 +116,16 @@ data class EnsRpcConfig(
         return customEndpoints.any { endpointKey(it) == key }
     }
 
+    /**
+     * Whether [url] is one of the built-in [PUBLIC_ENDPOINTS]
+     * ([endpointKey]): the resolver already asks it, under its own
+     * switch, so it isn't taken as one of yours.
+     */
+    fun isPublicEndpoint(url: String): Boolean {
+        val key = endpointKey(url)
+        return PUBLIC_ENDPOINTS.any { endpointKey(it) == key }
+    }
+
     companion object {
         /** The built-in public mainnet endpoints, tried in this order. */
         val PUBLIC_ENDPOINTS: List<String> = listOf(

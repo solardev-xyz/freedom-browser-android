@@ -336,6 +336,7 @@ internal fun RpcProvidersSection(
     if (addingEndpoint) {
         AddEndpointDialog(
             isDuplicate = config::hasCustomEndpoint,
+            isPublic = config::isPublicEndpoint,
             saveError = addError,
             onAdd = { url ->
                 addError = null
@@ -347,6 +348,7 @@ internal fun RpcProvidersSection(
                             null
                         }
                         NodeSettings.AddEndpointResult.DUPLICATE -> "Not added: already in your endpoints"
+                        NodeSettings.AddEndpointResult.PUBLIC -> "Not added: $PUBLIC_ENDPOINT_HINT"
                         NodeSettings.AddEndpointResult.FULL ->
                             "Not added: at most ${EnsRpcConfig.MAX_CUSTOM_ENDPOINTS} endpoints"
                         NodeSettings.AddEndpointResult.INVALID -> "Not added: not a valid endpoint URL"
@@ -491,9 +493,13 @@ private fun EndpointTestRow(url: String?) {
     }
 }
 
+/** Why a built-in public endpoint isn't taken as one of yours. */
+private const val PUBLIC_ENDPOINT_HINT = "already one of the built-in public endpoints; turn it on or off under $SUB_PUBLIC"
+
 @Composable
 private fun AddEndpointDialog(
     isDuplicate: (String) -> Boolean,
+    isPublic: (String) -> Boolean,
     saveError: String?,
     onAdd: (String) -> Unit,
     onDismiss: () -> Unit,
@@ -501,7 +507,8 @@ private fun AddEndpointDialog(
     var draft by remember { mutableStateOf("") }
     val validation = EnsRpcConfig.validateEndpoint(draft)
     val duplicate = validation.url != null && isDuplicate(validation.url)
-    val url = validation.url?.takeIf { !duplicate }
+    val public = validation.url != null && !duplicate && isPublic(validation.url)
+    val url = validation.url?.takeIf { !duplicate && !public }
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(ROW_ADD_ENDPOINT) },
@@ -517,6 +524,7 @@ private fun AddEndpointDialog(
                         Text(
                             when {
                                 duplicate -> "Already in your endpoints"
+                                public -> PUBLIC_ENDPOINT_HINT.replaceFirstChar { it.uppercase() }
                                 draft.isNotBlank() && validation.rejection != null ->
                                     endpointHint(validation.rejection)
                                 url != null && url.startsWith("http://", ignoreCase = true) ->

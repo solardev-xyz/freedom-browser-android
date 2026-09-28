@@ -1,6 +1,7 @@
 package baby.freedom.mobile.data
 
 import android.content.Context
+import android.os.SystemClock
 import android.util.Log
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
@@ -92,7 +93,11 @@ class NodeSettings private constructor(
     // (or should open) the chain list or the Keystore.
     chains: () -> ChainStore,
     keys: () -> RpcKeyStore,
-    private val clock: () -> Long = System::currentTimeMillis,
+    /**
+     * Monotonic milliseconds for [migrateEnsRpc]'s back-off: the wall
+     * clock would stall retries for as long as NTP set it back by.
+     */
+    private val clock: () -> Long = SystemClock::elapsedRealtime,
 ) {
     /**
      * Whether the embedded Swarm node should be running. Defaults to
@@ -363,16 +368,19 @@ class NodeSettings private constructor(
     }
 
     /** Why [addEnsRpcEndpoint] didn't add. */
-    enum class AddEndpointResult { ADDED, INVALID, DUPLICATE, FULL, FAILED }
+    enum class AddEndpointResult { ADDED, INVALID, DUPLICATE, PUBLIC, FULL, FAILED }
 
     /**
      * Add [url] to your own mainnet RPCs (after the ones already there),
      * unless it isn't a valid endpoint, is already listed
-     * ([EnsRpcConfig.endpointKey]) or the list is full. One of the
-     * Ethereum chain page's public RPCs is taken: name resolution never
-     * asks those ([EnsRpcConfig.PUBLIC_ENDPOINTS] is its own list), so
-     * adding it here is the only way to have it resolve names, and it
-     * becomes yours on the chain page too, asked first.
+     * ([EnsRpcConfig.endpointKey]), is one of name resolution's own
+     * built-in public endpoints ([EnsRpcConfig.isPublicEndpoint] —
+     * already asked, under its own switch; taking it as yours would
+     * label a third party's lone answer as your RPC's) or the list is
+     * full. One of the Ethereum chain page's *other* public RPCs is
+     * taken: name resolution never asks those, so adding it here is the
+     * only way to have it resolve names, and it becomes yours on the
+     * chain page too, asked first.
      */
     suspend fun addEnsRpcEndpoint(url: String): AddEndpointResult {
         val normalized = EnsRpcConfig.normalizeEndpoint(url) ?: return AddEndpointResult.INVALID
@@ -386,6 +394,7 @@ class NodeSettings private constructor(
                 return@withLock AddEndpointResult.FAILED
             }
             if (current.hasCustomEndpoint(normalized)) return@withLock AddEndpointResult.DUPLICATE
+            if (current.isPublicEndpoint(normalized)) return@withLock AddEndpointResult.PUBLIC
             when (chainStore.addUserRpc(MAINNET, normalized, allowPublic = true)) {
                 ChainStore.RpcAddResult.ADDED -> AddEndpointResult.ADDED
                 ChainStore.RpcAddResult.INVALID -> AddEndpointResult.INVALID
@@ -590,7 +599,7 @@ class NodeSettings private constructor(
             store: DataStore<Preferences>,
             chains: ChainStore,
             keys: RpcKeyStore,
-            clock: () -> Long = System::currentTimeMillis,
+            clock: () -> Long = { System.nanoTime() / 1_000_000 },
         ): NodeSettings = NodeSettings(store, { chains }, { keys }, clock)
 
         fun get(context: Context): NodeSettings =

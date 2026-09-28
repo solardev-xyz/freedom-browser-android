@@ -36,6 +36,9 @@ data class Chain(
      */
     val userRpcUrls: List<String> = emptyList(),
 ) {
+    /** [rpcUrls] not also among [userRpcUrls] — the chain page lists those under Your RPCs only. */
+    val publicRpcUrls: List<String> get() = rpcUrls.filter { it !in userRpcUrls }
+
     /** `0x`-prefixed hex chain ID, the EIP-1193 wire format. */
     val hexId: String get() = "0x" + id.toString(16)
 

@@ -123,12 +123,29 @@ class NodeSettingsEnsRpcTest {
         // Asked once: yours, then the rest of the chain's public RPCs.
         val eth = chains.chains.first().first { it.id == BuiltInChains.ETHEREUM.id }
         assertEquals(1, (eth.userRpcUrls + eth.rpcUrls).distinct().count { it == url })
+        // Listed under Your RPCs only on the chain page, not Public RPCs too.
+        assertFalse(url in eth.publicRpcUrls)
+        assertEquals(eth.rpcUrls.size - 1, eth.publicRpcUrls.size)
         assertEquals(NodeSettings.AddEndpointResult.DUPLICATE, settings.addEnsRpcEndpoint(url))
         // The chain page still refuses it: it asks its public RPCs already.
         assertEquals(ChainStore.RpcAddResult.PUBLIC, chains.addUserRpc(1, chainPublic[1]))
         // Removable like any other of yours.
         assertEquals(NodeSettings.EnsEdit.DONE, settings.removeEnsRpcEndpoint(url))
         assertEquals(emptyList<String>(), mainnetRpcs())
+    }
+
+    @Test
+    fun `a built-in public endpoint of name resolution is refused, not made yours`() = runBlocking {
+        // eth.drpc.org and friends are on both lists; name resolution
+        // already asks them under their own switch.
+        for (url in EnsRpcConfig.PUBLIC_ENDPOINTS) {
+            assertEquals(NodeSettings.AddEndpointResult.PUBLIC, settings.addEnsRpcEndpoint(url))
+        }
+        assertEquals(NodeSettings.AddEndpointResult.PUBLIC, settings.addEnsRpcEndpoint("https://ETH.drpc.org/"))
+        assertEquals(emptyList<String>(), mainnetRpcs())
+        assertEquals(emptyList<String>(), config().customEndpoints)
+        assertTrue(config().isPublicEndpoint("https://eth.drpc.org/"))
+        assertFalse(config().isPublicEndpoint("https://rpc.flashbots.net"))
     }
 
     @Test
