@@ -226,6 +226,12 @@ class EnsNormalizeTest {
             "a_b.ｔｅｚ" to "a_b.tez",
             "ALICE.ＴＥＺ" to "alice.tez",
             "alice。tez" to "alice.tez",
+            // Nontransitional: deviation characters are kept, not mapped
+            // (R2-F1 — transitional made `straße.tez` `strasse.tez`).
+            "stra\u00dfe.tez" to "stra\u00dfe.tez",
+            "STRAßE.tez" to "stra\u00dfe.tez",
+            "\u03c3\u03bf\u03c6\u03bf\u03c2.tez" to "\u03c3\u03bf\u03c6\u03bf\u03c2.tez",
+            "\u0915\u094d\u200d\u0937.tez" to "\u0915\u094d\u200d\u0937.tez",
         )
         for ((typed, key) in cases) {
             assertEquals(typed, key, EnsNormalize.normalizeOrNull(typed))

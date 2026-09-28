@@ -104,8 +104,15 @@ internal object WhatwgHost {
         fun map(domain: String): String? = null
 
         companion object {
-            /** Chromium's `url_idna_icu` options: nontransitional, CheckBidi, (and WHATWG's) CheckJoiners. */
-            const val OPTIONS = IDNA.NONTRANSITIONAL_TO_ASCII or IDNA.CHECK_BIDI or IDNA.CHECK_CONTEXTJ
+            /**
+             * Chromium's `url_idna_icu` options: nontransitional, CheckBidi,
+             * (and WHATWG's) CheckJoiners. Nontransitional both ways — ICU
+             * defaults ToUnicode (and so [map]) to *transitional*, which
+             * would turn `straße.tez` into `strasse.tez`, `ς` into `σ`
+             * and drop ZWJ/ZWNJ.
+             */
+            const val OPTIONS = IDNA.NONTRANSITIONAL_TO_ASCII or IDNA.NONTRANSITIONAL_TO_UNICODE or
+                IDNA.CHECK_BIDI or IDNA.CHECK_CONTEXTJ
 
             /** Errors WHATWG ignores: CheckHyphens and VerifyDnsLength are both off. */
             val IGNORED_ERRORS = setOf(
