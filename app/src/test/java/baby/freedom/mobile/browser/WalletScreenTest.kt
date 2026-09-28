@@ -34,6 +34,21 @@ class WalletScreenTest {
     }
 
     @Test
+    fun `import hint splits on the same whitespace as the parser`() {
+        // Separators a paste from a web page or note can carry.
+        for (sep in listOf("\u00A0", "\u2009", "\u202F", "\u3000", "\t", "\n")) {
+            val phrase = twelve.replaceFirst(" ", sep)
+            assertNull(baby.freedom.mobile.wallet.Mnemonic.problemWith(phrase))
+            assertTrue("separator U+%04X".format(sep[0].code), importHint(phrase) is ImportHint.Valid)
+        }
+        // A word ended by a no-break space counts as finished.
+        val bad = importHint("abandon notaword\u00A0")
+        assertTrue(bad is ImportHint.Problem)
+        assertTrue(bad.text.startsWith("Word 2"))
+        assertEquals("2 words", importHint("abandon\u3000abandon").text)
+    }
+
+    @Test
     fun `a paste is seen even when it replaces a selection`() {
         fun at(text: String, cursor: Int = text.length) = TextFieldValue(text, TextRange(cursor))
         fun all(text: String) = TextFieldValue(text, TextRange(0, text.length))

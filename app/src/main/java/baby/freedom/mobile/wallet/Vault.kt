@@ -202,9 +202,10 @@ class Vault internal constructor(
         if (record.backedUp) return@withLock
         val updated = record.withBackedUp(true)
         withContext(io) { store.write(updated) }
-        _state.value = when (_state.value) {
-            is State.Unlocked -> State.Unlocked(updated.info())
-            else -> State.Locked(updated.info())
+        // Under the seed lock, and keyed on the seed rather than the state
+        // read before it: an auto-lock landing meanwhile must not be undone.
+        synchronized(lock) {
+            _state.value = if (seed != null) State.Unlocked(updated.info()) else State.Locked(updated.info())
         }
     }
 
@@ -286,6 +287,16 @@ class Vault internal constructor(
             policy.foregrounded()
             if (seed != null) reschedule()
         }
+    }
+
+    /**
+     * Whether the seed is available right now: false if the vault is locked
+     * or its auto-lock deadline has passed (the timer can run late in deep
+     * sleep), in which case it locks now. What [withSeed] would find.
+     */
+    fun unlockedNow(): Boolean = synchronized(lock) {
+        lockIfExpiredLocked()
+        seed != null
     }
 
     /** Locks now if the auto-lock deadline has passed (the timer can run late in deep sleep). */
@@ -387,7 +398,7 @@ class Vault internal constructor(
      * it's answered or the last caller still waiting goes away.
      */
     suspend fun requireUnlocked(reason: String): Boolean {
-        if (_state.value is State.Unlocked) return true
+        if (unlockedNow()) return true
         val waiting = synchronized(setupLock) {
             val current = _setupRequest.value?.takeIf { !it.waiting.result.isCompleted }
             val next = when {

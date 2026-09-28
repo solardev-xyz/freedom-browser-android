@@ -117,7 +117,7 @@ class Mnemonic private constructor(val words: List<String>) {
          * word that isn't on the list, or a bad checksum.
          */
         fun parse(phrase: String): Mnemonic {
-            val parsed = nfkd(phrase).lowercase().splitWhere { it.isWhitespace() }.filter { it.isNotEmpty() }
+            val parsed = words(phrase)
             if (parsed.size !in IMPORT_WORD_COUNTS) throw ParseException(Problem.WordCount(parsed.size))
             val indices = parsed.mapIndexed { i, w ->
                 index[w] ?: throw ParseException(Problem.UnknownWord(i + 1))
@@ -146,8 +146,17 @@ class Mnemonic private constructor(val words: List<String>) {
             e.problem
         }
 
+        /**
+         * The words of [phrase] as [parse] reads them: normalized,
+         * lower-cased, split on any whitespace (a no-break or ideographic
+         * space from a paste too, not just ASCII). The import field's
+         * live checks use the same split, so they can't disagree with it.
+         */
+        fun words(phrase: String): List<String> =
+            nfkd(phrase).lowercase().splitWhere { it.isWhitespace() }.filter { it.isNotEmpty() }
+
         /** Words typed so far, for the import field's live count. */
-        fun wordCount(phrase: String): Int = phrase.splitWhere { it.isWhitespace() }.count { it.isNotEmpty() }
+        fun wordCount(phrase: String): Int = words(phrase).size
 
         private fun String.splitWhere(isSeparator: (Char) -> Boolean): List<String> {
             val out = ArrayList<String>()

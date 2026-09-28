@@ -35,8 +35,11 @@ class VaultTest {
         override fun deviceSecure() = secure
         override fun read() = record
         override fun exists() = fileExists || record != null
+        var onWrite: () -> Unit = {}
+
         override fun write(record: VaultRecord) {
             this.record = record
+            onWrite()
         }
 
         override fun newSealingCipher(protection: VaultProtection): SealingCipher {
@@ -301,6 +304,35 @@ class VaultTest {
         v.markBackedUp()
         assertTrue((v.state.value as Vault.State.Unlocked).info.backedUp)
         assertTrue((vault().state.value as Vault.State.Locked).info.backedUp)
+    }
+
+    @Test
+    fun `an auto-lock landing while markBackedUp writes stays locked`() = runBlocking {
+        val v = vault()
+        v.create(phrase, auth, imported = false)
+        // The timer fires between the record write and the state update.
+        store.onWrite = { v.lock() }
+        v.markBackedUp()
+        val s = v.state.value
+        assertTrue(s is Vault.State.Locked)
+        assertTrue((s as Vault.State.Locked).info.backedUp)
+        assertFalse(v.unlockedNow())
+    }
+
+    @Test
+    fun `requireUnlocked doesn't trust an Unlocked state past its deadline`() = runBlocking {
+        val v = vault()
+        v.create(phrase, auth, imported = false)
+        assertTrue(v.unlockedNow())
+        // Deep sleep: the idle time is up but the timer hasn't run yet.
+        now += 15 * 60_000L
+        assertTrue(v.state.value is Vault.State.Unlocked)
+        val waiting = async(Dispatchers.Unconfined) { v.requireUnlocked("Publishing needs a wallet") }
+        yield()
+        assertTrue(v.state.value is Vault.State.Locked)
+        assertFalse(waiting.isCompleted)
+        v.setupRequest.value!!.finish(false)
+        assertFalse(waiting.await())
     }
 
     @Test

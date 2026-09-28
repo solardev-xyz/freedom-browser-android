@@ -127,7 +127,7 @@ internal sealed class ImportHint(val text: String) {
 internal fun importHint(phrase: String): ImportHint {
     val count = Mnemonic.wordCount(phrase)
     if (count == 0) return ImportHint.Neutral("Enter 12, 15, 18, 21 or 24 words, separated by spaces")
-    val words = phrase.trim().lowercase().split(Regex("\\s+"))
+    val words = Mnemonic.words(phrase)
     val finished = if (phrase.last().isWhitespace()) words else words.dropLast(1)
     val unknown = finished.indexOfFirst { it !in bip39Words }
     if (unknown >= 0) {
@@ -268,7 +268,9 @@ fun WalletScreen(
 
     // A feature asked for the wallet: hand it back as soon as it's open.
     LaunchedEffect(request, state) {
-        if (request != null && state is Vault.State.Unlocked) request.finish(true)
+        // unlockedNow() re-checks the auto-lock deadline (a timer delayed
+        // by deep sleep); if it's passed, the vault locks and state follows.
+        if (request != null && state is Vault.State.Unlocked && vault.unlockedNow()) request.finish(true)
     }
 
     fun run(action: String, block: suspend () -> Unit) {

@@ -1988,14 +1988,6 @@ fun BrowserScreen(
         )
     }
 
-    // Settings → Wallet (#75, #76), or a feature's request for one.
-    if (showWallet || walletRequest != null) {
-        WalletScreen(
-            request = walletRequest,
-            onDismiss = { showWallet = false },
-        )
-    }
-
     if (showTabSwitcher) {
         TabSwitcherScreen(
             tabs = tabs,
@@ -2162,6 +2154,18 @@ fun BrowserScreen(
                     downloads.open(context, entry)?.let { snackbarHostState.showSnackbar(it) }
                 }
             },
+        )
+    }
+
+    // Settings → Wallet (#75, #76), or a feature's request for one.
+    // Composed after every other full-screen panel (Settings, Node, the
+    // tab switcher, History, Bookmarks, Downloads) so a request arriving
+    // while one of them is up opens on top of it rather than hidden
+    // underneath, leaving its caller waiting on a page nobody can see.
+    if (showWallet || walletRequest != null) {
+        WalletScreen(
+            request = walletRequest,
+            onDismiss = { showWallet = false },
         )
     }
 
