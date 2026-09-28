@@ -7,6 +7,7 @@ import android.os.IBinder
 import android.os.RemoteCallbackList
 import android.util.Log
 import baby.freedom.swarm.MyotisInfo
+import baby.freedom.swarm.MyotisNetwork
 import baby.freedom.swarm.MyotisNode
 import baby.freedom.swarm.MyotisStatus
 import kotlinx.coroutines.CoroutineScope
@@ -64,6 +65,14 @@ class MyotisService : Service() {
 
         override fun onAppBackground() {
             node?.enterBackground()
+        }
+
+        override fun retryRecovery(chainId: Long) {
+            MyotisNetwork.forChain(chainId)?.let { node?.retryRecovery(it) }
+        }
+
+        override fun repairSyncData(chainId: Long) {
+            MyotisNetwork.forChain(chainId)?.let { node?.repairSyncData(it) }
         }
     }
 

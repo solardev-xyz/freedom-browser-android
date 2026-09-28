@@ -32,6 +32,10 @@ class MyotisNodeTest {
             calls += "create $network"
             return createAnswers.getValue(network)
         }
+        override fun createWithCheckpoint(network: String, dataDir: String, root: String, slot: Long): Long {
+            calls += "createWithCheckpoint $network $slot"
+            return createAnswers.getValue(network)
+        }
         override fun start(handle: Long): Boolean {
             calls += "start $handle"
             return startAnswers[handle] ?: true
@@ -55,8 +59,11 @@ class MyotisNodeTest {
         override fun drainLogs(max: Int): String = ""
     }
 
+    /** A checkpoint source that never answers: these tests are about parking, not recovery. */
+    private val silent = MyotisNode.CheckpointSource { _, _ -> kotlinx.coroutines.awaitCancellation() }
+
     private fun node(engine: FakeEngine) =
-        MyotisNode(tmp.root, engine, pollIntervalMs = 60_000L)
+        MyotisNode(tmp.root, engine, pollIntervalMs = 60_000L, checkpoints = silent)
 
     private fun idle(node: MyotisNode) = runBlocking { withTimeout(5_000) { node.awaitIdle() } }
 
@@ -256,7 +263,10 @@ class MyotisNodeTest {
     private class Clocks(var wall: Long = 1_000_000_000L, var up: Long = 1_000L)
 
     private fun node(engine: FakeEngine, clocks: Clocks) =
-        MyotisNode(tmp.root, engine, pollIntervalMs = 60_000L, wallClock = { clocks.wall }, upClock = { clocks.up })
+        MyotisNode(
+            tmp.root, engine, pollIntervalMs = 60_000L,
+            wallClock = { clocks.wall }, upClock = { clocks.up }, checkpoints = silent,
+        )
 
     private fun FakeEngine.pausesAndResumes() = calls.filter { it.startsWith("pause") || it.startsWith("resume") }
 
@@ -304,6 +314,59 @@ class MyotisNodeTest {
         assertEquals("SYNCED", node.state.value.chain(MyotisNetwork.Mainnet)?.beaconState)
         assertFalse(node.state.value.chain(MyotisNetwork.Mainnet)!!.staleAnchor)
     }
+
+    /**
+     * A recovery blocked on an acquisition failure — including evidence that
+     * failed verification ([MyotisRecoveryReason.Mismatch]) — is dropped once
+     * a corrected clock lets the engine accept its own anchor.
+     */
+    private fun assertAcquisitionBlockDropped(error: MyotisCheckpointError, reason: MyotisRecoveryReason) {
+        val engine = FakeEngine()
+        val clocks = Clocks(wall = 1_000_000_000L + 40L * 86_400_000L) // 40 days ahead
+        engine.status[1L] = """{"running":true,"beaconState":"STALE_ANCHOR"}"""
+        val failing = MyotisNode.CheckpointSource { _, _ -> throw MyotisCheckpointException(error) }
+        val node = MyotisNode(
+            tmp.root, engine, pollIntervalMs = 60_000L,
+            wallClock = { clocks.wall }, upClock = { clocks.up }, checkpoints = failing,
+        )
+        node.start()
+        idle(node)
+        node.pollNow()
+        idle(node)
+        // The acquisition runs off the node's queue: wait for its failure to land.
+        val deadline = System.currentTimeMillis() + 5_000
+        while (node.state.value.chain(MyotisNetwork.Mainnet)?.recovery?.phase != MyotisRecovery.Phase.Blocked &&
+            System.currentTimeMillis() < deadline
+        ) {
+            Thread.sleep(5)
+            idle(node)
+        }
+        val blocked = node.state.value.chain(MyotisNetwork.Mainnet)!!.recovery
+        assertEquals(MyotisRecovery.Phase.Blocked, blocked?.phase)
+        assertEquals(reason, blocked?.reason)
+
+        // NTP puts the clock back; the resumed engine accepts its own anchor.
+        engine.status[1L] = """{"running":true,"beaconState":"SYNCED"}"""
+        clocks.wall = 1_000_000_000L + 33_000L
+        clocks.up += 3_000L
+        node.pollNow()
+        idle(node)
+        clocks.up += 3_000L
+        clocks.wall += 3_000L
+        node.pollNow()
+        idle(node)
+        val chain = node.state.value.chain(MyotisNetwork.Mainnet)!!
+        assertEquals("SYNCED", chain.beaconState)
+        assertNull(chain.recovery)
+    }
+
+    @Test
+    fun `a mismatch block from acquisition is dropped once the engine accepts its own anchor`() =
+        assertAcquisitionBlockDropped(MyotisCheckpointError.Mismatch, MyotisRecoveryReason.Mismatch)
+
+    @Test
+    fun `a quorum-conflict block is dropped once the engine accepts its own anchor`() =
+        assertAcquisitionBlockDropped(MyotisCheckpointError.QuorumConflict, MyotisRecoveryReason.QuorumConflict)
 
     @Test
     fun `a released chain that is still stale after the grace parks again`() {
