@@ -354,6 +354,7 @@ class TabsState(
         // Let the WebView wind its fullscreen session down before the
         // host destroys it (see [BrowserWebViewHost]).
         if (fullscreen?.tabId == tabs[index].id) exitFullscreen()
+        val closingActive = index == activeIndex
         // The list is never empty: the last tab is replaced by a blank one.
         val placeholder = if (tabs.size == 1) newBlankTab() else null
         if (remember && !tabs[index].private) rememberClosed(index, placeholder?.id)
@@ -363,8 +364,14 @@ class TabsState(
             activeIndex = 0
             return
         }
-        activeIndex = (if (index >= tabs.size) tabs.lastIndex else index)
-            .coerceIn(0, tabs.lastIndex)
+        // Closing the active tab moves to the one that slid into its
+        // place (or the new last one); closing any other keeps the
+        // active tab, which only shifts left if it came after.
+        activeIndex = when {
+            closingActive -> if (index >= tabs.size) tabs.lastIndex else index
+            index < activeIndex -> activeIndex - 1
+            else -> activeIndex
+        }.coerceIn(0, tabs.lastIndex)
     }
 
     /**
