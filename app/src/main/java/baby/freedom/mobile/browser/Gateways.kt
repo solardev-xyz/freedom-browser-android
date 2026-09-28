@@ -444,8 +444,14 @@ object Gateways {
         assertedProtocol: String? = null,
     ): String? {
         val key = name.lowercase()
-        val last = (pins?.lastAnswerFor(name) ?: KnownEnsNames.uriFor(name))
-            ?.takeIf { VirtualOrigin.parseContentUrl(it) != null }
+        // The fallback answer together with how it was checked, from the
+        // same source: a document served from it shows *that* check on
+        // its shield, not the registry's newer answer's (#97 R3-F1).
+        val fallback: Pair<String, EnsTrust?>? =
+            (pins?.lastAnswerWithTrust(name) ?: KnownEnsNames.answerFor(name))
+                ?.takeIf { VirtualOrigin.parseContentUrl(it.first) != null }
+        val last = fallback?.first
+        val lastTrust = fallback?.second
         // With something to fall back on, don't hold the document for
         // the resolver's worst case (see [reverifyDeadlineMs]).
         val deadline = when {
@@ -485,7 +491,7 @@ object Gateways {
                     "ens_unverified"
                 } else {
                     KnownEnsNames.record(result.uri, name, result.trust)
-                    pins?.pin(name, result.uri, page)
+                    pins?.pin(name, result.uri, page, result.trust)
                     null
                 }
             }
@@ -499,7 +505,7 @@ object Gateways {
                 if (last == null) {
                     "ens_lookup_failed"
                 } else {
-                    pins?.pin(name, last, page)
+                    pins?.pin(name, last, page, lastTrust)
                     null
                 }
             }
@@ -546,10 +552,16 @@ class EnsDocumentPins {
     class Page internal constructor(internal val url: String?) {
         internal val pins = ConcurrentHashMap<String, String>()
 
+        /** How each of [pins] was checked, where known (#97). */
+        internal val trusts = ConcurrentHashMap<String, EnsTrust>()
+
         /** When the interceptor handed WebView this page's document; 0 = not yet. */
         internal var deliveredAt = 0L
 
         fun uriFor(name: String): String? = pins[name.lowercase()]
+
+        /** How [uriFor]'s answer was checked; `null` = not known. */
+        fun trustFor(name: String): EnsTrust? = trusts[name.lowercase()]
     }
 
     private val lock = ReentrantLock()
@@ -559,18 +571,41 @@ class EnsDocumentPins {
     private var current = Page(null)
     private var pending: Page? = null
     private val last = ConcurrentHashMap<String, String>()
+    private val lastTrust = ConcurrentHashMap<String, EnsTrust>()
 
     /**
      * Pin [name] to [uri] for [page] (the incoming page from
      * [beginNavigation]), or for the page on screen when `null`.
+     * [trust] is how that answer was checked — what the page's trust
+     * shield shows (#97); `null` (not known) shows none.
      */
-    fun pin(name: String, uri: String, page: Page? = null) {
-        (page ?: current).pins[name.lowercase()] = uri
-        last[name.lowercase()] = uri
+    fun pin(name: String, uri: String, page: Page? = null, trust: EnsTrust? = null) {
+        val key = name.lowercase()
+        val target = page ?: current
+        synchronized(target) {
+            target.pins[key] = uri
+            if (trust != null) target.trusts[key] = trust else target.trusts.remove(key)
+        }
+        synchronized(last) {
+            last[key] = uri
+            if (trust != null) lastTrust[key] = trust else lastTrust.remove(key)
+        }
     }
 
     /** The root the current page's documents on [name] were served from. */
     fun uriFor(name: String): String? = current.uriFor(name)
+
+    /**
+     * The answer the page on screen was served from for [name], and how
+     * it was checked (`null` = not known) — one snapshot, so a later
+     * re-pin can't pair one answer with another's trust. `null` when the
+     * page has no pin for the name.
+     */
+    fun answerFor(name: String): Pair<String, EnsTrust?>? {
+        val page = current
+        val key = name.lowercase()
+        return synchronized(page) { page.pins[key]?.let { it to page.trusts[key] } }
+    }
 
     /**
      * The page a subresource (or iframe) request on [name] belongs to:
@@ -605,11 +640,23 @@ class EnsDocumentPins {
     fun lastAnswerFor(name: String): String? = last[name.lowercase()]
 
     /**
+     * [lastAnswerFor] and how it was checked (`null` = not known), as one
+     * snapshot: what a failed re-check serves, and shows, instead.
+     */
+    fun lastAnswerWithTrust(name: String): Pair<String, EnsTrust?>? {
+        val key = name.lowercase()
+        return synchronized(last) { last[key]?.let { it to lastTrust[key] } }
+    }
+
+    /**
      * The name answered that it no longer points at loadable content:
      * a later failed lookup must not bring its old root back.
      */
     fun forgetLastAnswer(name: String) {
-        last.remove(name.lowercase())
+        synchronized(last) {
+            last.remove(name.lowercase())
+            lastTrust.remove(name.lowercase())
+        }
     }
 
     /**

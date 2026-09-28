@@ -135,6 +135,9 @@ object KnownEnsNames {
         return hashToName[hashOrCid.lowercase()]
     }
 
+    /** "bzz" | "ipfs" | "ipns" of a content [uri] (`ipfs://<cid>/…`), else `null`. */
+    fun protocolOf(uri: String): String? = rootOf(uri)?.second
+
     /** "bzz" | "ipfs" | "ipns" for any name resolved this session. */
     fun protocolFor(name: String): String? = nameToProtocol[name.lowercase()]
 

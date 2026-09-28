@@ -1,5 +1,6 @@
 package baby.freedom.mobile.browser
 
+import baby.freedom.mobile.ens.EnsResult
 import baby.freedom.mobile.ens.EnsTrust
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -191,6 +192,56 @@ class TrustShieldTest {
         assertEquals("bzz://$REF", shown.answer)
         assertEquals(unverified, shown.trust)
         assertEquals("ipfs://$CID", nameTrustFor("ipfs://name.eth")!!.answer)
+    }
+
+    @Test
+    fun `a document served from the tab's fallback answer shows that answer, not the session's`() {
+        // R3-F1: tab A let name.eth → bzz://A through on one server's
+        // word; tab B's lookup then recorded ipfs://B, verified. RPCs go
+        // down and tab A follows a link on the name: its re-check serves
+        // A from the tab's pin, so the bar, shield and dialog say A.
+        val origin = VirtualOrigin.originFor(ContentRoot.Ens("name.eth"))!!
+        val tabA = EnsDocumentPins()
+        val real = Gateways.ensLookup
+        Gateways.resetEnsLookupState()
+        try {
+            KnownEnsNames.record("bzz://$REF", "name.eth", unverified)
+            Gateways.ensLookup = { EnsResult.Ok(it, "bzz", "bzz://$REF", REF, unverified) }
+            val first = tabA.beginNavigation("$origin/")
+            assertNull(Gateways.reverifyEnsDocument("name.eth", tabA, first))
+            tabA.documentStarted("$origin/")
+
+            KnownEnsNames.record("ipfs://$CID", "name.eth", verified)
+
+            Gateways.resetEnsLookupState()
+            Gateways.ensLookup = { EnsResult.Error(it, "PROVIDER_ERROR", "down", retryable = true) }
+            val next = tabA.beginNavigation("$origin/page2")
+            assertNull(Gateways.reverifyEnsDocument("name.eth", tabA, next))
+            tabA.documentStarted("$origin/page2")
+
+            val state = BrowserState(1L)
+            val shown = displayFor("$origin/page2", state, tabA)
+            assertEquals("bzz://name.eth/page2", shown)
+            val trust = committedNameTrust("$origin/page2", shown, NameRefusalSlot(), tabA)!!
+            assertEquals(TrustTier.Unverified, trust.tier)
+            assertEquals(unverified, trust.trust)
+            assertEquals("bzz://$REF", trust.answer)
+            // Without the tab's pins (another tab, a service worker), the
+            // session's current answer.
+            assertEquals("ipfs://name.eth/page2", displayFor("$origin/page2", state))
+        } finally {
+            Gateways.ensLookup = real
+            Gateways.resetEnsLookupState()
+        }
+    }
+
+    @Test
+    fun `a pin with no known check gets no shield`() {
+        val origin = VirtualOrigin.originFor(ContentRoot.Ens("name.eth"))!!
+        KnownEnsNames.record("bzz://$REF", "name.eth", verified)
+        val pins = EnsDocumentPins()
+        pins.pin("name.eth", "bzz://$REF")
+        assertNull(committedNameTrust("$origin/", "bzz://name.eth/", NameRefusalSlot(), pins))
     }
 
     private companion object {

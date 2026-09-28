@@ -124,14 +124,27 @@ internal fun nameResolutionErrorIn(headers: Map<String, String>?): String? =
  * `null` for an [ErrorPage] or a document the interceptor refused
  * ([NameRefusalSlot]) — neither was served from the name's answer.
  */
-internal fun committedNameTrust(url: String?, displayUrl: String, refusal: NameRefusalSlot): NameTrust? {
+internal fun committedNameTrust(
+    url: String?,
+    displayUrl: String,
+    refusal: NameRefusalSlot,
+    pins: EnsDocumentPins? = null,
+): NameTrust? {
     if (url == null || ErrorPage.isErrorPage(url) || refusal.isRefused(url)) return null
+    // A document the tab's re-check served is described by the answer
+    // it was served from — which, when the lookup failed, is the tab's
+    // own earlier answer, not the session's newer one (R3-F1).
+    val name = nameIn(displayUrl) ?: return null
+    pins?.answerFor(name)?.let { (answer, trust) ->
+        return trust?.let { NameTrust(name, it, answer) }
+    }
     val trust = nameTrustFor(displayUrl) ?: return null
     // A raw `bzz://<hash>` load shown as the name (name preservation)
     // is the name's page only while the name still resolves to that
     // hash (R1-F2): the name's trust says nothing about content it
-    // pointed at before. A load on the name's own origin is served
-    // from its current answer, so it needs no such check.
+    // pointed at before. A document on the name's own origin with no
+    // pin (restored from the back/forward cache) gets the session's
+    // current answer, as before.
     val loaded = Gateways.toDisplay(url)
     val raw = CONTENT_ROOT_SCHEMES.any { loaded.startsWith(it) }
     if (raw && !KnownEnsNames.isCurrentRoot(trust.name, loaded)) return null
@@ -2297,7 +2310,7 @@ private fun buildRefreshableWebView(
                 // managed to plant via document.cookie before this
                 // page gets a chance to read it.
                 if (VirtualOrigin.isVirtualUrl(url)) CookieHygiene.sweepAsync(url)
-                val display = url?.let { displayFor(it, state) }
+                val display = url?.let { displayFor(it, state, ensPins) }
                 if (display != null) {
                     // For error pages, surface the URL the user was
                     // actually trying to visit (`ens://…`, `bzz://…`)
@@ -2327,7 +2340,7 @@ private fun buildRefreshableWebView(
                 // answer, taken now — the interceptor recorded it before
                 // handing the document over. An error page or a name
                 // refusal was served from no answer, so it has none.
-                state.nameTrust = committedNameTrust(url, state.url, nameRefusal)
+                state.nameTrust = committedNameTrust(url, state.url, nameRefusal, ensPins)
                 // Refresh navigation flags here (as well as in
                 // onPageFinished) so the system-back hardware button
                 // works the instant a new page starts loading. If we
@@ -2460,7 +2473,7 @@ private fun buildRefreshableWebView(
                 // finished loading (or errored out). Happens regardless
                 // of whether the load was user-initiated reload or not.
                 refreshLayout.isRefreshing = false
-                val display = displayFor(url.orEmpty(), state)
+                val display = displayFor(url.orEmpty(), state, ensPins)
                 // See the companion comment in `onPageStarted` — for
                 // error pages the address bar / `state.url` show the
                 // URL the user was trying to visit, while the raw
@@ -4556,8 +4569,21 @@ private fun isMediaLikeUrl(url: String): Boolean =
  * for Swarm content, or an external origin) to the friendly string for the
  * address bar.
  */
-internal fun displayFor(actualUrl: String, state: BrowserState): String =
-    DisplayUrl.forActualUrl(actualUrl, state.override)
+internal fun displayFor(
+    actualUrl: String,
+    state: BrowserState,
+    pins: EnsDocumentPins? = null,
+): String = DisplayUrl.forActualUrl(actualUrl, state.override, committedProtocolFor(pins))
+
+/**
+ * The transport a name is shown under on the page on screen: the one
+ * its document was served from ([pins], the tab's committed page), which
+ * a failed re-check can hold on an older answer than the session's
+ * (R3-F1) — else the session's current answer.
+ */
+internal fun committedProtocolFor(pins: EnsDocumentPins?): (String) -> String? = { name ->
+    pins?.uriFor(name)?.let(KnownEnsNames::protocolOf) ?: KnownEnsNames.protocolFor(name)
+}
 
 /**
  * Android's [WebView] auto-generates a title from the page URL when the

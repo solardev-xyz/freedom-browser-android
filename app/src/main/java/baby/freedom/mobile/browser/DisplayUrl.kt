@@ -37,16 +37,24 @@ object DisplayUrl {
     private val ipfsRegex = Regex("^ipfs://([A-Za-z0-9]+)(.*)$")
     private val ipnsRegex = Regex("^ipns://([A-Za-z0-9.-]+)(.*)$")
 
+    /**
+     * [protocolFor] is the transport a name's page is shown under —
+     * by default the session's current answer ([KnownEnsNames]); for
+     * the document a tab has on screen, the answer that document was
+     * actually served from ([EnsDocumentPins.answerFor], R3-F1).
+     */
     fun forActualUrl(
         actualUrl: String,
         override: BrowserState.Override?,
+        protocolFor: (name: String) -> String? = KnownEnsNames::protocolFor,
     ): String {
         if (override != null && actualUrl.startsWith(override.baseUrl)) {
-            return override.shown + actualUrl.substring(override.baseUrl.length)
+            return withTransport(override.prefix, protocolFor) +
+                actualUrl.substring(override.baseUrl.length)
         }
 
         val display = Gateways.toDisplay(actualUrl)
-        return withTransport(applyNamePreservation(display))
+        return withTransport(applyNamePreservation(display), protocolFor)
     }
 
     /**
@@ -61,10 +69,13 @@ object DisplayUrl {
      * contenthash moves from Swarm to IPFS is shown as `ipfs://…` on its
      * next load, not under the transport it had when first typed.
      */
-    fun withTransport(display: String): String {
+    fun withTransport(
+        display: String,
+        protocolFor: (name: String) -> String? = KnownEnsNames::protocolFor,
+    ): String {
         if (display.contains("://")) return display
         val name = EnsInput.parse(display)?.name ?: return display
-        val protocol = KnownEnsNames.protocolFor(name) ?: return display
+        val protocol = protocolFor(name) ?: return display
         return "$protocol://$display"
     }
 

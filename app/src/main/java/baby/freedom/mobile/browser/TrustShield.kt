@@ -101,17 +101,21 @@ internal data class NameTrust(val name: String, val trust: EnsTrust, val answer:
  * that isn't a name, or a name with no recorded answer.
  *
  * Read once per committed document by the tab's WebView client
- * ([BrowserState.nameTrust]), so the shield describes the answer the
- * page on screen was served from, not whatever another tab's re-check
- * of the same name found later.
+ * ([BrowserState.nameTrust], via [committedNameTrust]), so the shield
+ * doesn't follow another tab's later re-check of the same name. A
+ * document the tab's own re-check served takes its trust from the
+ * answer it was served from ([EnsDocumentPins.answerFor]) instead —
+ * after a failed lookup, an older one than this.
  */
 internal fun nameTrustFor(displayUrl: String): NameTrust? {
-    val name = EnsInput.parse(displayUrl)?.name
-        ?: EnsInput.parseConstrained(displayUrl)?.name
-        ?: return null
+    val name = nameIn(displayUrl) ?: return null
     val (answer, trust) = KnownEnsNames.answerFor(name) ?: return null
     return NameTrust(name, trust, answer)
 }
+
+/** The name [displayUrl] (`ipfs://vitalik.eth/p`, `swarm.eth`) shows, if any. */
+internal fun nameIn(displayUrl: String): String? =
+    EnsInput.parse(displayUrl)?.name ?: EnsInput.parseConstrained(displayUrl)?.name
 
 /** Diameter of the shield riding the protocol badge's corner. */
 private val ShieldMarkSize = 11.dp
