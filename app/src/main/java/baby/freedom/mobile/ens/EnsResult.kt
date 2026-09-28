@@ -107,17 +107,23 @@ sealed class EnsResult {
 
 /**
  * How far an answer ([EnsResult.Ok], [EnsResult.NotFound],
- * [EnsResult.Unsupported]) was cross-checked (#96).
+ * [EnsResult.Unsupported]) was checked (#96, #100).
  *
- * [verified]: at least [EnsQuorum.M] independent RPC servers returned
- * byte-identical answers at a block whose hash a majority of them agreed
- * on. Otherwise only one server's word stands behind it — because only
- * one answered, or because too few servers were reachable to agree on a
- * block at all — and the browser asks before loading it.
+ * [verified]: either proven — the Colibri verifier checked a proof of
+ * the record against Ethereum's sync committee on this device
+ * ([Source.COLIBRI]) — or cross-checked: at least [EnsQuorum.M]
+ * independent RPC servers returned byte-identical answers at a block
+ * whose hash a majority of them agreed on ([Source.RPC]). Otherwise only
+ * one server's word stands behind it — because only one answered, or
+ * because too few servers were reachable to agree on a block at all —
+ * and the browser asks before loading it.
  */
 data class EnsTrust(
     val verified: Boolean,
-    /** Hosts that returned this answer. */
+    /**
+     * Hosts that returned this answer: the RPC servers, or for a
+     * [Source.COLIBRI] answer the prover(s) whose proof was checked.
+     */
     val agreed: List<String> = emptyList(),
     /** Hosts that returned a different one (outvoted). */
     val dissented: List<String> = emptyList(),
@@ -129,7 +135,23 @@ data class EnsTrust(
      * even possible — as opposed to too few of them answering this time.
      */
     val tooFewServers: Boolean = false,
+    /**
+     * What stands behind the answer. Defaults to [Source.RPC], the
+     * weaker claim: only the Colibri path says [Source.COLIBRI].
+     */
+    val source: Source = Source.RPC,
 ) {
+    enum class Source {
+        /** RPC servers' answers: cross-checked if [verified], one server's word if not. */
+        RPC,
+
+        /** A Colibri proof, checked on this device (#100). Always [verified]. */
+        COLIBRI,
+    }
+
+    /** Proven by the Colibri verifier, not just agreed on by servers. */
+    val proven: Boolean get() = verified && source == Source.COLIBRI
+
     companion object {
         /**
          * Verified with no provenance: for results built outside the

@@ -1,5 +1,7 @@
 package baby.freedom.mobile.browser
 
+import baby.freedom.mobile.ens.EnsColibri
+import baby.freedom.mobile.ens.EnsHttp
 import baby.freedom.mobile.ens.EnsResolver
 import baby.freedom.mobile.ens.EnsResult
 import baby.freedom.mobile.ens.EnsRpcConfig
@@ -17,6 +19,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeoutOrNull
+import java.io.File
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.locks.ReentrantLock
@@ -145,7 +148,21 @@ object Gateways {
      * request interceptor (which resolves `<name>.ens.…` hosts) share
      * a cache and never disagree mid-session.
      */
-    val ensResolver: EnsResolver by lazy { EnsResolver { ensRpcConfig().resolverSettings } }
+    val ensResolver: EnsResolver by lazy {
+        EnsResolver(
+            settings = { ensRpcConfig().resolverSettings },
+            http = EnsHttp.Default,
+            colibri = EnsColibri(EnsColibri.NativeEngine { colibriStatesDir }),
+        )
+    }
+
+    /**
+     * Where the Colibri verifier keeps its sync-committee state (#100).
+     * `MainActivity` sets it on start; until then (and in unit tests)
+     * the proven tier stays off and names go to the RPC servers.
+     */
+    @Volatile
+    var colibriStatesDir: File? = null
 
     /**
      * Blocking ENS lookup used by the request interceptor. A seam so the

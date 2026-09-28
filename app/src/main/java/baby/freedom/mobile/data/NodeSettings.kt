@@ -265,6 +265,7 @@ class NodeSettings private constructor(
             disabledPublicEndpoints = prefs[Keys.ENS_RPC_DISABLED_PUBLIC].orEmpty(),
             apiKeys = EnsRpcConfig.decodeKeys(prefs[RpcKeyStore.LEGACY_KEY]) + apiKeys,
             ccipRead = prefs[Keys.ENS_CCIP_READ] ?: true,
+            colibri = prefs[Keys.ENS_COLIBRI] ?: true,
         )
 
     private suspend fun currentEnsRpc(): EnsRpcConfig =
@@ -463,6 +464,13 @@ class NodeSettings private constructor(
             true
         }
 
+    /** Whether name resolution asks the Colibri verifier for a proof first (#100). */
+    suspend fun setEnsColibri(enabled: Boolean): EnsEdit =
+        editEnsRpc({ it }) {
+            store.edit { it[Keys.ENS_COLIBRI] = enabled }
+            true
+        }
+
     /**
      * External Swarm endpoint (#125): the base URL of a bee/ant HTTP API
      * that serves `bzz://` in place of the embedded node, or `""` for
@@ -560,6 +568,7 @@ class NodeSettings private constructor(
         val LEGACY_ENS_RPC_CUSTOM = stringPreferencesKey("ens_rpc_custom_endpoints")
         val ENS_RPC_DISABLED_PUBLIC = stringSetPreferencesKey("ens_rpc_disabled_public")
         val ENS_CCIP_READ = booleanPreferencesKey("ens_ccip_read")
+        val ENS_COLIBRI = booleanPreferencesKey("ens_colibri")
         val EXTERNAL_SWARM_ENDPOINT = stringPreferencesKey("external_swarm_endpoint")
         val EXTERNAL_IPFS_GATEWAY = stringPreferencesKey("external_ipfs_gateway")
         val ADBLOCK_ALLOWLIST = stringSetPreferencesKey("adblock_allowlist")

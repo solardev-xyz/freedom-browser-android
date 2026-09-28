@@ -55,6 +55,8 @@ data class EnsRpcConfig(
     /** Provider id ([KEYED_PROVIDERS]) → API key. */
     val apiKeys: Map<String, String> = emptyMap(),
     val ccipRead: Boolean = true,
+    /** Ask the Colibri verifier for a proven answer first (#100). */
+    val colibri: Boolean = true,
 ) {
     /** One entry of the resolution order, for the settings page. */
     data class Source(val kind: Kind, val label: String, val url: String)
@@ -123,7 +125,7 @@ data class EnsRpcConfig(
 
     /** What [EnsResolver] needs from this, compared to spot a change. */
     val resolverSettings: EnsResolver.Settings
-        get() = EnsResolver.Settings(endpoints = endpoints, ccipRead = ccipRead)
+        get() = EnsResolver.Settings(endpoints = endpoints, ccipRead = ccipRead, colibri = colibri)
 
     /**
      * Whether removing one of the user's own endpoints / switching off a
