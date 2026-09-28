@@ -405,6 +405,7 @@ fun BrowserScreen(
     onToggleMyotis: (Boolean) -> Unit = {},
     onEnsureIpfsStarted: () -> Unit,
     onIpfsToggle: (Boolean) -> Unit,
+    radicle: RadicleControls = RadicleControls(),
     initialUrl: String = HOME_URL,
     deepLinkUrl: String? = null,
     onDeepLinkHandled: () -> Unit = {},
@@ -440,6 +441,7 @@ fun BrowserScreen(
     val focusManager = LocalFocusManager.current
     var showSettings by rememberSaveable { mutableStateOf(false) }
     var showNode by rememberSaveable { mutableStateOf(false) }
+    var showRadicle by rememberSaveable { mutableStateOf(false) }
     var showTabSwitcher by rememberSaveable { mutableStateOf(false) }
     var showHistory by rememberSaveable { mutableStateOf(false) }
     var showBookmarks by rememberSaveable { mutableStateOf(false) }
@@ -462,7 +464,7 @@ fun BrowserScreen(
     val sitePermissions = remember(context) { SitePermissionBroker.get(context) }
     SitePermissionAndroidBridge(sitePermissions, snackbarHostState)
     // Any full-screen panel over the browser (they're all opaque).
-    val overlayShown = showSettings || showNode || showTabSwitcher ||
+    val overlayShown = showSettings || showNode || showRadicle || showTabSwitcher ||
         showHistory || showBookmarks || showDownloads
     val downloads = remember(context) { DownloadManager.get(context) }
 
@@ -1259,6 +1261,7 @@ fun BrowserScreen(
         // tab we just opened.
         showSettings = false
         showNode = false
+        showRadicle = false
         showTabSwitcher = false
         showHistory = false
         showBookmarks = false
@@ -1897,6 +1900,8 @@ fun BrowserScreen(
             repo = repo,
             ipfsInfo = ipfsInfo,
             onIpfsToggle = onIpfsToggle,
+            radicle = radicle,
+            onOpenRadicle = { showRadicle = true },
             // The reopen stack keeps closed tabs' pages, titles and
             // back/forward lists — history by any other name.
             onClearHistory = { tabs.forgetClosedTabs() },
@@ -1921,6 +1926,15 @@ fun BrowserScreen(
             myotisEnabled = myotisEnabled,
             onToggleMyotis = onToggleMyotis,
             onDismiss = { showNode = false },
+        )
+    }
+
+    // Settings → Nodes → Radicle node (#73); over Settings, like NodeScreen.
+    if (showRadicle) {
+        RadicleScreen(
+            radicle = radicle,
+            runNodeEnabled = runNodeEnabled,
+            onDismiss = { showRadicle = false },
         )
     }
 

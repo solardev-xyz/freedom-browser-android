@@ -106,7 +106,8 @@ import kotlinx.coroutines.launch
  *     every "open <scheme>: links in another app" one (#85).
  *  3. **Nodes** — where `bzz://` and `ipfs://` content comes from: the
  *     embedded nodes, or an external Swarm endpoint / IPFS gateway the
- *     user runs (#125, [ExternalEndpoints]). The IPFS row shows only
+ *     user runs (#125, [ExternalEndpoints]); and the embedded Radicle
+ *     node's row, which opens its own page ([RadicleScreen], #73). The IPFS row shows only
  *     while advanced options are on, or once an external gateway is
  *     set — its unverified warning must stay in view while it's in use.
  *  4. **Chains** — Ethereum, Gnosis and Base, plus the user's custom
@@ -133,6 +134,8 @@ fun SettingsScreen(
     onClearHistory: () -> Unit,
     onClearWebViewData: () -> Unit,
     onDismiss: () -> Unit,
+    radicle: RadicleControls = RadicleControls(),
+    onOpenRadicle: () -> Unit = {},
 ) {
     BackHandler(onBack = onDismiss)
     // Settings search (#93). Registered after the dismiss handler so it
@@ -198,7 +201,8 @@ fun SettingsScreen(
         query, SECTION_PERMISSIONS, sitePermissionRows(permissionEntries),
     )
     val nodeRows = visibleSettingsRows(
-        query, SECTION_NODES, nodeRows(externalSwarm, externalIpfs, showIpfsUi),
+        query, SECTION_NODES,
+        nodeRows(externalSwarm, externalIpfs, showIpfsUi) + radicleSettingsRow(radicle),
     )
     val chainRows = visibleSettingsRows(query, SECTION_CHAINS, chainSettingsRows(chains))
     val aboutRows = visibleSettingsRows(
@@ -321,6 +325,8 @@ fun SettingsScreen(
                         externalSwarm = externalSwarm,
                         externalIpfs = externalIpfs,
                         onEdit = { editEndpoint = it },
+                        radicle = radicle,
+                        onOpenRadicle = onOpenRadicle,
                     )
                 }
                 if (chainRows.isNotEmpty()) item("chains") {
@@ -728,6 +734,8 @@ private fun NodesSection(
     externalSwarm: String,
     externalIpfs: String,
     onEdit: (NodeEndpoint) -> Unit,
+    radicle: RadicleControls,
+    onOpenRadicle: () -> Unit,
 ) {
     SectionCard(title = SECTION_NODES) {
         if (NodeEndpoint.Swarm.key in visible) {
@@ -744,6 +752,15 @@ private fun NodesSection(
                 external = externalIpfs,
                 icon = ImageVector.vectorResource(R.drawable.ic_ipfs),
                 onClick = { onEdit(NodeEndpoint.Ipfs) },
+            )
+        }
+        if (RADICLE_ROW_KEY in visible) {
+            PageRow(
+                title = RADICLE_ROW_TITLE,
+                subtitle = radicleSummary(radicle.info, radicle.enabled),
+                style = PageRowStyle.Inset,
+                leadingIcon = ImageVector.vectorResource(R.drawable.ic_radicle),
+                onClick = onOpenRadicle,
             )
         }
     }

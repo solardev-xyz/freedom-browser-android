@@ -28,6 +28,7 @@ import baby.freedom.mobile.browser.HOME_URL
 import baby.freedom.mobile.browser.Adblock
 import baby.freedom.mobile.browser.PublicSuffixList
 import baby.freedom.mobile.browser.OnchainApps
+import baby.freedom.mobile.browser.RadicleControls
 import baby.freedom.mobile.browser.UnverifiedOrigins
 import baby.freedom.mobile.browser.VirtualOrigin
 import baby.freedom.mobile.browser.statusBarIconsDark
@@ -44,12 +45,15 @@ import baby.freedom.swarm.IpfsInfo
 import baby.freedom.swarm.MyotisInfo
 import baby.freedom.swarm.MyotisStatus
 import baby.freedom.swarm.NodeInfo
+import baby.freedom.swarm.RadicleInfo
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
 /**
@@ -68,6 +72,14 @@ class MainActivity : ComponentActivity() {
 
     private val infoFlow = MutableStateFlow(NodeInfo())
     private val ipfsInfoFlow = MutableStateFlow(IpfsInfo())
+    private val radicleInfoFlow = MutableStateFlow(RadicleInfo())
+
+    /**
+     * Serializes relaying the Radicle setting to `:node`: a toggle's
+     * write-then-start/stop and a bind's read-then-start each run whole,
+     * so the service hears them in the order the setting changed (#73).
+     */
+    private val radicleRelay = Mutex()
     private val myotisInfoFlow = MutableStateFlow(MyotisInfo())
     private lateinit var settings: NodeSettings
 
@@ -96,6 +108,10 @@ class MainActivity : ComponentActivity() {
                 ipfsInfoFlow.value = info
                 Gateways.setIpfsBase(info.gatewayUrl)
             }
+        }
+
+        override fun onRadicleStateChanged(info: RadicleInfo?) {
+            if (info != null) radicleInfoFlow.value = info
         }
     }
 
@@ -146,6 +162,17 @@ class MainActivity : ComponentActivity() {
                     Gateways.setIpfsBase(it.gatewayUrl)
                 }
             }
+            runCatching { b.radicleState?.let { radicleInfoFlow.value = it } }
+            // The Radicle on/off setting lives here, in the UI process's
+            // DataStore; a freshly (re)started `:node` hears it on bind.
+            // Under [radicleRelay], so a toggle landing at the same time
+            // can't have its stop overtaken by a start this bind read
+            // from the setting before the toggle wrote it.
+            lifecycleScope.launch {
+                radicleRelay.withLock {
+                    if (settings.radicleEnabled.first()) runCatching { b.startRadicle() }
+                }
+            }
         }
 
         override fun onServiceDisconnected(name: ComponentName?) {
@@ -154,6 +181,7 @@ class MainActivity : ComponentActivity() {
             binder = null
             infoFlow.value = NodeInfo()
             ipfsInfoFlow.value = IpfsInfo()
+            radicleInfoFlow.value = RadicleInfo()
             Gateways.setIpfsBase("")
         }
     }
@@ -235,6 +263,9 @@ class MainActivity : ComponentActivity() {
                 ) {
                     val info by infoFlow.collectAsState()
                     val ipfsInfo by ipfsInfoFlow.collectAsState()
+                    val radicleInfo by radicleInfoFlow.collectAsState()
+                    val radicleEnabled by settings.radicleEnabled
+                        .collectAsState(initial = false)
                     val runNodeEnabled by settings.runNodeEnabled
                         .collectAsState(initial = true)
                     val myotisInfo by myotisInfoFlow.collectAsState()
@@ -251,6 +282,13 @@ class MainActivity : ComponentActivity() {
                         onToggleMyotis = ::onToggleMyotis,
                         onEnsureIpfsStarted = ::onEnsureIpfsStarted,
                         onIpfsToggle = ::onIpfsToggle,
+                        radicle = RadicleControls(
+                            info = radicleInfo,
+                            enabled = radicleEnabled,
+                            onToggle = ::onRadicleToggle,
+                            onSeed = ::onRadicleSeed,
+                            onUnseed = ::onRadicleUnseed,
+                        ),
                         initialUrl = startUrl,
                         deepLinkUrl = deepLink,
                         onDeepLinkHandled = { deepLinkFlow.value = null },
@@ -441,6 +479,31 @@ class MainActivity : ComponentActivity() {
         myotisInfoFlow.value = MyotisInfo()
     }
 
+    /**
+     * The user turned the embedded Radicle node on or off (#73). Unlike
+     * IPFS this is persisted, and relayed again on every bind; the node
+     * itself lives in `:node`, so while the node service is off the
+     * setting just waits for it.
+     */
+    private fun onRadicleToggle(enabled: Boolean) {
+        lifecycleScope.launch {
+            radicleRelay.withLock {
+                settings.setRadicleEnabled(enabled)
+                runCatching { if (enabled) binder?.startRadicle() else binder?.stopRadicle() }
+            }
+        }
+    }
+
+    /** Stop seeding a repository from the Radicle page's list. */
+    private fun onRadicleUnseed(rid: String) {
+        runCatching { binder?.unseedRadicleRepo(rid) }
+    }
+
+    /** Seed-by-RID from the Radicle page; progress comes back on the callback. */
+    private fun onRadicleSeed(rid: String) {
+        runCatching { binder?.seedRadicleRepo(rid) }
+    }
+
     private fun startAndBindService() {
         NodeService.start(this)
         if (!bound) {
@@ -458,6 +521,7 @@ class MainActivity : ComponentActivity() {
         NodeService.stop(this)
         infoFlow.value = NodeInfo()
         ipfsInfoFlow.value = IpfsInfo()
+        radicleInfoFlow.value = RadicleInfo()
         Gateways.setIpfsBase("")
     }
 
