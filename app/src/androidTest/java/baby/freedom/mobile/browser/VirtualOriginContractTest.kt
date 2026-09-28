@@ -541,4 +541,25 @@ class VirtualOriginContractTest {
         // The real freedom.baby site's own host-only cookie is untouched.
         assertTrue(cm.getCookie("https://freedom.baby/").orEmpty().contains("own=keep"))
     }
+
+    @Test
+    fun cookiesTossedAtANonRootPathAreSweptAtThatPath() {
+        // R3-F1: a `Path=/swap` cookie is invisible to a `/` read, so a
+        // root-only sweep left it for every other app at /swap.
+        val cm = CookieManager.getInstance()
+        val appA = "https://0x${"1".repeat(40)}-1.web3.freedom.baby/"
+        val appB = "https://0x${"2".repeat(40)}-1.web3.freedom.baby/swap"
+        InstrumentationRegistry.getInstrumentation().runOnMainSync {
+            cm.setCookie(appA, "tossw3=1; Domain=.web3.freedom.baby; Path=/swap")
+            cm.setCookie(appA, "tossfb=1; Domain=.freedom.baby; Path=/swap/")
+            cm.setCookie(originA, "tossbzz=1; Domain=.bzz.freedom.baby; Path=/swap")
+        }
+        assertTrue(cm.getCookie(appB).orEmpty().contains("tossw3"))
+        assertTrue(cm.getCookie("$appB/deep").orEmpty().contains("tossfb"))
+        CookieHygiene.sweepBlocking("$appB/deep")
+        val left = cm.getCookie("$appB/deep").orEmpty()
+        assertFalse(left, left.contains("tossw3"))
+        assertFalse(left, left.contains("tossfb"))
+        assertFalse(cm.getCookie("${originA}swap").orEmpty().contains("tossbzz"))
+    }
 }

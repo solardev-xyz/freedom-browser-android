@@ -167,6 +167,20 @@ class OnchainAppTest {
     }
 
     @Test
+    fun `the cookie sweep reads at the document's own path and expires every path that reaches it`() {
+        assertEquals("/", CookieHygiene.pathOf("https://$zswapLower-1.web3.freedom.baby"))
+        assertEquals("/", CookieHygiene.pathOf("https://$zswapLower-1.web3.freedom.baby/?q=/a#/b"))
+        assertEquals("/swap", CookieHygiene.pathOf("https://a@$zswapLower-1.web3.freedom.baby/swap?x=1#y"))
+        assertEquals(listOf("/"), CookieHygiene.cookiePathsMatching("/"))
+        assertEquals(listOf("/", "/swap"), CookieHygiene.cookiePathsMatching("/swap"))
+        assertEquals(
+            listOf("/", "/swap", "/swap/", "/swap/x"),
+            CookieHygiene.cookiePathsMatching("/swap/x"),
+        )
+        assertEquals(listOf("/", "/swap", "/swap/"), CookieHygiene.cookiePathsMatching("/swap/"))
+    }
+
+    @Test
     fun `private approvals end with the private session, normal ones don't`() {
         val d = doc(ChainTrust.Level.UNVERIFIED, "private-session")
         OnchainApps.approvalsFor(private = true).add(d)

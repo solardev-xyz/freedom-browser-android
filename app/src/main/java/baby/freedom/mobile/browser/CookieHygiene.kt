@@ -18,15 +18,26 @@ import java.util.concurrent.Executors
  *
  * This sweep expires everything [CookieManager] reports for the
  * virtual suffixes, the domain-scoped cookies of the shared base
- * domain, and for the specific origin being navigated to.
- * It runs on navigation to any virtual origin plus periodically, and
+ * domain, and for the specific origin being navigated to — read at
+ * the root and at the path of every document it is told about, since
+ * a cookie tossed with some other `Path` is only visible there.
+ * It runs on navigation to any virtual origin, on a same-document URL
+ * change (`pushState`), when a tab is brought to the front, and
+ * periodically over every open tab's URL; and
  * stays on permanently as defense in depth even after the PSL entry
  * lands (per issue #5).
  *
+ * Not a hard barrier: a page still running in another tab can plant a
+ * cookie again between two sweeps, and a document reading
+ * `document.cookie` in the same task as its own `pushState` to a new
+ * path reads before the sweep for that path. Ending the vector for
+ * good is the PSL entry (issue #6).
+ *
  * `CookieManager` has no enumeration API, so this is best-effort by
  * construction: it can expire domain-scoped cookies (the tossing
- * vector — those are visible at the suffix level) and host cookies of
- * origins we're told about, which is exactly the set that matters.
+ * vector — visible at the suffix level at the same path) and host
+ * cookies of origins we're told about, at the paths of the documents
+ * we're told about — exactly the cookies those documents can read.
  */
 object CookieHygiene {
     private const val TAG = "CookieHygiene"
@@ -37,8 +48,13 @@ object CookieHygiene {
         Thread(r, "cookie-hygiene").apply { isDaemon = true }
     }
 
-    /** How often the periodic sweep should run (used by the host). */
-    const val SWEEP_INTERVAL_MS: Long = 60_000L
+    /**
+     * How often the periodic sweep should run (used by the host). It
+     * bounds how long a cookie a background tab plants again stays
+     * readable by another open document (R3-F2); each run is a handful
+     * of in-memory `getCookie` reads, flushing only when it expired one.
+     */
+    const val SWEEP_INTERVAL_MS: Long = 15_000L
 
     /**
      * Asynchronously expire all cookies under the virtual suffixes and
@@ -46,23 +62,45 @@ object CookieHygiene {
      * virtual-origin or onchain-app URL — under its exact host as well.
      */
     fun sweepAsync(navigatedUrl: String? = null) {
-        executor.execute { sweepBlocking(navigatedUrl) }
+        sweepAsync(listOfNotNull(navigatedUrl))
     }
 
-    internal fun sweepBlocking(navigatedUrl: String? = null) {
+    /**
+     * [sweepAsync] for several documents at once — every open tab's
+     * current URL for the periodic sweep, so a cookie planted at the
+     * path one of them sits on is caught, not only `Path=/` ones.
+     */
+    fun sweepAsync(urls: Collection<String>) {
+        val snapshot = urls.toList()
+        executor.execute { sweepBlocking(snapshot) }
+    }
+
+    internal fun sweepBlocking(navigatedUrl: String? = null) =
+        sweepBlocking(listOfNotNull(navigatedUrl))
+
+    internal fun sweepBlocking(urls: List<String>) {
         // Private tabs (#86) keep their cookies in their own profile's jar.
         val jars = listOfNotNull(
             runCatching { CookieManager.getInstance() }.getOrNull(),
             PrivateProfile.cookieManager(),
         )
-        for (cm in jars) runCatching { sweepJar(cm, navigatedUrl) }
+        for (cm in jars) runCatching { sweepJar(cm, urls) }
     }
 
-    private fun sweepJar(cm: CookieManager, navigatedUrl: String?) {
+    private fun sweepJar(cm: CookieManager, urls: List<String>) {
+        // A cookie is only readable by a document whose path it
+        // path-matches, and `document.cookie` accepts any `Path=`, so a
+        // `Path=/` read misses a cookie tossed at `/swap` (R3-F1). With
+        // no enumeration API, read at every path a covered document is
+        // on — that is exactly the set of cookies those documents can see.
+        val covered = urls.filter { hostToSweep(it) != null }
+        val paths = (listOf("/") + covered.map(::pathOf)).distinct().take(MAX_PATHS)
         var expired = 0
         // Onchain apps' origins (#123) sit under the same base domain.
         for (suffix in VirtualOrigin.SUFFIXES + OnchainAppRef.SUFFIX) {
-            expired += expireAllFor(cm, "https://$suffix/", domain = ".$suffix")
+            for (path in paths) {
+                expired += expireAllFor(cm, "https://$suffix", path, domain = ".$suffix")
+            }
         }
         // Every virtual origin and onchain app shares the registrable
         // domain `freedom.baby` (until the PSL entry, issue #6), so a
@@ -71,14 +109,18 @@ object CookieHygiene {
         // domain-scoped variant is expired here: the real
         // `https://freedom.baby/` site's own host-only cookies are left
         // alone (a Domain-scoped expiry never touches a host-only cookie).
-        expired += expireAllFor(
-            cm,
-            "https://${VirtualOrigin.BASE_DOMAIN}/",
-            domain = ".${VirtualOrigin.BASE_DOMAIN}",
-            hostScoped = false,
-        )
-        hostToSweep(navigatedUrl)?.let { host ->
-            expired += expireAllFor(cm, "https://$host/", domain = null)
+        for (path in paths) {
+            expired += expireAllFor(
+                cm,
+                "https://${VirtualOrigin.BASE_DOMAIN}",
+                path,
+                domain = ".${VirtualOrigin.BASE_DOMAIN}",
+                hostScoped = false,
+            )
+        }
+        for (url in covered) {
+            val host = hostToSweep(url) ?: continue
+            expired += expireAllFor(cm, "https://$host", pathOf(url), domain = null)
         }
         if (expired > 0) {
             Log.i(TAG, "expired $expired cookie(s) under virtual origins")
@@ -100,32 +142,67 @@ object CookieHygiene {
     /** Should a navigation to [url] sweep the jar (see [hostToSweep])? */
     fun coversNavigation(url: String?): Boolean = hostToSweep(url) != null
 
+    /** Upper bound on distinct document paths one sweep reads at. */
+    private const val MAX_PATHS = 64
+
+    /** The path of [url] (no query or fragment), `/` when it has none. */
+    internal fun pathOf(url: String): String {
+        val afterScheme = url.substringAfter("://", "")
+        val rest = afterScheme.substringBefore('?').substringBefore('#')
+        val slash = rest.indexOf('/')
+        return if (slash < 0) "/" else rest.substring(slash)
+    }
+
     /**
-     * Expire every cookie [CookieManager] would send to [url]. Each is
-     * rewritten with `Max-Age=0` host-scoped (unless [hostScoped] is
-     * false) and (when [domain] is given) domain-scoped, since we can't
-     * see which scope the original carried.
+     * Every cookie `Path` that path-matches [path] (RFC 6265 §5.1.4):
+     * the root, each ancestor directory with and without its trailing
+     * slash, and [path] itself. Expiring a name at each of them reaches
+     * whichever of those paths the original was set at.
+     */
+    internal fun cookiePathsMatching(path: String): List<String> {
+        val out = linkedSetOf("/")
+        var i = path.indexOf('/', 1)
+        while (i > 0) {
+            out += path.substring(0, i)
+            out += path.substring(0, i + 1)
+            i = path.indexOf('/', i + 1)
+        }
+        if (path.isNotEmpty()) out += path
+        return out.toList()
+    }
+
+    /**
+     * Expire every cookie [CookieManager] would send to [origin]+[path].
+     * Each is rewritten with `Max-Age=0` host-scoped (unless [hostScoped]
+     * is false) and (when [domain] is given) domain-scoped, at every
+     * `Path` that could have let it through — we can see neither the
+     * scope nor the path the original carried.
      */
     private fun expireAllFor(
         cm: CookieManager,
-        url: String,
+        origin: String,
+        path: String,
         domain: String?,
         hostScoped: Boolean = true,
     ): Int {
+        val url = origin + path
         val cookies = runCatching { cm.getCookie(url) }.getOrNull() ?: return 0
-        val names = cookieNames(cookies)
+        val names = cookieNames(cookies).distinct()
+        val cookiePaths = cookiePathsMatching(path)
         for (name in names) {
-            runCatching {
-                if (hostScoped) cm.setCookie(url, "$name=; Path=/; Max-Age=0")
-                if (domain != null) {
-                    cm.setCookie(url, "$name=; Domain=$domain; Path=/; Max-Age=0")
+            for (p in cookiePaths) {
+                runCatching {
+                    if (hostScoped) cm.setCookie(url, "$name=; Path=$p; Max-Age=0")
+                    if (domain != null) {
+                        cm.setCookie(url, "$name=; Domain=$domain; Path=$p; Max-Age=0")
+                    }
                 }
             }
         }
-        if (hostScoped) return names.size
-        // Host-only cookies were deliberately left: count what went.
+        // Count what actually went (host-only cookies are deliberately
+        // left when [hostScoped] is false).
         val left = runCatching { cm.getCookie(url) }.getOrNull()?.let(::cookieNames).orEmpty()
-        return (names.size - left.size).coerceAtLeast(0)
+        return (cookieNames(cookies).size - left.size).coerceAtLeast(0)
     }
 
     private fun cookieNames(header: String): List<String> =

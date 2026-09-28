@@ -615,18 +615,6 @@ fun BrowserWebViewHost(
         Unit
     }
 
-    // Periodic cookie sweep (defense in depth against cookie tossing
-    // across virtual origins until the PSL entry propagates — and kept
-    // afterwards; see [CookieHygiene]). The on-navigation sweep in
-    // onPageStarted handles the common case; this catches long-lived
-    // pages that write document.cookie while sitting idle.
-    LaunchedEffect(Unit) {
-        while (true) {
-            CookieHygiene.sweepAsync()
-            kotlinx.coroutines.delay(CookieHygiene.SWEEP_INTERVAL_MS)
-        }
-    }
-
     val frame = remember {
         FrameLayout(context).apply {
             layoutParams = ViewGroup.LayoutParams(
@@ -644,6 +632,29 @@ fun BrowserWebViewHost(
     val refreshLayouts = remember { mutableMapOf<Long, SwipeRefreshLayout>() }
     // The ids in [webViews] of private tabs (#86).
     val privateIds = remember { mutableSetOf<Long>() }
+
+    // Periodic cookie sweep (defense in depth against cookie tossing
+    // across virtual origins until the PSL entry propagates — and kept
+    // afterwards; see [CookieHygiene]). The on-navigation sweep in
+    // onPageStarted handles the common case; this catches long-lived
+    // pages that write document.cookie while sitting idle, including
+    // one in a background tab re-planting a cookie after another app's
+    // document loaded (R3-F2). It reads at every open tab's current
+    // path, since a cookie tossed with a non-root `Path` is only
+    // visible there (R3-F1). Runs on the main thread: `WebView.url`.
+    LaunchedEffect(Unit) {
+        while (true) {
+            CookieHygiene.sweepAsync(webViews.values.mapNotNull { it.url })
+            kotlinx.coroutines.delay(CookieHygiene.SWEEP_INTERVAL_MS)
+        }
+    }
+    // A tab brought to the front: sweep at its document's path before
+    // the user interacts with it — it may have sat in the background
+    // while another tab planted cookies (R3-F2).
+    LaunchedEffect(tabs.active.id) {
+        val url = webViews[tabs.active.id]?.url
+        if (CookieHygiene.coversNavigation(url)) CookieHygiene.sweepAsync(url)
+    }
 
     /**
      * No private tab is left (#86): wipe the private profile's cookies
@@ -2600,6 +2611,10 @@ private fun buildRefreshableWebView(
                 // A same-document step keeps the page on screen as the
                 // load's document for the IPFS phase line (#94, R3-F2).
                 state.historyUpdated(isHome = url == ABOUT_BLANK)
+                // A same-document move (`pushState`) to a new path on a
+                // virtual origin or onchain app can bring cookies tossed
+                // at that path into view (R3-F1): sweep there too.
+                if (CookieHygiene.coversNavigation(url)) CookieHygiene.sweepAsync(url)
                 if (view == null || !bottomUiApplies(url)) return
                 // An SPA route can bring its own theme colour (#92). Only
                 // once the document has painted: before that, this is the
