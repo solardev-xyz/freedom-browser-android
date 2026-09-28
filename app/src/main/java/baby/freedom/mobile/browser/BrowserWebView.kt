@@ -969,6 +969,7 @@ fun BrowserWebViewHost(
             // Take down any permission prompt the tab still had up;
             // its request is denied along with the page.
             sitePermissions.onTabClosed(id)
+            RadicleProviders.onTabClosed(id)
             UnverifiedOrigins.release(wv)
             (wv as? PageWebView)?.sweptReload?.committed()
             wv.stopLoading()
@@ -1199,7 +1200,10 @@ fun BrowserWebViewHost(
             val relaunch = context.findActivity()?.isChangingConfigurations == true
             if (relaunch) {
                 tabs.parkForRelaunch { tab -> webViews[tab.id]?.let(::saveWebViewState) }
-                for (tab in tabs.tabs) sitePermissions.onDocumentStarted(tab)
+                for (tab in tabs.tabs) {
+                    sitePermissions.onDocumentStarted(tab)
+                    RadicleProviders.onDocumentStarted(tab, url = null)
+                }
             } else {
                 // As when the last private tab closes (#86): the private
                 // cache goes through a private WebView, before they all do.
@@ -2189,6 +2193,9 @@ private fun buildRefreshableWebView(
         val adblockPage = AdblockPage()
         AdblockCosmetic.install(this, state.private) { adblockPage.current() }
 
+        // `window.radicle` (#124): the provider's page object and channel.
+        RadicleProviders.install(this, state)
+
         // Force an initial paint so the WebView's compositor surface
         // is valid even before the user submits a URL. Not for a popup:
         // Chromium rejects (crashes on) a popup WebView that has already
@@ -2478,6 +2485,7 @@ private fun buildRefreshableWebView(
                 // document left standing: its requests are denied and
                 // a late answer can't land on this one (#81).
                 sitePermissions.onDocumentStarted(state)
+                RadicleProviders.onDocumentStarted(state, url)
                 // …and with the progress latch open again: whatever the
                 // last Stop aborted, this document is a load of its own
                 // and its percentages are worth drawing (#41).
@@ -4467,6 +4475,8 @@ private val CONTENT_SCHEMES = setOf("bzz", "ipfs", "ipns", "ens")
  */
 internal fun submitDetourForNavigation(url: String, isForMainFrame: Boolean): Boolean {
     if (!isForMainFrame) return false
+    // A Radicle repository (#124), in either form (`rad:z…` has no `//`).
+    if (RadUrl.isRadScheme(url)) return true
     val schemeEnd = url.indexOf("://")
     if (schemeEnd <= 0) return false
     val scheme = url.substring(0, schemeEnd).lowercase()
@@ -4608,7 +4618,9 @@ internal fun interceptVirtualRequest(
     // the user switched away from it (#125): its next document first
     // clears what that gateway's pages left there, before anything else
     // runs.
-    val response = interceptOnchainAppRequest(req, url, onchain)
+    // The Radicle repository browser and its read API (#124).
+    val response = RadApi.intercept(req, url)
+        ?: interceptOnchainAppRequest(req, url, onchain)
         ?: siteDataCleanupFor(req, url, tab)
         ?: interceptVirtualRequestFor(req, ensPins, incoming, assertedProtocol, onMainFrameRoot)
     if (incoming != null && response != null &&
