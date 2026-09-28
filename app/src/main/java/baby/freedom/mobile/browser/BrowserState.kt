@@ -749,8 +749,14 @@ class BrowserState(val id: Long, val private: Boolean = false) {
      * user asserting one — so Reload hands back the override's own
      * bare form, which [effectiveFetchUrl] maps onto the loaded
      * manifest, instead of re-submitting the shown string as a
-     * typed-scheme assertion. Typing `ipfs://vitalik.eth` yourself
-     * still asserts.
+     * typed-scheme assertion.
+     *
+     * Typing the scheme the bar already shows for the name gets the
+     * same treatment: [effectiveFetchUrl] maps it through the shown
+     * prefix onto the generic override, so it doesn't assert either
+     * (R1-F4). A typed scheme asserts when it is a different one
+     * (`bzz://vitalik.eth` over a shown `ipfs://vitalik.eth/`) or
+     * when the tab isn't already on the name.
      */
     fun reloadUrl(): String {
         val shown = url.ifBlank { addressBarText }

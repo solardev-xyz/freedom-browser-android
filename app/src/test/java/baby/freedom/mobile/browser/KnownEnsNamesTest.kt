@@ -88,4 +88,39 @@ class KnownEnsNamesTest {
         assertEquals("a.eth", KnownEnsNames.nameFor("aaa"))
         assertEquals("b.eth", KnownEnsNames.nameFor("bbb"))
     }
+
+    @Test
+    fun `a shared root names the name recorded there last, whatever the hash order`() {
+        // R2-F1: record() used to hand the just-recorded root back to
+        // whichever other name hash iteration met first. Try many pairs
+        // so the old order-dependent pick can't pass by luck.
+        for (i in 0 until 40) {
+            KnownEnsNames.clear()
+            val first = "n$i-first.eth"
+            val last = "n$i-last.eth"
+            KnownEnsNames.record("bzz://aaaa", first, EnsTrust.ASSUMED)
+            KnownEnsNames.record("bzz://aaaa", last, EnsTrust.ASSUMED)
+            assertEquals(last, KnownEnsNames.nameFor("aaaa"))
+            // Re-recording the first name takes the root back.
+            KnownEnsNames.record("bzz://aaaa", first, EnsTrust.ASSUMED)
+            assertEquals(first, KnownEnsNames.nameFor("aaaa"))
+        }
+    }
+
+    @Test
+    fun `a root released by a moving name goes to the most recent other holder`() {
+        for (i in 0 until 40) {
+            KnownEnsNames.clear()
+            val a = "a$i.eth"
+            val b = "b$i.eth"
+            val c = "c$i.eth"
+            KnownEnsNames.record("bzz://aaaa", a, EnsTrust.ASSUMED)
+            KnownEnsNames.record("bzz://aaaa", b, EnsTrust.ASSUMED)
+            KnownEnsNames.record("bzz://aaaa", c, EnsTrust.ASSUMED)
+            KnownEnsNames.record("bzz://bbbb", c, EnsTrust.ASSUMED)
+            assertEquals(b, KnownEnsNames.nameFor("aaaa"))
+            KnownEnsNames.forgetName(b)
+            assertEquals(a, KnownEnsNames.nameFor("aaaa"))
+        }
+    }
 }

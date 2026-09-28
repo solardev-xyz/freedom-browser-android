@@ -30,6 +30,14 @@ object KnownEnsNames {
     private val nameToUri = ConcurrentHashMap<String, String>()
     private val nameToTrust = ConcurrentHashMap<String, EnsTrust>()
 
+    /**
+     * When each name's answer was last [record]ed — only read under the
+     * lock, to hand a shared root to the name that claimed it most
+     * recently rather than to whichever one hash order yields first.
+     */
+    private val nameToSeq = HashMap<String, Long>()
+    private var seq = 0L
+
     private val bzzRegex = Regex("^bzz://([a-fA-F0-9]+)")
     private val ipfsRegex = Regex("^ipfs://([A-Za-z0-9]+)")
     private val ipnsRegex = Regex("^ipns://([A-Za-z0-9.-]+)")
@@ -54,6 +62,7 @@ object KnownEnsNames {
         val lowerName = name.lowercase()
         nameToUri[lowerName] = uri
         nameToTrust[lowerName] = trust
+        nameToSeq[lowerName] = ++seq
         val root = rootOf(uri)
         if (root != null) {
             hashToName[root.first] = lowerName
@@ -91,16 +100,19 @@ object KnownEnsNames {
 
     /**
      * Hash-to-name mappings to [lowerName] whose root it no longer
-     * resolves to: handed to another name that still resolves there,
-     * or dropped. Callers hold the lock.
+     * resolves to: handed to the other name that most recently
+     * recorded that root, or dropped. The root [lowerName] resolves to
+     * now stays with it — it is the name recorded last there (R2-F1).
+     * Callers hold the lock.
      */
     private fun releaseStaleRoots(lowerName: String) {
-        val stillNamed = nameToUri.entries.mapNotNull { (other, uri) ->
-            rootOf(uri)?.let { it.first to other }
-        }.toMap()
+        val own = nameToUri[lowerName]?.let(::rootOf)?.first
         for (hash in hashToName.filterValues { it == lowerName }.keys) {
-            val other = stillNamed[hash]
-            if (other == lowerName) continue
+            if (hash == own) continue
+            val other = nameToUri.entries
+                .filter { (other, uri) -> other != lowerName && rootOf(uri)?.first == hash }
+                .maxByOrNull { nameToSeq[it.key] ?: 0L }
+                ?.key
             if (other != null) hashToName[hash] = other else hashToName.remove(hash, lowerName)
         }
     }
@@ -157,6 +169,7 @@ object KnownEnsNames {
         nameToProtocol.remove(lowerName)
         nameToUri.remove(lowerName)
         nameToTrust.remove(lowerName)
+        nameToSeq.remove(lowerName)
         releaseStaleRoots(lowerName)
     }
 
@@ -167,5 +180,6 @@ object KnownEnsNames {
         nameToProtocol.clear()
         nameToUri.clear()
         nameToTrust.clear()
+        nameToSeq.clear()
     }
 }
