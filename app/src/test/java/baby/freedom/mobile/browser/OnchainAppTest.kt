@@ -232,6 +232,32 @@ class OnchainAppTest {
     }
 
     @Test
+    fun `an overflowing sweep keeps the newest host passes`() {
+        // R1-F1: past MAX_PATHS distinct (host, path) pairs, the pairs
+        // dropped are the oldest ones, never the page just navigated to.
+        val urls = (0 until 200).map { "https://a.bzz.freedom.baby/p$it" } +
+            "https://b.bzz.freedom.baby/now"
+        val covered = CookieHygiene.coveredPairs(urls)
+        assertEquals(CookieHygiene.MAX_PATHS, covered.size)
+        assertEquals("b.bzz.freedom.baby" to "/now", covered.first())
+        assertTrue(("a.bzz.freedom.baby" to "/p199") in covered)
+        assertFalse(("a.bzz.freedom.baby" to "/p0") in covered)
+        // A re-visited old URL counts as newest, not as its first slot.
+        val again = CookieHygiene.coveredPairs(urls + urls.first())
+        assertEquals("a.bzz.freedom.baby" to "/p0", again.first())
+        assertEquals(CookieHygiene.MAX_PATHS, again.size)
+        // The suffix passes always read at `/` and keep the newest paths.
+        val paths = CookieHygiene.sweepPaths(covered)
+        assertEquals(CookieHygiene.MAX_PATHS, paths.size)
+        assertEquals(listOf("/", "/now"), paths.take(2))
+        // Non-virtual URLs never take a slot.
+        assertEquals(
+            listOf("b.bzz.freedom.baby" to "/"),
+            CookieHygiene.coveredPairs(listOf("https://b.bzz.freedom.baby/", "https://example.com/x")),
+        )
+    }
+
+    @Test
     fun `private approvals end with the private session, normal ones don't`() {
         val d = doc(ChainTrust.Level.UNVERIFIED, "private-session")
         OnchainApps.approvalsFor(private = true).add(d)

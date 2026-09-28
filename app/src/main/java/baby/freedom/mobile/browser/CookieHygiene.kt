@@ -127,9 +127,8 @@ object CookieHygiene {
         // no enumeration API, read at every path a covered document is
         // on — that is exactly the set of cookies those documents can see.
         // One host pass per distinct (host, path), capped like the paths.
-        val covered = urls.mapNotNull { u -> hostToSweep(u)?.let { it to pathOf(u) } }
-            .distinct().take(MAX_PATHS)
-        val paths = (listOf("/") + covered.map { it.second }).distinct().take(MAX_PATHS)
+        val covered = coveredPairs(urls)
+        val paths = sweepPaths(covered)
         var expired = 0
         // Onchain apps' origins (#123) sit under the same base domain.
         for (suffix in VirtualOrigin.SUFFIXES + OnchainAppRef.SUFFIX) {
@@ -163,6 +162,31 @@ object CookieHygiene {
     }
 
     /**
+     * The distinct (host, path) pairs [urls] cover, at most [MAX_PATHS].
+     * [urls] is oldest-first (the coalesced queue appends), so on
+     * overflow the *newest* pairs are kept — the page just navigated to
+     * gets its host pass now, while an older one dropped here is still
+     * picked up by the next periodic sweep if its tab is open (R1-F1).
+     * Returned newest-first.
+     */
+    internal fun coveredPairs(urls: List<String>): List<Pair<String, String>> {
+        val out = LinkedHashSet<Pair<String, String>>()
+        for (u in urls.asReversed()) {
+            if (out.size >= MAX_PATHS) break
+            val host = hostToSweep(u) ?: continue
+            out += host to pathOf(u)
+        }
+        return out.toList()
+    }
+
+    /**
+     * The document paths the suffix passes read at: always `/`, then
+     * the distinct paths of [covered] (newest-first), at most [MAX_PATHS].
+     */
+    internal fun sweepPaths(covered: List<Pair<String, String>>): List<String> =
+        (listOf("/") + covered.map { it.second }).distinct().take(MAX_PATHS)
+
+    /**
      * The exact host whose own cookies a navigation to [url] expires: a
      * dweb virtual origin's, or an onchain app's (#123); `null` for
      * anything else.
@@ -177,7 +201,7 @@ object CookieHygiene {
     fun coversNavigation(url: String?): Boolean = hostToSweep(url) != null
 
     /** Upper bound on distinct document paths one sweep reads at. */
-    private const val MAX_PATHS = 64
+    internal const val MAX_PATHS = 64
 
     /** Upper bound on URLs waiting for the next coalesced sweep. */
     internal const val MAX_PENDING = 256
