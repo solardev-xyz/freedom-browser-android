@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Android 11 and lower (`fullBackupContent`): the same exclusions as
+  data_extraction_rules.xml: the encrypted RPC API keys. Backup is off
+  (`allowBackup="false"`); this keeps them out should that ever change.
+-->
+<full-backup-content>
+    <exclude domain="file" path="datastore/freedom_rpc_secrets.preferences_pb" />
+</full-backup-content>

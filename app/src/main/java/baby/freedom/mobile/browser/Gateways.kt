@@ -2,6 +2,7 @@ package baby.freedom.mobile.browser
 
 import baby.freedom.mobile.ens.EnsResolver
 import baby.freedom.mobile.ens.EnsResult
+import baby.freedom.mobile.ens.EnsRpcConfig
 import baby.freedom.mobile.ens.EnsTrust
 import baby.freedom.swarm.SwarmNode
 import kotlinx.coroutines.CompletableDeferred
@@ -94,6 +95,15 @@ object Gateways {
     }
 
     /**
+     * The name-resolution settings (#102), read by [ensResolver] for
+     * every lookup. `MainActivity` points this at the persisted
+     * settings on start; until then (and in unit tests) it's the
+     * defaults.
+     */
+    @Volatile
+    var ensRpcConfig: suspend () -> EnsRpcConfig = { EnsRpcConfig() }
+
+    /**
      * The external endpoint settings are being loaded: until
      * [setExternalEndpoints] lands, [awaitExternalEndpoints] waits. So a
      * cold-start deep link or restored tab can't reach the embedded
@@ -135,7 +145,7 @@ object Gateways {
      * request interceptor (which resolves `<name>.ens.…` hosts) share
      * a cache and never disagree mid-session.
      */
-    val ensResolver: EnsResolver by lazy { EnsResolver() }
+    val ensResolver: EnsResolver by lazy { EnsResolver { ensRpcConfig().resolverSettings } }
 
     /**
      * Blocking ENS lookup used by the request interceptor. A seam so the
@@ -178,8 +188,64 @@ object Gateways {
     internal var reverifyFailureWindowMs: Long = 30_000
 
     private val lookupScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private val lookupsInFlight = ConcurrentHashMap<String, Deferred<EnsResult>>()
-    private val lookupFailedAt = ConcurrentHashMap<String, Long>()
+    /**
+     * In-flight lookups and recent failures, keyed by name *and* the
+     * resolver settings the lookup ran under: after a settings change
+     * (an endpoint removed, CCIP-Read switched off) a document must not
+     * join — or skip the wait because of — a lookup that is still asking
+     * the old endpoints, and pin that answer in its tab and in
+     * [KnownEnsNames]. The resolver's own cache is epoch-scoped the same
+     * way ([EnsResolver]).
+     */
+    private data class LookupKey(val name: String, val settings: EnsResolver.Settings?)
+
+    private val lookupsInFlight = ConcurrentHashMap<LookupKey, Deferred<EnsResult>>()
+    private val lookupFailedAt = ConcurrentHashMap<LookupKey, Long>()
+
+    /**
+     * The resolver settings most recently read by [lookupKey] — the
+     * current ones, as far as lookups know. A lookup that finishes under
+     * settings other than these started before a settings change.
+     */
+    @Volatile
+    private var latestSettings: EnsResolver.Settings? = null
+
+    /**
+     * Open the failure window for [key]. Also drops entries that can no
+     * longer matter — those under other resolver settings (superseded by
+     * a settings change) and those whose window has closed — so the map
+     * holds at most the recent failures under the current settings
+     * rather than growing with every settings change for the life of the
+     * process.
+     *
+     * A lookup that started under settings since superseded records
+     * nothing and prunes nothing: no document will look its entry up
+     * again, and pruning by *its* settings would drop the current
+     * settings' recent failures, making the next document for such a
+     * name wait [reverifyDeadlineMs] again.
+     */
+    private fun recordLookupFailure(key: LookupKey) {
+        if (key.settings != latestSettings) return
+        val now = System.currentTimeMillis()
+        val window = reverifyFailureWindowMs
+        lookupFailedAt.entries.removeIf { (k, at) ->
+            k.settings != key.settings || now - at >= window
+        }
+        lookupFailedAt[key] = now
+    }
+
+    /** Number of recorded lookup failures (tests). */
+    internal fun ensLookupFailureCount(): Int = lookupFailedAt.size
+
+    private fun lookupKey(name: String): LookupKey {
+        val settings = try {
+            runBlocking { ensRpcConfig().resolverSettings }
+        } catch (e: Exception) {
+            null // the resolver will fail the same way; still de-duplicate by name
+        }
+        latestSettings = settings
+        return LookupKey(name.lowercase(), settings)
+    }
 
     /**
      * Forget recent lookup failures and detach lookups still in flight
@@ -196,8 +262,7 @@ object Gateways {
      * flight, waiting at most [deadlineMs] (`null` = until it answers).
      * `null` when the deadline passed first; the lookup keeps running.
      */
-    private fun lookupWithin(name: String, deadlineMs: Long?): EnsResult? {
-        val key = name.lowercase()
+    private fun lookupWithin(key: LookupKey, name: String, deadlineMs: Long?): EnsResult? {
         var started: Deferred<EnsResult>? = null
         val job = lookupsInFlight.computeIfAbsent(key) {
             lookupScope.async(start = CoroutineStart.LAZY) {
@@ -216,8 +281,11 @@ object Gateways {
                 // a failure opens the failure window, an answer closes it.
                 @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
                 val outcome = own.getCompleted()
-                if (outcome is EnsResult.Error) {
-                    lookupFailedAt[key] = System.currentTimeMillis()
+                // CCIP-Read switched off is an answer about the settings,
+                // not a flaky network: it must not let later documents
+                // skip the wait and fall back on an earlier answer.
+                if (outcome is EnsResult.Error && outcome.reason != "CCIP_DISABLED") {
+                    recordLookupFailure(key)
                 } else {
                     lookupFailedAt.remove(key)
                 }
@@ -234,7 +302,7 @@ object Gateways {
         // document skipped the wait, it didn't find the network any slower,
         // and the running lookup records its own outcome when it finishes.
         if (result == null && deadlineMs != null && deadlineMs > 0 && !job.isCompleted) {
-            lookupFailedAt[key] = System.currentTimeMillis()
+            recordLookupFailure(key)
         }
         return result
     }
@@ -250,6 +318,8 @@ object Gateways {
     fun toLoadable(url: String): String {
         VirtualOrigin.toVirtualUrl(url)?.let { return it }
         OnchainAppRef.toVirtualUrl(url)?.let { return it }
+        // A Radicle repository (#124), browsed from the embedded node.
+        RadUrl.toVirtualUrl(url)?.let { return it }
         return toGatewayUrl(url)
     }
 
@@ -275,6 +345,7 @@ object Gateways {
     fun toDisplay(url: String): String {
         VirtualOrigin.displayUrlFor(url)?.let { return it }
         OnchainAppRef.displayUrlFor(url)?.let { return it }
+        RadUrl.displayUrlFor(url)?.let { return it }
         val swarm = SwarmResolver.toDisplay(url, swarmBase)
         if (swarm != url) return swarm
         val ipfsNow = ipfsBase
@@ -440,6 +511,9 @@ object Gateways {
      * or this session had for the name, as it did before the re-check
      * existed — the network being down is no reason to stop Back from
      * working. With no earlier answer at all it's `ens_lookup_failed`.
+     * A name that needs CCIP-Read while the user has switched it off is
+     * refused with `ens_ccip_disabled` whether or not there is an
+     * earlier answer: that's the setting, not the network.
      * The same goes for a lookup that hasn't answered within
      * [reverifyDeadlineMs] when there is an earlier answer: a stalled
      * network costs Back a few seconds at most, and nothing on the
@@ -493,7 +567,6 @@ object Gateways {
         assertedProtocol: String? = null,
         onWebRecord: (EnsResult.Ok) -> Unit = {},
     ): String? {
-        val key = name.lowercase()
         // The fallback answer together with how it was checked, from the
         // same source: a document served from it shows *that* check on
         // its shield, not the registry's newer answer's (#97 R3-F1).
@@ -502,17 +575,32 @@ object Gateways {
                 ?.takeIf { VirtualOrigin.parseContentUrl(it.first) != null }
         val last = fallback?.first
         val lastTrust = fallback?.second
-        // With something to fall back on, don't hold the document for
-        // the resolver's worst case (see [reverifyDeadlineMs]).
-        val deadline = when {
-            last == null -> null
-            lookupFailedAt[key]?.let {
-                System.currentTimeMillis() - it < reverifyFailureWindowMs
-            } == true -> 0L
-            else -> reverifyDeadlineMs
+        fun lookup(key: LookupKey): EnsResult? {
+            // With something to fall back on, don't hold the document for
+            // the resolver's worst case (see [reverifyDeadlineMs]).
+            val deadline = when {
+                last == null -> null
+                lookupFailedAt[key]?.let {
+                    System.currentTimeMillis() - it < reverifyFailureWindowMs
+                } == true -> 0L
+                else -> reverifyDeadlineMs
+            }
+            // [lookupWithin] keeps [lookupFailedAt] — see [reverifyFailureWindowMs].
+            return lookupWithin(key, name, deadline)
         }
-        // [lookupWithin] keeps [lookupFailedAt] — see [reverifyFailureWindowMs].
-        val result = lookupWithin(name, deadline)
+        var key = lookupKey(name)
+        var result = lookup(key)
+        // The settings changed while this document waited: that answer
+        // came from endpoints the user has since removed (or with
+        // CCIP-Read in its old state). Ask again under the new settings
+        // rather than pin it here and in the registry. Bounded, so a
+        // user flipping a switch repeatedly can't hold the document.
+        repeat(2) {
+            val now = lookupKey(name)
+            if (now == key) return@repeat
+            key = now
+            result = lookup(key)
+        }
         fun gone(code: String): String {
             KnownEnsNames.forgetName(name)
             pins?.forgetLastAnswer(name)
@@ -562,10 +650,17 @@ object Gateways {
             // too long to encode), which is as final as a NotFound (no
             // lookup ran, and none ever will — so no server's word to
             // cross-check either).
+            // CCIP-Read switched off isn't a network problem either, so
+            // there's no falling back on an earlier answer: "Off" means
+            // those names don't resolve, whether typed, reloaded or
+            // reached by Back (#102). The earlier answer is kept — it's
+            // still the name's content once CCIP-Read is back on.
             is EnsResult.Error, null -> {
                 val refused = result?.let { refusedNameErrorCode(it.reason) }
                 if (refused != null) {
                     gone(refused)
+                } else if ((result as? EnsResult.Error)?.reason == "CCIP_DISABLED") {
+                    "ens_ccip_disabled"
                 } else if (last == null) {
                     "ens_lookup_failed"
                 } else {

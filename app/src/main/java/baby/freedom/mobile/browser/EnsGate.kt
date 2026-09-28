@@ -1,5 +1,6 @@
 package baby.freedom.mobile.browser
 
+import baby.freedom.mobile.ens.EnsQuorum
 import baby.freedom.mobile.ens.EnsResult
 import baby.freedom.mobile.ens.EnsTrust
 import java.security.SecureRandom
@@ -58,7 +59,21 @@ internal class EnsGate(
             add("Answer: ${result.uri}")
             if (result.trust.agreed.isNotEmpty()) add("From: ${result.trust.agreed.joinToString(", ")}")
             add("Block: " + (result.trust.block?.let { "#$it" } ?: "latest"))
+            tooFewNote(result.trust)?.let(::add)
         }.joinToString("\n")
+
+        /**
+         * Why nothing was cross-checked when the user enabled too few RPC
+         * endpoints to (#102): then no answer ever is, and the warning
+         * says so rather than suggesting a server let the others down.
+         */
+        private fun tooFewNote(trust: EnsTrust): String? =
+            if (trust.verified || !trust.tooFewServers) {
+                null
+            } else {
+                "Fewer than ${EnsQuorum.MIN_PROVIDERS} RPC endpoints are enabled in " +
+                    "Settings → RPC providers, so no answer can be cross-checked."
+            }
 
         /**
          * [detail] for a "nothing to load" answer, plus a note when only
@@ -69,7 +84,8 @@ internal class EnsGate(
             if (trust.verified) return detail
             val from = trust.agreed.takeIf { it.isNotEmpty() }?.joinToString(", ") ?: "one RPC server"
             val block = trust.block?.let { "#$it" } ?: "latest"
-            return "$detail\nNot cross-checked: only $from answered (block $block)"
+            val note = "$detail\nNot cross-checked: only $from answered (block $block)"
+            return tooFewNote(trust)?.let { "$note\n$it" } ?: note
         }
 
         /**

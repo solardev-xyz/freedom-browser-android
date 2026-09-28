@@ -412,6 +412,8 @@ fun BrowserScreen(
     myotisInfo: MyotisInfo = MyotisInfo(),
     myotisEnabled: Boolean = false,
     onToggleMyotis: (Boolean) -> Unit = {},
+    /** A light-client chain's Retry (`repair = false`) or Repair sync data (`true`), by chain id. */
+    onMyotisRecovery: (chainId: Long, repair: Boolean) -> Unit = { _, _ -> },
     onEnsureIpfsStarted: () -> Unit,
     onIpfsToggle: (Boolean) -> Unit,
     radicle: RadicleControls = RadicleControls(),
@@ -937,6 +939,8 @@ fun BrowserScreen(
         // lifts a download block a declined offer left on it
         // ([DownloadOffers]); a page's own navigation doesn't.
         if (source == SubmitSource.User) downloads.allowOffers(target.id)
+        // Likewise a refused `window.radicle` prompt's block (#124).
+        if (source == SubmitSource.User) RadicleProviders.allowPrompts(target.id)
         // Nor is it a load a restore put back over its page (#185 R4-F1).
         if (source == SubmitSource.User) target.userNavigated()
         // And the load it schedules is theirs: its redirects may end in
@@ -1968,6 +1972,7 @@ fun BrowserScreen(
             myotisEnabled = myotisEnabled,
             onToggleMyotis = onToggleMyotis,
             tor = tor,
+            onMyotisRecovery = onMyotisRecovery,
             onDismiss = { showNode = false },
         )
     }
@@ -1975,7 +1980,14 @@ fun BrowserScreen(
     // Settings → Nodes → Radicle node (#73); over Settings, like NodeScreen.
     if (showRadicle) {
         RadicleScreen(
-            radicle = radicle,
+            radicle = radicle.copy(
+                // A seeded repository, in the `rad://` browser (#124).
+                onOpen = { rid ->
+                    showRadicle = false
+                    showSettings = false
+                    submit(state, "rad://" + rid.removePrefix("rad:"))
+                },
+            ),
             runNodeEnabled = runNodeEnabled,
             onDismiss = { showRadicle = false },
         )
@@ -2093,13 +2105,21 @@ fun BrowserScreen(
     val pageUncovered = !overlayShown
     val androidDialogUp by sitePermissions.androidDialogUp.collectAsState()
     var offerHasTurn by remember(activeTabId) { mutableStateOf(false) }
+    var radicleHasTurn by remember(activeTabId) { mutableStateOf(false) }
     val promptTurn = modalPromptTurn(
         permissionWaiting = pageUncovered && state.permissionPrompt != null,
         offerWaiting = tabOffers.isNotEmpty(),
         offerHasTurn = offerHasTurn,
         androidDialogUp = androidDialogUp,
+        // The `window.radicle` consent prompt (#124), gated like the
+        // permission prompt on the page being what's on screen.
+        radicleWaiting = pageUncovered && state.radiclePrompt != null,
+        radicleHasTurn = radicleHasTurn,
     )
-    SideEffect { offerHasTurn = promptTurn == PromptTurn.DownloadOffer }
+    SideEffect {
+        offerHasTurn = promptTurn == PromptTurn.DownloadOffer
+        radicleHasTurn = promptTurn == PromptTurn.Radicle
+    }
     tabOffers.firstOrNull()?.takeIf { promptTurn == PromptTurn.DownloadOffer }?.let { offer ->
         DownloadOfferDialog(
             offer = offer,
@@ -2173,9 +2193,12 @@ fun BrowserScreen(
     // History, Bookmarks, Downloads) covers the page, so the user
     // always sees the page that is asking, and it waits its turn with
     // the tab's download offer ([modalPromptTurn]).
-    val pageOnScreen = pageUncovered && promptTurn != PromptTurn.DownloadOffer
+    val pageOnScreen = pageUncovered && promptTurn != PromptTurn.DownloadOffer && promptTurn != PromptTurn.Radicle
     state.permissionPrompt?.takeIf { promptTurn == PromptTurn.SitePermission }?.let { prompt ->
         androidx.compose.runtime.key(prompt) { SitePermissionPrompt(prompt) }
+    }
+    state.radiclePrompt?.takeIf { promptTurn == PromptTurn.Radicle }?.let { prompt ->
+        androidx.compose.runtime.key(prompt) { RadiclePromptDialog(prompt) }
     }
     // The same gate for Android's own runtime-permission dialog, which
     // the broker raises only over the tab named here — plus the app

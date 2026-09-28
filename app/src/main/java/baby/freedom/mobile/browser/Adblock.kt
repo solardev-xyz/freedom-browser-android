@@ -800,7 +800,8 @@ internal object Adblock {
 
     /** Loopback (the embedded nodes) and the virtual dweb origins are never filtered. */
     private fun isExempt(host: String): Boolean =
-        host == "localhost" || host == "127.0.0.1" || host == "[::1]" || VirtualOrigin.isVirtualHost(host)
+        host == "localhost" || host == "127.0.0.1" || host == "[::1]" || VirtualOrigin.isVirtualHost(host) ||
+            host == RadUrl.HOST
 
     /**
      * What a blocked request gets: an empty 403, so the page's element

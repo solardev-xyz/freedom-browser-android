@@ -20,7 +20,8 @@ internal object AddressInput {
         /**
          * A name the browser resolves itself (`vitalik.eth`, `ens://…`,
          * `bzz://name.eth`) or a content address on one of the embedded
-         * gateways (`bzz://<hash>`, `ipfs://<cid>`, `ipns://…`).
+         * gateways (`bzz://<hash>`, `ipfs://<cid>`, `ipns://…`), or a
+         * Radicle repository (`rad://z…`, `rad:z…`, #124).
          */
         Dweb,
     }
@@ -33,7 +34,8 @@ internal object AddressInput {
         if (trimmed.isEmpty()) return null
         if (EnsInput.parse(trimmed) != null ||
             EnsInput.parseConstrained(trimmed) != null ||
-            dwebSchemes.any { trimmed.startsWith(it, ignoreCase = true) }
+            dwebSchemes.any { trimmed.startsWith(it, ignoreCase = true) } ||
+            RadUrl.parse(trimmed) != null
         ) return Kind.Dweb
         return if (UrlParser.isSearch(trimmed)) Kind.Search else Kind.Url
     }
@@ -70,6 +72,7 @@ internal sealed interface AddressAction {
                 input.startsWith("bzz://", ignoreCase = true) -> "Open on Swarm"
                 input.startsWith("ipfs://", ignoreCase = true) ||
                     input.startsWith("ipns://", ignoreCase = true) -> "Open on IPFS"
+                RadUrl.parse(input) != null -> "Open on Radicle"
                 else -> "Go to address"
             }
     }

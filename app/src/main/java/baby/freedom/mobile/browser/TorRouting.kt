@@ -27,6 +27,14 @@ import java.text.Normalizer
  * with Tor off, stopped, still without a port, or gone, a `.onion` request
  * is refused, never resolved or connected directly.
  *
+ * "Request" means the WebView's HTTP(S)/WebSocket stack and the app's own
+ * native fetches. WebRTC is outside all three layers below: Chromium
+ * resolves an `RTCPeerConnection`'s STUN/TURN server names itself, past
+ * the proxy override and the interceptor, so a page that writes a
+ * `.onion` name into its own `iceServers` sends that name to system DNS
+ * (#203 R4-F1). Only the page's own chosen string leaks that way, nothing
+ * of the user's browsing, and there is no WebView API to gate it.
+ *
  * Three layers, all keyed on [isOnionHost]:
  *
  *  1. **The WebView's proxy override** ([ProxyController], reverse-bypass

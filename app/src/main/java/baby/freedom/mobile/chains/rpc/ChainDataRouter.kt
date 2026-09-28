@@ -6,6 +6,7 @@ import baby.freedom.mobile.browser.PublicSuffixList
 import baby.freedom.mobile.chains.Chain
 import baby.freedom.mobile.chains.RpcUrls
 import baby.freedom.mobile.data.ChainStore
+import baby.freedom.mobile.ens.EnsRpcConfig
 import baby.freedom.mobile.ens.Keccak256
 import baby.freedom.mobile.ens.hexToBytes
 import baby.freedom.mobile.ens.toHex
@@ -246,7 +247,10 @@ class ChainDataRouter internal constructor(
      */
     private fun pool(chain: Chain): List<String> {
         val now = clock()
-        val all = (chain.userRpcUrls + chain.rpcUrls).distinct()
+        // One entry per endpoint ([EnsRpcConfig.endpointKey]), the user's
+        // own spelling kept: `https://eth.drpc.org:443` is the listed
+        // `https://eth.drpc.org`, asked once and labelled as the user's.
+        val all = (chain.userRpcUrls + chain.rpcUrls).distinctBy(EnsRpcConfig::endpointKey)
         return all.sortedWith(
             compareBy<String> { it !in chain.userRpcUrls }
                 .thenBy { url -> failedAt[url]?.let { now - it in 0 until QUARANTINE_MS } == true },
@@ -436,7 +440,13 @@ class ChainDataRouter internal constructor(
          * machine are one operator — and every loopback spelling
          * (`localhost`, `*.localhost`, any `127.0.0.0/8` literal, `[::1]`)
          * is the one device, so the user's own node added twice can never
-         * outvote a public RPC.
+         * outvote a public RPC. A provider serving from more than one
+         * registrable domain is one provider too ([PROVIDER_ALIASES]):
+         * DRPC's keyed `lb.drpc.live` and its public `eth.drpc.org` are
+         * the same operator's answer.
+         *
+         * Name resolution's quorum counts its voters by this too
+         * ([baby.freedom.mobile.ens.EnsQuorum.voters]).
          */
         internal fun providerOf(url: String): String {
             if (RpcUrls.isLoopbackUrl(url)) return LOOPBACK_PROVIDER
@@ -448,8 +458,16 @@ class ChainDataRouter internal constructor(
                 ?: return url
             val ipLiteral = ':' in host || host.all { it.isDigit() || it == '.' }
             if (ipLiteral) return host
-            return PublicSuffixList.registrableDomain(host) ?: host
+            val domain = PublicSuffixList.registrableDomain(host) ?: host
+            return PROVIDER_ALIASES[domain] ?: domain
         }
+
+        /**
+         * Registrable domains one provider serves RPCs from besides its
+         * main one → that main one. Only operators with a keyed and a
+         * public endpoint on different domains need an entry.
+         */
+        private val PROVIDER_ALIASES = mapOf("drpc.live" to "drpc.org")
 
         /** An RPC's host (and port), never its path or query — those can carry a key. */
         internal fun hostOf(url: String): String = try {

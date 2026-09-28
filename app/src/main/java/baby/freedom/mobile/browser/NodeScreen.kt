@@ -19,11 +19,13 @@ import androidx.compose.material.icons.filled.HourglassTop
 import androidx.compose.material.icons.filled.PowerSettingsNew
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.ui.platform.LocalContext
 import baby.freedom.mobile.data.NodeSettings
@@ -36,12 +38,15 @@ import androidx.compose.ui.unit.dp
 import baby.freedom.swarm.MyotisChainStatus
 import baby.freedom.swarm.MyotisInfo
 import baby.freedom.swarm.MyotisNetwork
+import baby.freedom.swarm.MyotisRecovery
 import baby.freedom.swarm.MyotisStatus
 import baby.freedom.swarm.NodeInfo
 import baby.freedom.swarm.NodeStatus
 import baby.freedom.swarm.SwarmNode
 import baby.freedom.swarm.TorInfo
 import baby.freedom.swarm.TorStatus
+import android.os.SystemClock
+import kotlinx.coroutines.delay
 import java.util.Locale
 
 /**
@@ -62,6 +67,8 @@ fun NodeScreen(
     onToggleMyotis: (Boolean) -> Unit,
     onDismiss: () -> Unit,
     tor: TorControls = TorControls(),
+    /** A chain's Retry (`repair = false`) or Repair sync data (`true`) on a blocked or waiting recovery. */
+    onMyotisRecovery: (chainId: Long, repair: Boolean) -> Unit = { _, _ -> },
 ) {
     BackHandler(onBack = onDismiss)
     val triple = nodeStatusTriple(nodeInfo.status)
@@ -100,6 +107,7 @@ fun NodeScreen(
                     info = myotisInfo,
                     enabled = myotisEnabled,
                     onToggle = onToggleMyotis,
+                    onRecovery = onMyotisRecovery,
                 )
             }
         }
@@ -195,6 +203,7 @@ private fun LightClientSection(
     info: MyotisInfo,
     enabled: Boolean,
     onToggle: (Boolean) -> Unit,
+    onRecovery: (chainId: Long, repair: Boolean) -> Unit,
 ) {
     val triple = lightClientStatusTriple(if (enabled) info else MyotisInfo())
     SectionCard(title = "Ethereum light client") {
@@ -220,19 +229,29 @@ private fun LightClientSection(
             val err = info.errorMessage
             if (!err.isNullOrBlank()) DetailRow("Error", err, singleLine = false)
             for (network in MyotisNetwork.entries) {
-                ChainRows(network, info.status, info.chain(network))
+                ChainRows(network, info.status, info.chain(network), onRecovery)
             }
         }
     }
 }
 
 @Composable
-private fun ChainRows(network: MyotisNetwork, nodeStatus: MyotisStatus, chain: MyotisChainStatus?) {
+private fun ChainRows(
+    network: MyotisNetwork,
+    nodeStatus: MyotisStatus,
+    chain: MyotisChainStatus?,
+    onRecovery: (chainId: Long, repair: Boolean) -> Unit,
+) {
     Spacer(Modifier.height(8.dp))
     DetailRow(network.displayName, myotisChainLabel(nodeStatus, chain))
     if (chain == null || nodeStatus != MyotisStatus.Running) return
     chain.error?.let {
         DetailRow("Error", it, singleLine = false)
+        return
+    }
+    val recovery = chain.recovery
+    if (recovery != null) {
+        RecoveryRows(chain, recovery, onRecovery)
         return
     }
     if (chain.staleAnchor) {
@@ -249,6 +268,41 @@ private fun ChainRows(network: MyotisNetwork, nodeStatus: MyotisStatus, chain: M
     if (reason.isNotEmpty()) DetailRow("Not serving", reason, singleLine = false)
 }
 
+/**
+ * A chain in stale-anchor checkpoint recovery (#195): what it's doing or
+ * why it stopped, how old the refused checkpoint was, and — blocked or
+ * waiting for an automatic retry — Retry / Repair sync data.
+ */
+@Composable
+private fun RecoveryRows(
+    chain: MyotisChainStatus,
+    recovery: MyotisRecovery,
+    onRecovery: (chainId: Long, repair: Boolean) -> Unit,
+) {
+    // The retry countdown runs on elapsedRealtime, the clock the :myotis
+    // process stamped it with; tick it while it's counting.
+    val now by produceState(SystemClock.elapsedRealtime(), recovery) {
+        while (recovery.phase == MyotisRecovery.Phase.Waiting) {
+            value = SystemClock.elapsedRealtime()
+            delay(1_000)
+        }
+    }
+    DetailRow(
+        if (recovery.phase == MyotisRecovery.Phase.Blocked) "Not syncing" else "Recovery",
+        recovery.message(now),
+        singleLine = false,
+    )
+    anchorAge(chain)?.let { DetailRow("Trust checkpoint", it, singleLine = false) }
+    if (recovery.canRetry) {
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedButton(onClick = { onRecovery(chain.chainId, false) }) { Text("Retry") }
+            if (recovery.canRepair) {
+                OutlinedButton(onClick = { onRecovery(chain.chainId, true) }) { Text("Repair sync data") }
+            }
+        }
+    }
+}
+
 /** One-line state for a chain row: what the light client is doing on that chain. */
 internal fun myotisChainLabel(nodeStatus: MyotisStatus, chain: MyotisChainStatus?): String =
     when (nodeStatus) {
@@ -258,6 +312,7 @@ internal fun myotisChainLabel(nodeStatus: MyotisStatus, chain: MyotisChainStatus
         MyotisStatus.Running -> when {
             chain == null -> "Off"
             chain.error != null -> "Failed"
+            chain.recovery != null -> chain.recovery?.label.orEmpty()
             chain.paused -> "Paused"
             chain.staleAnchor -> "Checkpoint too old"
             chain.ready -> "Synced"
@@ -269,18 +324,23 @@ internal fun myotisChainLabel(nodeStatus: MyotisStatus, chain: MyotisChainStatus
     }
 
 /**
- * Why a chain parked on a stale trust anchor isn't syncing. The engine
+ * Why a chain parked on a stale trust anchor isn't syncing: the engine
  * refuses to sync forward from a checkpoint older than the weak-subjectivity
- * bound; desktop and iOS then fetch a fresh one (checkpoint recovery),
- * which Android doesn't do yet — the chain stays parked, never unverified.
+ * bound. Shown only until its checkpoint recovery (#195) is on the row,
+ * which is almost at once — the node starts one the moment it parks.
  */
 internal fun staleAnchorExplanation(chain: MyotisChainStatus): String {
+    val detail = anchorAge(chain)?.let { " ($it)" } ?: ""
+    // The refused anchor is the embedded one or a previously verified
+    // generation's checkpoint; the status doesn't say which.
+    return "This chain's checkpoint is too old to sync from safely$detail."
+}
+
+/** How old a refused anchor is against the engine's limit, or null when it isn't a stale anchor. */
+internal fun anchorAge(chain: MyotisChainStatus): String? {
+    if (!chain.staleAnchor || chain.wsBoundPeriods <= 0) return null
     val age = (chain.targetPeriod - chain.currentPeriod).coerceAtLeast(0)
-    val detail = if (chain.wsBoundPeriods > 0) {
-        " (${plural(age, "sync period")} old, the safe limit is ${chain.wsBoundPeriods})"
-    } else ""
-    return "The built-in checkpoint is too old to sync from safely$detail. " +
-        "Fetching a fresh checkpoint isn't supported on Android yet."
+    return "${plural(age, "sync period")} old, the safe limit is ${chain.wsBoundPeriods}"
 }
 
 private fun plural(n: Long, noun: String) = if (n == 1L) "1 $noun" else "$n ${noun}s"
@@ -308,15 +368,21 @@ internal fun lightClientStatusTriple(info: MyotisInfo): NodeStatusTriple = when 
     MyotisStatus.Running -> {
         val live = info.chains.filter { it.error == null }
         val ready = live.count { it.ready }
-        val parked = live.count { it.staleAnchor }
+        // A chain on a stale checkpoint is recovering (or stuck), not
+        // syncing along: don't let it keep the whole line on "Syncing…" —
+        // neither when it's the only chain left nor beside one still waiting.
+        val parked = live.count { it.staleAnchor || it.recovery != null }
         when {
             live.isNotEmpty() && ready == live.size ->
                 NodeStatusTriple(Color(0xFF22C55E), Icons.Filled.CheckCircle, "Synced")
-            // A chain parked on a stale checkpoint never catches up on its
-            // own; don't let it keep the whole line on "Syncing…" — neither
-            // when it's the only chain left nor beside one still waiting.
             live.isNotEmpty() && parked == live.size -> NodeStatusTriple(
-                Color(0xFFF59E0B), Icons.Filled.ErrorOutline, "Checkpoint too old",
+                Color(0xFFF59E0B),
+                Icons.Filled.ErrorOutline,
+                when {
+                    live.any { it.recovery?.phase == MyotisRecovery.Phase.Blocked } -> "Sync paused"
+                    live.any { it.recovery != null } -> "Updating checkpoint"
+                    else -> "Checkpoint too old"
+                },
             )
             ready > 0 || parked > 0 -> NodeStatusTriple(
                 Color(0xFFF59E0B), Icons.Filled.HourglassTop, "$ready of ${live.size} chains synced",

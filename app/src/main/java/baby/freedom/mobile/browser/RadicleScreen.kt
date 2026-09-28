@@ -1,5 +1,6 @@
 package baby.freedom.mobile.browser
 
+import baby.freedom.mobile.data.RadicleGrantStore
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -55,6 +56,11 @@ data class RadicleControls(
     val onToggle: (Boolean) -> Unit = {},
     val onSeed: (String) -> Unit = {},
     val onUnseed: (String) -> Unit = {},
+    /** Open a seeded repository (`rad:z…`) in the `rad://` browser (#124); set by [BrowserScreen]. */
+    val onOpen: ((String) -> Unit)? = null,
+    /** Sites connected to `window.radicle` (#124), and dropping one's grant. */
+    val grants: List<RadicleGrantStore.Grant> = emptyList(),
+    val onRevoke: (String) -> Unit = {},
 )
 
 internal const val RADICLE_ROW_KEY = "radicle"
@@ -101,8 +107,9 @@ internal fun seedLine(seed: RadicleSeed): String {
  * The embedded Radicle node's page (#73), the Android counterpart of iOS's
  * `RadicleNodeSheet`: an on/off switch, the node's identity (DID, node ID,
  * alias) and peer count, the repositories it seeds, and a seed-by-RID
- * field so replication can be exercised without a dApp page. Browsing
- * `rad://` and the page-facing provider are separate work.
+ * field so replication can be exercised without a dApp page. A seeded
+ * repository opens in the `rad://` browser (#124), and the sites
+ * connected to `window.radicle` are listed with a way to disconnect them.
  *
  * Identities and RIDs are shown whole and wrapped, never cut, so they can
  * be read (and selected) on the narrowest screen.
@@ -135,8 +142,11 @@ fun RadicleScreen(
             if (radicle.enabled && info.status == RadicleStatus.Running) {
                 item("identity") { RadicleIdentitySection(info) }
                 item("repos") {
-                    RadicleReposSection(info, onSeed = radicle.onSeed, onUnseed = radicle.onUnseed)
+                    RadicleReposSection(info, onSeed = radicle.onSeed, onUnseed = radicle.onUnseed, onOpen = radicle.onOpen)
                 }
+            }
+            if (radicle.enabled && radicle.grants.isNotEmpty()) {
+                item("sites") { RadicleSitesSection(radicle.grants, radicle.onRevoke) }
             }
         }
     }
@@ -228,6 +238,7 @@ private fun RadicleReposSection(
     info: RadicleInfo,
     onSeed: (String) -> Unit,
     onUnseed: (String) -> Unit,
+    onOpen: ((String) -> Unit)?,
 ) {
     var input by rememberSaveable { mutableStateOf("") }
     val focusManager = LocalFocusManager.current
@@ -267,6 +278,10 @@ private fun RadicleReposSection(
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
                         }
+                    }
+                    // Only once it has fetched: there's nothing to browse before.
+                    if (onOpen != null && repo.name.isNotEmpty()) {
+                        TextButton(onClick = { onOpen(repo.rid) }) { Text("Open") }
                     }
                     // Also the way out for a RID that never fetched.
                     TextButton(onClick = { onUnseed(repo.rid) }) { Text("Stop seeding") }
@@ -312,6 +327,30 @@ private fun RadicleReposSection(
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+            }
+        }
+    }
+}
+
+/**
+ * Sites connected to `window.radicle` (#124), and what they may do. A
+ * site can drop its own grant (`radicle_disconnect`); this is the user's
+ * way to drop it for them.
+ */
+@Composable
+private fun RadicleSitesSection(grants: List<RadicleGrantStore.Grant>, onRevoke: (String) -> Unit) {
+    SectionCard(title = "Connected sites") {
+        grants.forEach { grant ->
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(modifier = Modifier.weight(1f).padding(vertical = 4.dp)) {
+                    Text(permissionOriginDisplay(grant.origin), fontWeight = FontWeight.Medium)
+                    Text(
+                        if (grant.signing) "Can see your identity and write as you" else "Can see your node and ask to seed",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                TextButton(onClick = { onRevoke(grant.origin) }) { Text("Disconnect") }
             }
         }
     }

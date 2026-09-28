@@ -3,6 +3,7 @@ package baby.freedom.mobile.browser
 import baby.freedom.mobile.ens.EnsResult
 import baby.freedom.mobile.ens.EnsTrust
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -94,5 +95,25 @@ class EnsGateTest {
         assertNull(EnsGate.continueDestination(stale, gate, other))
         // Not a continue URL at all.
         assertNull(EnsGate.continueDestination("ens://swarm.eth", gate, warning))
+    }
+
+    @Test
+    fun `with too few endpoints enabled the warning says so`() {
+        val ref = "ab".repeat(32)
+        val lone = EnsTrust(verified = false, agreed = listOf("my.node"), tooFewServers = true)
+        val ok = EnsResult.Ok("swarm.eth", "bzz", "bzz://$ref", ref, lone)
+        assertTrue(EnsGate.unverifiedDetail(ok).contains("Settings → RPC providers"))
+        assertTrue(EnsGate.withTrustNote("NO_RESOLVER", lone).contains("Settings → RPC providers"))
+        // Too few *answering* isn't the user's setting to fix.
+        val unlucky = lone.copy(tooFewServers = false)
+        assertFalse(EnsGate.unverifiedDetail(ok.copy(trust = unlucky)).contains("Settings"))
+    }
+
+    @Test
+    fun `the settings hint shows below three enabled endpoints`() {
+        assertTrue(tooFewEndpointsHint(1)!!.contains("Only one endpoint"))
+        assertTrue(tooFewEndpointsHint(2)!!.contains("aren't cross-checked"))
+        assertNull(tooFewEndpointsHint(3))
+        assertNull(tooFewEndpointsHint(8))
     }
 }
