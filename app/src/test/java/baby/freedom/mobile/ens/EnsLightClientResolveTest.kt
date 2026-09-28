@@ -14,12 +14,13 @@ import org.junit.Test
  * whenever it isn't ready or has no usable answer. Scripted through a
  * fake [EnsLightClient] and the [EnsHttp] seam — no network, no engine.
  */
+private val IPFS = "e30101701220" + "7f38d55c61cef80e6cd1b6b3c17b0b9f1d0c8b3a61ec7a0e3c7b6a4b4a0b7c3d"
+
 class EnsLightClientResolveTest {
 
     private val rpc = "https://rpc.test/"
     private val ur = "0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe"
-    private val ipfsContenthash =
-        "e30101701220" + "7f38d55c61cef80e6cd1b6b3c17b0b9f1d0c8b3a61ec7a0e3c7b6a4b4a0b7c3d"
+    private val ipfsContenthash = IPFS
 
     /** Answers every call with [answer]; records the calls. */
     private class FakeLightClient(
@@ -452,6 +453,112 @@ class EnsLightClientResolveTest {
         require(result is EnsResult.Ok) { "got $result" }
         assertTrue(result.trust.lightClient)
         assertEquals(2, client.calls.size)
+    }
+
+    /**
+     * A light client whose first call defers offchain to [gatewayUrls]
+     * (and whose every later call answers), served by [gateway] — a
+     * CCIP-Read gateway taking as long as it likes — and an RPC server.
+     */
+    private class SlowGatewaySetup(ur: String, gatewayUrls: List<String>, private val gateway: (String) -> EnsHttp.Reply) {
+        val revert = encodeOffchainLookup(
+            sender = ur,
+            urls = gatewayUrls,
+            callData = "deadbeef".hexToBytes(),
+            callback = "11223344".hexToBytes(),
+            extraData = "ee".hexToBytes(),
+        )
+        val gatewayRequests: MutableList<Pair<String, Int>> = Collections.synchronizedList(mutableListOf())
+        val http = object : EnsHttp {
+            override fun request(
+                method: String,
+                url: String,
+                headers: Map<String, String>,
+                body: String?,
+                timeoutMs: Int,
+                maxBytes: Long,
+                followRedirects: Boolean,
+            ): EnsHttp.Reply {
+                if (url == "https://rpc.test/") {
+                    return EnsHttp.Reply(
+                        200,
+                        """{"jsonrpc":"2.0","id":1,"result":"${wrapAsOuterInner(IPFS)}"}""",
+                    )
+                }
+                gatewayRequests += url to timeoutMs
+                return gateway(url)
+            }
+        }
+    }
+
+    @Test
+    fun `a name's stalled CCIP gateway does not back the light client off for other names`() {
+        val setup = SlowGatewaySetup(ur, listOf("https://gw.example/{sender}/{data}")) {
+            Thread.sleep(1_000)
+            EnsHttp.Reply(200, JSONObject().put("data", "0x01").toString())
+        }
+        var first = true
+        val client = FakeLightClient { _, _ ->
+            if (first) {
+                first = false
+                EnsLightClient.Call.Revert(setup.revert, 21_000_000L)
+            } else {
+                lightClientOk
+            }
+        }
+        val r = resolver(client, setup.http, deadlineMs = 200)
+
+        val offchain = runBlocking { r.resolveContenthash("1.offchainexample.eth") }
+        require(offchain is EnsResult.Ok) { "got $offchain" }
+        assertFalse(offchain.trust.lightClient) // the gateway ran out the budget: RPC answered
+
+        val other = runBlocking { r.resolveContenthash("vitalik.eth") }
+        require(other is EnsResult.Ok) { "got $other" }
+        assertTrue(other.trust.lightClient)
+        assertEquals(2, client.calls.size)
+    }
+
+    @Test
+    fun `an engine stuck on a CCIP callback still backs off`() {
+        val setup = SlowGatewaySetup(ur, listOf("https://gw.example/{sender}/{data}")) {
+            EnsHttp.Reply(200, JSONObject().put("data", "0x01").toString())
+        }
+        val client = FakeLightClient { _, data ->
+            if (data.startsWith("0x9061b923")) {
+                EnsLightClient.Call.Revert(setup.revert, 21_000_000L)
+            } else {
+                Thread.sleep(2_000)
+                lightClientOk
+            }
+        }
+        val r = resolver(client, setup.http, deadlineMs = 200)
+
+        runBlocking { r.resolveContenthash("1.offchainexample.eth") }
+        val callsAfterFirst = client.calls.size
+        val other = runBlocking { r.resolveContenthash("vitalik.eth") }
+        require(other is EnsResult.Ok) { "got $other" }
+        assertFalse(other.trust.lightClient)
+        assertEquals(callsAfterFirst, client.calls.size)
+    }
+
+    @Test
+    fun `an abandoned read fetches no further gateway URLs and none past its budget`() {
+        val urls = listOf("https://gw1.example/{data}", "https://gw2.example/{data}", "https://gw3.example/{data}")
+        val setup = SlowGatewaySetup(ur, urls) {
+            Thread.sleep(400)
+            EnsHttp.Reply(500, "")
+        }
+        val client = FakeLightClient { _, _ -> EnsLightClient.Call.Revert(setup.revert, 21_000_000L) }
+        val r = resolver(client, setup.http, deadlineMs = 200)
+
+        val result = runBlocking { r.resolveContenthash("1.offchainexample.eth") }
+        require(result is EnsResult.Ok) { "got $result" }
+        assertFalse(result.trust.lightClient)
+        // Long enough for the other two gateways to have been tried, had the read carried on.
+        Thread.sleep(1_500)
+        assertEquals(listOf("https://gw1.example/"), setup.gatewayRequests.map { it.first.substringBefore("0x") })
+        assertTrue("timeout ${setup.gatewayRequests.single().second}", setup.gatewayRequests.single().second in 1..200)
+        assertEquals(1, client.calls.size)
     }
 
     /** An offchain name whose light-client callback lands [moves] times on a newer head than its first call. */

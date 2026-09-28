@@ -76,7 +76,8 @@ import org.json.JSONObject
  * can't answer within [LIGHT_CLIENT_DEADLINE_MS], or gives anything but
  * a record or a known "no resolver" revert, the lookup falls back to the
  * RPC servers exactly as without it. After a miss that says the light
- * client itself can't serve right now (unavailable, busy, out of time)
+ * client itself can't serve right now (unavailable, busy, out of time
+ * with the engine — not a name's CCIP-Read gateway — using most of it)
  * it's skipped for [LIGHT_CLIENT_BACKOFF_MS], so one struggling light
  * client doesn't add its whole deadline to every lookup. Its readiness is
  * read per lookup and is not part of [Settings]: a flapping light client
@@ -341,10 +342,70 @@ class EnsResolver internal constructor(
     private class HeadMoved : Exception("head moved during CCIP-Read")
 
     /**
+     * One light-client read's budget, and where it went: into the engine
+     * (the light client's own time) or into a name's CCIP-Read gateway
+     * (the name's). Running out of time backs the light client off only
+     * when the engine spent at least as much of it as the gateways did —
+     * one name's stalled gateway is that name's miss, not the light
+     * client's. [abandon]ed once the lookup stops waiting, after which
+     * the read has no time left: it stops before its next engine call or
+     * gateway URL instead of fetching on for an answer nobody reads.
+     */
+    private class LightClientBudget(private val deadline: Long) {
+        @Volatile
+        private var abandoned = false
+        private var engineMs = 0L
+        private var gatewayMs = 0L
+        private var engineSince = -1L
+        private var gatewaySince = -1L
+
+        fun abandon() {
+            abandoned = true
+        }
+
+        /** What's left, 0 once spent or [abandon]ed. */
+        fun left(now: Long = System.currentTimeMillis()): Long =
+            if (abandoned) 0 else (deadline - now).coerceAtLeast(0)
+
+        fun <T> engine(block: () -> T): T = timed(gateway = false, block)
+
+        fun <T> gateway(block: () -> T): T = timed(gateway = true, block)
+
+        private fun <T> timed(gateway: Boolean, block: () -> T): T {
+            val start = System.currentTimeMillis()
+            synchronized(this) { if (gateway) gatewaySince = start else engineSince = start }
+            try {
+                return block()
+            } finally {
+                val took = System.currentTimeMillis() - start
+                synchronized(this) {
+                    if (gateway) {
+                        gatewayMs += took
+                        gatewaySince = -1
+                    } else {
+                        engineMs += took
+                        engineSince = -1
+                    }
+                }
+            }
+        }
+
+        /** Whether the time spent so far (a call still running included) was mostly the engine's. */
+        fun engineOwnsTheTime(now: Long = System.currentTimeMillis()): Boolean = synchronized(this) {
+            val engine = engineMs + if (engineSince >= 0) now - engineSince else 0
+            val gateway = gatewayMs + if (gatewaySince >= 0) now - gatewaySince else 0
+            engine >= gateway
+        }
+    }
+
+    /**
      * Resolve through [lightClient], within [lightClientDeadlineMs] in
      * all — CCIP-Read's gateway hops included, bounded from out here so a
-     * slow gateway or a stuck engine can't hold the lookup past it (the
-     * read carries on detached and its answer is dropped). `null` when
+     * slow gateway or a stuck engine can't hold the lookup past it. The
+     * abandoned read stops at its next engine call or gateway URL, and
+     * none of its blocking calls is given more than the budget had left
+     * (see [LightClientBudget]). Out of time backs the light client off
+     * only when the engine, not a gateway, used most of it. `null` when
      * it has no usable answer, for the RPC servers to give one.
      */
     private suspend fun resolveByLightClient(
@@ -357,10 +418,14 @@ class EnsResolver internal constructor(
     ): Verdict? {
         val client = lightClient ?: return null
         val startedAt = System.currentTimeMillis()
-        val read = io.async { lightClientRead(client, generation, name, target, callData, contract, ccipRead) }
+        val budget = LightClientBudget(startedAt + lightClientDeadlineMs)
+        val read = io.async { lightClientRead(client, generation, name, target, callData, contract, ccipRead, budget) }
+        var engineOwnsTheTime = true
         val outcome = try {
             withTimeoutOrNull(lightClientDeadlineMs) { runCatchingCancellable { read.await() } }
+                .also { if (it == null) engineOwnsTheTime = budget.engineOwnsTheTime() }
         } finally {
+            budget.abandon()
             read.cancel()
         }
         val took = System.currentTimeMillis() - startedAt
@@ -371,8 +436,9 @@ class EnsResolver internal constructor(
             else -> null
         }
         if (miss != null) {
-            // Out of time, or a miss the light client owns: back off.
-            val backOff = outcome == null || (failure as? LightClientMiss)?.backOff == true
+            // Out of time on the engine's account, or a miss the light
+            // client owns: back off. A name's slow gateway doesn't.
+            val backOff = (outcome == null && engineOwnsTheTime) || (failure as? LightClientMiss)?.backOff == true
             if (backOff) lightClientMiss = LightClientBackoff(generation, System.currentTimeMillis())
             Log.i(
                 TAG,
@@ -395,15 +461,15 @@ class EnsResolver internal constructor(
         callData: ByteArray,
         contract: String?,
         ccipRead: Boolean,
+        budget: LightClientBudget,
     ): Verdict {
         // Each call waits only for what's left of the lookup's budget, so
         // a read abandoned at the deadline doesn't hold a thread past it.
-        val deadline = System.currentTimeMillis() + lightClientDeadlineMs
         fun call(to: String, data: ByteArray, pin: Long?): Pair<CallOutcome, Long?> {
             if (client.readyGeneration() != generation) throw LightClientMiss("light client no longer ready")
-            val left = deadline - System.currentTimeMillis()
-            if (left <= 0) throw LightClientMiss("out of time", backOff = true)
-            val answer = client.ethCall(to, "0x" + data.toHex(), left)
+            val left = budget.left()
+            if (left <= 0) throw LightClientMiss("out of time", backOff = budget.engineOwnsTheTime())
+            val answer = budget.engine { client.ethCall(to, "0x" + data.toHex(), left) }
             // An answer from a light client that has since stopped or
             // restarted isn't one this lookup's epoch vouches for.
             if (client.readyGeneration() != generation) throw LightClientMiss("light client availability changed")
@@ -438,7 +504,10 @@ class EnsResolver internal constructor(
                 // The gateway's answer is checked by the callback, which runs
                 // on the light client like the first call, at the same block.
                 outcome = try {
-                    followOffchainLookup(offchain) { to, data -> call(to, data, pin = block).first }
+                    followOffchainLookup(
+                        offchain,
+                        fetch = { sender, urls, data -> budget.gateway { ccipFetch(sender, urls, data, budget::left) } },
+                    ) { to, data -> call(to, data, pin = block).first }
                 } catch (e: HeadMoved) {
                     if (attempt < LIGHT_CLIENT_CCIP_ATTEMPTS) continue
                     throw LightClientMiss("head kept moving during CCIP-Read")
@@ -1071,6 +1140,9 @@ class EnsResolver internal constructor(
      */
     private fun followOffchainLookup(
         firstRevert: String,
+        fetch: (sender: String, urls: List<String>, callData: ByteArray) -> ByteArray? = { sender, urls, data ->
+            ccipFetch(sender, urls, data)
+        },
         ethCall: (to: String, data: ByteArray) -> CallOutcome,
     ): CallOutcome {
         var revert = firstRevert
@@ -1083,7 +1155,7 @@ class EnsResolver internal constructor(
             if (!lookup.sender.equals(UNIVERSAL_RESOLVER, ignoreCase = true)) {
                 throw IllegalStateException("OffchainLookup sender is not the Universal Resolver")
             }
-            val response = ccipFetch(lookup.sender, lookup.urls, lookup.callData)
+            val response = fetch(lookup.sender, lookup.urls, lookup.callData)
                 ?: throw IllegalStateException("CCIP gateways unavailable or returned invalid data")
             val callbackData = lookup.callback + abiEncodeTwoBytes(response, lookup.extraData)
             // At the same block as the call that deferred: the callback
@@ -1109,12 +1181,23 @@ class EnsResolver internal constructor(
      * bare-IP / local hosts, [CCIP_TIMEOUT_MS] wall clock and
      * [CCIP_MAX_RESPONSE_BYTES] body per gateway. Non-URL entries such
      * as the Universal Resolver's `x-batch-gateway:true` hint are
-     * skipped like any other non-https string.
+     * skipped like any other non-https string. [left], when given, is
+     * the caller's remaining budget: each gateway gets no more than it,
+     * and none is tried once it's spent.
      */
-    internal fun ccipFetch(sender: String, urls: List<String>, callData: ByteArray): ByteArray? {
+    internal fun ccipFetch(
+        sender: String,
+        urls: List<String>,
+        callData: ByteArray,
+        left: (() -> Long)? = null,
+    ): ByteArray? {
         val senderLower = sender.lowercase()
         val dataHex = "0x" + callData.toHex()
         for (template in urls) {
+            val remaining = left?.invoke()
+            if (remaining != null && remaining <= 0) return null
+            // Never 0: that's "no timeout" to HttpURLConnection.
+            val timeoutMs = remaining?.coerceIn(1, CCIP_TIMEOUT_MS.toLong())?.toInt() ?: CCIP_TIMEOUT_MS
             val url = template.replace("{sender}", senderLower).replace("{data}", dataHex)
             val parsed = runCatching { URL(url) }.getOrNull() ?: continue
             val host = parsed.host.orEmpty().trim('[', ']').trimEnd('.').lowercase()
@@ -1136,7 +1219,7 @@ class EnsResolver internal constructor(
                     } else {
                         JSONObject().put("sender", senderLower).put("data", dataHex).toString()
                     },
-                    timeoutMs = CCIP_TIMEOUT_MS,
+                    timeoutMs = timeoutMs,
                     maxBytes = CCIP_MAX_RESPONSE_BYTES,
                     followRedirects = false,
                 )
@@ -1430,7 +1513,7 @@ class EnsResolver internal constructor(
 
         /**
          * How long the light client is skipped after it missed for its own
-         * reasons (unavailable, busy, out of time) — lookups go straight to
+         * reasons (unavailable, busy, out of time in the engine) — lookups go straight to
          * RPC meanwhile instead of each paying its delay first.
          */
         internal const val LIGHT_CLIENT_BACKOFF_MS = 60_000L
