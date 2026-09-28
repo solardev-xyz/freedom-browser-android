@@ -19,7 +19,7 @@ class ChainDetailPageTest {
         val eth = readSteps(BuiltInChains.ETHEREUM, ChainAccessPolicy.default(1), wiredRpcsOnly)
         assertEquals(2, eth.size)
         assertEquals(
-            "RPC quorum: 2 of the first 3 RPCs (each from a different provider, yours among them) " +
+            "RPC quorum: 2 of the first 3 RPCs (each from a different provider) " +
                 "must give the same answer — verified",
             eth[0],
         )
@@ -42,6 +42,12 @@ class ChainDetailPageTest {
         assertEquals(
             "RPC quorum: skipped, needs RPCs from at least 2 providers (this chain has 1)",
             readSteps(sameProvider, ChainAccessPolicy.default(5), wiredRpcsOnly)[0],
+        )
+        val allMine = lonely.copy(userRpcUrls = listOf("https://m1.example", "https://m2.example", "https://m3.example"))
+        assertEquals(
+            "RPC quorum: 2 of the first 3 RPCs (each from a different provider, all of them yours) " +
+                "must give the same answer — verified",
+            readSteps(allMine, ChainAccessPolicy.default(5), wiredRpcsOnly)[0],
         )
         assertEquals(
             "P2P light client: a proof checked on this device",
@@ -73,11 +79,36 @@ class ChainDetailPageTest {
     }
 
     @Test
-    fun yourRpcsNoteSaysThePublicRpcsStillSeeReads() {
-        val note = userRpcsNote(ChainAccessPolicy.default(1).sanitized(1))
-        assert("not alone" in note && "up to 3 RPCs at the same time" in note && "first" !in note && "public RPCs still see your reads" in note) { note }
+    fun yourRpcsNoteSaysWhoIsInTheQuorumForTheRpcsYouHave() {
+        val policy = ChainAccessPolicy.default(1).sanitized(1)
+        val eth = BuiltInChains.ETHEREUM
+        val none = userRpcsNote(eth, policy)
+        assert("up to 3 RPCs from different providers at the same time" in none && "all the chain's public RPCs" in none) { none }
+
+        val one = userRpcsNote(eth.copy(userRpcUrls = listOf("https://mine.example")), policy)
+        assert("in the quorum, but not alone" in one && "public RPCs fill the other 2 seats and see the same read" in one) { one }
+        assert("isn't in the quorum" !in one) { one }
+
+        // Three providers of the user's own fill every seat: no public RPC is in the quorum.
+        val three = eth.copy(userRpcUrls = listOf("https://m1.example", "https://m2.example", "https://m3.example"))
+        val full = userRpcsNote(three, policy)
+        assert("quorum is only yours" in full && "see the same read" !in full && "not alone" !in full) { full }
+
+        // A fourth, and a second spelling of this device, take no seat — and the note says so.
+        val extra = three.copy(userRpcUrls = three.userRpcUrls + "https://m4.example")
+        assert("1 RPC of yours isn't in the quorum" in userRpcsNote(extra, policy)) { userRpcsNote(extra, policy) }
+        val loopbackTwice = eth.copy(userRpcUrls = listOf("http://localhost:8545", "http://127.0.0.1:8545"))
+        val lb = userRpcsNote(loopbackTwice, policy)
+        assert("public RPCs fill the other 2 seats" in lb && "1 RPC of yours isn't in the quorum" in lb) { lb }
+        val two = eth.copy(userRpcUrls = listOf("https://m1.example", "http://localhost:8545"))
+        assert("public RPCs fill the other seat and see the same read" in userRpcsNote(two, policy)) { userRpcsNote(two, policy) }
+
+        // No quorum can form on a chain with one provider: yours is simply asked first.
+        val lonely = Chain(id = 5, name = "X", symbol = "X", rpcUrls = listOf("https://a.example"))
+        assert("asked before the public RPCs" in userRpcsNote(lonely, ChainAccessPolicy.default(5))) { userRpcsNote(lonely, ChainAccessPolicy.default(5)) }
+
         val directOnly = ChainAccessPolicy(listOf(ChainSource.DIRECT), listOf(ChainSource.DIRECT))
-        assert("asked before the public RPCs" in userRpcsNote(directOnly)) { userRpcsNote(directOnly) }
+        assert("asked before the public RPCs" in userRpcsNote(eth, directOnly)) { userRpcsNote(eth, directOnly) }
     }
 
     @Test

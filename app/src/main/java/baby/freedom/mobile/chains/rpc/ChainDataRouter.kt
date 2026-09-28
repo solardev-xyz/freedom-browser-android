@@ -35,8 +35,9 @@ import org.json.JSONArray
  * - **Quorum** ([QuorumRun]): the chain's first K RPCs from different
  *   providers ([quorumMembers]) are asked the same bytes at once; M
  *   identical answers are verified. Needs M providers. The user's own
- *   RPCs ([Chain.userRpcUrls]) lead the pool, so they're among the K —
- *   alongside public RPCs, which see the same read.
+ *   RPCs ([Chain.userRpcUrls]) lead the pool, so they take the first
+ *   seats — alongside public RPCs, which see the same read, unless the
+ *   user has K providers of their own.
  * - **Direct**: the first RPC that answers, unverified — or
  *   [ChainTrust.Level.USER_CONFIGURED] when it's one the user added. After a
  *   quorum that fell short, it reuses the quorum's best answer (and says
