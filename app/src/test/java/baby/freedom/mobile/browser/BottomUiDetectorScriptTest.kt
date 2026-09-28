@@ -941,4 +941,199 @@ class BottomUiDetectorScriptTest {
         eval("kotlinSays('${pageReissueRequest(token, "http://127.0.0.1:8700/meet")}')")
         assertEquals(1, sent)
     }
+
+    // A started detector goes only through natives saved at document start (#146).
+
+    /** Real-shaped prototypes for everything the probe, the start and the observers touch. */
+    private val protoDom = """
+        function getter(proto, n, f) { Object.defineProperty(proto, n, { configurable: true, get: f }); }
+        function Node() {}
+        getter(Node.prototype, 'parentElement', function () { return this._parent || null; });
+        getter(Node.prototype, 'nodeName', function () { return this._tag; });
+        function Element() {}
+        Element.prototype = Object.create(Node.prototype);
+        getter(Element.prototype, 'clientWidth', function () { return this._cw; });
+        getter(Element.prototype, 'clientHeight', function () { return this._ch; });
+        getter(Element.prototype, 'scrollHeight', function () { return this._sh; });
+        Element.prototype.getBoundingClientRect = function () { reads++; return new DOMRect(this._rect); };
+        Element.prototype.querySelector = function (sel) { return this._interactive ? {} : null; };
+        function DOMRectReadOnly() {}
+        getter(DOMRectReadOnly.prototype, 'bottom', function () { return this._r.bottom; });
+        function DOMRect(r) { this._r = r; }
+        DOMRect.prototype = Object.create(DOMRectReadOnly.prototype);
+        getter(DOMRect.prototype, 'height', function () { return this._r.height; });
+        getter(DOMRect.prototype, 'width', function () { return this._r.width; });
+        function CSSStyleDeclaration(e) { this._e = e; }
+        CSSStyleDeclaration.prototype.getPropertyValue = function (n) {
+          return n === 'position' ? (this._e._pos || 'static') : n === 'background-color' ? (this._e._bg || 'rgba(0, 0, 0, 0)') : '';
+        };
+        getComputedStyle = function (e) { return new CSSStyleDeclaration(e); };
+        function pel(tag, parent, rect, o) {
+          var e = Object.create(Element.prototype); e._tag = tag; e._parent = parent; e._rect = rect;
+          for (var k in o || {}) e['_' + k] = o[k];
+          return e;
+        }
+        var phtml = pel('HTML', null, { bottom: 863, height: 863, width: 412 }, { cw: 412, ch: 863, sh: 863 });
+        var pbody = pel('BODY', phtml, { bottom: 863, height: 863, width: 412 });
+        var pnav = pel('NAV', pbody, { bottom: 863, height: 56, width: 412 }, { pos: 'fixed', bg: 'rgb(103, 80, 164)', interactive: true });
+        var ptab = pel('BUTTON', pnav, { bottom: 863, height: 56, width: 103 });
+        var pmeta = pel('META', phtml, {});
+        function Document() {}
+        getter(Document.prototype, 'documentElement', function () { return phtml; });
+        getter(Document.prototype, 'body', function () { return pbody; });
+        getter(Document.prototype, 'compatMode', function () { return 'CSS1Compat'; });
+        getter(Document.prototype, 'scrollingElement', function () { return phtml; });
+        Document.prototype.elementFromPoint = function (x, y) { return hit; };
+        Document.prototype.addEventListener = function (t, f) { docListeners.push({ t: t, f: f }); };
+        var oldDoc = document;
+        document = Object.create(Document.prototype);
+        document.querySelectorAll = oldDoc.querySelectorAll; document.createElement = oldDoc.createElement;
+        function NodeList(items) { for (var i = 0; i < items.length; i++) this[i] = items[i]; this._n = items.length; }
+        getter(NodeList.prototype, 'length', function () { return this._n; });
+        function MutationRecord(type, target, added) { this._type = type; this._target = target; this._added = new NodeList(added || []); this._removed = new NodeList([]); }
+        getter(MutationRecord.prototype, 'type', function () { return this._type; });
+        getter(MutationRecord.prototype, 'target', function () { return this._target; });
+        getter(MutationRecord.prototype, 'addedNodes', function () { return this._added; });
+        getter(MutationRecord.prototype, 'removedNodes', function () { return this._removed; });
+        MutationObserver = function (cb) { mutationCb = cb; mutationObs = this; };
+        MutationObserver.prototype.observe = function (n, o) { this.target = n; this.opts = o; };
+        function observerClass(kind) {
+          var C = function (cb) { this.cb = cb; };
+          C.prototype.observe = function (e) { observed.push({ kind: kind, el: e, cb: this.cb, obs: this }); };
+          C.prototype.disconnect = function () { var self = this; observed = observed.filter(function (o) { return o.obs !== self; }); };
+          return C;
+        }
+        ResizeObserver = observerClass('resize'); IntersectionObserver = observerClass('intersection');
+        // A real MessageEvent's getter throws on anything else, and the
+        // platform hands the channel's listeners a plain { data } object:
+        // the fake DOM's kotlinSays already does, and the detector must cope.
+        function MessageEvent(data) { this._data = data; }
+        getter(MessageEvent.prototype, 'data', function () {
+          if (!(this instanceof MessageEvent)) throw new TypeError('Illegal invocation');
+          return this._data;
+        });
+        hit = ptab;
+    """
+
+
+    /** The page's wrappers: each records its name in `seen`, then does what the original did. */
+    private val spies = """
+        var seen = [];
+        function saw(n) { seen[seen.length] = n; }
+        function spy(o, n) { var f = o[n]; o[n] = function () { saw(n); return f.apply(this, arguments); }; }
+        function spyGet(proto, n) {
+          var x = Object.getOwnPropertyDescriptor(proto, n);
+          Object.defineProperty(proto, n, { configurable: true, get: function () { saw(n); return x.get.apply(this); } });
+        }
+        // Array methods, as seen on any array but the fake DOM's own bookkeeping.
+        function fakes(a) {
+          return a === sent || a === timers || a === resizeListeners || a === docListeners || a === observed ||
+              a === mediaListeners || a === contextMenuListeners || a === channelListeners || a.fake;
+        }
+        ['indexOf', 'push', 'splice'].forEach(function (n) {
+          var f = Array.prototype[n];
+          Array.prototype[n] = function () { if (!fakes(this)) saw(n); return f.apply(this, arguments); };
+        });
+        spy(RegExp.prototype, 'exec'); spy(Math, 'round'); spy(JSON, 'stringify');
+        Object.prototype.toJSON = function () { saw('toJSON'); return {}; };
+        var realCall = Function.prototype.call;
+        Function.prototype.call = function () { saw('call'); return realCall.apply(this, arguments); };
+        function pageSaw() { Function.prototype.call = realCall; delete Object.prototype.toJSON; return seen.join(','); }
+    """
+
+    /** The page, after document start, wraps every method and getter a started detector could use. */
+    private val pageWrapsEverything = """
+        spyGet(Node.prototype, 'parentElement'); spyGet(Node.prototype, 'nodeName');
+        ['clientWidth', 'clientHeight', 'scrollHeight'].forEach(function (n) { spyGet(Element.prototype, n); });
+        spy(Element.prototype, 'getBoundingClientRect'); spy(Element.prototype, 'querySelector');
+        spyGet(DOMRectReadOnly.prototype, 'bottom'); spyGet(DOMRect.prototype, 'height'); spyGet(DOMRect.prototype, 'width');
+        spy(CSSStyleDeclaration.prototype, 'getPropertyValue');
+        ['documentElement', 'body', 'compatMode', 'scrollingElement'].forEach(function (n) { spyGet(Document.prototype, n); });
+        spy(Document.prototype, 'elementFromPoint'); spy(Document.prototype, 'addEventListener'); spy(window, 'addEventListener');
+        spyGet(NodeList.prototype, 'length');
+        ['type', 'target', 'addedNodes', 'removedNodes'].forEach(function (n) { spyGet(MutationRecord.prototype, n); });
+        spy(MutationObserver.prototype, 'observe');
+        spy(ResizeObserver.prototype, 'observe'); spy(ResizeObserver.prototype, 'disconnect');
+        spy(IntersectionObserver.prototype, 'observe'); spy(IntersectionObserver.prototype, 'disconnect');
+        spyGet(MessageEvent.prototype, 'data');
+    """
+
+    @Test
+    fun `a started detector probes, observes and listens only through functions saved at document start`() = page {
+        eval(protoDom)
+        documentStart()
+        eval(spies)
+        eval(pageWrapsEverything)
+        // First paint: it starts (listeners, observer) and probes.
+        firstPaint()
+        // A mutation touching a <meta>, a resize, the nav's own observers,
+        // a readystatechange, and Kotlin asking again.
+        eval("mutationCb([new MutationRecord('attributes', pmeta), new MutationRecord('childList', pbody, [pmeta])]); flushTimers()")
+        eval("phtml._ch = 800; pnav._rect = { bottom: 800, height: 56, width: 412 }; for (var i = 0; i < resizeListeners.length; i++) resizeListeners[i](); flushTimers()")
+        eval("observed[0].cb(); flushTimers(); readyStateChanges(); flushTimers()")
+        // The nav goes: the probe misses it and its observers are dropped.
+        eval("hit = pbody")
+        kotlinProbe()
+        eval("kotlinSays('${themeColorRequest(token)}')")
+        assertEquals("", Context.toString(eval("pageSaw()")))
+        // And it all still worked.
+        val reports = (0 until sent).map { Context.toString(eval("sent[$it]")) }.filter { it.startsWith("{") }
+        val first = JSONObject(reports.first())
+        assertEquals(token, first.getString("token"))
+        assertTrue(first.has())
+        assertEquals("rgb(103, 80, 164)", first.color())
+        assertEquals(BottomUiReport(true, "rgb(103, 80, 164)"), parseBottomUiMessage(reports.first(), true, token))
+        assertEquals(BottomUiReport(false, null), parseBottomUiMessage(reports.last(), true, token))
+        assertTrue(eval("mutationObs.target === phtml") as Boolean)
+        assertEquals(1, num("resizeListeners.length"))
+        assertEquals(1, num("docListeners.length"))
+        assertEquals(0, num("observed.length"))
+        // The meta mutation was noticed through the saved getters: a theme report went out unasked.
+        assertTrue((0 until sent).any { Context.toString(eval("sent[$it]")).startsWith("theme $token ") })
+    }
+
+    @Test
+    fun `media is tracked only through functions saved at document start`() = page {
+        eval(
+            """
+            function getter(proto, n, f) { Object.defineProperty(proto, n, { configurable: true, get: f }); }
+            HTMLMediaElement.prototype.__proto__ = EventTarget.prototype;
+            ['paused', 'ended', 'muted', 'volume', 'readyState'].forEach(function (n) {
+              getter(HTMLMediaElement.prototype, n, function () { return this['_' + n]; });
+            });
+            ['type', 'target', 'currentTarget', 'defaultPrevented'].forEach(function (n) {
+              getter(Event.prototype, n, function () { return this['_' + n]; });
+            });
+            function pmedia() { var m = Object.create(HTMLMediaElement.prototype); m._paused = true; m._ended = false; m._muted = false; m._volume = 1; m._readyState = 4; m.ls = []; m.ls.fake = true; return m; }
+            function pfire(m, t) {
+              function ev() { var e = new Event(); e._type = t; e._target = m; e._currentTarget = m; e.isTrusted = true; return e; }
+              for (var i = 0; i < mediaListeners.length; i++) if (mediaListeners[i].t === t) mediaListeners[i].f(ev());
+              var ls = m.ls || [];
+              for (var j = 0; j < ls.length; j++) if (ls[j].t === t) ls[j].f(ev());
+            }
+            """,
+        )
+        documentStart()
+        eval(spies)
+        eval(
+            """
+            ['paused', 'ended', 'muted', 'volume', 'readyState', 'webkitAudioDecodedByteCount'].forEach(function (n) { spyGet(HTMLMediaElement.prototype, n); });
+            ['type', 'target', 'currentTarget', 'defaultPrevented'].forEach(function (n) { spyGet(Event.prototype, n); });
+            spy(EventTarget.prototype, 'addEventListener');
+            var m = pmedia(); m._paused = false; pfire(m, 'playing');
+            var m2 = pmedia(); m2._paused = false; pfire(m2, 'playing');
+            m._paused = true; pfire(m, 'pause');
+            m2._paused = true; pfire(m2, 'pause');
+            var ce = new Event(); ce.isTrusted = true; ce._defaultPrevented = true;
+            pressAndHold(ce, false);
+            """,
+        )
+        assertEquals("", Context.toString(eval("pageSaw()")))
+        assertEquals(
+            listOf(AUDIO_AUDIBLE, AUDIO_SILENT, CONTEXT_MENU_KEPT),
+            (0 until sent).map { Context.toString(eval("sent[$it]")) },
+        )
+        // Each element got its listeners once, through the saved addEventListener.
+        assertEquals(7, num("m.ls.length"))
+    }
 }
