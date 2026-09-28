@@ -50,9 +50,14 @@ import kotlin.math.abs
  * and wait for the user ([retryRecovery], [repairSyncData]). Nothing calls
  * `myotis_accept_stale_anchor` or raises the bound.
  *
+ * Verified reads: [ethCall] only, for name resolution (#101). It runs on
+ * the caller's thread, not the queue — a read can take seconds and must
+ * not hold up a status poll or a Stop — against a chain the last poll
+ * found [MyotisChainStatus.ready] ([readable]).
+ *
  * Same shape as the iOS `MyotisNode` (freedom-browser-ios), minus its
  * Colibri corroboration of the checkpoint (see [MyotisCheckpointAcquirer]),
- * seed pins and verified reads, which come with their consumers.
+ * seed pins and the other verified reads, which come with their consumers.
  */
 class MyotisNode internal constructor(
     private val dataDir: File,
@@ -86,6 +91,9 @@ class MyotisNode internal constructor(
         fun setServedBlockWindow(handle: Long, blocks: Int): Boolean
         fun statusJson(handle: Long): String?
         fun drainLogs(max: Int): String?
+
+        /** `myotis_eth_call_json` (anonymous, zero value); see [MyotisNative.ethCall]. */
+        fun ethCall(handle: Long, to: String, data: String, block: String): String? = null
     }
 
     /**
@@ -226,6 +234,16 @@ class MyotisNode internal constructor(
     private val _state = MutableStateFlow(MyotisInfo())
     val state: StateFlow<MyotisInfo> = _state.asStateFlow()
 
+    /**
+     * The handles a verified read ([ethCall]) may use: chains the last
+     * poll found [MyotisChainStatus.ready], not parked, in the foreground. Written on the
+     * queue, read from any thread; emptied *before* the queue pauses,
+     * stops or relaunches an engine, so no new read starts on a handle
+     * going down (one already running gets the engine's own error).
+     */
+    @Volatile
+    private var readable: Map<MyotisNetwork, Long> = emptyMap()
+
     init {
         scope.launch {
             for (op in ops) {
@@ -306,6 +324,18 @@ class MyotisNode internal constructor(
         ops.trySend(Op.Repair(network))
     }
 
+    /**
+     * A verified `eth_call` of [data] on [to] at [network]'s verified head,
+     * run by the engine against proven state: the engine's JSON
+     * ([MyotisNative.ethCall]), or `{"status":"unavailable",…}` while the
+     * chain isn't ready. Blocks for as long as the engine takes (its own
+     * budget is ~90 s): call off the main thread and bound the wait.
+     */
+    fun ethCall(network: MyotisNetwork, to: String, data: String): String {
+        val handle = readable[network] ?: return NOT_READY_JSON
+        return engine.ethCall(handle, to, data, "latest") ?: """{"error":"no result from the engine"}"""
+    }
+
     /** Wait until every op sent so far has run. Tests only. */
     internal suspend fun awaitIdle() {
         val done = CompletableDeferred<Unit>()
@@ -325,6 +355,7 @@ class MyotisNode internal constructor(
             Op.Background -> {
                 foreground = false
                 polling = false
+                readable = emptyMap()
                 // Recovery starts and retries in the foreground only; an
                 // acquisition already in flight finishes (the process keeps
                 // running, and a relaunch in the background comes up
@@ -489,6 +520,7 @@ class MyotisNode internal constructor(
         if (id == null) "${origin.code} anchor" else "${origin.code} generation ${id.take(8)}"
 
     private fun stopEngines() {
+        readable = emptyMap()
         polling = false
         started = false
         val stopping = handles.toMap()
@@ -514,6 +546,7 @@ class MyotisNode internal constructor(
         }
 
     private fun refreshStatus() {
+        val ready = LinkedHashMap<MyotisNetwork, Long>()
         val chains = networks.mapNotNull { network ->
             val handle = handles[network]
             val row = when {
@@ -524,8 +557,13 @@ class MyotisNode internal constructor(
                     return@mapNotNull MyotisChainStatus(network.chainId, error = startErrors[network])
                 else -> return@mapNotNull null
             }
-            row.copy(recovery = recovery[network]?.snapshot())
+            row.copy(recovery = recovery[network]?.snapshot()).also {
+                // In the background the engines are paused, whatever
+                // the status read just before the pause landed says.
+                if (foreground && handle != null && network !in parked && it.ready) ready[network] = handle
+            }
         }
+        readable = ready
         _state.value = MyotisInfo(status = MyotisStatus.Running, chains = chains)
     }
 
@@ -561,6 +599,7 @@ class MyotisNode internal constructor(
             if (upClock() - release.at < REJUDGE_GRACE_MS) return
             released.remove(network)
         }
+        readable = readable - network
         if (!engine.pause(handle)) return
         parked[network] = Park(status, clockOffset())
         Log.i(TAG, "${network.engineName}: trust anchor too old, parked (paused)")
@@ -686,6 +725,7 @@ class MyotisNode internal constructor(
      * marker, and boot it. A failure blocks recovery with its reason.
      */
     private fun relaunch(network: MyotisNetwork, rec: Recovery, makeGeneration: () -> MyotisGeneration) {
+        readable = readable - network
         handles.remove(network)?.let { handle ->
             engine.stop(handle)
             Log.i(TAG, "${network.engineName}: stopped for relaunch")
@@ -879,6 +919,8 @@ class MyotisNode internal constructor(
         override fun statusJson(handle: Long) =
             MyotisNative.statusJson(handle)?.toString(Charsets.UTF_8)
         override fun drainLogs(max: Int) = MyotisNative.drainLogs(max)?.toString(Charsets.UTF_8)
+        override fun ethCall(handle: Long, to: String, data: String, block: String) =
+            MyotisNative.ethCall(handle, to, data, block)?.toString(Charsets.UTF_8)
     }
 
     companion object {
@@ -913,6 +955,9 @@ class MyotisNode internal constructor(
             MyotisRecoveryReason.Clock,
             MyotisRecoveryReason.Stale,
         )
+
+        /** [ethCall]'s answer while the chain isn't ready: the engine's own "unavailable" shape. */
+        const val NOT_READY_JSON = """{"status":"unavailable","reason":"light client not ready"}"""
 
         private const val LOG_DRAIN_EVERY = 5
         private const val LOG_DRAIN_MAX = 50

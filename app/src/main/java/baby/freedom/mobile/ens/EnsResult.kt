@@ -111,7 +111,8 @@ sealed class EnsResult {
  *
  * [verified]: at least [EnsQuorum.M] independent RPC servers returned
  * byte-identical answers at a block whose hash a majority of them agreed
- * on. Otherwise only one server's word stands behind it — because only
+ * on — or the Myotis light client proved it on this device
+ * ([lightClient], #101). Otherwise only one server's word stands behind it — because only
  * one answered, or because too few servers were reachable to agree on a
  * block at all — and the browser asks before loading it.
  */
@@ -129,6 +130,13 @@ data class EnsTrust(
      * even possible — as opposed to too few of them answering this time.
      */
     val tooFewServers: Boolean = false,
+    /**
+     * Verified by the embedded Myotis light client (#101) rather than by
+     * RPC servers agreeing: the call ran on this device against state
+     * proven to the chain's sync committee, at its verified head [block].
+     * [agreed] names the light client alone; [verified] is true.
+     */
+    val lightClient: Boolean = false,
 ) {
     companion object {
         /**

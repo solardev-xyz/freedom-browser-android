@@ -57,6 +57,10 @@ class MyotisNodeTest {
         }
         override fun statusJson(handle: Long): String = status[handle] ?: "{}"
         override fun drainLogs(max: Int): String = ""
+        override fun ethCall(handle: Long, to: String, data: String, block: String): String {
+            calls += "ethCall $handle $to $data $block"
+            return """{"status":"ok","resultHex":"0x01","blockNumber":7,"verified":false}"""
+        }
     }
 
     /** A checkpoint source that never answers: these tests are about parking, not recovery. */
@@ -592,5 +596,52 @@ class MyotisNodeTest {
         assertEquals(listOf("stop 1", "stop 2"), engine.calls.filter { it.startsWith("stop") })
         // A second shutdown (queue already closed) must not hang.
         runBlocking { withTimeout(5_000) { node.shutdown() } }
+    }
+
+    private val readyJson =
+        """{"running":true,"beaconState":"SYNCED","snapServingPeers":1,"elReaderAvailable":true}"""
+
+    @Test
+    fun `a verified read reaches the engine only on a chain the last poll found ready`() {
+        val engine = FakeEngine()
+        engine.status[1L] = """{"running":true,"beaconState":"CATCHING_UP","elReaderAvailable":true}"""
+        val node = node(engine)
+        // Before start: nothing to read from.
+        assertEquals(MyotisNode.NOT_READY_JSON, node.ethCall(MyotisNetwork.Mainnet, "0xaa", "0x01"))
+        node.start()
+        idle(node)
+        // Catching up isn't ready.
+        assertEquals(MyotisNode.NOT_READY_JSON, node.ethCall(MyotisNetwork.Mainnet, "0xaa", "0x01"))
+
+        engine.status[1L] = readyJson
+        node.pollNow()
+        idle(node)
+        assertTrue(node.ethCall(MyotisNetwork.Mainnet, "0xaa", "0x01").contains("\"ok\""))
+        assertTrue("ethCall 1 0xaa 0x01 latest" in engine.calls)
+        // Gnosis (handle 2) never reported ready.
+        assertEquals(MyotisNode.NOT_READY_JSON, node.ethCall(MyotisNetwork.Gnosis, "0xaa", "0x01"))
+    }
+
+    @Test
+    fun `background and stop close the read gate before the engines pause or stop`() {
+        val engine = FakeEngine()
+        engine.status[1L] = readyJson
+        val node = node(engine)
+        node.start()
+        idle(node)
+        assertTrue(node.ethCall(MyotisNetwork.Mainnet, "0xaa", "0x01").contains("\"ok\""))
+
+        node.enterBackground()
+        idle(node)
+        assertEquals(MyotisNode.NOT_READY_JSON, node.ethCall(MyotisNetwork.Mainnet, "0xaa", "0x01"))
+
+        node.enterForeground()
+        idle(node)
+        assertTrue(node.ethCall(MyotisNetwork.Mainnet, "0xaa", "0x01").contains("\"ok\""))
+
+        node.stop()
+        idle(node)
+        assertEquals(MyotisNode.NOT_READY_JSON, node.ethCall(MyotisNetwork.Mainnet, "0xaa", "0x01"))
+        assertEquals(2, engine.calls.count { it.startsWith("ethCall") })
     }
 }

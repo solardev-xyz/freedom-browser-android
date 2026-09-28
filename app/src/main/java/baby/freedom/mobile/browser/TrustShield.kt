@@ -42,7 +42,8 @@ import baby.freedom.mobile.ens.NameSystem
  *
  * - [Verified]: at least [baby.freedom.mobile.ens.EnsQuorum.M]
  *   independent RPC servers returned the byte-identical record at a
- *   block a majority of them agreed on.
+ *   block a majority of them agreed on — or the Myotis light client
+ *   proved it on this device ([EnsTrust.lightClient], #101).
  * - [Unverified]: only one server's word — the user let it through the
  *   *Not cross-checked* warning, or a re-check served the answer the
  *   session already had.
@@ -87,7 +88,11 @@ internal data class NameTrust(val name: String, val trust: EnsTrust, val answer:
     /** One sentence on what the tier means for this answer. */
     val summary: String
         get() = when (tier) {
-            TrustTier.Verified -> {
+            TrustTier.Verified -> if (trust.lightClient) {
+                "The Myotis light client on this device read the $system record for $name " +
+                    "at $block and checked it against Ethereum state proofs signed off by the " +
+                    "chain's sync committee. No RPC server's word was involved."
+            } else {
                 val n = trust.agreed.size
                 val agreed = if (n >= 2) "$n independent RPC servers" else "Independent RPC servers"
                 "$agreed returned the same $system record for $name at $block."
@@ -212,7 +217,11 @@ internal fun TrustDetailsDialog(
                     )
                     if (trust.trust.agreed.isNotEmpty()) {
                         TrustFact(
-                            if (trust.tier == TrustTier.Verified) "Agreed (${trust.trust.agreed.size})" else "Answered by",
+                            when {
+                                trust.trust.lightClient -> "Verified by"
+                                trust.tier == TrustTier.Verified -> "Agreed (${trust.trust.agreed.size})"
+                                else -> "Answered by"
+                            },
                             trust.trust.agreed.joinToString("\n"),
                         )
                     }

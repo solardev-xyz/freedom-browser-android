@@ -1,6 +1,7 @@
 package baby.freedom.mobile.browser
 
 import baby.freedom.mobile.ens.EnsResolver
+import baby.freedom.mobile.node.MyotisLink
 import baby.freedom.mobile.ens.EnsResult
 import baby.freedom.mobile.ens.EnsRpcConfig
 import baby.freedom.mobile.ens.EnsTrust
@@ -145,7 +146,15 @@ object Gateways {
      * request interceptor (which resolves `<name>.ens.…` hosts) share
      * a cache and never disagree mid-session.
      */
-    val ensResolver: EnsResolver by lazy { EnsResolver { ensRpcConfig().resolverSettings } }
+    val ensResolver: EnsResolver by lazy { EnsResolver({ ensResolverSettings() }, MyotisLink) }
+
+    /**
+     * What a lookup runs under: the user's RPC settings, and whether the
+     * Myotis light client can take it first (#101) — read afresh each
+     * time, so a lookup started once the light client is ready uses it.
+     */
+    private suspend fun ensResolverSettings(): EnsResolver.Settings =
+        ensRpcConfig().resolverSettings.copy(lightClient = MyotisLink.readyGeneration())
 
     /**
      * Blocking ENS lookup used by the request interceptor. A seam so the
@@ -239,7 +248,7 @@ object Gateways {
 
     private fun lookupKey(name: String): LookupKey {
         val settings = try {
-            runBlocking { ensRpcConfig().resolverSettings }
+            runBlocking { ensResolverSettings() }
         } catch (e: Exception) {
             null // the resolver will fail the same way; still de-duplicate by name
         }

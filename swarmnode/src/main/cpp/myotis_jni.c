@@ -5,10 +5,12 @@
  * `myotis_engine.h` from biafra23/myotis v0.1.12, engine ABI 32).
  *
  * Same split as `ant_jni.c` / `freedom_ipfs_jni.c`: the Rust library owns
- * the C ABI, this file only marshals JNI types. Only the node lifecycle is
- * bridged (init, create, create-with-checkpoint for stale-anchor recovery, start/stop, pause/resume, status, logs); the
- * verified reads come with their first consumer. Errors are the engine's
- * own sentinels (negative handle ids, `false`, `"{}"`), not exceptions.
+ * the C ABI, this file only marshals JNI types. Bridged: the node lifecycle
+ * (init, create, create-with-checkpoint for stale-anchor recovery,
+ * start/stop, pause/resume, status, logs) and one verified read, eth_call,
+ * for name resolution (#101); the other verified reads come with their
+ * first consumer. Errors are the engine's own sentinels (negative handle
+ * ids, `false`, `"{}"`, `{"error": …}`), not exceptions.
  */
 
 #include <jni.h>
@@ -140,4 +142,33 @@ JNIEXPORT jbyteArray JNICALL
 Java_baby_freedom_swarm_MyotisNative_drainLogs(JNIEnv *env, jobject thiz, jint max) {
     (void)thiz;
     return take_bytes(env, myotis_drain_logs((int32_t)max));
+}
+
+/*
+ * myotis_eth_call_json: anonymous (empty `from`), zero value. Blocking —
+ * the engine's own ~90 s budget; the caller bounds its wait. NULL only
+ * when a string couldn't be pinned (OOM, exception pending).
+ */
+JNIEXPORT jbyteArray JNICALL
+Java_baby_freedom_swarm_MyotisNative_ethCall(JNIEnv *env, jobject thiz, jlong handle,
+                                             jstring to, jstring data, jstring block) {
+    (void)thiz;
+    const char *to_c = (*env)->GetStringUTFChars(env, to, NULL);
+    if (to_c == NULL) return NULL;
+    const char *data_c = (*env)->GetStringUTFChars(env, data, NULL);
+    if (data_c == NULL) {
+        (*env)->ReleaseStringUTFChars(env, to, to_c);
+        return NULL;
+    }
+    const char *block_c = (*env)->GetStringUTFChars(env, block, NULL);
+    if (block_c == NULL) {
+        (*env)->ReleaseStringUTFChars(env, data, data_c);
+        (*env)->ReleaseStringUTFChars(env, to, to_c);
+        return NULL;
+    }
+    char *out = myotis_eth_call_json((int64_t)handle, "", to_c, data_c, "0", block_c);
+    (*env)->ReleaseStringUTFChars(env, block, block_c);
+    (*env)->ReleaseStringUTFChars(env, data, data_c);
+    (*env)->ReleaseStringUTFChars(env, to, to_c);
+    return take_bytes(env, out);
 }
