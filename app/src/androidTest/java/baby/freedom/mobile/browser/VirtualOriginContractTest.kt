@@ -520,4 +520,25 @@ class VirtualOriginContractTest {
         harness.awaitJsTrue("window.results && window.results.loaded === true")
         assertFalse(harness.js("document.cookie").contains("tossed"))
     }
+
+    @Test
+    fun tossedBaseDomainCookieIsSweptButTheRealSitesHostCookieStays() {
+        val cm = CookieManager.getInstance()
+        InstrumentationRegistry.getInstrumentation().runOnMainSync {
+            cm.setCookie("https://freedom.baby/", "own=keep; Path=/")
+        }
+        harness.load(originA)
+        harness.awaitJsTrue("window.results && window.results.loaded === true")
+        // One level above the per-protocol suffix: reaches every dweb
+        // origin and every onchain app (web3.freedom.baby) alike.
+        harness.js("document.cookie = 'toss=fromA; domain=freedom.baby; path=/';")
+        assertTrue(cm.getCookie("https://0x1-1.web3.freedom.baby/").orEmpty().contains("toss"))
+        CookieHygiene.sweepBlocking(originA)
+        harness.load(originB)
+        harness.awaitJsTrue("window.results && window.results.loaded === true")
+        assertFalse(harness.js("document.cookie").contains("toss"))
+        assertFalse(cm.getCookie("https://0x1-1.web3.freedom.baby/").orEmpty().contains("toss"))
+        // The real freedom.baby site's own host-only cookie is untouched.
+        assertTrue(cm.getCookie("https://freedom.baby/").orEmpty().contains("own=keep"))
+    }
 }

@@ -12,11 +12,13 @@ import java.util.concurrent.Executors
  * from page JS. Until the PSL entry for `*.{bzz,ipfs,ipns,ens}.freedom.baby`
  * propagates into users' WebView (issue #6 — months, via Chromium
  * releases), all virtual origins share one registrable domain, so a
- * malicious root could set `Domain=.bzz.freedom.baby` cookies visible
- * to every other dweb site (cookie tossing).
+ * malicious root could set `Domain=.bzz.freedom.baby` (or, one level
+ * up, `Domain=freedom.baby`) cookies visible to every other dweb site
+ * and onchain app (cookie tossing).
  *
  * This sweep expires everything [CookieManager] reports for the
- * virtual suffixes and for the specific origin being navigated to.
+ * virtual suffixes, the domain-scoped cookies of the shared base
+ * domain, and for the specific origin being navigated to.
  * It runs on navigation to any virtual origin plus periodically, and
  * stays on permanently as defense in depth even after the PSL entry
  * lands (per issue #5).
@@ -62,6 +64,19 @@ object CookieHygiene {
         for (suffix in VirtualOrigin.SUFFIXES + OnchainAppRef.SUFFIX) {
             expired += expireAllFor(cm, "https://$suffix/", domain = ".$suffix")
         }
+        // Every virtual origin and onchain app shares the registrable
+        // domain `freedom.baby` (until the PSL entry, issue #6), so a
+        // `Domain=freedom.baby` cookie set by any one of them reaches all
+        // of them — the same tossing vector one level up. Only the
+        // domain-scoped variant is expired here: the real
+        // `https://freedom.baby/` site's own host-only cookies are left
+        // alone (a Domain-scoped expiry never touches a host-only cookie).
+        expired += expireAllFor(
+            cm,
+            "https://${VirtualOrigin.BASE_DOMAIN}/",
+            domain = ".${VirtualOrigin.BASE_DOMAIN}",
+            hostScoped = false,
+        )
         hostToSweep(navigatedUrl)?.let { host ->
             expired += expireAllFor(cm, "https://$host/", domain = null)
         }
@@ -87,24 +102,32 @@ object CookieHygiene {
 
     /**
      * Expire every cookie [CookieManager] would send to [url]. Each is
-     * rewritten with `Max-Age=0` both host-scoped and (when [domain] is
-     * given) domain-scoped, since we can't see which scope the original
-     * carried.
+     * rewritten with `Max-Age=0` host-scoped (unless [hostScoped] is
+     * false) and (when [domain] is given) domain-scoped, since we can't
+     * see which scope the original carried.
      */
-    private fun expireAllFor(cm: CookieManager, url: String, domain: String?): Int {
+    private fun expireAllFor(
+        cm: CookieManager,
+        url: String,
+        domain: String?,
+        hostScoped: Boolean = true,
+    ): Int {
         val cookies = runCatching { cm.getCookie(url) }.getOrNull() ?: return 0
-        var count = 0
-        for (cookie in cookies.split(';')) {
-            val name = cookie.substringBefore('=').trim()
-            if (name.isEmpty()) continue
+        val names = cookieNames(cookies)
+        for (name in names) {
             runCatching {
-                cm.setCookie(url, "$name=; Path=/; Max-Age=0")
+                if (hostScoped) cm.setCookie(url, "$name=; Path=/; Max-Age=0")
                 if (domain != null) {
                     cm.setCookie(url, "$name=; Domain=$domain; Path=/; Max-Age=0")
                 }
             }
-            count++
         }
-        return count
+        if (hostScoped) return names.size
+        // Host-only cookies were deliberately left: count what went.
+        val left = runCatching { cm.getCookie(url) }.getOrNull()?.let(::cookieNames).orEmpty()
+        return (names.size - left.size).coerceAtLeast(0)
     }
+
+    private fun cookieNames(header: String): List<String> =
+        header.split(';').map { it.substringBefore('=').trim() }.filter { it.isNotEmpty() }
 }
