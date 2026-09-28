@@ -268,7 +268,9 @@ internal class AllowlistStore(
  * update's feed version and build date (`null` when none is applied),
  * the lists (by [AdblockCategory.listName]) that update serves, and
  * those the bundled assets serve, because the update doesn't carry
- * them or its copy is older.
+ * them (or its copy no longer matches its hash) or its copy is older —
+ * [newerBuiltInLists] is the subset of [builtInLists] for that last
+ * reason only.
  */
 internal data class AdblockStatus(
     val loading: Boolean,
@@ -277,6 +279,7 @@ internal data class AdblockStatus(
     val listsGeneratedAt: String? = null,
     val updatedLists: List<String> = emptyList(),
     val builtInLists: List<String> = emptyList(),
+    val newerBuiltInLists: List<String> = emptyList(),
 )
 
 /** Where the engine's lists came from; see [AdblockStatus]. */
@@ -284,6 +287,7 @@ private data class AdblockListSources(
     val applied: AppliedUpdate?,
     val updated: List<String>,
     val builtIn: List<String>,
+    val newerBuiltIn: List<String>,
 )
 
 /** What Settings shows about list updates (#127): a check under way, and how the last one ended. */
@@ -412,6 +416,7 @@ internal object Adblock {
                         listsGeneratedAt = sources?.applied?.generatedAt,
                         updatedLists = sources?.updated.orEmpty(),
                         builtInLists = sources?.builtIn.orEmpty(),
+                        newerBuiltInLists = sources?.newerBuiltIn.orEmpty(),
                     )
                     _revision.value++
                 }
@@ -450,6 +455,7 @@ internal object Adblock {
         val applied = lists.applied()
         val fromUpdate = ArrayList<String>()
         val fromBundle = ArrayList<String>()
+        val bundleNewer = ArrayList<String>()
         val texts = AdblockCategory.entries.filter { it in categories }.mapNotNull { category ->
             checkpoint()
             // A missing or unreadable list costs its own category only.
@@ -464,6 +470,7 @@ internal object Adblock {
                     return@mapNotNull text
                 }
                 Log.i(TAG, "bundled ${category.file} is newer than update ${update.version}'s; using it")
+                bundleNewer += category.listName
             }
             if (bundled != null) fromBundle += category.listName
             bundled
@@ -475,7 +482,7 @@ internal object Adblock {
             "engine ready: ${categories.joinToString { it.key }}, ${built.filterCount} filters " +
                 "(update ${applied?.version}: $fromUpdate, bundled: $fromBundle) in ${SystemClock.elapsedRealtime() - t0} ms",
         )
-        return built to AdblockListSources(applied, fromUpdate, fromBundle)
+        return built to AdblockListSources(applied, fromUpdate, fromBundle, bundleNewer)
     }
 
     /**

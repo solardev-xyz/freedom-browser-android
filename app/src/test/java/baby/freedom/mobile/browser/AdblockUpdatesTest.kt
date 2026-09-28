@@ -336,7 +336,22 @@ class AdblockUpdatesTest {
         )
         assertEquals(
             "Using the built-in lists (newer than update 2)",
-            adblockListsLine(applied.copy(builtInLists = listOf("EasyList", "EasyPrivacy"))),
+            adblockListsLine(
+                applied.copy(builtInLists = listOf("EasyList", "EasyPrivacy"), newerBuiltInLists = listOf("EasyList", "EasyPrivacy")),
+            ),
+        )
+        // An update that doesn't carry the enabled lists (a category
+        // switched on since it applied, or a copy that failed its hash)
+        // isn't called older than them.
+        assertEquals(
+            "Using the built-in lists (update 2 doesn't include them)",
+            adblockListsLine(applied.copy(builtInLists = listOf("Fanboy's Cookie List"))),
+        )
+        assertEquals(
+            "Using the built-in lists (EasyList newer than update 2's; update 2 doesn't include Fanboy's Cookie List)",
+            adblockListsLine(
+                applied.copy(builtInLists = listOf("EasyList", "Fanboy's Cookie List"), newerBuiltInLists = listOf("EasyList")),
+            ),
         )
         assertEquals("Updated to version 2", adblockUpdateLine(AdblockUpdateState(last = AdblockUpdateOutcome.Applied(2))))
         assertEquals(

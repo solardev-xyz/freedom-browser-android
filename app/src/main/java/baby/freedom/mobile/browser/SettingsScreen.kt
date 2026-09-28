@@ -805,13 +805,26 @@ private const val ADBLOCK_CHECK_UPDATES_SUBTITLE = "Reads the update feed on Swa
  * The wrapping line under "Keep filter lists up to date": which lists
  * the engine uses now (#127) — the applied update's version and the day
  * it was built, and, where the bundled lists serve some categories
- * instead (the update doesn't carry them, or theirs is newer), which.
+ * instead (the update doesn't carry them, or theirs is newer), which —
+ * saying "newer" only of the lists that are.
  * (The subtitle is one ellipsised line, too short to be sure of showing
  * the version on a phone.)
  */
 internal fun adblockListsLine(status: AdblockStatus): String {
     val version = status.listsVersion ?: return "Using the built-in lists"
-    if (status.updatedLists.isEmpty()) return "Using the built-in lists (newer than update $version)"
+    if (status.updatedLists.isEmpty()) {
+        // Only claim "newer" for lists that actually beat the update's
+        // copy; the rest are ones it doesn't carry (or whose copy failed
+        // its hash check), e.g. a category switched on since it applied.
+        val newer = status.newerBuiltInLists
+        val uncovered = status.builtInLists - newer.toSet()
+        return when {
+            uncovered.isEmpty() -> "Using the built-in lists (newer than update $version)"
+            newer.isEmpty() -> "Using the built-in lists (update $version doesn't include them)"
+            else -> "Using the built-in lists (${newer.joinToString(", ")} newer than update $version's; " +
+                "update $version doesn't include ${uncovered.joinToString(", ")})"
+        }
+    }
     val day = status.listsGeneratedAt?.take(10)?.takeIf { it.matches(Regex("\\d{4}-\\d{2}-\\d{2}")) }
     val update = "Using update $version" + (day?.let { " of $it" } ?: "")
     if (status.builtInLists.isEmpty()) return update
