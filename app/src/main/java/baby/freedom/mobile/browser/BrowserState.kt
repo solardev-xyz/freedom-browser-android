@@ -21,8 +21,8 @@ import kotlinx.coroutines.Job
  * WebView runs on the throwaway [PrivateProfile] (its own cookies,
  * storage and cache, deleted once the last private tab closes), and
  * nothing it browses is written to history, the favicon cache,
- * remembered zoom levels, remembered site permissions or the download
- * list on disk. It never goes on the reopen-closed-tab stack.
+ * remembered zoom levels, remembered desktop sites, remembered site
+ * permissions or the download list on disk. It never goes on the reopen-closed-tab stack.
  */
 class BrowserState(val id: Long, val private: Boolean = false) {
     /**
@@ -509,7 +509,10 @@ class BrowserState(val id: Long, val private: Boolean = false) {
      * still coming in — a stop would leave it truncated, for good if the
      * put-back load then doesn't commit (a Stop, a 204, a download).
      * Before the relaunch the load was in flight over a complete page;
-     * Chromium keeps that page loading until the new one commits.
+     * Chromium keeps that page loading until the new one commits. One
+     * that needs the other user agent (#180) can't go in under a page
+     * still loading, so it waits for that page's finish instead, for at
+     * most a few seconds ([PutBackHold]).
      *
      * One handoff's worth, taken by the WebView's nav observer
      * ([takePutBackKeepsPage]), and dropped by whatever supersedes the

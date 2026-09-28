@@ -557,6 +557,14 @@ internal fun bottomUiProbeRequest(token: String): String = "probe $token"
  * one inside a shadow root (`playing` isn't composed). WebView itself has
  * no "this page is audible" signal (see [TabAudioFrames]).
  *
+ * **Re-issuing the page's own navigation** (#180), in the main frame: a
+ * `go <token> <url>` ask ([pageReissueRequest]) for the started document's
+ * own token builds a detached `<a>` with `referrerPolicy=origin` and
+ * `target=_self` and clicks it — through `createElement`, the anchor's
+ * setters and `HTMLElement.prototype.click` saved at document start, so
+ * no function the page wraps later sees it (R5-F3). Without those natives
+ * the ask does nothing (and Kotlin's deadline undoes its switch).
+ *
  * **Input in the top document** (#85): in the main frame, capture
  * listeners for trusted `pointerdown`, `keydown` and `click` post
  * [TOP_DOCUMENT_INPUT] at once (not a task later: it has to reach Kotlin
@@ -729,7 +737,8 @@ internal fun bottomUiDetectorJs(channel: String, debounceMs: Int = BOTTOM_UI_DEB
   said('pointerdown');
   said('keydown');
   said('click');
-  var T = null, started = false, ASK = /^probe ([0-9a-f]{1,64})$/, THEME_ASK = /^theme ([0-9a-f]{1,64})$/, SEL = 'a, button, [role="button"], [role="tab"], [role="link"]';
+  var T = null, started = false, ASK = /^probe ([0-9a-f]{1,64})$/, THEME_ASK = /^theme ([0-9a-f]{1,64})$/,
+      GO = /^$PAGE_REISSUE_PREFIX([0-9a-f]{1,64}) (https?:\/\/\S+)$/i, SEL = 'a, button, [role="button"], [role="tab"], [role="link"]';
   var gcs = w.getComputedStyle, MO = w.MutationObserver,
       RO = w.ResizeObserver, IO = w.IntersectionObserver, str = JSON.stringify;
   var timer = 0, last = null, owed = false, mo = null, watched = null, ro = null, io = null, fullW = -1, fullH = 0, ctx = null,
@@ -737,7 +746,7 @@ internal fun bottomUiDetectorJs(channel: String, debounceMs: Int = BOTTOM_UI_DEB
   // The theme-colour read's natives, saved before the page runs (#92):
   // un(f)(o, …) is f.call(o, …) through a `call` bound now, so neither a
   // wrapped method nor a wrapped `Function.prototype.call` sees a read.
-  var tc = null;
+  var tc = null, go = null;
   try {
     var fcall = Function.prototype.call, fbind = Function.prototype.bind, gopd = Object.getOwnPropertyDescriptor;
     var un = function (f) { return typeof f === 'function' ? fbind.call(fcall, f) : null; };
@@ -760,7 +769,14 @@ internal fun bottomUiDetectorJs(channel: String, debounceMs: Int = BOTTOM_UI_DEB
       data: prop(w.ImageData && w.ImageData.prototype, 'data'),
       exec: un(RegExp.prototype.exec), pInt: w.parseInt, pFloat: w.parseFloat, round: Math.round
     };
-  } catch (e) { tc = null; }
+    // The re-issue of the page's own navigation (#180): a detached
+    // link, built and clicked through natives saved now, or not at all.
+    var AP = w.HTMLAnchorElement && w.HTMLAnchorElement.prototype, HP = w.HTMLElement && w.HTMLElement.prototype;
+    var setter = function (proto, n) { var x = proto && gopd(proto, n); return x ? un(x.set) : null; };
+    go = { mk: tc.mkEl, href: setter(AP, 'href'), policy: setter(AP, 'referrerPolicy'),
+           target: setter(AP, 'target'), click: HP ? un(HP.click) : null };
+    if (!go.mk || !go.href || !go.policy || !go.target || !go.click) go = null;
+  } catch (e) { tc = null; go = null; }
   // Without them there is no theme-colour read; the probe still runs.
   var live = !tc;
   if (live) tc = { exec: function (r, s) { return r.exec(s); }, pFloat: w.parseFloat, round: Math.round };
@@ -876,6 +892,14 @@ internal fun bottomUiDetectorJs(channel: String, debounceMs: Int = BOTTOM_UI_DEB
     attach();
   }
   port.addEventListener('message', function (e) {
+    var g = go && e && typeof e.data === 'string' ? tc.exec(GO, e.data) : null;
+    if (g) {
+      if (started && g[1] === T) {
+        var a = go.mk(d, 'a');
+        go.href(a, g[2]); go.policy(a, '$REISSUE_REFERRER_POLICY'); go.target(a, '_self'); go.click(a);
+      }
+      return;
+    }
     var m = e && typeof e.data === 'string' ? tc.exec(ASK, e.data) : null;
     if (!m) {
       var t = e && typeof e.data === 'string' ? tc.exec(THEME_ASK, e.data) : null;

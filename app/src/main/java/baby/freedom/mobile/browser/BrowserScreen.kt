@@ -417,6 +417,7 @@ fun BrowserScreen(
     val gatewayProbe = remember { GatewayProbe() }
     val context = LocalContext.current
     val pageZoom = remember(context) { PageZoom.get(context) }
+    val desktopSites = remember(context) { DesktopSites.get(context) }
     val repo = remember(context) { BrowsingRepository.get(context) }
     // The search engine chosen in Settings (#87). Read at submit time
     // through the State, so a change in Settings applies to the next
@@ -627,7 +628,7 @@ fun BrowserScreen(
             BackAction.History -> {
                 // A navigation of its own (#94, see [BrowserState.loadGeneration]).
                 state.beginLoad()
-                state.loadUrl("javascript:history.back();void(0);")
+                state.loadUrl(HISTORY_BACK_JS)
             }
             BackAction.Home -> {
                 state.cancelPendingProbe()
@@ -1598,7 +1599,7 @@ fun BrowserScreen(
                     onBack = goBack,
                     onForward = {
                         state.beginLoad()
-                        state.loadUrl("javascript:history.forward();void(0);")
+                        state.loadUrl(HISTORY_FORWARD_JS)
                     },
                     onHome = {
                         submit(state, tabs.homepageUrl)
@@ -1662,6 +1663,20 @@ fun BrowserScreen(
                         ?.takeIf { state.url.isNotBlank() }
                         ?.let { pageZoom.levelFor(it, state.private) },
                     onZoom = { action -> state.zoomSite?.let { pageZoom.apply(it, action, state.private) } },
+                    // Request desktop site (#180): per site, like zoom,
+                    // but never for a dweb page (no key). Toggling asks
+                    // for the page again, as Reload does, and the load
+                    // picks the user agent for its site.
+                    desktopSite = desktopSiteOf(state.zoomSite)
+                        ?.takeIf { state.url.isNotBlank() }
+                        ?.let { desktopSites.isDesktop(it, state.private) },
+                    onToggleDesktopSite = {
+                        desktopSiteOf(state.zoomSite)?.let { site ->
+                            desktopSites.toggle(site, state.private)
+                            val url = state.url.ifBlank { state.addressBarText }
+                            if (url.isNotBlank()) submit(state, url)
+                        }
+                    },
                     onPrint = { tabs.printPage?.invoke(state) },
                     adblockState = adblockState,
                     onToggleAdblock = {
