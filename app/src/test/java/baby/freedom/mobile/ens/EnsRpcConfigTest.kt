@@ -244,6 +244,19 @@ class EnsRpcConfigTest {
     }
 
     @Test
+    fun `a seat whose read fails is stood in for by its provider's next server only`() {
+        val keyed = "https://lb.drpc.live/ethereum/KEY"
+        val c = EnsRpcConfig(apiKeys = mapOf("drpc" to "KEY"))
+        val pool = c.endpoints
+        assertEquals("https://eth.drpc.org", EnsQuorum.standIn(pool, keyed, setOf(keyed)))
+        // Already tried, or another provider's seat with no twin: nobody.
+        assertEquals(null, EnsQuorum.standIn(pool, keyed, setOf(keyed, "https://eth.drpc.org")))
+        assertEquals(null, EnsQuorum.standIn(pool, "https://1rpc.io/eth", setOf("https://1rpc.io/eth")))
+        // A twin that didn't report a head isn't in [reported] to stand in.
+        assertEquals(null, EnsQuorum.standIn(pool - "https://eth.drpc.org", keyed, setOf(keyed)))
+    }
+
+    @Test
     fun `your own endpoint on another host of a public provider takes its seat`() {
         val mine = "https://lb.drpc.org/ogrpc?network=ethereum"
         val c = EnsRpcConfig(customEndpoints = listOf(mine))

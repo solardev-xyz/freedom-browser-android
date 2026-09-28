@@ -79,11 +79,23 @@ internal object EnsQuorum {
      * endpoint gets its operator a second vote — the first of that
      * provider's servers *that reported*: a keyed endpoint whose key is
      * wrong (HTTP 401) hands the seat to its public twin rather than
-     * taking its provider's vote down with it.
+     * taking its provider's vote down with it. One that reports a head
+     * but then fails the record read hands it over there ([standIn]).
      */
     fun waveOrder(pool: List<String>, reported: Collection<String>): List<String> {
         val set = reported.toSet()
         return voters(pool.filter { it in set })
+    }
+
+    /**
+     * The server to read the record from in [seat]'s place once [seat]'s
+     * own read failed: the next of [reported] (the servers that reported
+     * a head, in the user's order) run by the same provider and not yet
+     * [tried]. `null` when that provider has no one left.
+     */
+    fun standIn(reported: List<String>, seat: String, tried: Set<String>): String? {
+        val provider = ChainDataRouter.providerOf(seat)
+        return reported.firstOrNull { it !in tried && ChainDataRouter.providerOf(it) == provider }
     }
 
     sealed class HashVote {

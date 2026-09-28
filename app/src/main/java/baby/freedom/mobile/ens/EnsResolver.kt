@@ -268,8 +268,17 @@ class EnsResolver internal constructor(
      */
     private class AnchorRound(
         val number: Long,
-        /** Servers that reported a head, in the configured order. */
+        /**
+         * The seats: one server per provider that reported a head, in
+         * the configured order ([EnsQuorum.waveOrder]).
+         */
         val order: List<String>,
+        /**
+         * Every server that reported a head, in the configured order —
+         * [order] plus each seat's same-provider twins, which stand in
+         * for a seat whose record read fails ([collectLegs]).
+         */
+        val reported: List<String>,
         /** Each of those servers' hash for block [number]. */
         val hashes: Map<String, Deferred<String>>,
         val vote: Deferred<EnsQuorum.HashVote>,
@@ -343,7 +352,8 @@ class EnsResolver internal constructor(
             if (result !is EnsQuorum.HashVote.Agreed) Log.w(TAG, "anchor #$number: ${scrub(result, pool)}")
             result
         }
-        return AnchorRound(number, order, hashes, vote, startedAt).also { epoch.anchor = it }
+        val reported = pool.filter { it in heads }
+        return AnchorRound(number, order, reported, hashes, vote, startedAt).also { epoch.anchor = it }
     }
 
     /**
@@ -381,13 +391,13 @@ class EnsResolver internal constructor(
                 return null
             }
         }
-        collectLegs(calls, round, hash, legs, outcomes)
+        collectLegs(calls, round, hash, legs, outcomes, target, callData, contract, ccipRead)
         var vote = EnsQuorum.waveVote(legs)
         val rest = round.order.drop(EnsQuorum.K)
         if (EnsQuorum.worthWidening(vote, asked = first.size) && rest.isNotEmpty()) {
             Log.i(TAG, "[$name] widening the wave to ${rest.map(::hostOf)} after ${scrub(vote, round.order)}")
             val more = rest.associateWith { startCall(it, target, callData, contract, round.tag, ccipRead) }
-            collectLegs(more, round, hash, legs, outcomes)
+            collectLegs(more, round, hash, legs, outcomes, target, callData, contract, ccipRead)
             vote = EnsQuorum.waveVote(legs)
         }
         Log.i(TAG, "[$name] block #${round.number}: ${scrub(vote, round.order)}")
@@ -480,6 +490,14 @@ class EnsResolver internal constructor(
      * until [EnsQuorum.M] agree or all are in. A read only counts if its
      * server also put block [AnchorRound.number] at [hash]: a server on
      * another chain, or one that won't say, has no vote.
+     *
+     * A seat whose read fails hands its provider's vote to that
+     * provider's next server that reported a head
+     * ([AnchorRound.reported]) — a keyed endpoint that answers heads but
+     * is rate-limited on `eth_call` doesn't take its public twin's vote
+     * down with it. The stand-in replaces the seat in [legs], so the
+     * provider still counts once. Not after a CCIP-Read failure: that
+     * was the name's gateway, which the twin would ask too.
      */
     private suspend fun collectLegs(
         calls: Map<String, Deferred<CallOutcome>>,
@@ -487,14 +505,35 @@ class EnsResolver internal constructor(
         hash: String,
         legs: LinkedHashMap<String, EnsQuorum.Leg>,
         outcomes: MutableMap<String, CallOutcome>,
+        target: String,
+        callData: ByteArray,
+        contract: String?,
+        ccipRead: Boolean,
     ) {
-        val judged = gather<EnsQuorum.Leg>(
-            tasks = calls.mapValues { (rpc, call) -> suspend { judge(rpc, call, round, hash, outcomes) } },
-            timeoutMs = LEG_TIMEOUT_MS,
-            done = { got -> EnsQuorum.waveDecided(legs + got.answered()) },
-        )
-        for ((rpc, leg) in judged) legs[rpc] = leg ?: EnsQuorum.Leg.Failed()
-        calls.values.forEach { if (it.isActive) it.cancel() }
+        val tried = HashSet(legs.keys)
+        var pending = calls
+        while (pending.isNotEmpty()) {
+            tried += pending.keys
+            val judged = gather<EnsQuorum.Leg>(
+                tasks = pending.mapValues { (rpc, call) -> suspend { judge(rpc, call, round, hash, outcomes) } },
+                timeoutMs = LEG_TIMEOUT_MS,
+                done = { got -> EnsQuorum.waveDecided(legs + got.answered()) },
+            )
+            for ((rpc, leg) in judged) legs[rpc] = leg ?: EnsQuorum.Leg.Failed()
+            pending.values.forEach { if (it.isActive) it.cancel() }
+            if (EnsQuorum.waveDecided(legs)) return
+            val standIns = LinkedHashMap<String, String>()
+            for ((rpc, leg) in judged) {
+                if (leg is EnsQuorum.Leg.Answer || (leg is EnsQuorum.Leg.Failed && leg.ccip)) continue
+                val twin = EnsQuorum.standIn(round.reported, rpc, tried) ?: continue
+                standIns[rpc] = twin
+            }
+            for ((seat, twin) in standIns) {
+                legs.remove(seat)
+                Log.i(TAG, "${hostOf(seat)}: no read; its provider votes through ${hostOf(twin)}")
+            }
+            pending = standIns.values.associateWith { startCall(it, target, callData, contract, round.tag, ccipRead) }
+        }
     }
 
     /** One server's read as its vote — see [collectLegs]. */

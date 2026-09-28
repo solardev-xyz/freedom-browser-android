@@ -518,7 +518,8 @@ internal fun publicEndpointHint(url: String): String {
  * Under a public endpoint's switch, when [twin] — one of yours or a
  * keyed provider, run by the same provider — is asked ahead of it
  * ([EnsRpcConfig.publicTwinOf]): one provider is one vote, cast by
- * whichever of the two answers first in that order. [asked] false: the
+ * the first of the two in that order that answers — the head probe
+ * and, if [twin]'s record read fails, the read too. [asked] false: the
  * public one isn't asked at all, [twin] being on its very host.
  */
 internal fun publicTwinHelp(twin: EnsRpcConfig.Source, asked: Boolean = true): String {
@@ -529,7 +530,7 @@ internal fun publicTwinHelp(twin: EnsRpcConfig.Source, asked: Boolean = true): S
     }
     // Not [asked]: [twin] is on this very host, the same server.
     if (!asked) return "Not asked: same server as $what, which is asked in its place"
-    return "Same provider as $what: one vote between them, this one's only if that one doesn't answer"
+    return "Same provider as $what: one vote between them — this one casts it when that one fails to answer"
 }
 
 @Composable

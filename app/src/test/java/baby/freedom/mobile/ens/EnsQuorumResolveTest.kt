@@ -612,6 +612,58 @@ class EnsQuorumResolveTest {
     }
 
     @Test
+    fun `a keyed endpoint that reports a head but fails the read hands the vote to its public twin`() {
+        // DRPC's keyed endpoint answers heads and block hashes but its
+        // eth_call is rate-limited; rpc3's record read fails too. Without
+        // eth.drpc.org standing in for the failed read, only rpc2 answers
+        // and the lookup is unverified (PR #169 R2-F1).
+        val limited = honest().apply { record = { _, _ -> null } }
+        val readless = honest().apply { record = { _, _ -> null } }
+        val servers = Servers(
+            listOf(
+                "https://lb.drpc.live/ethereum/KEY",
+                "https://eth.drpc.org",
+                "https://rpc2.test/",
+                "https://rpc3.test/",
+            ).zip(listOf(limited, honest(), honest(), readless)).toMap(LinkedHashMap()),
+        )
+
+        val result = resolve(servers)
+
+        require(result is EnsResult.Ok) { "got $result" }
+        assertEquals("bzz://$honestRef", result.uri)
+        assertTrue(result.trust.verified)
+        assertEquals(anchor, result.trust.block)
+        assertTrue("eth.drpc.org" in result.trust.agreed)
+        assertTrue("rpc2.test" in result.trust.agreed)
+        // Asked once each: the keyed seat, then its twin in its place.
+        assertEquals(1, servers.calls("https://lb.drpc.live/ethereum/KEY").size)
+        assertEquals(1, servers.calls("https://eth.drpc.org").size)
+    }
+
+    @Test
+    fun `a stand-in's answer counts once for its provider`() {
+        // Keyed DRPC fails the read, eth.drpc.org stands in and lies; the
+        // two honest providers still out-vote it, and DRPC is one dissent.
+        val limited = honest().apply { record = { _, _ -> null } }
+        val servers = Servers(
+            listOf(
+                "https://lb.drpc.live/ethereum/KEY",
+                "https://eth.drpc.org",
+                "https://rpc2.test/",
+                "https://rpc3.test/",
+            ).zip(listOf(limited, honest(otherRef), honest(), honest())).toMap(LinkedHashMap()),
+        )
+
+        val result = resolve(servers)
+
+        require(result is EnsResult.Ok) { "got $result" }
+        assertEquals("bzz://$honestRef", result.uri)
+        assertTrue(result.trust.verified)
+        assertFalse(result.trust.agreed.any { "drpc" in it })
+    }
+
+    @Test
     fun `two endpoints of one provider still count one head each provider`() {
         // Both DRPC endpoints report a head; only three providers — the
         // median is over three heads, and DRPC's keyed one alone reads.

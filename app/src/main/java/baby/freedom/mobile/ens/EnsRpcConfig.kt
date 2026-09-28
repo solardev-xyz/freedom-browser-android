@@ -72,9 +72,10 @@ data class EnsRpcConfig(
      * run by the same provider ([ChainDataRouter.providerOf]) as one of
      * yours or a keyed one stays in, after it ([publicTwinOf]): the
      * quorum gives that provider one vote, cast by the first of its
-     * servers that answers ([EnsQuorum.waveOrder]), and the single-server
-     * fallback tries both — so a mistyped or expired key doesn't take a
-     * working public twin out with it.
+     * servers that answers (the head, [EnsQuorum.waveOrder]; the
+     * record read, [EnsQuorum.standIn]), and the single-server fallback
+     * tries both. So a mistyped, expired or rate-limited key doesn't
+     * take a working public twin out with it.
      */
     val sources: List<Source>
         get() {
