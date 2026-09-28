@@ -3,8 +3,6 @@ package baby.freedom.mobile.browser
 import android.app.Activity
 import android.content.Context
 import android.content.ContextWrapper
-import android.os.Build
-import android.view.WindowManager
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -83,13 +81,10 @@ internal fun PrivateScreenGuard(secure: Boolean) {
  */
 private const val SECURE_OFF_DELAY_MS = 150L
 
-private fun Activity.setPrivateScreenSecure(secure: Boolean) {
-    if (secure) window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
-    else window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
-    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-        setRecentsScreenshotEnabled(!secure)
-    }
-}
+/** [PrivateScreenGuard]'s token in [setWindowSecureFor]; other screens hold their own. */
+private object PrivateContent
+
+private fun Activity.setPrivateScreenSecure(secure: Boolean) = setWindowSecureFor(PrivateContent, secure)
 
 private tailrec fun Context.findActivity(): Activity? = when (this) {
     is Activity -> this

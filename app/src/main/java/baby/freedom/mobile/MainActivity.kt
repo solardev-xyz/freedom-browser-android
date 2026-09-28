@@ -43,6 +43,7 @@ import baby.freedom.mobile.node.MyotisService
 import baby.freedom.mobile.node.NodeService
 import baby.freedom.mobile.ui.FreedomTheme
 import baby.freedom.mobile.ui.isLight
+import baby.freedom.mobile.wallet.Vault
 import baby.freedom.swarm.IpfsInfo
 import baby.freedom.swarm.MyotisInfo
 import baby.freedom.swarm.MyotisStatus
@@ -414,11 +415,15 @@ class MainActivity : ComponentActivity() {
      */
     override fun onStart() {
         super.onStart()
+        // The wallet's auto-lock (#76): back within the 1-minute grace,
+        // it stays open; later than that, it locks now.
+        Vault.get(this).onAppForeground()
         runCatching { binder?.onAppForeground() }
         runCatching { myotisBinder?.onAppForeground() }
     }
 
     override fun onStop() {
+        Vault.get(this).onAppBackground()
         runCatching { binder?.onAppBackground() }
         runCatching { myotisBinder?.onAppBackground() }
         super.onStop()

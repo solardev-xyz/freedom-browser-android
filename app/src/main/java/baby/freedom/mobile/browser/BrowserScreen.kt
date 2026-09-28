@@ -81,6 +81,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import baby.freedom.mobile.data.BrowsingRepository
 import baby.freedom.mobile.ui.PrivateTheme
 import baby.freedom.mobile.data.NodeSettings
+import baby.freedom.mobile.wallet.Vault
 import baby.freedom.mobile.ens.EnsInput
 import baby.freedom.mobile.ens.EnsResult
 import baby.freedom.mobile.ens.TezosDomainsResolver
@@ -451,6 +452,11 @@ fun BrowserScreen(
     var showSettings by rememberSaveable { mutableStateOf(false) }
     var showNode by rememberSaveable { mutableStateOf(false) }
     var showRadicle by rememberSaveable { mutableStateOf(false) }
+    var showWallet by rememberSaveable { mutableStateOf(false) }
+    // A feature asking for an identity (#75: created lazily, never forced)
+    // opens the wallet page over whatever is up; see [Vault.requireUnlocked].
+    val vault = remember(context) { Vault.get(context) }
+    val walletRequest by vault.setupRequest.collectAsState()
     var showTabSwitcher by rememberSaveable { mutableStateOf(false) }
     var showHistory by rememberSaveable { mutableStateOf(false) }
     var showBookmarks by rememberSaveable { mutableStateOf(false) }
@@ -473,7 +479,8 @@ fun BrowserScreen(
     val sitePermissions = remember(context) { SitePermissionBroker.get(context) }
     SitePermissionAndroidBridge(sitePermissions, snackbarHostState)
     // Any full-screen panel over the browser (they're all opaque).
-    val overlayShown = showSettings || showNode || showRadicle || showTabSwitcher ||
+    val overlayShown = showSettings || showNode || showRadicle || showWallet || walletRequest != null ||
+        showTabSwitcher ||
         showHistory || showBookmarks || showDownloads
     val downloads = remember(context) { DownloadManager.get(context) }
 
@@ -1303,6 +1310,7 @@ fun BrowserScreen(
         showSettings = false
         showNode = false
         showRadicle = false
+        showWallet = false
         showTabSwitcher = false
         showHistory = false
         showBookmarks = false
@@ -1943,6 +1951,7 @@ fun BrowserScreen(
             onIpfsToggle = onIpfsToggle,
             radicle = radicle,
             onOpenRadicle = { showRadicle = true },
+            onOpenWallet = { showWallet = true },
             // The reopen stack keeps closed tabs' pages, titles and
             // back/forward lists — history by any other name.
             onClearHistory = { tabs.forgetClosedTabs() },
@@ -1976,6 +1985,14 @@ fun BrowserScreen(
             radicle = radicle,
             runNodeEnabled = runNodeEnabled,
             onDismiss = { showRadicle = false },
+        )
+    }
+
+    // Settings → Wallet (#75, #76), or a feature's request for one.
+    if (showWallet || walletRequest != null) {
+        WalletScreen(
+            request = walletRequest,
+            onDismiss = { showWallet = false },
         )
     }
 
