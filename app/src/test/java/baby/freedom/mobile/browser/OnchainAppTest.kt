@@ -181,6 +181,19 @@ class OnchainAppTest {
     }
 
     @Test
+    fun `cookie path candidates stay strictly increasing and linear in a deep path`() {
+        assertEquals(listOf("/", "//"), CookieHygiene.cookiePathsMatching("//"))
+        // R4-F1: a pushState'd '/a' x 4000 path gives 8000 candidates as
+        // plain end offsets — the sweep bisects them rather than
+        // expiring every name at each one.
+        val deep = "/a".repeat(4000)
+        val ends = CookieHygiene.cookiePathEnds(deep)
+        assertEquals(8000, ends.size)
+        assertTrue((1 until ends.size).all { ends[it] > ends[it - 1] })
+        assertEquals(deep.length, ends.last())
+    }
+
+    @Test
     fun `private approvals end with the private session, normal ones don't`() {
         val d = doc(ChainTrust.Level.UNVERIFIED, "private-session")
         OnchainApps.approvalsFor(private = true).add(d)

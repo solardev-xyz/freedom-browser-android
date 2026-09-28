@@ -562,4 +562,28 @@ class VirtualOriginContractTest {
         assertFalse(left, left.contains("tossfb"))
         assertFalse(cm.getCookie("${originA}swap").orEmpty().contains("tossbzz"))
     }
+
+    @Test
+    fun deepPathSweepIsBoundedByCookiesNotDepth() {
+        // R4-F1: expiring every name at every candidate path took ~35 s
+        // for 50 cookies under '/a' x 4000. The sweep now bisects the
+        // candidate chain, so it stays fast — and still finds a cookie
+        // tossed at a deep path and one at the root.
+        val cm = CookieManager.getInstance()
+        val app = "https://0x${"3".repeat(40)}-1.web3.freedom.baby"
+        val deepPath = "/a".repeat(4000)
+        val mid = "/a".repeat(1234) + "/"
+        InstrumentationRegistry.getInstrumentation().runOnMainSync {
+            for (n in 0 until 50) cm.setCookie("$app/", "h$n=1; Path=/")
+            cm.setCookie("$app/", "tossmid=1; Domain=.web3.freedom.baby; Path=$mid")
+            cm.setCookie("$app/", "tossdeep=1; Domain=.freedom.baby; Path=$deepPath")
+        }
+        assertTrue(cm.getCookie("$app$deepPath").orEmpty().contains("tossmid"))
+        val started = System.nanoTime()
+        CookieHygiene.sweepBlocking("$app$deepPath")
+        val ms = (System.nanoTime() - started) / 1_000_000
+        val left = cm.getCookie("$app$deepPath").orEmpty()
+        assertTrue("sweep took $ms ms", ms < 3_000)
+        assertEquals("", left)
+    }
 }

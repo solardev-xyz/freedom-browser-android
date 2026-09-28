@@ -71,9 +71,25 @@ object CookieHygiene {
      * path one of them sits on is caught, not only `Path=/` ones.
      */
     fun sweepAsync(urls: Collection<String>) {
-        val snapshot = urls.toList()
-        executor.execute { sweepBlocking(snapshot) }
+        // Coalesce: at most one sweep waits behind the running one, and
+        // it covers every URL asked for since. A sweep that takes longer
+        // than [SWEEP_INTERVAL_MS] can then never build a backlog that
+        // pushes a navigation's sweep minutes into the future (R4-F1).
+        val schedule = synchronized(pending) {
+            pending += urls
+            (!queued).also { queued = true }
+        }
+        if (schedule) executor.execute {
+            val snapshot = synchronized(pending) {
+                queued = false
+                pending.toList().also { pending.clear() }
+            }
+            sweepBlocking(snapshot)
+        }
     }
+
+    private val pending = LinkedHashSet<String>()
+    private var queued = false
 
     internal fun sweepBlocking(navigatedUrl: String? = null) =
         sweepBlocking(listOfNotNull(navigatedUrl))
@@ -156,27 +172,50 @@ object CookieHygiene {
     /**
      * Every cookie `Path` that path-matches [path] (RFC 6265 §5.1.4):
      * the root, each ancestor directory with and without its trailing
-     * slash, and [path] itself. Expiring a name at each of them reaches
-     * whichever of those paths the original was set at.
+     * slash, and [path] itself, shallowest first. Used for tests; the
+     * sweep works on [cookiePathEnds] so a deep path never materializes
+     * thousands of long substrings.
      */
-    internal fun cookiePathsMatching(path: String): List<String> {
-        val out = linkedSetOf("/")
+    internal fun cookiePathsMatching(path: String): List<String> =
+        cookiePathEnds(path).map { path.substring(0, it) }
+
+    /**
+     * The candidates of [cookiePathsMatching] as end offsets into
+     * [path], strictly increasing. Along this chain visibility is
+     * monotone: a cookie whose `Path` is candidate `k` is sent to
+     * candidate `j` exactly when `j >= k`.
+     */
+    internal fun cookiePathEnds(path: String): IntArray {
+        if (path.isEmpty()) return intArrayOf()
+        val out = ArrayList<Int>()
+        fun add(end: Int) {
+            if (out.isEmpty() || out.last() < end) out += end
+        }
+        add(1)
         var i = path.indexOf('/', 1)
         while (i > 0) {
-            out += path.substring(0, i)
-            out += path.substring(0, i + 1)
+            add(i)
+            add(i + 1)
             i = path.indexOf('/', i + 1)
         }
-        if (path.isNotEmpty()) out += path
-        return out.toList()
+        add(path.length)
+        return out.toIntArray()
     }
 
     /**
      * Expire every cookie [CookieManager] would send to [origin]+[path].
      * Each is rewritten with `Max-Age=0` host-scoped (unless [hostScoped]
-     * is false) and (when [domain] is given) domain-scoped, at every
-     * `Path` that could have let it through — we can see neither the
-     * scope nor the path the original carried.
+     * is false) and (when [domain] is given) domain-scoped, at the
+     * `Path` it was actually set at — we can see neither the scope nor
+     * the path, so the path is found by reading along the chain of
+     * candidate paths ([cookiePathEnds]).
+     *
+     * Cost is bounded by the cookies present, not by how deep [path]
+     * is (R4-F1): a candidate range whose two ends see the same cookies
+     * holds no cookie path in between (visibility is monotone), so the
+     * search bisects only ranges where some name's count grows —
+     * `O(cookies × log(depth))` reads, and one expiry per cookie path
+     * found, instead of every name at every candidate.
      */
     private fun expireAllFor(
         cm: CookieManager,
@@ -187,10 +226,39 @@ object CookieHygiene {
     ): Int {
         val url = origin + path
         val cookies = runCatching { cm.getCookie(url) }.getOrNull() ?: return 0
-        val names = cookieNames(cookies).distinct()
-        val cookiePaths = cookiePathsMatching(path)
-        for (name in names) {
-            for (p in cookiePaths) {
+        val before = cookieNames(cookies)
+        val ends = cookiePathEnds(path)
+        if (ends.isEmpty()) return 0
+        val seen = HashMap<Int, Map<String, Int>>()
+        fun countsAt(j: Int): Map<String, Int> = when {
+            j < 0 -> emptyMap()
+            j == ends.lastIndex -> seen.getOrPut(j) { countNames(before) }
+            else -> seen.getOrPut(j) {
+                countNames(
+                    runCatching { cm.getCookie(origin + path.substring(0, ends[j])) }
+                        .getOrNull()?.let(::cookieNames).orEmpty(),
+                )
+            }
+        }
+        // Candidate index -> names whose count first grows there, i.e.
+        // names with a cookie set at exactly that `Path`.
+        val found = LinkedHashMap<Int, Set<String>>()
+        fun search(lo: Int, hi: Int) {
+            val a = countsAt(lo)
+            val b = countsAt(hi)
+            if (a == b) return
+            if (hi == lo + 1) {
+                found[hi] = b.filter { (n, c) -> c > (a[n] ?: 0) }.keys
+                return
+            }
+            val mid = (lo + hi) ushr 1
+            search(lo, mid)
+            search(mid, hi)
+        }
+        search(-1, ends.lastIndex)
+        for ((j, names) in found) {
+            val p = path.substring(0, ends[j])
+            for (name in names) {
                 runCatching {
                     if (hostScoped) cm.setCookie(url, "$name=; Path=$p; Max-Age=0")
                     if (domain != null) {
@@ -202,8 +270,11 @@ object CookieHygiene {
         // Count what actually went (host-only cookies are deliberately
         // left when [hostScoped] is false).
         val left = runCatching { cm.getCookie(url) }.getOrNull()?.let(::cookieNames).orEmpty()
-        return (cookieNames(cookies).size - left.size).coerceAtLeast(0)
+        return (before.size - left.size).coerceAtLeast(0)
     }
+
+    private fun countNames(names: List<String>): Map<String, Int> =
+        names.groupingBy { it }.eachCount()
 
     private fun cookieNames(header: String): List<String> =
         header.split(';').map { it.substringBefore('=').trim() }.filter { it.isNotEmpty() }
