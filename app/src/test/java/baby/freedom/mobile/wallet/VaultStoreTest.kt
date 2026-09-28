@@ -7,7 +7,9 @@ import java.security.UnrecoverableKeyException
 import javax.crypto.Cipher
 import javax.crypto.SecretKey
 import javax.crypto.spec.SecretKeySpec
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertSame
+import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Test
 
@@ -58,5 +60,16 @@ class VaultStoreTest {
             unauthenticated,
             assertThrows<UserNotAuthenticatedException> { open(init = { throw unauthenticated }, keyStillWorks = false) },
         )
+    }
+
+    @Test
+    fun `the key probe goes by the init, not by whether the cipher would finish`() {
+        assertFalse(probeKey { throw InvalidKeyException("invalidated") })
+        assertFalse(probeKey { throw KeyPermanentlyInvalidatedException() })
+        // An auth-per-use key opens an encrypt cipher but refuses to finish
+        // it without BiometricPrompt: that key is alive.
+        val refusesToFinish = Cipher.getInstance("AES/GCM/NoPadding") // never initialised: doFinal throws
+        assertTrue(probeKey { refusesToFinish })
+        assertTrue(probeKey { Cipher.getInstance("AES/GCM/NoPadding").apply { init(Cipher.ENCRYPT_MODE, key) } })
     }
 }

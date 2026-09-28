@@ -1,5 +1,6 @@
 package baby.freedom.mobile.browser
 
+import baby.freedom.mobile.wallet.Mnemonic
 import baby.freedom.mobile.wallet.Vault
 import baby.freedom.mobile.wallet.VaultAuthCancelledException
 import baby.freedom.mobile.wallet.VaultKeyLostException
@@ -113,6 +114,10 @@ class WalletScreenTest {
         assertFalse(clipHoldsPhrase("https://example.com", words))
         assertFalse(clipHoldsPhrase(twelve.substringBeforeLast(" "), words))
         assertFalse(clipHoldsPhrase(twelve.replace("about", "abandon"), words))
+        // Compatibility letters (fullwidth) are normalized the way the parser does.
+        val fullwidth = twelve.map { if (it in 'a'..'z') (it.code - 'a'.code + 0xFF41).toChar() else it }.joinToString("")
+        assertTrue(clipHoldsPhrase(fullwidth, Mnemonic.words(fullwidth)))
+        assertTrue(clipHoldsPhrase(fullwidth, words))
         assertFalse(clipHoldsPhrase(null, words))
         assertFalse(clipHoldsPhrase("", words))
     }

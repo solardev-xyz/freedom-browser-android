@@ -149,11 +149,14 @@ class Mnemonic private constructor(val words: List<String>) {
         /**
          * The words of [phrase] as [parse] reads them: normalized,
          * lower-cased, split on any whitespace (a no-break or ideographic
-         * space from a paste too, not just ASCII). The import field's
+         * space from a paste too, not just ASCII) and on invisible format
+         * characters a web paste can carry (a zero-width space or joiner,
+         * a byte-order mark), which would otherwise glue onto a word and
+         * make it unrecognisable. The import field's
          * live checks use the same split, so they can't disagree with it.
          */
         fun words(phrase: String): List<String> =
-            nfkd(phrase).lowercase().splitWhere { it.isWhitespace() }.filter { it.isNotEmpty() }
+            nfkd(phrase).lowercase().splitWhere { it.isWhitespace() || Character.getType(it) == Character.FORMAT.toInt() }.filter { it.isNotEmpty() }
 
         /** Words typed so far, for the import field's live count. */
         fun wordCount(phrase: String): Int = words(phrase).size

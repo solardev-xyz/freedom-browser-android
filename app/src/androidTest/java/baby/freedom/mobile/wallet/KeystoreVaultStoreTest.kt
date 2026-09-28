@@ -91,5 +91,8 @@ class KeystoreVaultStoreTest {
         } catch (_: Exception) {
             // IllegalBlockSizeException wrapping KeyStoreException "Key user not authenticated".
         }
+        // That refusal isn't a dead key: the probe behind VaultKeyLostException
+        // must still call this live screen-lock key alive.
+        assertTrue(store.keyStillWorks(key()))
     }
 }

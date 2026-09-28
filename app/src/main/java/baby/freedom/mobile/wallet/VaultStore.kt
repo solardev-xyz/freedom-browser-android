@@ -57,6 +57,24 @@ internal fun openCipherOrKeyLost(
 }
 
 /**
+ * Whether a key is still usable, judged by [start] opening a cipher with
+ * it: a key Android has invalidated fails there. The cipher is then
+ * finished with an empty `doFinal` only so the Keystore operation isn't
+ * left open; its outcome says nothing about the key, since an
+ * auth-per-use (screen-lock) key always refuses to finish without
+ * BiometricPrompt — a failed finish aborts the operation just the same.
+ */
+internal fun probeKey(start: () -> Cipher): Boolean {
+    val cipher = try {
+        start()
+    } catch (_: Exception) {
+        return false
+    }
+    runCatching { cipher.doFinal() }
+    return true
+}
+
+/**
  * Where [Vault] keeps its sealed phrase and gets its ciphers from. The
  * Keystore implementation is [KeystoreVaultStore]; tests use a software
  * key.
@@ -155,18 +173,18 @@ class KeystoreVaultStore(context: Context) : VaultStore {
                 init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(GCM_TAG_BITS, record.iv))
             }
         },
-        // Opening a cipher to *encrypt* needs no authentication even for
-        // an authentication-bound key, so it tells a dead key apart from
-        // one that merely refused this decryption. The probe is finished
-        // with an empty doFinal so it doesn't leave a Keystore operation open.
-        keyStillWorks = { key ->
-            runCatching {
-                val probe = Cipher.getInstance(TRANSFORMATION)
-                probe.init(Cipher.ENCRYPT_MODE, key)
-                probe.doFinal()
-            }.isSuccess
-        },
+        keyStillWorks = ::keyStillWorks,
     )
+
+    /**
+     * Whether [key] is still alive: opening a cipher to *encrypt* needs no
+     * authentication even for an authentication-bound key, so it tells a
+     * dead key apart from one that merely refused this decryption. Only
+     * the init is the answer — see [probeKey].
+     */
+    internal fun keyStillWorks(key: SecretKey): Boolean = probeKey {
+        Cipher.getInstance(TRANSFORMATION).apply { init(Cipher.ENCRYPT_MODE, key) }
+    }
 
     override fun wipe() {
         file.delete()

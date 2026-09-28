@@ -143,6 +143,14 @@ class MnemonicTest {
     }
 
     @Test
+    fun `invisible format characters from a paste split words instead of gluing onto them`() {
+        val phrase = "legal winner thank year wave sausage worth useful legal winner thank yellow"
+        val pasted = "\uFEFF" + phrase.replaceFirst(" ", "\u200B").replace("wave ", "wave\u200C ").replace("thank yellow", "thank\u2060yellow")
+        assertEquals(phrase.split(" "), Mnemonic.words(pasted))
+        assertEquals(Mnemonic.parse(phrase).phrase(), Mnemonic.parse(pasted).phrase())
+    }
+
+    @Test
     fun `wordCount counts words as typed`() {
         assertEquals(0, Mnemonic.wordCount("   "))
         assertEquals(3, Mnemonic.wordCount(" a  b\nc "))

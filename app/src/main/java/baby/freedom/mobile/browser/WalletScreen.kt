@@ -69,6 +69,7 @@ import baby.freedom.mobile.wallet.VaultAuthFailedException
 import baby.freedom.mobile.wallet.VaultKeyLostException
 import baby.freedom.mobile.wallet.VaultProtection
 import baby.freedom.mobile.wallet.VaultUnreadableException
+import java.text.Normalizer
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 
@@ -154,7 +155,10 @@ internal fun importHint(phrase: String): ImportHint {
  */
 internal fun clipHoldsPhrase(clip: CharSequence?, words: List<String>): Boolean {
     if (clip.isNullOrBlank() || words.isEmpty()) return false
-    val tokens = clip.toString().lowercase().split(Regex("[^\\p{L}]+")).filter { it.isNotEmpty() }
+    // Normalized the way Mnemonic.words normalizes, so a phrase pasted in
+    // compatibility letters (fullwidth, say) still matches its words.
+    val tokens = Normalizer.normalize(clip, Normalizer.Form.NFKD).lowercase()
+        .split(Regex("[^\\p{L}\\p{M}]+")).filter { it.isNotEmpty() }
     return (0..tokens.size - words.size).any { start -> tokens.subList(start, start + words.size) == words }
 }
 
