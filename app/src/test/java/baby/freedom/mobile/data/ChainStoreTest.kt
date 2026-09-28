@@ -71,8 +71,8 @@ class ChainStoreTest {
         assertEquals(polygon, listed.last())
         assertEquals(amoy, listed[3])
 
-        assertTrue(store.remove(80002))
-        assertFalse(store.remove(80002))
+        assertEquals(ChainStore.RemoveResult.REMOVED, store.remove(80002))
+        assertEquals(ChainStore.RemoveResult.NOT_FOUND, store.remove(80002))
         assertEquals(listOf(1L, 100L, 8453L, 137L), store.chains.first().map { it.id })
     }
 
@@ -80,7 +80,7 @@ class ChainStoreTest {
     fun builtInsCanNeitherBeAddedNorRemoved() = runBlocking {
         val store = ChainStore(MemoryStore())
         assertEquals(ChainStore.AddResult.BUILT_IN, store.add(polygon.copy(id = 8453)))
-        assertFalse(store.remove(1))
+        assertEquals(ChainStore.RemoveResult.NOT_FOUND, store.remove(1))
         assertEquals(BuiltInChains.ALL, store.chains.first())
     }
 
@@ -118,6 +118,6 @@ class ChainStoreTest {
         val store = ChainStore(BrokenStore(CorruptionException("bad")), backOff = {})
         assertEquals(BuiltInChains.ALL, store.chains.first())
         assertEquals(ChainStore.AddResult.FAILED, store.add(polygon))
-        assertFalse(store.remove(137))
+        assertEquals(ChainStore.RemoveResult.FAILED, store.remove(137))
     }
 }

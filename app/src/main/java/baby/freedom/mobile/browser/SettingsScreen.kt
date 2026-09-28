@@ -172,6 +172,7 @@ fun SettingsScreen(
     var chainQuery by rememberSaveable { mutableStateOf("") }
     var openChain by remember { mutableStateOf<Chain?>(null) }
     var confirmRemoveChain by remember { mutableStateOf<Chain?>(null) }
+    var removeChainFailed by remember { mutableStateOf<Chain?>(null) }
 
     val scope = rememberCoroutineScope()
     val appVersion = remember(context) { appVersionLabel(context) }
@@ -386,10 +387,24 @@ fun SettingsScreen(
                 "You can add it again later.",
             confirmLabel = "Remove",
             onConfirm = {
-                scope.launch { chainStore.remove(chain.id) }
+                scope.launch {
+                    if (chainStore.remove(chain.id) == ChainStore.RemoveResult.FAILED) {
+                        removeChainFailed = chain
+                    }
+                }
                 confirmRemoveChain = null
             },
             onDismiss = { confirmRemoveChain = null },
+        )
+    }
+    removeChainFailed?.let { chain ->
+        AlertDialog(
+            onDismissRequest = { removeChainFailed = null },
+            title = { Text("Couldn't remove ${chain.name}") },
+            text = { Text("Chain ${chain.id} is still on this device. Try again.") },
+            confirmButton = {
+                TextButton(onClick = { removeChainFailed = null }) { Text("OK") }
+            },
         )
     }
     if (addAllowlistSite) {

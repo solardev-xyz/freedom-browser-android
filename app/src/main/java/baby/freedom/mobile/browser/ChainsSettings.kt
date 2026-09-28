@@ -478,7 +478,7 @@ internal fun AddChainPage(
                         value = id, onValueChange = { id = it; error = null }, label = "Chain ID",
                         placeholder = "137",
                         hint = if (id.isNotBlank() && ChainInput.parseId(id) == null) {
-                            "A positive whole number (or 0x hex)"
+                            "A whole number from 1 to ${Chain.MAX_ID} (or 0x hex)"
                         } else null,
                         keyboardType = KeyboardType.Ascii,
                         literal = true,

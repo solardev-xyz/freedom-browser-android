@@ -43,7 +43,7 @@ import org.json.JSONObject
  *
  * Never throws for storage trouble, like [SitePermissionStore]: a file
  * that can't be read lists only the built-ins (and re-reads with
- * back-off), a failed write reports [AddResult.FAILED] / `false`, and a
+ * back-off), a failed write reports [AddResult.FAILED] / [RemoveResult.FAILED], and a
  * corrupt file is replaced with an empty one.
  */
 class ChainStore internal constructor(
@@ -53,6 +53,12 @@ class ChainStore internal constructor(
     private val clock: () -> Long = System::currentTimeMillis,
 ) {
     enum class AddResult { ADDED, BUILT_IN, DUPLICATE, FAILED }
+
+    /**
+     * [NOT_FOUND] (a built-in, or a chain already gone) is not an error —
+     * only [FAILED], a write that didn't land, leaves the chain listed.
+     */
+    enum class RemoveResult { REMOVED, NOT_FOUND, FAILED }
 
     /** Every chain: the built-ins, then custom chains in the order they were added. */
     val chains: Flow<List<Chain>> = flow {
@@ -97,21 +103,21 @@ class ChainStore internal constructor(
         }
     }
 
-    /** Remove the custom chain [id]; a built-in is never removed. `false` if nothing was. */
-    suspend fun remove(id: Long): Boolean {
-        if (BuiltInChains.isBuiltIn(id)) return false
+    /** Remove the custom chain [id]; a built-in is never removed. */
+    suspend fun remove(id: Long): RemoveResult {
+        if (BuiltInChains.isBuiltIn(id)) return RemoveResult.NOT_FOUND
         var removed = false
         return try {
             store.edit { prefs ->
                 removed = prefs.contains(keyOf(id))
                 prefs.remove(keyOf(id))
             }
-            removed
+            if (removed) RemoveResult.REMOVED else RemoveResult.NOT_FOUND
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
             Log.w(TAG, "removing chain failed", e)
-            false
+            RemoveResult.FAILED
         }
     }
 
