@@ -117,8 +117,15 @@ class MyotisNode internal constructor(
      * (and the overall line) to syncing and back for a poll. The cost, when
      * the corrected clock really did fix it, is the old row for up to
      * [REJUDGE_GRACE_MS] while it syncs — the row it had been showing anyway.
+     *
+     * The grace counts only time the engine is actually running: in the
+     * background it's paused and can't re-judge anything, so a release
+     * never runs out there, and the foreground restarts it ([at] reset on
+     * resume) — otherwise a chain released just before Home and still
+     * stale on return would show its raw `SYNCING` row for a poll before
+     * parking again.
      */
-    private class Release(val at: Long, val status: MyotisChainStatus)
+    private class Release(var at: Long, val status: MyotisChainStatus)
     private var foreground = true
     private var polls = 0
 
@@ -230,6 +237,9 @@ class MyotisNode internal constructor(
                     val resumed = engine.resume(handle)
                     Log.i(TAG, "${network.engineName}: resume → $resumed")
                 }
+                // Paused engines re-judged nothing: a release's grace starts over.
+                val now = upClock()
+                for (release in released.values) release.at = now
                 if (handles.isNotEmpty()) {
                     polling = true
                     refreshStatus()
@@ -338,7 +348,7 @@ class MyotisNode internal constructor(
         if (foreground && status.staleAnchor && !status.paused) park(network, handle, status)
         parked[network]?.let { return it.status }
         val release = released[network] ?: return status
-        if (status.anchorAccepted || upClock() - release.at >= REJUDGE_GRACE_MS) {
+        if (status.anchorAccepted || (foreground && upClock() - release.at >= REJUDGE_GRACE_MS)) {
             released.remove(network)
             return status
         }
