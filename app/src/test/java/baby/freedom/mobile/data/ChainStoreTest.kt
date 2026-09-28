@@ -120,4 +120,60 @@ class ChainStoreTest {
         assertEquals(ChainStore.AddResult.FAILED, store.add(polygon))
         assertEquals(ChainStore.RemoveResult.FAILED, store.remove(137))
     }
+
+    // ---- the user's own RPCs (#108) ----
+
+    @Test
+    fun ownRpcsAttachToBuiltInAndCustomChains() = runBlocking {
+        val store = ChainStore(MemoryStore())
+        val mine = "https://my-node.example/eth"
+        assertEquals(ChainStore.RpcAddResult.ADDED, store.addUserRpc(1, "  $mine "))
+        assertEquals(ChainStore.RpcAddResult.DUPLICATE, store.addUserRpc(1, mine))
+        assertEquals(ChainStore.RpcAddResult.PUBLIC, store.addUserRpc(1, BuiltInChains.ETHEREUM.rpcUrls[0]))
+        assertEquals(ChainStore.RpcAddResult.INVALID, store.addUserRpc(1, "http://192.168.1.10:8545"))
+        assertEquals(ChainStore.RpcAddResult.NO_CHAIN, store.addUserRpc(137, mine))
+        val eth = store.chains.first().first { it.id == 1L }
+        assertEquals(listOf(mine), eth.userRpcUrls)
+        assertEquals("the public list is untouched", BuiltInChains.ETHEREUM.rpcUrls, eth.rpcUrls)
+
+        assertEquals(ChainStore.AddResult.ADDED, store.add(polygon))
+        assertEquals(ChainStore.RpcAddResult.ADDED, store.addUserRpc(137, "http://127.0.0.1:8545"))
+        assertEquals(listOf("http://127.0.0.1:8545"), store.chains.first().last().userRpcUrls)
+
+        assertTrue(store.removeUserRpc(1, mine))
+        assertEquals(emptyList<String>(), store.chains.first().first { it.id == 1L }.userRpcUrls)
+    }
+
+    @Test
+    fun ownRpcsAreCappedAndGoWithTheirChain() = runBlocking {
+        val store = ChainStore(MemoryStore())
+        store.add(polygon)
+        for (i in 1..Chain.MAX_USER_RPC_URLS) {
+            assertEquals(ChainStore.RpcAddResult.ADDED, store.addUserRpc(137, "https://n$i.example"))
+        }
+        assertEquals(ChainStore.RpcAddResult.FULL, store.addUserRpc(137, "https://one-more.example"))
+        store.remove(137)
+        store.add(polygon)
+        assertEquals("a re-added chain starts without the old ones", emptyList<String>(), store.chains.first().last().userRpcUrls)
+    }
+
+    @Test
+    fun aBadStoredOwnRpcIsDropped() = runBlocking {
+        val mem = MemoryStore()
+        mem.edit {
+            it[stringPreferencesKey("rpcs:1")] =
+                """["https://ok.example","http://10.0.0.1","https://ethereum.publicnode.com",7,"https://ok.example"]"""
+            it[stringPreferencesKey("rpcs:100")] = "{not json"
+        }
+        val chains = ChainStore(mem).chains.first()
+        assertEquals(listOf("https://ok.example"), chains.first { it.id == 1L }.userRpcUrls)
+        assertEquals(emptyList<String>(), chains.first { it.id == 100L }.userRpcUrls)
+    }
+
+    @Test
+    fun ownRpcStorageTroubleNeverThrows() = runBlocking {
+        val store = ChainStore(BrokenStore(CorruptionException("bad")), backOff = {})
+        assertEquals(ChainStore.RpcAddResult.FAILED, store.addUserRpc(1, "https://ok.example"))
+        assertFalse(store.removeUserRpc(1, "https://ok.example"))
+    }
 }
