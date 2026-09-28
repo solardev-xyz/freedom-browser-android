@@ -165,7 +165,7 @@ private val CONTENT_ROOT_SCHEMES = listOf("bzz://", "ipfs://", "ipns://")
 
 /** Status for the interceptor's refusal of an ENS document. */
 internal fun statusForNameResolutionError(code: String): Int =
-    if (code == "ens_lookup_failed") 502 else 404
+    if (code == "ens_lookup_failed" || code == "ens_ccip_disabled") 502 else 404
 
 /**
  * "The main-frame document the interceptor last served for this tab was
@@ -284,6 +284,9 @@ internal fun nameResolutionRefusalCopy(
         "ens_unsupported_codec" -> "Unsupported content format" to
             "This $label name now resolves to a content format Freedom Browser " +
             "cannot load yet on mobile."
+        "ens_ccip_disabled" -> "$label lookup failed" to
+            "This name is resolved through an off-chain gateway (CCIP-Read), which is " +
+            "turned off in Settings &rarr; Name resolution."
         // ENSIP-15 refused the name ([EnsNormalize]): no lookup ran.
         "ens_invalid_name" -> "Not a valid $label name" to
             "This name breaks the ENSIP-15 naming rules " +
@@ -310,8 +313,13 @@ internal fun nameResolutionRefusalCopy(
             "The $chain RPC servers Freedom asked gave different answers for " +
             "this name. At least one of them is wrong, so nothing was loaded."
         else -> "$label lookup failed" to
-            "Couldn't reach ${if (tezos) "a Tezos" else "an Ethereum"} RPC endpoint to resolve this name. " +
-            "Check your connection and try again."
+            if (tezos) {
+                "Couldn't reach a Tezos RPC endpoint to resolve this name. " +
+                    "Check your connection and try again."
+            } else {
+                "Couldn't reach an Ethereum RPC endpoint to resolve this name. Check your " +
+                    "connection, or the endpoints in Settings &rarr; RPC providers, and try again."
+            }
     }
 }
 

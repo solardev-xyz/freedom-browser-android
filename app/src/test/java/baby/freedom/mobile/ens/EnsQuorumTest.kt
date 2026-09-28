@@ -173,4 +173,15 @@ class EnsQuorumTest {
         assertTrue(EnsQuorum.worthWidening(tie, asked = 3))
         assertFalse(EnsQuorum.worthWidening(tie, asked = 2))
     }
+
+    @Test
+    fun `wave order is the configured order of the servers that reported a head`() {
+        val pool = listOf("own", "infura", "pub1", "pub2", "pub3")
+        // Arrival order is irrelevant; the silent pub1 drops out.
+        val order = EnsQuorum.waveOrder(pool, listOf("pub3", "pub2", "infura", "own"))
+
+        assertEquals(listOf("own", "infura", "pub2", "pub3"), order)
+        assertEquals(listOf("own", "infura", "pub2"), order.take(EnsQuorum.K))
+        assertEquals(listOf("pub3"), order.drop(EnsQuorum.K))
+    }
 }

@@ -64,6 +64,7 @@ import baby.freedom.mobile.chains.rpc.ChainSource
 import baby.freedom.mobile.chains.rpc.ChainTrust
 import baby.freedom.mobile.chains.rpc.WalletRpc
 import baby.freedom.mobile.data.ChainStore
+import baby.freedom.mobile.ens.EnsRpcConfig
 import java.io.IOException
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
@@ -160,11 +161,15 @@ private sealed interface ReadCheck {
 }
 
 /** Why [ChainStore.addUserRpc] didn't add a URL, as the chain page says it; `null` once added. */
-internal fun userRpcAddError(result: ChainStore.RpcAddResult): String? = when (result) {
+internal fun userRpcAddError(result: ChainStore.RpcAddResult, url: String = ""): String? = when (result) {
     ChainStore.RpcAddResult.ADDED -> null
     ChainStore.RpcAddResult.INVALID -> "Not a usable RPC URL."
     ChainStore.RpcAddResult.DUPLICATE -> "That RPC is already in your list."
     ChainStore.RpcAddResult.PUBLIC -> "That's already one of this chain's public RPCs."
+    ChainStore.RpcAddResult.NAME_RESOLUTION_PUBLIC ->
+        (RpcUrls.normalize(url) ?: url).let(EnsRpcConfig::publicEndpointHost)
+            .let { host -> if (host != null) "Already provided by $host" else "That server is already provided" } +
+            ", one of name resolution's public RPCs, asked under its own switch there — it can't be one of yours."
     ChainStore.RpcAddResult.FULL -> "At most ${Chain.MAX_USER_RPC_URLS} of your own RPCs per chain."
     ChainStore.RpcAddResult.NO_CHAIN -> "This chain was removed."
     ChainStore.RpcAddResult.FAILED -> "Couldn't save the RPC. Try again."
@@ -276,7 +281,8 @@ private fun plural(n: Int, word: String) = if (n == 1) "1 $word" else "$n ${word
 internal fun ChainDetailPage(
     chain: Chain,
     onAddRpc: suspend (String) -> ChainStore.RpcAddResult,
-    onRemoveRpc: suspend (String) -> Boolean,
+    /** Removes an RPC of yours; the reason it didn't, or `null` once it did. */
+    onRemoveRpc: suspend (String) -> String?,
     onRemove: () -> Unit,
     onBack: () -> Unit,
 ) {
@@ -297,7 +303,7 @@ internal fun ChainDetailPage(
         if (saving || newRpcCheck.url == null) return
         saving = true
         scope.launch {
-            val error = userRpcAddError(onAddRpc(newRpc))
+            val error = userRpcAddError(onAddRpc(newRpc), newRpc)
             saving = false
             rpcError = error
             if (error == null) newRpc = ""
@@ -347,7 +353,7 @@ internal fun ChainDetailPage(
                         )
                         IconButton(onClick = {
                             scope.launch {
-                                rpcError = if (onRemoveRpc(url)) null else "Couldn't remove the RPC. Try again."
+                                rpcError = onRemoveRpc(url)
                             }
                         }) {
                             Icon(
@@ -384,10 +390,10 @@ internal fun ChainDetailPage(
             }
             SectionCard(title = "Public RPCs") {
                 Text(
-                    rpcCountLabel(chain.rpcUrls.size),
+                    rpcCountLabel(chain.publicRpcUrls.size),
                     style = MaterialTheme.typography.labelLarge,
                 )
-                for (url in chain.rpcUrls) {
+                for (url in chain.publicRpcUrls) {
                     Text(
                         url,
                         style = MaterialTheme.typography.bodySmall,

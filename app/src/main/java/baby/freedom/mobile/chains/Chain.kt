@@ -30,10 +30,15 @@ data class Chain(
      * #108), built-in chains included. The chain-data router tries them
      * before [rpcUrls], and one's answer on its own is labelled as the
      * user's own RPC's rather than unverified. Each has passed
-     * [RpcUrls.validate]; none is also in [rpcUrls].
+     * [RpcUrls.validate]. One can also be in [rpcUrls] (Ethereum mainnet's,
+     * added from the name-resolution page, which doesn't use [rpcUrls]):
+     * readers take the pool `distinct()`, so it's asked once, as yours.
      */
     val userRpcUrls: List<String> = emptyList(),
 ) {
+    /** [rpcUrls] not also among [userRpcUrls] — the chain page lists those under Your RPCs only. */
+    val publicRpcUrls: List<String> get() = rpcUrls.filter { it !in userRpcUrls }
+
     /** `0x`-prefixed hex chain ID, the EIP-1193 wire format. */
     val hexId: String get() = "0x" + id.toString(16)
 

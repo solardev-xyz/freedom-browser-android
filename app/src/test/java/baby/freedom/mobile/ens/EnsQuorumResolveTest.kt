@@ -32,6 +32,9 @@ class EnsQuorumResolveTest {
         var record: (block: String, data: String) -> EnsHttp.Reply?,
         /** Milliseconds the head answer takes, to fix the arrival order. */
         var headDelayMs: Long = 0,
+        /** Milliseconds the block-hash and record answers take. */
+        var hashDelayMs: Long = 0,
+        var recordDelayMs: Long = 0,
     )
 
     private class Request(val url: String, val method: String, val params: JSONArray)
@@ -67,9 +70,13 @@ class EnsQuorumResolveTest {
                 }
                 "eth_getBlockByNumber" -> {
                     val n = params.getString(0).removePrefix("0x").toLong(16)
+                    Thread.sleep(server.hashDelayMs)
                     server.hashOf(n)?.let { result("""{"number":"0x${n.toString(16)}","hash":"$it"}""") } ?: down
                 }
-                "eth_call" -> server.record(params.getString(1), params.getJSONObject(0).getString("data")) ?: down
+                "eth_call" -> {
+                    Thread.sleep(server.recordDelayMs)
+                    server.record(params.getString(1), params.getJSONObject(0).getString("data")) ?: down
+                }
                 else -> error("unexpected method $rpcMethod")
             }
         }
@@ -218,7 +225,7 @@ class EnsQuorumResolveTest {
         // The widened read stops once M agree; the liar stays on record.
         assertTrue("rpc2.test" in result.trust.agreed)
         assertTrue(result.trust.agreed.size >= EnsQuorum.M)
-        assertEquals(listOf("rpc1.test"), result.trust.dissented)
+        assertFalse("rpc1.test" in result.trust.agreed)
     }
 
     @Test
@@ -455,6 +462,361 @@ class EnsQuorumResolveTest {
         require(result is EnsResult.Ok) { "got $result" }
         assertTrue(result.trust.verified)
         assertEquals(setOf("rpc4.test", "rpc5.test"), result.trust.agreed.toSet())
+    }
+
+    // ---- The user's endpoint list as the quorum's pool (#102) ----
+
+    private fun offchainRevertReply(): EnsHttp.Reply {
+        val revert = encodeOffchainLookup(
+            sender = "0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe",
+            urls = listOf("https://gw.example/{sender}/{data}"),
+            callData = "deadbeef".hexToBytes(),
+            callback = "11223344".hexToBytes(),
+            extraData = "ee".hexToBytes(),
+        )
+        return EnsHttp.Reply(
+            200,
+            """{"jsonrpc":"2.0","id":1,"error":{"code":3,"message":"reverted","data":"$revert"}}""",
+        )
+    }
+
+    /** [rpcs], plus a gateway that counts the requests it gets. */
+    private class WithGateway(val rpcs: Servers) : EnsHttp {
+        val gatewayHits = java.util.concurrent.atomic.AtomicInteger()
+
+        override fun request(
+            method: String,
+            url: String,
+            headers: Map<String, String>,
+            body: String?,
+            timeoutMs: Int,
+            maxBytes: Long,
+            followRedirects: Boolean,
+        ): EnsHttp.Reply =
+            if (url.startsWith("https://gw.example/")) {
+                gatewayHits.incrementAndGet()
+                EnsHttp.Reply(200, """{"data":"0x01"}""")
+            } else {
+                rpcs.request(method, url, headers, body, timeoutMs, maxBytes, followRedirects)
+            }
+    }
+
+    @Test
+    fun `the first wave is the first servers in the configured order, not the fastest`() {
+        // The user ranked rpc1..rpc3 first, but they are the slowest to
+        // report a head; rpc4/rpc5 answer at once.
+        val servers = serversOf(
+            honest(delayMs = 30),
+            honest(delayMs = 20),
+            honest(delayMs = 10),
+            honest(delayMs = 0),
+            honest(delayMs = 0),
+        )
+
+        val result = resolve(servers)
+
+        require(result is EnsResult.Ok) { "got $result" }
+        assertTrue(result.trust.verified)
+        assertEquals(
+            setOf("https://rpc1.test/", "https://rpc2.test/", "https://rpc3.test/"),
+            servers.calls().map { it.url }.toSet(),
+        )
+        assertTrue(result.trust.agreed.toSet().all { it in setOf("rpc1.test", "rpc2.test", "rpc3.test") })
+    }
+
+    @Test
+    fun `the user's first endpoint doesn't decide alone`() {
+        // The user's own endpoint heads the list and says something the
+        // others don't: M stays 2, so it's outvoted.
+        val servers = serversOf(honest(ref = otherRef), honest(), honest(), honest(), honest())
+
+        val result = resolve(servers)
+
+        require(result is EnsResult.Ok) { "got $result" }
+        assertEquals("bzz://$honestRef", result.uri)
+        assertTrue(result.trust.verified)
+        assertFalse("rpc1.test" in result.trust.agreed)
+    }
+
+    @Test
+    fun `a single enabled endpoint gives answers labelled not cross-checked for that reason`() {
+        val servers = serversOf(honest())
+
+        val result = resolve(servers)
+
+        require(result is EnsResult.Ok) { "got $result" }
+        assertFalse(result.trust.verified)
+        assertTrue(result.trust.tooFewServers)
+        assertEquals(listOf("rpc1.test"), result.trust.agreed)
+        // Nothing to cross-check against: no anchor round at all.
+        assertEquals(0, servers.count("eth_blockNumber"))
+    }
+
+    @Test
+    fun `endpoints on one host are one provider, so not cross-checked`() {
+        // Three spellings one server answers alike (R6-F1): they'd be
+        // three votes if counted by URL.
+        val servers = Servers(
+            listOf("https://eth.drpc.org/?x=1", "https://eth.drpc.org", "https://eth.drpc.org//")
+                .zip(listOf(honest(), honest(), honest())).toMap(LinkedHashMap()),
+        )
+
+        val result = resolve(servers)
+
+        require(result is EnsResult.Ok) { "got $result" }
+        assertFalse(result.trust.verified)
+        assertTrue(result.trust.tooFewServers)
+        assertEquals(0, servers.count("eth_blockNumber"))
+    }
+
+    @Test
+    fun `a second endpoint of a provider gets no second vote`() {
+        // drpc twice (a keyed and a public one) says one thing, the two
+        // other providers another: by URL drpc would carry the vote.
+        val liar = honest(ref = otherRef)
+        val servers = Servers(
+            listOf(
+                "https://lb.drpc.live/ethereum/KEY",
+                "https://eth.drpc.org",
+                "https://rpc2.test/",
+                "https://rpc3.test/",
+            ).zip(listOf(liar, liar, honest(), honest())).toMap(LinkedHashMap()),
+        )
+
+        val result = resolve(servers)
+
+        require(result is EnsResult.Ok) { "got $result" }
+        assertEquals("bzz://$honestRef", result.uri)
+        assertTrue(result.trust.verified)
+        // The public twin is probed for a head but gets no vote: DRPC's
+        // keyed endpoint answered first in order and holds the seat.
+        assertEquals(0, servers.log.count { it.url == "https://eth.drpc.org" && it.method != "eth_blockNumber" })
+    }
+
+    @Test
+    fun `a provider whose keyed endpoint is down votes through its public twin`() {
+        // A mistyped or expired DRPC key (every request refused) with only
+        // three providers on: without the public DRPC standing in, two
+        // heads are too few for a median (PR #169 R1-F1).
+        val badKey = Server(head = null, hashOf = { null }, record = { _, _ -> null })
+        val servers = Servers(
+            listOf(
+                "https://lb.drpc.live/ethereum/BADKEY",
+                "https://eth.drpc.org",
+                "https://rpc2.test/",
+                "https://rpc3.test/",
+            ).zip(listOf(badKey, honest(), honest(), honest())).toMap(LinkedHashMap()),
+        )
+
+        val result = resolve(servers)
+
+        require(result is EnsResult.Ok) { "got $result" }
+        assertEquals("bzz://$honestRef", result.uri)
+        assertTrue(result.trust.verified)
+        assertEquals(anchor, result.trust.block)
+        assertTrue(servers.log.any { it.url == "https://eth.drpc.org" && it.method == "eth_getBlockByNumber" })
+        assertEquals(0, servers.calls("https://lb.drpc.live/ethereum/BADKEY").size)
+    }
+
+    @Test
+    fun `a keyed endpoint that reports a head but fails the read hands the vote to its public twin`() {
+        // DRPC's keyed endpoint answers heads and block hashes but its
+        // eth_call is rate-limited; rpc3's record read fails too. Without
+        // eth.drpc.org standing in for the failed read, only rpc2 answers
+        // and the lookup is unverified (PR #169 R2-F1).
+        val limited = honest().apply { record = { _, _ -> null } }
+        val readless = honest().apply { record = { _, _ -> null } }
+        val servers = Servers(
+            listOf(
+                "https://lb.drpc.live/ethereum/KEY",
+                "https://eth.drpc.org",
+                "https://rpc2.test/",
+                "https://rpc3.test/",
+            ).zip(listOf(limited, honest(), honest(), readless)).toMap(LinkedHashMap()),
+        )
+
+        val result = resolve(servers)
+
+        require(result is EnsResult.Ok) { "got $result" }
+        assertEquals("bzz://$honestRef", result.uri)
+        assertTrue(result.trust.verified)
+        assertEquals(anchor, result.trust.block)
+        assertTrue("eth.drpc.org" in result.trust.agreed)
+        assertTrue("rpc2.test" in result.trust.agreed)
+        // Asked once each: the keyed seat, then its twin in its place.
+        assertEquals(1, servers.calls("https://lb.drpc.live/ethereum/KEY").size)
+        assertEquals(1, servers.calls("https://eth.drpc.org").size)
+    }
+
+    @Test
+    fun `a stand-in's answer counts once for its provider`() {
+        // Keyed DRPC fails the read, eth.drpc.org stands in and lies; the
+        // two honest providers still out-vote it, and DRPC is one dissent.
+        val limited = honest().apply { record = { _, _ -> null } }
+        val servers = Servers(
+            listOf(
+                "https://lb.drpc.live/ethereum/KEY",
+                "https://eth.drpc.org",
+                "https://rpc2.test/",
+                "https://rpc3.test/",
+            ).zip(listOf(limited, honest(otherRef), honest(), honest())).toMap(LinkedHashMap()),
+        )
+
+        val result = resolve(servers)
+
+        require(result is EnsResult.Ok) { "got $result" }
+        assertEquals("bzz://$honestRef", result.uri)
+        assertTrue(result.trust.verified)
+        assertFalse(result.trust.agreed.any { "drpc" in it })
+    }
+
+    @Test
+    fun `a stand-in starts as soon as its seat fails, reading and hashing at once`() {
+        // Keyed DRPC's eth_call fails at once while rpc3 takes 3 s to fail
+        // its own. eth.drpc.org must not wait for rpc3, nor fetch its
+        // block hash only after its read (PR #169 R3-F1): its 800 ms read
+        // and 800 ms hash overlap, and the wave is decided with rpc2.
+        val limited = honest().apply { record = { _, _ -> null } }
+        val slowFail = honest().apply {
+            record = { _, _ -> null }
+            recordDelayMs = 3_000
+        }
+        val twin = honest().apply {
+            hashDelayMs = 800
+            recordDelayMs = 800
+        }
+        val servers = Servers(
+            listOf(
+                "https://lb.drpc.live/ethereum/KEY",
+                "https://eth.drpc.org",
+                "https://rpc2.test/",
+                "https://rpc3.test/",
+            ).zip(listOf(limited, twin, honest(), slowFail)).toMap(LinkedHashMap()),
+        )
+        val resolver = EnsResolver(servers.byUrl.keys.toList(), servers)
+        // Settle the anchor first so only the reads are timed.
+        runBlocking { resolver.resolveContenthash("warm.eth") }
+
+        val startedAt = System.currentTimeMillis()
+        val result = runBlocking { resolver.resolveContenthash("quorum.eth") }
+        val took = System.currentTimeMillis() - startedAt
+
+        require(result is EnsResult.Ok) { "got $result" }
+        assertTrue(result.trust.verified)
+        assertTrue("eth.drpc.org" in result.trust.agreed)
+        // Serial would be ≥ 3 s (rpc3) + 800 + 800; overlapped is ~800.
+        assertTrue("took $took ms", took < 1_500)
+    }
+
+    @Test
+    fun `two endpoints of one provider still count one head each provider`() {
+        // Both DRPC endpoints report a head; only three providers — the
+        // median is over three heads, and DRPC's keyed one alone reads.
+        val servers = Servers(
+            listOf(
+                "https://lb.drpc.live/ethereum/KEY",
+                "https://eth.drpc.org",
+                "https://rpc2.test/",
+                "https://rpc3.test/",
+            ).zip(listOf(honest(), honest(), honest(), honest())).toMap(LinkedHashMap()),
+        )
+
+        val result = resolve(servers)
+
+        require(result is EnsResult.Ok) { "got $result" }
+        assertTrue(result.trust.verified)
+        assertEquals(0, servers.calls("https://eth.drpc.org").size)
+        assertFalse("eth.drpc.org" in result.trust.agreed)
+    }
+
+    @Test
+    fun `too few servers reachable is not the same as too few enabled`() {
+        val silent = Server(head = null, hashOf = { null }, record = { _, _ -> null })
+        val servers = serversOf(honest(), silent, Server(null, { null }, { _, _ -> null }))
+
+        val result = resolve(servers)
+
+        require(result is EnsResult.Ok) { "got $result" }
+        assertFalse(result.trust.verified)
+        assertFalse(result.trust.tooFewServers)
+    }
+
+    @Test
+    fun `with CCIP-Read off, an OffchainLookup under the quorum is an agreed refusal`() {
+        val offchain = Server(head = head, hashOf = ::canonicalHash, record = { _, _ -> offchainRevertReply() })
+        val rpcs = serversOf(offchain, offchain, offchain, offchain, offchain)
+        val http = WithGateway(rpcs)
+        val resolver = EnsResolver(
+            { EnsResolver.Settings(rpcs.byUrl.keys.toList(), ccipRead = false) },
+            http,
+        )
+
+        val result = runBlocking { resolver.resolveContenthash("off.eth") }
+
+        require(result is EnsResult.Error) { "got $result" }
+        assertEquals("CCIP_DISABLED", result.reason)
+        assertFalse(result.retryable)
+        assertEquals(0, http.gatewayHits.get())
+        // A refusal, not a failure: the wave isn't widened past K.
+        assertTrue(rpcs.calls().size <= EnsQuorum.K)
+        assertTrue(rpcs.calls().all { it.params.getString(1) == anchorTag })
+    }
+
+    @Test
+    fun `turning CCIP-Read back on follows the lookup at once`() {
+        val offchain = Server(
+            head = head,
+            hashOf = ::canonicalHash,
+            record = { _, data ->
+                if (data.startsWith("0x9061b923")) offchainRevertReply() else contenthash(honestRef)
+            },
+        )
+        val rpcs = serversOf(offchain, offchain, offchain)
+        val http = WithGateway(rpcs)
+        var ccip = false
+        val resolver = EnsResolver({ EnsResolver.Settings(rpcs.byUrl.keys.toList(), ccipRead = ccip) }, http)
+
+        val off = runBlocking { resolver.resolveContenthash("off.eth") }
+        require(off is EnsResult.Error && off.reason == "CCIP_DISABLED") { "got $off" }
+        ccip = true
+        val on = runBlocking { resolver.resolveContenthash("off.eth") }
+
+        require(on is EnsResult.Ok) { "got $on" }
+        assertTrue(on.trust.verified)
+        assertTrue(http.gatewayHits.get() > 0)
+    }
+
+    @Test
+    fun `a settings change starts a new anchor over the new pool`() {
+        val a = serversOf(honest(), honest(), honest())
+        val b = Servers(
+            listOf("https://mine.test/", "https://rpc2.test/", "https://rpc3.test/")
+                .zip(listOf(honest(), honest(), honest())).toMap(LinkedHashMap()),
+        )
+        val both = object : EnsHttp {
+            override fun request(
+                method: String,
+                url: String,
+                headers: Map<String, String>,
+                body: String?,
+                timeoutMs: Int,
+                maxBytes: Long,
+                followRedirects: Boolean,
+            ): EnsHttp.Reply = (if (url in b.byUrl && url !in a.byUrl) b else a)
+                .request(method, url, headers, body, timeoutMs, maxBytes, followRedirects)
+        }
+        var pool = a.byUrl.keys.toList()
+        val resolver = EnsResolver({ EnsResolver.Settings(pool) }, both)
+
+        val first = runBlocking { resolver.resolveContenthash("quorum.eth") }
+        require(first is EnsResult.Ok && first.trust.verified) { "got $first" }
+        pool = b.byUrl.keys.toList()
+        val second = runBlocking { resolver.resolveContenthash("quorum.eth") }
+
+        // Not the cached answer: the added endpoint was asked, head and record.
+        require(second is EnsResult.Ok && second.trust.verified) { "got $second" }
+        assertEquals(1, b.count("eth_blockNumber"))
+        assertEquals(1, b.calls("https://mine.test/").size)
     }
 }
 

@@ -1,6 +1,8 @@
 package baby.freedom.mobile.browser
 
 import baby.freedom.mobile.ens.EnsResult
+import baby.freedom.mobile.ens.EnsRpcConfig
+import kotlinx.coroutines.runBlocking
 import baby.freedom.mobile.ens.EnsTrust
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -529,6 +531,173 @@ class GatewaysTest {
         withLookup({ EnsResult.Error(it, "NAME_TOO_LONG", "a label is longer than 255 bytes") }) {
             assertEquals("ens_name_too_long", Gateways.reverifyEnsDocument(name, pins))
             assertNull(pins.lastAnswerFor(name))
+        }
+    }
+
+    @Test
+    fun `reverifyEnsDocument says CCIP-Read is off rather than lookup failed`() {
+        withLookup({ EnsResult.Error(it, "CCIP_DISABLED", "off") }) {
+            val code = Gateways.reverifyEnsDocument("offchain.eth", EnsDocumentPins())
+            assertEquals("ens_ccip_disabled", code)
+            assertEquals(502, statusForNameResolutionError(code!!))
+        }
+    }
+
+    @Test
+    fun `with CCIP-Read off, an earlier answer doesn't bring the name back`() {
+        // Loaded before CCIP-Read was switched off; Back / reload now.
+        KnownEnsNames.record("bzz://$ref64", "offchain.eth", EnsTrust.ASSUMED)
+        val pins = EnsDocumentPins()
+        withLookup({ EnsResult.Error(it, "CCIP_DISABLED", "off") }) {
+            assertEquals("ens_ccip_disabled", Gateways.reverifyEnsDocument("offchain.eth", pins))
+            // Every later document too — the refusal doesn't open the
+            // failure window that would let one skip the wait and fall back.
+            assertEquals("ens_ccip_disabled", Gateways.reverifyEnsDocument("offchain.eth", pins))
+            assertNull(pins.uriFor("offchain.eth"))
+            // The answer is kept for when CCIP-Read is back on.
+            assertEquals("bzz://$ref64", KnownEnsNames.uriFor("offchain.eth"))
+        }
+    }
+
+    @Test
+    fun `a lookup started under old settings isn't joined after a settings change`() {
+        val realConfig = Gateways.ensRpcConfig
+        var config = EnsRpcConfig(customEndpoints = listOf("https://old.example"))
+        Gateways.ensRpcConfig = { config }
+        val release = java.util.concurrent.CountDownLatch(1)
+        val lookups = java.util.concurrent.atomic.AtomicInteger(0)
+        try {
+            withLookup({ name ->
+                lookups.incrementAndGet()
+                // Which endpoints this lookup asks is fixed when it starts.
+                val old = runBlocking { Gateways.ensRpcConfig() }.customEndpoints.isNotEmpty()
+                if (old) {
+                    release.await() // the old endpoint is slow to answer
+                    EnsResult.Ok(name, "bzz", "bzz://$ref64", ref64, EnsTrust.ASSUMED)
+                } else {
+                    EnsResult.Ok(name, "bzz", "bzz://$otherRef", otherRef, EnsTrust.ASSUMED)
+                }
+            }) {
+                val oldPins = EnsDocumentPins()
+                val first = Thread { Gateways.reverifyEnsDocument("switch.eth", oldPins) }
+                first.start()
+                val until = System.currentTimeMillis() + 2_000
+                while (lookups.get() == 0 && System.currentTimeMillis() < until) Thread.sleep(5)
+                assertEquals(1, lookups.get())
+
+                // The user removes the endpoint; a page for the name arrives.
+                config = EnsRpcConfig()
+                val pins = EnsDocumentPins()
+                assertNull(Gateways.reverifyEnsDocument("switch.eth", pins))
+                assertEquals(2, lookups.get())
+                assertEquals("bzz://$otherRef", pins.uriFor("switch.eth"))
+                assertEquals("bzz://$otherRef", KnownEnsNames.uriFor("switch.eth"))
+
+                // The first document's lookup answers late, from the old
+                // endpoint: it asks again rather than taking that answer.
+                release.countDown()
+                first.join(2_000)
+                assertFalse(first.isAlive)
+                assertEquals("bzz://$otherRef", oldPins.uriFor("switch.eth"))
+                assertEquals("bzz://$otherRef", KnownEnsNames.uriFor("switch.eth"))
+            }
+        } finally {
+            release.countDown()
+            Gateways.ensRpcConfig = realConfig
+        }
+    }
+
+    @Test
+    fun `failures recorded under superseded settings or past their window are dropped`() {
+        val realConfig = Gateways.ensRpcConfig
+        var config = EnsRpcConfig(customEndpoints = listOf("https://a.example"))
+        Gateways.ensRpcConfig = { config }
+        val window = Gateways.reverifyFailureWindowMs
+        try {
+            withLookup({ EnsResult.Error(it, "PROVIDER_ERROR", "down", retryable = true) }) {
+                fun fail(name: String) {
+                    KnownEnsNames.record("bzz://$ref64", name, EnsTrust.ASSUMED)
+                    assertNull(Gateways.reverifyEnsDocument(name, EnsDocumentPins()))
+                    // The failure is recorded when the lookup completes.
+                    val until = System.currentTimeMillis() + 2_000
+                    while (Gateways.ensLookupFailureCount() == 0 &&
+                        System.currentTimeMillis() < until
+                    ) Thread.sleep(5)
+                }
+                fail("a.eth")
+                fail("b.eth")
+                assertEquals(2, Gateways.ensLookupFailureCount())
+
+                // Each settings change leaves nothing behind from the old ones.
+                repeat(5) { i ->
+                    config = EnsRpcConfig(customEndpoints = listOf("https://e$i.example"))
+                    fail("a.eth")
+                    assertEquals(1, Gateways.ensLookupFailureCount())
+                }
+
+                // Under the same settings, failures whose window has closed go too.
+                fail("b.eth")
+                assertEquals(2, Gateways.ensLookupFailureCount())
+                Gateways.reverifyFailureWindowMs = 1
+                Thread.sleep(5)
+                fail("c.eth")
+                assertEquals(1, Gateways.ensLookupFailureCount())
+            }
+        } finally {
+            Gateways.reverifyFailureWindowMs = window
+            Gateways.ensRpcConfig = realConfig
+        }
+    }
+
+    @Test
+    fun `a lookup failing under superseded settings keeps the current settings' failures`() {
+        val realConfig = Gateways.ensRpcConfig
+        var config = EnsRpcConfig(customEndpoints = listOf("https://old.example"))
+        Gateways.ensRpcConfig = { config }
+        val deadline = Gateways.reverifyDeadlineMs
+        val release = java.util.concurrent.CountDownLatch(1)
+        try {
+            withLookup({ name ->
+                if (name == "old.eth") release.await()
+                EnsResult.Error(name, "PROVIDER_ERROR", "down", retryable = true)
+            }) {
+                KnownEnsNames.record("bzz://$ref64", "old.eth", EnsTrust.ASSUMED)
+                KnownEnsNames.record("bzz://$ref64", "new.eth", EnsTrust.ASSUMED)
+                Gateways.reverifyDeadlineMs = 50
+                // A lookup under the old settings is stuck on a removed endpoint.
+                assertNull(Gateways.reverifyEnsDocument("old.eth", EnsDocumentPins()))
+
+                // The user switches settings; a lookup under them fails.
+                config = EnsRpcConfig(customEndpoints = listOf("https://new.example"))
+                assertNull(Gateways.reverifyEnsDocument("new.eth", EnsDocumentPins()))
+                var until = System.currentTimeMillis() + 2_000
+                while (Gateways.ensLookupFailureCount() == 0 &&
+                    System.currentTimeMillis() < until
+                ) Thread.sleep(5)
+                assertEquals(1, Gateways.ensLookupFailureCount())
+
+                // The old lookup now fails too: it neither drops the
+                // current failure nor records one of its own.
+                release.countDown()
+                Thread.sleep(200)
+                assertEquals(1, Gateways.ensLookupFailureCount())
+
+                // So the next document for new.eth still skips the wait.
+                val stall = java.util.concurrent.CountDownLatch(1)
+                Gateways.ensLookup = { name ->
+                    stall.await()
+                    EnsResult.Error(name, "PROVIDER_ERROR", "down", retryable = true)
+                }
+                Gateways.reverifyDeadlineMs = 5_000
+                val started = System.currentTimeMillis()
+                assertNull(Gateways.reverifyEnsDocument("new.eth", EnsDocumentPins()))
+                assertTrue(System.currentTimeMillis() - started < 2_000)
+                stall.countDown()
+            }
+        } finally {
+            release.countDown()
+            Gateways.reverifyDeadlineMs = deadline
+            Gateways.ensRpcConfig = realConfig
         }
     }
 

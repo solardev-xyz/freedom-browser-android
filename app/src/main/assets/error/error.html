@@ -289,9 +289,19 @@
             'nothing was loaded. Try again in a moment.';
         } else if (error === 'ens_lookup_failed') {
           titleEl.textContent = nameLabel + ' lookup failed';
-          descriptionEl.innerHTML =
-            "Couldn't reach " + (nameLabel === 'Tezos Domains' ? 'a Tezos' : 'an Ethereum') +
-            ' RPC endpoint to resolve this name. Check your connection and try again.';
+          if (detail === 'CCIP_DISABLED') {
+            descriptionEl.innerHTML =
+              'This name is resolved through an off-chain gateway (CCIP-Read), which is ' +
+              'turned off in Settings &rarr; Name resolution.';
+          } else if (nameLabel === 'Tezos Domains') {
+            descriptionEl.innerHTML =
+              "Couldn't reach a Tezos RPC endpoint to resolve this name. Check your " +
+              'connection and try again.';
+          } else {
+            descriptionEl.innerHTML =
+              "Couldn't reach an Ethereum RPC endpoint to resolve this name. Check your " +
+              'connection, or the endpoints in Settings &rarr; RPC providers, and try again.';
+          }
         } else if (error === 'web3_unverified') {
           // #123: an onchain app's code only one RPC server returned.
           document.body.classList.add('warn');
