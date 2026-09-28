@@ -1637,6 +1637,7 @@ fun BrowserScreen(
             BrowserWebViewHost(
                 tabs = tabs,
                 modifier = Modifier.fillMaxSize(),
+                covered = overlayShown,
             )
             // Home overlay. Rendered whenever the tab hasn't loaded
             // a real page (fresh tab, or user navigated home). The

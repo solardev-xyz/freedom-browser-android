@@ -587,7 +587,10 @@ private fun ScreenLockSettingsButton() {
  * IME attached while hidden: without this, recovery-phrase words typed
  * on the Import page before tapping its field would land in the covered
  * Settings search (saved instance state, learning keyboard, no
- * `FLAG_SECURE` once the user goes back).
+ * `FLAG_SECURE` once the user goes back). The pages' WebViews are
+ * handled for the whole time the panel is up, not just here: page
+ * script can re-take focus whenever it likes, so [BrowserWebViewHost]
+ * blocks focus for them while any panel covers them.
  */
 @Composable
 private fun ReleaseCoveredFocus() {

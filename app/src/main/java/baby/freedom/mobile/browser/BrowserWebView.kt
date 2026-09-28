@@ -51,6 +51,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.snapshotFlow
@@ -747,6 +748,7 @@ internal fun captureThumbnail(view: WebView, state: BrowserState) {
 fun BrowserWebViewHost(
     tabs: TabsState,
     modifier: Modifier = Modifier,
+    covered: Boolean = false,
 ) {
     val context = LocalContext.current
     val repo = remember(context) { BrowsingRepository.get(context) }
@@ -1060,6 +1062,24 @@ fun BrowserWebViewHost(
         factory = { frame },
         modifier = modifier.fillMaxSize(),
     )
+
+    // A full-screen panel covers the pages ([covered]): none of them may
+    // hold Android focus underneath it. Page script can take it back at
+    // any time (`element.focus()` asks for view focus), and a focused
+    // WebView gets the hardware keyboard's keys — typing meant for the
+    // panel (the Wallet page's recovery phrase, above all) would go to a
+    // page nobody can see. Blocking descendants makes those requests
+    // fail for as long as the panel is up, not just when it opens.
+    SideEffect {
+        val blocked = frame.descendantFocusability == ViewGroup.FOCUS_BLOCK_DESCENDANTS
+        if (covered == blocked) return@SideEffect
+        if (covered) {
+            frame.descendantFocusability = ViewGroup.FOCUS_BLOCK_DESCENDANTS
+            frame.findFocus()?.clearFocus()
+        } else {
+            frame.descendantFocusability = ViewGroup.FOCUS_BEFORE_DESCENDANTS // ViewGroup default
+        }
+    }
 
     // Expose a "snapshot the active tab" hook to TabsState. The tab
     // switcher invokes this right before it renders and [TabsState.switchTo]
