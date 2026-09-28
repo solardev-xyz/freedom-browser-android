@@ -38,12 +38,15 @@ internal data class AppliedUpdate(
  *   each list's file and sha256) and one `<list_id>.txt` per list;
  * - `updated.next/` — an update being staged; never read;
  * - `updated.prev/` — the update `updated/` replaced, for the moment of
- *   the swap.
+ *   the swap. Found alone (the process died between the swap's two
+ *   renames), it is put back as `updated/` before anything reads.
  *
  * A list is taken from `updated/` only while its bytes still hash to
  * what `state.json` records; otherwise — and for any category the
- * update doesn't carry — the bundled asset serves. So the bundled
- * lists are a floor no bad update or damaged file can go below.
+ * update doesn't carry — the bundled asset serves. The engine also
+ * keeps the bundled list where it is newer than the update's
+ * ([updatedListIsNewer]). So the bundled lists are a floor no bad,
+ * stale or damaged update can go below.
  *
  * [lock] covers the swap and every read of `updated/`, so a read never
  * sees half of one update and half of the next.
@@ -56,7 +59,10 @@ internal class AdblockListStore(val root: File) {
     private val previous get() = File(root, "updated.prev")
 
     /** The applied update's state, or `null` when there is none (or it is unreadable). */
-    fun applied(): AppliedUpdate? = synchronized(lock) { readState(File(active, STATE)) }
+    fun applied(): AppliedUpdate? = synchronized(lock) {
+        recoverLocked()
+        readState(File(active, STATE))
+    }
 
     /**
      * The text of [category]'s list from the applied update, if it
@@ -64,6 +70,7 @@ internal class AdblockListStore(val root: File) {
      * Returns the list with the update it came from.
      */
     fun updatedList(category: String): Pair<String, AppliedUpdate>? = synchronized(lock) {
+        recoverLocked()
         val state = readState(File(active, STATE)) ?: return null
         val entry = state.lists[category] ?: return null
         val bytes = runCatching { File(active, entry.file).readBytes() }.getOrNull() ?: return null
@@ -76,6 +83,7 @@ internal class AdblockListStore(val root: File) {
 
     /** The applied copy of [entry]'s list, if one is on disk with the same hash. */
     fun reusable(entry: AdblockManifestList): ByteArray? = synchronized(lock) {
+        recoverLocked()
         val state = readState(File(active, STATE)) ?: return null
         val applied = state.lists[entry.category] ?: return null
         if (applied.sha256 != entry.sha256) return null
@@ -105,6 +113,7 @@ internal class AdblockListStore(val root: File) {
         }
         File(staging, STATE).writeText(writeState(AppliedUpdate(manifest.version, manifest.generatedAt, state)))
         synchronized(lock) {
+            recoverLocked()
             previous.deleteRecursively()
             if (active.exists() && !active.renameTo(previous)) {
                 staging.deleteRecursively()
@@ -117,6 +126,18 @@ internal class AdblockListStore(val root: File) {
                 throw IOException("can't promote the staged update")
             }
             previous.deleteRecursively()
+        }
+    }
+
+    /**
+     * Finish a swap the process died in the middle of: `updated/` was
+     * moved aside to `updated.prev/` but `updated.next/` never took its
+     * place. Put the previous update back, so a crash never drops the
+     * lists (and the version floor) to the bundled ones.
+     */
+    private fun recoverLocked() {
+        if (!active.exists() && previous.exists() && !previous.renameTo(active)) {
+            Log.w(TAG, "can't restore $previous")
         }
     }
 
@@ -156,6 +177,71 @@ internal class AdblockListStore(val root: File) {
         const val STATE = "state.json"
     }
 }
+
+/**
+ * When a filter list's text says it was last changed, from its header
+ * (`! Last modified: 27 Sep 2026 22:48 UTC` or `2026-09-26 03:50 UTC`,
+ * else `! Version: 202609272248`), in epoch minutes — or `null` if the
+ * header has neither.
+ */
+internal fun filterListTimestamp(text: String): Long? {
+    var version: Long? = null
+    for (line in text.lineSequence().take(HEADER_LINES)) {
+        if (!line.startsWith("!")) {
+            if (line.isBlank() || line.startsWith("[")) continue
+            break
+        }
+        val body = line.removePrefix("!").trim()
+        when {
+            body.startsWith("Last modified:", ignoreCase = true) ->
+                parseLastModified(body.substringAfter(':').trim())?.let { return it }
+            body.startsWith("Version:", ignoreCase = true) && version == null ->
+                version = parseVersionStamp(body.substringAfter(':').trim())
+        }
+    }
+    return version
+}
+
+/**
+ * Whether an update's [updated] list should serve instead of the
+ * [bundled] one: unless the bundled list is dated later. An APK built
+ * after the feed's latest manifest ships fresher lists than that
+ * manifest (or a lagging feed read can hand back an even older one);
+ * the signed update is taken whenever either date is missing.
+ */
+internal fun updatedListIsNewer(updated: String, bundled: String): Boolean {
+    val u = filterListTimestamp(updated) ?: return true
+    val b = filterListTimestamp(bundled) ?: return true
+    return u >= b
+}
+
+private const val HEADER_LINES = 40
+
+private val MONTHS = listOf("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec")
+
+private fun parseLastModified(s: String): Long? {
+    Regex("""^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})""").find(s)?.let { m ->
+        val (y, mo, d, h, mi) = m.destructured
+        return epochMinutes(y.toInt(), mo.toInt(), d.toInt(), h.toInt(), mi.toInt())
+    }
+    Regex("""^(\d{1,2}) ([A-Za-z]{3})[A-Za-z]* (\d{4}) (\d{2}):(\d{2})""").find(s)?.let { m ->
+        val (d, mon, y, h, mi) = m.destructured
+        val mo = MONTHS.indexOf(mon.lowercase()) + 1
+        if (mo == 0) return null
+        return epochMinutes(y.toInt(), mo, d.toInt(), h.toInt(), mi.toInt())
+    }
+    return null
+}
+
+private fun parseVersionStamp(s: String): Long? {
+    val m = Regex("""^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})$""").find(s) ?: return null
+    val (y, mo, d, h, mi) = m.destructured
+    return epochMinutes(y.toInt(), mo.toInt(), d.toInt(), h.toInt(), mi.toInt())
+}
+
+private fun epochMinutes(y: Int, mo: Int, d: Int, h: Int, mi: Int): Long? = runCatching {
+    java.time.LocalDateTime.of(y, mo, d, h, mi).toEpochSecond(java.time.ZoneOffset.UTC) / 60
+}.getOrNull()
 
 /** How one update check ended. */
 internal sealed interface AdblockUpdateOutcome {

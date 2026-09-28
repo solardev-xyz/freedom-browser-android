@@ -415,7 +415,8 @@ internal object Adblock {
     /**
      * The engine for [categories] and the update its lists came from
      * (`null` if all are bundled). Each list is the applied update's
-     * copy when it has one that still matches its hash, else the bundled
+     * copy when it has one that still matches its hash and isn't older
+     * than the bundled asset ([updatedListIsNewer]), else the bundled
      * asset.
      */
     private fun build(
@@ -429,14 +430,20 @@ internal object Adblock {
         var update: AppliedUpdate? = null
         val texts = AdblockCategory.entries.filter { it in categories }.mapNotNull { category ->
             checkpoint()
-            lists.updatedList(category.key)?.let { (text, applied) ->
-                update = applied
-                return@mapNotNull text
-            }
             // A missing or unreadable list costs its own category only.
-            runCatching {
+            val bundled = runCatching {
                 context.assets.open("adblock/${category.file}").bufferedReader().use { it.readText() }
             }.onFailure { Log.w(TAG, "list ${category.file} unreadable", it) }.getOrNull()
+            lists.updatedList(category.key)?.let { (text, applied) ->
+                // The bundled lists are the floor: an update older than
+                // them (a newer APK, a stalled publisher) doesn't serve.
+                if (bundled == null || updatedListIsNewer(text, bundled)) {
+                    update = applied
+                    return@mapNotNull text
+                }
+                Log.i(TAG, "bundled ${category.file} is newer than update ${applied.version}'s; using it")
+            }
+            bundled
         }
         if (texts.isEmpty()) return null
         val built = AdblockEngine.build(texts, checkpoint)
@@ -453,9 +460,15 @@ internal object Adblock {
         scope.launch { checkForUpdatesNow() }
     }
 
-    private suspend fun checkForUpdatesNow(): AdblockUpdateOutcome? {
-        val lists = lists ?: return null
-        val settings = settings ?: return null
+    private suspend fun checkForUpdatesNow(): AdblockUpdateOutcome {
+        val lists = lists
+        val settings = settings
+        if (lists == null || settings == null) {
+            // Only before [start]; say so rather than leave the row blank.
+            val outcome = AdblockUpdateOutcome.Failed("ad blocking hasn't started yet")
+            _updateState.value = AdblockUpdateState(checking = false, last = outcome)
+            return outcome
+        }
         return updateMutex.withLock {
             _updateState.value = _updateState.value.copy(checking = true)
             val outcome = try {
@@ -486,10 +499,23 @@ internal object Adblock {
         }
     }
 
-    private fun lastCheck(lists: AdblockListStore): Long =
-        runCatching { File(lists.root, LAST_CHECK).readText().trim().toLong() }.getOrDefault(0L)
+    /**
+     * When the last check that counts ran: the stamp on disk (so a
+     * restart doesn't check again at once), or this process's own
+     * record of it if that's later — a stamp that can't be written
+     * (full or read-only storage) must not make the schedule loop
+     * check back to back.
+     */
+    private fun lastCheck(lists: AdblockListStore): Long = maxOf(
+        lastCheckInMemory,
+        runCatching { File(lists.root, LAST_CHECK).readText().trim().toLong() }.getOrDefault(0L),
+    )
+
+    @Volatile
+    private var lastCheckInMemory = 0L
 
     private fun stampLastCheck(lists: AdblockListStore) {
+        lastCheckInMemory = System.currentTimeMillis()
         runCatching {
             lists.root.mkdirs()
             File(lists.root, LAST_CHECK).writeText(System.currentTimeMillis().toString())

@@ -2,7 +2,9 @@ package baby.freedom.mobile.browser
 
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
@@ -208,6 +210,62 @@ class AdblockUpdatesTest {
         publish(5, list("ads", "easylist", "||ads.example^"))
         assertEquals(AdblockUpdateOutcome.NothingEnabled, update())
         assertNull(store.applied())
+    }
+
+    @Test
+    fun `a swap the process died in is finished from the previous update`() {
+        publish(5, list("ads", "easylist", "||ads.example^"))
+        update("ads")
+        // Killed between moving updated/ aside and promoting updated.next/.
+        val root = File(tmp.root, "adblock")
+        assertTrue(File(root, "updated").renameTo(File(root, "updated.prev")))
+        assertEquals(5L, store.applied()!!.version)
+        assertEquals("||ads.example^", text("ads"))
+        assertEquals(listOf("updated"), root.list()!!.sorted())
+        // And the version floor holds: 5 isn't applied again.
+        downloaded.clear()
+        assertEquals(AdblockUpdateOutcome.UpToDate(5), update("ads"))
+        assertEquals(emptyList<String>(), downloaded)
+    }
+
+    @Test
+    fun `a list's date is read from its header, in each form the lists use`() {
+        val minutes = { s: String -> java.time.Instant.parse(s).epochSecond / 60 }
+        assertEquals(
+            minutes("2026-09-27T22:48:00Z"),
+            filterListTimestamp("[Adblock Plus 2.0]\n! Version: 202609272248\n! Title: EasyList\n! Last modified: 27 Sep 2026 22:48 UTC\n||a^"),
+        )
+        assertEquals(
+            minutes("2026-09-26T03:50:00Z"),
+            filterListTimestamp("! Checksum: x\n! Title: Easylist Cookie List\n! Last modified: 2026-09-26 03:50 UTC\n##.c"),
+        )
+        // Only a version stamp.
+        assertEquals(minutes("2026-09-18T20:41:00Z"), filterListTimestamp("[Adblock Plus 2.0]\n! Version: 202609182041\n||a^"))
+        assertNull(filterListTimestamp("||ads.example^"))
+        assertNull(filterListTimestamp("! Last modified: yesterday\n||a^"))
+        // A date further down, among the rules, isn't the header's.
+        assertNull(filterListTimestamp("||a^\n! Last modified: 27 Sep 2026 22:48 UTC"))
+    }
+
+    @Test
+    fun `every bundled list carries a date the floor check can read`() {
+        for (category in AdblockCategory.entries) {
+            val text = File("src/main/assets/adblock/${category.file}").readText()
+            assertTrue(category.file, filterListTimestamp(text) != null)
+        }
+    }
+
+    @Test
+    fun `an update older than the bundled list doesn't replace it`() {
+        val bundled = "[Adblock Plus 2.0]\n! Last modified: 27 Sep 2026 22:48 UTC\n||new.example^"
+        val older = "[Adblock Plus 2.0]\n! Last modified: 18 Sep 2026 20:00 UTC\n||old.example^"
+        val newer = "[Adblock Plus 2.0]\n! Last modified: 2026-09-28 01:00 UTC\n||newer.example^"
+        assertFalse(updatedListIsNewer(older, bundled))
+        assertTrue(updatedListIsNewer(newer, bundled))
+        assertTrue(updatedListIsNewer(bundled, bundled))
+        // The signed update is taken when either side has no date.
+        assertTrue(updatedListIsNewer("||x^", bundled))
+        assertTrue(updatedListIsNewer(older, "||x^"))
     }
 
     @Test
