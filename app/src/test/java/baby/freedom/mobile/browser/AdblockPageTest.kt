@@ -291,6 +291,20 @@ class AdblockPageTest {
     }
 
     @Test
+    fun `a superseded network navigation doesn't stop a service worker's page adopting its frames`() {
+        val a2 = "https://news.example/a2"
+        val page = AdblockPage().apply { committed("https://news.example/a1") }
+        // A link to a slow page the WebView fetches, abandoned for another
+        // article the SW answers: the new navigation's start drops it.
+        page.answered("https://slow.example/x", replacesDocument = true, fetchedByWebView = true)
+        page.kept()
+        page.frameRequested("https://video.example/embed", referer = "https://news.example/")
+        page.committed(a2)
+        page.answered("https://video.example/watch", replacesDocument = true, fetchedByWebView = true)
+        assertEquals(a2, page.current(referer = "https://video.example/"))
+    }
+
+    @Test
     fun `a page restored from the back-forward cache doesn't adopt the outgoing page's frames`() {
         val back = "https://p.example/"
         val page = onA()

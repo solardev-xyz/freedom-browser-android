@@ -2699,6 +2699,11 @@ private fun buildRefreshableWebView(
                 if (request.isForMainFrame && view is PageWebView) {
                     view.documents.navigationStarted(target)
                 }
+                // A new top-level navigation supersedes whatever was
+                // pending, which may never report back (an ERR_ABORTED
+                // fetch sends nothing): drop it, or a service worker's
+                // page couldn't adopt its frames (#178 R6-F1).
+                if (request.isForMainFrame && !request.isRedirect) adblockPage.kept()
                 // A server redirect of a navigation already answered as a
                 // new document: that document is the redirect target's.
                 if (request.isForMainFrame && request.isRedirect) adblockPage.redirected(target)
