@@ -162,6 +162,8 @@ class RadicleNode internal constructor(
          * until that peer's fetch does.
          */
         @Volatile var fetching = false
+        /** The native fetch has returned, or was never started. */
+        @Volatile var fetchOver = false
         /** A [stop] already took the policy back; the job leaves it alone. */
         @Volatile var rolledBack = false
         /** The coroutine running this call, rollback included. */
@@ -330,9 +332,13 @@ class RadicleNode internal constructor(
     /**
      * Seed and fetch the repository [input] names (`rad:z…`, `rad://z…` or
      * a bare `z…`), reporting phase progress through [RadicleInfo.seed].
-     * Ignored while another seed is in flight or the node isn't running;
-     * a fetch left over from before a stop that wouldn't wind down in time
-     * doesn't count as in flight.
+     * Ignored while another seed is in flight or the node isn't running.
+     * Neither a fetch left over from before a stop that wouldn't wind down
+     * in time nor one the user already unseeded (a cancelled fetch that is
+     * mid-transfer runs on until that peer is done) counts as in flight: the
+     * UI has dropped its line and offers Seed again. A new seed of the
+     * *same* RID as such a fetch is refused with [STALE_FETCH_DETAIL] until
+     * it ends.
      *
      * A fetch that fails or is cancelled takes back the seeding policy it
      * added, so a mistyped or unreachable RID doesn't sit in the seeded
@@ -352,7 +358,7 @@ class RadicleNode internal constructor(
             // Checked under the lock [stop] marks the run under; see there.
             if (!wanted || _state.value.status != RadicleStatus.Running) return
             val current = seedRun.get()
-            if (current != null && current.epoch == nodeEpoch.get()) return
+            if (current != null && current.epoch == nodeEpoch.get() && !current.dismissed) return
             if (liveFetches.any { it.rid == rid }) {
                 _state.update {
                     it.copy(seed = RadicleSeed(rid, PHASE_FAILED, STALE_FETCH_DETAIL, active = false))
@@ -393,6 +399,7 @@ class RadicleNode internal constructor(
                 run.fetching = false
                 liveFetches -= run
             }
+            run.fetchOver = true
             seedRun.compareAndSet(run, null)
             val settled = when {
                 result == null -> RadicleSeed(rid, PHASE_FAILED, "unreadable fetch response", active = false)
@@ -429,10 +436,12 @@ class RadicleNode internal constructor(
     /**
      * Cancel [run]'s fetch, asking again until the node confirms it or the
      * fetch is over: a cancel that lands before the native fetch registered
-     * its cancel token is a silent no-op (`{"cancelled":false}`).
+     * its cancel token is a silent no-op (`{"cancelled":false}`). Keyed to
+     * [run] itself, not to it still being [seedRun]: an unseeded run is
+     * replaced there by the next seed, and must still be cancelled.
      */
     private suspend fun cancelFetch(run: SeedRun) {
-        while (seedRun.get() === run) {
+        while (!run.fetchOver) {
             val confirmed = runCatching { json(ops.cancelClone(run.rid))?.optBoolean("cancelled") == true }
                 .getOrDefault(false)
             if (confirmed) return

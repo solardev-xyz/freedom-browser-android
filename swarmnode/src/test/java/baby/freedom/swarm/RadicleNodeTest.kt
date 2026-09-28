@@ -522,6 +522,37 @@ class RadicleNodeTest {
     }
 
     @Test
+    fun anUnseededFetchStillTransferringDoesntBlockTheNextSeed() {
+        // Stop seeding on a fetch mid-transfer: libradicle confirms the cancel
+        // but runs on until that peer is done. The line is gone and Seed is
+        // offered again, so a new seed must go through (another RID) or say
+        // why not (the same RID), not be dropped without a word.
+        val ops = FakeOps().apply { transferring = true; cloneResult = """{"cancelled":true}""" }
+        val node = RadicleNode(config, ops)
+        node.start()
+        await("running", node) { it.status == RadicleStatus.Running }
+        node.seed(rid)
+        await("fetching", node) { it.seed?.phase == "fetching" }
+        node.unseed(rid)
+        await("line dropped", node) { it.seed == null && "unseed:$rid" in ops.calls }
+        node.seed(rid)
+        await("same RID refused with a reason", node) {
+            it.seed?.rid == rid && it.seed?.phase == "failed" && it.seed?.detail == RadicleNode.STALE_FETCH_DETAIL
+        }
+        val other = "rad:z2SzCC9zYnP17QRPZUhrP2RTEwZHj"
+        node.seed(other)
+        await("other RID fetching", node) { it.seed?.rid == other && "clone:$other" in ops.calls }
+        ops.transferring = false
+        ops.releaseClone.countDown()
+        await("other RID settled", node) { it.seed?.rid == other && it.seed?.active == false }
+        // The unseeded fetch's own end doesn't repaint a line over the new one.
+        Thread.sleep(200)
+        assertEquals(other, node.state.value.seed?.rid)
+        assertFalse(node.state.value.seededRepos.any { it.rid == rid })
+        node.dispose()
+    }
+
+    @Test
     fun aSeedRacingAStopIsAlwaysCancelled() {
         // A seed landing at the same moment as a stop is either refused or
         // cancelled by it, never left to run out the stop's whole wait.
