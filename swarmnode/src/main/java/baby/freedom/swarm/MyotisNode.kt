@@ -894,11 +894,19 @@ class MyotisNode internal constructor(
         /** How long a chain released from a park gets to re-judge its anchor before it can park again. */
         const val REJUDGE_GRACE_MS = 15_000L
 
-        /** Blocked reasons from fetching a checkpoint, which an engine that accepted its own anchor makes moot. */
+        /**
+         * Blocked reasons from fetching a checkpoint (including evidence that
+         * failed verification, [MyotisRecoveryReason.Mismatch]), which an
+         * engine that accepted its own anchor makes moot. Not
+         * [MyotisRecoveryReason.AnchorMismatch]: that recovery isn't for a
+         * stale anchor ([Recovery.forStaleAnchor] is false) and must still
+         * replace the checkpoint the engine contradicted.
+         */
         private val ACQUISITION_REASONS = setOf(
             MyotisRecoveryReason.Unavailable,
             MyotisRecoveryReason.QuorumUnavailable,
             MyotisRecoveryReason.QuorumConflict,
+            MyotisRecoveryReason.Mismatch,
             MyotisRecoveryReason.Clock,
             MyotisRecoveryReason.Stale,
         )

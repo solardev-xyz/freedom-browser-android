@@ -16,7 +16,12 @@ enum class MyotisRecoveryReason(val code: String) {
     Unavailable("unavailable"),
     QuorumUnavailable("quorum-unavailable"),
     QuorumConflict("quorum-conflict"),
-    /** Checkpoint evidence that didn't pass verification (acquisition or a saved record). */
+    /**
+     * Checkpoint evidence that didn't pass verification — while acquiring
+     * it, or when [MyotisGenerationStore.replace] re-validates it. A saved
+     * record that fails validation on reload is [Storage] (offers Repair),
+     * not this.
+     */
     Mismatch("mismatch"),
 
     /**
