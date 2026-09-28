@@ -73,8 +73,33 @@ class RpcUrlsTest {
             "https://[::]",
             "https://nas.local",
             "https://nas",
+            // Names that spell a loopback/LAN address for wildcard DNS to resolve.
+            "https://127.0.0.1.nip.io",
+            "https://10.0.0.1.nip.io/",
+            "https://rpc.192.168.1.10.xip.io",
+            "https://10-0-0-1.sslip.io",
+            "https://app-192-168-0-1.traefik.me",
+            "https://magic-0a000001.nip.io",
+            "https://7f000001.nip.io",
+            "https://0--1.sslip.io",
+            "https://fe80--1.sslip.io",
+            "https://localtest.me",
+            "https://rpc.lvh.me",
         )) {
             assertEquals(url, Rejection.INTERNAL_HOST, rejection(url))
+        }
+        // …and plain `http` to one is still not loopback.
+        assertEquals(Rejection.SCHEME, rejection("http://127.0.0.1.nip.io:8545"))
+        // A public address spelled the same way is just a public name.
+        for (url in listOf(
+            "https://8.8.8.8.nip.io",
+            "https://1-1-1-1.sslip.io",
+            "https://studiochain-cf4a1621.calderachain.xyz",
+            "https://dchain-2716446429837000-1.jsonrpc.sagarpc.io",
+            "https://rpc-e4a1b2c3.example.org",
+            "https://rpc-10-0.example.org",
+        )) {
+            assertEquals(url, url, RpcUrls.normalize(url))
         }
     }
 

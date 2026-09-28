@@ -32,8 +32,12 @@ import org.json.JSONObject
  *    [RpcUrls.validate] rule (https, public host, no credentials);
  *  - tracking-free: an entry chainlist marks `tracking: "yes"` or
  *    `"limited"` is dropped — only `"none"` or no claim either way stays.
- * Loopback RPCs (`http://localhost:8545` on dev chains) are dropped too:
- * a catalog pick must never point the app at the device itself.
+ * Loopback RPCs (`http://localhost:8545` on dev chains) are dropped too,
+ * as are names that spell out a loopback or LAN address
+ * (`127.0.0.1.nip.io`, `10-0-0-1.sslip.io`, `lvh.me` — see
+ * [RpcUrls.isInternal]). A public-looking name whose DNS *happens* to
+ * point at the device or the LAN can only be caught at connect time,
+ * by whatever sends the requests (#108), not by reading the URL.
  */
 object Chainlist {
     const val URL = "https://chainlist.org/rpcs.json"
@@ -175,10 +179,40 @@ object Chainlist {
         val query = url.substringAfter('?', "").substringBefore('#')
         if (query.isEmpty()) return false
         return query.split('&').any { param ->
-            val name = param.substringBefore('=').lowercase()
+            val rawName = param.substringBefore('=')
             val value = param.substringAfter('=', "")
-            KEY_NAME_PARTS.any { it in name } || (value.isNotEmpty() && looksLikeKey(value))
+            val name = percentDecoded(rawName).lowercase()
+            KEY_NAME_PARTS.any { it in name } ||
+                // A bare `?<key>` has no `=`: the whole parameter is its name.
+                (rawName.isNotEmpty() && looksLikeKey(rawName)) ||
+                (value.isNotEmpty() && looksLikeKey(value))
         }
+    }
+
+    /**
+     * [s] with `%XX` escapes decoded (`+` left alone), so `api%5Fkey`
+     * reads as `api_key`; a malformed escape leaves the rest as is.
+     */
+    private fun percentDecoded(s: String): String {
+        if ('%' !in s) return s
+        val out = java.io.ByteArrayOutputStream()
+        var i = 0
+        while (i < s.length) {
+            val c = s[i]
+            val hex = if (c == '%' && i + 2 < s.length && HEX.matches(s.substring(i + 1, i + 3))) {
+                s.substring(i + 1, i + 3).toInt(16)
+            } else {
+                null
+            }
+            if (hex != null) {
+                out.write(hex)
+                i += 3
+            } else {
+                out.write(c.toString().toByteArray(Charsets.UTF_8))
+                i++
+            }
+        }
+        return out.toString("UTF-8")
     }
 
     /**

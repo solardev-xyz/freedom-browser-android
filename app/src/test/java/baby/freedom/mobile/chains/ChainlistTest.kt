@@ -191,6 +191,12 @@ class ChainlistTest {
             // …or under any name at all, judged by the value alone.
             "https://rpc.example.org/?n=sepolia&whatever=9aa3d95b3bc440fa88ea12eaa4456161",
             "https://rpc.example.org/?q=WddzdzI2o9S3COdT73d5w6AIogbKq4X-",
+            // A bare key with no `=` is a parameter name, judged as a key too.
+            "https://rpc.example.org/?9aa3d95b3bc440fa88ea12eaa4456161",
+            "https://rpc.example.org/?chain=1&WddzdzI2o9S3COdT73d5w6AIogbKq4X-",
+            // A credential name hidden behind percent-encoding.
+            "https://rpc.example.org/?api%5Fkey=abc",
+            "https://rpc.example.org/?%74oken=abc",
             // Subdomain-keyed providers.
             "https://9aa3d95b3bc440fa88ea12eaa4456161.eth.rpc.rivet.cloud/",
             "https://2ccf18bf-2916-4198-8856-42172854353c.rpc.example.org/",
@@ -200,6 +206,8 @@ class ChainlistTest {
         // Public query parameters and generated-looking public host labels from the live catalog.
         for (url in listOf(
             "https://andromeda.metis.io/?owner=1088",
+            "https://rpc.example.org/?mainnet",
+            "https://rpc.example.org/?chain%5Fid=1",
             "https://api.uniblock.dev/uni/v1/json-rpc?chainId=151",
             "https://rpc-astra-9on2f72wzn.t.conduit.xyz",
             "https://fraa-flashbox-2800-rpc.a.stagenet.tanssi.network",

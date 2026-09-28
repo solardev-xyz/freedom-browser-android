@@ -9,8 +9,11 @@ import java.net.URI
  * public host, no user name or password, no `{API_KEY}`-style
  * placeholder. Plain `http://` is allowed only to a loopback host, for a
  * node running on the device itself; LAN and other internal addresses
- * are refused either way, so a chain definition — including one pulled
- * from chainlist.org — can't point the app at the local network.
+ * are refused either way — as literals, and as DNS names that spell one
+ * out (`10.0.0.1.nip.io`, see [isInternal]) — so a chain definition,
+ * including one pulled from chainlist.org, can't name the local network.
+ * A public-looking name whose DNS resolves to an internal address can
+ * only be caught when connecting, by whatever sends the requests (#108).
  *
  * The same rules gate a URL the user types and every RPC imported from
  * the chainlist.org catalog ([Chainlist]).
@@ -92,6 +95,14 @@ object RpcUrls {
      * an IPv4-mapped, NAT64 or 6to4 IPv6 address); a unique-local,
      * link-local, site-local, Teredo or multicast IPv6; `.local`; or a
      * single-label name (only resolvable on the local network).
+     *
+     * Beyond desktop, a DNS name that spells out such an address for a
+     * wildcard-DNS service to resolve (see [spellsInternalAddress]:
+     * `127.0.0.1.nip.io`, `10-0-0-1.sslip.io`, `0a000001.nip.io`,
+     * `fe80--1.sslip.io`) or a well-known name for the device itself
+     * (`lvh.me`, `*.localtest.me`) counts as internal too. That's what a
+     * URL can say about itself; a name whose DNS points at the device or
+     * the LAN without spelling it out is only caught at connect time.
      */
     internal fun isInternal(host: String): Boolean {
         val h = host.trimEnd('.')
@@ -102,7 +113,47 @@ object RpcUrls {
             val s = ipv6(h.removePrefix("[").removeSuffix("]")) ?: return true
             return isInternalIpv6(s)
         }
-        return '.' !in h
+        if ('.' !in h) return true
+        if (LOOPBACK_NAMES.any { h == it || h.endsWith(".$it") }) return true
+        return spellsInternalAddress(h)
+    }
+
+    /** Public domains whose every name resolves to 127.0.0.1. */
+    private val LOOPBACK_NAMES = listOf("localtest.me", "lvh.me", "vcap.me", "lacolhost.com", "fuf.me")
+
+    /**
+     * Whether DNS name [h] carries an internal address the way wildcard
+     * DNS services (nip.io, sslip.io, xip.io, traefik.me, …) read one:
+     * four decimal labels in a row (`10.0.0.1.nip.io`), four decimal
+     * `-`-pieces in a row inside a label (`app-10-0-0-1.sslip.io`), an
+     * 8-hex-digit piece (`0a000001.nip.io`), or a label that is an IPv6
+     * address with `-` for `:` (`fe80--1.sslip.io`). Any service, not a
+     * list of them — a new one works the same way.
+     */
+    internal fun spellsInternalAddress(h: String): Boolean {
+        val labels = h.split('.')
+        fun internalRun(parts: List<String>) = parts.windowed(4).any { run ->
+            ipv4(run.joinToString("."))?.let(::isInternalIpv4) == true
+        }
+        if (internalRun(labels)) return true
+        for (label in labels) {
+            val pieces = label.split('-')
+            if (internalRun(pieces)) return true
+            for (piece in pieces) {
+                if (piece.length == 8 && piece.all { it in '0'..'9' || it in 'a'..'f' }) {
+                    val v = piece.toLong(16)
+                    val quad = IntArray(4) { ((v shr (24 - 8 * it)) and 0xff).toInt() }
+                    // Multicast/reserved (≥224) and 0/8 are left out here: they
+                    // cover 1 in 8 random hex strings, and a public ID like
+                    // conduit's `…-e4a1b2c3` isn't an address anyone meant.
+                    if (quad[0] in 1..223 && isInternalIpv4(quad)) return true
+                }
+            }
+            if ("--" in label || label.count { it == '-' } >= 7) {
+                ipv6(label.replace('-', ':'))?.let { if (isInternalIpv6(it)) return true }
+            }
+        }
+        return false
     }
 
     private fun isInternalIpv4(p: IntArray): Boolean {
