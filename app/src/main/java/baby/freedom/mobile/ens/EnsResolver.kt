@@ -75,11 +75,13 @@ import org.json.JSONObject
  * ([EnsTrust.lightClient]); no RPC server is asked. When it isn't ready,
  * can't answer within [LIGHT_CLIENT_DEADLINE_MS], or gives anything but
  * a record or a known "no resolver" revert, the lookup falls back to the
- * RPC servers exactly as without it. After a miss that says the light
- * client itself can't serve right now (unavailable, busy, out of time
- * with the engine — not a name's CCIP-Read gateway — using most of it)
- * it's skipped for [LIGHT_CLIENT_BACKOFF_MS], so one struggling light
- * client doesn't add its whole deadline to every lookup. Its readiness is
+ * RPC servers exactly as without it. After a miss that may be the light
+ * client's own (unavailable, busy, an engine error, out of time with the
+ * engine — not a name's CCIP-Read gateway — using most of it), and only
+ * if a name-independent probe call then fails too (a name's own resolver
+ * can fail the engine's call for that name alone), it's skipped for
+ * [LIGHT_CLIENT_BACKOFF_MS], so one struggling light client doesn't add
+ * its whole deadline to every lookup. Its readiness is
  * read per lookup and is not part of [Settings]: a flapping light client
  * never throws away the RPC epoch (cache, anchor, failed endpoints).
  *
@@ -155,6 +157,15 @@ class EnsResolver internal constructor(
 
     private fun lightClientBackingOff(generation: Long, now: Long): Boolean =
         lightClientMiss?.let { it.generation == generation && now - it.at in 0 until lightClientBackoffMs } == true
+
+    /**
+     * A [probeLightClient] still deciding whether a miss in [generation]
+     * was the light client's own; `true` once it's found it healthy.
+     */
+    private class LightClientProbe(val generation: Long, val healthy: Deferred<Boolean>)
+
+    @Volatile
+    private var lightClientProbe: LightClientProbe? = null
 
     /**
      * Everything a lookup learns about the servers — answer cache,
@@ -253,6 +264,14 @@ class EnsResolver internal constructor(
 
         // The light client first (#101) — backing off after a miss, unless
         // it's the only source there is.
+        // A probe still judging an earlier miss is waited for (it's
+        // bounded by [LIGHT_CLIENT_PROBE_TIMEOUT_MS]), so a struggling light
+        // client costs this lookup no more than that before it's skipped.
+        if (generation != null && config.endpoints.isNotEmpty()) {
+            lightClientProbe?.takeIf { it.generation == generation }?.let { probe ->
+                withTimeoutOrNull(LIGHT_CLIENT_PROBE_TIMEOUT_MS) { runCatchingCancellable { probe.healthy.await() } }
+            }
+        }
         val askLightClient = generation != null &&
             (config.endpoints.isEmpty() || !lightClientBackingOff(generation, System.currentTimeMillis()))
 
@@ -333,8 +352,9 @@ class EnsResolver internal constructor(
 
     /**
      * The light client couldn't give a usable answer: fall back to RPC.
-     * [backOff]: the miss is the light client's, not the name's (it was
-     * unavailable, busy, or out of time) — skip it for a while.
+     * [backOff]: the miss may be the light client's, not the name's (it
+     * was unavailable, busy, erroring, or out of time) — skip it for a
+     * while if a name-independent probe fails too ([probeLightClient]).
      */
     private class LightClientMiss(reason: String, val backOff: Boolean = false) : Exception(reason)
 
@@ -436,20 +456,64 @@ class EnsResolver internal constructor(
             else -> null
         }
         if (miss != null) {
-            // Out of time on the engine's account, or a miss the light
-            // client owns: back off. A name's slow gateway doesn't.
-            val backOff = (outcome == null && engineOwnsTheTime) || (failure as? LightClientMiss)?.backOff == true
-            if (backOff) lightClientMiss = LightClientBackoff(generation, System.currentTimeMillis())
+            // Out of time on the engine's account, or an engine error:
+            // maybe the light client's miss. A name's slow gateway isn't.
+            // Whether it is decides a probe no name has a say in.
+            val suspect = (outcome == null && engineOwnsTheTime) || (failure as? LightClientMiss)?.backOff == true
             Log.i(
                 TAG,
                 "[$name] light client: $miss after ${took}ms; falling back to RPC" +
-                    if (backOff) " (skipping it for ${lightClientBackoffMs}ms)" else "",
+                    if (suspect) " (probing it before skipping it)" else "",
             )
+            if (suspect) probeLightClient(client, generation)
             return null
         }
         lightClientMiss = null
         Log.i(TAG, "[$name] light client answered in ${took}ms")
         return outcome!!.getOrThrow()
+    }
+
+    /**
+     * Whether a miss in [generation] was the light client's own, or
+     * only the name's: the engine and the RPC path both run whatever the
+     * name's resolver contract does, so a resolver that reverts oddly,
+     * reads state no snap peer serves, or burns the budget in the EVM
+     * fails the engine's call for that name alone. Backing off on that
+     * would let any page that loads one subresource from such a name
+     * turn the light client off for every other name, again every
+     * [lightClientBackoffMs]. So the engine is asked one call no name
+     * has any say in ([PROBE_CALL_DATA] on [ENS_REGISTRY]: one account,
+     * one slot) and only backed off if that fails too — unavailable,
+     * busy, erroring, or unanswered within [LIGHT_CLIENT_PROBE_TIMEOUT_MS].
+     * One probe per generation at a time; the lookup that missed doesn't
+     * wait for it, later ones do ([resolve]).
+     */
+    private fun probeLightClient(client: EnsLightClient, generation: Long) {
+        synchronized(this) {
+            val running = lightClientProbe
+            if (running != null && running.generation == generation && running.healthy.isActive) return
+            val timeoutMs = minOf(LIGHT_CLIENT_PROBE_TIMEOUT_MS, lightClientDeadlineMs)
+            val healthy = io.async {
+                val answer = try {
+                    client.ethCall(ENS_REGISTRY, PROBE_CALL_DATA, timeoutMs)
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Throwable) {
+                    EnsLightClient.Call.Unavailable(e.message ?: "failed")
+                }
+                // A new stretch of readiness isn't this probe's to judge.
+                if (client.readyGeneration() != generation) return@async true
+                val ok = answer !is EnsLightClient.Call.Unavailable || answer.notReady
+                if (!ok) {
+                    lightClientMiss = LightClientBackoff(generation, System.currentTimeMillis())
+                    Log.i(TAG, "light client: probe failed too (${(answer as EnsLightClient.Call.Unavailable).reason}); skipping it for ${lightClientBackoffMs}ms")
+                } else {
+                    Log.i(TAG, "light client: probe answered; the miss was the name's, not skipping it")
+                }
+                ok
+            }
+            lightClientProbe = LightClientProbe(generation, healthy)
+        }
     }
 
     /** [resolveByLightClient]'s read, blocking; throws [LightClientMiss] for a fallback. */
@@ -1528,6 +1592,19 @@ class EnsResolver internal constructor(
          * RPC meanwhile instead of each paying its delay first.
          */
         internal const val LIGHT_CLIENT_BACKOFF_MS = 60_000L
+
+        /**
+         * How long [probeLightClient]'s name-independent call gets before
+         * the light client counts as struggling (capped at the lookup
+         * deadline). A proof of one registry slot is the least any call costs.
+         */
+        internal const val LIGHT_CLIENT_PROBE_TIMEOUT_MS = 5_000L
+
+        /** The ENS registry: [probeLightClient]'s target, a contract that is always there. */
+        internal const val ENS_REGISTRY = "0x00000000000C2E074eC69A0dFb2997BA6C7d2e1e"
+
+        /** `owner(bytes32(0))` — the root node's owner: one storage slot, no name involved. */
+        internal const val PROBE_CALL_DATA = "0x02571be3" + "0000000000000000000000000000000000000000000000000000000000000000"
 
         /** Tries at a CCIP-Read name whose callback lands on a newer head than its first call. */
         private const val LIGHT_CLIENT_CCIP_ATTEMPTS = 3

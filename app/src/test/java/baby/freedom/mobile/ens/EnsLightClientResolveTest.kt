@@ -1,6 +1,9 @@
 package baby.freedom.mobile.ens
 
 import java.util.Collections
+import java.util.concurrent.FutureTask
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.TimeoutException
 import kotlinx.coroutines.runBlocking
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
@@ -22,16 +25,31 @@ class EnsLightClientResolveTest {
     private val ur = "0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe"
     private val ipfsContenthash = IPFS
 
-    /** Answers every call with [answer]; records the calls. */
+    /**
+     * Answers every call with [answer]; records the calls. The resolver's
+     * name-independent health probe is recorded apart, in [probes] — and
+     * given [answer] too, bounded by its `timeoutMs` as `MyotisLink` is.
+     */
     private class FakeLightClient(
         @Volatile var generation: Long? = 1L,
         val answer: (to: String, data: String) -> EnsLightClient.Call,
     ) : EnsLightClient {
         val calls: MutableList<Pair<String, String>> = Collections.synchronizedList(mutableListOf())
+        val probes: MutableList<Long> = Collections.synchronizedList(mutableListOf())
         @Volatile var lastTimeoutMs = 0L
         override fun readyGeneration(): Long? = generation
         override fun ethCall(to: String, data: String, timeoutMs: Long): EnsLightClient.Call {
             lastTimeoutMs = timeoutMs
+            if (to == EnsResolver.ENS_REGISTRY && data == EnsResolver.PROBE_CALL_DATA) {
+                probes += timeoutMs
+                val task = FutureTask { answer(to, data) }
+                Thread(task).apply { isDaemon = true }.start()
+                return try {
+                    task.get(timeoutMs, TimeUnit.MILLISECONDS)
+                } catch (e: TimeoutException) {
+                    EnsLightClient.Call.Unavailable("no answer within ${timeoutMs}ms", timedOut = true)
+                }
+            }
             calls += to to data
             return answer(to, data)
         }
@@ -361,6 +379,8 @@ class EnsLightClientResolveTest {
 
         runBlocking { r.resolveContenthash("vitalik.eth") }
         assertEquals(1, client.calls.size)
+        // The miss was checked against a call no name has a say in.
+        assertEquals(1, client.probes.size)
         // A different name straight after: RPC only, no light-client wait.
         val second = runBlocking { r.resolveContenthash("nick.eth") } as EnsResult.Ok
         assertFalse(second.trust.lightClient)
@@ -440,6 +460,54 @@ class EnsLightClientResolveTest {
         runBlocking { r.resolveContenthash("vitalik.eth") }
         runBlocking { r.resolveContenthash("nick.eth") }
         assertEquals(2, client.calls.size)
+        assertTrue(client.probes.isEmpty())
+    }
+
+    /** Whether [data] is the Universal Resolver call for `evil.eth` (its DNS-encoded name inside). */
+    private fun isEvil(data: String) = data.startsWith("0x9061b923") && "046576696c0365746800" in data
+
+    @Test
+    fun `an engine error on one name's resolver does not back the light client off for others`() {
+        // evil.eth's resolver makes the engine fail its call (reads state no
+        // snap peer serves, hits the gas cap…); the engine itself is fine.
+        val client = FakeLightClient { _, data ->
+            if (isEvil(data)) EnsLightClient.parse("""{"error":"state unavailable"}""") else lightClientOk
+        }
+        val http = OneServer { rpcResult(wrapAsOuterInner(ipfsContenthash)) }
+        val r = resolver(client, http)
+
+        val first = runBlocking { r.resolveContenthash("evil.eth") }
+        require(first is EnsResult.Ok) { "got $first" }
+        assertFalse(first.trust.lightClient)
+
+        val other = runBlocking { r.resolveContenthash("vitalik.eth") }
+        require(other is EnsResult.Ok) { "got $other" }
+        assertTrue(other.trust.lightClient)
+        assertEquals(2, client.calls.size)
+        assertEquals(1, client.probes.size)
+    }
+
+    @Test
+    fun `a name whose resolver uses the budget in the engine does not back the light client off`() {
+        val client = FakeLightClient { _, data ->
+            if (isEvil(data)) {
+                Thread.sleep(2_000)
+                lightClientOk
+            } else {
+                lightClientOk
+            }
+        }
+        val http = OneServer { rpcResult(wrapAsOuterInner(ipfsContenthash)) }
+        val r = resolver(client, http, deadlineMs = 200)
+
+        val first = runBlocking { r.resolveContenthash("evil.eth") }
+        require(first is EnsResult.Ok) { "got $first" }
+        assertFalse(first.trust.lightClient)
+
+        val other = runBlocking { r.resolveContenthash("vitalik.eth") }
+        require(other is EnsResult.Ok) { "got $other" }
+        assertTrue(other.trust.lightClient)
+        assertEquals(1, client.probes.size)
     }
 
     @Test
