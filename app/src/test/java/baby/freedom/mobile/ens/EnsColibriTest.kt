@@ -289,6 +289,27 @@ class EnsColibriTest {
             fail("expected a failure")
         } catch (e: EnsColibri.Failure) {
             assertTrue(e.message!!.contains("invalid blockhash"))
+            // This call's own proof: says nothing about other names.
+            assertFalse(e.unreachable)
+        }
+        assertEquals(listOf(42L), engine.freed)
+    }
+
+    @Test
+    fun `a latest proof refused as too old counts against every call, like an unreachable prover`() {
+        // A prover lagging the chain, or this device's clock running
+        // ahead of it, fails every name's head proof alike: the resolver
+        // must back off instead of paying a proof round per name.
+        val engine = ScriptEngine(
+            emptyList(),
+            JSONObject().put("status", "error").put("error", "eth_call: ${EnsColibri.STALE_LATEST}"),
+        )
+
+        try {
+            call(EnsColibri(engine, ScriptHttp { ok("") }))
+            fail("expected a failure")
+        } catch (e: EnsColibri.Failure) {
+            assertTrue(e.unreachable)
         }
         assertEquals(listOf(42L), engine.freed)
     }

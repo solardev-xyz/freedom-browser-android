@@ -169,6 +169,17 @@ class EnsResolver internal constructor(
     internal val colibriBackoff = ColibriBackoff()
 
     /**
+     * How long a lookup under [settings] may wait on the proven tier
+     * before it asks the RPC servers: [colibriWaitMs] when the verifier
+     * would be asked now, 0 when the lookup would skip it (switched off,
+     * not in this build, or backing off). A caller holding a document
+     * for a bounded re-check adds this to its own deadline, so a normal
+     * proof doesn't miss it just for taking longer than an RPC read.
+     */
+    internal fun colibriWaitFor(settings: Settings): Long =
+        if (settings.colibri && colibriBackoff.remainingMs() == null && colibri?.available == true) colibriWaitMs else 0
+
+    /**
      * Everything a lookup learns about the servers — answer cache,
      * anchor block, recent failures — together with the [settings] it
      * was learnt under. A settings change swaps in a fresh [Epoch]
@@ -341,10 +352,14 @@ class EnsResolver internal constructor(
      *   the record is absent — desktop's and iOS's classification. A
      *   NameNFT registry (`.wei`, `.gwei`) has no error vocabulary, so
      *   any of its reverts falls through the same way;
-     * - an `OffchainLookup` whose gateway fails. Its callback goes
-     *   through the verifier too, so the gateway's answer is only taken
-     *   once the resolver contract has accepted it under proof. With
-     *   CCIP-Read off the lookup ends here, as it would on the servers.
+     * - an `OffchainLookup` whose callback can't be proven. The callback
+     *   goes through the verifier too, so the gateway's answer is only
+     *   taken once the resolver contract has accepted it under proof.
+     *   With CCIP-Read off the lookup ends here, as it would on the
+     *   servers — and so does a gateway that fails or runs out the
+     *   [COLIBRI_CCIP_BUDGET_MS] budget (`CCIP_GATEWAY_FAILED`, not
+     *   cached): the quorum would fetch the very same gateway again,
+     *   doubling the wait and showing it the name twice.
      */
     private suspend fun resolveByColibri(
         config: Settings,
@@ -419,9 +434,13 @@ class EnsResolver internal constructor(
         val revert = outcome.revertData
         if (revert != null && contract == null && isOffchainLookup(revert)) {
             if (!config.ccipRead) return Verdict(ccipDisabled(name), verified = true)
+            // Whether the pass is (or ended) at the gateway rather than
+            // at a proof: a gateway failure is the name's answer, since
+            // the quorum would only fetch the same gateway again.
+            val atGateway = AtomicBoolean(false)
             val followed = io.async {
                 runCatchingCancellable {
-                    followOffchainLookup(revert) { to, data ->
+                    followOffchainLookup(revert, atGateway) { to, data ->
                         when (val o = prove(to, data, colibriWaitMs)) {
                             is EnsColibri.Outcome.Returned -> CallOutcome(data = o.data, revertData = null)
                             is EnsColibri.Outcome.Reverted -> CallOutcome(data = null, revertData = o.data)
@@ -438,7 +457,17 @@ class EnsResolver internal constructor(
             }
             if (result == null) followed.cancel()
             outcome = result?.getOrNull() ?: run {
-                Log.i(TAG, "[$name] colibri: CCIP-Read failed (${result?.exceptionOrNull()?.message ?: "timed out"})")
+                val why = result?.exceptionOrNull()?.message ?: "timed out"
+                if (atGateway.get()) {
+                    // The gateway failed (or used up the budget): end the
+                    // lookup here, as the quorum would after asking it again.
+                    Log.w(TAG, "[$name] colibri: CCIP gateway failed ($why)")
+                    return Verdict(
+                        EnsResult.Error(name = name, reason = "CCIP_GATEWAY_FAILED", error = why, retryable = true),
+                        verified = false,
+                    )
+                }
+                Log.i(TAG, "[$name] colibri: CCIP-Read failed ($why), asking the RPC servers")
                 return null
             }
             offchain = true
@@ -1065,10 +1094,14 @@ class EnsResolver internal constructor(
      * [followOffchainLookup] with each callback made by [call] — one
      * server's `eth_call`, or a proven one (#100), so the gateway's
      * answer is only ever accepted through the same check that asked
-     * for it. Runs on an IO thread: [ccipFetch] blocks.
+     * for it. Runs on an IO thread: [ccipFetch] blocks. [atGateway], if
+     * given, is `true` while a gateway is being asked and stays `true`
+     * when the gateways failed, so a caller can tell a gateway failure
+     * (or a budget spent waiting on one) from a failed callback.
      */
     private suspend fun followOffchainLookup(
         firstRevert: String,
+        atGateway: AtomicBoolean? = null,
         call: suspend (to: String, data: ByteArray) -> CallOutcome,
     ): CallOutcome {
         var revert = firstRevert
@@ -1081,8 +1114,10 @@ class EnsResolver internal constructor(
             if (!lookup.sender.equals(UNIVERSAL_RESOLVER, ignoreCase = true)) {
                 throw IllegalStateException("OffchainLookup sender is not the Universal Resolver")
             }
+            atGateway?.set(true)
             val response = ccipFetch(lookup.sender, lookup.urls, lookup.callData)
                 ?: throw IllegalStateException("CCIP gateways unavailable or returned invalid data")
+            atGateway?.set(false)
             val callbackData = lookup.callback + abiEncodeTwoBytes(response, lookup.extraData)
             val outcome = call(lookup.sender, callbackData)
             val next = outcome.revertData

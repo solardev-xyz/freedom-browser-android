@@ -75,6 +75,9 @@ internal class EnsColibri(
      * asked for couldn't be served by any of its servers during the call
      * — the provers or RPCs not reachable, a problem every other call
      * would hit too — rather than a failure of this one call's own proof.
+     * A `latest` proof refused as too old ([MAX_LATEST_AGE_SECONDS]) is
+     * counted the same way: a prover lagging the chain, or this device's
+     * clock running ahead, fails every call alike.
      */
     class Failure(message: String, val unreachable: Boolean = false) : Exception(message)
 
@@ -123,7 +126,13 @@ internal class EnsColibri(
                         Outcome.Reverted(status.optString("data", "0x").ifEmpty { "0x" }),
                         provers.toList(),
                     )
-                    "error" -> throw Failure(status.optString("error", "verification failed").take(300), unreachable = unserved)
+                    "error" -> {
+                        val error = status.optString("error", "verification failed")
+                        // A head proof refused as stale says the prover is
+                        // behind or this device's clock is ahead, not that
+                        // this name's proof is bad: every call would hit it.
+                        throw Failure(error.take(300), unreachable = unserved || STALE_LATEST in error)
+                    }
                     "pending" -> {
                         val requests = status.optJSONArray("requests") ?: JSONArray()
                         val answers = coroutineScope {
@@ -357,6 +366,12 @@ internal class EnsColibri(
 
         /** Desktop's and iOS's pinned freshness window for `latest` proofs. */
         const val MAX_LATEST_AGE_SECONDS = 60L
+
+        /**
+         * The core's error (v3.0.0, `eth_check_latest_freshness`) for a
+         * `latest` proof older than the floor [ethCall] sets.
+         */
+        internal const val STALE_LATEST = "proof for latest too old"
 
         /**
          * corpus.core's mainnet provers — iOS's default first, then its

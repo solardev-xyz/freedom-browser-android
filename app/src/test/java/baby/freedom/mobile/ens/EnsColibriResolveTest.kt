@@ -388,18 +388,49 @@ class EnsColibriResolveTest {
     }
 
     @Test
-    fun `a gateway that fails a proven lookup hands it to the servers`() {
+    fun `a gateway that fails a proven lookup ends it there, without asking the gateway again`() {
         val prover = Prover({ _, _ -> reverted(fixtureRevert()) })
-        // The servers' own read defers to the same failing gateway.
+        // The servers' own read would defer to the same failing gateway.
         val http = Rpc { _, _ ->
             EnsHttp.Reply(200, """{"jsonrpc":"2.0","id":1,"error":{"code":3,"message":"execution reverted","data":"${fixtureRevert()}"}}""")
         }
+        val gateways = EnsResolver.decodeOffchainLookup(fixtureRevert())!!.urls.filter { it.startsWith("https://") }
 
         val result = resolve(resolver(prover, http), "1.offchainexample.eth")
 
         require(result is EnsResult.Error) { "got $result" }
         assertEquals("CCIP_GATEWAY_FAILED", result.reason)
-        assertEquals(1, http.calls.size)
+        assertTrue(result.retryable)
+        // Each gateway was asked once, by the proven pass; the servers
+        // weren't asked to fetch it all over again.
+        assertEquals(gateways.size, http.gateway.size)
+        assertTrue(http.calls.isEmpty())
+    }
+
+    @Test
+    fun `a gateway answer whose callback can't be proven hands the lookup to the servers`() {
+        val prover = Prover({ _, data ->
+            if (data.startsWith("0x9061b923")) reverted(fixtureRevert()) else JSONObject().put("status", "error").put("error", "bad proof")
+        })
+        val http = rpcAnswers().apply { gatewayReply = EnsHttp.Reply(200, """{"data":"0xcafe0042"}""") }
+
+        val result = resolve(resolver(prover, http), "1.offchainexample.eth")
+
+        require(result is EnsResult.Ok) { "got $result" }
+        assertEquals(EnsTrust.Source.RPC, result.trust.source)
+        assertFalse(http.calls.isEmpty())
+    }
+
+    @Test
+    fun `a re-check's proof allowance is the wait, only while the verifier would be asked`() {
+        val on = EnsResolver.Settings(listOf(rpc), colibri = true)
+        val r = resolver(Prover({ _, _ -> returned("0x") }), rpcAnswers(), waitMs = 1_234)
+        assertEquals(1_234L, r.colibriWaitFor(on))
+        assertEquals(0L, r.colibriWaitFor(on.copy(colibri = false)))
+        r.colibriBackoff.failed()
+        assertEquals(0L, r.colibriWaitFor(on))
+        r.colibriBackoff.succeeded()
+        assertEquals(0L, resolver(Prover({ _, _ -> returned("0x") }, available = false), rpcAnswers()).colibriWaitFor(on))
     }
 
     @Test
