@@ -6,7 +6,7 @@
  *
  * Same split as `ant_jni.c` / `freedom_ipfs_jni.c`: the Rust library owns
  * the C ABI, this file only marshals JNI types. Only the node lifecycle is
- * bridged (init, create, start/stop, pause/resume, status, logs); the
+ * bridged (init, create, create-with-checkpoint for stale-anchor recovery, start/stop, pause/resume, status, logs); the
  * verified reads come with their first consumer. Errors are the engine's
  * own sentinels (negative handle ids, `false`, `"{}"`), not exceptions.
  */
@@ -62,6 +62,32 @@ Java_baby_freedom_swarm_MyotisNative_create(JNIEnv *env, jobject thiz,
         return -1;
     }
     int64_t handle = myotis_create(net, dir);
+    (*env)->ReleaseStringUTFChars(env, data_dir, dir);
+    (*env)->ReleaseStringUTFChars(env, network, net);
+    return (jlong)handle;
+}
+
+JNIEXPORT jlong JNICALL
+Java_baby_freedom_swarm_MyotisNative_createWithCheckpoint(JNIEnv *env, jobject thiz,
+                                                          jstring network, jstring data_dir,
+                                                          jstring root, jlong slot) {
+    (void)thiz;
+    if (slot < 1) return -1; /* the engine refuses slot 0 too; never pass a negative as uint64 */
+    const char *net = (*env)->GetStringUTFChars(env, network, NULL);
+    if (net == NULL) return -1;
+    const char *dir = (*env)->GetStringUTFChars(env, data_dir, NULL);
+    if (dir == NULL) {
+        (*env)->ReleaseStringUTFChars(env, network, net);
+        return -1;
+    }
+    const char *hex = (*env)->GetStringUTFChars(env, root, NULL);
+    if (hex == NULL) {
+        (*env)->ReleaseStringUTFChars(env, data_dir, dir);
+        (*env)->ReleaseStringUTFChars(env, network, net);
+        return -1;
+    }
+    int64_t handle = myotis_create_with_checkpoint(net, dir, hex, (uint64_t)slot);
+    (*env)->ReleaseStringUTFChars(env, root, hex);
     (*env)->ReleaseStringUTFChars(env, data_dir, dir);
     (*env)->ReleaseStringUTFChars(env, network, net);
     return (jlong)handle;

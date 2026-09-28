@@ -226,10 +226,17 @@ class KeystoreVaultStore(context: Context) : VaultStore {
         runCatching { keyStore().deleteEntry(KEY_ALIAS) }
     }
 
-    private companion object {
-        const val KEYSTORE = "AndroidKeyStore"
+    internal companion object {
+        private const val KEYSTORE = "AndroidKeyStore"
+
+        /**
+         * Its own alias, distinct from the RPC API key store's
+         * (`KeystoreKey.ALIAS`), so removing the wallet (which deletes
+         * this key) never touches the API keys, and the API store (which
+         * creates its key whenever it's missing) never makes or uses this one.
+         */
         const val KEY_ALIAS = "freedom.wallet.vault"
-        const val TRANSFORMATION = "AES/GCM/NoPadding"
-        const val GCM_TAG_BITS = 128
+        private const val TRANSFORMATION = "AES/GCM/NoPadding"
+        private const val GCM_TAG_BITS = 128
     }
 }

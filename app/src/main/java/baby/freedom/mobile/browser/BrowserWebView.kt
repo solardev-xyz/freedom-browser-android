@@ -165,7 +165,7 @@ private val CONTENT_ROOT_SCHEMES = listOf("bzz://", "ipfs://", "ipns://")
 
 /** Status for the interceptor's refusal of an ENS document. */
 internal fun statusForNameResolutionError(code: String): Int =
-    if (code == "ens_lookup_failed") 502 else 404
+    if (code == "ens_lookup_failed" || code == "ens_ccip_disabled") 502 else 404
 
 /**
  * "The main-frame document the interceptor last served for this tab was
@@ -284,6 +284,9 @@ internal fun nameResolutionRefusalCopy(
         "ens_unsupported_codec" -> "Unsupported content format" to
             "This $label name now resolves to a content format Freedom Browser " +
             "cannot load yet on mobile."
+        "ens_ccip_disabled" -> "$label lookup failed" to
+            "This name is resolved through an off-chain gateway (CCIP-Read), which is " +
+            "turned off in Settings &rarr; Name resolution."
         // ENSIP-15 refused the name ([EnsNormalize]): no lookup ran.
         "ens_invalid_name" -> "Not a valid $label name" to
             "This name breaks the ENSIP-15 naming rules " +
@@ -310,8 +313,13 @@ internal fun nameResolutionRefusalCopy(
             "The $chain RPC servers Freedom asked gave different answers for " +
             "this name. At least one of them is wrong, so nothing was loaded."
         else -> "$label lookup failed" to
-            "Couldn't reach ${if (tezos) "a Tezos" else "an Ethereum"} RPC endpoint to resolve this name. " +
-            "Check your connection and try again."
+            if (tezos) {
+                "Couldn't reach a Tezos RPC endpoint to resolve this name. " +
+                    "Check your connection and try again."
+            } else {
+                "Couldn't reach an Ethereum RPC endpoint to resolve this name. Check your " +
+                    "connection, or the endpoints in Settings &rarr; RPC providers, and try again."
+            }
     }
 }
 
@@ -969,6 +977,7 @@ fun BrowserWebViewHost(
             // Take down any permission prompt the tab still had up;
             // its request is denied along with the page.
             sitePermissions.onTabClosed(id)
+            RadicleProviders.onTabClosed(id)
             UnverifiedOrigins.release(wv)
             (wv as? PageWebView)?.sweptReload?.committed()
             wv.stopLoading()
@@ -1199,7 +1208,10 @@ fun BrowserWebViewHost(
             val relaunch = context.findActivity()?.isChangingConfigurations == true
             if (relaunch) {
                 tabs.parkForRelaunch { tab -> webViews[tab.id]?.let(::saveWebViewState) }
-                for (tab in tabs.tabs) sitePermissions.onDocumentStarted(tab)
+                for (tab in tabs.tabs) {
+                    sitePermissions.onDocumentStarted(tab)
+                    RadicleProviders.onDocumentStarted(tab, url = null)
+                }
             } else {
                 // As when the last private tab closes (#86): the private
                 // cache goes through a private WebView, before they all do.
@@ -2189,6 +2201,9 @@ private fun buildRefreshableWebView(
         val adblockPage = AdblockPage()
         AdblockCosmetic.install(this, state.private) { adblockPage.current() }
 
+        // `window.radicle` (#124): the provider's page object and channel.
+        RadicleProviders.install(this, state)
+
         // Force an initial paint so the WebView's compositor surface
         // is valid even before the user submits a URL. Not for a popup:
         // Chromium rejects (crashes on) a popup WebView that has already
@@ -2478,6 +2493,7 @@ private fun buildRefreshableWebView(
                 // document left standing: its requests are denied and
                 // a late answer can't land on this one (#81).
                 sitePermissions.onDocumentStarted(state)
+                RadicleProviders.onDocumentStarted(state, url)
                 // …and with the progress latch open again: whatever the
                 // last Stop aborted, this document is a load of its own
                 // and its percentages are worth drawing (#41).
@@ -4467,6 +4483,8 @@ private val CONTENT_SCHEMES = setOf("bzz", "ipfs", "ipns", "ens")
  */
 internal fun submitDetourForNavigation(url: String, isForMainFrame: Boolean): Boolean {
     if (!isForMainFrame) return false
+    // A Radicle repository (#124), in either form (`rad:z…` has no `//`).
+    if (RadUrl.isRadScheme(url)) return true
     val schemeEnd = url.indexOf("://")
     if (schemeEnd <= 0) return false
     val scheme = url.substring(0, schemeEnd).lowercase()
@@ -4608,7 +4626,9 @@ internal fun interceptVirtualRequest(
     // the user switched away from it (#125): its next document first
     // clears what that gateway's pages left there, before anything else
     // runs.
-    val response = interceptOnchainAppRequest(req, url, onchain)
+    // The Radicle repository browser and its read API (#124).
+    val response = RadApi.intercept(req, url)
+        ?: interceptOnchainAppRequest(req, url, onchain)
         ?: siteDataCleanupFor(req, url, tab)
         ?: interceptVirtualRequestFor(req, ensPins, incoming, assertedProtocol, onMainFrameRoot)
     if (incoming != null && response != null &&

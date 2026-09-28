@@ -15,6 +15,7 @@
 #include <stdint.h>
 
 #include "ant.h"
+#include "freedom_mobile.h"
 
 static void throw_runtime(JNIEnv *env, char *owned_err, const char *fallback) {
     jclass cls = (*env)->FindClass(env, "java/lang/RuntimeException");
@@ -29,6 +30,10 @@ Java_baby_freedom_swarm_AntNative_init(JNIEnv *env, jobject thiz, jstring data_d
     (void)thiz;
     const char *dir = (*env)->GetStringUTFChars(env, data_dir, NULL);
     if (dir == NULL) return 0; /* OOM — exception already pending */
+    /* Before ant_init claims the process's tracing subscriber for its
+     * logs alone: this one also carries freedom-ipfs's progress recorder
+     * (see freedom_mobile.h; #156). */
+    freedom_mobile_init_logging();
     char *err = NULL;
     AntHandle *handle = ant_init(dir, &err);
     (*env)->ReleaseStringUTFChars(env, data_dir, dir);

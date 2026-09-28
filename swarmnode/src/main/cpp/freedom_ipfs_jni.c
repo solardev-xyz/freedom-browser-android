@@ -16,6 +16,7 @@
 #include <string.h>
 
 #include "freedom_ipfs.h"
+#include "freedom_mobile.h"
 
 JNIEXPORT jlong JNICALL
 Java_baby_freedom_swarm_FreedomIpfsNative_nodeNew(JNIEnv *env, jobject thiz,
@@ -24,6 +25,9 @@ Java_baby_freedom_swarm_FreedomIpfsNative_nodeNew(JNIEnv *env, jobject thiz,
     (void)thiz;
     const char *dir = (*env)->GetStringUTFChars(env, data_dir, NULL);
     if (dir == NULL) return 0; /* OOM — exception already pending */
+    /* Same as AntNative.init: whichever node starts first installs the
+     * shared subscriber, so the progress snapshot fills either way. */
+    freedom_mobile_init_logging();
     FreedomIpfsNode *node =
         freedom_ipfs_node_new_with_data_dir(dir, (uint64_t)max_cache_bytes);
     (*env)->ReleaseStringUTFChars(env, data_dir, dir);

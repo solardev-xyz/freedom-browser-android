@@ -83,6 +83,7 @@ import baby.freedom.mobile.chains.BuiltInChains
 import baby.freedom.mobile.data.BrowsingRepository
 import baby.freedom.mobile.data.ChainStore
 import baby.freedom.mobile.data.NodeSettings
+import baby.freedom.mobile.ens.EnsRpcConfig
 import baby.freedom.mobile.ui.isLight
 import baby.freedom.mobile.wallet.Vault
 import baby.freedom.swarm.IpfsInfo
@@ -101,8 +102,12 @@ import kotlinx.coroutines.launch
  *     [WalletScreen].
  *  0. **Search** — the address bar's search engine: the desktop set
  *     ([SearchEngines.BUILT_IN]) or a custom template (#87).
- *  ½. **Ad blocking** — the filter-list categories and the sites ad
+ *  0a. **Ad blocking** — the filter-list categories and the sites ad
  *     blocking is off for (#126, [Adblock]).
+ *  0b. **Name resolution** and **RPC providers** — the resolution
+ *     order, CCIP-Read, and the endpoints names resolve through: your
+ *     own, keyed providers, the public ones (#102; see
+ *     [NameResolutionSection]).
  *  1. **Browsing data** — wipe history, bookmarks, and WebView cookies /
  *     site storage / per-tab caches. Each action is guarded by a
  *     confirmation dialog.
@@ -160,6 +165,7 @@ fun SettingsScreen(
         .collectAsState(initial = SearchEngines.DEFAULT_ID)
     val customSearchTemplate by settings.customSearchTemplate.collectAsState(initial = "")
     var pickSearchEngine by remember { mutableStateOf(false) }
+    val ensRpcConfig by settings.ensRpcConfig.collectAsState(initial = EnsRpcConfig())
     val externalSwarm by settings.externalSwarmEndpoint.collectAsState(initial = "")
     val externalIpfs by settings.externalIpfsGateway.collectAsState(initial = "")
     var editEndpoint by remember { mutableStateOf<NodeEndpoint?>(null) }
@@ -204,6 +210,8 @@ fun SettingsScreen(
         query, SECTION_ADBLOCK,
         adblockSectionRows(adblockCategories, adblockAllowlist, adblockStatus, adblockUpdate),
     )
+    val ensRows = visibleSettingsRows(query, SECTION_ENS, ensSectionRows(ensRpcConfig))
+    val rpcRows = visibleSettingsRows(query, SECTION_RPC, rpcSectionRows(ensRpcConfig))
     val browsingRows = visibleSettingsRows(
         query, SECTION_BROWSING, browsingDataRows(history.size, bookmarks.size),
     )
@@ -223,8 +231,8 @@ fun SettingsScreen(
         visibleSettingsRows(query, SECTION_IPFS, ipfsRows(ipfsInfo))
     } else emptySet()
     val nothingMatches = listOf(
-        walletRows, searchRows, adblockRows, browsingRows, permissionRows, nodeRows, chainRows, aboutRows,
-        otherRows, ipfsRows,
+        walletRows, searchRows, adblockRows, ensRows, rpcRows, browsingRows, permissionRows, nodeRows,
+        chainRows, aboutRows, otherRows, ipfsRows,
     ).all { it.isEmpty() }
 
     // A new query starts the results from the top, so the first match
@@ -260,7 +268,23 @@ fun SettingsScreen(
                 ChainDetailPage(
                     chain = chain,
                     onAddRpc = { chainStore.addUserRpc(chain.id, it) },
-                    onRemoveRpc = { chainStore.removeUserRpc(chain.id, it) },
+                    onRemoveRpc = { url ->
+                        if (chain.id == BuiltInChains.ETHEREUM.id) {
+                            // Mainnet's own RPCs are name resolution's
+                            // "Your endpoints" too (#102): the same
+                            // last-endpoint check applies.
+                            when (settings.removeEnsRpcEndpoint(url)) {
+                                NodeSettings.EnsEdit.DONE -> null
+                                NodeSettings.EnsEdit.LAST_ENDPOINT ->
+                                    "Not removed: it's the last RPC names resolve through (Settings → RPC providers)"
+                                NodeSettings.EnsEdit.FAILED -> "Couldn't remove the RPC. Try again."
+                            }
+                        } else if (chainStore.removeUserRpc(chain.id, url)) {
+                            null
+                        } else {
+                            "Couldn't remove the RPC. Try again."
+                        }
+                    },
                     onRemove = { confirmRemoveChain = chain },
                     onBack = { chainPage = null },
                 )
@@ -313,6 +337,20 @@ fun SettingsScreen(
                             Adblock.removeAllowlisted(site)
                         },
                         onAddSite = { addAllowlistSite = true },
+                    )
+                }
+                if (ensRows.isNotEmpty()) item("ens") {
+                    NameResolutionSection(
+                        visible = ensRows,
+                        config = ensRpcConfig,
+                        settings = settings,
+                    )
+                }
+                if (rpcRows.isNotEmpty()) item("rpc") {
+                    RpcProvidersSection(
+                        visible = rpcRows,
+                        config = ensRpcConfig,
+                        settings = settings,
                     )
                 }
                 if (browsingRows.isNotEmpty()) item("browsing") {

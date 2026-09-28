@@ -45,8 +45,17 @@ data class MyotisChainStatus(
     val targetPeriod: Long = 0L,
     /** How many periods old an anchor may be before the engine refuses it (weak subjectivity). */
     val wsBoundPeriods: Long = 0L,
+    /** Beacon slot of the finalized header the engine has verified, 0 until known. */
+    val finalizedSlot: Long = 0L,
+    /** Beacon root of that header (64 hex, no `0x`), `""` until known. */
+    val finalizedRootHex: String = "",
     /** Why this chain's engine isn't running, when it failed to start. */
     val error: String? = null,
+    /**
+     * Stale-anchor checkpoint recovery in progress or blocked (#195); set by
+     * [MyotisNode], never by [decode]. A chain in recovery is never [ready].
+     */
+    val recovery: MyotisRecovery? = null,
 ) : Parcelable {
 
     val synced: Boolean get() = beaconState == SYNCED
@@ -63,11 +72,12 @@ data class MyotisChainStatus(
     /**
      * Whether a verified read attempted now has a realistic chance of an
      * answer: synced, a state peer at the head, and the execution reader
-     * up and not hunting — the same gate as the iOS and desktop hosts.
+     * up and not hunting — the same gate as the iOS and desktop hosts —
+     * and no checkpoint recovery in flight or blocked.
      */
     val ready: Boolean
         get() = running && !paused && synced && snapServingPeers >= 1 &&
-            elReaderAvailable && !elHunting
+            elReaderAvailable && !elHunting && recovery == null
 
     /**
      * Why a synced chain isn't [ready] yet, or `""` when it is (or isn't
@@ -75,7 +85,7 @@ data class MyotisChainStatus(
      */
     val notServingReason: String
         get() {
-            if (!running || paused || !synced || ready) return ""
+            if (!running || paused || !synced || ready || recovery != null) return ""
             val reasons = mutableListOf<String>()
             if (snapPeers < 1) {
                 reasons += "no state peer"
@@ -119,6 +129,8 @@ data class MyotisChainStatus(
                 currentPeriod = o.optLong("currentPeriod", 0L),
                 targetPeriod = o.optLong("targetPeriod", 0L),
                 wsBoundPeriods = o.optLong("wsBoundPeriods", 0L),
+                finalizedSlot = o.optLong("finalizedSlot", 0L),
+                finalizedRootHex = o.optString("finalizedRootHex", ""),
             )
         }
     }

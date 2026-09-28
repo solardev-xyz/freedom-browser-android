@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Android 12+ (targetSdk 31+): what cloud backup and device-to-device
+  transfer may copy. `allowBackup="false"` already turns cloud backup off,
+  but not device transfer, so the keyed RPC providers' API keys
+  (RpcKeyStore, `datastore/freedom_rpc_secrets.preferences_pb`) are
+  excluded here from both. They're encrypted under an Android Keystore
+  key that never leaves this device, so a copy would be unreadable
+  anyway. (Builds before that store kept them in plain text in
+  `freedom_node_settings`; MainActivity moves them out on start.)
+  The wallet vault (KeystoreVaultStore) needs no rule: it lives in
+  `noBackupFilesDir` (`no_backup/wallet/vault.json`), which no backup
+  domain includes, under its own Keystore key (`freedom.wallet.vault`,
+  distinct from the API keys' `freedom_rpc_api_keys`).
+-->
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="file" path="datastore/freedom_rpc_secrets.preferences_pb" />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="file" path="datastore/freedom_rpc_secrets.preferences_pb" />
+    </device-transfer>
+</data-extraction-rules>

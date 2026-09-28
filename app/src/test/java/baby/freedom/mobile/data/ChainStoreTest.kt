@@ -130,6 +130,12 @@ class ChainStoreTest {
         assertEquals(ChainStore.RpcAddResult.ADDED, store.addUserRpc(1, "  $mine "))
         assertEquals(ChainStore.RpcAddResult.DUPLICATE, store.addUserRpc(1, mine))
         assertEquals(ChainStore.RpcAddResult.PUBLIC, store.addUserRpc(1, BuiltInChains.ETHEREUM.rpcUrls[0]))
+        // Name resolution may add one as yours: it doesn't ask the chain's public RPCs.
+        val promoted = "https://rpc.flashbots.net"
+        assertTrue(promoted in BuiltInChains.ETHEREUM.rpcUrls)
+        assertEquals(ChainStore.RpcAddResult.ADDED, store.addUserRpc(1, promoted, allowPublic = true))
+        assertEquals(listOf(mine, promoted), store.chains.first().first { it.id == 1L }.userRpcUrls)
+        assertTrue(store.removeUserRpc(1, promoted))
         assertEquals(ChainStore.RpcAddResult.INVALID, store.addUserRpc(1, "http://192.168.1.10:8545"))
         assertEquals(ChainStore.RpcAddResult.NO_CHAIN, store.addUserRpc(137, mine))
         val eth = store.chains.first().first { it.id == 1L }
@@ -166,7 +172,11 @@ class ChainStoreTest {
             it[stringPreferencesKey("rpcs:100")] = "{not json"
         }
         val chains = ChainStore(mem).chains.first()
-        assertEquals(listOf("https://ok.example"), chains.first { it.id == 1L }.userRpcUrls)
+        // A public RPC stored as yours stays (added from name resolution, which doesn't ask the chain's).
+        assertEquals(
+            listOf("https://ok.example", "https://ethereum.publicnode.com"),
+            chains.first { it.id == 1L }.userRpcUrls,
+        )
         assertEquals(emptyList<String>(), chains.first { it.id == 100L }.userRpcUrls)
     }
 

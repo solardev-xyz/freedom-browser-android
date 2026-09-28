@@ -62,12 +62,13 @@ source .envrc   # if you haven't: cp .envrc.example .envrc && edit to taste
 #    which is gitignored here and must exist before Gradle can build the app.
 #    Needs cargo-ndk and ANDROID_NDK_HOME; rustup picks the toolchain from
 #    the repo's rust-toolchain.toml.
-#    Use the FFI_REF tag pinned in release.yml, with ant's `chain` feature
+#    Use the FFI_REF pinned in release.yml, with ant's `chain` feature
 #    and the embedded Radicle node on (see "Building libfreedom_mobile_ffi.so"
 #    below). Chained with && so a failed step (e.g. enable-ffi-chain.sh
 #    rejecting a reshaped cargo call) stops before a chain-less .so is
 #    built or copied.
-git clone --branch v0.12.1 https://github.com/solardev-xyz/freedom-mobile-ffi.git /tmp/freedom-mobile-ffi &&
+git clone https://github.com/solardev-xyz/freedom-mobile-ffi.git /tmp/freedom-mobile-ffi &&
+  git -C /tmp/freedom-mobile-ffi checkout 45203550b4ec1876a6a771f4d1dd32f3504b084c &&
   scripts/enable-ffi-chain.sh /tmp/freedom-mobile-ffi &&
   scripts/enable-ffi-radicle.sh /tmp/freedom-mobile-ffi &&
   ( cd /tmp/freedom-mobile-ffi && ./scripts/build-android.sh ) &&
@@ -135,6 +136,14 @@ Freedom handles this in two layers:
     - Stamps every outgoing fetch with `Swarm-Chunk-Retrieval-Timeout: 30s`, `Swarm-Redundancy-Strategy: 3`, `Swarm-Redundancy-Fallback-Mode: true` — the same retrieval hints bee honors, parsed by ant for parity.
 
 Unlike the Electron-based desktop port, Android WebView does not allow registering a custom `bzz:` scheme as a first-class origin (there is no `session.protocol.handle` equivalent). So the WebView loads the gateway URL directly (`http://127.0.0.1:1633/bzz/<hash>/…`) and `BrowserState.currentBzzRoot` tracks the active root so the interceptor can rewrite absolute-root paths at request time.
+
+## Radicle: `rad://` and `window.radicle`
+
+With Settings → Nodes → **Radicle node** on (it runs in `:node` alongside the Swarm node, #73), repositories the node has in storage can be browsed and dApps can act on them — the Android port of desktop's `rad:` protocol and `window.radicle` provider (`docs/radicle-provider-api.md`, spec 0.2) and iOS's `RadSchemeHandler` / `RadicleBridge` (#124).
+
+- **Browsing** (`RadUrl.kt`, `RadApi.kt`, `assets/rad/`). `rad://<rid>/…` (or the URN form `rad:<rid>/…`) loads from `https://rad.freedom.baby/<rid>/…`, which `shouldInterceptRequest` answers; the address bar, history and bookmarks show the `rad://` form. One host for every repository: the RID is case-sensitive base58, so it rides in the path, and the page is the browser's own viewer (code at the default branch head or a pinned commit, README, issues, patches, commits), not the repository's code. Everything the repository supplies is inserted as text under a CSP that runs only the viewer's script. A repository opens from the Radicle page's seeded list too.
+- **Read API.** The viewer reads `https://rad.freedom.baby/_/api/<rid>/<endpoint>` — the same per-repository endpoints and JSON as desktop's `rad:` URLs (root, `tree`, `blob`, `readme`, `commits`, `stats`, `remotes`, `issues`, `patches`), GET/HEAD only, public repositories only. Unlike desktop's `rad:` URLs it is not open to other sites: only the viewer's own same-origin requests (told apart by their `Referer`) are answered, and any other page gets one fixed 403 before the node is asked, so a site can't probe which repositories the device holds. At most four calls into the node run at once. Calls cross into `:node` through `INodeService.radicleCall`, which answers over a pipe (an issue list can outgrow a binder transaction) and can reach only the reads and COB writes in `RadicleNode.BROWSER_CALLS`.
+- **`window.radicle`** (`RadicleProvider.kt`, `RadicleProviderBridge.kt`, `RadiclePrompt.kt`). All 14 methods, three tiers: `getCapabilities` needs nothing; `requestAccess` asks once per origin to connect (node status, the seeded list, `sync`, and asking to `seed` / `unseed`, each of which prompts per repository); `getIdentity` and the four COB writes ask once more for the signing tier. Only a normal tab's top-level https (or loopback http) document gets it; its origin is the platform's, never the page's. Parameters are checked with desktop's limits before any prompt, writes are limited to 10 a minute per origin, and prompts are guarded like the site-permission prompt (tap delay, one at a time, taken down with the document). A refused prompt blocks that tab's pages from prompting again until the user navigates it. Grants live in their own DataStore and can be dropped from the Radicle page's **Connected sites**. Seeding goes through the node page's own one-at-a-time seed path, so a first fetch that fails takes its policy back.
 
 ## Ad and tracker blocking
 
@@ -209,9 +218,10 @@ $ANDROID_HOME/build-tools/36.0.0/aapt2 dump badging app/build/outputs/apk/debug/
 # 0. Run from the root of this repo; later steps cd away and come back.
 FREEDOM_ANDROID="$PWD"
 
-# 1. Clone freedom-mobile-ffi at the tag release.yml pins as FFI_REF,
+# 1. Clone freedom-mobile-ffi at the ref release.yml pins as FFI_REF,
 #    somewhere outside this repo.
-git clone --branch v0.12.1 https://github.com/solardev-xyz/freedom-mobile-ffi.git /tmp/freedom-mobile-ffi
+git clone https://github.com/solardev-xyz/freedom-mobile-ffi.git /tmp/freedom-mobile-ffi &&
+  git -C /tmp/freedom-mobile-ffi checkout 45203550b4ec1876a6a771f4d1dd32f3504b084c
 
 # 2. Cross-compile both ABIs. Needs cargo-ndk + ANDROID_NDK_HOME; rustup
 #    installs the pinned toolchain + targets from rust-toolchain.toml.
@@ -235,9 +245,9 @@ mkdir -p swarmnode/src/main/jniLibs
 cp -r /tmp/freedom-mobile-ffi/target/android/jniLibs/. swarmnode/src/main/jniLibs/
 ```
 
-The Kotlin side talks to it through the hand-written JNI shims in `swarmnode/src/main/cpp/` (built into `libfreedom_jni.so` by the module's CMake step): `ant_jni.c` wraps the ant C API (`ant_init`, `ant_start_gateway` — the bee-shaped HTTP gateway on `127.0.0.1:1633` —, `ant_peer_count`, `ant_shutdown`) and `freedom_ipfs_jni.c` wraps the freedom-ipfs loopback-gateway surface. When upgrading, refresh the vendored `swarmnode/src/main/cpp/{ant.h,freedom_ipfs.h}` from the build's `target/android/headers/` along with the `.so`s, and bump the pinned (ant, freedom-ipfs) tags in freedom-mobile-ffi's `Cargo.toml` — the same aggregator also feeds the iOS xcframework, so both platforms move versions together.
+The Kotlin side talks to it through the hand-written JNI shims in `swarmnode/src/main/cpp/` (built into `libfreedom_jni.so` by the module's CMake step): `ant_jni.c` wraps the ant C API (`ant_init`, `ant_start_gateway` — the bee-shaped HTTP gateway on `127.0.0.1:1633` —, `ant_peer_count`, `ant_shutdown`) and `freedom_ipfs_jni.c` wraps the freedom-ipfs loopback-gateway surface. Both shims call `freedom_mobile_init_logging()` (header `freedom_mobile.h`, freedom-mobile-ffi's own export) before starting their node: the `tracing` subscriber is process-wide and the first node to claim it wins, so without it ant's log subscriber would keep freedom-ipfs's progress recorder out and `freedom_ipfs_node_progress_snapshot_json` would stay empty (#156). When upgrading, refresh the vendored `swarmnode/src/main/cpp/{ant.h,freedom_ipfs.h,freedom_mobile.h}` from the build's `target/android/headers/` along with the `.so`s, and bump the pinned (ant, freedom-ipfs) tags in freedom-mobile-ffi's `Cargo.toml` — the same aggregator also feeds the iOS xcframework, so both platforms move versions together.
 
-Since freedom-mobile-ffi v0.12 the library also links the Myotis Ethereum light client (`myotis_*` exports; not optional upstream). The app drives it through `swarmnode/src/main/cpp/myotis_jni.c` (header `myotis_engine.h`, vendored from the myotis tag freedom-mobile-ffi pins — v0.1.12, engine ABI 32; refresh it with `FFI_REF`) from its own `:myotis` process, off by default and switched on from the node page (#72). The library is built with ant's `chain` feature so the gateway's `/wallet`, `/stamps`, `/chequebook` and `/chainstate` read Gnosis whenever `SwarmNode.Config.rpcEndpoint` is set. The app leaves that empty today (ultra-light, no chain traffic), so those endpoints answer bee's zero-stubs until a node-mode switch supplies an RPC.
+Since freedom-mobile-ffi v0.12 the library also links the Myotis Ethereum light client (`myotis_*` exports; not optional upstream). The app drives it through `swarmnode/src/main/cpp/myotis_jni.c` (header `myotis_engine.h`, vendored from the myotis tag freedom-mobile-ffi pins — v0.1.12, engine ABI 32; refresh it with `FFI_REF`) from its own `:myotis` process, off by default and switched on from the node page (#72). When a chain's embedded trust anchor is older than the engine's weak-subjectivity bound (Gnosis: 3 sync-committee periods, ~34 h; mainnet: 13, ~15 days) the chain parks in `STALE_ANCHOR`, and the node recovers it from a fresh finalized checkpoint agreed by an external quorum of checkpoint-sync authorities (mainnet 2 of 3 seats from 7, Gnosis 2 of 3), bootstrapped into a new sync-state generation via `myotis_create_with_checkpoint` (#195; `MyotisCheckpointQuorum.kt`, `MyotisGenerationStore.kt`). Unlike desktop and iOS it has no Colibri proof to corroborate the quorum with; it never accepts a stale anchor or raises the bound. The library is built with ant's `chain` feature so the gateway's `/wallet`, `/stamps`, `/chequebook` and `/chainstate` read Gnosis whenever `SwarmNode.Config.rpcEndpoint` is set. The app leaves that empty today (ultra-light, no chain traffic), so those endpoints answer bee's zero-stubs until a node-mode switch supplies an RPC.
 
 The `radicle` feature adds the embedded, publish-capable Radicle node (libradicle-uniffi with `no-spawn`, #73; about +7 MiB per ABI). Unlike ant and freedom-ipfs it has no hand-written C shim: Kotlin calls it through [UniFFI](https://mozilla.github.io/uniffi-rs/) bindings, committed as `swarmnode/src/main/java/uniffi/libradicle_uniffi/libradicle_uniffi.kt` and loaded through JNA, and wrapped by `baby.freedom.swarm.RadicleNode`. The generated code checks each function's checksum against the library at load, so whenever the `.so` changes (an `FFI_REF` bump), regenerate them from the same build and commit the result:
 

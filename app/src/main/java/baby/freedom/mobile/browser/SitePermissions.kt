@@ -392,11 +392,12 @@ suspend fun askAndroidPermissionOnScreen(
 }
 
 /** Which modal prompt the on-screen tab shows now; see [modalPromptTurn]. */
-enum class PromptTurn { None, SitePermission, DownloadOffer }
+enum class PromptTurn { None, SitePermission, DownloadOffer, Radicle }
 
 /**
- * Orders the two prompts a page can raise on its tab: the site-permission
- * prompt (#81) and the download offer (#79). Both are modal and both are
+ * Orders the prompts a page can raise on its tab: the site-permission
+ * prompt (#81), the download offer (#79) and the `window.radicle`
+ * consent prompt (#124, [radicleWaiting]). All are modal and all are
  * the page's doing, so they never stack — one waits while the other is
  * answered, then gets its turn:
  *
@@ -415,19 +416,28 @@ enum class PromptTurn { None, SitePermission, DownloadOffer }
  *   `BrowserScreen` only reports the tab on screen when the offer
  *   doesn't.
  *
- * [permissionWaiting] is already gated on the page being on screen (no
- * full-screen panel over it, the Downloads list included); the offer
- * keeps its own rules (see `BrowserScreen`).
+ * - The Radicle prompt keeps the turn once it has it ([radicleHasTurn])
+ *   like the offer does; waiting, it comes after the permission prompt
+ *   and before the offer.
+ *
+ * [permissionWaiting] and [radicleWaiting] are already gated on the page
+ * being on screen (no full-screen panel over it, the Downloads list
+ * included); the offer keeps its own rules (see `BrowserScreen`).
  */
 fun modalPromptTurn(
     permissionWaiting: Boolean,
     offerWaiting: Boolean,
     offerHasTurn: Boolean,
     androidDialogUp: Boolean,
+    radicleWaiting: Boolean = false,
+    radicleHasTurn: Boolean = false,
 ): PromptTurn = when {
     androidDialogUp -> PromptTurn.None
-    offerWaiting && (offerHasTurn || !permissionWaiting) -> PromptTurn.DownloadOffer
+    offerWaiting && offerHasTurn -> PromptTurn.DownloadOffer
+    radicleWaiting && radicleHasTurn -> PromptTurn.Radicle
     permissionWaiting -> PromptTurn.SitePermission
+    radicleWaiting -> PromptTurn.Radicle
+    offerWaiting -> PromptTurn.DownloadOffer
     else -> PromptTurn.None
 }
 

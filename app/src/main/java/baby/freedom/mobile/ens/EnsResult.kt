@@ -123,6 +123,12 @@ data class EnsTrust(
     val dissented: List<String> = emptyList(),
     /** Block number the answer was read at; `null` for `latest`. */
     val block: Long? = null,
+    /**
+     * Unverified because fewer than [EnsQuorum.MIN_PROVIDERS] RPC
+     * endpoints are enabled in Settings (#102), so no cross-check was
+     * even possible — as opposed to too few of them answering this time.
+     */
+    val tooFewServers: Boolean = false,
 ) {
     companion object {
         /**

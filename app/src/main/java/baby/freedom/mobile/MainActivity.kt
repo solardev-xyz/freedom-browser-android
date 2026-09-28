@@ -29,11 +29,15 @@ import baby.freedom.mobile.browser.HOME_URL
 import baby.freedom.mobile.browser.Adblock
 import baby.freedom.mobile.browser.PublicSuffixList
 import baby.freedom.mobile.browser.OnchainApps
+import baby.freedom.mobile.browser.RadApi
+import baby.freedom.mobile.browser.RadicleClient
+import baby.freedom.mobile.browser.RadicleProviders
 import baby.freedom.mobile.browser.RadicleControls
 import baby.freedom.mobile.browser.UnverifiedOrigins
 import baby.freedom.mobile.browser.VirtualOrigin
 import baby.freedom.mobile.browser.statusBarIconsDark
 import baby.freedom.mobile.data.NodeSettings
+import baby.freedom.mobile.data.RadicleGrantStore
 import baby.freedom.mobile.ens.EnsNormalize
 import baby.freedom.mobile.node.IMyotisCallback
 import baby.freedom.mobile.node.IMyotisService
@@ -75,7 +79,9 @@ class MainActivity : ComponentActivity() {
 
     private val infoFlow = MutableStateFlow(NodeInfo())
     private val ipfsInfoFlow = MutableStateFlow(IpfsInfo())
-    private val radicleInfoFlow = MutableStateFlow(RadicleInfo())
+    // Shared with the `rad://` browser and `window.radicle` (#124).
+    private val radicleInfoFlow = RadicleClient.state
+    private val radicleGrants by lazy { RadicleGrantStore.get(this) }
 
     /**
      * Serializes relaying the Radicle setting to `:node`: a toggle's
@@ -162,6 +168,7 @@ class MainActivity : ComponentActivity() {
         override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
             val b = INodeService.Stub.asInterface(service) ?: return
             binder = b
+            RadicleClient.service = b
             runCatching { b.registerCallback(callback) }
             runCatching { b.state?.let { infoFlow.value = it } }
             runCatching {
@@ -187,6 +194,7 @@ class MainActivity : ComponentActivity() {
             // `:node` died unexpectedly. A clean toggle-off goes through
             // [setRunNodeEnabled] instead, which sets Stopped explicitly.
             binder = null
+            RadicleClient.service = null
             infoFlow.value = NodeInfo()
             ipfsInfoFlow.value = IpfsInfo()
             radicleInfoFlow.value = RadicleInfo()
@@ -197,6 +205,21 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         settings = NodeSettings.get(this)
+        // Name resolution reads the user's RPC settings for every
+        // lookup, so a change in Settings applies to the next name.
+        Gateways.ensRpcConfig = { settings.ensRpcConfig.first() }
+        // The first read moves what an earlier build kept in the settings
+        // file — API keys in plain text among them — to where they now
+        // live (encrypted); do it now rather than at the first name.
+        lifecycleScope.launch(Dispatchers.IO) {
+            try {
+                settings.ensRpcConfig.first()
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                android.util.Log.w("MainActivity", "reading name-resolution settings failed (${e.javaClass.simpleName})")
+            }
+        }
 
         // Honor the persisted preference on cold start. If the user had
         // the node enabled, start + bind right away; otherwise leave
@@ -223,6 +246,16 @@ class MainActivity : ComponentActivity() {
         // Onchain apps (#123): a restored tab's app document is read by
         // the interceptor, which needs the chain-data router wired first.
         OnchainApps.init(this)
+        // Radicle (#124): the repository browser's page files, and the
+        // `window.radicle` provider behind every tab's page object.
+        RadApi.init(this)
+        RadicleProviders.init(this)
+        lifecycleScope.launch {
+            settings.radicleEnabled.collect {
+                RadicleClient.enabled = it
+                RadicleProviders.setEnabled(it)
+            }
+        }
         Gateways.expectExternalEndpoints()
         lifecycleScope.launch {
             withContext(Dispatchers.IO) { UnverifiedOrigins.init(this@MainActivity) }
@@ -295,6 +328,7 @@ class MainActivity : ComponentActivity() {
                     val radicleInfo by radicleInfoFlow.collectAsState()
                     val radicleEnabled by settings.radicleEnabled
                         .collectAsState(initial = false)
+                    val radicleGrants by radicleGrants.all.collectAsState(initial = emptyList())
                     val runNodeEnabled by settings.runNodeEnabled
                         .collectAsState(initial = true)
                     val myotisInfo by myotisInfoFlow.collectAsState()
@@ -309,6 +343,7 @@ class MainActivity : ComponentActivity() {
                         myotisInfo = myotisInfo,
                         myotisEnabled = myotisEnabled,
                         onToggleMyotis = ::onToggleMyotis,
+                        onMyotisRecovery = ::onMyotisRecovery,
                         onEnsureIpfsStarted = ::onEnsureIpfsStarted,
                         onIpfsToggle = ::onIpfsToggle,
                         radicle = RadicleControls(
@@ -317,6 +352,8 @@ class MainActivity : ComponentActivity() {
                             onToggle = ::onRadicleToggle,
                             onSeed = ::onRadicleSeed,
                             onUnseed = ::onRadicleUnseed,
+                            grants = radicleGrants,
+                            onRevoke = ::onRadicleRevoke,
                         ),
                         initialUrl = startUrl,
                         deepLink = pendingLinks.firstOrNull(),
@@ -494,6 +531,14 @@ class MainActivity : ComponentActivity() {
         lifecycleScope.launch { settings.setMyotisEnabled(enabled) }
     }
 
+    /** A chain row's Retry / Repair sync data (#195); the service ignores it unless it applies. */
+    private fun onMyotisRecovery(chainId: Long, repair: Boolean) {
+        runCatching {
+            val binder = myotisBinder ?: return
+            if (repair) binder.repairSyncData(chainId) else binder.retryRecovery(chainId)
+        }
+    }
+
     private fun bindMyotis() {
         if (myotisBound) return
         myotisInfoFlow.value = MyotisInfo(status = MyotisStatus.Starting)
@@ -541,6 +586,13 @@ class MainActivity : ComponentActivity() {
         runCatching { binder?.unseedRadicleRepo(rid) }
     }
 
+    /** The user disconnected a site from `window.radicle` on the Radicle page (#124). */
+    private fun onRadicleRevoke(origin: String) {
+        lifecycleScope.launch {
+            if (radicleGrants.revoke(origin)) RadicleProviders.revoked(origin)
+        }
+    }
+
     /** Seed-by-RID from the Radicle page; progress comes back on the callback. */
     private fun onRadicleSeed(rid: String) {
         runCatching { binder?.seedRadicleRepo(rid) }
@@ -572,6 +624,7 @@ class MainActivity : ComponentActivity() {
         runCatching { binder?.unregisterCallback(callback) }
         runCatching { unbindService(connection) }
         binder = null
+        RadicleClient.service = null
         bound = false
     }
 }
