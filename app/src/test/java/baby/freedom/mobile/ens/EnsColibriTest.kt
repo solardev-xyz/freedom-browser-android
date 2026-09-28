@@ -207,6 +207,57 @@ class EnsColibriTest {
     }
 
     @Test
+    fun `a req_ptr above Long MAX_VALUE (an arm64 tagged heap pointer) is still answered`() {
+        // 0xb400007a1c2d3e40, as the core prints it: unsigned decimal.
+        val tagged = "12970367451285765696"
+        val bits = 0xb400007a1c2d3e40uL.toLong()
+        val engine = ScriptEngine(
+            rounds = listOf(
+                listOf(
+                    request(1, "eth_rpc").put("req_ptr", tagged),
+                    request(2, "eth_rpc").put("req_ptr", "18446744073709551615"),
+                ),
+            ),
+            final = success,
+        )
+
+        call(EnsColibri(engine, ScriptHttp { ok("{}") }))
+
+        // Handed back as the same 64 bits in a jlong.
+        assertTrue(bits < 0)
+        assertEquals(setOf(bits, -1L), engine.responses.keys.toSet())
+    }
+
+    @Test
+    fun `a request with no usable req_ptr fails the call instead of being skipped`() {
+        for (bad in listOf("", "0xb400007a1c2d3e40", "18446744073709551616", "nope")) {
+            val engine = ScriptEngine(rounds = listOf(listOf(request(1, "eth_rpc").put("req_ptr", bad))), final = success)
+            try {
+                call(EnsColibri(engine, ScriptHttp { ok("{}") }))
+                fail("expected a failure for req_ptr '$bad'")
+            } catch (e: EnsColibri.Failure) {
+                assertTrue(e.message!!.contains("req_ptr"))
+            }
+            assertTrue(engine.responses.isEmpty() && engine.errors.isEmpty())
+            assertEquals(listOf(42L), engine.freed)
+        }
+    }
+
+    @Test
+    fun `an exclude_mask with bit 63 set still excludes the lower servers`() {
+        // Bits 0 and 63: rpc1 is excluded even though the mask is above Long.MAX_VALUE.
+        val engine = ScriptEngine(
+            rounds = listOf(listOf(request(1, "eth_rpc").put("exclude_mask", "9223372036854775809"))),
+            final = success,
+        )
+        val http = ScriptHttp { ok("{}") }
+
+        call(EnsColibri(engine, http))
+
+        assertEquals(listOf("https://rpc2.test/"), http.log.map { it.url })
+    }
+
+    @Test
     fun `a proven revert comes back with its data`() {
         val engine = ScriptEngine(emptyList(), JSONObject().put("status", "revert").put("data", "0x77209fe8"))
 

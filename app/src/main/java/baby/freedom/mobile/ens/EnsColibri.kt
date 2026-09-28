@@ -127,7 +127,10 @@ internal class EnsColibri(
                         // dies with [ctx].
                         ensureActive()
                         for ((request, answer) in answers) {
-                            val req = request.optString("req_ptr").toLongOrNull() ?: continue
+                            // Skipping a request would leave it unanswered, and
+                            // the core would just list it again next round.
+                            val req = parsePtr(request.optString("req_ptr"))
+                                ?: throw Failure("the verifier listed a request with no usable req_ptr")
                             when (answer) {
                                 is Served.Ok -> {
                                     engine.setResponse(req, answer.body, answer.index)
@@ -145,6 +148,15 @@ internal class EnsColibri(
             engine.free(ctx)
         }
     }
+
+    /**
+     * A `req_ptr` (or a 64-bit mask) as the core prints it: the unsigned
+     * decimal of a `uint64_t`. A pointer can sit above [Long.MAX_VALUE]
+     * (arm64 tagged heap pointers, `0xb4…`), so it's read unsigned and
+     * handed on as the same 64 bits in a `jlong`. A signed decimal is
+     * taken as-is too.
+     */
+    internal fun parsePtr(text: String): Long? = text.trim().let { it.toULongOrNull()?.toLong() ?: it.toLongOrNull() }
 
     private fun resultHex(status: JSONObject): String {
         val result = status.opt("result")
@@ -165,7 +177,7 @@ internal class EnsColibri(
     private suspend fun serve(request: JSONObject, ethRpcs: List<String>): Served {
         request.optLong("delay", 0).takeIf { it > 0 }?.let { delay(minOf(it, MAX_DELAY_MS)) }
         val servers = serversFor(request, ethRpcs)
-        val exclude = request.optString("exclude_mask").toLongOrNull() ?: request.optLong("exclude_mask", 0)
+        val exclude = parsePtr(request.optString("exclude_mask")) ?: 0L
         val path = request.optString("url", "")
         val payload = request.optJSONObject("payload")
         val method = request.optString("method", "POST").uppercase().takeIf { it == "GET" || it == "POST" } ?: "POST"
