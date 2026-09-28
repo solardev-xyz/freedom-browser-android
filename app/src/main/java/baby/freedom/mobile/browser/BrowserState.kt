@@ -378,9 +378,10 @@ class BrowserState(val id: Long, val private: Boolean = false) {
                 onBlank -> AfterBlank(address, submit)
                 // A load that hadn't committed over a real page yet
                 // (#183 R1-F2): the restored list ends on that page, so
-                // the address goes in once *it* has finished — the load
+                // the address goes in once *its* reload has finished —
+                // whatever URL that ends on (a redirect, R2-F2) — and
                 // supersedes it as it did before the relaunch.
-                restored && overPage && submit -> AfterBlank(address, submit = true, overEntry = currentEntryUrl)
+                restored && overPage && submit -> AfterBlank(address, submit = true, overPage = true)
                 else -> null
             }
         }
@@ -470,14 +471,68 @@ class BrowserState(val id: Long, val private: Boolean = false) {
      * [BrowserWebViewHost] for a reopened tab whose restored (or
      * unrestorable) state leaves the WebView *on* that entry, and
      * consumed by the first `onPageFinished` that follows, whichever
-     * entry it is for: only the blank one acts on it. With [overEntry]
-     * set, the restored list ends on that real page instead, under a
-     * load that hadn't committed yet (#183 R1-F2): only a finish of
-     * that page submits the address.
+     * entry it is for: only the blank one acts on it. With [overPage]
+     * set, the restored list ends on a real page instead, under a load
+     * that hadn't committed yet (#183 R1-F2): only a finish of that
+     * page's own reload submits the address.
+     *
+     * Either way it belongs to the restore's own load and nothing
+     * after it: any navigation handed to the WebView after the restore
+     * — the user's submit, Home, Back / Forward, Reload, Stop, a link
+     * the user taps on the page — drops it ([restoreLoadSuperseded],
+     * #185 R2-F1). Otherwise the stop that begins that navigation
+     * finishes the restored page and puts the old address in over it.
      */
-    class AfterBlank(val address: String, val submit: Boolean, val overEntry: String? = null)
+    class AfterBlank(val address: String, val submit: Boolean, val overPage: Boolean = false)
 
     internal var afterBlank: AfterBlank? = null
+        private set
+
+    internal fun armAfterRestore(after: AfterBlank?) {
+        afterBlank = after
+    }
+
+    /**
+     * A navigation other than the restore's own load was handed to this
+     * tab's WebView (or its load was stopped): the address the restore
+     * had waiting ([afterBlank]) is no longer the next thing to load.
+     */
+    internal fun restoreLoadSuperseded() {
+        afterBlank = null
+    }
+
+    /**
+     * The blank home entry finished: the address waiting for it, if it
+     * was armed for that entry. One armed over a restored page
+     * ([AfterBlank.overPage]) is dropped instead — the tab is Home.
+     */
+    internal fun takeAfterBlankEntry(): AfterBlank? =
+        afterBlank.also { afterBlank = null }?.takeUnless { it.overPage }
+
+    /**
+     * A real page finished. A pending blank-entry address is dropped: it
+     * can't apply to a later Home. One armed over the restored page
+     * ([AfterBlank.overPage]) is returned, still armed, for the caller
+     * to [claimAfterPage] once this finish has updated the tab — the
+     * first finish after the restore is that page's reload, under
+     * whatever URL it ended on (a redirect, #185 R2-F2).
+     */
+    internal fun afterPageFinished(): AfterBlank? {
+        val after = afterBlank ?: return null
+        if (!after.overPage) afterBlank = null
+        return after.takeIf { it.overPage }
+    }
+
+    /**
+     * Whether [after] (from [afterPageFinished]) is still the load to
+     * submit now: nothing superseded it in between, it wasn't claimed
+     * already, and the user hasn't stopped the tab. Disarms it either way.
+     */
+    internal fun claimAfterPage(after: AfterBlank): Boolean {
+        if (afterBlank !== after) return false
+        afterBlank = null
+        return !loadAborted
+    }
 
     /**
      * Compact-on-scroll state of the floating capsule for this tab.

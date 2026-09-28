@@ -770,14 +770,14 @@ fun BrowserWebViewHost(
             // ends on a real page never finishes a blank load, so there
             // it waits for that page instead — for a load the tab had in
             // flight over it (#183 R1-F2).
-            tab.afterBlank = restore.afterBlank(
+            tab.armAfterRestore(restore.afterBlank(
                 restored = restored,
                 currentEntryUrl = if (restored) {
                     wv.copyBackForwardList().currentItem?.url
                 } else {
                     ABOUT_BLANK
                 },
-            )
+            ))
         }
         val toRemove = webViews.keys.filter { it !in idsNow }
         var closedPrivate = false
@@ -1998,6 +1998,9 @@ private fun buildRefreshableWebView(
         // navigation's gesture mustn't carry over to its redirects (#85).
         this.onBrowserInitiatedLoad = { url, userNamed ->
             navigationHadGesture = false
+            // …nor does an address a restore had waiting for its own
+            // load (#185 R2-F1).
+            state.restoreLoadSuperseded()
             if (url != null && userNamed) userNamedChain.started(url) else userNamedChain.ended()
         }
         // Stop (or a new load's stop first) ends the navigation in flight
@@ -2005,6 +2008,11 @@ private fun buildRefreshableWebView(
         // it carries over to a navigation the page starts next (R1-F1).
         this.onStopLoading = {
             navigationHadGesture = false
+            // The stop finishes the restored page: the address waiting
+            // for that finish mustn't go in over what comes next — the
+            // user's own navigation, or nothing if they hit Stop
+            // (#185 R2-F1).
+            state.restoreLoadSuperseded()
             userNamedChain.ended()
         }
 
@@ -2423,8 +2431,7 @@ private fun buildRefreshableWebView(
                     // the tab loads behind the home overlay. A load the
                     // user had stopped only gets its address back, and
                     // the Stop latch so the bar offers Reload.
-                    state.afterBlank?.let {
-                        state.afterBlank = null
+                    state.takeAfterBlankEntry()?.let {
                         state.addressBarText = it.address
                         if (it.submit) onSubmitUrl(state, it.address) else state.stopProgress()
                     }
@@ -2433,18 +2440,19 @@ private fun buildRefreshableWebView(
                 // The first page to finish after a restore consumes the
                 // pending blank-entry address too, even though it isn't
                 // the blank entry: it can't apply to a later Home.
-                // Unless it was armed for this very page (#183 R1-F2): a
-                // load the tab had in flight over it before its WebView
-                // was rebuilt goes in now — posted, so this finish has
-                // updated the tab first — unless the user stopped it.
-                state.afterBlank?.takeIf { it.overEntry != null && it.overEntry == url }?.let { after ->
+                // Unless it was armed over the restored page (#183
+                // R1-F2): a load the tab had in flight over it before its
+                // WebView was rebuilt goes in now, whatever URL the
+                // reload ended on (#185 R2-F2) — posted, so this finish
+                // has updated the tab first, and only if nothing has
+                // superseded it by then (#185 R2-F1).
+                state.afterPageFinished()?.let { after ->
                     view?.post {
-                        if (state.loadAborted) return@post
+                        if (!state.claimAfterPage(after)) return@post
                         state.addressBarText = after.address
                         onSubmitUrl(state, after.address)
                     }
                 }
-                state.afterBlank = null
                 // Dismiss the pull-to-refresh spinner once the page has
                 // finished loading (or errored out). Happens regardless
                 // of whether the load was user-initiated reload or not.
@@ -2586,6 +2594,11 @@ private fun buildRefreshableWebView(
                     navigationHadGesture = request.hasGesture()
                     // The page's own navigation, not the user's load.
                     userNamedChain.ended()
+                    // A link the user tapped on a restored page is where
+                    // they're going now, not the load a restore had
+                    // waiting (#185 R2-F1). A script's redirect without a
+                    // tap is still the restored page's own load.
+                    if (request.hasGesture()) state.restoreLoadSuperseded()
                 }
                 // A popup's very first navigation: an app link there is
                 // its opener's, and the popup was opened for it alone.

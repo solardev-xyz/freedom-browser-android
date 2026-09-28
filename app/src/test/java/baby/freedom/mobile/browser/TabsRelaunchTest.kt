@@ -89,9 +89,68 @@ class TabsRelaunchTest {
         val after = restore.afterBlank(restored = true, currentEntryUrl = "https://b.example/")!!
         assertEquals("https://next.example/", after.address)
         assertTrue(after.submit)
-        assertEquals("https://b.example/", after.overEntry)
+        assertTrue(after.overPage)
         // Not restored: the in-flight address is what loads.
         assertEquals("https://next.example/", restore.afterBlank(restored = false, currentEntryUrl = ABOUT_BLANK)!!.address)
+    }
+
+    private fun armedOverPage(): BrowserState {
+        val tabs = threeTabs()
+        val tab = tabs.active // on b
+        tab.addressBarText = "https://next.example/"
+        tab.progress = 10
+        tabs.parkForRelaunch { null }
+        tab.armAfterRestore(tab.pendingRestore!!.afterBlank(restored = true, currentEntryUrl = "https://b.example/"))
+        return tab
+    }
+
+    @Test
+    fun `the load put back over a restored page goes in when that page finishes, redirected or not`() {
+        val tab = armedOverPage()
+        // b's reload ended on another URL (a 302): still that load's finish.
+        val after = tab.afterPageFinished()!!
+        assertEquals("https://next.example/", after.address)
+        assertTrue(tab.claimAfterPage(after))
+        // Claimed once only.
+        assertFalse(tab.claimAfterPage(after))
+        assertNull(tab.afterPageFinished())
+    }
+
+    @Test
+    fun `a navigation after the restore drops the load it had waiting`() {
+        // The user's submit, Home, Back, a tapped link: each stops the
+        // restored page first, and that stop's finish must not put the
+        // old address in over it (#185 R2-F1).
+        val beforeFinish = armedOverPage()
+        beforeFinish.restoreLoadSuperseded()
+        assertNull(beforeFinish.afterPageFinished())
+        // Superseded between the finish and its posted submit.
+        val afterFinish = armedOverPage()
+        val after = afterFinish.afterPageFinished()!!
+        afterFinish.restoreLoadSuperseded()
+        assertFalse(afterFinish.claimAfterPage(after))
+    }
+
+    @Test
+    fun `the load put back over a restored page isn't submitted from home or after a stop`() {
+        val home = armedOverPage()
+        assertNull(home.takeAfterBlankEntry())
+        assertNull(home.afterPageFinished())
+        val stopped = armedOverPage()
+        val after = stopped.afterPageFinished()!!
+        stopped.stopProgress()
+        assertFalse(stopped.claimAfterPage(after))
+    }
+
+    @Test
+    fun `a navigation before the blank entry finishes drops the address it had waiting`() {
+        val tabs = threeTabs()
+        val loading = tabs.newTab()
+        loading.addressBarText = "https://d.example/"
+        tabs.parkForRelaunch { null }
+        loading.armAfterRestore(loading.pendingRestore!!.afterBlank(restored = true, currentEntryUrl = ABOUT_BLANK))
+        loading.restoreLoadSuperseded()
+        assertNull(loading.takeAfterBlankEntry())
     }
 
     @Test
