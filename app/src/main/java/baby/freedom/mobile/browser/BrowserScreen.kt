@@ -1446,13 +1446,13 @@ fun BrowserScreen(
         // asks for and strictly better at "no layout shifts" — an
         // overlay on fixed geometry can't move anything, whereas the
         // strip's reserved slot was 14 dp of permanently dead band.
-        // The page menu's per-site ad-blocking switch (#126): the site
-        // the tab is on, and whether blocking is on there — re-read
-        // whenever the allowlist or the engine changes.
+        // The page menu's per-site ad-blocking switch (#126): whether
+        // blocking is really on for the page — not allowlisted, an
+        // engine loaded, no list exempting it — re-read whenever the
+        // allowlist or the engine changes.
         val adblockRevision by Adblock.revision.collectAsState()
-        val adblockSite = adblockSiteFor(state.url)
-        val adblockBlocking = remember(adblockRevision, adblockSite, state.private) {
-            adblockSite != null && !Adblock.isAllowlisted(adblockSite, state.private)
+        val adblockState = remember(adblockRevision, state.url, state.private) {
+            Adblock.siteState(state.url, state.private)
         }
         Box(modifier = Modifier.align(Alignment.BottomCenter)) {
             // Tap-to-dismiss catcher for the whole chrome band — the
@@ -1611,11 +1611,12 @@ fun BrowserScreen(
                         ?.let { pageZoom.levelFor(it, state.private) },
                     onZoom = { action -> state.zoomSite?.let { pageZoom.apply(it, action, state.private) } },
                     onPrint = { tabs.printPage?.invoke(state) },
-                    adblockSite = adblockSite,
-                    adblockBlocking = adblockBlocking,
+                    adblockState = adblockState,
                     onToggleAdblock = {
-                        val site = adblockSite ?: return@BottomToolbar
-                        Adblock.setAllowlisted(context, site, allowed = adblockBlocking, private = state.private)
+                        val site = adblockSiteFor(state.url) ?: return@BottomToolbar
+                        val current = Adblock.siteState(state.url, state.private) ?: return@BottomToolbar
+                        if (!current.toggleable) return@BottomToolbar
+                        Adblock.setAllowlisted(site, allowed = current.checked, private = state.private)
                         // Already-loaded ads (or already-blocked content)
                         // only change with the next load of the page.
                         val url = state.url.ifBlank { state.addressBarText }

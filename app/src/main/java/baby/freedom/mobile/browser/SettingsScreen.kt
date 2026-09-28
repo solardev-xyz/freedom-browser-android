@@ -230,7 +230,7 @@ fun SettingsScreen(
                             scope.launch { settings.setAdblockCategory(category, on) }
                         },
                         onRemoveSite = { site ->
-                            Adblock.removeAllowlisted(context, site)
+                            Adblock.removeAllowlisted(site)
                         },
                         onAddSite = { addAllowlistSite = true },
                     )
@@ -325,7 +325,7 @@ fun SettingsScreen(
     if (addAllowlistSite) {
         AllowlistSiteDialog(
             onAdd = { site ->
-                Adblock.setAllowlisted(context, site, allowed = true, private = false)
+                Adblock.setAllowlisted(site, allowed = true, private = false)
                 addAllowlistSite = false
             },
             onDismiss = { addAllowlistSite = false },

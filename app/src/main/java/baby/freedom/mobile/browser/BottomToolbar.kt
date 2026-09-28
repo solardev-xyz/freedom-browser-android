@@ -1422,10 +1422,8 @@ internal fun BottomToolbar(
     onStop: () -> Unit,
     onNewTab: () -> Unit,
     onPrint: () -> Unit,
-    /** The site the page menu's ad-blocking switch is for (#126), or null to leave it out. */
-    adblockSite: String? = null,
-    /** Whether ads are blocked on [adblockSite] (it isn't allowlisted). */
-    adblockBlocking: Boolean = false,
+    /** The page menu's ad-blocking switch (#126), or null to leave it out. */
+    adblockState: AdblockSiteState? = null,
     onToggleAdblock: () -> Unit = {},
     /** "New private tab" (#86); null where private tabs can't run, and the menu doesn't offer it. */
     onNewPrivateTab: (() -> Unit)? = null,
@@ -1710,8 +1708,7 @@ internal fun BottomToolbar(
                     zoomLevel = zoomLevel,
                     onZoom = onZoom,
                     onPrint = onPrint,
-                    adblockSite = adblockSite,
-                    adblockBlocking = adblockBlocking,
+                    adblockState = adblockState,
                     onToggleAdblock = onToggleAdblock,
                 )
             },
@@ -2923,8 +2920,7 @@ private fun OverflowMenuButton(
     zoomLevel: Int?,
     onZoom: (ZoomAction) -> Unit,
     onPrint: () -> Unit,
-    adblockSite: String?,
-    adblockBlocking: Boolean,
+    adblockState: AdblockSiteState?,
     onToggleAdblock: () -> Unit,
 ) {
     var menuExpanded by remember { mutableStateOf(false) }
@@ -3070,20 +3066,37 @@ private fun OverflowMenuButton(
                                 onPrint()
                             },
                         )
-                        // Ad blocking on this site (#126): the switch shows
-                        // the site's state; a tap allowlists it (or lifts
-                        // that) and reloads the page. Only on a web page.
-                        if (adblockSite != null) {
+                        // Ad blocking on this site (#126): the switch is on
+                        // only where filters really apply; a tap allowlists
+                        // the site (or lifts that) and reloads the page.
+                        // Where nothing is filtered for another reason (no
+                        // lists on, still loading, a list exempts the page)
+                        // it is off and disabled, and says why in a
+                        // sub-line. Only on a web page.
+                        if (adblockState != null) {
                             DropdownMenuItem(
-                                text = { MenuItemLabel("Block ads on this site") },
+                                text = {
+                                    Column(modifier = Modifier.padding(end = 32.dp)) {
+                                        Text("Block ads on this site")
+                                        adblockState.note?.let { note ->
+                                            Text(
+                                                text = note,
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            )
+                                        }
+                                    }
+                                },
                                 leadingIcon = { Icon(Icons.Filled.Shield, contentDescription = null) },
                                 trailingIcon = {
                                     Switch(
-                                        checked = adblockBlocking,
+                                        checked = adblockState.checked,
                                         onCheckedChange = null,
+                                        enabled = adblockState.toggleable,
                                         modifier = Modifier.scale(0.8f),
                                     )
                                 },
+                                enabled = adblockState.toggleable,
                                 onClick = {
                                     menuExpanded = false
                                     onToggleAdblock()
@@ -3091,7 +3104,7 @@ private fun OverflowMenuButton(
                                 // Read out as the switch it looks like.
                                 modifier = Modifier.semantics {
                                     role = Role.Switch
-                                    toggleableState = ToggleableState(adblockBlocking)
+                                    toggleableState = ToggleableState(adblockState.checked)
                                 },
                             )
                         }
