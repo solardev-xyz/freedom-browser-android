@@ -817,17 +817,18 @@ internal fun bottomUiDetectorJs(channel: String, debounceMs: Int = BOTTOM_UI_DEB
   // would see the call.
   // The attribute filter is a sequence, which the platform reads by
   // iterating: an array would be walked through Array.prototype's
-  // iterator, which the page can replace. So it is its own iterable.
+  // iterator, which the page can replace. So it is its own iterable,
+  // and its iterator is built now too: iterating calls nothing but
+  // these closures (a fresh Object.create at observe() time would call
+  // whatever the page has put there since).
   var moOpts = Object.create(null), FILTER = ['class', 'style', 'hidden', 'open', 'content', 'media', 'name'],
       ITER = typeof Symbol === 'function' ? Symbol.iterator : null;
   moOpts.childList = true; moOpts.subtree = true; moOpts.attributes = true;
   if (ITER) {
+    var fi = 0, fit = Object.create(null);
+    fit.next = function () { return fi < FILTER.length ? { value: FILTER[fi++], done: false } : { value: undefined, done: true }; };
     moOpts.attributeFilter = Object.create(null);
-    moOpts.attributeFilter[ITER] = function () {
-      var i = 0, it = Object.create(null);
-      it.next = function () { return i < FILTER.length ? { value: FILTER[i++], done: false } : { value: undefined, done: true }; };
-      return it;
-    };
+    moOpts.attributeFilter[ITER] = function () { fi = 0; return fit; };
   } else moOpts.attributeFilter = FILTER;
   function style(n, name, camel) { var s = gcs(n); return dom.css ? dom.css(s, name) : s[camel]; }
   // The theme-colour read's natives, saved before the page runs (#92).

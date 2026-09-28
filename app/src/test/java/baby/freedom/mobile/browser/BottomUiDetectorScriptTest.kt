@@ -319,6 +319,24 @@ class BottomUiDetectorScriptTest {
     }
 
     @Test
+    fun `the attribute filter's iterator calls nothing the page can replace after document start`() = page {
+        // Rhino has no Symbol: stand one in, so the filter is the iterable Chromium gets.
+        eval("Symbol = function () {}; Symbol.iterator = '@@iterator'")
+        eval("hit = tab")
+        documentStart()
+        // The page, after document start: every Object.create call is seen and refused.
+        eval("var seen = 0; Object.create = function () { seen++; throw new Error('page saw it'); }")
+        firstPaint()
+        // observe() reads the sequence by iterating it — twice, as a re-attach would.
+        val walk = "(function () { var it = mutationCbOpts().attributeFilter['@@iterator'](), r, out = [];" +
+            " while (!(r = it.next()).done) out.push(r.value); return out.join(','); })()"
+        repeat(2) {
+            assertEquals("class,style,hidden,open,content,media,name", Context.toString(eval(walk)))
+        }
+        assertEquals(0, num("seen"))
+    }
+
+    @Test
     fun `a meta change sends Kotlin the theme colour, debounced, and nothing else does`() = page {
         eval("hit = tab")
         install()
