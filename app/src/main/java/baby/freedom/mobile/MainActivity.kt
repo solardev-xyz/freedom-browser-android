@@ -26,6 +26,7 @@ import baby.freedom.mobile.browser.Gateways
 import baby.freedom.mobile.browser.HOME_URL
 import baby.freedom.mobile.browser.Adblock
 import baby.freedom.mobile.browser.PublicSuffixList
+import baby.freedom.mobile.browser.OnchainApps
 import baby.freedom.mobile.browser.UnverifiedOrigins
 import baby.freedom.mobile.browser.VirtualOrigin
 import baby.freedom.mobile.browser.statusBarIconsDark
@@ -132,6 +133,9 @@ class MainActivity : ComponentActivity() {
         // wait for it (so a cold-start deep link or restored tab can't
         // reach the embedded node's gateway first) — the main thread
         // doesn't.
+        // Onchain apps (#123): a restored tab's app document is read by
+        // the interceptor, which needs the chain-data router wired first.
+        OnchainApps.init(this)
         Gateways.expectExternalEndpoints()
         lifecycleScope.launch {
             withContext(Dispatchers.IO) { UnverifiedOrigins.init(this@MainActivity) }

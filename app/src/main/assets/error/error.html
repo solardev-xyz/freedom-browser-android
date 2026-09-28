@@ -252,6 +252,44 @@
           descriptionEl.innerHTML =
             "Couldn't reach an Ethereum RPC endpoint to resolve this name. Check your " +
             'connection and try again.';
+        } else if (error === 'web3_unverified') {
+          // #123: an onchain app's code only one RPC server returned.
+          document.body.classList.add('warn');
+          titleEl.textContent = 'Not cross-checked';
+          descriptionEl.innerHTML =
+            "Only one RPC server returned this onchain app's code, so Freedom couldn't " +
+            'check it against another server. It may be the real app, but a single ' +
+            'misbehaving server could have changed it. Continue only if you trust that ' +
+            'server with this app.';
+        } else if (error === 'web3_conflict') {
+          titleEl.textContent = 'RPC servers disagreed';
+          descriptionEl.innerHTML =
+            "The RPC servers Freedom asked returned different code for this onchain app. " +
+            'At least one of them is wrong &mdash; or lying &mdash; so nothing was run. ' +
+            'Try again in a moment.';
+        } else if (error === 'web3_unknown_chain') {
+          titleEl.textContent = 'Unknown chain';
+          descriptionEl.innerHTML =
+            "This app lives on a chain that isn't in your chain list, so Freedom doesn't " +
+            'know which RPC servers to ask. Add the chain in Settings, then try again.';
+        } else if (error === 'web3_not_an_app') {
+          titleEl.textContent = 'Not an onchain app';
+          descriptionEl.innerHTML =
+            "The contract didn't return an ERC-8244 <code>html()</code> document on this " +
+            'chain. Check the address and the chain ID.';
+        } else if (error === 'web3_too_large') {
+          titleEl.textContent = 'App too large';
+          descriptionEl.innerHTML = "The app's document is larger than Freedom loads.";
+        } else if (error === 'web3_invalid') {
+          titleEl.textContent = 'Not a web3:// app address';
+          descriptionEl.innerHTML =
+            'Freedom loads web3:// apps by contract address: ' +
+            '<code>web3://0x&hellip;[:chainId]/</code>. Names are not supported yet.';
+        } else if (error === 'web3_lookup_failed') {
+          titleEl.textContent = "Couldn't read the app";
+          descriptionEl.innerHTML =
+            "Couldn't get an answer from the chain's RPC servers. Check your connection " +
+            'and try again.';
         } else if (error === 'swarm_content_not_found') {
           titleEl.textContent = 'Content not ready yet';
           descriptionEl.innerHTML =

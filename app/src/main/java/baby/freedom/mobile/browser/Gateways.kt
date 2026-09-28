@@ -249,6 +249,7 @@ object Gateways {
      */
     fun toLoadable(url: String): String {
         VirtualOrigin.toVirtualUrl(url)?.let { return it }
+        OnchainAppRef.toVirtualUrl(url)?.let { return it }
         return toGatewayUrl(url)
     }
 
@@ -273,6 +274,7 @@ object Gateways {
      */
     fun toDisplay(url: String): String {
         VirtualOrigin.displayUrlFor(url)?.let { return it }
+        OnchainAppRef.displayUrlFor(url)?.let { return it }
         val swarm = SwarmResolver.toDisplay(url, swarmBase)
         if (swarm != url) return swarm
         val ipfsNow = ipfsBase

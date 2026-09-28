@@ -58,7 +58,8 @@ object CookieHygiene {
 
     private fun sweepJar(cm: CookieManager, navigatedUrl: String?) {
         var expired = 0
-        for (suffix in VirtualOrigin.SUFFIXES) {
+        // Onchain apps' origins (#123) sit under the same base domain.
+        for (suffix in VirtualOrigin.SUFFIXES + OnchainAppRef.SUFFIX) {
             expired += expireAllFor(cm, "https://$suffix/", domain = ".$suffix")
         }
         if (navigatedUrl != null && VirtualOrigin.isVirtualUrl(navigatedUrl)) {

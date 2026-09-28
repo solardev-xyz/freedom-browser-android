@@ -2834,7 +2834,7 @@ private fun buildRefreshableWebView(
                 }
                 val work = state.gatewayWork.start(generation)
                 val response = try {
-                    interceptVirtualRequest(request, ensPins, view)
+                    interceptVirtualRequest(request, ensPins, view, state.onchain)
                 } catch (t: Throwable) {
                     state.gatewayWork.finish(work)
                     throw t
@@ -3818,7 +3818,9 @@ internal fun submitDetourForNavigation(url: String, isForMainFrame: Boolean): Bo
     if (!isForMainFrame) return false
     val schemeEnd = url.indexOf("://")
     if (schemeEnd <= 0) return false
-    return url.substring(0, schemeEnd).lowercase() in CONTENT_SCHEMES
+    val scheme = url.substring(0, schemeEnd).lowercase()
+    // A `web3://` app (#123) is read, and gated, by the submit flow too.
+    return scheme in CONTENT_SCHEMES || scheme == OnchainAppRef.SCHEME
 }
 
 /**
@@ -3923,19 +3925,27 @@ private fun syntheticResponse(
  * [tab] is the requesting tab's WebView (null for a service worker): a
  * cleanup page another tab's hold asks for is served to it only once
  * ([UnverifiedOrigins.takeClearFor]).
+ *
+ * [onchain] is the requesting tab's onchain-app documents (#123, see
+ * [interceptOnchainAppRequest]); null for a service worker or a native
+ * re-fetch, which are refused on an app's origin anyway.
  */
 internal fun interceptVirtualRequest(
     request: WebResourceRequest?,
     ensPins: EnsDocumentPins? = null,
     tab: Any? = null,
+    onchain: OnchainAppTab? = null,
 ): WebResourceResponse? {
     val req = request ?: return null
     val url = req.url?.toString() ?: return null
     val incoming = if (req.isForMainFrame) ensPins?.beginNavigation(url) else null
-    // An origin an unverified external IPFS gateway served before the
-    // user switched away from it (#125): its next document first clears
-    // what that gateway's pages left there, before anything else runs.
-    val response = siteDataCleanupFor(req, url, tab)
+    // A contract-hosted app's origin (#123) is answered by its own rules.
+    // Then an origin an unverified external IPFS gateway served before
+    // the user switched away from it (#125): its next document first
+    // clears what that gateway's pages left there, before anything else
+    // runs.
+    val response = interceptOnchainAppRequest(req, url, onchain)
+        ?: siteDataCleanupFor(req, url, tab)
         ?: interceptVirtualRequestFor(req, ensPins, incoming)
     if (incoming != null && response != null &&
         rendersInPlace(response.statusCode, response.mimeType, response.responseHeaders)
