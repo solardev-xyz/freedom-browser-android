@@ -268,6 +268,47 @@ class GatewaysTest {
     }
 
     @Test
+    fun `a re-check waits out the proof on top of its own deadline while Colibri is asked first`() {
+        // A proof that takes longer than the RPC share of the deadline
+        // (an ordinary 2-3 s proof against a 3 s deadline) must still be
+        // taken, not time out onto the earlier answer and open the
+        // failure window for a network that is working fine.
+        KnownEnsNames.record("bzz://$ref64", "proving.eth", EnsTrust.ASSUMED)
+        val deadline = Gateways.reverifyDeadlineMs
+        val allowance = Gateways.colibriAllowanceMs
+        val asked = java.util.concurrent.atomic.AtomicReference<baby.freedom.mobile.ens.EnsResolver.Settings?>()
+        Gateways.reverifyDeadlineMs = 100
+        Gateways.colibriAllowanceMs = { settings, _ -> asked.set(settings); 1_000 }
+        try {
+            withLookup({ name ->
+                Thread.sleep(400) // longer than the RPC share, well inside the proof's
+                EnsResult.Ok(name, "bzz", "bzz://$otherRef", otherRef, EnsTrust.ASSUMED)
+            }) {
+                val pins = EnsDocumentPins()
+                assertNull(Gateways.reverifyEnsDocument("proving.eth", pins))
+                assertEquals("bzz://$otherRef", pins.uriFor("proving.eth"))
+                assertEquals(0, Gateways.ensLookupFailureCount())
+                assertTrue(asked.get() != null)
+            }
+            // With the verifier not being asked (off, backing off), the
+            // deadline is the RPC share alone again.
+            Gateways.colibriAllowanceMs = { _, _ -> 0 }
+            KnownEnsNames.record("bzz://$ref64", "slowrpc.eth", EnsTrust.ASSUMED)
+            withLookup({ name ->
+                Thread.sleep(400)
+                EnsResult.Ok(name, "bzz", "bzz://$otherRef", otherRef, EnsTrust.ASSUMED)
+            }) {
+                val pins = EnsDocumentPins()
+                assertNull(Gateways.reverifyEnsDocument("slowrpc.eth", pins))
+                assertEquals("bzz://$ref64", pins.uriFor("slowrpc.eth"))
+            }
+        } finally {
+            Gateways.reverifyDeadlineMs = deadline
+            Gateways.colibriAllowanceMs = allowance
+        }
+    }
+
+    @Test
     fun `after a timeout, a background answer is taken even while documents keep coming`() {
         // One timeout opens the failure window; the network then recovers
         // and the name's contenthash is gone. Documents loading every few

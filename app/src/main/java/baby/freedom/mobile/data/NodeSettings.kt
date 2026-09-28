@@ -143,6 +143,34 @@ class NodeSettings private constructor(
     }
 
     /**
+     * Settings → Tor (#143): whether `.onion` sites open through the
+     * embedded Tor client. Off by default, as on desktop; while off, onion
+     * sites are refused (never resolved directly) and Tor can't be started.
+     * `MainActivity` relays it to `TorRouting` and stops Tor when it's
+     * switched off.
+     */
+    val torEnabled: Flow<Boolean> = store.data.map { prefs ->
+        prefs[Keys.TOR_ENABLED] ?: false
+    }
+
+    suspend fun setTorEnabled(enabled: Boolean) {
+        store.edit { it[Keys.TOR_ENABLED] = enabled }
+    }
+
+    /**
+     * Settings → Tor → Start Tor at launch (#143): start the Tor
+     * client at launch while [torEnabled] is on. Off by default; otherwise
+     * Tor is started from the node page.
+     */
+    val torStartOnLaunch: Flow<Boolean> = store.data.map { prefs ->
+        prefs[Keys.TOR_START_ON_LAUNCH] ?: false
+    }
+
+    suspend fun setTorStartOnLaunch(enabled: Boolean) {
+        store.edit { it[Keys.TOR_START_ON_LAUNCH] = enabled }
+    }
+
+    /**
      * Whether any IPFS UI is rendered. Off by default — IPFS support
      * is a hidden capability surfaced only from Settings → Other. The
      * IPFS node still runs regardless of this flag.
@@ -265,6 +293,7 @@ class NodeSettings private constructor(
             disabledPublicEndpoints = prefs[Keys.ENS_RPC_DISABLED_PUBLIC].orEmpty(),
             apiKeys = EnsRpcConfig.decodeKeys(prefs[RpcKeyStore.LEGACY_KEY]) + apiKeys,
             ccipRead = prefs[Keys.ENS_CCIP_READ] ?: true,
+            colibri = prefs[Keys.ENS_COLIBRI] ?: true,
         )
 
     private suspend fun currentEnsRpc(): EnsRpcConfig =
@@ -463,6 +492,13 @@ class NodeSettings private constructor(
             true
         }
 
+    /** Whether name resolution asks the Colibri verifier for a proof first (#100). */
+    suspend fun setEnsColibri(enabled: Boolean): EnsEdit =
+        editEnsRpc({ it }) {
+            store.edit { it[Keys.ENS_COLIBRI] = enabled }
+            true
+        }
+
     /**
      * External Swarm endpoint (#125): the base URL of a bee/ant HTTP API
      * that serves `bzz://` in place of the embedded node, or `""` for
@@ -550,6 +586,8 @@ class NodeSettings private constructor(
     private object Keys {
         val RUN_NODE_ENABLED = booleanPreferencesKey("run_node_enabled")
         val MYOTIS_ENABLED = booleanPreferencesKey("myotis_enabled")
+        val TOR_ENABLED = booleanPreferencesKey("tor_enabled")
+        val TOR_START_ON_LAUNCH = booleanPreferencesKey("tor_start_on_launch")
         val SHOW_IPFS_UI = booleanPreferencesKey("show_ipfs_ui")
         val RADICLE_ENABLED = booleanPreferencesKey("radicle_enabled")
         val IPFS_LOW_POWER = booleanPreferencesKey("ipfs_low_power")
@@ -560,6 +598,7 @@ class NodeSettings private constructor(
         val LEGACY_ENS_RPC_CUSTOM = stringPreferencesKey("ens_rpc_custom_endpoints")
         val ENS_RPC_DISABLED_PUBLIC = stringSetPreferencesKey("ens_rpc_disabled_public")
         val ENS_CCIP_READ = booleanPreferencesKey("ens_ccip_read")
+        val ENS_COLIBRI = booleanPreferencesKey("ens_colibri")
         val EXTERNAL_SWARM_ENDPOINT = stringPreferencesKey("external_swarm_endpoint")
         val EXTERNAL_IPFS_GATEWAY = stringPreferencesKey("external_ipfs_gateway")
         val ADBLOCK_ALLOWLIST = stringSetPreferencesKey("adblock_allowlist")

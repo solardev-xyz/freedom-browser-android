@@ -13,6 +13,7 @@ import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.GppMaybe
+import androidx.compose.material.icons.filled.Verified
 import androidx.compose.material.icons.filled.VerifiedUser
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
@@ -38,20 +39,26 @@ import baby.freedom.mobile.ens.NameSystem
  * How far the answer behind a name-addressed page was checked (#97) —
  * the trust shield on the address bar's protocol badge, and the details
  * behind it. Mirrors iOS's `TrustShield.swift` / `ENSTrustLevel`, with
- * the tiers this browser's resolver can produce (#96):
+ * the tiers this browser's resolver can produce (#96, #100):
  *
+ * - [Proven]: the Colibri verifier checked a proof of the record
+ *   against Ethereum's sync committee on this device, or the Myotis
+ *   light client ran the lookup itself against state proven to that
+ *   committee ([EnsTrust.lightClient], #101) — the chain's own
+ *   consensus, not servers agreeing. A seal rather than a shield, as on
+ *   iOS, so the two verified tiers are told apart at a glance.
  * - [Verified]: at least [baby.freedom.mobile.ens.EnsQuorum.M]
  *   independent RPC servers returned the byte-identical record at a
- *   block a majority of them agreed on — or the Myotis light client
- *   proved it on this device ([EnsTrust.lightClient], #101).
+ *   block a majority of them agreed on.
  * - [Unverified]: only one server's word — the user let it through the
  *   *Not cross-checked* warning, or a re-check served the answer the
  *   session already had.
  *
- * The same two tiers cover every name system the browser resolves —
+ * The quorum's two tiers cover every name system the browser resolves —
  * ENS, WNS (`.wei`), GNS (`.gwei`) and Tezos Domains (`.tez`, #176),
  * whose providers vote the same way ([NameTrust.system] names whose
- * record it is).
+ * record it is). [Proven] is Ethereum's alone: `.tez` records live on
+ * Tezos, which neither Colibri nor Myotis covers.
  *
  * iOS's other two tiers have no page to sit on here: servers that
  * *disagree* (a conflict, #174's third verdict) never load anything —
@@ -67,6 +74,7 @@ internal enum class TrustTier(
     val icon: ImageVector,
     val color: Color,
 ) {
+    Proven("Proven name", Icons.Filled.Verified, Color(0xFF3FB950)),
     Verified("Verified name", Icons.Filled.VerifiedUser, Color(0xFF3FB950)),
     Unverified("Name not cross-checked", Icons.Filled.GppMaybe, Color(0xFFF0A020)),
 }
@@ -78,7 +86,12 @@ internal enum class TrustTier(
  * servers and block with a later answer's URI.
  */
 internal data class NameTrust(val name: String, val trust: EnsTrust, val answer: String? = null) {
-    val tier: TrustTier get() = if (trust.verified) TrustTier.Verified else TrustTier.Unverified
+    val tier: TrustTier
+        get() = when {
+            trust.proven -> TrustTier.Proven
+            trust.verified -> TrustTier.Verified
+            else -> TrustTier.Unverified
+        }
 
     /** ENS, WNS, GNS or Tezos Domains — whose records these are. */
     val system: String get() = NameSystem.forName(name).label
@@ -88,11 +101,23 @@ internal data class NameTrust(val name: String, val trust: EnsTrust, val answer:
     /** One sentence on what the tier means for this answer. */
     val summary: String
         get() = when (tier) {
-            TrustTier.Verified -> if (trust.lightClient) {
+            TrustTier.Proven -> if (trust.lightClient) {
                 "The Myotis light client on this device read the $system record for $name " +
                     "at $block and checked it against Ethereum state proofs signed off by the " +
                     "chain's sync committee. No RPC server's word was involved."
             } else {
+                val prover = trust.agreed.joinToString(" and ").ifEmpty { "the Colibri prover" }
+                if (trust.offchain) {
+                    "$name's $system record comes from an off-chain gateway (CCIP-Read). This device " +
+                        "checked a proof from $prover against Ethereum's sync committee that the name's " +
+                        "resolver contract accepted that answer at $block; the record itself isn't on chain."
+                } else {
+                    "This device checked a proof from $prover against Ethereum's sync committee: " +
+                        "$name's $system record is what the chain itself holds at $block, " +
+                        "not just what RPC servers agree on."
+                }
+            }
+            TrustTier.Verified -> {
                 val n = trust.agreed.size
                 val agreed = if (n >= 2) "$n independent RPC servers" else "Independent RPC servers"
                 "$agreed returned the same $system record for $name at $block."
@@ -217,10 +242,10 @@ internal fun TrustDetailsDialog(
                     )
                     if (trust.trust.agreed.isNotEmpty()) {
                         TrustFact(
-                            when {
-                                trust.trust.lightClient -> "Verified by"
-                                trust.tier == TrustTier.Verified -> "Agreed (${trust.trust.agreed.size})"
-                                else -> "Answered by"
+                            when (trust.tier) {
+                                TrustTier.Proven -> if (trust.trust.lightClient) "Verified by" else "Proof from"
+                                TrustTier.Verified -> "Agreed (${trust.trust.agreed.size})"
+                                TrustTier.Unverified -> "Answered by"
                             },
                             trust.trust.agreed.joinToString("\n"),
                         )

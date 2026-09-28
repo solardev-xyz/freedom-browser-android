@@ -62,7 +62,8 @@ import kotlinx.coroutines.withContext
 /*
  * Settings → Name resolution and → RPC providers (#102): the desktop
  * browser's pages of the same names, cut to what the Android resolver
- * does: the RPC quorum (#96) over the endpoints below, in their order. Every
+ * does: a Colibri proof first (#100), then the RPC quorum (#96) over the
+ * endpoints below, in their order. Every
  * edit goes to [NodeSettings.ensRpcConfig], which the resolver reads
  * for each lookup, so it applies to the next name without a restart.
  */
@@ -71,7 +72,10 @@ internal const val SECTION_ENS = "Name resolution"
 internal const val SECTION_RPC = "RPC providers"
 
 private const val ENS_ABOUT =
-    "How ENS (.eth), WNS (.wei) and GNS (.gwei) names are resolved. Every answer is cross-checked: it's only trusted when at least two RPC endpoints return exactly the same one. An answer only one endpoint gave is shown to you before anything loads."
+    "How ENS (.eth), WNS (.wei) and GNS (.gwei) names are resolved. With Colibri proofs on, an answer is proven first: checked on this device against Ethereum's own consensus. An answer that can't be proven is cross-checked: it's only trusted when at least two RPC endpoints return exactly the same one. An answer only one endpoint gave is shown to you before anything loads."
+private const val ROW_COLIBRI = "Colibri proofs"
+private const val COLIBRI_HELP =
+    "Each name's record is proven by corpus.core's Colibri prover (colibri-proof.tech) and the proof checked on this device against Ethereum's sync committee, so no server can make up the answer. The prover learns which contract storage a lookup reads; the reads themselves go to the endpoints in the resolution order. If no proof comes back within a few seconds, the endpoints are cross-checked instead. Off: every name is cross-checked."
 private const val ROW_ORDER = "Resolution order"
 private const val ORDER_HELP =
     "The first three providers in this order that are reachable read each name, so the order decides who answers; the rest are asked, in order, when those can't agree or don't answer. Two endpoints of one provider count once: the first that answers. Change it under RPC providers."
@@ -93,16 +97,24 @@ private const val LAST_ENDPOINT_HELP = "At least one endpoint has to stay on."
  * than [EnsQuorum.MIN_PROVIDERS] different providers ([enabled],
  * [EnsRpcConfig.providerCount]) among the [endpoints] that are on leaves
  * every answer one server's word, which the browser then asks about each
- * time. `null` when there are enough.
+ * time — every answer the Colibri verifier can't prove, when Colibri
+ * proofs are on ([colibri], #100). `null` when there are enough.
  */
-internal fun tooFewEndpointsHint(enabled: Int, endpoints: Int = enabled): String? = when {
-    enabled >= EnsQuorum.MIN_PROVIDERS -> null
-    endpoints > enabled ->
-        "The $endpoints endpoints that are on come from only $enabled ${if (enabled == 1) "provider" else "different providers"}, and a provider's answer counts once. Cross-checking needs ${EnsQuorum.MIN_PROVIDERS} different providers (to agree on a block), so answers aren't cross-checked: you'll be asked before each name loads."
-    enabled == 1 ->
-        "Only one endpoint is on, so answers can't be cross-checked: you'll be asked before each name loads. Turn on ${EnsQuorum.MIN_PROVIDERS} or more to cross-check."
-    else ->
-        "Only $enabled endpoints are on. Cross-checking needs ${EnsQuorum.MIN_PROVIDERS} (to agree on a block), so answers aren't cross-checked: you'll be asked before each name loads."
+internal fun tooFewEndpointsHint(enabled: Int, endpoints: Int = enabled, colibri: Boolean = false): String? {
+    if (enabled >= EnsQuorum.MIN_PROVIDERS) return null
+    // A proven answer (#100) needs no cross-check and loads without
+    // asking; only one Colibri can't prove falls to a single endpoint.
+    val which = if (colibri) "an answer Colibri can't prove" else "answers"
+    val asked = if (colibri) "you'll be asked before that name loads" else "you'll be asked before each name loads"
+    val isnt = if (colibri) "isn't" else "aren't"
+    return when {
+        endpoints > enabled ->
+            "The $endpoints endpoints that are on come from only $enabled ${if (enabled == 1) "provider" else "different providers"}, and a provider's answer counts once. Cross-checking needs ${EnsQuorum.MIN_PROVIDERS} different providers (to agree on a block), so $which $isnt cross-checked: $asked."
+        enabled == 1 ->
+            "Only one endpoint is on, so $which can't be cross-checked: $asked. Turn on ${EnsQuorum.MIN_PROVIDERS} or more to cross-check."
+        else ->
+            "Only $enabled endpoints are on. Cross-checking needs ${EnsQuorum.MIN_PROVIDERS} (to agree on a block), so $which $isnt cross-checked: $asked."
+    }
 }
 
 /** "Ordered" line for [EnsRpcConfig.Source]: never shows an API key. */
@@ -117,9 +129,10 @@ internal fun ensSectionRows(config: EnsRpcConfig) = listOf(
         "order",
         ROW_ORDER,
         ORDER_HELP,
-        tooFewEndpointsHint(config.providerCount, config.sources.size),
+        tooFewEndpointsHint(config.providerCount, config.sources.size, config.colibri),
         *config.sources.map(::sourceLine).toTypedArray(),
     ),
+    settingsRow("colibri", ROW_COLIBRI, if (config.colibri) "On" else "Off", COLIBRI_HELP, "proof", "verified"),
     settingsRow("ccip", ROW_CCIP, if (config.ccipRead) "On" else "Off", CCIP_HELP, "EIP-3668"),
 )
 
@@ -179,13 +192,23 @@ internal fun NameResolutionSection(
                     )
                 }
             }
-            tooFewEndpointsHint(config.providerCount, config.sources.size)?.let {
+            tooFewEndpointsHint(config.providerCount, config.sources.size, config.colibri)?.let {
                 Spacer(Modifier.height(6.dp))
                 WarningText(it)
             }
         }
-        if ("ccip" in visible) {
+        if ("colibri" in visible) {
             if ("about" in visible || "order" in visible) Spacer(Modifier.height(12.dp))
+            SwitchRow(
+                title = ROW_COLIBRI,
+                help = COLIBRI_HELP,
+                checked = config.colibri,
+                enabled = true,
+                onCheckedChange = { on -> scope.launch { settings.setEnsColibri(on) } },
+            )
+        }
+        if ("ccip" in visible) {
+            if ("about" in visible || "order" in visible || "colibri" in visible) Spacer(Modifier.height(12.dp))
             SwitchRow(
                 title = ROW_CCIP,
                 help = CCIP_HELP,
@@ -336,7 +359,7 @@ internal fun RpcProvidersSection(
                     )
                 }
             }
-            tooFewEndpointsHint(config.providerCount, config.sources.size)?.let {
+            tooFewEndpointsHint(config.providerCount, config.sources.size, config.colibri)?.let {
                 Spacer(Modifier.height(6.dp))
                 WarningText(it)
             }

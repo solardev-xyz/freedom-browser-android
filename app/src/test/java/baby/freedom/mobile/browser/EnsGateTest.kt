@@ -116,4 +116,15 @@ class EnsGateTest {
         assertNull(tooFewEndpointsHint(3))
         assertNull(tooFewEndpointsHint(8))
     }
+
+    @Test
+    fun `with Colibri on the settings hint only warns about answers it can't prove`() {
+        // #100: a proven answer loads without asking, however few endpoints.
+        for (hint in listOf(tooFewEndpointsHint(1, colibri = true)!!, tooFewEndpointsHint(2, colibri = true)!!, tooFewEndpointsHint(2, 4, colibri = true)!!)) {
+            assertTrue(hint, hint.contains("an answer Colibri can't prove"))
+            assertTrue(hint, hint.contains("you'll be asked before that name loads"))
+            assertFalse(hint, hint.contains("each name"))
+        }
+        assertNull(tooFewEndpointsHint(3, colibri = true))
+    }
 }

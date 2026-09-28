@@ -19,3 +19,11 @@
 -keepclasseswithmembernames class baby.freedom.swarm.MyotisNative {
     native <methods>;
 }
+-keepclasseswithmembernames class baby.freedom.swarm.TorNative {
+    native <methods>;
+}
+
+# colibri_jni.c resolves Java_baby_freedom_swarm_ColibriNative_n* (#100).
+-keepclasseswithmembernames class baby.freedom.swarm.ColibriNative {
+    native <methods>;
+}

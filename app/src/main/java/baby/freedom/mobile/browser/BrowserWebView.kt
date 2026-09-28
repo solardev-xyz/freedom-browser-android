@@ -339,7 +339,18 @@ internal fun nameResolutionRefusalHtml(
     } else {
         ""
     }
-    return """<!doctype html><html lang="en"><head><meta charset="utf-8">
+    return inPlaceErrorPageHtml(title, description, "ens://$safeName\n\n$code$reason")
+}
+
+/**
+ * A self-contained error page served *as* a refused document's own
+ * response (no script, nothing fetched): [title], [descriptionHtml], and
+ * [detailsHtml] in the details box (both already escaped), with a
+ * Try again link that reloads the entry. [nameResolutionRefusal]'s and
+ * [TorRouting]'s refusals.
+ */
+internal fun inPlaceErrorPageHtml(title: String, descriptionHtml: String, detailsHtml: String): String =
+    """<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'">
 <title>$title</title><style>
@@ -355,11 +366,8 @@ a{display:inline-block;padding:12px 22px;background:#2c2c2c;color:#fff;border:1p
 border-radius:8px;font-size:15px;text-decoration:none}
 @media (prefers-color-scheme:light){body{background:#fff;color:#24292f}h1{color:#cf222e}
 p{color:#57606a}.d{background:#f6f8fa;color:#cf222e}a{background:#f6f8fa;border-color:#d0d7de;color:#24292f}}
-</style></head><body><div class="c"><h1>$title</h1><p>$description</p>
-<div class="d">ens://$safeName
-
-$code$reason</div><a href="">Try again</a></div></body></html>"""
-}
+</style></head><body><div class="c"><h1>$title</h1><p>$descriptionHtml</p>
+<div class="d">$detailsHtml</div><a href="">Try again</a></div></body></html>"""
 
 /** Where [nameWebRecordNavigation] sends a request for [pathAndQuery] on the name's origin. */
 internal fun webRecordTarget(result: EnsResult.Ok, pathAndQuery: String): String =
@@ -437,11 +445,15 @@ private fun HttpURLConnection.applySwarmRequestHeaders() {
 private fun HttpURLConnection.forwardProxiedHeaders(
     req: WebResourceRequest,
     stripRange: Boolean = false,
+    crossOrigin: Boolean = false,
 ) {
     req.requestHeaders?.forEach { (k, v) ->
         val lk = k.lowercase()
         if (lk in REQUEST_HEADERS_TO_STRIP) return@forEach
         if (stripRange && lk == "range") return@forEach
+        // A redirect hop to another origin doesn't get the credentials
+        // (HttpURLConnection's own following dropped them too).
+        if (crossOrigin && lk == "authorization") return@forEach
         try { setRequestProperty(k, v) } catch (_: Throwable) {}
     }
     // Force `identity` so HttpURLConnection doesn't silently
@@ -3213,6 +3225,22 @@ private fun buildRefreshableWebView(
                 val failed = req.url?.toString() ?: return
                 // Already on the error page? Don't loop.
                 if (ErrorPage.isErrorPage(failed)) return
+                // An onion page whose Tor went away mid-load (#143): the
+                // proxy refused it. Reloading lands on the interceptor's
+                // "Tor isn't running" page in place, which can't fail
+                // again — nor loop, as the reload only happens while no
+                // Tor port is routed. A form POST's reload would only
+                // ask to resend (answered "don't"), so that one is
+                // loaded again as a GET (R2-F2).
+                if (isOnionHost(req.url?.host) && TorRouting.port == 0 && view != null) {
+                    Log.i(LOG_TAG, "main-frame ${error?.errorCode} for $failed with Tor down → refusal page")
+                    if (onionRefusalByReload(req.method)) {
+                        view.post { view.reload() }
+                    } else {
+                        view.post { view.loadUrl(failed) }
+                    }
+                    return
+                }
                 if (!isDwebPageUrl(failed)) return
 
                 if (autoRecoveredUrl != failed && view != null) {
@@ -4620,6 +4648,9 @@ internal fun interceptVirtualRequest(
 ): WebResourceResponse? {
     val req = request ?: return null
     val url = req.url?.toString() ?: return null
+    // A `.onion` request with no Tor port routed is refused before
+    // anything else looks at it (#143, fail closed).
+    TorRouting.refusalFor(req)?.let { return it }
     val incoming = if (req.isForMainFrame) ensPins?.beginNavigation(url) else null
     // A contract-hosted app's origin (#123) is answered by its own rules.
     // Then an origin an unverified external IPFS gateway served before
@@ -5002,20 +5033,20 @@ private fun tryLoadMediaBody(
     req: WebResourceRequest,
     targetUrl: String,
 ): MediaLoadResult {
-    val conn = try {
-        (URL(targetUrl).openConnection() as HttpURLConnection).apply {
-            requestMethod = "GET"
-            connectTimeout = 5_000
-            readTimeout = 60_000
-            instanceFollowRedirects = true
-            forwardProxiedHeaders(req, stripRange = true)
-        }
+    val target = try {
+        URL(targetUrl)
     } catch (t: Throwable) {
         Log.w(LOG_TAG, "media fetch open failed: $targetUrl", t)
         return MediaLoadResult.Fatal
     }
     return try {
-        conn.connect()
+        // Redirects are followed hop by hop through TorRouting.
+        val conn = TorRouting.openFollowingRedirects(target) { hop ->
+            requestMethod = "GET"
+            connectTimeout = 5_000
+            readTimeout = 60_000
+            forwardProxiedHeaders(req, stripRange = true, crossOrigin = !TorRouting.sameOrigin(hop, target))
+        }
         val status = conn.responseCode
         if (status in TRANSIENT_STATUSES) {
             Log.w(LOG_TAG, "media fetch transient $status for $targetUrl")
@@ -5037,6 +5068,9 @@ private fun tryLoadMediaBody(
         synchronized(mediaBodyCache) { mediaBodyCache[targetUrl] = body }
         Log.i(LOG_TAG, "media cached: $targetUrl bytes=${bytes.size} mime=$mime")
         MediaLoadResult.Ok(body)
+    } catch (t: TorRouting.RefusedException) {
+        Log.w(LOG_TAG, "media fetch open failed: $targetUrl", t)
+        MediaLoadResult.Fatal
     } catch (t: java.net.ConnectException) {
         // The gateway socket refused — the node is down; retrying the
         // whole backoff schedule would just stall the media element.
@@ -5181,14 +5215,14 @@ private fun fetchOnce(
     targetUrl: String,
 ): FetchAttempt {
     return try {
-        val conn = (URL(targetUrl).openConnection() as HttpURLConnection).apply {
+        val target = URL(targetUrl)
+        // Redirects are followed hop by hop through TorRouting.
+        val conn = TorRouting.openFollowingRedirects(target) { hop ->
             requestMethod = if (req.method == "HEAD") "HEAD" else "GET"
             connectTimeout = 5_000
             readTimeout = 10_000
-            instanceFollowRedirects = true
-            forwardProxiedHeaders(req)
+            forwardProxiedHeaders(req, crossOrigin = !TorRouting.sameOrigin(hop, target))
         }
-        conn.connect()
         val status = conn.responseCode
         val reason = conn.responseMessage?.ifBlank { null } ?: "OK"
         val rawCt = conn.contentType

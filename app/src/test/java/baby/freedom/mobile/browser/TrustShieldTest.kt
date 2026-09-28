@@ -41,6 +41,41 @@ class TrustShieldTest {
     }
 
     @Test
+    fun `a proven answer gets the proof's seal, above the quorum's shield, and names the prover`() {
+        // #100: a Colibri proof checked on this device.
+        val proven = EnsTrust(
+            verified = true,
+            agreed = listOf("mainnet1.colibri-proof.tech"),
+            source = EnsTrust.Source.COLIBRI,
+        )
+        KnownEnsNames.record("ipfs://$CID", "vitalik.eth", proven)
+        val trust = nameTrustFor("ipfs://vitalik.eth")!!
+        assertEquals(TrustTier.Proven, trust.tier)
+        assertEquals("Proven name", trust.tier.title)
+        assertTrue(TrustTier.Proven.ordinal < TrustTier.Verified.ordinal)
+        assertTrue(TrustTier.Proven.icon != TrustTier.Verified.icon)
+        assertEquals(
+            "This device checked a proof from mainnet1.colibri-proof.tech against Ethereum's sync committee: " +
+                "vitalik.eth's ENS record is what the chain itself holds at the latest block, " +
+                "not just what RPC servers agree on.",
+            trust.summary,
+        )
+        // A CCIP-Read answer: the proof covers the resolver's acceptance, not an on-chain record.
+        KnownEnsNames.record("ipfs://$CID", "vitalik.eth", proven.copy(offchain = true))
+        val offchain = nameTrustFor("ipfs://vitalik.eth")!!
+        assertEquals(TrustTier.Proven, offchain.tier)
+        assertEquals(
+            "vitalik.eth's ENS record comes from an off-chain gateway (CCIP-Read). This device checked a " +
+                "proof from mainnet1.colibri-proof.tech against Ethereum's sync committee that the name's " +
+                "resolver contract accepted that answer at the latest block; the record itself isn't on chain.",
+            offchain.summary,
+        )
+        // Servers agreeing is still the verified shield, never the seal.
+        KnownEnsNames.record("ipfs://$CID", "vitalik.eth", verified)
+        assertEquals(TrustTier.Verified, nameTrustFor("vitalik.eth")!!.tier)
+    }
+
+    @Test
     fun `one server's answer gets the unverified shield and names the server`() {
         KnownEnsNames.record("bzz://$REF", "alice.wei", unverified)
         val trust = nameTrustFor("bzz://alice.wei")!!

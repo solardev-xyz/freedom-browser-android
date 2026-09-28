@@ -366,7 +366,7 @@ class EnsQuorumResolveTest {
     @Test
     fun `CCIP-Read is followed on each server at the anchor block`() {
         val ur = "0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe"
-        val revert = encodeOffchainLookup(
+        val revert = offchainLookupRevert(
             sender = ur,
             urls = listOf("https://gw.example/{sender}/{data}"),
             callData = "deadbeef".hexToBytes(),
@@ -420,7 +420,7 @@ class EnsQuorumResolveTest {
         // rpc3's. It has no vote, so the wave isn't a gateway-only failure
         // and is widened to rpc4/rpc5, which answer directly.
         val ur = "0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe"
-        val revert = encodeOffchainLookup(
+        val revert = offchainLookupRevert(
             sender = ur,
             urls = listOf("https://gw.example/{sender}/{data}"),
             callData = "deadbeef".hexToBytes(),
@@ -467,7 +467,7 @@ class EnsQuorumResolveTest {
     // ---- The user's endpoint list as the quorum's pool (#102) ----
 
     private fun offchainRevertReply(): EnsHttp.Reply {
-        val revert = encodeOffchainLookup(
+        val revert = offchainLookupRevert(
             sender = "0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe",
             urls = listOf("https://gw.example/{sender}/{data}"),
             callData = "deadbeef".hexToBytes(),
@@ -828,8 +828,8 @@ private fun wrapAsOuterInner(contentHashHex: String): String {
     return "0x" + (uint256(0x40L) + ByteArray(32) + outerBody).toHex()
 }
 
-/** `OffchainLookup(address,string[],bytes,bytes4,bytes)` revert data. */
-private fun encodeOffchainLookup(
+/** `OffchainLookup(address,string[],bytes,bytes4,bytes)` revert data (shared with [EnsColibriResolveTest]). */
+internal fun offchainLookupRevert(
     sender: String,
     urls: List<String>,
     callData: ByteArray,
