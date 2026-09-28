@@ -186,6 +186,9 @@ $ANDROID_HOME/build-tools/36.0.0/aapt2 dump badging app/build/outputs/apk/debug/
 `libfreedom_mobile_ffi.so` is both embedded nodes in one Rust cdylib — the ant Swarm light-node plus the freedom-ipfs reader, compiled per ABI from [`solardev-xyz/freedom-mobile-ffi`](https://github.com/solardev-xyz/freedom-mobile-ffi). Combining them in a single compilation graph dedupes everything the two dependency trees share (std, tokio, hyper/axum, libp2p, ring, SQLite, …), which is ~7 MiB per ABI versus shipping two separate `.so`s. It's **not checked in**; every fresh clone builds it once:
 
 ```bash
+# 0. Run from the root of this repo; later steps cd away and come back.
+FREEDOM_ANDROID="$PWD"
+
 # 1. Clone freedom-mobile-ffi at the tag release.yml pins as FFI_REF,
 #    somewhere outside this repo.
 git clone --branch v0.12.1 https://github.com/solardev-xyz/freedom-mobile-ffi.git /tmp/freedom-mobile-ffi
@@ -198,12 +201,13 @@ git clone --branch v0.12.1 https://github.com/solardev-xyz/freedom-mobile-ffi.gi
 #    scripts/enable-ffi-chain.sh (run from this repo) puts ant's `chain`
 #    feature back — the same helper release.yml calls — and fails if the
 #    script's cargo call has changed shape.
-<freedom-browser-android>/scripts/enable-ffi-chain.sh /tmp/freedom-mobile-ffi
-cd /tmp/freedom-mobile-ffi
-./scripts/build-android.sh
+#    Chained with && so a failed helper stops before a chain-less build.
+"$FREEDOM_ANDROID/scripts/enable-ffi-chain.sh" /tmp/freedom-mobile-ffi &&
+  cd /tmp/freedom-mobile-ffi &&
+  ./scripts/build-android.sh
 
 # 3. Copy the results into Freedom.
-cd <freedom-browser-android>
+cd "$FREEDOM_ANDROID"
 mkdir -p swarmnode/src/main/jniLibs
 cp -r /tmp/freedom-mobile-ffi/target/android/jniLibs/. swarmnode/src/main/jniLibs/
 ```
