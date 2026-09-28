@@ -143,10 +143,22 @@ class MnemonicTest {
     }
 
     @Test
-    fun `invisible format characters from a paste split words instead of gluing onto them`() {
+    fun `invisible format characters from a paste are dropped, a zero-width space splits`() {
         val phrase = "legal winner thank year wave sausage worth useful legal winner thank yellow"
-        val pasted = "\uFEFF" + phrase.replaceFirst(" ", "\u200B").replace("wave ", "wave\u200C ").replace("thank yellow", "thank\u2060yellow")
+        val pasted = "\uFEFF" + phrase.replaceFirst(" ", "\u200B").replace("wave ", "wave\u200C ").replace("thank yellow", "thank\u2060 yellow")
         assertEquals(phrase.split(" "), Mnemonic.words(pasted))
+        assertEquals(Mnemonic.parse(phrase).phrase(), Mnemonic.parse(pasted).phrase())
+    }
+
+    @Test
+    fun `a soft hyphen or joiner inside a word doesn't split it`() {
+        val phrase = "legal winner thank year wave sausage worth useful legal winner thank yellow"
+        // Hyphenated web text: soft hyphens, a ZWJ/ZWNJ, a direction mark mid-word.
+        val pasted = phrase.replace("sausage", "sau\u00ADsage").replace("useful", "use\u200Dful")
+            .replace("winner", "win\u200Cner").replace("yellow", "yel\u200Elow")
+        assertEquals(phrase.split(" "), Mnemonic.words(pasted))
+        assertEquals(12, Mnemonic.wordCount(pasted))
+        assertEquals(Mnemonic.parse(phrase).phrase(), Mnemonic.parse(pasted).phrase())
         assertEquals(Mnemonic.parse(phrase).phrase(), Mnemonic.parse(pasted).phrase())
     }
 

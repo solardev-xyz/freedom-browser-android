@@ -69,7 +69,6 @@ import baby.freedom.mobile.wallet.VaultAuthFailedException
 import baby.freedom.mobile.wallet.VaultKeyLostException
 import baby.freedom.mobile.wallet.VaultProtection
 import baby.freedom.mobile.wallet.VaultUnreadableException
-import java.text.Normalizer
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 
@@ -156,8 +155,9 @@ internal fun importHint(phrase: String): ImportHint {
 internal fun clipHoldsPhrase(clip: CharSequence?, words: List<String>): Boolean {
     if (clip.isNullOrBlank() || words.isEmpty()) return false
     // Normalized the way Mnemonic.words normalizes, so a phrase pasted in
-    // compatibility letters (fullwidth, say) still matches its words.
-    val tokens = Normalizer.normalize(clip, Normalizer.Form.NFKD).lowercase()
+    // compatibility letters (fullwidth, say) or carrying a soft hyphen
+    // inside a word still matches its words.
+    val tokens = Mnemonic.normalized(clip)
         .split(Regex("[^\\p{L}\\p{M}]+")).filter { it.isNotEmpty() }
     return (0..tokens.size - words.size).any { start -> tokens.subList(start, start + words.size) == words }
 }
@@ -328,7 +328,10 @@ fun WalletScreen(
                 SectionCard(title = "Wallet needed") {
                     Text(request.reason, style = MaterialTheme.typography.bodyMedium)
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                        TextButton(onClick = dismiss) { Text("Not now") }
+                        // Declines only the feature's request: the page stays
+                        // if the user opened it themselves (Settings → Wallet),
+                        // and closes with the request if the request opened it.
+                        TextButton(onClick = { request.finish(false) }) { Text("Not now") }
                     }
                 }
             }

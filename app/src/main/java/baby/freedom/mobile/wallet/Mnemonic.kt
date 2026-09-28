@@ -149,14 +149,32 @@ class Mnemonic private constructor(val words: List<String>) {
         /**
          * The words of [phrase] as [parse] reads them: normalized,
          * lower-cased, split on any whitespace (a no-break or ideographic
-         * space from a paste too, not just ASCII) and on invisible format
-         * characters a web paste can carry (a zero-width space or joiner,
-         * a byte-order mark), which would otherwise glue onto a word and
-         * make it unrecognisable. The import field's
-         * live checks use the same split, so they can't disagree with it.
+         * space from a paste too, not just ASCII) and on a zero-width
+         * space, the one invisible character that marks a break between
+         * words. Every other invisible format character a web paste can
+         * carry (a soft hyphen or zero-width joiner inside a word, a word
+         * joiner, a byte-order mark, a direction mark) is dropped rather
+         * than split on: it would otherwise glue onto a word and make it
+         * unrecognisable, and splitting on it would cut a hyphenated
+         * "aban\u00ADdon" into two words. The import field's live checks
+         * use the same split, so they can't disagree with it.
          */
         fun words(phrase: String): List<String> =
-            nfkd(phrase).lowercase().splitWhere { it.isWhitespace() || Character.getType(it) == Character.FORMAT.toInt() }.filter { it.isNotEmpty() }
+            normalized(phrase)
+                .splitWhere { it.isWhitespace() || it == ZERO_WIDTH_SPACE }
+                .filter { it.isNotEmpty() }
+
+        /**
+         * [phrase] NFKD-normalized, lower-cased and with every invisible
+         * format character but the zero-width space dropped: the text
+         * [words] splits, shared with anything else that must read a
+         * phrase the same way (the import's clipboard match).
+         */
+        internal fun normalized(phrase: CharSequence): String =
+            nfkd(phrase.toString()).lowercase()
+                .filterNot { it != ZERO_WIDTH_SPACE && Character.getType(it) == Character.FORMAT.toInt() }
+
+        private const val ZERO_WIDTH_SPACE = '\u200B'
 
         /** Words typed so far, for the import field's live count. */
         fun wordCount(phrase: String): Int = words(phrase).size

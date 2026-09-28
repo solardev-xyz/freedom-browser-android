@@ -118,6 +118,10 @@ class WalletScreenTest {
         val fullwidth = twelve.map { if (it in 'a'..'z') (it.code - 'a'.code + 0xFF41).toChar() else it }.joinToString("")
         assertTrue(clipHoldsPhrase(fullwidth, Mnemonic.words(fullwidth)))
         assertTrue(clipHoldsPhrase(fullwidth, words))
+        // Copied from hyphenated web text: a soft hyphen inside a word.
+        val hyphenated = twelve.replace("about", "abo\u00ADut").replaceFirst("abandon", "aban\u00ADdon")
+        assertEquals(twelve.split(" "), Mnemonic.words(hyphenated))
+        assertTrue(clipHoldsPhrase(hyphenated, words))
         assertFalse(clipHoldsPhrase(null, words))
         assertFalse(clipHoldsPhrase("", words))
     }
