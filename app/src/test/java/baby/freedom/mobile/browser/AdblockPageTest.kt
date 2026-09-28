@@ -218,4 +218,51 @@ class AdblockPageTest {
         p.kept("https://elsewhere.example/")
         assertEquals(a, p.current())
     }
+
+    @Test
+    fun `a same-site navigation's early cross-origin frame stays the new page's`() {
+        val a1 = "https://news.example/a1"
+        val a2 = "https://news.example/a2"
+        val embed = "https://video.example/embed"
+        val watch = "https://video.example/watch"
+
+        val link = AdblockPage().apply { committed(a1) }
+        link.answered(a2, replacesDocument = true, fetchedByWebView = true)
+        link.frameRequested(embed, referer = "https://news.example/")
+        // Can't tell whose: it's the page on screen's frame meanwhile.
+        link.answered(watch, replacesDocument = true, fetchedByWebView = true)
+        assertEquals(a1, link.current(referer = "https://video.example/"))
+        link.answered(a2, replacesDocument = true, fetchedByWebView = true)
+        link.frameRequested(embed, referer = "https://news.example/")
+        link.committed(a2)
+        link.answered(watch, replacesDocument = true, fetchedByWebView = true)
+        assertEquals(a2, link.current(referer = "https://video.example/"))
+
+        val reload = AdblockPage().apply { committed(a2) }
+        reload.answered(a2, replacesDocument = true, fetchedByWebView = true)
+        reload.frameRequested(embed, referer = "https://news.example/")
+        reload.committed(a2)
+        reload.answered(watch, replacesDocument = true, fetchedByWebView = true)
+        assertEquals(a2, reload.current(referer = "https://video.example/"))
+    }
+
+    @Test
+    fun `a different navigation committing doesn't adopt the pending page's frames`() {
+        val p = "https://p.example/"
+        val page = onA()
+        page.answered(b, replacesDocument = true, fetchedByWebView = true)
+        page.frameRequested("https://ads.example/frame", referer = b)
+        // Back to a page restored from the back/forward cache.
+        page.committed(p)
+        page.answered("https://ads.example/x", replacesDocument = true, fetchedByWebView = true)
+        assertEquals("https://ads.example/x", page.current(referer = "https://ads.example/"))
+
+        // The pending navigation, at a URL the WebView normalised, still does.
+        val normalised = onA()
+        normalised.answered(b, replacesDocument = true, fetchedByWebView = true)
+        normalised.frameRequested("https://ads.example/frame", referer = b)
+        normalised.committed("$b?")
+        normalised.answered("https://ads.example/x", replacesDocument = true, fetchedByWebView = true)
+        assertEquals("$b?", normalised.current(referer = "https://ads.example/"))
+    }
 }

@@ -50,7 +50,13 @@ package baby.freedom.mobile.browser
  * otherwise a page's frame requested in that window (routinely — tens
  * to hundreds of ms after the main document) would be unknown when a
  * later link to that frame's site is pending, and its bare-origin
- * requests would be taken for the destination's.
+ * requests would be taken for the destination's. A frame whose document
+ * request sends a bare origin that is the destination's but also the
+ * page on screen's (a same-site link, a reload) can't be told apart, so
+ * it is both: the page on screen's frame now, and held for the next
+ * page too. Only a commit of the pending navigation itself (its URL, or
+ * its origin) adopts the held frames; a Back restored from the
+ * back/forward cache while a link loads doesn't.
  *
  * A navigation that never commits — it became a download, a 204, a hop
  * cancelled as a link to another app, a Stop — leaves the page on screen
@@ -118,12 +124,26 @@ internal class AdblockPage {
             destination != null && referer != null && namesDestination(referer, destination)
         ) {
             // The incoming page's frame: its own once it commits.
-            if (pendingFrames.add(withoutFragment(url)) && pendingFrames.size > MAX_FRAMES) {
-                pendingFrames.remove(pendingFrames.first())
-            }
+            holdPendingFrame(url)
             return
         }
         rememberFrame(url)
+        // A bare origin that is the destination's but can't be told for
+        // it — the page on screen (a same-site link, a reload) or one of
+        // its frames has that origin too — may be either page's frame
+        // (R4-F1 of the R10 round): it's the page on screen's now, and,
+        // should the destination commit, that page's too.
+        if (destination != null && referer != null && isBareOrigin(referer) &&
+            originOf(referer) == originOf(destination)
+        ) {
+            holdPendingFrame(url)
+        }
+    }
+
+    private fun holdPendingFrame(url: String) {
+        if (pendingFrames.add(withoutFragment(url)) && pendingFrames.size > MAX_FRAMES) {
+            pendingFrames.remove(pendingFrames.first())
+        }
     }
 
     private fun namesDestination(referer: String, destination: String): Boolean {
@@ -199,6 +219,7 @@ internal class AdblockPage {
     /** [url]'s document committed (or is the one on screen): it's the page now. */
     @Synchronized
     fun committed(url: String?) {
+        val pending = incoming ?: fetching
         committed = url
         incoming = null
         fetching = null
@@ -206,8 +227,16 @@ internal class AdblockPage {
         frameOrigins.clear()
         // The committed page's frames it requested before the commit got
         // here (none after a Stop, a download or a superseding answer,
-        // which drop them).
-        pendingFrames.forEach(::rememberFrame)
+        // which drop them) — if it is the pending navigation that
+        // committed. A different one (a Back restored from the
+        // back/forward cache while a link loads, which is never answered)
+        // didn't load them (R4-F2 of the R10 round). The same origin
+        // counts as the same navigation, so a redirect within the site
+        // the WebView didn't report, or a URL it normalised, still
+        // adopts them.
+        if (pending != null && url != null && isSameNavigation(url, pending)) {
+            pendingFrames.forEach(::rememberFrame)
+        }
         pendingFrames.clear()
     }
 
@@ -217,6 +246,10 @@ internal class AdblockPage {
 }
 
 private fun withoutFragment(url: String) = url.substringBefore('#')
+
+private fun isSameNavigation(committed: String, pending: String): Boolean =
+    withoutFragment(committed) == withoutFragment(pending) ||
+        originOf(committed)?.let { it == originOf(pending) } == true
 
 /** Is [referer] an origin alone (`scheme://host[:port]/`), as sent cross-origin? */
 private fun isBareOrigin(referer: String): Boolean {
