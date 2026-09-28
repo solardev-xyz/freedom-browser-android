@@ -2,6 +2,7 @@ package baby.freedom.mobile.chains.rpc
 
 import android.content.Context
 import android.util.Log
+import baby.freedom.mobile.browser.PublicSuffixList
 import baby.freedom.mobile.chains.Chain
 import baby.freedom.mobile.data.ChainStore
 import baby.freedom.mobile.ens.Keccak256
@@ -30,11 +31,13 @@ import org.json.JSONArray
  * - **Myotis / Colibri** ([VerifiedChainSource]): a proof. No source is
  *   wired on Android yet (the light client is #72), so these tiers are
  *   skipped and a read on Ethereum or Gnosis starts at the quorum.
- * - **Quorum** ([QuorumRun]): the chain's first K RPCs are asked the same
- *   bytes; M identical answers are verified. Needs a pool of at least M.
+ * - **Quorum** ([QuorumRun]): the chain's first K RPCs from different
+ *   providers ([quorumMembers]) are asked the same bytes at once; M
+ *   identical answers are verified. Needs M providers. The user's own
+ *   RPCs ([Chain.userRpcUrls]) lead the pool, so they're among the K —
+ *   alongside public RPCs, which see the same read.
  * - **Direct**: the first RPC that answers, unverified — or
- *   [ChainTrust.Level.USER_CONFIGURED] when it's one the user added
- *   ([Chain.userRpcUrls], tried before the chain's public ones). After a
+ *   [ChainTrust.Level.USER_CONFIGURED] when it's one the user added. After a
  *   quorum that fell short, it reuses the quorum's best answer (and says
  *   who agreed and dissented) instead of asking the same RPC again, and
  *   never re-asks an RPC the quorum already asked.
@@ -113,11 +116,12 @@ class ChainDataRouter internal constructor(
                     ChainSource.MYOTIS, ChainSource.COLIBRI ->
                         verified(source, chain, method, normalized, waitMs)
                     ChainSource.QUORUM -> {
-                        if (pool.size < policy.quorumM) {
-                            "needs ${policy.quorumM} RPCs, the chain has ${pool.size}"
+                        val members = quorumMembers(pool, policy.quorumK)
+                        if (members.size < policy.quorumM) {
+                            "needs ${policy.quorumM} RPC providers, the chain has ${quorumMembers(pool).size}"
                         } else {
                             val keepLegs = policy.readOrder.getOrNull(index + 1) == ChainSource.DIRECT
-                            val run = QuorumRun(pool.take(policy.quorumK), policy.quorumM, legScope) { url ->
+                            val run = QuorumRun(members, policy.quorumM, legScope) { url ->
                                 // A leg a direct tier may reuse keeps the full
                                 // endpoint timeout, whatever the quorum waits.
                                 call(url, body, if (keepLegs) policy.timeoutMs else waitMs)
@@ -153,7 +157,9 @@ class ChainDataRouter internal constructor(
     /**
      * Send the signed [rawTransaction] (`0x…`) on chain [chainId] through
      * the policy's broadcast order. [ChainDataResult.result] is the
-     * transaction hash. A node that already has the transaction
+     * transaction hash — always the one computed here from the bytes
+     * sent, never whatever the node echoed back (a `true`, a malformed
+     * or foreign hash would otherwise be tracked instead). A node that already has the transaction
      * (`already known`, typically after an earlier endpoint took it but
      * timed out answering) counts as sent: the hash is the transaction's
      * own. A light client's uncertain outcome ends the walk
@@ -179,7 +185,10 @@ class ChainDataRouter internal constructor(
                     }
                     try {
                         val sent = s.broadcast(chain.id, raw)
-                        return ChainDataResult(sent, oneOf(source, ChainTrust.Level.VERIFIED, source.key))
+                        if (!sent.equals(hash, ignoreCase = true)) {
+                            Log.w(TAG, "[chain-data] broadcast chain=$chainId ${source.key} answered a different hash")
+                        }
+                        return ChainDataResult(hash, oneOf(source, ChainTrust.Level.VERIFIED, source.key))
                     } catch (e: CancellationException) {
                         currentCoroutineContext().ensureActive()
                         failures += "${source.key}: cancelled"
@@ -196,8 +205,10 @@ class ChainDataRouter internal constructor(
                 ChainSource.DIRECT -> for (url in pool(chain)) {
                     when (val leg = call(url, body, policy.timeoutMs)) {
                         is Leg.Value -> {
-                            Log.i(TAG, "[chain-data] broadcast chain=$chainId via direct ${hostOf(url)}")
-                            return ChainDataResult(leg.result ?: hash, direct(chain, url))
+                            val echoed = (leg.result as? String)?.equals(hash, ignoreCase = true) == true
+                            Log.i(TAG, "[chain-data] broadcast chain=$chainId via direct ${hostOf(url)}" +
+                                if (echoed) "" else " (it answered a different hash)")
+                            return ChainDataResult(hash, direct(chain, url))
                         }
                         is Leg.Deterministic -> throw leg.error
                         is Leg.NodeError -> {
@@ -222,11 +233,17 @@ class ChainDataRouter internal constructor(
     /**
      * The chain's RPCs in the order tiers use them: the user's own, then
      * the public ones, each group with recently failed RPCs moved last.
+     * A failed RPC of the user's stays ahead of every public one — it was
+     * put there on purpose, and one blip mustn't take it out of the
+     * quorum for [QUARANTINE_MS].
      */
     private fun pool(chain: Chain): List<String> {
         val now = clock()
         val all = (chain.userRpcUrls + chain.rpcUrls).distinct()
-        return all.sortedBy { url -> failedAt[url]?.let { now - it in 0 until QUARANTINE_MS } == true }
+        return all.sortedWith(
+            compareBy<String> { it !in chain.userRpcUrls }
+                .thenBy { url -> failedAt[url]?.let { now - it in 0 until QUARANTINE_MS } == true },
+        )
     }
 
     private suspend fun verified(
@@ -297,7 +314,7 @@ class ChainDataRouter internal constructor(
                 )
             }
         }
-        val asked = quorum?.urls.orEmpty().toSet()
+        val asked = quorum?.asked().orEmpty()
         var last: String? = null
         for (url in pool) {
             if (url in asked) continue
@@ -389,6 +406,33 @@ class ChainDataRouter internal constructor(
         )
 
         private val ALREADY_KNOWN = Regex("already known|known transaction|already imported", RegexOption.IGNORE_CASE)
+
+        /**
+         * The first [k] of [pool] run by different providers, in order:
+         * two URLs on one registrable domain (`ethereum.publicnode.com/?x`
+         * and `ethereum.publicnode.com`, or `eth.drpc.org` and
+         * `lb.drpc.org`) are one operator and so one vote, never two.
+         */
+        fun quorumMembers(pool: List<String>, k: Int = Int.MAX_VALUE): List<String> =
+            pool.distinctBy(::providerOf).take(k)
+
+        /**
+         * Who runs [url], for telling quorum voters apart: its host's
+         * registrable domain, or the host itself for an IP literal,
+         * `localhost` or a host without one. The port doesn't count —
+         * two ports on one machine are one operator.
+         */
+        internal fun providerOf(url: String): String {
+            val host = try {
+                URI(url).host
+            } catch (_: Exception) {
+                null
+            }?.lowercase()?.removePrefix("[")?.removeSuffix("]")?.trimEnd('.')
+                ?: return url
+            val ipLiteral = ':' in host || host.all { it.isDigit() || it == '.' }
+            if (ipLiteral) return host
+            return PublicSuffixList.registrableDomain(host) ?: host
+        }
 
         /** An RPC's host (and port), never its path or query — those can carry a key. */
         internal fun hostOf(url: String): String = try {

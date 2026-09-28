@@ -40,7 +40,8 @@ internal sealed interface Leg {
  * waiting without cutting them short: when a direct tier follows, a leg
  * still in flight after the quorum gave up keeps its own endpoint
  * timeout and can serve the direct tier ([directCandidate]) instead of a
- * new request to the same endpoint. [cancel] ends whatever is left.
+ * new request to the same endpoint. [cancel] ends whatever is left and
+ * files each unfinished leg as cancelled, so nothing waits on it.
  */
 internal class QuorumRun(
     val urls: List<String>,
@@ -71,6 +72,9 @@ internal class QuorumRun(
     // lands while nobody is waiting (or just as a wait times out) is
     // never lost; [version] wakes whoever is.
     private val legs = LinkedHashMap<Int, Leg>()
+
+    /** Legs [cancel] ended before they answered: never asked, as far as a later tier is concerned. */
+    private val cancelled = HashSet<Int>()
     private val version = MutableStateFlow(0)
     private val jobs = urls.mapIndexed { i, url ->
         scope.launch {
@@ -81,7 +85,8 @@ internal class QuorumRun(
             } catch (e: Exception) {
                 Leg.Failed(e.message ?: e.javaClass.simpleName, timeout = false)
             }
-            synchronized(legs) { legs[i] = leg }
+            // [cancel] may have filed this leg already; its verdict stands.
+            synchronized(legs) { legs.putIfAbsent(i, leg) }
             version.update { it + 1 }
         }
     }
@@ -142,7 +147,22 @@ internal class QuorumRun(
         )
     }
 
+    /**
+     * The endpoints this run really asked: every one but those [cancel]
+     * ended before they answered. A later tier needn't ask these again.
+     */
+    fun asked(): Set<String> = synchronized(legs) { urls.filterIndexed { i, _ -> i !in cancelled }.toSet() }
+
     fun cancel() {
         jobs.forEach { it.cancel() }
+        synchronized(legs) {
+            for (i in urls.indices) {
+                if (i !in legs) {
+                    legs[i] = Leg.Failed("cancelled", timeout = false)
+                    cancelled += i
+                }
+            }
+        }
+        version.update { it + 1 }
     }
 }

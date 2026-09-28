@@ -18,20 +18,30 @@ class ChainDetailPageTest {
     fun stepsListOnlyWiredTiersAndSayWhenAQuorumCantForm() {
         val eth = readSteps(BuiltInChains.ETHEREUM, ChainAccessPolicy.default(1), wiredRpcsOnly)
         assertEquals(2, eth.size)
-        assertEquals("RPC quorum: 2 of the first 3 RPCs must give the same answer — verified", eth[0])
+        assertEquals(
+            "RPC quorum: 2 of the first 3 RPCs (each from a different provider, yours first) " +
+                "must give the same answer — verified",
+            eth[0],
+        )
         assertEquals(
             "Direct RPC: otherwise the first RPC that answers — unverified, or marked as yours if it's one of your RPCs",
             eth[1],
         )
         val lonely = Chain(id = 5, name = "X", symbol = "X", rpcUrls = listOf("https://a.example"))
         assertEquals(
-            "RPC quorum: skipped, needs at least 2 RPCs (this chain has 1)",
+            "RPC quorum: skipped, needs RPCs from at least 2 providers (this chain has 1)",
             readSteps(lonely, ChainAccessPolicy.default(5), wiredRpcsOnly)[0],
         )
         val withMine = lonely.copy(userRpcUrls = listOf("https://mine.example"))
         assertEquals(
-            "RPC quorum: 2 of the first 2 RPCs must give the same answer — verified",
+            "RPC quorum: 2 of the first 2 RPCs (each from a different provider, yours first) " +
+                "must give the same answer — verified",
             readSteps(withMine, ChainAccessPolicy.default(5), wiredRpcsOnly)[0],
+        )
+        val sameProvider = lonely.copy(userRpcUrls = listOf("https://a.example/?key=1"))
+        assertEquals(
+            "RPC quorum: skipped, needs RPCs from at least 2 providers (this chain has 1)",
+            readSteps(sameProvider, ChainAccessPolicy.default(5), wiredRpcsOnly)[0],
         )
         assertEquals(
             "P2P light client: a proof checked on this device",
@@ -60,6 +70,14 @@ class ChainDetailPageTest {
             "Verified by the P2P light client",
             trustSummary(trust(ChainTrust.Level.VERIFIED, ChainSource.MYOTIS, listOf("myotis-p2p"))),
         )
+    }
+
+    @Test
+    fun yourRpcsNoteSaysThePublicRpcsStillSeeReads() {
+        val note = userRpcsNote(ChainAccessPolicy.default(1).sanitized(1))
+        assert("not alone" in note && "up to 3 RPCs at once" in note && "public RPCs still see your reads" in note) { note }
+        val directOnly = ChainAccessPolicy(listOf(ChainSource.DIRECT), listOf(ChainSource.DIRECT))
+        assert("asked before the public RPCs" in userRpcsNote(directOnly)) { userRpcsNote(directOnly) }
     }
 
     @Test

@@ -226,6 +226,78 @@ class ChainDataRouterTest {
     }
 
     @Test
+    fun aFailedUserRpcStaysAheadOfThePublicOnes() = runBlocking {
+        val net = Net()
+        var now = 1_000_000L
+        var down = true
+        net.handlers[mine] = { if (down) throw IOException("restarting") else ok("0x5") }
+        listOf(a, b, c).forEach { url -> net.handlers[url] = { ok("0x5") } }
+        val r = router(net, listOf(chain(rpcs = listOf(a, b, c), user = listOf(mine))), clock = { now })
+        assertEquals(ChainTrust.Level.VERIFIED, r.request(137, "eth_blockNumber").trust.level)
+        down = false
+        now += 1_000
+        val next = r.request(137, "eth_blockNumber")
+        assertEquals(
+            "one blip doesn't drop the user's own RPC out of the quorum for ten minutes",
+            listOf("my-node.example", "a.example", "b.example"),
+            next.trust.queried,
+        )
+        assertEquals(2, net.count(mine))
+    }
+
+    @Test
+    fun oneProviderIsOneVoteInTheQuorum() = runBlocking {
+        val net = Net()
+        val sameAsA = "https://a.example/?key=1"
+        val sibling = "https://eu.b.example"
+        listOf(sameAsA, a, sibling, b, c).forEach { url -> net.handlers[url] = { ok("0x1") } }
+        val r = router(net, listOf(chain(rpcs = listOf(a, sibling, b, c), user = listOf(sameAsA))))
+            .request(137, "eth_blockNumber")
+        assertEquals(listOf("a.example", "eu.b.example", "c.example"), r.trust.queried)
+        assertEquals(listOf(1, 0, 1, 0, 1), listOf(sameAsA, a, sibling, b, c).map(net::count))
+
+        val oneOperator = router(net, listOf(chain(rpcs = listOf(a, sameAsA))))
+        val lone = oneOperator.request(137, "eth_blockNumber")
+        assertEquals("two URLs of one provider never verify each other", ChainTrust.Level.UNVERIFIED, lone.trust.level)
+    }
+
+    @Test
+    fun providersAreTellApartByRegistrableDomainOrAddress() {
+        assertEquals("publicnode.com", ChainDataRouter.providerOf("https://ethereum.publicnode.com/?x"))
+        assertEquals("publicnode.com", ChainDataRouter.providerOf("https://Ethereum-Rpc.PublicNode.com"))
+        assertEquals("127.0.0.1", ChainDataRouter.providerOf("http://127.0.0.1:8710/"))
+        assertEquals("::1", ChainDataRouter.providerOf("http://[::1]:8545"))
+        assertEquals("localhost", ChainDataRouter.providerOf("http://localhost:8545"))
+        assertEquals(
+            listOf(a, b),
+            ChainDataRouter.quorumMembers(listOf(a, "https://x.a.example", b, "https://b.example/2"), 3),
+        )
+    }
+
+    @Test
+    fun aDirectTierNotRightAfterTheQuorumDoesntWaitOnItsCancelledLegs() = runBlocking {
+        val net = Net()
+        // a and b refuse at once, so the quorum can't form while c is
+        // still in flight; c hangs when the quorum asks, answers when asked again.
+        net.handlers[a] = { err(-32005, "rate limited") }
+        net.handlers[b] = { err(-32005, "rate limited") }
+        net.handlers[c] = { if (net.count(c) == 1) awaitCancellation() else ok("0x9") }
+        val eth = chain(id = 1, rpcs = listOf(a, b, c))
+        val policy = ChainAccessPolicy(
+            readOrder = listOf(ChainSource.QUORUM, ChainSource.COLIBRI, ChainSource.DIRECT),
+            broadcastOrder = listOf(ChainSource.DIRECT),
+        )
+        val started = System.currentTimeMillis()
+        val r = kotlinx.coroutines.withTimeout(10_000) {
+            router(net, listOf(eth), { policy }).request(1, "eth_blockNumber")
+        }
+        assertEquals("0x9", r.result)
+        assertTrue(System.currentTimeMillis() - started < 2_000)
+        assertEquals("c's cancelled leg never answered, so direct asks it again", 2, net.count(c))
+        assertEquals("a and b did answer, so aren't asked twice", listOf(1, 1), listOf(a, b).map(net::count))
+    }
+
+    @Test
     fun filtersSkipTheVerifiedTiers() = runBlocking {
         val net = Net()
         listOf(a, b, c, d).forEach { url -> net.handlers[url] = { ok("0x1") } }
@@ -410,6 +482,16 @@ class ChainDataRouterTest {
         assertEquals(txHash, r.result)
         assertEquals(ChainSource.DIRECT, r.trust.source)
         assertEquals(0, net.count(c))
+    }
+
+    @Test
+    fun broadcastAnswersTheTransactionsOwnHashWhateverTheNodeSays() = runBlocking {
+        for (reply in listOf(ok(true), ok("0xdeadbeef"), ok(null))) {
+            val net = Net()
+            net.handlers[a] = { reply }
+            val r = router(net, listOf(chain(rpcs = listOf(a)))).broadcast(137, rawTx)
+            assertEquals(reply, txHash, r.result)
+        }
     }
 
     @Test

@@ -175,15 +175,16 @@ internal fun userRpcAddError(result: ChainStore.RpcAddResult): String? = when (r
  * chain page lists them — only the tiers [wired] in this build.
  */
 internal fun readSteps(chain: Chain, policy: ChainAccessPolicy, wired: (ChainSource) -> Boolean): List<String> {
-    val pool = (chain.userRpcUrls + chain.rpcUrls).distinct().size
+    val providers = ChainDataRouter.quorumMembers((chain.userRpcUrls + chain.rpcUrls).distinct()).size
     return policy.readOrder.filter(wired).map { source ->
         when (source) {
             ChainSource.MYOTIS, ChainSource.COLIBRI -> "${source.label}: a proof checked on this device"
-            ChainSource.QUORUM -> if (pool >= policy.quorumM) {
-                "${source.label}: ${policy.quorumM} of the first ${minOf(policy.quorumK, pool)} RPCs " +
-                    "must give the same answer — verified"
+            ChainSource.QUORUM -> if (providers >= policy.quorumM) {
+                "${source.label}: ${policy.quorumM} of the first ${minOf(policy.quorumK, providers)} RPCs " +
+                    "(each from a different provider, yours first) must give the same answer — verified"
             } else {
-                "${source.label}: skipped, needs at least ${policy.quorumM} RPCs (this chain has $pool)"
+                "${source.label}: skipped, needs RPCs from at least ${policy.quorumM} providers " +
+                    "(this chain has $providers)"
             }
             ChainSource.DIRECT -> "${source.label}: otherwise the first RPC that answers — unverified, " +
                 "or marked as yours if it's one of your RPCs"
@@ -207,8 +208,24 @@ internal fun trustSummary(trust: ChainTrust): String {
 }
 
 /**
+ * What the "Your RPCs" section says about how the user's own RPCs are
+ * used — true of [ChainDataRouter]: they lead the pool, so they're in
+ * every quorum, but the quorum's other members are public RPCs asked at
+ * the same time. Adding one doesn't keep reads away from public RPCs.
+ */
+internal fun userRpcsNote(policy: ChainAccessPolicy): String {
+    val quorum = ChainSource.QUORUM in policy.readOrder
+    return "Your own node or provider for this chain. " + if (quorum) {
+        "It's asked first, but not alone: each read goes to up to ${policy.quorumK} RPCs at once, " +
+            "yours and the chain's public ones, so the public RPCs still see your reads. "
+    } else {
+        "It's asked before the public RPCs. "
+    } + "An answer only your RPC gave is marked as yours rather than unverified."
+}
+
+/**
  * A chain's page (#107, #108): what it is, the user's own RPCs ("Your
- * RPCs", added and removed here, tried first), its public RPCs, and how a
+ * RPCs", added and removed here, asked first), its public RPCs, and how a
  * read is checked — with a Check button that reads the latest block
  * through [ChainDataRouter] and says how that answer was verified. Every
  * URL is shown in full (wrapped, never cut). A custom chain also offers
@@ -229,7 +246,10 @@ internal fun ChainDetailPage(
     var newRpc by rememberSaveable(chain.id) { mutableStateOf("") }
     var rpcError by remember(chain.id) { mutableStateOf<String?>(null) }
     var saving by remember { mutableStateOf(false) }
-    var check by remember(chain.id) { mutableStateOf<ReadCheck>(ReadCheck.Idle) }
+    // Keyed to the RPC lists too: a result naming an RPC the user has
+    // since removed (or read before they added one) no longer describes
+    // this chain, and a check still running writes only to the old state.
+    var check by remember(chain.id, chain.userRpcUrls, chain.rpcUrls) { mutableStateOf<ReadCheck>(ReadCheck.Idle) }
     val newRpcCheck = RpcUrls.validate(newRpc)
 
     fun addRpc() {
@@ -272,8 +292,7 @@ internal fun ChainDetailPage(
             }
             SectionCard(title = "Your RPCs") {
                 Text(
-                    "Your own node or provider for this chain. Tried before the public RPCs; " +
-                        "an answer only your RPC gave is marked as yours rather than unverified.",
+                    userRpcsNote(router.policy(chain)),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
