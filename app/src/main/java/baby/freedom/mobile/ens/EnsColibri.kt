@@ -1,6 +1,7 @@
 package baby.freedom.mobile.ens
 
 import android.util.Log
+import baby.freedom.mobile.browser.TorRouting
 import baby.freedom.swarm.ColibriNative
 import java.io.ByteArrayOutputStream
 import java.io.IOException
@@ -322,7 +323,11 @@ internal class EnsColibri(
 
         companion object {
             val Default = Http { method, url, headers, body, opened ->
-                val conn = (URL(url).openConnection() as HttpURLConnection).apply {
+                // Through TorRouting like every native fetch (#143): a
+                // user's .onion name-resolution RPC goes via Tor (or is
+                // refused), never to the system DNS.
+                val conn = (TorRouting.openConnection(URL(url)) as? HttpURLConnection
+                    ?: throw IOException("Not an HTTP URL: $url")).apply {
                     requestMethod = method
                     connectTimeout = CONNECT_TIMEOUT_MS
                     readTimeout = READ_TIMEOUT_MS
