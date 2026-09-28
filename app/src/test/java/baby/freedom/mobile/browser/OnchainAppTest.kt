@@ -167,6 +167,28 @@ class OnchainAppTest {
     }
 
     @Test
+    fun `every cookie expiry is Secure, host and domain scoped, plain and partitioned`() {
+        // R6-F1: without Secure, Chromium drops the expiry of a __Secure-/__Host- cookie.
+        assertEquals(
+            listOf(
+                "Path=/a; Max-Age=0; Secure",
+                "Path=/a; Max-Age=0; Secure; Partitioned",
+                "Domain=.freedom.baby; Path=/a; Max-Age=0; Secure",
+                "Domain=.freedom.baby; Path=/a; Max-Age=0; Secure; Partitioned",
+            ),
+            CookieHygiene.expiryAttributes("/a", ".freedom.baby", hostScoped = true),
+        )
+        // The base domain's own host-only cookies are the real site's.
+        assertEquals(
+            listOf(
+                "Domain=.freedom.baby; Path=/; Max-Age=0; Secure",
+                "Domain=.freedom.baby; Path=/; Max-Age=0; Secure; Partitioned",
+            ),
+            CookieHygiene.expiryAttributes("/", ".freedom.baby", hostScoped = false),
+        )
+    }
+
+    @Test
     fun `the cookie sweep reads at the document's own path and expires every path that reaches it`() {
         assertEquals("/", CookieHygiene.pathOf("https://$zswapLower-1.web3.freedom.baby"))
         assertEquals("/", CookieHygiene.pathOf("https://$zswapLower-1.web3.freedom.baby/?q=/a#/b"))

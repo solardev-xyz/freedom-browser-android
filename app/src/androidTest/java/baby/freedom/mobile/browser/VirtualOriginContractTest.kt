@@ -585,6 +585,56 @@ class VirtualOriginContractTest {
     }
 
     @Test
+    fun prefixedAndPartitionedTossedCookiesAreSwept() {
+        // R6-F1: Chromium drops a `__Secure-`/`__Host-` cookie written
+        // without `Secure` — the `Max-Age=0` rewrite included — so an
+        // unsecured expiry left prefixed tossed cookies in place.
+        val cm = CookieManager.getInstance()
+        val app = "https://0x${"5".repeat(40)}-1.web3.freedom.baby/"
+        val elsewhere = "https://example.com/"
+        InstrumentationRegistry.getInstrumentation().runOnMainSync {
+            // Outside the covered origins: must survive the sweep.
+            cm.setCookie(elsewhere, "__Secure-other=1; Domain=example.com; Path=/; Secure")
+            cm.setCookie(elsewhere, "__Host-other=1; Path=/; Secure")
+            cm.setCookie(elsewhere, "otherPart=1; Path=/; Secure; SameSite=None; Partitioned")
+            cm.setCookie("https://freedom.baby/", "__Host-own=keep; Path=/; Secure")
+            // Planted from an onchain app's origin, one level down.
+            cm.setCookie(app, "__Secure-w3=1; Domain=web3.freedom.baby; Path=/; Secure")
+        }
+        harness.load(originA)
+        harness.awaitJsTrue("window.results && window.results.loaded === true")
+        harness.js("document.cookie = '__Secure-toss=1; domain=freedom.baby; path=/; Secure';")
+        harness.js("document.cookie = '__Host-h=1; path=/; Secure';")
+        harness.js("document.cookie = 'plain=1; domain=freedom.baby; path=/';")
+        harness.js(
+            "document.cookie = 'part=1; domain=freedom.baby; path=/; Secure; SameSite=None; Partitioned';",
+        )
+        harness.js("document.cookie = 'hostPart=1; path=/; Secure; SameSite=None; Partitioned';")
+        val planted = harness.js("document.cookie")
+        for (n in listOf("__Secure-toss", "__Host-h", "plain", "part", "hostPart")) {
+            assertTrue("$n not planted: $planted", planted.contains("$n=1"))
+        }
+        assertTrue(cm.getCookie(app).orEmpty().contains("__Secure-w3"))
+
+        CookieHygiene.sweepBlocking(listOf(originA, app))
+
+        assertEquals("", cm.getCookie(originA).orEmpty())
+        assertEquals("", cm.getCookie(app).orEmpty())
+        harness.load(originB)
+        harness.awaitJsTrue("window.results && window.results.loaded === true")
+        assertEquals("", harness.js("document.cookie").trim('"'))
+        harness.load(originA)
+        harness.awaitJsTrue("window.results && window.results.loaded === true")
+        assertEquals("", harness.js("document.cookie").trim('"'))
+        // Untouched elsewhere.
+        val other = cm.getCookie(elsewhere).orEmpty()
+        assertTrue(other, other.contains("__Secure-other=1"))
+        assertTrue(other, other.contains("__Host-other=1"))
+        assertTrue(other, other.contains("otherPart=1"))
+        assertTrue(cm.getCookie("https://freedom.baby/").orEmpty().contains("__Host-own=keep"))
+    }
+
+    @Test
     fun deepPathSweepIsBoundedByCookiesNotDepth() {
         // R4-F1: expiring every name at every candidate path took ~35 s
         // for 50 cookies under '/a' x 4000. The sweep now bisects the

@@ -287,11 +287,8 @@ object CookieHygiene {
             // so one nameless `=x` rewrite per path expires whichever
             // nameless cookie sits there. (A both-empty `=` is rejected.)
             for (pair in names.map { "$it=" } + "=x") {
-                runCatching {
-                    if (hostScoped) cm.setCookie(url, "$pair; Path=$p; Max-Age=0")
-                    if (domain != null) {
-                        cm.setCookie(url, "$pair; Domain=$domain; Path=$p; Max-Age=0")
-                    }
+                for (attrs in expiryAttributes(p, domain, hostScoped)) {
+                    runCatching { cm.setCookie(url, "$pair; $attrs") }
                 }
             }
         }
@@ -299,6 +296,43 @@ object CookieHygiene {
         // left when [hostScoped] is false).
         val left = runCatching { cm.getCookie(url) }.getOrNull()?.let(::cookieNames).orEmpty()
         return (before.size - left.size).coerceAtLeast(0)
+    }
+
+    /**
+     * The attribute strings of the `Max-Age=0` rewrites that expire a
+     * cookie at [path]: host-only (when [hostScoped]) and
+     * [domain]-scoped, each unpartitioned and partitioned.
+     *
+     * Every one is `Secure` (R6-F1): Chromium drops a `__Secure-` or
+     * `__Host-` prefixed cookie without it — the expiry too — so an
+     * unsecured rewrite left a tossed `__Secure-t; Domain=freedom.baby`
+     * in place for every origin. All swept URLs are `https://`, and a
+     * `Secure` overwrite replaces a non-`Secure` cookie of the same
+     * (name, domain, path) as well. A `__Host-` cookie can only exist
+     * host-only at `Path=/`, which the host rewrite at the root is; the
+     * other shapes are rejected for it, harmlessly. `SameSite` is not
+     * part of a cookie's key, so one rewrite covers every value.
+     *
+     * A partitioned (CHIPS) cookie is keyed by its top-level site as
+     * well, and only a `Partitioned` rewrite reaches it; [CookieManager]
+     * files that under the URL's own site — the partition of a
+     * top-level document on the swept origin, i.e. what another virtual
+     * origin can read as a top-level page (they share the site
+     * `freedom.baby` until issue #6). A partitioned cookie set by a
+     * virtual origin framed inside some *other* top-level site lives in
+     * that site's partition, which `CookieManager` can neither read nor
+     * write; it is only visible to frames under that same top-level
+     * site, so it is outside what this sweep can (or needs to) reach.
+     */
+    internal fun expiryAttributes(path: String, domain: String?, hostScoped: Boolean): List<String> {
+        val scopes = listOfNotNull(
+            if (hostScoped) "" else null,
+            domain?.let { "Domain=$it; " },
+        )
+        return scopes.flatMap { scope ->
+            val base = "${scope}Path=$path; Max-Age=0; Secure"
+            listOf(base, "$base; Partitioned")
+        }
     }
 
     private fun countNames(names: List<String>): Map<String, Int> =
