@@ -264,14 +264,26 @@ internal class AllowlistStore(
 
 /**
  * What Settings shows about the engine: whether it's (re)building, its
- * filter count, and the feed version its lists came from — `null` while
- * every list is the bundled one (#127).
+ * filter count, and where its lists came from (#127) — the applied
+ * update's feed version and build date (`null` when none is applied),
+ * the lists (by [AdblockCategory.listName]) that update serves, and
+ * those the bundled assets serve, because the update doesn't carry
+ * them or its copy is older.
  */
 internal data class AdblockStatus(
     val loading: Boolean,
     val filterCount: Int,
     val listsVersion: Long? = null,
     val listsGeneratedAt: String? = null,
+    val updatedLists: List<String> = emptyList(),
+    val builtInLists: List<String> = emptyList(),
+)
+
+/** Where the engine's lists came from; see [AdblockStatus]. */
+private data class AdblockListSources(
+    val applied: AppliedUpdate?,
+    val updated: List<String>,
+    val builtIn: List<String>,
 )
 
 /** What Settings shows about list updates (#127): a check under way, and how the last one ended. */
@@ -331,6 +343,10 @@ internal object Adblock {
     @Volatile
     private var lists: AdblockListStore? = null
 
+    /** Set in [start]: for the bundled lists' dates an update check compares against. */
+    @Volatile
+    private var appContext: Context? = null
+
     /** Bumped when an update lands, to rebuild the engine from it. */
     private val listsRevision = MutableStateFlow(0)
 
@@ -366,6 +382,7 @@ internal object Adblock {
         this.settings = settings
         val lists = AdblockListStore(File(app.filesDir, "adblock"))
         this.lists = lists
+        appContext = app
         scope.launch { store.run() }
         val allowlistRead = CompletableDeferred<Unit>()
         scope.launch {
@@ -387,11 +404,14 @@ internal object Adblock {
                     // An allowlisted site is never blocked while settings load.
                     allowlistRead.await()
                     engine = built?.first
+                    val sources = built?.second
                     _status.value = AdblockStatus(
                         loading = false,
                         filterCount = built?.first?.filterCount ?: 0,
-                        listsVersion = built?.second?.version,
-                        listsGeneratedAt = built?.second?.generatedAt,
+                        listsVersion = sources?.applied?.version,
+                        listsGeneratedAt = sources?.applied?.generatedAt,
+                        updatedLists = sources?.updated.orEmpty(),
+                        builtInLists = sources?.builtIn.orEmpty(),
                     )
                     _revision.value++
                 }
@@ -413,8 +433,8 @@ internal object Adblock {
     }
 
     /**
-     * The engine for [categories] and the update its lists came from
-     * (`null` if all are bundled). Each list is the applied update's
+     * The engine for [categories] and where its lists came from. Each
+     * list is the applied update's
      * copy when it has one that still matches its hash and isn't older
      * than the bundled asset ([updatedListIsNewer]), else the bundled
      * asset.
@@ -424,25 +444,28 @@ internal object Adblock {
         lists: AdblockListStore,
         categories: Set<AdblockCategory>,
         checkpoint: () -> Unit,
-    ): Pair<AdblockEngine, AppliedUpdate?>? {
+    ): Pair<AdblockEngine, AdblockListSources>? {
         if (categories.isEmpty()) return null
         val t0 = SystemClock.elapsedRealtime()
-        var update: AppliedUpdate? = null
+        val applied = lists.applied()
+        val fromUpdate = ArrayList<String>()
+        val fromBundle = ArrayList<String>()
         val texts = AdblockCategory.entries.filter { it in categories }.mapNotNull { category ->
             checkpoint()
             // A missing or unreadable list costs its own category only.
             val bundled = runCatching {
                 context.assets.open("adblock/${category.file}").bufferedReader().use { it.readText() }
             }.onFailure { Log.w(TAG, "list ${category.file} unreadable", it) }.getOrNull()
-            lists.updatedList(category.key)?.let { (text, applied) ->
+            lists.updatedList(category.key)?.let { (text, update) ->
                 // The bundled lists are the floor: an update older than
                 // them (a newer APK, a stalled publisher) doesn't serve.
                 if (bundled == null || updatedListIsNewer(text, bundled)) {
-                    update = applied
+                    fromUpdate += category.listName
                     return@mapNotNull text
                 }
-                Log.i(TAG, "bundled ${category.file} is newer than update ${applied.version}'s; using it")
+                Log.i(TAG, "bundled ${category.file} is newer than update ${update.version}'s; using it")
             }
+            if (bundled != null) fromBundle += category.listName
             bundled
         }
         if (texts.isEmpty()) return null
@@ -450,9 +473,22 @@ internal object Adblock {
         Log.i(
             TAG,
             "engine ready: ${categories.joinToString { it.key }}, ${built.filterCount} filters " +
-                "(lists ${update?.let { "update ${it.version}" } ?: "bundled"}) in ${SystemClock.elapsedRealtime() - t0} ms",
+                "(update ${applied?.version}: $fromUpdate, bundled: $fromBundle) in ${SystemClock.elapsedRealtime() - t0} ms",
         )
-        return built to update
+        return built to AdblockListSources(applied, fromUpdate, fromBundle)
+    }
+
+    /**
+     * The date in the header of [categoryKey]'s bundled list, epoch
+     * minutes, or `null` (no such category, no date, unreadable).
+     */
+    private fun bundledListTime(context: Context, categoryKey: String): Long? {
+        val category = AdblockCategory.entries.firstOrNull { it.key == categoryKey } ?: return null
+        return runCatching {
+            context.assets.open("adblock/${category.file}").bufferedReader().use { r ->
+                filterListTimestamp(r.lineSequence().take(50).joinToString("\n"))
+            }
+        }.getOrNull()
     }
 
     /** Settings' "Check for updates": run a check now, whatever the schedule. */
@@ -463,7 +499,8 @@ internal object Adblock {
     private suspend fun checkForUpdatesNow(): AdblockUpdateOutcome {
         val lists = lists
         val settings = settings
-        if (lists == null || settings == null) {
+        val app = appContext
+        if (lists == null || settings == null || app == null) {
             // Only before [start]; say so rather than leave the row blank.
             val outcome = AdblockUpdateOutcome.Failed("ad blocking hasn't started yet")
             _updateState.value = AdblockUpdateState(checking = false, last = outcome)
@@ -482,6 +519,7 @@ internal object Adblock {
                         signer = AdblockFeed.SIGNER,
                         readFeed = { readAdblockFeed(base) },
                         download = { ref, max -> downloadSwarmBytes(base, ref, max) },
+                        bundledTime = { bundledListTime(app, it) },
                         activate = { listsRevision.value++ },
                     )
                 }

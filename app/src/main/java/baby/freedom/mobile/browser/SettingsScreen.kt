@@ -803,15 +803,25 @@ private const val ADBLOCK_CHECK_UPDATES_SUBTITLE = "Reads the update feed on Swa
 
 /**
  * The wrapping line under "Keep filter lists up to date": which lists
- * the engine uses now — an update's version and the day it was built,
- * or the bundled ones (#127). (The subtitle is one ellipsised line, too
- * short to be sure of showing the version on a phone.)
+ * the engine uses now (#127) — the applied update's version and the day
+ * it was built, and, where the bundled lists serve some categories
+ * instead (the update doesn't carry them, or theirs is newer), which.
+ * (The subtitle is one ellipsised line, too short to be sure of showing
+ * the version on a phone.)
  */
 internal fun adblockListsLine(status: AdblockStatus): String {
     val version = status.listsVersion ?: return "Using the built-in lists"
+    if (status.updatedLists.isEmpty()) return "Using the built-in lists (newer than update $version)"
     val day = status.listsGeneratedAt?.take(10)?.takeIf { it.matches(Regex("\\d{4}-\\d{2}-\\d{2}")) }
-    return "Using update $version" + (day?.let { " of $it" } ?: "")
+    val update = "Using update $version" + (day?.let { " of $it" } ?: "")
+    if (status.builtInLists.isEmpty()) return update
+    return "$update for ${status.updatedLists.joinToString(", ")}; " +
+        "the built-in ${status.builtInLists.joinToString(", ")}"
 }
+
+/** The Settings name of the category [key] ("ads" → "EasyList"). */
+private fun adblockListName(key: String): String =
+    AdblockCategory.entries.firstOrNull { it.key == key }?.listName ?: key
 
 /**
  * The wrapping line under "Check for list updates": a check under way,
@@ -821,7 +831,16 @@ internal fun adblockUpdateLine(update: AdblockUpdateState): String? {
     if (update.checking) return "Checking…"
     return when (val last = update.last) {
         null -> null
-        is AdblockUpdateOutcome.Applied -> "Updated to version ${last.version}"
+        is AdblockUpdateOutcome.Applied ->
+            if (last.olderThanBuiltIn.isEmpty()) {
+                "Updated to version ${last.version}"
+            } else {
+                "Updated to version ${last.version}; the built-in " +
+                    last.olderThanBuiltIn.joinToString(", ") { adblockListName(it) } +
+                    if (last.olderThanBuiltIn.size == 1) " stays, it's newer" else " stay, they're newer"
+            }
+        is AdblockUpdateOutcome.BuiltInNewer ->
+            "Version ${last.version} on the feed is older than the built-in lists; they stay in use"
         is AdblockUpdateOutcome.UpToDate ->
             if (last.version > 0) "Up to date (version ${last.version})" else "Up to date"
         AdblockUpdateOutcome.FeedUnavailable ->

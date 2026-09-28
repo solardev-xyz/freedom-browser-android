@@ -209,11 +209,27 @@ internal fun filterListTimestamp(text: String): Long? {
  * manifest (or a lagging feed read can hand back an even older one);
  * the signed update is taken whenever either date is missing.
  */
-internal fun updatedListIsNewer(updated: String, bundled: String): Boolean {
-    val u = filterListTimestamp(updated) ?: return true
-    val b = filterListTimestamp(bundled) ?: return true
-    return u >= b
-}
+internal fun updatedListIsNewer(updated: String, bundled: String): Boolean =
+    !bundledListBeats(filterListTimestamp(updated), filterListTimestamp(bundled))
+
+/**
+ * Whether a bundled list dated [bundled] is newer than an update's
+ * list dated [updated] (both epoch minutes). The one rule the engine
+ * ([updatedListIsNewer]) and the updater ([runAdblockUpdate]) share: a
+ * missing date on either side means the signed update wins.
+ */
+internal fun bundledListBeats(updated: Long?, bundled: Long?): Boolean =
+    updated != null && bundled != null && updated < bundled
+
+/** A manifest's `generated_at` (ISO 8601) in epoch minutes, or `null`. */
+internal fun manifestTimestamp(generatedAt: String): Long? =
+    runCatching { java.time.Instant.parse(generatedAt).epochSecond / 60 }.getOrNull()
+
+/** The date in the header of the list [bytes], reading only as far as the header can reach. */
+private fun listBytesTimestamp(bytes: ByteArray): Long? =
+    filterListTimestamp(String(bytes, 0, minOf(bytes.size, HEADER_BYTES), Charsets.UTF_8))
+
+private const val HEADER_BYTES = 16 * 1024
 
 private const val HEADER_LINES = 40
 
@@ -245,8 +261,20 @@ private fun epochMinutes(y: Int, mo: Int, d: Int, h: Int, mi: Int): Long? = runC
 
 /** How one update check ended. */
 internal sealed interface AdblockUpdateOutcome {
-    /** A new update is in place; the engine is being rebuilt from it. */
-    data class Applied(val version: Long) : AdblockUpdateOutcome
+    /**
+     * A new update is in place; the engine is being rebuilt from it.
+     * [olderThanBuiltIn] names the enabled categories (keys) whose
+     * bundled list is newer than the update's, so the bundled one
+     * keeps serving them.
+     */
+    data class Applied(val version: Long, val olderThanBuiltIn: List<String> = emptyList()) : AdblockUpdateOutcome
+
+    /**
+     * The feed's [version] is newer than what's applied, but every list
+     * it has for the enabled categories is older than the bundled one,
+     * so the bundled lists stay in use.
+     */
+    data class BuiltInNewer(val version: Long) : AdblockUpdateOutcome
 
     /** The feed has nothing newer than what's applied. */
     data class UpToDate(val version: Long) : AdblockUpdateOutcome
@@ -284,8 +312,19 @@ internal sealed interface AdblockUpdateOutcome {
  * off keeps its applied copy while the new manifest still names the
  * same bytes, so switching it back on doesn't drop to the bundled list.
  *
+ * The bundled lists stay the floor here too, as in the engine
+ * ([bundledListBeats]): a list whose manifest was generated before the
+ * bundled list's date ([bundledTime]) can't be newer than it, so it
+ * isn't downloaded at all; one whose own header turns out older once
+ * downloaded is kept on disk (so the next check doesn't fetch it
+ * again) and reported in [AdblockUpdateOutcome.Applied.olderThanBuiltIn].
+ * When no list the enabled categories need beats its bundled one, the
+ * outcome is [AdblockUpdateOutcome.BuiltInNewer], never "applied".
+ *
  * [readFeed] returns the feed's payload or `null` when it can't be read;
- * [download] returns a blob of at most `maxBytes` or `null`.
+ * [download] returns a blob of at most `maxBytes` or `null`;
+ * [bundledTime] gives a category's bundled list date (epoch minutes),
+ * or `null` when it has none.
  */
 internal suspend fun runAdblockUpdate(
     store: AdblockListStore,
@@ -293,6 +332,7 @@ internal suspend fun runAdblockUpdate(
     signer: String,
     readFeed: suspend () -> ByteArray?,
     download: suspend (ref: String, maxBytes: Long) -> ByteArray?,
+    bundledTime: (category: String) -> Long?,
     activate: () -> Unit,
 ): AdblockUpdateOutcome {
     if (enabled.isEmpty()) return AdblockUpdateOutcome.NothingEnabled
@@ -315,13 +355,22 @@ internal suspend fun runAdblockUpdate(
 
     val wanted = manifest.lists.filter { it.category in enabled }
     if (wanted.isEmpty()) return AdblockUpdateOutcome.UpToDate(appliedVersion)
+    // A list generated before its bundled one's date is older than it:
+    // not worth downloading, the engine would never serve it.
+    val generated = manifestTimestamp(manifest.generatedAt)
+    val (stale, fetch) = wanted.partition { bundledListBeats(generated, bundledTime(it.category)) }
     // The republished version brings nothing this install is missing.
-    if (manifest.version == appliedVersion && wanted.all { it.category in appliedCategories }) {
+    if (manifest.version == appliedVersion && fetch.all { it.category in appliedCategories }) {
         return AdblockUpdateOutcome.UpToDate(appliedVersion)
+    }
+    if (fetch.isEmpty()) {
+        Log.i(TAG, "update ${manifest.version} is older than the bundled lists; not downloading it")
+        return AdblockUpdateOutcome.BuiltInNewer(manifest.version)
     }
 
     val lists = ArrayList<Pair<AdblockManifestList, ByteArray>>()
-    for (entry in wanted) {
+    val olderThanBuiltIn = stale.mapTo(ArrayList()) { it.category }
+    for (entry in fetch) {
         val bytes = store.reusable(entry) ?: run {
             val blob = download(entry.ref, entry.bytes)
                 ?: return AdblockUpdateOutcome.DownloadFailed(entry.category)
@@ -332,6 +381,7 @@ internal suspend fun runAdblockUpdate(
             blob
         }
         lists += entry to bytes
+        if (bundledListBeats(listBytesTimestamp(bytes), bundledTime(entry.category))) olderThanBuiltIn += entry.category
     }
     // Switched-off categories the new version still lists unchanged.
     for (entry in manifest.lists) {
@@ -347,8 +397,12 @@ internal suspend fun runAdblockUpdate(
         return AdblockUpdateOutcome.Failed(e.message ?: e.javaClass.simpleName)
     }
     activate()
-    Log.i(TAG, "applied filter-list update ${manifest.version} (${wanted.size} lists)")
-    return AdblockUpdateOutcome.Applied(manifest.version)
+    Log.i(TAG, "applied filter-list update ${manifest.version} (${fetch.size} lists, older than bundled: $olderThanBuiltIn)")
+    // Applied all the same (the version floor moves, nothing is fetched
+    // again), but no list of it serves: don't call that an update.
+    if (olderThanBuiltIn.size == wanted.size) return AdblockUpdateOutcome.BuiltInNewer(manifest.version)
+    val order = wanted.map { it.category }
+    return AdblockUpdateOutcome.Applied(manifest.version, olderThanBuiltIn.sortedBy { order.indexOf(it) })
 }
 
 /**

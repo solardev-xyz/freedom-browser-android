@@ -24,6 +24,11 @@ class AdblockUpdatesTest {
     private val downloaded = ArrayList<String>()
     private var activations = 0
 
+    /** The bundled lists' header dates, by category (epoch minutes); none by default. */
+    private val bundledTimes = HashMap<String, Long>()
+
+    private fun minutes(iso: String) = java.time.Instant.parse(iso).epochSecond / 60
+
     private val store by lazy { AdblockListStore(File(tmp.root, "adblock")) }
 
     private fun ref(text: String) = sha256Hex(text.toByteArray()) // any 64-hex name will do
@@ -60,6 +65,7 @@ class AdblockUpdatesTest {
                 downloaded += ref
                 blobs[ref]?.takeIf { it.size <= max }
             },
+            bundledTime = { bundledTimes[it] },
             activate = { activations++ },
         )
     }
@@ -269,11 +275,91 @@ class AdblockUpdatesTest {
     }
 
     @Test
+    fun `a manifest generated before the bundled lists is neither downloaded nor reported as an update`() {
+        // Version 5 is generated 2026-09-06; this APK's lists are from the 27th.
+        bundledTimes["ads"] = minutes("2026-09-27T22:48:00Z")
+        bundledTimes["privacy"] = minutes("2026-09-27T22:48:00Z")
+        publish(5, list("ads", "easylist", "||ads.example^"), list("privacy", "easyprivacy", "||track.example^"))
+        assertEquals(AdblockUpdateOutcome.BuiltInNewer(5), update("ads", "privacy"))
+        assertEquals(emptyList<String>(), downloaded)
+        assertNull(store.applied())
+        assertEquals(0, activations)
+    }
+
+    @Test
+    fun `only the lists newer than the bundled ones are fetched, and the rest are named`() {
+        bundledTimes["ads"] = minutes("2026-09-27T22:48:00Z")
+        bundledTimes["privacy"] = minutes("2026-09-01T00:00:00Z")
+        publish(5, list("ads", "easylist", "||ads.example^"), list("privacy", "easyprivacy", "||track.example^"))
+        assertEquals(AdblockUpdateOutcome.Applied(5, listOf("ads")), update("ads", "privacy"))
+        assertEquals(listOf(ref("||track.example^")), downloaded)
+        assertNull(text("ads"))
+        assertEquals("||track.example^", text("privacy"))
+        // The next check doesn't take ads' absence for a category to backfill.
+        downloaded.clear()
+        assertEquals(AdblockUpdateOutcome.UpToDate(5), update("ads", "privacy"))
+        assertEquals(emptyList<String>(), downloaded)
+        assertEquals(1, activations)
+    }
+
+    @Test
+    fun `a downloaded list whose own header is older than the bundled one is kept but not called an update`() {
+        bundledTimes["ads"] = minutes("2026-09-05T12:00:00Z")
+        bundledTimes["privacy"] = minutes("2026-09-05T12:00:00Z")
+        val oldAds = "[Adblock Plus 2.0]\n! Last modified: 2026-09-04 00:00 UTC\n||ads.example^"
+        val oldPrivacy = "[Adblock Plus 2.0]\n! Version: 202609040000\n||track.example^"
+        val newPrivacy = "[Adblock Plus 2.0]\n! Version: 202609060000\n||track2.example^"
+        // Generated on the 6th, after the bundled date, but carrying lists from the 4th.
+        publish(5, list("ads", "easylist", oldAds), list("privacy", "easyprivacy", oldPrivacy))
+        assertEquals(AdblockUpdateOutcome.BuiltInNewer(5), update("ads", "privacy"))
+        // Kept, so the version floor moves and the same lists aren't fetched again.
+        assertEquals(5L, store.applied()!!.version)
+        downloaded.clear()
+        assertEquals(AdblockUpdateOutcome.UpToDate(5), update("ads", "privacy"))
+        assertEquals(emptyList<String>(), downloaded)
+        // A later version with one list newer: an update, naming the other.
+        publish(6, list("ads", "easylist", oldAds), list("privacy", "easyprivacy", newPrivacy))
+        assertEquals(AdblockUpdateOutcome.Applied(6, listOf("ads")), update("ads", "privacy"))
+        assertEquals(listOf(ref(newPrivacy)), downloaded)
+    }
+
+    @Test
+    fun `Settings says which lists an update serves and which the bundled ones do`() {
+        val applied = AdblockStatus(false, 1, listsVersion = 2, listsGeneratedAt = "2026-09-28T01:00:00.000Z")
+        assertEquals(
+            "Using update 2 of 2026-09-28",
+            adblockListsLine(applied.copy(updatedLists = listOf("EasyList", "EasyPrivacy"))),
+        )
+        assertEquals(
+            "Using update 2 of 2026-09-28 for EasyPrivacy; the built-in EasyList",
+            adblockListsLine(applied.copy(updatedLists = listOf("EasyPrivacy"), builtInLists = listOf("EasyList"))),
+        )
+        assertEquals(
+            "Using the built-in lists (newer than update 2)",
+            adblockListsLine(applied.copy(builtInLists = listOf("EasyList", "EasyPrivacy"))),
+        )
+        assertEquals("Updated to version 2", adblockUpdateLine(AdblockUpdateState(last = AdblockUpdateOutcome.Applied(2))))
+        assertEquals(
+            "Updated to version 2; the built-in EasyList stays, it's newer",
+            adblockUpdateLine(AdblockUpdateState(last = AdblockUpdateOutcome.Applied(2, listOf("ads")))),
+        )
+        assertEquals(
+            "Version 142 on the feed is older than the built-in lists; they stay in use",
+            adblockUpdateLine(AdblockUpdateState(last = AdblockUpdateOutcome.BuiltInNewer(142))),
+        )
+    }
+
+    @Test
     fun `Settings names the lists in use and how the last check ended`() {
         assertEquals("Using the built-in lists", adblockListsLine(AdblockStatus(loading = false, filterCount = 1)))
         assertEquals(
             "Using update 142 of 2026-09-18",
-            adblockListsLine(AdblockStatus(false, 1, listsVersion = 142, listsGeneratedAt = "2026-09-18T20:41:06.821Z")),
+            adblockListsLine(
+                AdblockStatus(
+                    false, 1, listsVersion = 142, listsGeneratedAt = "2026-09-18T20:41:06.821Z",
+                    updatedLists = listOf("EasyList"),
+                ),
+            ),
         )
         assertNull(adblockUpdateLine(AdblockUpdateState()))
         assertEquals("Checking…", adblockUpdateLine(AdblockUpdateState(checking = true)))
