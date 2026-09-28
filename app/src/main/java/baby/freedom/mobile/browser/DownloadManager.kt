@@ -624,40 +624,33 @@ class DownloadManager private constructor(context: Context) {
         for (delayMs in DWEB_RETRY_DELAYS_MS) {
             if (delayMs > 0) delay(delayMs)
             currentCoroutineContext().ensureActive()
-            val conn = try {
-                (TorRouting.openConnection(URL(gatewayUrl)) as HttpURLConnection).apply {
-                    track(AutoCloseable { disconnect() })
-                    connectTimeout = 5_000
-                    readTimeout = 60_000
-                    instanceFollowRedirects = true
-                    setRequestProperty("Accept-Encoding", "identity")
-                    setRequestProperty("Swarm-Chunk-Retrieval-Timeout", "30s")
-                    setRequestProperty("Swarm-Redundancy-Strategy", "3")
-                    setRequestProperty("Swarm-Redundancy-Fallback-Mode", "true")
-                }
-            } catch (e: IOException) {
-                Log.i(LOG_TAG, "dweb download attempt failed: $gatewayUrl", e)
-                continue
-            }
             // The header wait is part of the attempt: a cold node that
             // accepts the connection and then resets gets the rest of
             // the retry budget, like a 404. A read timeout doesn't: that
             // attempt alone already waited a full [readTimeout], twice
             // the node's own retrieval timeout, and nine of those would
             // hold the row at 0 B for ~10 min (see [dwebHeaderFailureRetries]).
-            val status = try {
-                conn.connect()
-                conn.responseCode
+            // Redirects are followed hop by hop through TorRouting (each
+            // failed hop is disconnected there).
+            val conn = try {
+                TorRouting.openFollowingRedirects(URL(gatewayUrl)) {
+                    track(AutoCloseable { disconnect() })
+                    connectTimeout = 5_000
+                    readTimeout = 60_000
+                    setRequestProperty("Accept-Encoding", "identity")
+                    setRequestProperty("Swarm-Chunk-Retrieval-Timeout", "30s")
+                    setRequestProperty("Swarm-Redundancy-Strategy", "3")
+                    setRequestProperty("Swarm-Redundancy-Fallback-Mode", "true")
+                }
             } catch (_: java.net.ConnectException) {
-                conn.disconnect()
                 throw DownloadFailure("Node not running")
             } catch (e: IOException) {
-                conn.disconnect()
                 currentCoroutineContext().ensureActive()
                 Log.i(LOG_TAG, "dweb download attempt failed: $gatewayUrl", e)
                 if (!dwebHeaderFailureRetries(e)) break
                 continue
             }
+            val status = conn.responseCode
             if (status in 200..299) return bodyOf(conn, nameUrl)
             lastStatus = status
             conn.disconnect()

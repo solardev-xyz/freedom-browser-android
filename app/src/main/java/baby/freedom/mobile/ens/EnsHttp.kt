@@ -39,18 +39,27 @@ internal interface EnsHttp {
             maxBytes: Long,
             followRedirects: Boolean,
         ): Reply {
-            val conn = (TorRouting.openConnection(URL(url)) as HttpURLConnection).apply {
+            fun HttpURLConnection.setUp() {
                 requestMethod = method
                 connectTimeout = minOf(timeoutMs, 8_000)
                 readTimeout = timeoutMs
-                instanceFollowRedirects = followRedirects
                 for ((k, v) in headers) setRequestProperty(k, v)
-                if (body != null) doOutput = true
+            }
+            val bytes = body?.toByteArray(Charsets.UTF_8)
+            // A followed redirect goes hop by hop through TorRouting, never
+            // HttpURLConnection's own following (which would dial an onion
+            // hop directly).
+            val conn = if (followRedirects) {
+                TorRouting.openFollowingRedirects(URL(url), bytes) { setUp() }
+            } else {
+                (TorRouting.openConnection(URL(url)) as HttpURLConnection).apply {
+                    setUp()
+                    instanceFollowRedirects = false
+                    if (bytes != null) doOutput = true
+                }
             }
             try {
-                if (body != null) {
-                    conn.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
-                }
+                if (!followRedirects && bytes != null) conn.outputStream.use { it.write(bytes) }
                 val code = conn.responseCode
                 if (conn.contentLengthLong > maxBytes) {
                     throw IOException("response exceeds $maxBytes bytes")

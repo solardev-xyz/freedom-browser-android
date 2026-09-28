@@ -8,6 +8,8 @@ import java.io.File
 import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.concurrent.thread
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineExceptionHandler
@@ -516,17 +518,26 @@ class ChainlistService internal constructor(
          * first, cache-less load neither leaves a multi-MB download running
          * nor makes the next Add chain wait for it. (A background refresh of
          * a stale cache isn't tied to the page, and runs to completion.)
+         *
+         * Redirects are followed hop by hop through [TorRouting] (never by
+         * `HttpURLConnection` itself, which would open an onion hop
+         * directly); a cancellation disconnects whichever hop is current.
          */
         internal suspend fun download(url: String = Chainlist.URL): String {
-            val conn = (TorRouting.openConnection(URL(url)) as HttpURLConnection).apply {
-                connectTimeout = CONNECT_TIMEOUT_MS
-                readTimeout = READ_TIMEOUT_MS
-                useCaches = false
-                setRequestProperty("Accept", "application/json")
-            }
+            val target = URL(url)
+            val current = AtomicReference<HttpURLConnection?>()
+            val cancelled = AtomicBoolean(false)
             return suspendCancellableCoroutine { cont ->
                 thread(name = "chainlist-download", isDaemon = true) {
                     val result = runCatching {
+                        val conn = TorRouting.openFollowingRedirects(target) {
+                            current.set(this)
+                            if (cancelled.get()) throw IOException("cancelled")
+                            connectTimeout = CONNECT_TIMEOUT_MS
+                            readTimeout = READ_TIMEOUT_MS
+                            useCaches = false
+                            setRequestProperty("Accept", "application/json")
+                        }
                         try {
                             read(conn)
                         } finally {
@@ -537,7 +548,8 @@ class ChainlistService internal constructor(
                     cont.resumeWith(result)
                 }
                 cont.invokeOnCancellation {
-                    thread(name = "chainlist-abort", isDaemon = true) { conn.disconnect() }
+                    cancelled.set(true)
+                    thread(name = "chainlist-abort", isDaemon = true) { current.get()?.disconnect() }
                 }
             }
         }

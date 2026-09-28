@@ -24,6 +24,16 @@ import java.io.File
  * any other target). The browser routes `*.onion` — and only that — to
  * [TorInfo.socksPort] (#143).
  *
+ * Known limit: the SOCKS5 listener on `127.0.0.1` is unauthenticated,
+ * like Tor's own `SocksPort` by default. Android has no per-app loopback
+ * isolation, so any other app on the device that finds the port can send
+ * its own `.onion` requests through this client, or tell from an open
+ * listener that the user runs Tor in Freedom. It can't reach clearnet
+ * through it (only `.onion` targets are accepted), and it gets no data of
+ * Freedom's, but closing it takes SOCKS username/password auth on the
+ * Rust side (freedom-mobile-ffi) and a per-run secret in the WebView
+ * proxy rule — tracked as a follow-up, not done here.
+ *
  * [start] and [stop] run one at a time, in call order, on [lifecycle];
  * while the client is up a poller reads the bootstrap status (every
  * second while bootstrapping, every [POLL_RUNNING_MS] after) into [state].

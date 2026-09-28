@@ -11,11 +11,14 @@ import baby.freedom.swarm.TorInfo
 import baby.freedom.swarm.TorStatus
 import java.io.ByteArrayInputStream
 import java.io.IOException
+import java.net.HttpURLConnection
+import java.net.IDN
 import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.Proxy
 import java.net.URL
 import java.net.URLConnection
+import java.text.Normalizer
 
 /**
  * `.onion` routing (#143): only onion hosts go through the embedded Tor
@@ -113,6 +116,20 @@ object TorRouting {
         apply(context)
     }
 
+    /** [ProxyController.setProxyOverride]; swapped in tests. */
+    internal var setOverride: (ProxyConfig, Context, Runnable) -> Unit = { config, context, done ->
+        ProxyController.getInstance().setProxyOverride(config, context.mainExecutor, done)
+    }
+
+    /** Tests: pretend [init] found reverse-bypass support, with nothing applied yet. */
+    internal fun resetForTest(supported: Boolean?) {
+        this.supported = supported
+        enabled = false
+        info = TorInfo()
+        routedPort = 0
+        targetPort = -1
+    }
+
     private val TOR_HOST: InetAddress = InetAddress.getByAddress(byteArrayOf(127, 0, 0, 1))
 
     /** The port a native onion fetch may use, or 0. */
@@ -126,11 +143,13 @@ object TorRouting {
         if (desired != routedPort) routedPort = 0
         val target = if (desired == 0) REFUSE_PORT else desired
         if (target == targetPort) return
-        targetPort = target
         val gen = ++generation
         val config = proxyConfigFor(target)
         runCatching {
-            ProxyController.getInstance().setProxyOverride(config, context.mainExecutor) {
+            // Recorded only once the WebView took the override: after a
+            // failure the next apply() with the same target retries.
+            targetPort = target
+            setOverride(config, context) {
                 if (gen == generation && desired != 0) {
                     routedPort = desired
                     Log.i(TAG, ".onion → socks5://127.0.0.1:$desired")
@@ -139,7 +158,9 @@ object TorRouting {
                 }
             }
         }.onFailure {
-            // Keep refusing: routedPort stays 0.
+            // Keep refusing (routedPort stays 0), and forget the target so
+            // the next state update tries again.
+            targetPort = -1
             Log.w(TAG, "setProxyOverride failed", it)
         }
     }
@@ -173,14 +194,111 @@ object TorRouting {
      * port with an explicit SOCKS proxy (the hostname goes to Tor; nothing
      * resolves here), or an [IOException] with none; anything else as
      * [URL.openConnection] would.
+     *
+     * The host is judged the way the HTTP stack will read it, not as
+     * [URL.getHost] spells it: `HttpURLConnection` re-parses the URL's
+     * string and percent-decodes and IDNA-maps the host, so a redirect to
+     * `http://name%2eonion/` or `http://name\u3002onion/` is still an
+     * onion fetch ([fetchMayReachOnion]).
+     *
+     * Don't let the connection follow redirects itself — each hop has to
+     * come back through here. Use [openFollowingRedirects] for that.
      */
     fun openConnection(url: URL): URLConnection {
-        if (!isOnionHost(url.host)) return url.openConnection()
+        if (!fetchMayReachOnion(url)) return url.openConnection()
         val port = routedPort
-        if (port == 0) throw IOException("Tor isn't running: .onion addresses need Tor")
+        if (port == 0) throw RefusedException()
         // 127.0.0.1 by address, where the listener binds: Android's
         // InetAddress.getLoopbackAddress() is ::1.
         return url.openConnection(Proxy(Proxy.Type.SOCKS, InetSocketAddress(TOR_HOST, port)))
+    }
+
+    /**
+     * Open [url] and send the request, following redirects by hand so
+     * every hop is routed by [openConnection] — `HttpURLConnection`'s own
+     * redirect following would open an onion hop off a clearnet URL
+     * directly, resolving it through the system DNS.
+     *
+     * [configure] runs on each hop's fresh connection (method, timeouts,
+     * headers), with that hop's URL; [body], if any, is written to the
+     * first hop. Redirects are followed the way `HttpURLConnection` would
+     * ([redirectFor]). Returns the final connection with its response
+     * status read; every earlier hop is disconnected.
+     */
+    fun openFollowingRedirects(
+        url: URL,
+        body: ByteArray? = null,
+        configure: HttpURLConnection.(hop: URL) -> Unit,
+    ): HttpURLConnection {
+        var current = url
+        var method: String? = null
+        var payload = body
+        repeat(MAX_REDIRECTS + 1) {
+            val conn = openConnection(current) as? HttpURLConnection
+                ?: throw IOException("Not an HTTP URL: $current")
+            var keep = false
+            try {
+                conn.configure(current)
+                method?.let { conn.requestMethod = it }
+                conn.instanceFollowRedirects = false
+                payload?.let { bytes ->
+                    conn.doOutput = true
+                    conn.outputStream.use { it.write(bytes) }
+                }
+                val code = conn.responseCode
+                val next = redirectFor(current, code, conn.requestMethod, conn.getHeaderField("Location"))
+                if (next == null) {
+                    keep = true
+                    return conn
+                }
+                current = next.url
+                if (next.toGet) {
+                    method = "GET"
+                    payload = null
+                }
+            } finally {
+                if (!keep) runCatching { conn.disconnect() }
+            }
+        }
+        throw IOException("Too many redirects")
+    }
+
+    /** [openConnection]'s refusal of an onion URL while no Tor port is routed. */
+    class RefusedException : IOException("Tor isn't running: .onion addresses need Tor")
+
+    /**
+     * Whether [a] and [b] are the same origin (scheme, host, port) — a
+     * redirect hop that isn't doesn't get the first request's credentials.
+     */
+    fun sameOrigin(a: URL, b: URL): Boolean =
+        a.protocol.equals(b.protocol, ignoreCase = true) &&
+            a.host.equals(b.host, ignoreCase = true) &&
+            (if (a.port == -1) a.defaultPort else a.port) == (if (b.port == -1) b.defaultPort else b.port)
+
+    /** `HttpURLConnection`'s own follow-up limit. */
+    internal const val MAX_REDIRECTS = 20
+
+    internal class Redirect(val url: URL, val toGet: Boolean)
+
+    /**
+     * Where a [code] response with [location] to a [method] request for
+     * [from] redirects, or `null` to hand it to the caller as is — the
+     * rules `HttpURLConnection` follows: 300–303 always (a request with
+     * a body is re-sent as a bodiless GET), 307/308 only for GET/HEAD,
+     * and never to another scheme (Android's `HttpURLConnection` doesn't
+     * follow http ↔ https).
+     */
+    internal fun redirectFor(from: URL, code: Int, method: String, location: String?): Redirect? {
+        if (location.isNullOrEmpty()) return null
+        val safe = method == "GET" || method == "HEAD"
+        when (code) {
+            300, 301, 302, 303 -> Unit
+            307, 308 -> if (!safe) return null
+            else -> return null
+        }
+        val next = runCatching { URL(from, location) }.getOrNull() ?: return null
+        if (!next.protocol.equals(from.protocol, ignoreCase = true)) return null
+        return Redirect(next, toGet = !safe)
     }
 
     /**
@@ -254,4 +372,86 @@ internal fun isOnionHost(host: String?): Boolean {
     if (!h.endsWith(".onion")) return false
     val rest = h.removeSuffix(".onion")
     return rest.isNotEmpty() && !rest.endsWith(".")
+}
+
+/**
+ * Whether a native fetch of [url] may end up at an onion host — judged
+ * on every way the host can be read, and failing towards "onion" when in
+ * doubt (an onion fetch without Tor is refused; with Tor, the Tor side
+ * refuses anything that isn't really an onion name).
+ *
+ * `HttpURLConnection` (OkHttp inside) doesn't use [URL.getHost]: it
+ * re-parses `url.toString()` with its own authority rules (a `\` ends
+ * the authority), then percent-decodes the host and runs it through
+ * IDNA, which maps `%2e`, `。`, `．`, `｡` to a dot and drops soft
+ * hyphens and joiners. So both readings of the host are checked, each
+ * canonicalized ([hostMayBeOnion]).
+ */
+internal fun fetchMayReachOnion(url: URL): Boolean =
+    hostMayBeOnion(url.host) || hostMayBeOnion(okHttpHost(url.toString()))
+
+/**
+ * The host of [url] as OkHttp's `HttpUrl` reads the authority: after the
+ * scheme's slashes (either kind), up to the first `/`, `\`, `?` or `#`,
+ * after the last `@`, before a port colon outside brackets. Raw, not
+ * decoded; `null` without an authority.
+ */
+internal fun okHttpHost(url: String): String? {
+    val colon = url.indexOf(':').takeIf { it > 0 } ?: return null
+    var i = colon + 1
+    while (i < url.length && (url[i] == '/' || url[i] == '\\')) i++
+    val end = url.indexOfAny(charArrayOf('/', '\\', '?', '#'), i).let { if (it < 0) url.length else it }
+    val authority = url.substring(i, end)
+    val hostPort = authority.substringAfterLast('@')
+    if (hostPort.startsWith("[")) return hostPort.substringBefore(']') + "]"
+    return hostPort.substringBefore(':').takeIf { it.isNotEmpty() }
+}
+
+/**
+ * Whether [rawHost] (as written in a URL) names an onion host once
+ * canonicalized as an HTTP stack would: percent-decoded, IDNA-mapped,
+ * trailing dots dropped. A host that can't be canonicalized cleanly but
+ * still reads as `….onion` once everything but letters, digits, dots and
+ * hyphens is stripped counts too.
+ */
+internal fun hostMayBeOnion(rawHost: String?): Boolean {
+    if (rawHost.isNullOrEmpty() || rawHost.startsWith("[")) return false
+    fun onion(h: String) = isOnionHost(h.trimEnd('.'))
+    if (onion(rawHost)) return true
+    val plain = rawHost.all { it.code in 0x21..0x7e } && '%' !in rawHost
+    if (plain) return false
+    val decoded = percentDecodeUtf8(rawHost)
+    if (onion(decoded)) return true
+    val idna = runCatching { IDN.toASCII(decoded, IDN.ALLOW_UNASSIGNED) }.getOrNull()
+    if (idna != null && onion(idna)) return true
+    // Whatever mapping the stack applies, it can't turn a host that
+    // doesn't read as an onion name here into one.
+    val loose = Normalizer.normalize(decoded, Normalizer.Form.NFKC)
+        .lowercase()
+        .map { if (it == '\u3002' || it == '\uff0e' || it == '\uff61') '.' else it }
+        .filter { it in 'a'..'z' || it in '0'..'9' || it == '.' || it == '-' }
+        .joinToString("")
+    return loose.trimEnd('.').endsWith(".onion")
+}
+
+/** `%XX` escapes decoded as UTF-8 bytes; a malformed escape is kept as is. */
+private fun percentDecodeUtf8(s: String): String {
+    val out = java.io.ByteArrayOutputStream()
+    val bytes = s.toByteArray(Charsets.UTF_8)
+    var i = 0
+    while (i < bytes.size) {
+        val b = bytes[i]
+        if (b == '%'.code.toByte() && i + 2 < bytes.size) {
+            val hi = Character.digit(bytes[i + 1].toInt(), 16)
+            val lo = Character.digit(bytes[i + 2].toInt(), 16)
+            if (hi >= 0 && lo >= 0) {
+                out.write(hi * 16 + lo)
+                i += 3
+                continue
+            }
+        }
+        out.write(b.toInt())
+        i++
+    }
+    return out.toString(Charsets.UTF_8.name())
 }

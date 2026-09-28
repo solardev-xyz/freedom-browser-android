@@ -437,11 +437,15 @@ private fun HttpURLConnection.applySwarmRequestHeaders() {
 private fun HttpURLConnection.forwardProxiedHeaders(
     req: WebResourceRequest,
     stripRange: Boolean = false,
+    crossOrigin: Boolean = false,
 ) {
     req.requestHeaders?.forEach { (k, v) ->
         val lk = k.lowercase()
         if (lk in REQUEST_HEADERS_TO_STRIP) return@forEach
         if (stripRange && lk == "range") return@forEach
+        // A redirect hop to another origin doesn't get the credentials
+        // (HttpURLConnection's own following dropped them too).
+        if (crossOrigin && lk == "authorization") return@forEach
         try { setRequestProperty(k, v) } catch (_: Throwable) {}
     }
     // Force `identity` so HttpURLConnection doesn't silently
@@ -5003,20 +5007,20 @@ private fun tryLoadMediaBody(
     req: WebResourceRequest,
     targetUrl: String,
 ): MediaLoadResult {
-    val conn = try {
-        (TorRouting.openConnection(URL(targetUrl)) as HttpURLConnection).apply {
-            requestMethod = "GET"
-            connectTimeout = 5_000
-            readTimeout = 60_000
-            instanceFollowRedirects = true
-            forwardProxiedHeaders(req, stripRange = true)
-        }
+    val target = try {
+        URL(targetUrl)
     } catch (t: Throwable) {
         Log.w(LOG_TAG, "media fetch open failed: $targetUrl", t)
         return MediaLoadResult.Fatal
     }
     return try {
-        conn.connect()
+        // Redirects are followed hop by hop through TorRouting.
+        val conn = TorRouting.openFollowingRedirects(target) { hop ->
+            requestMethod = "GET"
+            connectTimeout = 5_000
+            readTimeout = 60_000
+            forwardProxiedHeaders(req, stripRange = true, crossOrigin = !TorRouting.sameOrigin(hop, target))
+        }
         val status = conn.responseCode
         if (status in TRANSIENT_STATUSES) {
             Log.w(LOG_TAG, "media fetch transient $status for $targetUrl")
@@ -5038,6 +5042,9 @@ private fun tryLoadMediaBody(
         synchronized(mediaBodyCache) { mediaBodyCache[targetUrl] = body }
         Log.i(LOG_TAG, "media cached: $targetUrl bytes=${bytes.size} mime=$mime")
         MediaLoadResult.Ok(body)
+    } catch (t: TorRouting.RefusedException) {
+        Log.w(LOG_TAG, "media fetch open failed: $targetUrl", t)
+        MediaLoadResult.Fatal
     } catch (t: java.net.ConnectException) {
         // The gateway socket refused — the node is down; retrying the
         // whole backoff schedule would just stall the media element.
@@ -5182,14 +5189,14 @@ private fun fetchOnce(
     targetUrl: String,
 ): FetchAttempt {
     return try {
-        val conn = (TorRouting.openConnection(URL(targetUrl)) as HttpURLConnection).apply {
+        val target = URL(targetUrl)
+        // Redirects are followed hop by hop through TorRouting.
+        val conn = TorRouting.openFollowingRedirects(target) { hop ->
             requestMethod = if (req.method == "HEAD") "HEAD" else "GET"
             connectTimeout = 5_000
             readTimeout = 10_000
-            instanceFollowRedirects = true
-            forwardProxiedHeaders(req)
+            forwardProxiedHeaders(req, crossOrigin = !TorRouting.sameOrigin(hop, target))
         }
-        conn.connect()
         val status = conn.responseCode
         val reason = conn.responseMessage?.ifBlank { null } ?: "OK"
         val rawCt = conn.contentType
