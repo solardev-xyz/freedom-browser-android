@@ -12,6 +12,7 @@ import androidx.datastore.preferences.preferencesDataStore
 import baby.freedom.mobile.chains.BuiltInChains
 import baby.freedom.mobile.chains.Chain
 import baby.freedom.mobile.chains.ChainInput
+import baby.freedom.mobile.chains.RpcUrls
 import java.io.IOException
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
@@ -34,6 +35,10 @@ import org.json.JSONObject
  *     "chain:<chainId>" → {"id", "name", "symbol", "currencyName",
  *                          "decimals", "explorerUrl", "rpcUrls",
  *                          "isTestnet", "addedAt"}
+ *
+ * and the user's own RPCs for any chain, built-in or custom (#108):
+ *
+ *     "rpcs:<chainId>" → ["https://…", …]
  *
  * Built-ins are never stored, so they can't be removed or shadowed: a
  * chain ID that's built in can't be added, and a stored entry for one
@@ -60,6 +65,12 @@ class ChainStore internal constructor(
      */
     enum class RemoveResult { REMOVED, NOT_FOUND, FAILED }
 
+    /**
+     * [addUserRpc]'s answer. [PUBLIC]: already one of the chain's public
+     * RPCs; [NO_CHAIN]: no such chain (removed meanwhile).
+     */
+    enum class RpcAddResult { ADDED, INVALID, DUPLICATE, PUBLIC, FULL, NO_CHAIN, FAILED }
+
     /** Every chain: the built-ins, then custom chains in the order they were added. */
     val chains: Flow<List<Chain>> = flow {
         var failures = 0
@@ -75,7 +86,58 @@ class ChainStore internal constructor(
                     true
                 },
         )
-    }.map { prefs -> BuiltInChains.ALL + customChains(prefs) }
+    }.map { prefs ->
+        (BuiltInChains.ALL + customChains(prefs)).map { chain ->
+            userRpcs(prefs, chain).takeIf { it.isNotEmpty() }?.let { chain.copy(userRpcUrls = it) } ?: chain
+        }
+    }
+
+    /**
+     * Add [raw] to chain [id]'s own RPCs ([Chain.userRpcUrls]), after
+     * [RpcUrls.normalize] — checked against the stored list inside the
+     * same write, so two quick adds can't overflow it or add one twice.
+     */
+    suspend fun addUserRpc(id: Long, raw: String): RpcAddResult {
+        val url = RpcUrls.normalize(raw) ?: return RpcAddResult.INVALID
+        var result = RpcAddResult.ADDED
+        return try {
+            store.edit { prefs ->
+                val chain = BuiltInChains.ALL.firstOrNull { it.id == id }
+                    ?: prefs[keyOf(id)]?.let(::decode)?.first?.takeIf { it.id == id && !BuiltInChains.isBuiltIn(id) }
+                val current = chain?.let { userRpcs(prefs, it) }.orEmpty()
+                result = when {
+                    chain == null -> RpcAddResult.NO_CHAIN
+                    url in current -> RpcAddResult.DUPLICATE
+                    url in chain.rpcUrls -> RpcAddResult.PUBLIC
+                    current.size >= Chain.MAX_USER_RPC_URLS -> RpcAddResult.FULL
+                    else -> {
+                        prefs[rpcsKeyOf(id)] = JSONArray(current + url).toString()
+                        RpcAddResult.ADDED
+                    }
+                }
+            }
+            result
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.w(TAG, "writing RPC failed", e)
+            RpcAddResult.FAILED
+        }
+    }
+
+    /** Drop [url] from chain [id]'s own RPCs. `false` only when the write failed. */
+    suspend fun removeUserRpc(id: Long, url: String): Boolean = try {
+        store.edit { prefs ->
+            val left = decodeRpcs(prefs[rpcsKeyOf(id)]) - url
+            if (left.isEmpty()) prefs.remove(rpcsKeyOf(id)) else prefs[rpcsKeyOf(id)] = JSONArray(left).toString()
+        }
+        true
+    } catch (e: CancellationException) {
+        throw e
+    } catch (e: Exception) {
+        Log.w(TAG, "removing RPC failed", e)
+        false
+    }
 
     /**
      * Add [chain] as a custom chain, unless its ID is built in or
@@ -111,6 +173,7 @@ class ChainStore internal constructor(
             store.edit { prefs ->
                 removed = prefs.contains(keyOf(id))
                 prefs.remove(keyOf(id))
+                prefs.remove(rpcsKeyOf(id))
             }
             if (removed) RemoveResult.REMOVED else RemoveResult.NOT_FOUND
         } catch (e: CancellationException) {
@@ -130,11 +193,30 @@ class ChainStore internal constructor(
             }
         }.sortedWith(compareBy({ it.second }, { it.first.id })).map { it.first }
 
+    /**
+     * [chain]'s own RPCs as stored, each re-validated, capped, and minus
+     * any that's also a public one — a hand-edited or stale entry is
+     * dropped rather than routed to.
+     */
+    private fun userRpcs(prefs: Preferences, chain: Chain): List<String> =
+        decodeRpcs(prefs[rpcsKeyOf(chain.id)])
+            .filter { RpcUrls.normalize(it) == it && it !in chain.rpcUrls }
+            .distinct()
+            .take(Chain.MAX_USER_RPC_URLS)
+
     companion object {
         private const val PREFIX = "chain:"
+        private const val RPCS_PREFIX = "rpcs:"
         private const val TAG = "ChainStore"
 
         private fun keyOf(id: Long) = stringPreferencesKey("$PREFIX$id")
+        private fun rpcsKeyOf(id: Long) = stringPreferencesKey("$RPCS_PREFIX$id")
+
+        private fun decodeRpcs(json: String?): List<String> = try {
+            json?.let { JSONArray(it) }?.let { a -> (0 until a.length()).mapNotNull { a.opt(it) as? String } }.orEmpty()
+        } catch (_: Exception) {
+            emptyList()
+        }
 
         internal fun encode(chain: Chain, addedAt: Long): String = JSONObject()
             .put("id", chain.id)

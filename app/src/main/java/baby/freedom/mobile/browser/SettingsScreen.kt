@@ -109,7 +109,8 @@ import kotlinx.coroutines.launch
  *     set — its unverified warning must stay in view while it's in use.
  *  4. **Chains** — Ethereum, Gnosis and Base, plus the user's custom
  *     chains, added from a chainlist.org search or by hand (#107, see
- *     [ChainsSection]). Its Add chain pages replace the list while open.
+ *     [ChainsSection]). Its Add chain pages and each chain's page (its own
+ *     RPCs and how reads are checked, #108) replace the list while open.
  *  5. **About** — app name, version, package, and a short blurb.
  *  6. **Other** — a single "Show advanced options" row. Tapping it
  *     flips [NodeSettings.showIpfsUi] on, which reveals an "IPFS node
@@ -170,7 +171,6 @@ fun SettingsScreen(
         .collectAsState(initial = BuiltInChains.ALL)
     var chainPage by remember { mutableStateOf<ChainPage?>(null) }
     var chainQuery by rememberSaveable { mutableStateOf("") }
-    var openChain by remember { mutableStateOf<Chain?>(null) }
     var confirmRemoveChain by remember { mutableStateOf<Chain?>(null) }
     var removeChainFailed by remember { mutableStateOf<Chain?>(null) }
 
@@ -235,6 +235,21 @@ fun SettingsScreen(
             },
             onBack = { chainPage = if (page.prefill != null) ChainPage.Search else null },
         )
+        is ChainPage.Detail -> {
+            val chain = chains.firstOrNull { it.id == page.chainId }
+            if (chain != null) {
+                ChainDetailPage(
+                    chain = chain,
+                    onAddRpc = { chainStore.addUserRpc(chain.id, it) },
+                    onRemoveRpc = { chainStore.removeUserRpc(chain.id, it) },
+                    onRemove = { confirmRemoveChain = chain },
+                    onBack = { chainPage = null },
+                )
+            } else {
+                // Removed (from this page's Remove): back to the list.
+                LaunchedEffect(page) { chainPage = null }
+            }
+        }
         null -> Unit
     }
     if (chainPage == null) FullScreenScaffold(
@@ -303,7 +318,7 @@ fun SettingsScreen(
                     ChainsSection(
                         visible = chainRows,
                         chains = chains,
-                        onOpen = { openChain = it },
+                        onOpen = { chainPage = ChainPage.Detail(it.id) },
                         onRemove = { confirmRemoveChain = it },
                         onAdd = { chainPage = ChainPage.Search },
                     )
@@ -368,16 +383,6 @@ fun SettingsScreen(
                 editEndpoint = null
             },
             onDismiss = { editEndpoint = null },
-        )
-    }
-    openChain?.let { chain ->
-        ChainDetailsDialog(
-            chain = chain,
-            onRemove = {
-                openChain = null
-                confirmRemoveChain = chain
-            },
-            onDismiss = { openChain = null },
         )
     }
     confirmRemoveChain?.let { chain ->

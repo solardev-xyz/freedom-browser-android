@@ -7,7 +7,8 @@ package baby.freedom.mobile.chains
  * ([Chainlist]).
  *
  * [rpcUrls] are the chain's public, key-free JSON-RPC endpoints in the
- * order they're tried; every one has passed [RpcUrls.validate].
+ * order they're tried; every one has passed [RpcUrls.validate]. The
+ * user's own RPCs for the chain ([userRpcUrls], #108) come before them.
  */
 data class Chain(
     /** EIP-155 chain ID. */
@@ -24,6 +25,14 @@ data class Chain(
     val isTestnet: Boolean = false,
     /** Ships with the app; can't be removed. */
     val builtIn: Boolean = false,
+    /**
+     * RPCs the user added on the chain's Settings page ("Your RPCs",
+     * #108), built-in chains included. The chain-data router tries them
+     * before [rpcUrls], and one's answer on its own is labelled as the
+     * user's own RPC's rather than unverified. Each has passed
+     * [RpcUrls.validate]; none is also in [rpcUrls].
+     */
+    val userRpcUrls: List<String> = emptyList(),
 ) {
     /** `0x`-prefixed hex chain ID, the EIP-1193 wire format. */
     val hexId: String get() = "0x" + id.toString(16)
@@ -38,6 +47,7 @@ data class Chain(
         const val MAX_NAME_LENGTH = 64
         const val MAX_SYMBOL_LENGTH = 16
         const val MAX_RPC_URLS = 16
+        const val MAX_USER_RPC_URLS = 10
     }
 }
 

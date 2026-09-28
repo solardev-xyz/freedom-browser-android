@@ -26,7 +26,6 @@ import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Hub
 import androidx.compose.material.icons.filled.Search
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -58,6 +57,12 @@ import baby.freedom.mobile.chains.ChainInput
 import baby.freedom.mobile.chains.Chainlist
 import baby.freedom.mobile.chains.ChainlistService
 import baby.freedom.mobile.chains.RpcUrls
+import baby.freedom.mobile.chains.rpc.ChainAccessPolicy
+import baby.freedom.mobile.chains.rpc.ChainDataRouter
+import baby.freedom.mobile.chains.rpc.ChainRpcException
+import baby.freedom.mobile.chains.rpc.ChainSource
+import baby.freedom.mobile.chains.rpc.ChainTrust
+import baby.freedom.mobile.chains.rpc.WalletRpc
 import baby.freedom.mobile.data.ChainStore
 import java.io.IOException
 import kotlinx.coroutines.CancellationException
@@ -82,6 +87,9 @@ internal sealed interface ChainPage {
 
     /** The form, pre-filled from [prefill] (a chainlist pick) or empty. */
     data class Form(val prefill: Chain?) : ChainPage
+
+    /** One chain's page ([ChainDetailPage]). */
+    data class Detail(val chainId: Long) : ChainPage
 }
 
 internal fun chainSubtitle(chain: Chain) = "Chain ID ${chain.id} · ${chain.symbol}"
@@ -143,21 +151,178 @@ internal fun ChainsSection(
     }
 }
 
+/** What "Check" found out, for the chain page's read section. */
+private sealed interface ReadCheck {
+    data object Idle : ReadCheck
+    data object Running : ReadCheck
+    data class Done(val block: Long, val trust: ChainTrust) : ReadCheck
+    data class Failed(val message: String) : ReadCheck
+}
+
+/** Why [ChainStore.addUserRpc] didn't add a URL, as the chain page says it; `null` once added. */
+internal fun userRpcAddError(result: ChainStore.RpcAddResult): String? = when (result) {
+    ChainStore.RpcAddResult.ADDED -> null
+    ChainStore.RpcAddResult.INVALID -> "Not a usable RPC URL."
+    ChainStore.RpcAddResult.DUPLICATE -> "That RPC is already in your list."
+    ChainStore.RpcAddResult.PUBLIC -> "That's already one of this chain's public RPCs."
+    ChainStore.RpcAddResult.FULL -> "At most ${Chain.MAX_USER_RPC_URLS} of your own RPCs per chain."
+    ChainStore.RpcAddResult.NO_CHAIN -> "This chain was removed."
+    ChainStore.RpcAddResult.FAILED -> "Couldn't save the RPC. Try again."
+}
+
 /**
- * Everything a chain carries, every RPC URL in full (wrapped, never
- * cut). A custom chain's dialog also offers Remove.
+ * The steps a read on [chain] walks under [policy], in order, as the
+ * chain page lists them — only the tiers [wired] in this build.
+ */
+internal fun readSteps(chain: Chain, policy: ChainAccessPolicy, wired: (ChainSource) -> Boolean): List<String> {
+    val pool = (chain.userRpcUrls + chain.rpcUrls).distinct()
+    val providers = ChainDataRouter.quorumMembers(pool).size
+    val members = ChainDataRouter.quorumMembers(pool, policy.quorumK)
+    val mine = members.count { it in chain.userRpcUrls }
+    val whose = when {
+        mine == 0 -> ""
+        mine == members.size -> ", all of them yours"
+        else -> ", yours among them"
+    }
+    return policy.readOrder.filter(wired).map { source ->
+        when (source) {
+            ChainSource.MYOTIS, ChainSource.COLIBRI -> "${source.label}: a proof checked on this device"
+            ChainSource.QUORUM -> if (providers >= policy.quorumM) {
+                "${source.label}: ${policy.quorumM} of the first ${members.size} RPCs " +
+                    "(each from a different provider$whose) must give the same answer — verified"
+            } else {
+                "${source.label}: skipped, needs RPCs from at least ${policy.quorumM} providers " +
+                    "(this chain has $providers)"
+            }
+            ChainSource.DIRECT -> "${source.label}: otherwise the first RPC that answers — unverified, " +
+                "or marked as yours if it's one of your RPCs"
+        }
+    }
+}
+
+/** How a read was checked, in a line: who agreed, who didn't. Hosts only. */
+internal fun trustSummary(trust: ChainTrust): String {
+    val dissent = if (trust.dissented.isEmpty()) "" else
+        " · ${trust.dissented.joinToString(", ")} answered differently"
+    return when (trust.level) {
+        ChainTrust.Level.VERIFIED -> if (trust.source == ChainSource.QUORUM) {
+            "Verified: ${trust.agreed.size} of ${trust.k} RPCs agreed (${trust.agreed.joinToString(", ")})$dissent"
+        } else {
+            "Verified by the ${trust.source.label}"
+        }
+        ChainTrust.Level.USER_CONFIGURED -> "From your RPC ${trust.agreed.firstOrNull().orEmpty()}$dissent"
+        ChainTrust.Level.UNVERIFIED -> "Unverified: only ${trust.agreed.joinToString(", ")}'s word$dissent"
+    }
+}
+
+/**
+ * What the "Your RPCs" section says about how [chain]'s own RPCs are
+ * used — true of [ChainDataRouter] for the RPCs the user has now: they
+ * lead the pool, so the quorum's K seats (one per provider) are handed to
+ * them ahead of public RPCs, which fill the rest; every seat is asked at
+ * the same time, so "ahead" is about who gets a seat, never timing. With
+ * no RPCs of the user's own the note claims no seat for one. Once the
+ * user's providers fill every seat, no public RPC is in the quorum; an
+ * RPC sharing a provider with an earlier one (every loopback spelling is
+ * one) or past the first K takes no seat and is only asked if the quorum
+ * falls short.
+ */
+internal fun userRpcsNote(chain: Chain, policy: ChainAccessPolicy): String {
+    val lead = "Your own node or provider for this chain. "
+    val tail = "An answer only your RPC gave is marked as yours rather than unverified."
+    val k = policy.quorumK
+    val pool = (chain.userRpcUrls + chain.rpcUrls).distinct()
+    val providers = ChainDataRouter.quorumMembers(pool).size
+    if (ChainSource.QUORUM !in policy.readOrder || providers < policy.quorumM) {
+        val order = when (chain.userRpcUrls.size) {
+            0 -> "One you add is asked before the public RPCs. "
+            1 -> "It's asked before the public RPCs. "
+            else -> "They're asked before the public RPCs. "
+        }
+        return lead + order + tail
+    }
+    val members = ChainDataRouter.quorumMembers(pool, k)
+    val seats = members.count { it in chain.userRpcUrls }
+    val publicSeats = members.size - seats
+    val howReadsGo = "Each read goes to up to $k RPCs from different providers at the same time. "
+    val who = when {
+        seats == 0 -> "Until you add one, those are all the chain's public RPCs; " +
+            "one you add takes a seat ahead of them. "
+        publicSeats == 0 -> "Your RPCs fill every seat, so the quorum is only yours: " +
+            "a public RPC is asked only if it falls short. "
+        else -> "Yours ${if (seats == 1) "takes a seat" else "take seats"} ahead of public RPCs, so ${if (seats == 1) "it's" else "they're"} in the quorum, but not alone: " +
+            "public RPCs fill ${if (publicSeats == 1) "the other seat" else "the other $publicSeats seats"} and see the same read. "
+    }
+    val spare = chain.userRpcUrls.size - seats
+    val spareNote = if (spare <= 0) "" else
+        "${plural(spare, "RPC")} of yours ${if (spare == 1) "isn't" else "aren't"} in the quorum — " +
+            "it takes one per provider (this device counts as one) and $k at most — " +
+            "so ${if (spare == 1) "it's" else "they're"} asked only if it falls short. "
+    return lead + howReadsGo + who + spareNote + tail
+}
+
+private fun plural(n: Int, word: String) = if (n == 1) "1 $word" else "$n ${word}s"
+
+/**
+ * A chain's page (#107, #108): what it is, the user's own RPCs ("Your
+ * RPCs", added and removed here, given quorum seats ahead of public
+ * ones), its public RPCs, and how a
+ * read is checked — with a Check button that reads the latest block
+ * through [ChainDataRouter] and says how that answer was verified. Every
+ * URL is shown in full (wrapped, never cut). A custom chain also offers
+ * Remove.
  */
 @Composable
-internal fun ChainDetailsDialog(
+internal fun ChainDetailPage(
     chain: Chain,
+    onAddRpc: suspend (String) -> ChainStore.RpcAddResult,
+    onRemoveRpc: suspend (String) -> Boolean,
     onRemove: () -> Unit,
-    onDismiss: () -> Unit,
+    onBack: () -> Unit,
 ) {
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text(chain.name) },
-        text = {
-            Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
+    BackHandler(onBack = onBack)
+    val context = LocalContext.current
+    val router = remember(context) { ChainDataRouter.get(context) }
+    val scope = rememberCoroutineScope()
+    var newRpc by rememberSaveable(chain.id) { mutableStateOf("") }
+    var rpcError by remember(chain.id) { mutableStateOf<String?>(null) }
+    var saving by remember { mutableStateOf(false) }
+    // Keyed to the RPC lists too: a result naming an RPC the user has
+    // since removed (or read before they added one) no longer describes
+    // this chain, and a check still running writes only to the old state.
+    var check by remember(chain.id, chain.userRpcUrls, chain.rpcUrls) { mutableStateOf<ReadCheck>(ReadCheck.Idle) }
+    val newRpcCheck = RpcUrls.validate(newRpc)
+
+    fun addRpc() {
+        if (saving || newRpcCheck.url == null) return
+        saving = true
+        scope.launch {
+            val error = userRpcAddError(onAddRpc(newRpc))
+            saving = false
+            rpcError = error
+            if (error == null) newRpc = ""
+        }
+    }
+
+    FullScreenScaffold(
+        title = chain.name,
+        onDismiss = onBack,
+        trailing = {
+            if (!chain.builtIn) {
+                TextButton(onClick = onRemove) {
+                    Text("Remove", color = MaterialTheme.colorScheme.error)
+                }
+            }
+        },
+    ) {
+        Column(
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+            modifier = Modifier
+                .fillMaxSize()
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = 16.dp, vertical = 8.dp),
+        ) {
+            SectionCard(title = "Chain") {
                 DetailLine("Chain ID", "${chain.id} (${chain.hexId})")
                 DetailLine("Currency", "${chain.currencyName} (${chain.symbol}), ${chain.decimals} decimals")
                 DetailLine("Block explorer", chain.explorerUrl ?: "None")
@@ -165,7 +330,59 @@ internal fun ChainDetailsDialog(
                     if (chain.builtIn) "Built in" else "Custom",
                     "Testnet".takeIf { chain.isTestnet },
                 ).joinToString(", "))
-                Spacer(Modifier.height(8.dp))
+            }
+            SectionCard(title = "Your RPCs") {
+                Text(
+                    userRpcsNote(chain, router.policy(chain)),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                for (url in chain.userRpcUrls) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            url,
+                            style = MaterialTheme.typography.bodySmall,
+                            fontFamily = FontFamily.Monospace,
+                            modifier = Modifier.weight(1f),
+                        )
+                        IconButton(onClick = {
+                            scope.launch {
+                                rpcError = if (onRemoveRpc(url)) null else "Couldn't remove the RPC. Try again."
+                            }
+                        }) {
+                            Icon(
+                                Icons.Filled.Close,
+                                contentDescription = "Remove $url",
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                }
+                if (chain.userRpcUrls.size < Chain.MAX_USER_RPC_URLS) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Box(modifier = Modifier.weight(1f)) {
+                            FormField(
+                                value = newRpc,
+                                onValueChange = { newRpc = it; rpcError = null },
+                                label = "RPC URL",
+                                placeholder = "https://rpc.example.org",
+                                hint = rpcError ?: newRpcCheck.rejection
+                                    ?.takeIf { newRpc.isNotBlank() }
+                                    ?.let(::rpcUrlHint),
+                                url = true,
+                                imeAction = ImeAction.Done,
+                                onImeAction = { addRpc() },
+                            )
+                        }
+                        IconButton(onClick = { addRpc() }, enabled = newRpcCheck.url != null && !saving) {
+                            Icon(Icons.Filled.Add, contentDescription = "Add your RPC")
+                        }
+                    }
+                } else rpcError?.let {
+                    Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+                }
+            }
+            SectionCard(title = "Public RPCs") {
                 Text(
                     rpcCountLabel(chain.rpcUrls.size),
                     style = MaterialTheme.typography.labelLarge,
@@ -179,18 +396,66 @@ internal fun ChainDetailsDialog(
                     )
                 }
             }
-        },
-        confirmButton = {
-            TextButton(onClick = onDismiss) { Text("Done") }
-        },
-        dismissButton = if (chain.builtIn) null else {
-            {
-                TextButton(onClick = onRemove) {
-                    Text("Remove", color = MaterialTheme.colorScheme.error)
+            SectionCard(title = "How reads are checked") {
+                val steps = readSteps(chain, router.policy(chain)) { router.isWired(it, chain.id) }
+                steps.forEachIndexed { i, step ->
+                    Text("${i + 1}. $step", style = MaterialTheme.typography.bodyMedium)
+                }
+                if (chain.id in ChainAccessPolicy.LIGHT_CLIENT_CHAIN_IDS &&
+                    !router.isWired(ChainSource.MYOTIS, chain.id)
+                ) {
+                    Text(
+                        "The P2P light client and the Colibri prover, which verify ${chain.name} " +
+                            "reads with a proof, aren't in this version yet.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    TextButton(
+                        enabled = check != ReadCheck.Running,
+                        onClick = {
+                            check = ReadCheck.Running
+                            scope.launch {
+                                check = try {
+                                    val r = WalletRpc(router).blockNumber(chain.id)
+                                    ReadCheck.Done(r.value, r.trust)
+                                } catch (e: ChainRpcException) {
+                                    ReadCheck.Failed(e.message ?: "No answer")
+                                }
+                            }
+                        },
+                    ) { Text("Check latest block") }
+                    if (check == ReadCheck.Running) {
+                        CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+                    }
+                }
+                when (val c = check) {
+                    is ReadCheck.Done -> {
+                        Text(
+                            "Block %,d".format(c.block),
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = FontWeight.Medium,
+                        )
+                        Text(
+                            trustSummary(c.trust),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = if (c.trust.level == ChainTrust.Level.UNVERIFIED) {
+                                MaterialTheme.colorScheme.error
+                            } else MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    is ReadCheck.Failed -> Text(
+                        c.message,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                    else -> Unit
                 }
             }
-        },
-    )
+            Spacer(Modifier.height(8.dp))
+        }
+    }
 }
 
 @Composable
