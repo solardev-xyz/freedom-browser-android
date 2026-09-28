@@ -21,6 +21,8 @@ import baby.freedom.swarm.IpfsInfo
 import baby.freedom.swarm.IpfsNode
 import baby.freedom.swarm.NodeInfo
 import baby.freedom.swarm.NodeStatus
+import baby.freedom.swarm.RadicleInfo
+import baby.freedom.swarm.RadicleNode
 import baby.freedom.swarm.SwarmNode
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -34,7 +36,7 @@ import kotlinx.coroutines.launch
 import kotlin.system.exitProcess
 
 /**
- * Holds the embedded Swarm + IPFS nodes for the lifetime of the `:node`
+ * Holds the embedded Swarm + IPFS (+ Radicle, while on) nodes for the lifetime of the `:node`
  * process. The service is started + bound while the user wants the
  * node(s) running; when the user flips the Swarm toggle off the UI
  * calls [stopService] + [unbindService], Android destroys this Service,
@@ -50,6 +52,14 @@ class NodeService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var swarmObserver: Job? = null
     private var ipfsObserver: Job? = null
+
+    /**
+     * The embedded Radicle node (#73). Created with the service but only
+     * started while the user has Radicle on ([NodeSettings.radicleEnabled]),
+     * which the UI relays through [INodeService.startRadicle].
+     */
+    private lateinit var radicleNode: RadicleNode
+    private var radicleObserver: Job? = null
 
     /**
      * Bound UI clients that want state updates. [RemoteCallbackList]
@@ -74,6 +84,7 @@ class NodeService : Service() {
             callbacks.register(cb)
             runCatching { cb.onStateChanged(swarmNode.state.value) }
             runCatching { cb.onIpfsStateChanged(ipfsNode?.state?.value ?: IpfsInfo()) }
+            runCatching { cb.onRadicleStateChanged(radicleNode.state.value) }
         }
 
         override fun unregisterCallback(cb: INodeCallback?) {
@@ -109,10 +120,25 @@ class NodeService : Service() {
         override fun recoverNetwork() {
             scope.launch { recoverNetworkNow("ui request") }
         }
+
+        override fun getRadicleState(): RadicleInfo = radicleNode.state.value
+
+        override fun startRadicle() {
+            scope.launch { radicleNode.start() }
+        }
+
+        override fun stopRadicle() {
+            scope.launch { radicleNode.stop() }
+        }
+
+        override fun seedRadicleRepo(rid: String?) {
+            rid ?: return
+            scope.launch { radicleNode.seed(rid) }
+        }
     }
 
     /**
-     * Drop stale connections and redial on both nodes. Triggered by a
+     * Drop stale connections and redial on every node. Triggered by a
      * network change, or by the UI after a dweb fetch failed against a
      * node that reports Running (the wedge in freedom-hq/ant#12).
      */
@@ -120,6 +146,7 @@ class NodeService : Service() {
         Log.i(TAG, "recover network ($reason)")
         swarmNode.onNetworkChanged()
         ipfsNode?.onNetworkChanged()
+        radicleNode.onNetworkChanged()
     }
 
     /**
@@ -222,6 +249,24 @@ class NodeService : Service() {
         swarmNode.start()
         registerNetworkCallback()
 
+        // Radicle (#73) runs only while the user has it on: the UI calls
+        // [INodeService.startRadicle] on every bind while the setting is
+        // on (the setting lives in the UI process's DataStore). Its profile
+        // lives under files/radicle; the control socket stays there too
+        // unless that path is too long for a unix socket.
+        radicleNode = RadicleNode(
+            RadicleNode.Config(
+                home = filesDir.resolve("radicle").absolutePath,
+                shortSocketDir = cacheDir.absolutePath,
+            ),
+        )
+        radicleObserver = radicleNode.state
+            .onEach { info ->
+                broadcastRadicleState(info)
+                Log.i(TAG, "radicle → ${info.status}  peers=${info.connectedPeers}  seeded=${info.seededRepos.size}")
+            }
+            .launchIn(scope)
+
         // IPFS is NOT started here. Cold boot leaves the freedom-ipfs node
         // dormant so users who never visit `ipfs://` / IPFS-resolved
         // ENS content don't pay the bootstrap cost (or the background
@@ -297,9 +342,11 @@ class NodeService : Service() {
         callbacks.kill()
         swarmObserver?.cancel()
         ipfsObserver?.cancel()
+        radicleObserver?.cancel()
         scope.cancel()
         ipfsNode?.dispose()
         ipfsNode = null
+        radicleNode.dispose()
         swarmNode.dispose()
         super.onDestroy()
 
@@ -324,6 +371,15 @@ class NodeService : Service() {
         for (i in 0 until n) {
             runCatching { callbacks.getBroadcastItem(i).onIpfsStateChanged(info) }
                 .onFailure { Log.w(TAG, "ipfs callback threw", it) }
+        }
+        callbacks.finishBroadcast()
+    }
+
+    private fun broadcastRadicleState(info: RadicleInfo) {
+        val n = callbacks.beginBroadcast()
+        for (i in 0 until n) {
+            runCatching { callbacks.getBroadcastItem(i).onRadicleStateChanged(info) }
+                .onFailure { Log.w(TAG, "radicle callback threw", it) }
         }
         callbacks.finishBroadcast()
     }

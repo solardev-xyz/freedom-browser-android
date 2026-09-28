@@ -63,11 +63,13 @@ source .envrc   # if you haven't: cp .envrc.example .envrc && edit to taste
 #    Needs cargo-ndk and ANDROID_NDK_HOME; rustup picks the toolchain from
 #    the repo's rust-toolchain.toml.
 #    Use the FFI_REF tag pinned in release.yml, with ant's `chain` feature
-#    on (see "Building libfreedom_mobile_ffi.so" below). Chained with && so
-#    a failed step (e.g. enable-ffi-chain.sh rejecting a reshaped cargo
-#    call) stops before a chain-less .so is built or copied.
+#    and the embedded Radicle node on (see "Building libfreedom_mobile_ffi.so"
+#    below). Chained with && so a failed step (e.g. enable-ffi-chain.sh
+#    rejecting a reshaped cargo call) stops before a chain-less .so is
+#    built or copied.
 git clone --branch v0.12.1 https://github.com/solardev-xyz/freedom-mobile-ffi.git /tmp/freedom-mobile-ffi &&
   scripts/enable-ffi-chain.sh /tmp/freedom-mobile-ffi &&
+  scripts/enable-ffi-radicle.sh /tmp/freedom-mobile-ffi &&
   ( cd /tmp/freedom-mobile-ffi && ./scripts/build-android.sh ) &&
   mkdir -p swarmnode/src/main/jniLibs &&
   cp -r /tmp/freedom-mobile-ffi/target/android/jniLibs/. swarmnode/src/main/jniLibs/
@@ -218,8 +220,11 @@ git clone --branch v0.12.1 https://github.com/solardev-xyz/freedom-mobile-ffi.gi
 #    scripts/enable-ffi-chain.sh (run from this repo) puts ant's `chain`
 #    feature back — the same helper release.yml calls — and fails if the
 #    script's cargo call has changed shape.
+#    scripts/enable-ffi-radicle.sh then extends that to `chain,radicle`,
+#    the embedded Radicle node (see below).
 #    Chained with && so a failed helper stops before a chain-less build.
 "$FREEDOM_ANDROID/scripts/enable-ffi-chain.sh" /tmp/freedom-mobile-ffi &&
+  "$FREEDOM_ANDROID/scripts/enable-ffi-radicle.sh" /tmp/freedom-mobile-ffi &&
   cd /tmp/freedom-mobile-ffi &&
   ./scripts/build-android.sh
 
@@ -233,17 +238,24 @@ The Kotlin side talks to it through the hand-written JNI shims in `swarmnode/src
 
 Since freedom-mobile-ffi v0.12 the library also links the Myotis Ethereum light client (`myotis_*` exports; not optional upstream, and not yet wired to Kotlin — see issue #72), and it is built with ant's `chain` feature so the gateway's `/wallet`, `/stamps`, `/chequebook` and `/chainstate` read Gnosis whenever `SwarmNode.Config.rpcEndpoint` is set. The app leaves that empty today (ultra-light, no chain traffic), so those endpoints answer bee's zero-stubs until a node-mode switch supplies an RPC.
 
+The `radicle` feature adds the embedded, publish-capable Radicle node (libradicle-uniffi with `no-spawn`, #73; about +7 MiB per ABI). Unlike ant and freedom-ipfs it has no hand-written C shim: Kotlin calls it through [UniFFI](https://mozilla.github.io/uniffi-rs/) bindings, committed as `swarmnode/src/main/java/uniffi/libradicle_uniffi/libradicle_uniffi.kt` and loaded through JNA, and wrapped by `baby.freedom.swarm.RadicleNode`. The generated code checks each function's checksum against the library at load, so whenever the `.so` changes (an `FFI_REF` bump), regenerate them from the same build and commit the result:
+
+```bash
+scripts/generate-radicle-bindings.sh /tmp/freedom-mobile-ffi           # rewrite the committed file
+scripts/generate-radicle-bindings.sh /tmp/freedom-mobile-ffi --check   # what release.yml runs: fail if stale
+```
+
 ## APK size
 
-The combined node library is ~27 MiB (arm64) / ~31 MiB (x86_64) and dominates the APK — everything else (dex, resources, the JNI shim) is under 6 MiB in a release build.
+The combined node library is ~34 MiB (arm64) / ~39 MiB (x86_64) with Radicle and dominates the APK — everything else (dex, resources, the JNI shim) is under 6 MiB in a release build.
 
 `app/build.gradle.kts` already enables per-ABI splits (`arm64-v8a` + `x86_64`) alongside a universal fallback, so every build produces:
 
 | APK | Release | Debug | Use |
 |---|---|---|---|
-| `app-arm64-v8a-*.apk` | ~33 MiB | ~116 MiB | Physical arm64 devices, Apple Silicon emulators |
-| `app-x86_64-*.apk` | ~37 MiB | ~123 MiB | x86_64 Android emulators |
-| `app-universal-*.apk` | ~64 MiB | ~170 MiB | Fallback / `:installDebug` default |
+| `app-arm64-v8a-*.apk` | ~43 MiB | ~107 MiB | Physical arm64 devices, Apple Silicon emulators |
+| `app-x86_64-*.apk` | ~48 MiB | ~112 MiB | x86_64 Android emulators |
+| `app-universal-*.apk` | ~82 MiB | ~147 MiB | Fallback / `:installDebug` default |
 
 (For context: shipping ant and freedom-ipfs as two separate `.so`s cost ~11 MiB more per ABI in duplicated Rust std/tokio/libp2p/SQLite; the gomobile-era APKs were 157–456 MiB.)
 

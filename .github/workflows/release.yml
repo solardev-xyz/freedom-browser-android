@@ -64,14 +64,21 @@ jobs:
           cd freedom-mobile-ffi
           # build-android.sh passes --no-default-features, which drops
           # both `chain` and `radicle`. Put `chain` back (ant's on-chain
-          # /wallet, /stamps, /chequebook gateway surfaces); radicle
-          # stays off until it has Kotlin bindings. The helper fails the
-          # job if the script's cargo call ever changes shape under a new
-          # FFI_REF; it's the same one the README's local build uses.
+          # /wallet, /stamps, /chequebook gateway surfaces), then extend
+          # it to `chain,radicle` (the embedded Radicle node). The helpers
+          # fail the job if the script's cargo call ever changes shape
+          # under a new FFI_REF; they're the same ones the README's local
+          # build uses.
           "$GITHUB_WORKSPACE/scripts/enable-ffi-chain.sh" .
+          "$GITHUB_WORKSPACE/scripts/enable-ffi-radicle.sh" .
           ./scripts/build-android.sh
           mkdir -p "$GITHUB_WORKSPACE/swarmnode/src/main/jniLibs"
           cp -r target/android/jniLibs/. "$GITHUB_WORKSPACE/swarmnode/src/main/jniLibs/"
+
+      # The committed Kotlin bindings must match the Radicle surface this
+      # .so was built with (they checksum every call at load).
+      - name: Check the Radicle UniFFI bindings are current
+        run: scripts/generate-radicle-bindings.sh freedom-mobile-ffi --check
 
       - name: Upload native diagnostics on failure
         if: failure()

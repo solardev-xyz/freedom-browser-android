@@ -80,6 +80,22 @@ class NodeSettings private constructor(
     }
 
     /**
+     * Whether the embedded Radicle node should run (#73). Off by default,
+     * as on iOS: it's a publish-capable node that creates an identity key
+     * and dials Radicle seeds, so it starts only once the user asks. The UI
+     * relays it to the `:node` process on every bind, and live from the
+     * Radicle page, through [baby.freedom.mobile.node.INodeService.startRadicle] /
+     * [baby.freedom.mobile.node.INodeService.stopRadicle].
+     */
+    val radicleEnabled: Flow<Boolean> = store.data.map { prefs ->
+        prefs[Keys.RADICLE_ENABLED] ?: false
+    }
+
+    suspend fun setRadicleEnabled(enabled: Boolean) {
+        store.edit { it[Keys.RADICLE_ENABLED] = enabled }
+    }
+
+    /**
      * Whether any IPFS UI is rendered. Off by default — IPFS support
      * is a hidden capability surfaced only from Settings → Other. The
      * IPFS node still runs regardless of this flag.
@@ -238,6 +254,7 @@ class NodeSettings private constructor(
     private object Keys {
         val RUN_NODE_ENABLED = booleanPreferencesKey("run_node_enabled")
         val SHOW_IPFS_UI = booleanPreferencesKey("show_ipfs_ui")
+        val RADICLE_ENABLED = booleanPreferencesKey("radicle_enabled")
         val IPFS_LOW_POWER = booleanPreferencesKey("ipfs_low_power")
         val IPFS_ROUTING_MODE = stringPreferencesKey("ipfs_routing_mode")
         val SEARCH_ENGINE = stringPreferencesKey("search_engine")

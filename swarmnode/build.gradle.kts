@@ -61,6 +61,10 @@ kotlin {
 dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.1")
     implementation("androidx.core:core-ktx:1.15.0")
+    // The generated Radicle bindings (uniffi.libradicle_uniffi) call into
+    // libfreedom_mobile_ffi.so through JNA; the AAR carries the
+    // libjnidispatch.so JNA needs on-device.
+    implementation("net.java.dev.jna:jna:5.17.0@aar")
 
     testImplementation("junit:junit:4.13.2")
     // Real org.json: the android.jar stub is all no-ops under unit tests.

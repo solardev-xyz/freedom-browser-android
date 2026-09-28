@@ -1,0 +1,363 @@
+package baby.freedom.swarm
+
+import android.util.Log
+import java.io.File
+import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicReference
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+import org.json.JSONArray
+import org.json.JSONObject
+
+/**
+ * Kotlin wrapper around the embedded, publish-capable Radicle node
+ * (libradicle-uniffi inside `libfreedom_mobile_ffi.so`, called through the
+ * generated UniFFI bindings in `uniffi.libradicle_uniffi`).
+ *
+ * The Android counterpart of iOS's `RadicleNode` and desktop's
+ * `radicle-embedded.js`: one node per process (the Rust layer holds it in
+ * a global slot), a profile under [Config.home] whose identity key is
+ * created on first start and reused after, and a seed book dialled right
+ * after start. The `no-spawn` build serves peers' fetches in-process, so
+ * repositories this node seeds are served back out without any child
+ * process.
+ *
+ * Every UniFFI export is synchronous and blocking; all of them run on
+ * [scope]'s IO threads, never the caller's. Results are the JSON strings
+ * the desktop napi addon returns (`{"error": …}` on failure); only what
+ * the node page shows is decoded into [state].
+ *
+ * Start and stop run one at a time, in call order, on [lifecycle]. Each
+ * one bumps [generation], and anything a start launched (the seed dial, the peer
+ * poller, a seed-by-RID fetch) publishes only while its generation is
+ * still current, so a slow call that returns after [stop] can't paint
+ * the stopped node's state back.
+ */
+class RadicleNode internal constructor(
+    private val config: Config,
+    private val ops: Ops,
+) {
+    constructor(config: Config) : this(config, Ops.Native)
+
+    data class Config(
+        /** Profile home (keys, storage, node.db). Created on first start. */
+        val home: String,
+        /** Alias written into a fresh profile; an existing profile keeps its own. */
+        val alias: String = DEFAULT_ALIAS,
+        /**
+         * Where the control socket goes if `<home>/node/control.sock` is too
+         * long for a unix socket path. Nothing dials the socket on Android
+         * (there's no `rad` CLI); it only has to bind.
+         */
+        val shortSocketDir: String,
+    )
+
+    /** The libradicle-uniffi calls [RadicleNode] makes; swapped for a fake in tests. */
+    internal interface Ops {
+        fun setSocketPath(path: String)
+        fun start(home: String, alias: String): String
+        fun connectSeeds(timeoutMs: Int): String
+        fun identity(): String
+        fun status(): String
+        fun listSeededRepos(): String
+        fun cloneRepoWithProgress(rid: String, timeoutMs: Int, onProgress: (String) -> Unit): String
+        fun cancelClone(rid: String): String
+        fun shutdown(): String
+
+        object Native : Ops {
+            override fun setSocketPath(path: String) =
+                android.system.Os.setenv("RAD_SOCKET", path, true)
+            override fun start(home: String, alias: String) =
+                uniffi.libradicle_uniffi.start(home, alias)
+            override fun connectSeeds(timeoutMs: Int) =
+                uniffi.libradicle_uniffi.connectSeeds(timeoutMs.toUInt())
+            override fun identity() = uniffi.libradicle_uniffi.identity()
+            override fun status() = uniffi.libradicle_uniffi.status()
+            override fun listSeededRepos() = uniffi.libradicle_uniffi.listSeededRepos()
+            override fun cloneRepoWithProgress(
+                rid: String,
+                timeoutMs: Int,
+                onProgress: (String) -> Unit,
+            ) = uniffi.libradicle_uniffi.cloneRepoWithProgress(
+                rid,
+                timeoutMs.toUInt(),
+                object : uniffi.libradicle_uniffi.ProgressListener {
+                    override fun onProgress(event: String) = onProgress(event)
+                },
+            )
+            override fun cancelClone(rid: String) = uniffi.libradicle_uniffi.cancelClone(rid)
+            override fun shutdown() = uniffi.libradicle_uniffi.shutdown()
+        }
+    }
+
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    /**
+     * Start and stop run here, one at a time and in the order they were
+     * asked for, so a quick on → off → on can't reorder into a shutdown
+     * of the node the last start booted.
+     */
+    @OptIn(ExperimentalCoroutinesApi::class)
+    private val lifecycle = Dispatchers.IO.limitedParallelism(1)
+
+    /** Bumped by every [start] / [stop]; see the class comment. */
+    private val generation = AtomicLong(0L)
+
+    /** Whether the last lifecycle call was a start. Guarded by `this`. */
+    private var wanted = false
+
+    /** Whether a node is up in this process. Touched only on [lifecycle]. */
+    private var booted = false
+
+    @Volatile
+    private var poller: Job? = null
+
+    @Volatile
+    private var dialJob: Job? = null
+
+    /** RID of the seed-by-RID fetch in flight, or null. */
+    private val seedingRid = AtomicReference<String?>(null)
+
+    private val _state = MutableStateFlow(RadicleInfo())
+    val state: StateFlow<RadicleInfo> = _state.asStateFlow()
+
+    /** Idempotently start the node, then dial the seed book. */
+    fun start() {
+        val gen = synchronized(this) {
+            if (wanted) return
+            wanted = true
+            generation.incrementAndGet()
+        }
+        _state.value = RadicleInfo(status = RadicleStatus.Starting)
+        scope.launch(lifecycle) {
+            // Superseded by a later start/stop before it got here.
+            if (gen != generation.get() || booted) return@launch
+            val failure = runCatching { bootNode() }
+                .fold(onSuccess = { it }, onFailure = { it.message ?: it.javaClass.simpleName })
+            booted = failure == null
+            if (gen != generation.get()) return@launch
+            if (failure != null) {
+                Log.e(TAG, "radicle start failed: $failure")
+                _state.value = RadicleInfo(status = RadicleStatus.Error, errorMessage = failure)
+                return@launch
+            }
+            refreshIdentity(gen)
+            refreshRepos(gen)
+            _state.update { if (gen == generation.get()) it.copy(status = RadicleStatus.Running) else it }
+            Log.i(TAG, "radicle running as ${_state.value.did}")
+            poller = scope.launch { pollStatus(gen) }
+            dial(gen)
+        }
+    }
+
+    /** Null on success, or why the node didn't come up. */
+    private fun bootNode(): String? {
+        val socket = File(File(config.home, "node"), "control.sock")
+        if (socket.absolutePath.toByteArray().size > MAX_SOCKET_PATH) {
+            ops.setSocketPath(File(config.shortSocketDir, "rad.sock").absolutePath)
+        }
+        val result = json(ops.start(config.home, config.alias))
+        val error = result?.optString("error").orEmpty()
+        return when {
+            result == null -> "unreadable start response"
+            result.optString("did").isNotEmpty() -> null
+            else -> error.ifEmpty { "start failed" }
+        }
+    }
+
+    /**
+     * Stop the node and join its thread. Also covers a start still in
+     * flight: its generation is superseded here, so it publishes nothing,
+     * and the shutdown below (queued behind it on [lifecycle]) takes down
+     * whatever it booted. The status goes back to Stopped even if the
+     * shutdown call itself reports an error, since the node is gone from
+     * the UI's point of view either way; the error is kept.
+     */
+    fun stop() {
+        val gen = synchronized(this) {
+            if (!wanted) return
+            wanted = false
+            generation.incrementAndGet()
+        }
+        poller?.cancel()
+        poller = null
+        dialJob?.cancel()
+        dialJob = null
+        seedingRid.get()?.let { rid -> runCatching { ops.cancelClone(rid) } }
+        _state.update { it.copy(status = RadicleStatus.Stopping) }
+        scope.launch(lifecycle) {
+            var error = ""
+            if (booted) {
+                error = runCatching { json(ops.shutdown())?.optString("error").orEmpty() }
+                    .getOrElse { it.message ?: it.javaClass.simpleName }
+                booted = false
+                if (error.isNotEmpty()) Log.w(TAG, "radicle shutdown: $error")
+            }
+            if (gen == generation.get()) {
+                _state.value = RadicleInfo(errorMessage = error.ifEmpty { null })
+            }
+        }
+    }
+
+    /**
+     * [stop], for the owning service's teardown. The shutdown runs on
+     * [scope] like any other; the `:node` process exits right after, and a
+     * node killed mid-shutdown only leaves a stale control socket, which
+     * the next start clears.
+     */
+    fun dispose() = stop()
+
+    /**
+     * The network changed (Wi-Fi ↔ cellular, airplane mode off): the old
+     * sessions are dead, so dial the seed book again.
+     */
+    fun onNetworkChanged() {
+        if (_state.value.status == RadicleStatus.Running) dial(generation.get())
+    }
+
+    /**
+     * Seed and fetch the repository [input] names (`rad:z…`, `rad://z…` or
+     * a bare `z…`), reporting phase progress through [RadicleInfo.seed].
+     * Ignored while another seed is in flight or the node isn't running.
+     */
+    fun seed(input: String) {
+        if (_state.value.status != RadicleStatus.Running || seedingRid.get() != null) return
+        val rid = normalizeRid(input)
+        if (rid == null) {
+            _state.update {
+                it.copy(seed = RadicleSeed(input.trim(), PHASE_FAILED, "Not a valid repository ID", active = false))
+            }
+            return
+        }
+        val gen = generation.get()
+        if (!seedingRid.compareAndSet(null, rid)) return
+        _state.update { it.copy(seed = RadicleSeed(rid, PHASE_RESOLVING)) }
+        scope.launch {
+            val result = try {
+                json(
+                    ops.cloneRepoWithProgress(rid, SEED_TIMEOUT_MS) { event ->
+                        val parsed = json(event) ?: return@cloneRepoWithProgress
+                        val progress = RadicleSeed(rid, parsed.optString("phase"), progressDetail(parsed))
+                        _state.update { if (gen == generation.get()) it.copy(seed = progress) else it }
+                    },
+                )
+            } catch (t: Throwable) {
+                JSONObject().put("error", t.message ?: t.javaClass.simpleName)
+            } finally {
+                seedingRid.set(null)
+            }
+            val settled = when {
+                result == null -> RadicleSeed(rid, PHASE_FAILED, "unreadable fetch response", active = false)
+                result.optBoolean("ok") -> RadicleSeed(rid, PHASE_DONE, active = false)
+                result.optBoolean("cancelled") -> RadicleSeed(rid, PHASE_CANCELLED, active = false)
+                else -> RadicleSeed(rid, PHASE_FAILED, result.optString("error"), active = false)
+            }
+            Log.i(TAG, "seed $rid → ${settled.phase} ${settled.detail}")
+            _state.update { if (gen == generation.get()) it.copy(seed = settled) else it }
+            refreshRepos(gen)
+        }
+    }
+
+    private fun dial(gen: Long) {
+        if (dialJob?.isActive == true) return
+        dialJob = scope.launch {
+            val report = runCatching { json(ops.connectSeeds(DIAL_TIMEOUT_MS)) }.getOrNull()
+            Log.i(TAG, "radicle seed dial: $report")
+            refreshPeers(gen)
+        }
+    }
+
+    private suspend fun pollStatus(gen: Long) {
+        while (scope.isActive && gen == generation.get()) {
+            delay(POLL_INTERVAL_MS)
+            refreshPeers(gen)
+            refreshRepos(gen)
+        }
+    }
+
+    private fun refreshIdentity(gen: Long) {
+        val id = runCatching { json(ops.identity()) }.getOrNull() ?: return
+        if (id.has("error")) return
+        _state.update {
+            if (gen != generation.get()) it
+            else it.copy(did = id.optString("did"), nid = id.optString("nid"), alias = id.optString("alias"))
+        }
+    }
+
+    private fun refreshPeers(gen: Long) {
+        val status = runCatching { json(ops.status()) }.getOrNull() ?: return
+        if (!status.has("connectedPeers")) return
+        val peers = status.optInt("connectedPeers")
+        _state.update { if (gen == generation.get()) it.copy(connectedPeers = peers) else it }
+    }
+
+    private fun refreshRepos(gen: Long) {
+        val raw = runCatching { ops.listSeededRepos() }.getOrNull() ?: return
+        val repos = parseRepos(raw) ?: return
+        _state.update { if (gen == generation.get()) it.copy(seededRepos = repos) else it }
+    }
+
+    companion object {
+        private const val TAG = "RadicleNode"
+        const val DEFAULT_ALIAS = "freedom-android"
+
+        /** `sun_path` is 108 bytes on Linux, one of them the terminating NUL. */
+        internal const val MAX_SOCKET_PATH = 107
+        internal const val DIAL_TIMEOUT_MS = 15_000
+        internal const val SEED_TIMEOUT_MS = 120_000
+        internal const val POLL_INTERVAL_MS = 5_000L
+
+        const val PHASE_RESOLVING = "resolving"
+        const val PHASE_DONE = "done"
+        const val PHASE_FAILED = "failed"
+        const val PHASE_CANCELLED = "cancelled"
+
+        private val BARE_RID = Regex("^z[1-9A-HJ-NP-Za-km-z]{20,60}$")
+
+        /**
+         * `rad:z…` for a repository ID typed as `rad:z…`, `rad://z…` or a
+         * bare `z…`, or null if it isn't one. Base58, so case matters and
+         * nothing is case-folded.
+         */
+        fun normalizeRid(input: String): String? {
+            var bare = input.trim()
+            bare = when {
+                bare.startsWith("rad://") -> bare.removePrefix("rad://")
+                bare.startsWith("rad:") -> bare.removePrefix("rad:")
+                else -> bare
+            }
+            return if (BARE_RID.matches(bare)) "rad:$bare" else null
+        }
+
+        internal fun parseRepos(raw: String): List<RadicleRepo>? {
+            val array = runCatching { JSONArray(raw) }.getOrNull() ?: return null
+            return (0 until array.length()).mapNotNull { i ->
+                val repo = array.optJSONObject(i) ?: return@mapNotNull null
+                val rid = repo.optString("rid")
+                if (rid.isEmpty()) null
+                else RadicleRepo(rid, if (repo.isNull("name")) "" else repo.optString("name"))
+            }
+        }
+
+        /** The part of a progress event worth a line under the phase. */
+        internal fun progressDetail(event: JSONObject): String = when (event.optString("phase")) {
+            "resolving" -> event.optInt("candidates").let { if (it == 1) "1 candidate seed" else "$it candidate seeds" }
+            "connecting" -> "${event.optString("addr")} (${event.optInt("index")}/${event.optInt("total")})"
+            "fetching" -> "from ${event.optString("nid")}"
+            "peer-failed", "failed" -> event.optString("reason")
+            else -> ""
+        }
+
+        private fun json(raw: String): JSONObject? = runCatching { JSONObject(raw) }.getOrNull()
+    }
+}

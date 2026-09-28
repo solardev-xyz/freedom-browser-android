@@ -26,6 +26,7 @@ import baby.freedom.mobile.browser.Gateways
 import baby.freedom.mobile.browser.HOME_URL
 import baby.freedom.mobile.browser.Adblock
 import baby.freedom.mobile.browser.PublicSuffixList
+import baby.freedom.mobile.browser.RadicleControls
 import baby.freedom.mobile.browser.UnverifiedOrigins
 import baby.freedom.mobile.browser.VirtualOrigin
 import baby.freedom.mobile.browser.statusBarIconsDark
@@ -37,6 +38,7 @@ import baby.freedom.mobile.ui.FreedomTheme
 import baby.freedom.mobile.ui.isLight
 import baby.freedom.swarm.IpfsInfo
 import baby.freedom.swarm.NodeInfo
+import baby.freedom.swarm.RadicleInfo
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.combine
@@ -60,6 +62,7 @@ class MainActivity : ComponentActivity() {
 
     private val infoFlow = MutableStateFlow(NodeInfo())
     private val ipfsInfoFlow = MutableStateFlow(IpfsInfo())
+    private val radicleInfoFlow = MutableStateFlow(RadicleInfo())
     private lateinit var settings: NodeSettings
 
     /**
@@ -88,6 +91,10 @@ class MainActivity : ComponentActivity() {
                 Gateways.setIpfsBase(info.gatewayUrl)
             }
         }
+
+        override fun onRadicleStateChanged(info: RadicleInfo?) {
+            if (info != null) radicleInfoFlow.value = info
+        }
     }
 
     private val connection = object : ServiceConnection {
@@ -102,6 +109,12 @@ class MainActivity : ComponentActivity() {
                     Gateways.setIpfsBase(it.gatewayUrl)
                 }
             }
+            runCatching { b.radicleState?.let { radicleInfoFlow.value = it } }
+            // The Radicle on/off setting lives here, in the UI process's
+            // DataStore; a freshly (re)started `:node` hears it on bind.
+            lifecycleScope.launch {
+                if (settings.radicleEnabled.first()) runCatching { b.startRadicle() }
+            }
         }
 
         override fun onServiceDisconnected(name: ComponentName?) {
@@ -110,6 +123,7 @@ class MainActivity : ComponentActivity() {
             binder = null
             infoFlow.value = NodeInfo()
             ipfsInfoFlow.value = IpfsInfo()
+            radicleInfoFlow.value = RadicleInfo()
             Gateways.setIpfsBase("")
         }
     }
@@ -180,6 +194,9 @@ class MainActivity : ComponentActivity() {
                 ) {
                     val info by infoFlow.collectAsState()
                     val ipfsInfo by ipfsInfoFlow.collectAsState()
+                    val radicleInfo by radicleInfoFlow.collectAsState()
+                    val radicleEnabled by settings.radicleEnabled
+                        .collectAsState(initial = false)
                     val runNodeEnabled by settings.runNodeEnabled
                         .collectAsState(initial = true)
                     val deepLink by deepLinkFlow.collectAsState()
@@ -190,6 +207,12 @@ class MainActivity : ComponentActivity() {
                         onToggleRunNode = ::onToggleRunNode,
                         onEnsureIpfsStarted = ::onEnsureIpfsStarted,
                         onIpfsToggle = ::onIpfsToggle,
+                        radicle = RadicleControls(
+                            info = radicleInfo,
+                            enabled = radicleEnabled,
+                            onToggle = ::onRadicleToggle,
+                            onSeed = ::onRadicleSeed,
+                        ),
                         initialUrl = startUrl,
                         deepLinkUrl = deepLink,
                         onDeepLinkHandled = { deepLinkFlow.value = null },
@@ -345,6 +368,24 @@ class MainActivity : ComponentActivity() {
         else runCatching { binder?.stopIpfs() }
     }
 
+    /**
+     * The user turned the embedded Radicle node on or off (#73). Unlike
+     * IPFS this is persisted, and relayed again on every bind; the node
+     * itself lives in `:node`, so while the node service is off the
+     * setting just waits for it.
+     */
+    private fun onRadicleToggle(enabled: Boolean) {
+        lifecycleScope.launch {
+            settings.setRadicleEnabled(enabled)
+            runCatching { if (enabled) binder?.startRadicle() else binder?.stopRadicle() }
+        }
+    }
+
+    /** Seed-by-RID from the Radicle page; progress comes back on the callback. */
+    private fun onRadicleSeed(rid: String) {
+        runCatching { binder?.seedRadicleRepo(rid) }
+    }
+
     private fun startAndBindService() {
         NodeService.start(this)
         if (!bound) {
@@ -362,6 +403,7 @@ class MainActivity : ComponentActivity() {
         NodeService.stop(this)
         infoFlow.value = NodeInfo()
         ipfsInfoFlow.value = IpfsInfo()
+        radicleInfoFlow.value = RadicleInfo()
         Gateways.setIpfsBase("")
     }
 

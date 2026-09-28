@@ -2,6 +2,7 @@ package baby.freedom.mobile.node;
 
 import baby.freedom.swarm.NodeInfo;
 import baby.freedom.swarm.IpfsInfo;
+import baby.freedom.swarm.RadicleInfo;
 import baby.freedom.mobile.node.INodeCallback;
 
 /**
@@ -67,4 +68,24 @@ interface INodeService {
      * connections and redial, without a restart.
      */
     void recoverNetwork();
+
+    RadicleInfo getRadicleState();
+
+    /**
+     * Start the embedded Radicle node (#73) if it isn't already up, then
+     * dial its seed book. Called when the user turns Radicle on; the
+     * service also starts it by itself on boot while the persisted
+     * setting is on. No-op while Starting / Running.
+     */
+    void startRadicle();
+
+    /** Shut the Radicle node down. Leaves Swarm and IPFS untouched. */
+    void stopRadicle();
+
+    /**
+     * Seed and fetch the repository `rid` names (`rad:z…`, `rad://z…` or
+     * a bare `z…`). Progress arrives through [RadicleInfo.seed] on the
+     * callback. Ignored while another seed is in flight.
+     */
+    void seedRadicleRepo(String rid);
 }

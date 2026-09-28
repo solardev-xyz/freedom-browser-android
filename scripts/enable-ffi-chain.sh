@@ -6,8 +6,8 @@
 # build-android.sh passes --no-default-features to its cargo call, which
 # drops both `chain` (ant's on-chain /wallet, /stamps, /chequebook gateway
 # surfaces) and `radicle`, and it has no way to pass features in. This
-# rewrites that cargo invocation to add `--features chain`; radicle stays
-# off until it has Kotlin bindings.
+# rewrites that cargo invocation to add `--features chain`;
+# scripts/enable-ffi-radicle.sh then adds `radicle`.
 #
 # Fails unless every (non-comment) cargo line that passes
 # --no-default-features now carries the exact substituted fragment, so a
