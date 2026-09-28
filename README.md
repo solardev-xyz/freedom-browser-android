@@ -62,10 +62,17 @@ source .envrc   # if you haven't: cp .envrc.example .envrc && edit to taste
 #    which is gitignored here and must exist before Gradle can build the app.
 #    Needs cargo-ndk and ANDROID_NDK_HOME; rustup picks the toolchain from
 #    the repo's rust-toolchain.toml.
-git clone https://github.com/solardev-xyz/freedom-mobile-ffi.git /tmp/freedom-mobile-ffi
-( cd /tmp/freedom-mobile-ffi && ./scripts/build-android.sh )
-mkdir -p swarmnode/src/main/jniLibs
-cp -r /tmp/freedom-mobile-ffi/target/android/jniLibs/. swarmnode/src/main/jniLibs/
+#    Use the FFI_REF tag pinned in release.yml, with ant's `chain` feature
+#    and the embedded Radicle node on (see "Building libfreedom_mobile_ffi.so"
+#    below). Chained with && so a failed step (e.g. enable-ffi-chain.sh
+#    rejecting a reshaped cargo call) stops before a chain-less .so is
+#    built or copied.
+git clone --branch v0.12.1 https://github.com/solardev-xyz/freedom-mobile-ffi.git /tmp/freedom-mobile-ffi &&
+  scripts/enable-ffi-chain.sh /tmp/freedom-mobile-ffi &&
+  scripts/enable-ffi-radicle.sh /tmp/freedom-mobile-ffi &&
+  ( cd /tmp/freedom-mobile-ffi && ./scripts/build-android.sh ) &&
+  mkdir -p swarmnode/src/main/jniLibs &&
+  cp -r /tmp/freedom-mobile-ffi/target/android/jniLibs/. swarmnode/src/main/jniLibs/
 
 # 3. Build the debug APK.
 ./gradlew :app:assembleDebug
@@ -76,7 +83,7 @@ cp -r /tmp/freedom-mobile-ffi/target/android/jniLibs/. swarmnode/src/main/jniLib
 #   adb install -r app/build/outputs/apk/debug/app-arm64-v8a-debug.apk
 ```
 
-The build produces three debug APKs — `app-arm64-v8a-debug.apk` (~157 MiB), `app-x86_64-debug.apk` (~189 MiB), and `app-universal-debug.apk` (~456 MiB, all ABIs). See [APK size](#apk-size) for what to ship.
+The build produces three debug APKs — `app-arm64-v8a-debug.apk` (~116 MiB), `app-x86_64-debug.apk` (~123 MiB), and `app-universal-debug.apk` (~170 MiB, all ABIs). See [APK size](#apk-size) for what to ship.
 
 ## Running on an emulator
 
@@ -128,6 +135,22 @@ Freedom handles this in two layers:
     - Stamps every outgoing fetch with `Swarm-Chunk-Retrieval-Timeout: 30s`, `Swarm-Redundancy-Strategy: 3`, `Swarm-Redundancy-Fallback-Mode: true` — the same retrieval hints bee honors, parsed by ant for parity.
 
 Unlike the Electron-based desktop port, Android WebView does not allow registering a custom `bzz:` scheme as a first-class origin (there is no `session.protocol.handle` equivalent). So the WebView loads the gateway URL directly (`http://127.0.0.1:1633/bzz/<hash>/…`) and `BrowserState.currentBzzRoot` tracks the active root so the interceptor can rewrite absolute-root paths at request time.
+
+## Ad and tracker blocking
+
+Settings → **Ad blocking** switches four filter-list categories, as on desktop and iOS: **ads** (EasyList) and **trackers** (EasyPrivacy) on by default, **cookie notices** (Fanboy's Cookiemonster) and **other annoyances** (Fanboy's Annoyances) opt-in. The page menu's **Block ads on this site** switch allowlists the current site (and its subdomains) and reloads it; Settings lists the allowlist, and adds and removes sites. A private tab's allowlisting lasts for the private session only.
+
+- **Lists** ship in `app/src/main/assets/adblock/`, unmodified; refresh them with `python3 infra/adblock/vendor-lists.py` before a release. They are the floor: an update replaces a category's list only while its own header date (`! Last modified:`, else `! Version:`) is no older than the bundled one's, so an APK vendored after the feed's latest manifest keeps its fresher lists.
+- **Updates over Swarm** (#127; `AdblockManifest.kt`, `AdblockUpdates.kt`), the same channel desktop and iOS read. [freedom-adblock-service](https://github.com/solardev-xyz/freedom-adblock-service) publishes a signed manifest to a Swarm feed; the app reads that feed by its pinned owner and topic (`freedom/adblock/lists/v1`) through the Swarm gateway in use (the embedded node's, or an external endpoint), 45 s after start and then every 6 hours while it runs, or when you tap **Check for list updates** (**Keep filter lists up to date** turns the schedule off). Nothing in the payload is trusted until the manifest's EIP-191 `sig` — over its canonical JSON (keys sorted, compact, as the publisher's `canonicalManifestForSigning`) — recovers to the pinned signer address; the manifest's version must be above the applied one (the same version is taken again only to fetch a category switched on since); each list of an enabled category is then downloaded from `/bytes/<ref>` (or reused from the applied update if unchanged), capped at the size the manifest gives and checked against its signed sha256. Only when every list passes are they staged to `files/adblock/updated.next/` and swapped in for `files/adblock/updated/`, and the engine is rebuilt in the background — pages use the new lists from their next load, without a restart. Any failure keeps the lists in use; the swap is finished at the next read if the app dies half-way through it; a list on disk that no longer matches its hash is replaced by the bundled one at the next build. Settings shows which update is in use and how the last check went. For a test publisher, build with `-Pfreedom.adblockFeedOwner=0x… -Pfreedom.adblockSigner=0x…` (compile-time only; desktop's and iOS's `FREEDOM_ADBLOCK_*` overrides).
+- **Engine** (`AdblockEngine.kt`): Adblock Plus syntax compiled on the device off the main thread at startup (~0.5 s for the default lists in a release build). Requests that arrive before the first build lands — a tab restored after the process was killed, or a page opened from another app on a cold start — wait for it, for at most 5 s from startup, and go through unfiltered only past that; a frame's first element-hiding CSS is held back the same way. The engine is built from the applied update's lists where they are intact and newer than the bundled ones (the bundled list otherwise), and rebuilt when the categories change or an update lands; a rebuild never makes requests wait: the previous engine answers until the new one is swapped in. `||host^` rules sit in a hash set, other patterns in a token index, so a lookup costs microseconds.
+- **Requests** are blocked in `shouldInterceptRequest` with an empty `403` — never a main-frame navigation, the local node gateways, or a virtual dweb origin. Service-worker fetches aren't filtered (they reach no tab's interceptor).
+- **Dweb pages** (`bzz://`, `ipfs://`, `ens://`, …): their own resources come from the page's virtual origin and are never filtered, but third-party http(s) resources they pull in are. The page menu has no **Block ads on this site** switch there (the address isn't a host to allowlist), so a dweb page broken by a list rule can only be fixed by turning that category off in Settings.
+- **The page menu's switch** is on only where filtering really applies: with every category off, while the lists are still compiling, or on a page a list exempts with `@@…$document`, it shows off, can't be tapped, and says why beneath the label. The site's own allowlisting can always be lifted from it.
+- **Allowlist changes** apply at once and are written to Settings in the order they were made, one at a time.
+- **Which page a request belongs to** (`AdblockPage.kt`): a request is judged against the tab's committed page. A navigation the WebView fetches from the network doesn't commit until Chromium says so, and the new page's own head/preload requests often arrive first; they are told apart by their `Referer` naming the destination (its URL, or its bare origin when that differs from the page on screen and from every frame the page on screen has loaded, so a page's embed from the site it links to stays judged against the page). A destination that sends no referrer (`Referrer-Policy: no-referrer`, or `same-origin` when arriving from another site), a same-origin navigation sending only its origin, or one to a site the page on screen embeds has those early requests judged against the page on screen until it commits. So an allowlisted site reached by a link from a non-allowlisted one can occasionally lose an early third-party head script, and a site reached from an allowlisted one can occasionally let one through; a reload settles it. Likewise, a Back (or Forward) that the back/forward cache restores to a page on the *same* origin can briefly attribute the frames the outgoing page embedded to the restored page, until a reload.
+- **Cosmetic filtering** (`AdblockCosmetic.kt`): a document-start script asks for its frame's element-hiding CSS over a message channel and reports the class and id names it sees, so generic rules are sent only for names a page actually uses. The CSS is applied as constructed stylesheets (not subject to the page's CSP), and put back if the page replaces `document.adoptedStyleSheets` (with its next DOM change, or within 2 s). It doesn't reach elements inside a shadow root, nor `about:blank` / `srcdoc` iframes (the script runs in http(s) frames only). Procedural selectors, scriptlets and `$redirect` / `$csp` / `$removeparam` filters are not supported, and filters using them are skipped.
+
+Filter list data is © the list authors, dual-licensed GPLv3+ / CC BY-SA 3.0+, and redistributed under CC BY-SA (see `app/src/main/assets/adblock/README.md`).
 
 ## Project layout
 
@@ -183,35 +206,57 @@ $ANDROID_HOME/build-tools/36.0.0/aapt2 dump badging app/build/outputs/apk/debug/
 `libfreedom_mobile_ffi.so` is both embedded nodes in one Rust cdylib — the ant Swarm light-node plus the freedom-ipfs reader, compiled per ABI from [`solardev-xyz/freedom-mobile-ffi`](https://github.com/solardev-xyz/freedom-mobile-ffi). Combining them in a single compilation graph dedupes everything the two dependency trees share (std, tokio, hyper/axum, libp2p, ring, SQLite, …), which is ~7 MiB per ABI versus shipping two separate `.so`s. It's **not checked in**; every fresh clone builds it once:
 
 ```bash
-# 1. Clone freedom-mobile-ffi somewhere outside this repo.
-git clone https://github.com/solardev-xyz/freedom-mobile-ffi.git /tmp/freedom-mobile-ffi
+# 0. Run from the root of this repo; later steps cd away and come back.
+FREEDOM_ANDROID="$PWD"
+
+# 1. Clone freedom-mobile-ffi at the tag release.yml pins as FFI_REF,
+#    somewhere outside this repo.
+git clone --branch v0.12.1 https://github.com/solardev-xyz/freedom-mobile-ffi.git /tmp/freedom-mobile-ffi
 
 # 2. Cross-compile both ABIs. Needs cargo-ndk + ANDROID_NDK_HOME; rustup
 #    installs the pinned toolchain + targets from rust-toolchain.toml.
 #    The script also verifies both C ABIs are exported and stages the
-#    matching headers under target/android/headers/.
-cd /tmp/freedom-mobile-ffi
-./scripts/build-android.sh
+#    matching headers under target/android/headers/. It builds with
+#    --no-default-features (no `chain`, no `radicle`);
+#    scripts/enable-ffi-chain.sh (run from this repo) puts ant's `chain`
+#    feature back — the same helper release.yml calls — and fails if the
+#    script's cargo call has changed shape.
+#    scripts/enable-ffi-radicle.sh then extends that to `chain,radicle`,
+#    the embedded Radicle node (see below).
+#    Chained with && so a failed helper stops before a chain-less build.
+"$FREEDOM_ANDROID/scripts/enable-ffi-chain.sh" /tmp/freedom-mobile-ffi &&
+  "$FREEDOM_ANDROID/scripts/enable-ffi-radicle.sh" /tmp/freedom-mobile-ffi &&
+  cd /tmp/freedom-mobile-ffi &&
+  ./scripts/build-android.sh
 
 # 3. Copy the results into Freedom.
-cd <freedom-browser-android>
+cd "$FREEDOM_ANDROID"
 mkdir -p swarmnode/src/main/jniLibs
 cp -r /tmp/freedom-mobile-ffi/target/android/jniLibs/. swarmnode/src/main/jniLibs/
 ```
 
 The Kotlin side talks to it through the hand-written JNI shims in `swarmnode/src/main/cpp/` (built into `libfreedom_jni.so` by the module's CMake step): `ant_jni.c` wraps the ant C API (`ant_init`, `ant_start_gateway` — the bee-shaped HTTP gateway on `127.0.0.1:1633` —, `ant_peer_count`, `ant_shutdown`) and `freedom_ipfs_jni.c` wraps the freedom-ipfs loopback-gateway surface. When upgrading, refresh the vendored `swarmnode/src/main/cpp/{ant.h,freedom_ipfs.h}` from the build's `target/android/headers/` along with the `.so`s, and bump the pinned (ant, freedom-ipfs) tags in freedom-mobile-ffi's `Cargo.toml` — the same aggregator also feeds the iOS xcframework, so both platforms move versions together.
 
+Since freedom-mobile-ffi v0.12 the library also links the Myotis Ethereum light client (`myotis_*` exports; not optional upstream). The app drives it through `swarmnode/src/main/cpp/myotis_jni.c` (header `myotis_engine.h`, vendored from the myotis tag freedom-mobile-ffi pins — v0.1.12, engine ABI 32; refresh it with `FFI_REF`) from its own `:myotis` process, off by default and switched on from the node page (#72). The library is built with ant's `chain` feature so the gateway's `/wallet`, `/stamps`, `/chequebook` and `/chainstate` read Gnosis whenever `SwarmNode.Config.rpcEndpoint` is set. The app leaves that empty today (ultra-light, no chain traffic), so those endpoints answer bee's zero-stubs until a node-mode switch supplies an RPC.
+
+The `radicle` feature adds the embedded, publish-capable Radicle node (libradicle-uniffi with `no-spawn`, #73; about +7 MiB per ABI). Unlike ant and freedom-ipfs it has no hand-written C shim: Kotlin calls it through [UniFFI](https://mozilla.github.io/uniffi-rs/) bindings, committed as `swarmnode/src/main/java/uniffi/libradicle_uniffi/libradicle_uniffi.kt` and loaded through JNA, and wrapped by `baby.freedom.swarm.RadicleNode`. The generated code checks each function's checksum against the library at load, so whenever the `.so` changes (an `FFI_REF` bump), regenerate them from the same build and commit the result:
+
+```bash
+scripts/generate-radicle-bindings.sh /tmp/freedom-mobile-ffi           # rewrite the committed file
+scripts/generate-radicle-bindings.sh /tmp/freedom-mobile-ffi --check   # what release.yml runs: fail if stale
+```
+
 ## APK size
 
-The combined node library is ~20 MiB (arm64) / ~23 MiB (x86_64) and dominates the APK — everything else (dex, resources, the JNI shim) is under 6 MiB in a release build.
+The combined node library is ~34 MiB (arm64) / ~39 MiB (x86_64) with Radicle and dominates the APK — everything else (dex, resources, the JNI shim) is under 6 MiB in a release build.
 
 `app/build.gradle.kts` already enables per-ABI splits (`arm64-v8a` + `x86_64`) alongside a universal fallback, so every build produces:
 
 | APK | Release | Debug | Use |
 |---|---|---|---|
-| `app-arm64-v8a-*.apk` | ~25 MiB | ~94 MiB | Physical arm64 devices, Apple Silicon emulators |
-| `app-x86_64-*.apk` | ~28 MiB | ~98 MiB | x86_64 Android emulators |
-| `app-universal-*.apk` | ~48 MiB | ~127 MiB | Fallback / `:installDebug` default |
+| `app-arm64-v8a-*.apk` | ~43 MiB | ~107 MiB | Physical arm64 devices, Apple Silicon emulators |
+| `app-x86_64-*.apk` | ~48 MiB | ~112 MiB | x86_64 Android emulators |
+| `app-universal-*.apk` | ~82 MiB | ~147 MiB | Fallback / `:installDebug` default |
 
 (For context: shipping ant and freedom-ipfs as two separate `.so`s cost ~11 MiB more per ABI in duplicated Rust std/tokio/libp2p/SQLite; the gomobile-era APKs were 157–456 MiB.)
 

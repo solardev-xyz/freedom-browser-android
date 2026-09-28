@@ -4,6 +4,7 @@ import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.yield
 import org.junit.Assert.assertEquals
@@ -190,6 +191,66 @@ class SitePermissionsTest {
         assertFalse("must not raise over a panel", wait.isCompleted)
         onScreen.value = 2L
         assertTrue(withTimeout(1_000) { wait.await() })
+    }
+
+    @Test
+    fun `upload camera ask launches only over the tab that asked`() = runBlocking {
+        val dialogUp = MutableStateFlow(false)
+        var launches = 0
+        var held = false
+        suspend fun ask(onScreen: Long?, launch: (suspend () -> Unit)? = { launches++; held = true }) =
+            askAndroidPermissionOnScreen(Mutex(), MutableStateFlow(onScreen), 2L, dialogUp, { held }, launch)
+
+        // Another tab, or a panel / the app in the background: nothing shown.
+        assertEquals(AndroidPermissionAsk.OFF_SCREEN, ask(1L))
+        assertEquals(AndroidPermissionAsk.OFF_SCREEN, ask(null))
+        assertEquals(0, launches)
+        // No screen to ask with.
+        assertEquals(AndroidPermissionAsk.REFUSED, ask(2L, launch = null))
+        // Refused: the dialog ran and the permission still isn't held.
+        assertEquals(AndroidPermissionAsk.REFUSED, ask(2L, launch = { launches++ }))
+        // A launch that throws is a refusal, and the dialog flag comes down.
+        assertEquals(AndroidPermissionAsk.REFUSED, ask(2L, launch = { error("boom") }))
+        assertFalse(dialogUp.value)
+        // Allowed.
+        assertEquals(AndroidPermissionAsk.GRANTED, ask(2L))
+        assertEquals(2, launches)
+        // Already held: no dialog.
+        assertEquals(AndroidPermissionAsk.GRANTED, ask(2L))
+        assertEquals(2, launches)
+    }
+
+    @Test
+    fun `upload camera ask waits for a dialog already up and rechecks the screen`() = runBlocking {
+        val lock = Mutex()
+        val onScreen = MutableStateFlow<Long?>(2L)
+        val dialogUp = MutableStateFlow(false)
+        var launched = false
+        lock.lock() // a site's Android dialog is up
+        val ask = async(start = CoroutineStart.UNDISPATCHED) {
+            askAndroidPermissionOnScreen(lock, onScreen, 2L, dialogUp, { false }, {
+                assertTrue("dialog flag raised while shown", dialogUp.value)
+                launched = true
+            })
+        }
+        repeat(3) { yield() }
+        assertFalse("must not launch over the other dialog", ask.isCompleted || launched)
+        // The user switched to the tab switcher meanwhile.
+        onScreen.value = null
+        lock.unlock()
+        assertEquals(AndroidPermissionAsk.OFF_SCREEN, withTimeout(1_000) { ask.await() })
+        assertFalse(launched)
+
+        onScreen.value = 2L
+        assertEquals(
+            AndroidPermissionAsk.REFUSED,
+            askAndroidPermissionOnScreen(lock, onScreen, 2L, dialogUp, { false }, {
+                assertTrue(dialogUp.value)
+                launched = true
+            }),
+        )
+        assertTrue(launched)
+        assertFalse(dialogUp.value)
     }
 
     @Test

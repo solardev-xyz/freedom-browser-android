@@ -37,7 +37,7 @@ object AddressLabel {
     /**
      * TLDs whose names are ENS-style names rather than DNS domains —
      * the ones [baby.freedom.mobile.ens.EnsInput] accepts, ENS's `.eth`
-     * / `.box` plus WNS `.wei` and GNS `.gwei`.
+     * / `.box`, WNS `.wei`, GNS `.gwei` and Tezos Domains `.tez`.
      *
      * DNS has a registrable-domain boundary — everything under
      * `example.com` is `example.com`'s to give away, so collapsing

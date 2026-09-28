@@ -57,6 +57,33 @@ class TabsStateTest {
         assertEquals(listOf("a", "b", "c"), tabs.titles)
     }
 
+    // Closing a background tab from the switcher used to make whatever
+    // tab slid into the closed slot active (post-merge sweep, #181).
+    @Test
+    fun `closing a background tab keeps the active tab active`() {
+        val tabs = threeTabs()
+        tabs.switchTo(2) // c
+        tabs.closeTab(0) // a, before the active tab
+        assertEquals(listOf("b", "c"), tabs.titles)
+        assertEquals("c", tabs.active.title)
+
+        tabs.newTab().visit("d") // [b, c, d], d active
+        tabs.switchTo(0) // b
+        tabs.closeTab(2) // d, after the active tab
+        assertEquals(listOf("b", "c"), tabs.titles)
+        assertEquals("b", tabs.active.title)
+    }
+
+    @Test
+    fun `closing the active tab activates its right neighbour, or the new last tab`() {
+        val tabs = threeTabs()
+        tabs.switchTo(1) // b
+        tabs.closeTab(1)
+        assertEquals("c", tabs.active.title)
+        tabs.closeTab(1) // c, the last one
+        assertEquals("a", tabs.active.title)
+    }
+
     @Test
     fun `reopen brings the last closed tab back where it was, active`() {
         val tabs = threeTabs()

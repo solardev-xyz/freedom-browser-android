@@ -317,6 +317,7 @@ object Gateways {
      */
     fun toLoadable(url: String): String {
         VirtualOrigin.toVirtualUrl(url)?.let { return it }
+        OnchainAppRef.toVirtualUrl(url)?.let { return it }
         return toGatewayUrl(url)
     }
 
@@ -341,6 +342,7 @@ object Gateways {
      */
     fun toDisplay(url: String): String {
         VirtualOrigin.displayUrlFor(url)?.let { return it }
+        OnchainAppRef.displayUrlFor(url)?.let { return it }
         val swarm = SwarmResolver.toDisplay(url, swarmBase)
         if (swarm != url) return swarm
         val ipfsNow = ipfsBase
@@ -401,16 +403,46 @@ object Gateways {
         pathAndQuery: String,
         pins: EnsDocumentPins? = null,
         page: EnsDocumentPins.Page? = null,
-    ): String? = when (root) {
-        is ContentRoot.Bzz -> "$swarmBase/bzz/${root.ref}$pathAndQuery"
-        is ContentRoot.Ipfs -> ipfsBase.ifEmpty { null }?.let { "$it/ipfs/${root.cid}$pathAndQuery" }
-        is ContentRoot.IpnsKey -> ipfsBase.ifEmpty { null }?.let { "$it/ipns/${root.key}$pathAndQuery" }
-        is ContentRoot.IpnsName -> ipfsBase.ifEmpty { null }?.let { "$it/ipns/${root.name}$pathAndQuery" }
+    ): String? {
+        val (served, basePath) = servedContentFor(root, pins, page) ?: return null
+        // A `.tez` website record may publish a base path
+        // (`ipfs://<cid>/site`); ENS contenthashes never carry one.
+        val path = if (basePath.isEmpty()) pathAndQuery else basePath.trimEnd('/') + pathAndQuery
+        return when (served) {
+            is ContentRoot.Bzz -> "$swarmBase/bzz/${served.ref}$path"
+            is ContentRoot.Ipfs -> ipfsBase.ifEmpty { null }?.let { "$it/ipfs/${served.cid}$path" }
+            is ContentRoot.IpnsKey -> ipfsBase.ifEmpty { null }?.let { "$it/ipns/${served.key}$path" }
+            is ContentRoot.IpnsName -> ipfsBase.ifEmpty { null }?.let { "$it/ipns/${served.name}$path" }
+            // Only from an ENS [root] whose answer is itself a name.
+            is ContentRoot.Ens -> gatewayUrlFor(served, path)
+        }
+    }
+
+    /**
+     * The content root [gatewayUrlFor] serves [root] from: an ENS name's
+     * answer by the same precedence (the incoming [page]'s pin, then the
+     * tab's [pins], then the session registry — resolving if it has
+     * none), any other root itself. `null` when the name doesn't resolve.
+     * The main-frame IPFS phase line reads it too, so it describes the
+     * answer the fetch is actually made from (#179 R5-F1).
+     */
+    internal fun servedRootFor(
+        root: ContentRoot,
+        pins: EnsDocumentPins? = null,
+        page: EnsDocumentPins.Page? = null,
+    ): ContentRoot? = servedContentFor(root, pins, page)?.first
+
+    /** [servedRootFor] plus the base path its answer carries (`""` but for a `.tez` website record). */
+    private fun servedContentFor(
+        root: ContentRoot,
+        pins: EnsDocumentPins?,
+        page: EnsDocumentPins.Page?,
+    ): Pair<ContentRoot, String>? = when (root) {
         is ContentRoot.Ens ->
-            ((page?.uriFor(root.name) ?: pins?.uriFor(root.name))
-                ?.let { VirtualOrigin.parseContentUrl(it)?.first }
-                ?: resolveEnsRoot(root.name))
-                ?.let { gatewayUrlFor(it, pathAndQuery) }
+            (page?.uriFor(root.name) ?: pins?.uriFor(root.name))
+                ?.let { VirtualOrigin.parseContentUrl(it) }
+                ?: resolveEnsContent(root.name)
+        else -> root to ""
     }
 
     /**
@@ -424,19 +456,26 @@ object Gateways {
      * uses the resolver's own TTL cache after the first call. Blocking
      * is fine — the interceptor never runs on the UI thread.
      */
-    internal fun resolveEnsRoot(name: String): ContentRoot? {
+    internal fun resolveEnsRoot(name: String): ContentRoot? = resolveEnsContent(name)?.first
+
+    /** [resolveEnsRoot] plus the base path the resolved URI carries (`""` for ENS). */
+    private fun resolveEnsContent(name: String): Pair<ContentRoot, String>? {
         KnownEnsNames.uriFor(name)?.let { uri ->
-            VirtualOrigin.parseContentUrl(uri)?.let { return it.first }
+            VirtualOrigin.parseContentUrl(uri)?.let { return it }
         }
         val result = ensLookup(name)
         // One server's word isn't served unasked (#96); the submit flow
         // records what the user let through.
         if (result is EnsResult.Ok && result.trust.verified) {
-            KnownEnsNames.record(result.uri, name)
-            return VirtualOrigin.parseContentUrl(result.uri)?.first
+            val content = VirtualOrigin.parseContentUrl(result.uri) ?: return null
+            KnownEnsNames.record(result.uri, name, result.trust)
+            return content
         }
         return null
     }
+
+    /** [reverifyEnsDocument]'s answer for a `.tez` name whose website is now on the web. */
+    const val ENS_WEB_RECORD = "ens_web_record"
 
     /**
      * Resolve [name] again for a document on its `<name>.ens.…` host
@@ -461,7 +500,10 @@ object Gateways {
      * (service workers).
      *
      * Only an *answer* refuses the document: `NotFound` / `Unsupported`
-     * say the name no longer points at loadable content. A lookup that
+     * say the name no longer points at loadable content, and an
+     * `INVALID_NAME` / `NAME_TOO_LONG` error refuses the name itself
+     * (`ens_invalid_name` / `ens_name_too_long`, see
+     * [refusedNameErrorCode]). A lookup that
      * merely failed (RPC unreachable) serves the last answer this tab
      * or this session had for the name, as it did before the re-check
      * existed — the network being down is no reason to stop Back from
@@ -498,14 +540,38 @@ object Gateways {
      * answers, so neither the address bar's protocol badge / hash-to-name
      * mapping nor a later failed lookup describes content the name no
      * longer points at. Pages already on screen keep their own pins.
+     *
+     * [assertedProtocol] is the transport the tab's address asserts for
+     * [name] — `bzz` for a tab the user sent to `bzz://name.eth` (#97,
+     * [BrowserState.Override.assertedProtocol]). An answer on another
+     * transport is refused with `ens_wrong_protocol` rather than served:
+     * a typed scheme is an assertion, and a Reload or Back must not
+     * switch networks under it any more than the typed navigation did.
+     * Not an answer to forget — the name does point at content, just not
+     * the kind the address promises.
+     *
+     * A `.tez` name whose website record is now on the ordinary web
+     * (`http(s)`) returns [ENS_WEB_RECORD] after handing the answer to
+     * [onWebRecord]: the document can't be served on the name's origin,
+     * so the caller sends the frame there instead. An unverified one is
+     * refused like any other (`ens_unverified`) unless the typed flow
+     * already let it through.
      */
     fun reverifyEnsDocument(
         name: String,
         pins: EnsDocumentPins? = null,
         page: EnsDocumentPins.Page? = null,
+        assertedProtocol: String? = null,
+        onWebRecord: (EnsResult.Ok) -> Unit = {},
     ): String? {
-        val last = (pins?.lastAnswerFor(name) ?: KnownEnsNames.uriFor(name))
-            ?.takeIf { VirtualOrigin.parseContentUrl(it) != null }
+        // The fallback answer together with how it was checked, from the
+        // same source: a document served from it shows *that* check on
+        // its shield, not the registry's newer answer's (#97 R3-F1).
+        val fallback: Pair<String, EnsTrust?>? =
+            (pins?.lastAnswerWithTrust(name) ?: KnownEnsNames.answerFor(name))
+                ?.takeIf { VirtualOrigin.parseContentUrl(it.first) != null }
+        val last = fallback?.first
+        val lastTrust = fallback?.second
         fun lookup(key: LookupKey): EnsResult? {
             // With something to fall back on, don't hold the document for
             // the resolver's worst case (see [reverifyDeadlineMs]).
@@ -546,8 +612,11 @@ object Gateways {
             if (!trust.verified && last != null) "ens_unverified" else gone(code)
         return when (result) {
             is EnsResult.Ok -> {
-                if (VirtualOrigin.parseContentUrl(result.uri) == null) {
+                val web = result.protocol == "http" || result.protocol == "https"
+                if (!web && VirtualOrigin.parseContentUrl(result.uri) == null) {
                     noContent("ens_unsupported_codec", result.trust)
+                } else if (assertedProtocol != null && result.protocol != assertedProtocol) {
+                    "ens_wrong_protocol"
                 } else if (!result.trust.verified &&
                     result.uri != pins?.lastAnswerFor(name) &&
                     result.uri != KnownEnsNames.uriFor(name)
@@ -556,9 +625,15 @@ object Gateways {
                     // tab or the session already had — cross-checked
                     // then, or let through by the user (#96).
                     "ens_unverified"
+                } else if (web) {
+                    // A `.tez` website on the ordinary web: not content
+                    // this origin serves, so drop the old root, as for any
+                    // answer that no longer loads here.
+                    onWebRecord(result)
+                    gone(ENS_WEB_RECORD)
                 } else {
-                    KnownEnsNames.record(result.uri, name)
-                    pins?.pin(name, result.uri, page)
+                    KnownEnsNames.record(result.uri, name, result.trust)
+                    pins?.pin(name, result.uri, page, result.trust)
                     null
                 }
             }
@@ -567,19 +642,26 @@ object Gateways {
             // Servers disagree about the name right now (#96). Not the
             // name's answer to forget, but nothing to serve on either.
             is EnsResult.Conflict -> "ens_conflict"
-            // Failed, or still running at the deadline: not an answer.
-            // CCIP-Read switched off isn't a network problem, so there's
-            // no falling back on an earlier answer: "Off" means those
-            // names don't resolve, whether typed, reloaded or reached
-            // by Back (#102). The earlier answer is kept — it's still
-            // the name's content once CCIP-Read is back on.
+            // Failed, or still running at the deadline: not an answer —
+            // unless the name itself was refused (ENSIP-15, or a label
+            // too long to encode), which is as final as a NotFound (no
+            // lookup ran, and none ever will — so no server's word to
+            // cross-check either).
+            // CCIP-Read switched off isn't a network problem either, so
+            // there's no falling back on an earlier answer: "Off" means
+            // those names don't resolve, whether typed, reloaded or
+            // reached by Back (#102). The earlier answer is kept — it's
+            // still the name's content once CCIP-Read is back on.
             is EnsResult.Error, null -> {
-                if ((result as? EnsResult.Error)?.reason == "CCIP_DISABLED") {
+                val refused = result?.let { refusedNameErrorCode(it.reason) }
+                if (refused != null) {
+                    gone(refused)
+                } else if ((result as? EnsResult.Error)?.reason == "CCIP_DISABLED") {
                     "ens_ccip_disabled"
                 } else if (last == null) {
                     "ens_lookup_failed"
                 } else {
-                    pins?.pin(name, last, page)
+                    pins?.pin(name, last, page, lastTrust)
                     null
                 }
             }
@@ -626,10 +708,16 @@ class EnsDocumentPins {
     class Page internal constructor(internal val url: String?) {
         internal val pins = ConcurrentHashMap<String, String>()
 
+        /** How each of [pins] was checked, where known (#97). */
+        internal val trusts = ConcurrentHashMap<String, EnsTrust>()
+
         /** When the interceptor handed WebView this page's document; 0 = not yet. */
         internal var deliveredAt = 0L
 
         fun uriFor(name: String): String? = pins[name.lowercase()]
+
+        /** How [uriFor]'s answer was checked; `null` = not known. */
+        fun trustFor(name: String): EnsTrust? = trusts[name.lowercase()]
     }
 
     private val lock = ReentrantLock()
@@ -639,18 +727,41 @@ class EnsDocumentPins {
     private var current = Page(null)
     private var pending: Page? = null
     private val last = ConcurrentHashMap<String, String>()
+    private val lastTrust = ConcurrentHashMap<String, EnsTrust>()
 
     /**
      * Pin [name] to [uri] for [page] (the incoming page from
      * [beginNavigation]), or for the page on screen when `null`.
+     * [trust] is how that answer was checked — what the page's trust
+     * shield shows (#97); `null` (not known) shows none.
      */
-    fun pin(name: String, uri: String, page: Page? = null) {
-        (page ?: current).pins[name.lowercase()] = uri
-        last[name.lowercase()] = uri
+    fun pin(name: String, uri: String, page: Page? = null, trust: EnsTrust? = null) {
+        val key = name.lowercase()
+        val target = page ?: current
+        synchronized(target) {
+            target.pins[key] = uri
+            if (trust != null) target.trusts[key] = trust else target.trusts.remove(key)
+        }
+        synchronized(last) {
+            last[key] = uri
+            if (trust != null) lastTrust[key] = trust else lastTrust.remove(key)
+        }
     }
 
     /** The root the current page's documents on [name] were served from. */
     fun uriFor(name: String): String? = current.uriFor(name)
+
+    /**
+     * The answer the page on screen was served from for [name], and how
+     * it was checked (`null` = not known) — one snapshot, so a later
+     * re-pin can't pair one answer with another's trust. `null` when the
+     * page has no pin for the name.
+     */
+    fun answerFor(name: String): Pair<String, EnsTrust?>? {
+        val page = current
+        val key = name.lowercase()
+        return synchronized(page) { page.pins[key]?.let { it to page.trusts[key] } }
+    }
 
     /**
      * The page a subresource (or iframe) request on [name] belongs to:
@@ -685,11 +796,23 @@ class EnsDocumentPins {
     fun lastAnswerFor(name: String): String? = last[name.lowercase()]
 
     /**
+     * [lastAnswerFor] and how it was checked (`null` = not known), as one
+     * snapshot: what a failed re-check serves, and shows, instead.
+     */
+    fun lastAnswerWithTrust(name: String): Pair<String, EnsTrust?>? {
+        val key = name.lowercase()
+        return synchronized(last) { last[key]?.let { it to lastTrust[key] } }
+    }
+
+    /**
      * The name answered that it no longer points at loadable content:
      * a later failed lookup must not bring its old root back.
      */
     fun forgetLastAnswer(name: String) {
-        last.remove(name.lowercase())
+        synchronized(last) {
+            last.remove(name.lowercase())
+            lastTrust.remove(name.lowercase())
+        }
     }
 
     /**
@@ -746,4 +869,15 @@ class EnsDocumentPins {
         @Volatile
         internal var commitWaitMs = 2_000L
     }
+}
+
+/**
+ * The error page for an [EnsResult.Error] that refuses the *name* rather
+ * than reporting a failed lookup — no RPC ran, so "couldn't reach an
+ * Ethereum RPC endpoint" would be wrong — or `null` for a lookup failure.
+ */
+internal fun refusedNameErrorCode(reason: String): String? = when (reason) {
+    "INVALID_NAME" -> "ens_invalid_name"
+    "NAME_TOO_LONG" -> "ens_name_too_long"
+    else -> null
 }

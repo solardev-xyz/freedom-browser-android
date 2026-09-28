@@ -17,6 +17,20 @@ android {
         versionCode = 24
         versionName = "0.6.7"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
+        // Filter-list update trust anchor overrides (#127), for a build
+        // pointed at a test publisher's feed — desktop's and iOS's
+        // FREEDOM_ADBLOCK_FEED_OWNER / FREEDOM_ADBLOCK_SIG_ADDRESS. Empty
+        // (the default, and every release) means the production publisher
+        // pinned in AdblockFeed. Compile-time only: nothing at runtime can
+        // change who the app trusts.
+        fun addressProperty(name: String): String {
+            val value = (project.findProperty(name) as String?).orEmpty()
+            require(value.isEmpty() || Regex("^0x[0-9a-fA-F]{40}$").matches(value)) { "$name: not an address" }
+            return "\"$value\""
+        }
+        buildConfigField("String", "ADBLOCK_FEED_OWNER", addressProperty("freedom.adblockFeedOwner"))
+        buildConfigField("String", "ADBLOCK_SIGNER", addressProperty("freedom.adblockSigner"))
     }
 
     // Release signing comes from the environment so the same config
@@ -40,6 +54,7 @@ android {
     buildFeatures {
         compose = true
         aidl = true
+        buildConfig = true
     }
 
     buildTypes {
@@ -126,11 +141,16 @@ dependencies {
     // Service-worker request interception (feature-gated at runtime via
     // WebViewFeature) so SW fetches on virtual dweb origins route
     // through the same interceptor as everything else.
-    implementation("androidx.webkit:webkit:1.13.0")
+    implementation("androidx.webkit:webkit:1.15.0")
 
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.1")
 
     implementation("androidx.datastore:datastore-preferences:1.2.1")
+
+    // ENSIP-15 name normalization: the Java port of desktop's
+    // @adraffy/ens-normalize, by the spec's author. Pure JVM, no
+    // dependencies, ~60 KB with its spec tables.
+    implementation("io.github.adraffy:ens-normalize:0.3.1")
 
     val roomVersion = "2.8.4"
     implementation("androidx.room:room-runtime:$roomVersion")

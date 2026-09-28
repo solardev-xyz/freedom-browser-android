@@ -197,7 +197,7 @@ class GatewaysTest {
 
     @Test
     fun `gatewayUrlFor resolves ens roots from the session registry`() {
-        KnownEnsNames.record("bzz://$ref64", "swarm.eth")
+        KnownEnsNames.record("bzz://$ref64", "swarm.eth", EnsTrust.ASSUMED)
         try {
             assertEquals(
                 "http://127.0.0.1:1633/bzz/$ref64/p",
@@ -225,7 +225,7 @@ class GatewaysTest {
 
     @Test
     fun `a stalled lookup serves the last answer after the deadline, and only waits once`() {
-        KnownEnsNames.record("bzz://$ref64", "stalled.eth")
+        KnownEnsNames.record("bzz://$ref64", "stalled.eth", EnsTrust.ASSUMED)
         val release = java.util.concurrent.CountDownLatch(1)
         val lookups = java.util.concurrent.atomic.AtomicInteger(0)
         val deadline = Gateways.reverifyDeadlineMs
@@ -272,7 +272,7 @@ class GatewaysTest {
         // One timeout opens the failure window; the network then recovers
         // and the name's contenthash is gone. Documents loading every few
         // ms (well inside the window) must not stay on the stale root.
-        KnownEnsNames.record("bzz://$ref64", "gone.eth")
+        KnownEnsNames.record("bzz://$ref64", "gone.eth", EnsTrust.ASSUMED)
         val first = java.util.concurrent.atomic.AtomicBoolean(true)
         val deadline = Gateways.reverifyDeadlineMs
         Gateways.reverifyDeadlineMs = 100
@@ -324,7 +324,7 @@ class GatewaysTest {
         assertNull(pins.uriFor("swarm.eth"))
         assertEquals("bzz://$otherRef", pins.lastAnswerFor("swarm.eth"))
         // …which a failed lookup on the next page still falls back on.
-        KnownEnsNames.record("bzz://$ref64", "swarm.eth")
+        KnownEnsNames.record("bzz://$ref64", "swarm.eth", EnsTrust.ASSUMED)
         withLookup({ EnsResult.Error(it, "PROVIDER_ERROR", "down", retryable = true) }) {
             assertNull(Gateways.reverifyEnsDocument("swarm.eth", pins))
             assertEquals("bzz://$otherRef", pins.uriFor("swarm.eth"))
@@ -334,7 +334,7 @@ class GatewaysTest {
     @Test
     fun `reverifyEnsDocument replaces the first visit's answer with the current one`() {
         // First visit recorded ref64; the name has since moved on.
-        KnownEnsNames.record("bzz://$ref64", "swarm.eth")
+        KnownEnsNames.record("bzz://$ref64", "swarm.eth", EnsTrust.ASSUMED)
         val lookups = mutableListOf<String>()
         withLookup({ name ->
             lookups += name
@@ -354,7 +354,7 @@ class GatewaysTest {
 
     @Test
     fun `reverifyEnsDocument refuses a name that no longer resolves`() {
-        KnownEnsNames.record("bzz://$ref64", "swarm.eth")
+        KnownEnsNames.record("bzz://$ref64", "swarm.eth", EnsTrust.ASSUMED)
         val pins = EnsDocumentPins()
         pins.pin("swarm.eth", "bzz://$ref64")
         withLookup({ EnsResult.NotFound(it, "NO_CONTENTHASH", EnsTrust.ASSUMED) }) {
@@ -383,14 +383,14 @@ class GatewaysTest {
     fun `one server's word for a new answer is refused, the answer already served is not`() {
         // #96: the page was served ref64 (cross-checked, or let through
         // by the user); only one server now answers, with another root.
-        KnownEnsNames.record("bzz://$ref64", "swarm.eth")
+        KnownEnsNames.record("bzz://$ref64", "swarm.eth", EnsTrust.ASSUMED)
         val pins = EnsDocumentPins()
         withLookup({ unverified(it, otherRef) }) {
             assertEquals("ens_unverified", Gateways.reverifyEnsDocument("swarm.eth", pins))
             // Not an answer about the name: nothing is forgotten.
             assertEquals("bzz://$ref64", KnownEnsNames.uriFor("swarm.eth"))
         }
-        KnownEnsNames.record("bzz://$ref64", "swarm.eth")
+        KnownEnsNames.record("bzz://$ref64", "swarm.eth", EnsTrust.ASSUMED)
         withLookup({ unverified(it, ref64) }) {
             assertNull(Gateways.reverifyEnsDocument("swarm.eth", pins))
             assertEquals("bzz://$ref64", pins.uriFor("swarm.eth"))
@@ -404,7 +404,7 @@ class GatewaysTest {
         // flow records in the session registry.
         val pins = EnsDocumentPins()
         pins.pin("swarm.eth", "bzz://$ref64")
-        KnownEnsNames.record("bzz://$otherRef", "swarm.eth")
+        KnownEnsNames.record("bzz://$otherRef", "swarm.eth", EnsTrust.ASSUMED)
         withLookup({ unverified(it, otherRef) }) {
             assertNull(Gateways.reverifyEnsDocument("swarm.eth", pins))
             assertEquals("bzz://$otherRef", pins.uriFor("swarm.eth"))
@@ -412,8 +412,57 @@ class GatewaysTest {
     }
 
     @Test
+    fun `a typed scheme is held on a re-check - another transport is refused, not switched to`() {
+        // #97: the tab is on `bzz://swarm.eth`; the name has moved to IPFS.
+        KnownEnsNames.record("bzz://$ref64", "swarm.eth", EnsTrust.ASSUMED)
+        val pins = EnsDocumentPins()
+        pins.pin("swarm.eth", "bzz://$ref64")
+        withLookup({ EnsResult.Ok(it, "ipfs", "ipfs://bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi", "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi", EnsTrust.ASSUMED) }) {
+            assertEquals(
+                "ens_wrong_protocol",
+                Gateways.reverifyEnsDocument("swarm.eth", pins, assertedProtocol = "bzz"),
+            )
+            // The page on screen, the tab's and the session's answers
+            // are left as they were — nothing was switched.
+            assertEquals("bzz://$ref64", pins.uriFor("swarm.eth"))
+            assertEquals("bzz://$ref64", KnownEnsNames.uriFor("swarm.eth"))
+            // With no assertion (a bare `swarm.eth`) the answer is taken.
+            assertNull(Gateways.reverifyEnsDocument("swarm.eth", pins))
+            assertEquals("ipfs", KnownEnsNames.protocolFor("swarm.eth"))
+        }
+    }
+
+    @Test
+    fun `a typed scheme on a tez name is held too - a web record under it is refused, not followed`() {
+        // #97 across name systems: `ipfs://alice.tez` whose website record
+        // moved to the ordinary web is the same broken assertion.
+        KnownEnsNames.record("ipfs://bafyold", "alice.tez", EnsTrust.ASSUMED)
+        val pins = EnsDocumentPins()
+        pins.pin("alice.tez", "ipfs://bafyold")
+        withLookup({ EnsResult.Ok(it, "https", "https://alice.example/", "https://alice.example/", EnsTrust.ASSUMED) }) {
+            var web: EnsResult.Ok? = null
+            assertEquals(
+                "ens_wrong_protocol",
+                Gateways.reverifyEnsDocument("alice.tez", pins, assertedProtocol = "ipfs", onWebRecord = { web = it }),
+            )
+            assertNull(web)
+            assertEquals("ipfs://bafyold", pins.uriFor("alice.tez"))
+            assertEquals("ipfs://bafyold", KnownEnsNames.uriFor("alice.tez"))
+        }
+    }
+
+    @Test
+    fun `a typed scheme the answer matches is served, with the answer's trust recorded`() {
+        val trust = EnsTrust(verified = true, agreed = listOf("a.test", "b.test"), block = 7L)
+        withLookup({ EnsResult.Ok(it, "bzz", "bzz://$ref64", ref64, trust) }) {
+            assertNull(Gateways.reverifyEnsDocument("swarm.eth", assertedProtocol = "bzz"))
+            assertEquals(trust, KnownEnsNames.trustFor("swarm.eth"))
+        }
+    }
+
+    @Test
     fun `servers that disagree refuse the document without forgetting the name`() {
-        KnownEnsNames.record("bzz://$ref64", "swarm.eth")
+        KnownEnsNames.record("bzz://$ref64", "swarm.eth", EnsTrust.ASSUMED)
         val conflict = { name: String ->
             EnsResult.Conflict(
                 name, EnsResult.Conflict.Subject.RECORD,
@@ -441,7 +490,7 @@ class GatewaysTest {
         // unloadable codec. With an earlier answer that's refused as
         // unverified and the answer kept, not acted on as not-found.
         val lone = EnsTrust(verified = false, agreed = listOf("rpc.test"))
-        KnownEnsNames.record("bzz://$ref64", "swarm.eth")
+        KnownEnsNames.record("bzz://$ref64", "swarm.eth", EnsTrust.ASSUMED)
         val pins = EnsDocumentPins()
         pins.pin("swarm.eth", "bzz://$ref64")
         withLookup({ EnsResult.NotFound(it, "NO_RESOLVER", lone) }) {
@@ -451,7 +500,7 @@ class GatewaysTest {
         }
         withLookup({ EnsResult.Unsupported(it, "0xe5", "", lone) }) {
             // (withLookup cleared the registry; the tab's pins remain.)
-            KnownEnsNames.record("bzz://$ref64", "swarm.eth")
+            KnownEnsNames.record("bzz://$ref64", "swarm.eth", EnsTrust.ASSUMED)
             assertEquals("ens_unverified", Gateways.reverifyEnsDocument("swarm.eth", pins))
             assertEquals("bzz://$ref64", pins.lastAnswerFor("swarm.eth"))
             assertEquals("bzz://$ref64", KnownEnsNames.uriFor("swarm.eth"))
@@ -459,6 +508,29 @@ class GatewaysTest {
         // With nothing earlier to lose it's the plain not-found.
         withLookup({ EnsResult.NotFound(it, "NO_RESOLVER", lone) }) {
             assertEquals("ens_not_found", Gateways.reverifyEnsDocument("fresh.eth", EnsDocumentPins()))
+        }
+    }
+
+    @Test
+    fun `reverifyEnsDocument refuses a name ENSIP-15 rejects, even with an earlier answer`() {
+        val pins = EnsDocumentPins()
+        pins.pin("ab--c.eth", "bzz://$ref64")
+        withLookup({ EnsResult.Error(it, "INVALID_NAME", "invalid label extension") }) {
+            // Not a transport failure: serving the last answer would keep
+            // a name no client can resolve alive.
+            assertEquals("ens_invalid_name", Gateways.reverifyEnsDocument("ab--c.eth", pins))
+            assertNull(pins.lastAnswerFor("ab--c.eth"))
+        }
+    }
+
+    @Test
+    fun `reverifyEnsDocument refuses a name too long to look up`() {
+        val name = "a".repeat(256) + ".eth"
+        val pins = EnsDocumentPins()
+        pins.pin(name, "bzz://$ref64")
+        withLookup({ EnsResult.Error(it, "NAME_TOO_LONG", "a label is longer than 255 bytes") }) {
+            assertEquals("ens_name_too_long", Gateways.reverifyEnsDocument(name, pins))
+            assertNull(pins.lastAnswerFor(name))
         }
     }
 
@@ -474,7 +546,7 @@ class GatewaysTest {
     @Test
     fun `with CCIP-Read off, an earlier answer doesn't bring the name back`() {
         // Loaded before CCIP-Read was switched off; Back / reload now.
-        KnownEnsNames.record("bzz://$ref64", "offchain.eth")
+        KnownEnsNames.record("bzz://$ref64", "offchain.eth", EnsTrust.ASSUMED)
         val pins = EnsDocumentPins()
         withLookup({ EnsResult.Error(it, "CCIP_DISABLED", "off") }) {
             assertEquals("ens_ccip_disabled", Gateways.reverifyEnsDocument("offchain.eth", pins))
@@ -544,7 +616,7 @@ class GatewaysTest {
         try {
             withLookup({ EnsResult.Error(it, "PROVIDER_ERROR", "down", retryable = true) }) {
                 fun fail(name: String) {
-                    KnownEnsNames.record("bzz://$ref64", name)
+                    KnownEnsNames.record("bzz://$ref64", name, EnsTrust.ASSUMED)
                     assertNull(Gateways.reverifyEnsDocument(name, EnsDocumentPins()))
                     // The failure is recorded when the lookup completes.
                     val until = System.currentTimeMillis() + 2_000
@@ -589,8 +661,8 @@ class GatewaysTest {
                 if (name == "old.eth") release.await()
                 EnsResult.Error(name, "PROVIDER_ERROR", "down", retryable = true)
             }) {
-                KnownEnsNames.record("bzz://$ref64", "old.eth")
-                KnownEnsNames.record("bzz://$ref64", "new.eth")
+                KnownEnsNames.record("bzz://$ref64", "old.eth", EnsTrust.ASSUMED)
+                KnownEnsNames.record("bzz://$ref64", "new.eth", EnsTrust.ASSUMED)
                 Gateways.reverifyDeadlineMs = 50
                 // A lookup under the old settings is stuck on a removed endpoint.
                 assertNull(Gateways.reverifyEnsDocument("old.eth", EnsDocumentPins()))
@@ -631,7 +703,7 @@ class GatewaysTest {
 
     @Test
     fun `reverifyEnsDocument refuses a name whose content is no longer loadable`() {
-        KnownEnsNames.record("bzz://$ref64", "swarm.eth")
+        KnownEnsNames.record("bzz://$ref64", "swarm.eth", EnsTrust.ASSUMED)
         withLookup({ EnsResult.Unsupported(it, "0xe5", "", EnsTrust.ASSUMED) }) {
             assertEquals("ens_unsupported_codec", Gateways.reverifyEnsDocument("swarm.eth"))
             assertNull(KnownEnsNames.uriFor("swarm.eth"))
@@ -780,7 +852,7 @@ class GatewaysTest {
     fun `a failed lookup serves the last answer instead of refusing`() {
         // RPC unreachable: Back keeps working off what this tab (or, for
         // a fresh tab, the session) last had for the name.
-        KnownEnsNames.record("bzz://$ref64", "swarm.eth")
+        KnownEnsNames.record("bzz://$ref64", "swarm.eth", EnsTrust.ASSUMED)
         val pins = EnsDocumentPins()
         withLookup({ EnsResult.Error(it, "PROVIDER_ERROR", "down", retryable = true) }) {
             assertNull(Gateways.reverifyEnsDocument("swarm.eth", pins))
@@ -789,6 +861,74 @@ class GatewaysTest {
             assertNull(Gateways.reverifyEnsDocument("swarm.eth", pins))
             // The tab's own answer beats the session's.
             assertEquals("bzz://$otherRef", pins.uriFor("swarm.eth"))
+        }
+    }
+
+    @Test
+    fun `a Tezos provider conflict is refused like an ENS one, the last answer kept`() {
+        KnownEnsNames.record("ipfs://bafyold", "alice.tez", EnsTrust.ASSUMED)
+        val pins = EnsDocumentPins()
+        pins.pin("alice.tez", "ipfs://bafyold")
+        val conflict = { name: String ->
+            EnsResult.Conflict(
+                name,
+                EnsResult.Conflict.Subject.RECORD,
+                listOf(
+                    EnsResult.Conflict.Group("ipfs://bafyA", listOf("rpc.tzkt.io")),
+                    EnsResult.Conflict.Group("ipfs://bafyB", listOf("mainnet.tezos.ecadinfra.com")),
+                ),
+                15_133_172,
+            )
+        }
+        withLookup(conflict) {
+            assertEquals("ens_conflict", Gateways.reverifyEnsDocument("alice.tez", pins))
+            assertEquals("ipfs://bafyold", pins.lastAnswerFor("alice.tez"))
+            assertEquals("ipfs://bafyold", KnownEnsNames.uriFor("alice.tez"))
+        }
+    }
+
+    @Test
+    fun `an unverified tez answer on re-check goes through the not-cross-checked gate`() {
+        KnownEnsNames.record("ipfs://bafyold", "alice.tez", EnsTrust.ASSUMED)
+        val pins = EnsDocumentPins()
+        pins.pin("alice.tez", "ipfs://bafyold")
+        val lone = EnsTrust(verified = false, agreed = listOf("rpc.tzkt.io"))
+        withLookup({ EnsResult.Ok(it, "ipfs", "ipfs://bafynew", "bafynew", lone) }) {
+            val page = pins.beginNavigation("https://alice.tez.ens.freedom.baby/")
+            assertEquals("ens_unverified", Gateways.reverifyEnsDocument("alice.tez", pins, page))
+            assertEquals("ipfs://bafyold", pins.lastAnswerFor("alice.tez"))
+        }
+        // A lone web record isn't followed unasked either.
+        withLookup({ EnsResult.Ok(it, "https", "https://evil.example/", "https://evil.example/", lone) }) {
+            var web: EnsResult.Ok? = null
+            assertEquals(
+                "ens_unverified",
+                Gateways.reverifyEnsDocument("alice.tez", pins, onWebRecord = { web = it }),
+            )
+            assertNull(web)
+        }
+        // A verified one is served and remembered.
+        withLookup({ EnsResult.Ok(it, "ipfs", "ipfs://bafynew", "bafynew", EnsTrust.ASSUMED) }) {
+            assertNull(Gateways.reverifyEnsDocument("alice.tez", pins))
+            assertEquals("ipfs://bafynew", pins.lastAnswerFor("alice.tez"))
+        }
+    }
+
+    @Test
+    fun `a tez name whose record moved to the web sends the document there`() {
+        KnownEnsNames.record("ipfs://bafyold", "alice.tez", EnsTrust.ASSUMED)
+        val pins = EnsDocumentPins()
+        pins.pin("alice.tez", "ipfs://bafyold")
+        withLookup({ EnsResult.Ok(it, "https", "https://alice.example/", "https://alice.example/", EnsTrust.ASSUMED) }) {
+            var web: EnsResult.Ok? = null
+            assertEquals(
+                Gateways.ENS_WEB_RECORD,
+                Gateways.reverifyEnsDocument("alice.tez", pins, onWebRecord = { web = it }),
+            )
+            assertEquals("https://alice.example/", web?.uri)
+            // The old IPFS root no longer describes the name.
+            assertNull(KnownEnsNames.uriFor("alice.tez"))
+            assertNull(pins.lastAnswerFor("alice.tez"))
         }
     }
 

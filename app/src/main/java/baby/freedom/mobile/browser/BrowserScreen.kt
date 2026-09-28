@@ -76,12 +76,16 @@ import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.lerp
+import androidx.lifecycle.createSavedStateHandle
+import androidx.lifecycle.viewmodel.compose.viewModel
 import baby.freedom.mobile.data.BrowsingRepository
 import baby.freedom.mobile.ui.PrivateTheme
 import baby.freedom.mobile.data.NodeSettings
 import baby.freedom.mobile.ens.EnsInput
 import baby.freedom.mobile.ens.EnsResult
+import baby.freedom.mobile.ens.TezosDomainsResolver
 import baby.freedom.swarm.IpfsInfo
+import baby.freedom.swarm.MyotisInfo
 import baby.freedom.swarm.IpfsStatus
 import baby.freedom.swarm.NodeInfo
 import baby.freedom.swarm.NodeStatus
@@ -284,8 +288,17 @@ private fun contentUriForSubmit(url: String): String? {
         url.startsWith("ipns://")
     ) return url
     val display = Gateways.toDisplay(url)
+    // A name's own virtual origin (`https://<name>.ens.…`, what Reload
+    // of a name-addressed page maps to via [BrowserState.effectiveFetchUrl])
+    // displays as the bare name — not content to probe: the gateway
+    // would be asked for `vitalik.eth/`. It loads as a plain URL, and
+    // the interceptor's document re-check resolves the name (#99), and
+    // holds a typed-scheme assertion (#97).
+    if (!CONTENT_SCHEMES_FOR_SUBMIT.any { display.startsWith(it) }) return null
     return if (display != url) display else null
 }
+
+private val CONTENT_SCHEMES_FOR_SUBMIT = listOf("bzz://", "ipfs://", "ipns://")
 
 /**
  * Which gateway logo (if any) to show in the leading end of the
@@ -396,23 +409,30 @@ fun BrowserScreen(
     ipfsInfo: IpfsInfo,
     runNodeEnabled: Boolean,
     onToggleRunNode: (Boolean) -> Unit,
+    myotisInfo: MyotisInfo = MyotisInfo(),
+    myotisEnabled: Boolean = false,
+    onToggleMyotis: (Boolean) -> Unit = {},
     onEnsureIpfsStarted: () -> Unit,
     onIpfsToggle: (Boolean) -> Unit,
+    radicle: RadicleControls = RadicleControls(),
     initialUrl: String = HOME_URL,
-    deepLinkUrl: String? = null,
-    onDeepLinkHandled: () -> Unit = {},
+    deepLink: DeepLink? = null,
+    onDeepLinkHandled: (DeepLink) -> Unit = {},
     onRecoverNodes: () -> Unit = {},
     ipfsProgressSnapshot: () -> String? = { null },
     ipfsCounters: () -> LongArray? = { null },
     onStatusBarTint: (Int?) -> Unit = {},
 ) {
-    val tabs = remember { TabsState(homepage = initialUrl) }
+    // Outside composition, so the tabs survive an Activity relaunch
+    // (#183, see [TabsSession]).
+    val tabs = viewModel { TabsSession(initialUrl, createSavedStateHandle()) }.tabs
     // Shared with the request interceptor (which resolves
     // `<name>.ens.…` virtual hosts) so both sides use one cache.
     val ensResolver = Gateways.ensResolver
     val gatewayProbe = remember { GatewayProbe() }
     val context = LocalContext.current
     val pageZoom = remember(context) { PageZoom.get(context) }
+    val desktopSites = remember(context) { DesktopSites.get(context) }
     val repo = remember(context) { BrowsingRepository.get(context) }
     // The search engine chosen in Settings (#87). Read at submit time
     // through the State, so a change in Settings applies to the next
@@ -430,18 +450,11 @@ fun BrowserScreen(
     val focusManager = LocalFocusManager.current
     var showSettings by rememberSaveable { mutableStateOf(false) }
     var showNode by rememberSaveable { mutableStateOf(false) }
+    var showRadicle by rememberSaveable { mutableStateOf(false) }
     var showTabSwitcher by rememberSaveable { mutableStateOf(false) }
     var showHistory by rememberSaveable { mutableStateOf(false) }
     var showBookmarks by rememberSaveable { mutableStateOf(false) }
     var showDownloads by rememberSaveable { mutableStateOf(false) }
-    // Intentionally NOT `rememberSaveable`: rotation and the other
-    // declared `configChanges` don't recreate the Activity (see the
-    // manifest), but process death or an undeclared config change still
-    // does. In that case `tabs` is rebuilt as a fresh blank tab and we
-    // need to re-submit the homepage into it. If this survived
-    // recreation the load would be suppressed and the tab would render
-    // blank.
-    var didInitialLoad by remember { mutableStateOf(false) }
     var addressFocused by remember { mutableStateOf(false) }
     // Suggestions should only appear once the user has actively changed
     // the address-bar text. Tapping the pill (which select-alls the
@@ -456,10 +469,11 @@ fun BrowserScreen(
     // text lives here until it is submitted.
     var addressQuery by remember { mutableStateOf("") }
     val snackbarHostState = remember { SnackbarHostState() }
+
     val sitePermissions = remember(context) { SitePermissionBroker.get(context) }
     SitePermissionAndroidBridge(sitePermissions, snackbarHostState)
     // Any full-screen panel over the browser (they're all opaque).
-    val overlayShown = showSettings || showNode || showTabSwitcher ||
+    val overlayShown = showSettings || showNode || showRadicle || showTabSwitcher ||
         showHistory || showBookmarks || showDownloads
     val downloads = remember(context) { DownloadManager.get(context) }
 
@@ -631,7 +645,7 @@ fun BrowserScreen(
             BackAction.History -> {
                 // A navigation of its own (#94, see [BrowserState.loadGeneration]).
                 state.beginLoad()
-                state.loadUrl("javascript:history.back();void(0);")
+                state.loadUrl(HISTORY_BACK_JS)
             }
             BackAction.Home -> {
                 state.cancelPendingProbe()
@@ -678,6 +692,7 @@ fun BrowserScreen(
         displayPrefix: String?,
         displayUrl: String,
         loadUri: String = contentUri,
+        namedByUser: Boolean = false,
     ) {
         val generation = target.loadGeneration
         val isIpfs = contentUri.startsWith("ipfs://") || contentUri.startsWith("ipns://")
@@ -759,7 +774,8 @@ fun BrowserScreen(
             target.gatewayWork.finish(probeWork)
         }
         when (outcome) {
-            GatewayProbe.Outcome.Ok -> target.loadUrl(loadUri, displayPrefix = displayPrefix)
+            GatewayProbe.Outcome.Ok ->
+                target.loadUrl(loadUri, displayPrefix = displayPrefix, namedByUser = namedByUser)
             GatewayProbe.Outcome.Aborted -> { /* superseded by a later submit */ }
             is GatewayProbe.Outcome.Unreachable -> showError("ERR_CONNECTION_REFUSED")
             GatewayProbe.Outcome.NotFound, is GatewayProbe.Outcome.Other -> {
@@ -769,6 +785,106 @@ fun BrowserScreen(
                 showError(detail)
             }
         }
+    }
+
+    /**
+     * The submit flow's `web3://` branch (#123, ERC-8244): read the
+     * app's `html()` through the chain-data router and load it — at once
+     * when the read was verified (a proof or an RPC quorum) or came from
+     * the user's own RPC, or when these exact bytes were already let
+     * through this session. Code only one public RPC returned gets the
+     * *not cross-checked* warning, whose "Continue once" comes back here
+     * with its hash as [approvedUri] and runs exactly the bytes the
+     * warning described, without another read; code the RPCs disagreed
+     * about gets a warning with no way on.
+     */
+    fun submitOnchainApp(
+        target: BrowserState,
+        input: String,
+        source: SubmitSource,
+        approvedUri: String?,
+        namedByUser: Boolean,
+    ) {
+        target.clearEnsOverride()
+        target.ipfsLoad = false
+        val parsed = OnchainAppRef.parse(input)
+        if (parsed == null) {
+            target.addressBarText = pendingAddressBarText(target.addressBarText, input.trim(), source)
+            target.loadUrl(
+                ErrorPage.url(
+                    errorCode = "web3_invalid",
+                    displayUrl = input.trim(),
+                    protocol = "web3",
+                    detail = "Expected web3://<contract address>[:<chain ID>]/",
+                ),
+            )
+            return
+        }
+        val (app, tail) = parsed
+        val display = app.displayUrl(tail)
+        target.addressBarText = pendingAddressBarText(target.addressBarText, display, source)
+        target.resolving = true
+
+        fun onchainError(code: String, detail: String, continueUrl: String? = null) {
+            target.loadUrl(
+                ErrorPage.url(
+                    errorCode = code,
+                    displayUrl = display,
+                    protocol = "web3",
+                    // A form Chromium lets the page navigate to
+                    // ([OnchainAppRef.linkUrl]).
+                    retryUrl = app.linkUrl(tail),
+                    detail = detail,
+                    continueUrl = continueUrl,
+                ),
+            )
+        }
+
+        val probe = scope.launch {
+            try {
+                val pending = approvedUri?.let { target.onchain.takePending(app, it) }
+                val load = if (pending != null) {
+                    OnchainLoad.Loaded(pending)
+                } else {
+                    OnchainApps.init(context)
+                    // Off the main thread: decoding and hashing a
+                    // document of megabytes is real work.
+                    withContext(Dispatchers.Default) { OnchainApps.loader!!.load(app) }
+                }
+                // As in the ENS branch: a superseded read writes nothing.
+                ensureActive()
+                when (load) {
+                    is OnchainLoad.Failed -> onchainError(load.code, load.detail)
+                    is OnchainLoad.Loaded -> {
+                        val doc = load.document
+                        val approvals = OnchainApps.approvalsFor(target.private)
+                        val approved = approvedUri != null && doc.hash.equals(approvedUri, ignoreCase = true)
+                        when {
+                            doc.conflict -> onchainError("web3_conflict", doc.conflictDetail())
+                            doc.trusted || approved || approvals.contains(doc) -> {
+                                approvals.add(doc)
+                                target.onchain.handOff(doc)
+                                target.loadUrl(app.virtualUrl(tail), namedByUser = namedByUser)
+                            }
+                            else -> {
+                                target.onchain.offer(doc)
+                                val gate = EnsGate.create(display, doc.hash, app.linkUrl(tail))
+                                target.ensGate = gate
+                                onchainError(
+                                    "web3_unverified",
+                                    doc.unverifiedDetail(),
+                                    continueUrl = EnsGate.continueUrl(gate),
+                                )
+                            }
+                        }
+                    }
+                }
+            } finally {
+                target.resolving = false
+                target.finishPendingProbe(coroutineContext.job)
+            }
+        }
+        target.beginPendingProbe(probe, source, target = app.virtualUrl(tail))
     }
 
     fun submit(
@@ -820,6 +936,13 @@ fun BrowserScreen(
         // lifts a download block a declined offer left on it
         // ([DownloadOffers]); a page's own navigation doesn't.
         if (source == SubmitSource.User) downloads.allowOffers(target.id)
+        // Nor is it a load a restore put back over its page (#185 R4-F1).
+        if (source == SubmitSource.User) target.userNavigated()
+        // And the load it schedules is theirs: its redirects may end in
+        // an app link without a tap on a page (#173). Handed to that
+        // load's own `loadUrl` below, never left for whichever load
+        // comes next (R2-F2).
+        val namedByUser = source == SubmitSource.User
 
         // Any new submit supersedes a probe that was still in flight on
         // this tab — otherwise switching URL mid-probe would let the
@@ -871,6 +994,7 @@ fun BrowserScreen(
                 detail: String,
                 retryUrl: String = retryDisplay,
                 continueUrl: String? = null,
+                resolvedProtocol: String? = null,
             ) {
                 target.clearEnsOverride()
                 target.loadUrl(
@@ -881,6 +1005,7 @@ fun BrowserScreen(
                         retryUrl = retryUrl,
                         detail = detail,
                         continueUrl = continueUrl,
+                        resolvedProtocol = resolvedProtocol,
                     ),
                 )
             }
@@ -898,6 +1023,35 @@ fun BrowserScreen(
                     // itself; this is the tab's own last word on it.
                     ensureActive()
                     when (result) {
+                        // A typed scheme is an assertion (#97): content
+                        // on another transport is a "resolves to X, not
+                        // Y" page, never a silent switch. Checked before
+                        // the cross-check gate — asking the user to
+                        // accept an answer that couldn't load anyway
+                        // would be a question with no good answer; the
+                        // page says whose word it is instead. Its button
+                        // opens the name under the transport it does
+                        // resolve to: the user switching, by name.
+                        is EnsResult.Ok if requiredProtocol != null &&
+                            result.protocol != requiredProtocol -> {
+                            ensError(
+                                errorCode = "ens_wrong_protocol",
+                                detail = EnsGate.withTrustNote(
+                                    "$name resolves to ${result.protocol}:// content, " +
+                                        "not $requiredProtocol://",
+                                    result.trust,
+                                ),
+                                // A `.tez` website record has no name-
+                                // addressed scheme of its own: the generic
+                                // form follows it onto the web.
+                                retryUrl = if (result.protocol == "http" || result.protocol == "https") {
+                                    "ens://$name$suffix"
+                                } else {
+                                    "${result.protocol}://$name$suffix"
+                                },
+                                resolvedProtocol = result.protocol,
+                            )
+                        }
                         // Only one RPC server's word for it (#96): ask
                         // first. The user's "Continue once" comes back
                         // here with this very answer approved.
@@ -911,21 +1065,31 @@ fun BrowserScreen(
                             )
                         }
                         is EnsResult.Ok -> {
+                            val webRecord = result.protocol == "http" || result.protocol == "https"
                             // Remember hash/cid → name for the whole session
                             // (cross-tab address-bar preservation). Safe for
                             // every protocol — bzz, ipfs, and ipns all round-
                             // trip through [Gateways] + [DisplayUrl] now.
-                            KnownEnsNames.record(result.uri, name)
-                            if (requiredProtocol != null && result.protocol != requiredProtocol) {
-                                // Retry with the generic ens:// form: the
-                                // same constrained URL would fail forever,
-                                // but the content itself is loadable.
-                                ensError(
-                                    errorCode = "ens_wrong_protocol",
-                                    detail = "$name resolves to ${result.protocol}:// content, " +
-                                        "not $requiredProtocol://",
-                                    retryUrl = "ens://$name$suffix",
-                                )
+                            // With how it was checked, for the bar's
+                            // trust shield (#97). A `.tez` name's http(s)
+                            // website is not content the name's origin
+                            // serves, so it isn't recorded.
+                            if (!webRecord) KnownEnsNames.record(result.uri, name, result.trust)
+                            if (webRecord) {
+                                // A `.tez` website record on the ordinary
+                                // web: navigate there directly, as desktop
+                                // does. A redirect record is the whole
+                                // destination; a content URL keeps the
+                                // typed path.
+                                val web = if (result.redirect) {
+                                    result.uri
+                                } else {
+                                    TezosDomainsResolver.appendWebsiteSuffix(result.uri, suffix)
+                                }
+                                target.clearEnsOverride()
+                                target.addressBarText =
+                                    pendingAddressBarText(target.addressBarText, web, source)
+                                target.loadUrl(web)
                             } else if (result.protocol == "bzz" ||
                                 result.protocol == "ipfs" ||
                                 result.protocol == "ipns"
@@ -941,6 +1105,7 @@ fun BrowserScreen(
                                     // above), and per-site storage sticks
                                     // to the name across content updates.
                                     loadUri = "ens://$name$suffix",
+                                    namedByUser = namedByUser,
                                 )
                             } else {
                                 ensError(
@@ -959,10 +1124,22 @@ fun BrowserScreen(
                         is EnsResult.Unsupported ->
                             ensError(
                                 "ens_unsupported_codec",
-                                detail = EnsGate.withTrustNote("codec ${result.codec}", result.trust),
+                                // A `.tez` record's "codec" is the reason
+                                // its website URI was refused.
+                                detail = EnsGate.withTrustNote(
+                                    if (name.endsWith(".tez")) result.codec else "codec ${result.codec}",
+                                    result.trust,
+                                ),
                             )
-                        is EnsResult.Error ->
-                            ensError("ens_lookup_failed", detail = result.reason)
+                        // The name itself was refused: no lookup ran, so
+                        // "couldn't reach an RPC endpoint" would be a lie.
+                        is EnsResult.Error -> refusedNameErrorCode(result.reason)?.let {
+                            ensError(it, detail = result.error)
+                        } ?: ensError(
+                            "ens_lookup_failed",
+                            // `.tez` says what failed.
+                            detail = if (name.endsWith(".tez")) "${result.reason}: ${result.error}" else result.reason,
+                        )
                         // RPC servers disagreed (#96): nothing to load.
                         is EnsResult.Conflict ->
                             ensError("ens_conflict", detail = EnsGate.conflictDetail(result))
@@ -979,6 +1156,14 @@ fun BrowserScreen(
             return
         }
 
+        // A contract-hosted app (#123): its document is read from the
+        // chain here, gated on how it was read, and handed to the
+        // interceptor with the navigation.
+        if (OnchainAppRef.isWeb3Scheme(canonical)) {
+            submitOnchainApp(target, canonical, source, approvedUri, namedByUser)
+            return
+        }
+
         val url = UrlParser.toUrl(canonical, searchTemplate)
         // Home is a special non-URL destination — clear the tab, blank
         // the WebView, and let the Compose [HomeScreen] overlay take
@@ -992,7 +1177,12 @@ fun BrowserScreen(
         // `bzz://` / `ipfs://` click waits for the commit before the
         // pill describes where it is going.
         target.addressBarText = pendingAddressBarText(target.addressBarText, url, source)
-        target.clearEnsOverride()
+        // A Reload, or an edited path, of the name on screen maps onto
+        // its own origin ([BrowserState.effectiveFetchUrl]) and keeps the
+        // tab's override — generic stays generic, a typed scheme keeps
+        // asserting — instead of the next Reload re-reading the shown
+        // `ipfs://name.eth` as a fresh assertion (#97).
+        if (!target.isUnderOverride(url)) target.clearEnsOverride()
 
         // Direct content-addressed URLs (bzz://, ipfs://, ipns://, or
         // their loaded gateway form) get the same probe-gated treatment
@@ -1008,6 +1198,7 @@ fun BrowserScreen(
                         contentUri = contentUri,
                         displayPrefix = null,
                         displayUrl = contentUri,
+                        namedByUser = namedByUser,
                     )
                 } finally {
                     target.resolving = false
@@ -1018,7 +1209,7 @@ fun BrowserScreen(
             return
         }
 
-        target.loadUrl(url)
+        target.loadUrl(url, namedByUser = namedByUser)
     }
 
     // "New private tab" (#86), from the menu and the tab switcher —
@@ -1090,8 +1281,10 @@ fun BrowserScreen(
     // address bar here — the home surface should be the first thing
     // the user sees, not an already-open keyboard.
     LaunchedEffect(Unit) {
-        if (!didInitialLoad) {
-            didInitialLoad = true
+        // Once per tab list ([TabsState.initialLoadDone]): not again
+        // into the active tab of tabs that outlived a relaunch (#183).
+        if (!tabs.initialLoadDone) {
+            tabs.initialLoadDone = true
             submit(tabs.active, tabs.homepageUrl)
         }
     }
@@ -1100,20 +1293,22 @@ fun BrowserScreen(
     // MainActivity.onNewIntent). Cold start doesn't come through here —
     // it's the [initialUrl] above — so a link tapped now is a second
     // destination and gets its own tab rather than replacing whatever
-    // the user was reading. [onDeepLinkHandled] clears the pending URL
-    // so a config change doesn't re-open it.
-    LaunchedEffect(deepLinkUrl) {
-        val url = deepLinkUrl ?: return@LaunchedEffect
+    // the user was reading. [deepLink] is the head of a queue (several
+    // links can arrive in one frame); [onDeepLinkHandled] pops it so a
+    // config change doesn't re-open it and the next link gets its turn.
+    LaunchedEffect(deepLink) {
+        val link = deepLink ?: return@LaunchedEffect
         // Whatever full-screen overlay was up would otherwise hide the
         // tab we just opened.
         showSettings = false
         showNode = false
+        showRadicle = false
         showTabSwitcher = false
         showHistory = false
         showBookmarks = false
         showDownloads = false
-        submit(tabs.newTab(), url)
-        onDeepLinkHandled()
+        submit(tabs.newTab(), link.url)
+        onDeepLinkHandled(link)
     }
 
     // The chrome is a floating capsule layered *over* an edge-to-edge
@@ -1489,6 +1684,14 @@ fun BrowserScreen(
         // asks for and strictly better at "no layout shifts" — an
         // overlay on fixed geometry can't move anything, whereas the
         // strip's reserved slot was 14 dp of permanently dead band.
+        // The page menu's per-site ad-blocking switch (#126): whether
+        // blocking is really on for the page — not allowlisted, an
+        // engine loaded, no list exempting it — re-read whenever the
+        // allowlist or the engine changes.
+        val adblockRevision by Adblock.revision.collectAsState()
+        val adblockState = remember(adblockRevision, state.url, state.private) {
+            Adblock.siteState(state.url, state.private)
+        }
         Box(modifier = Modifier.align(Alignment.BottomCenter)) {
             // Tap-to-dismiss catcher for the whole chrome band — the
             // capsule's own gutters, the side margins and the padding
@@ -1581,7 +1784,7 @@ fun BrowserScreen(
                     onBack = goBack,
                     onForward = {
                         state.beginLoad()
-                        state.loadUrl("javascript:history.forward();void(0);")
+                        state.loadUrl(HISTORY_FORWARD_JS)
                     },
                     onHome = {
                         submit(state, tabs.homepageUrl)
@@ -1609,7 +1812,7 @@ fun BrowserScreen(
                     onOpenBookmarks = { showBookmarks = true },
                     onOpenDownloads = { showDownloads = true },
                     onReload = {
-                        val url = state.url.ifBlank { state.addressBarText }
+                        val url = state.reloadUrl()
                         if (url.isNotBlank()) submit(state, url)
                     },
                     // Stop covers both halves of a load: the WebView's
@@ -1645,7 +1848,33 @@ fun BrowserScreen(
                         ?.takeIf { state.url.isNotBlank() }
                         ?.let { pageZoom.levelFor(it, state.private) },
                     onZoom = { action -> state.zoomSite?.let { pageZoom.apply(it, action, state.private) } },
+                    // Request desktop site (#180): per site, like zoom,
+                    // but never for a dweb page (no key). Toggling asks
+                    // for the page again, as Reload does, and the load
+                    // picks the user agent for its site.
+                    desktopSite = desktopSiteOf(state.zoomSite)
+                        ?.takeIf { state.url.isNotBlank() }
+                        ?.let { desktopSites.isDesktop(it, state.private) },
+                    onToggleDesktopSite = {
+                        desktopSiteOf(state.zoomSite)?.let { site ->
+                            desktopSites.toggle(site, state.private)
+                            val url = state.url.ifBlank { state.addressBarText }
+                            if (url.isNotBlank()) submit(state, url)
+                        }
+                    },
                     onPrint = { tabs.printPage?.invoke(state) },
+                    adblockState = adblockState,
+                    onToggleAdblock = {
+                        val site = adblockSiteFor(state.url) ?: return@BottomToolbar
+                        val current = Adblock.siteState(state.url, state.private) ?: return@BottomToolbar
+                        if (!current.toggleable) return@BottomToolbar
+                        Adblock.setAllowlisted(site, allowed = current.checked, private = state.private)
+                        if (dropsMemoryCache(current)) tabs.dropMemoryCache?.invoke(state)
+                        // Already-loaded ads (or already-blocked content)
+                        // only change with the next load of the page.
+                        val url = state.url.ifBlank { state.addressBarText }
+                        if (url.isNotBlank()) submit(state, url)
+                    },
                     modifier = Modifier
                         .widthIn(max = CHROME_MAX_WIDTH)
                         .fillMaxWidth(),
@@ -1712,6 +1941,8 @@ fun BrowserScreen(
             repo = repo,
             ipfsInfo = ipfsInfo,
             onIpfsToggle = onIpfsToggle,
+            radicle = radicle,
+            onOpenRadicle = { showRadicle = true },
             // The reopen stack keeps closed tabs' pages, titles and
             // back/forward lists — history by any other name.
             onClearHistory = { tabs.forgetClosedTabs() },
@@ -1732,7 +1963,19 @@ fun BrowserScreen(
             nodeInfo = nodeInfo,
             runNodeEnabled = runNodeEnabled,
             onToggleRunNode = onToggleRunNode,
+            myotisInfo = myotisInfo,
+            myotisEnabled = myotisEnabled,
+            onToggleMyotis = onToggleMyotis,
             onDismiss = { showNode = false },
+        )
+    }
+
+    // Settings → Nodes → Radicle node (#73); over Settings, like NodeScreen.
+    if (showRadicle) {
+        RadicleScreen(
+            radicle = radicle,
+            runNodeEnabled = runNodeEnabled,
+            onDismiss = { showRadicle = false },
         )
     }
 

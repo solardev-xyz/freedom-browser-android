@@ -77,4 +77,12 @@ class SettingsSearchTest {
         )
         assertEquals(setOf("status"), visibleSettingsRows("4217", "IPFS", ipfsRows(info)))
     }
+
+    @Test
+    fun `desktop site choices are found under clear site data`() {
+        // #180: "Clear cookies & site data" also forgets desktop-site choices.
+        for (q in listOf("desktop site", "Desktop")) {
+            assertEquals(q, setOf("site-data"), visibleSettingsRows(q, "Browsing data", browsingDataRows(3, 2)))
+        }
+    }
 }

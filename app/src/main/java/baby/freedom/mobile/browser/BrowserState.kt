@@ -21,8 +21,8 @@ import kotlinx.coroutines.Job
  * WebView runs on the throwaway [PrivateProfile] (its own cookies,
  * storage and cache, deleted once the last private tab closes), and
  * nothing it browses is written to history, the favicon cache,
- * remembered zoom levels, remembered site permissions or the download
- * list on disk. It never goes on the reopen-closed-tab stack.
+ * remembered zoom levels, remembered desktop sites, remembered site
+ * permissions or the download list on disk. It never goes on the reopen-closed-tab stack.
  */
 class BrowserState(val id: Long, val private: Boolean = false) {
     /**
@@ -63,8 +63,27 @@ class BrowserState(val id: Long, val private: Boolean = false) {
      * override only catches in-manifest navigation within a tab, the
      * registry catches raw `bzz://<hash>` loads of a previously-resolved
      * hash in any tab.
+     *
+     * A bare-name [prefix] (a generic `name.eth` submit) makes no claim
+     * about the transport, so what the bar shows ([shown]) follows the
+     * name's current answer — `ipfs://vitalik.eth` (#97). A scheme
+     * prefix (`bzz://name.eth`, typed) is an assertion
+     * ([assertedProtocol]) and is shown as typed.
      */
-    data class Override(val baseUrl: String, val prefix: String)
+    data class Override(val baseUrl: String, val prefix: String) {
+        /** The prefix as the address bar shows it; see [DisplayUrl.withTransport]. */
+        val shown: String get() = DisplayUrl.withTransport(prefix)
+
+        /**
+         * `bzz` / `ipfs` / `ipns` when the prefix is a typed-scheme form
+         * — the transport this tab's address asserts, which a document
+         * re-check holds the name to ([Gateways.reverifyEnsDocument]).
+         * `null` for a bare name, which accepts any transport.
+         */
+        val assertedProtocol: String?
+            get() = prefix.substringBefore("://", "").lowercase()
+                .takeIf { it in ASSERTING_SCHEMES }
+    }
 
     var url by mutableStateOf("")
         internal set
@@ -105,11 +124,26 @@ class BrowserState(val id: Long, val private: Boolean = false) {
         internal set
 
     /**
+     * How the name the page on screen was reached through was checked
+     * (#96) — the trust shield on the protocol badge (#97, [TrustShield]).
+     * Taken at each document's commit from the answer it was served
+     * from; `null` for a page that isn't a name's (or is an error page).
+     */
+    internal var nameTrust by mutableStateOf<NameTrust?>(null)
+
+    /**
      * The "Continue once" the tab's *not cross-checked* warning offers,
      * if that's what it is showing (#96, see [EnsGate]). Replaced by the
      * next such warning; used up by the Continue it was made for.
      */
     internal var ensGate: EnsGate? = null
+
+    /**
+     * The tab's onchain-app documents (#123): the one its submit flow
+     * hands the interceptor, what it served last per app, and the one a
+     * not-cross-checked warning is asking about ([OnchainAppTab]).
+     */
+    val onchain = OnchainAppTab(private)
 
     /**
      * This tab's current (or pending) load is content the embedded IPFS
@@ -297,6 +331,22 @@ class BrowserState(val id: Long, val private: Boolean = false) {
         internal set
 
     /**
+     * The WebView URL of the navigation the user named, scheduled as
+     * [pendingUrl] by their submit's own [loadUrl] (`namedByUser`),
+     * until the WebView takes it ([takeUserNamedLoad]).
+     */
+    private var userNamedPendingUrl: String? = null
+
+    /**
+     * Whether the load of [url] the tab's WebView is starting from
+     * [pendingUrl] is the one the user named: its server redirects may
+     * then end in a link to another app without a tap on any page
+     * (#173, see [externalLinkVerdict]). One load's worth: taken here.
+     */
+    internal fun takeUserNamedLoad(url: String): Boolean =
+        (userNamedPendingUrl == url).also { userNamedPendingUrl = null }
+
+    /**
      * The site-permission prompt this tab is waiting on (#81), or null.
      * Owned by [SitePermissionBroker]; [BrowserScreen] shows it while
      * this tab is the active one, so a background tab can never put a
@@ -325,22 +375,25 @@ class BrowserState(val id: Long, val private: Boolean = false) {
         internal set
 
     /**
-     * What a tab brought back by [TabsState.reopenClosedTab] should be
-     * rebuilt from: the closed WebView's saved state, the URL to
+     * What a tab brought back by [TabsState.reopenClosedTab] (or whose
+     * WebView was rebuilt, #183) should be rebuilt from: the closed WebView's saved state, the URL to
      * bring back afresh if that state can't be restored, and — for a
      * tab closed before its page committed — the address to put back
      * even after a successful restore ([resubmitUrl], blank otherwise).
      * [submit] is false when that first navigation was one the user
      * had stopped: the address comes back in the bar, with Reload, but
-     * isn't fetched again. Consumed (and cleared) by
-     * [BrowserWebViewHost] when it creates this tab's WebView; null for
-     * every other tab.
+     * isn't fetched again. [overPage]: the tab had a committed page
+     * with a load still in flight over it (an Activity relaunch, #183
+     * R1-F2), so [resubmitUrl] goes in once that page is restored.
+     * Consumed (and cleared) by [BrowserWebViewHost] when it creates
+     * this tab's WebView; null for every other tab.
      */
     class PendingRestore(
         val webViewState: Bundle?,
         val fallbackUrl: String,
         val resubmitUrl: String = "",
         val submit: Boolean = true,
+        val overPage: Boolean = false,
     ) {
         /**
          * What the rebuilt WebView should do once its blank entry
@@ -353,9 +406,95 @@ class BrowserState(val id: Long, val private: Boolean = false) {
          */
         fun afterBlank(restored: Boolean, currentEntryUrl: String?): AfterBlank? {
             val address = if (restored) resubmitUrl else fallbackUrl
+            if (address.isBlank()) return null
             val onBlank = currentEntryUrl == null || currentEntryUrl == ABOUT_BLANK
-            return if (address.isNotBlank() && onBlank) AfterBlank(address, submit) else null
+            return when {
+                onBlank -> AfterBlank(address, submit)
+                // A load that hadn't committed over a real page yet
+                // (#183 R1-F2): the restored list ends on that page, so
+                // the address goes in once *its* reload has finished —
+                // whatever URL that ends on (a redirect, R2-F2) — and
+                // supersedes it as it did before the relaunch.
+                restored && overPage && submit -> AfterBlank(address, submit = true, overPage = true)
+                else -> null
+            }
         }
+
+        companion object {
+            /**
+             * What to rebuild a tab from, given its committed [url], its
+             * [address] and its Stop latch ([loadStopped]) as
+             * [restorableAddress] reports them. A tab whose page hadn't
+             * committed yet gets its address back — submitted again,
+             * unless the user had stopped that load. So does a tab with
+             * a load still [inFlight] over its committed page (see
+             * [uncommittedLoad]), once that page is back.
+             */
+            fun of(
+                url: String,
+                address: String,
+                loadStopped: Boolean,
+                webViewState: Bundle?,
+                inFlight: Boolean = false,
+            ): PendingRestore {
+                val overPage = url.isNotBlank() && inFlight && !loadStopped
+                return PendingRestore(
+                    webViewState = webViewState,
+                    fallbackUrl = address.ifBlank { url },
+                    resubmitUrl = address.takeIf { url.isBlank() || overPage }.orEmpty(),
+                    submit = !(url.isBlank() && loadStopped),
+                    overPage = overPage,
+                )
+            }
+        }
+    }
+
+    /**
+     * This tab's committed URL and address as a rebuilt tab should get
+     * them back. A popup nothing has committed in yet shows its
+     * `about:blank` as a page (see [blankIsPage]); rebuilt, that's the
+     * blank home entry, not an address to load.
+     */
+    internal fun restorableAddress(): Pair<String, String> {
+        val popupBlank = blankIsPage && url == ABOUT_BLANK
+        val restoredUrl = if (popupBlank) "" else url
+        val address = if (popupBlank && addressBarText == ABOUT_BLANK) "" else addressBarText
+        return restoredUrl to address
+    }
+
+    /**
+     * A navigation is under way over the committed page and hasn't
+     * committed yet: a submit still being resolved or probed, or one
+     * the WebView is fetching, whose address the bar already shows in
+     * place of the page's (#183 R1-F2). Not one the user stopped. A
+     * link the page follows itself keeps the page's address until it
+     * commits, so it doesn't count — there's no address to put back.
+     */
+    internal fun uncommittedLoad(): Boolean =
+        !loadAborted && url.isNotBlank() && addressBarText.isNotBlank() &&
+            addressBarText != url && (resolving || progress >= 0)
+
+    /**
+     * The [navCounter] of the last navigation the tab's WebView was
+     * handed. Survives with the tab when its WebView doesn't (#183, see
+     * [TabsState.parkForRelaunch]), so the rebuilt WebView isn't handed
+     * that same navigation again on top of its restored state.
+     */
+    internal var handedNavCounter: Int = 0
+
+    /**
+     * The tab's WebView is being destroyed while the tab lives on (#183,
+     * an Activity relaunch). What only mirrored that WebView goes with
+     * it: a load in flight (the rebuilt WebView reports its own), a
+     * name still being resolved (its job belonged to the screen being
+     * torn down), find-in-page matches, playing audio.
+     */
+    internal fun webViewLost() {
+        cancelPendingProbe()
+        progress = -1
+        resolving = false
+        find.close()
+        playingAudio = false
     }
 
     internal var pendingRestore: PendingRestore? = null
@@ -366,11 +505,120 @@ class BrowserState(val id: Long, val private: Boolean = false) {
      * [BrowserWebViewHost] for a reopened tab whose restored (or
      * unrestorable) state leaves the WebView *on* that entry, and
      * consumed by the first `onPageFinished` that follows, whichever
-     * entry it is for: only the blank one acts on it.
+     * entry it is for: only the blank one acts on it. With [overPage]
+     * set, the restored list ends on a real page instead, under a load
+     * that hadn't committed yet (#183 R1-F2): the commit of that page's
+     * own reload submits the address ([afterPageCommitted]).
+     *
+     * Either way it belongs to the restore's own load and nothing
+     * after it: any navigation handed to the WebView after the restore
+     * — the user's submit, Home, Back / Forward, Reload, Stop, a link
+     * the user taps on the page — drops it ([restoreLoadSuperseded],
+     * #185 R2-F1) before it has gone in.
      */
-    class AfterBlank(val address: String, val submit: Boolean)
+    class AfterBlank(val address: String, val submit: Boolean, val overPage: Boolean = false)
 
     internal var afterBlank: AfterBlank? = null
+        private set
+
+    internal fun armAfterRestore(after: AfterBlank?) {
+        afterBlank = after
+    }
+
+    /**
+     * A navigation other than the restore's own load was handed to this
+     * tab's WebView (or its load was stopped): the address the restore
+     * had waiting ([afterBlank]) is no longer the next thing to load.
+     */
+    internal fun restoreLoadSuperseded() {
+        afterBlank = null
+        putBackOverLoadingPage = false
+    }
+
+    /**
+     * The load put back over the restored page ([claimAfterPage]) is on
+     * its way to the WebView, which is still loading that page: it goes
+     * in without stopping it first (#185 R4-F1). The restored page's own
+     * reload committed a moment ago and its HTML and subresources are
+     * still coming in — a stop would leave it truncated, for good if the
+     * put-back load then doesn't commit (a Stop, a 204, a download).
+     * Before the relaunch the load was in flight over a complete page;
+     * Chromium keeps that page loading until the new one commits. One
+     * that needs the other user agent (#180) can't go in under a page
+     * still loading, so it waits for that page's finish instead, for at
+     * most a few seconds ([PutBackHold]).
+     *
+     * One handoff's worth, taken by the WebView's nav observer
+     * ([takePutBackKeepsPage]), and dropped by whatever supersedes the
+     * put-back before it gets there — the same things that drop
+     * [afterBlank] ([restoreLoadSuperseded]), the user's own submit or
+     * Home ([userNavigated]) — or by the restored page finishing, when
+     * there is nothing left to cut.
+     */
+    private var putBackOverLoadingPage = false
+
+    /** Whether the load being handed to the WebView now is the put-back one (see [putBackOverLoadingPage]). */
+    internal fun takePutBackKeepsPage(): Boolean =
+        putBackOverLoadingPage.also { putBackOverLoadingPage = false }
+
+    /**
+     * The user named a navigation of their own (a submit, Home): a load
+     * put back over the restored page and not yet handed to the WebView
+     * isn't the next one any more, so what's handed next stops the page
+     * first as usual.
+     */
+    internal fun userNavigated() {
+        putBackOverLoadingPage = false
+    }
+
+    /**
+     * The blank home entry finished: the address waiting for it, if it
+     * was armed for that entry. One armed over a restored page
+     * ([AfterBlank.overPage]) is dropped instead — the tab is Home.
+     */
+    internal fun takeAfterBlankEntry(): AfterBlank? =
+        afterBlank.also { afterBlank = null }?.takeUnless { it.overPage }
+
+    /**
+     * A real page finished. A pending blank-entry address is dropped: it
+     * can't apply to a later Home. One armed over the restored page
+     * ([AfterBlank.overPage]) was already taken at that page's commit
+     * ([afterPageCommitted]); if it's still here, nothing committed.
+     */
+    internal fun afterPageFinished() {
+        if (afterBlank?.overPage == false) afterBlank = null
+        putBackOverLoadingPage = false
+    }
+
+    /**
+     * A main-frame document committed. The address armed over the
+     * restored page ([AfterBlank.overPage]) is returned, still armed,
+     * for the caller to [claimAfterPage] once this commit has updated
+     * the tab: the first commit after the restore is that page's
+     * reload, under whatever URL it ended on (a redirect, #185 R2-F2).
+     * It goes in at the commit, not at the page's finish: the load was
+     * in flight over this page before the relaunch, and is again from
+     * before the page can take any input — so a navigation the user
+     * starts on it (a tapped link, a POST form, which never reaches
+     * `shouldOverrideUrlLoading`) replaces that load in the WebView
+     * itself, as it would have before, instead of being overwritten by
+     * it once the page finishes (#185 R3-F1).
+     */
+    internal fun afterPageCommitted(): AfterBlank? = afterBlank?.takeIf { it.overPage }
+
+    /**
+     * Whether [after] (from [afterPageCommitted]) is still the load to
+     * submit now: nothing superseded it in between, it wasn't claimed
+     * already, and the user hasn't stopped the tab. Disarms it either way.
+     * A claimed load goes to the WebView without stopping the restored
+     * page ([takePutBackKeepsPage]).
+     */
+    internal fun claimAfterPage(after: AfterBlank): Boolean {
+        if (afterBlank !== after) return false
+        afterBlank = null
+        putBackOverLoadingPage = !loadAborted
+        return putBackOverLoadingPage
+    }
 
     /**
      * Compact-on-scroll state of the floating capsule for this tab.
@@ -565,15 +813,28 @@ class BrowserState(val id: Long, val private: Boolean = false) {
      * scheme-constrained ENS load. Passing `null` (the default) leaves
      * any existing override untouched — reload, back, and forward all
      * reuse the current override. Call [clearEnsOverride] to reset.
+     *
+     * [namedByUser]: this is the load a user's own submit scheduled
+     * (#173, [takeUserNamedLoad]). Only [BrowserScreen]'s submit passes
+     * it, at the load that submit makes.
      */
-    fun loadUrl(url: String, displayPrefix: String? = null) {
+    fun loadUrl(url: String, displayPrefix: String? = null, namedByUser: Boolean = false) {
         cancelPendingProbe()
         // A new load supersedes whatever the last Stop aborted, so the
         // progress latch opens again.
         loadAborted = false
+        // For a name, the session's answer is only a first guess: the
+        // main-frame interceptor re-checks it and, before the fetch
+        // starts, sets the flag from the answer it actually serves —
+        // which a failed re-check can hold on this tab's older one
+        // (see `noteMainFrameContentLoad`, #179 R5-F1).
         ipfsLoad = ipfsLoadFor(url, ipfsLoad)
         val loadable = Gateways.toLoadable(url)
         pendingUrl = loadable
+        // Named by the user only when their submit's own load says so
+        // (#173): never an error page, a restore, or a Back step that
+        // happens to come after it (R2-F2).
+        userNamedPendingUrl = loadable.takeIf { namedByUser }
         if (displayPrefix != null) {
             // The override base is the virtual origin the content is
             // served from — in-manifest navigation stays under it, so
@@ -606,6 +867,24 @@ class BrowserState(val id: Long, val private: Boolean = false) {
         navCounter++
     }
 
+    /**
+     * The transport this tab's address asserts for [name] (#97): the
+     * typed scheme of the display override, if that override is the
+     * name's own origin. `null` — any transport — otherwise. Read from
+     * the interceptor's threads for a document's re-check.
+     */
+    fun assertedProtocolFor(name: String): String? {
+        val o = override ?: return null
+        if (o.baseUrl != VirtualOrigin.originFor(ContentRoot.Ens(name.lowercase()))) return null
+        return o.assertedProtocol
+    }
+
+    /** Is [url] on the display override's origin (its manifest)? */
+    fun isUnderOverride(url: String): Boolean {
+        val o = override ?: return false
+        return startsWithPrefix(url, o.baseUrl)
+    }
+
     /** Drop any active ENS display override. Call before loading a URL
      *  that the user explicitly typed (and that isn't an ENS name). */
     fun clearEnsOverride() {
@@ -627,9 +906,11 @@ class BrowserState(val id: Long, val private: Boolean = false) {
     fun navigateHome() {
         // Home is home, even for a popup whose opener left it blank.
         blankIsPage = false
+        userNavigated()
         cancelPendingProbe()
         capsuleCollapse.expand()
         override = null
+        nameTrust = null
         url = ""
         title = ""
         addressBarText = ""
@@ -664,10 +945,55 @@ class BrowserState(val id: Long, val private: Boolean = false) {
      */
     fun effectiveFetchUrl(raw: String): String {
         val o = override ?: return raw
-        if (raw.startsWith(o.prefix)) {
-            return o.baseUrl + raw.substring(o.prefix.length)
+        for (p in listOfNotNull(o.prefix, shownPrefixOf(o)).distinct()) {
+            if (startsWithPrefix(raw, p)) return o.baseUrl + raw.substring(p.length)
         }
         return raw
+    }
+
+    /**
+     * What Reload submits: the page on screen ([url]), or the pending
+     * address if nothing has committed yet.
+     *
+     * A generic ENS load shows its transport (`ipfs://vitalik.eth/p`,
+     * #97), but that scheme is the bar describing the answer, not the
+     * user asserting one — so Reload hands back the override's own
+     * bare form, which [effectiveFetchUrl] maps onto the loaded
+     * manifest, instead of re-submitting the shown string as a
+     * typed-scheme assertion.
+     *
+     * Typing the scheme the bar already shows for the name gets the
+     * same treatment: [effectiveFetchUrl] maps it through the shown
+     * prefix onto the generic override, so it doesn't assert either
+     * (R1-F4). A typed scheme asserts when it is a different one
+     * (`bzz://vitalik.eth` over a shown `ipfs://vitalik.eth/`) or
+     * when the tab isn't already on the name.
+     */
+    fun reloadUrl(): String {
+        val shown = url.ifBlank { addressBarText }
+        val o = override ?: return shown
+        val p = shownPrefixOf(o) ?: return shown
+        if (p != o.prefix && startsWithPrefix(shown, p)) {
+            return o.prefix + shown.substring(p.length)
+        }
+        return shown
+    }
+
+    /**
+     * The override's prefix in the form the bar *showed* it for the page
+     * on screen — the scheme [url] was committed with, not the one
+     * [Override.shown] would pick now. A generic name's transport is
+     * read at display time, so it can have moved since (another tab's
+     * re-check, R1-F1); what the user saw, and edits, is this form.
+     * Falls back to [Override.shown] before anything has committed.
+     */
+    private fun shownPrefixOf(o: Override): String? {
+        if (o.prefix.contains("://")) return o.prefix
+        if (url.isBlank()) return o.shown
+        val scheme = url.substringBefore("://", "")
+        if (scheme !in ASSERTING_SCHEMES) return null
+        val p = "$scheme://${o.prefix}"
+        return p.takeIf { startsWithPrefix(url, it) }
     }
 
     /** Tokens the WebView client should not treat as "new" navigations. */
@@ -683,6 +1009,17 @@ class BrowserState(val id: Long, val private: Boolean = false) {
         canGoBack = false
         canGoForward = false
         override = null
+        nameTrust = null
         thumbnail = null
     }
 }
+
+/**
+ * Does [s] start with [prefix] at an address boundary — the prefix is
+ * the whole host, not `vitalik.eth` inside `vitalik.ethx`?
+ */
+private fun startsWithPrefix(s: String, prefix: String): Boolean =
+    s.startsWith(prefix) && (s.length == prefix.length || s[prefix.length] in "/?#")
+
+/** Schemes that, typed in front of a name, assert its transport (#97). */
+private val ASSERTING_SCHEMES = setOf("bzz", "ipfs", "ipns")
