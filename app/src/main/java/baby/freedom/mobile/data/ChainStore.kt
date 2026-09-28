@@ -13,6 +13,7 @@ import baby.freedom.mobile.chains.BuiltInChains
 import baby.freedom.mobile.chains.Chain
 import baby.freedom.mobile.chains.ChainInput
 import java.io.IOException
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.emitAll
@@ -88,7 +89,9 @@ class ChainStore internal constructor(
                 }
             }
             result
-        } catch (e: IOException) {
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
             Log.w(TAG, "writing chain failed", e)
             AddResult.FAILED
         }
@@ -104,7 +107,9 @@ class ChainStore internal constructor(
                 prefs.remove(keyOf(id))
             }
             removed
-        } catch (e: IOException) {
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
             Log.w(TAG, "removing chain failed", e)
             false
         }

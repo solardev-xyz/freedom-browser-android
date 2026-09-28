@@ -8,6 +8,8 @@ import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
 import kotlin.concurrent.thread
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -364,7 +366,13 @@ object Chainlist {
 class ChainlistService internal constructor(
     private val cacheFile: File,
     private val fetch: suspend () -> String,
-    private val background: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
+    private val background: CoroutineScope = CoroutineScope(
+        SupervisorJob() + Dispatchers.IO +
+            // Backstop only: the refresh below already catches everything
+            // but cancellation. Nobody waits on it, so nothing it throws may
+            // reach the thread's uncaught handler and kill the app.
+            CoroutineExceptionHandler { _, e -> Log.w(TAG, "chainlist background job failed", e) },
+    ),
     private val clock: () -> Long = System::currentTimeMillis,
 ) {
     private val mutex = Mutex()
@@ -418,8 +426,14 @@ class ChainlistService internal constructor(
                     store(body, parsed)
                     failedAt = null
                 }
-            } catch (e: IOException) {
-                Log.w(TAG, "chainlist refresh failed, keeping the stale copy: ${e.message}")
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                // Not just IOException: download() re-raises whatever its
+                // worker thread hit (a platform RuntimeException, an OOM on a
+                // body near the cap), and an unattended job must never crash
+                // the app over a refresh nobody is waiting for.
+                Log.w(TAG, "chainlist refresh failed, keeping the stale copy", e)
                 mutex.withLock { failedAt = clock() }
             }
         }

@@ -7,7 +7,10 @@ import java.io.IOException
 import java.nio.file.Files
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineExceptionHandler
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
@@ -466,6 +469,44 @@ class ChainlistTest {
         assertEquals(3, net.calls)
         service.entries()
         assertEquals(3, net.calls)
+    }
+
+    /**
+     * R6-F1: a background refresh that dies with something other than an
+     * IOException (a platform RuntimeException, an OOM re-raised from the
+     * download thread) records the failure and backs off; nothing escapes
+     * the job to the thread's uncaught handler, where it would kill the app.
+     */
+    @Test
+    fun aRefreshThrowingANonIoErrorIsContained() = runBlocking {
+        var now = 1_700_000_000_000L
+        val file = File(dir, "rpcs.json")
+        val net = Net { catalog }
+        ChainlistService(file, net::fetch) { now }.entries()
+
+        now += 2 * Chainlist.CACHE_TTL_MS
+        val escaped = mutableListOf<Throwable>()
+        // No backstop handler of the service's own here: an exception that
+        // left the job would land in this one instead.
+        val scope = CoroutineScope(
+            SupervisorJob() + Dispatchers.IO + CoroutineExceptionHandler { _, e -> escaped += e },
+        )
+        for (boom in listOf<Throwable>(RuntimeException("platform bug"), OutOfMemoryError("body"))) {
+            net.body = { throw boom }
+            val service = ChainlistService(file, net::fetch, scope) { now }
+            val callsBefore = net.calls
+            assertEquals(6, service.entries().size)
+            val job = service.refreshing!!
+            job.join()
+            assertFalse(job.isCancelled)
+            assertEquals(callsBefore + 1, net.calls)
+            assertTrue(escaped.toString(), escaped.isEmpty())
+
+            // The failure was recorded: the next visit keeps the stale copy
+            // and doesn't retry within the back-off.
+            assertEquals(6, service.entries().size)
+            assertEquals(callsBefore + 1, net.calls)
+        }
     }
 
     @Test

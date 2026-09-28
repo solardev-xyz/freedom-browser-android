@@ -1,5 +1,6 @@
 package baby.freedom.mobile.browser
 
+import android.util.Log
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -59,6 +60,7 @@ import baby.freedom.mobile.chains.ChainlistService
 import baby.freedom.mobile.chains.RpcUrls
 import baby.freedom.mobile.data.ChainStore
 import java.io.IOException
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 
 /*
@@ -233,7 +235,12 @@ internal fun ChainlistPage(
         state = CatalogState.Loading
         state = try {
             CatalogState.Loaded(service.entries())
-        } catch (_: IOException) {
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            // Not only IOException: the download re-raises whatever its
+            // worker thread hit, and that must show Retry, not crash.
+            if (e !is IOException) Log.w("ChainsSettings", "chainlist load failed", e)
             CatalogState.Failed
         }
     }
