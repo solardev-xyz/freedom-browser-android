@@ -40,6 +40,7 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Computer
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Home
@@ -54,6 +55,7 @@ import androidx.compose.material.icons.filled.StarBorder
 import androidx.compose.material.icons.filled.ZoomIn
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.ColorScheme
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
 import androidx.compose.material3.Icon
@@ -105,11 +107,15 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.isTraversalGroup
+import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.toggleableState
 import androidx.compose.ui.semantics.traversalIndex
+import androidx.compose.ui.state.ToggleableState
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
@@ -1421,6 +1427,9 @@ internal fun BottomToolbar(
     onFindInPage: () -> Unit,
     zoomLevel: Int?,
     onZoom: (ZoomAction) -> Unit,
+    /** "Desktop site" is on for the page's site (#180); null where it can't apply. */
+    desktopSite: Boolean?,
+    onToggleDesktopSite: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     // Clamp rather than trust the caller: both fractions are driven by
@@ -1697,6 +1706,8 @@ internal fun BottomToolbar(
                     onFindInPage = onFindInPage,
                     zoomLevel = zoomLevel,
                     onZoom = onZoom,
+                    desktopSite = desktopSite,
+                    onToggleDesktopSite = onToggleDesktopSite,
                     onPrint = onPrint,
                 )
             },
@@ -2907,6 +2918,8 @@ private fun OverflowMenuButton(
     onFindInPage: () -> Unit,
     zoomLevel: Int?,
     onZoom: (ZoomAction) -> Unit,
+    desktopSite: Boolean?,
+    onToggleDesktopSite: () -> Unit,
     onPrint: () -> Unit,
 ) {
     var menuExpanded by remember { mutableStateOf(false) }
@@ -3040,6 +3053,30 @@ private fun OverflowMenuButton(
                         // menu stays open across presses so the user
                         // can watch the page settle between steps.
                         ZoomMenuRow(level = zoomLevel, onZoom = onZoom)
+                        // Request desktop site (#180), per site, with a
+                        // checkmark. Disabled where there is no site to
+                        // ask as a desktop one (home, an error page, a
+                        // dweb page). The page reloads, so the menu closes.
+                        DropdownMenuItem(
+                            text = { MenuItemLabel("Desktop site") },
+                            leadingIcon = { Icon(Icons.Filled.Computer, contentDescription = null) },
+                            trailingIcon = {
+                                Checkbox(
+                                    checked = desktopSite == true,
+                                    onCheckedChange = null,
+                                    enabled = desktopSite != null,
+                                )
+                            },
+                            enabled = desktopSite != null,
+                            onClick = {
+                                menuExpanded = false
+                                onToggleDesktopSite()
+                            },
+                            modifier = Modifier.semantics {
+                                role = Role.Checkbox
+                                toggleableState = ToggleableState(desktopSite == true)
+                            },
+                        )
                         // Print or save as PDF (#89). Same rule as Find
                         // in page: the home tab is Compose rather than a
                         // page, so there is no document behind it to print.

@@ -1,0 +1,294 @@
+package baby.freedom.mobile.browser
+
+import android.content.Context
+import android.webkit.WebView
+import androidx.compose.runtime.mutableStateMapOf
+import androidx.webkit.ScriptHandler
+import androidx.webkit.UserAgentMetadata
+import androidx.webkit.WebSettingsCompat
+import androidx.webkit.WebViewCompat
+import androidx.webkit.WebViewFeature
+import baby.freedom.mobile.data.SiteDesktopStore
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.MainScope
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+
+/**
+ * The key a site's "Desktop site" choice (#180) is remembered under:
+ * the registrable domain of the page's host (`meet.google.com` →
+ * `google.com`, [PublicSuffixList]) — the unit Chrome's own per-site
+ * "Request desktop site" exceptions use (`[*.]google.com`). Per host
+ * alone the choice couldn't reach a site that only ever hands a phone
+ * off: `meet.google.com/new` goes to the Meet app (#177) and
+ * `meet.google.com/` to `workspace.google.com`, so there is never a
+ * Meet page on screen to switch — but the Workspace page can switch
+ * `google.com`. A host with no registrable domain (an IP literal,
+ * `localhost`, a host that is itself a public suffix) is its own key.
+ *
+ * Null for anything that isn't a site ([zoomSiteKey]'s home sentinel,
+ * error pages, `data:`/`blob:`) and for dweb pages: a `bzz://`,
+ * `ens://` or `ipfs://` page is served from a virtual origin by our
+ * own interceptor ([VirtualOrigin]), so there's no server to hand it a
+ * different layout for a different user agent. The menu's row is
+ * disabled on all of these, and their tabs always use the WebView's
+ * own (mobile) user agent.
+ */
+fun desktopSiteKey(url: String?): String? = desktopSiteOf(zoomSiteKey(url))
+
+/** [desktopSiteKey] for a page already keyed by [zoomSiteKey] (e.g. [BrowserState.zoomSite]). */
+fun desktopSiteOf(zoomSite: String?): String? {
+    val host = zoomSite?.takeUnless { VirtualOrigin.isVirtualHost(it) } ?: return null
+    if (host.startsWith("[") || IPV4_LITERAL.matches(host)) return host
+    return PublicSuffixList.registrableDomain(host.removeSuffix(".")) ?: host
+}
+
+private val IPV4_LITERAL = Regex("""^\d{1,3}(\.\d{1,3}){3}$""")
+
+/**
+ * The chrome's Back and Forward (a script step, not
+ * [android.webkit.WebView.goBack], so the page's own history handling
+ * sees them). [PageWebView] knows them to put the user agent of the
+ * entry they step to in place first (#180).
+ */
+const val HISTORY_BACK_JS = "javascript:history.back();void(0);"
+const val HISTORY_FORWARD_JS = "javascript:history.forward();void(0);"
+
+/**
+ * The user agent a desktop site is requested with (#180): what desktop
+ * Chrome on Linux sends, so a site that serves Android a mobile-only
+ * page or an app hand-off (Google Meet, #177) serves its desktop page.
+ *
+ * The string is desktop Chrome's reduced user agent — `X11; Linux
+ * x86_64` as the platform (no `Android`, `Mobile` or `wv` token) and
+ * only the major version, `Chrome/<major>.0.0.0` — at the WebView's own
+ * Chromium major, so feature sniffing still matches the engine that
+ * actually renders the page. The client hints ([metadata]) say the same.
+ */
+object DesktopUserAgent {
+    /** Used if the WebView's own user agent has no `Chrome/<major>` (never, in practice). */
+    internal const val FALLBACK_MAJOR = "140"
+
+    /** The brand WebView adds to its client hints; desktop Chromium has none like it. */
+    internal const val WEBVIEW_BRAND = "Android WebView"
+
+    /** The desktop user agent for a WebView whose own one is [mobile]. */
+    fun string(mobile: String): String {
+        val major = Regex("""\bChrome/(\d+)""").find(mobile)?.groupValues?.get(1) ?: FALLBACK_MAJOR
+        return "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) " +
+            "Chrome/$major.0.0.0 Safari/537.36"
+    }
+
+    /**
+     * The client hints (`Sec-CH-UA-*`, `navigator.userAgentData`) that go
+     * with [string], built from the WebView's own [mobile] ones: the same
+     * engine versions, minus the `Android WebView` brand (desktop
+     * Chromium's list is just `Chromium` and the GREASE brand), as a
+     * non-mobile 64-bit x86 Linux with no device model. [kernel] is the
+     * platform version desktop Chrome reports on Linux: the kernel's.
+     */
+    fun metadata(mobile: UserAgentMetadata, kernel: String): UserAgentMetadata =
+        UserAgentMetadata.Builder(mobile)
+            .setBrandVersionList(mobile.brandVersionList.filter { it.brand != WEBVIEW_BRAND })
+            .setPlatform("Linux")
+            .setPlatformVersion(kernel)
+            .setArchitecture("x86")
+            .setBitness(64)
+            .setModel("")
+            .setMobile(false)
+            .setWow64(false)
+            .build()
+
+    /**
+     * The kernel version as desktop Chrome writes it on Linux, from
+     * `os.version` (e.g. `6.6.30-android15-8-g1234` → `6.6.30`); empty if
+     * it doesn't start with one.
+     */
+    fun kernelVersion(osVersion: String?): String =
+        osVersion?.let { Regex("""^\d+(\.\d+)*""").find(it)?.value }.orEmpty()
+
+    /** `navigator.platform` on desktop Chrome for Linux x86_64 — what [string] claims. */
+    const val PLATFORM = "Linux x86_64"
+
+    /**
+     * Whether `navigator.platform` needs [platformScript] to agree with
+     * [string]. Chromium answers it from the kernel's machine name
+     * (`uname`), which is `x86_64` on an x86_64 device already — only
+     * other architectures (`aarch64` on nearly every phone) need it.
+     * [osArch]: the `os.arch` property.
+     */
+    fun needsPlatformScript(osArch: String?): Boolean = osArch != "x86_64"
+
+    /**
+     * A document-start script that makes `navigator.platform` read
+     * [PLATFORM]. WebView has no setting for it. The getter stays
+     * Chromium's own function behind a Proxy, so it still reads as
+     * native code, still throws on a foreign receiver the same way, and
+     * nothing new appears on `window` or `navigator` (no global, no
+     * marker a page could find this browser by).
+     */
+    val platformScript: String = """
+        (() => {
+          const proto = Navigator.prototype;
+          const d = Object.getOwnPropertyDescriptor(proto, 'platform');
+          if (!d || typeof d.get !== 'function') return;
+          const get = new Proxy(d.get, {
+            apply(target, self, args) {
+              Reflect.apply(target, self, args);
+              return '$PLATFORM';
+            },
+          });
+          Object.defineProperty(proto, 'platform', { get, set: d.set, enumerable: d.enumerable, configurable: d.configurable });
+        })();
+    """.trimIndent()
+}
+
+/**
+ * One WebView's user agent, switched between its own (mobile) one and
+ * [DesktopUserAgent]'s (#180). Captures the WebView's own string and
+ * client hints before it changes anything, so switching back restores
+ * exactly what the WebView sent before.
+ */
+internal class UserAgentSwitch(private val webView: WebView) {
+    private val settings = webView.settings
+    private val mobileString: String = settings.userAgentString
+    private val hintsSupported = WebViewFeature.isFeatureSupported(WebViewFeature.USER_AGENT_METADATA)
+    private val mobileHints: UserAgentMetadata? =
+        if (hintsSupported) runCatching { WebSettingsCompat.getUserAgentMetadata(settings) }.getOrNull() else null
+    private val desktopString = DesktopUserAgent.string(mobileString)
+    private val desktopHints: UserAgentMetadata? = mobileHints?.let {
+        DesktopUserAgent.metadata(it, DesktopUserAgent.kernelVersion(System.getProperty("os.version")))
+    }
+
+    /** Whether the WebView currently sends the desktop user agent. */
+    var desktop: Boolean = false
+        private set
+
+    // The `navigator.platform` script while desktop, where needed and
+    // supported; applies to documents created from then on.
+    private var platformScript: ScriptHandler? = null
+    private val platformScriptWanted =
+        DesktopUserAgent.needsPlatformScript(System.getProperty("os.arch")) &&
+            WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)
+
+    /**
+     * Send the desktop user agent if [desktop], the WebView's own if not.
+     * True if that changed anything.
+     */
+    fun set(desktop: Boolean): Boolean {
+        if (desktop == this.desktop) return false
+        this.desktop = desktop
+        // Hints first: WebView pairs a user-agent string with the
+        // metadata in force when the string is set.
+        val hints = if (desktop) desktopHints else mobileHints
+        if (hints != null) runCatching { WebSettingsCompat.setUserAgentMetadata(settings, hints) }
+        settings.userAgentString = if (desktop) desktopString else mobileString
+        if (platformScriptWanted) {
+            platformScript?.remove()
+            platformScript = if (desktop) {
+                runCatching {
+                    WebViewCompat.addDocumentStartJavaScript(webView, DesktopUserAgent.platformScript, setOf("*"))
+                }.getOrNull()
+            } else {
+                null
+            }
+        }
+        return true
+    }
+}
+
+/**
+ * The sites "Desktop site" is on for (#180), shared by every tab, and
+ * remembered like page zoom ([PageZoom]): the store is read once, at
+ * startup, and merged under anything the user changed before that read
+ * landed; after that it is only written, in order.
+ *
+ * [isDesktop] is Compose state, so the menu's checkmark follows it.
+ */
+class DesktopSites internal constructor(
+    private val scope: CoroutineScope,
+    private val load: suspend () -> Set<String>,
+    private val save: suspend (site: String, desktop: Boolean) -> Unit,
+    private val clear: suspend () -> Unit,
+) {
+    /** Sites on, as a set (Compose has no snapshot set). */
+    private val sites = mutableStateMapOf<String, Unit>()
+
+    /** Sites changed this session, which the startup read must not override. */
+    private val touched = HashSet<String>()
+
+    /** Set by [clearAll]: the startup read, if still pending, is stale. */
+    private var cleared = false
+    private val writes = Mutex()
+
+    init {
+        scope.launch {
+            val stored = load()
+            if (cleared) return@launch
+            for (site in stored) if (site !in touched) sites[site] = Unit
+        }
+    }
+
+    /**
+     * Private tabs' choices (#86): what was switched in a private tab
+     * this private session, kept in memory only and shared by the
+     * private tabs alone. A site not switched there reads the
+     * remembered choice, as page zoom does.
+     */
+    private val privateChoices = mutableStateMapOf<String, Boolean>()
+
+    /** Whether [site] (a [desktopSiteKey]) is a desktop site; [private]: as a private tab sees it. */
+    fun isDesktop(site: String?, private: Boolean = false): Boolean {
+        site ?: return false
+        if (private) privateChoices[site]?.let { return it }
+        return site in sites
+    }
+
+    /**
+     * Switch [site] between desktop and mobile and remember it — for
+     * this private session only if [private]. Returns the new choice.
+     */
+    fun toggle(site: String, private: Boolean = false): Boolean {
+        val next = !isDesktop(site, private)
+        if (private) {
+            // Kept even when off: it overrides a remembered "on".
+            privateChoices[site] = next
+            return next
+        }
+        touched += site
+        if (next) sites[site] = Unit else sites.remove(site)
+        scope.launch { writes.withLock { save(site, next) } }
+        return next
+    }
+
+    /**
+     * Forget every desktop site (part of "Clear cookies & site data"):
+     * the file lists sites the user visited, so it goes with the rest of
+     * the browsing trail.
+     */
+    fun clearAll() {
+        cleared = true
+        touched.clear()
+        sites.clear()
+        privateChoices.clear()
+        scope.launch { writes.withLock { clear() } }
+    }
+
+    /** The private session is over (#86): its choices go with it. */
+    fun clearPrivate() {
+        privateChoices.clear()
+    }
+
+    companion object {
+        @Volatile
+        private var instance: DesktopSites? = null
+
+        fun get(context: Context): DesktopSites =
+            instance ?: synchronized(this) {
+                instance ?: SiteDesktopStore.get(context).let { store ->
+                    DesktopSites(MainScope(), store::load, store::set, store::clear)
+                }.also { instance = it }
+            }
+    }
+}

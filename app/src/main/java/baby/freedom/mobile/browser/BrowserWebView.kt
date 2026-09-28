@@ -590,6 +590,7 @@ fun BrowserWebViewHost(
     val repo = remember(context) { BrowsingRepository.get(context) }
     val sitePermissions = remember(context) { SitePermissionBroker.get(context) }
     val pageZoom = remember(context) { PageZoom.get(context) }
+    val desktopSites = remember(context) { DesktopSites.get(context) }
     val fileChooser = rememberFileChooser()
 
     // Enable Chrome DevTools inspection for debug builds so we can
@@ -653,6 +654,7 @@ fun BrowserWebViewHost(
         PrivateProfile.discard()
         sitePermissions.onPrivateSessionEnded()
         pageZoom.clearPrivate()
+        desktopSites.clearPrivate()
         DownloadManager.get(context).endPrivateSession()
     }
 
@@ -677,6 +679,7 @@ fun BrowserWebViewHost(
             repo = repo,
             sitePermissions = sitePermissions,
             pageZoom = pageZoom,
+            desktopSites = desktopSites,
             onSubmitUrl = { target, url ->
                 tabs.requestSubmit?.invoke(target, url)
             },
@@ -739,6 +742,9 @@ fun BrowserWebViewHost(
             val wv = attach(tab)
             if (restore == null) continue
             tab.pendingRestore = null
+            // The restored entry is fetched again: with its site's user
+            // agent (#180), in place before the fetch starts.
+            (wv as? PageWebView)?.matchUserAgentTo(tab.url)
             val restored = restore.webViewState?.let { wv.restoreState(it) } != null
             if (restored) {
                 tab.canGoBack = wv.canGoBack()
@@ -939,6 +945,8 @@ fun BrowserWebViewHost(
             runCatching { fileChooser.clearCaptures() }
             // Remembered zoom levels are keyed by the sites visited (#88).
             pageZoom.clearAll()
+            // …and so are the sites asked for as desktop sites (#180).
+            desktopSites.clearAll()
         }
         onDispose {
             tabs.captureActiveThumbnail = null
@@ -1006,6 +1014,7 @@ private fun buildRefreshableWebView(
     repo: BrowsingRepository,
     sitePermissions: SitePermissionBroker,
     pageZoom: PageZoom,
+    desktopSites: DesktopSites,
     onSubmitUrl: (BrowserState, String) -> Unit,
     onEnterFullscreen: (View, WebChromeClient.CustomViewCallback?) -> Unit,
     onExitFullscreen: () -> Unit,
@@ -1342,6 +1351,11 @@ private fun buildRefreshableWebView(
         // themselves (home page, most real sites) are unaffected; they
         // paint their own background over this base colour.
         setBackgroundColor(0xFFFFFFFF.toInt())
+
+        // "Desktop site" (#180): this tab's pages are requested with a
+        // desktop user agent on the sites the user asked for, and as
+        // the tab sees it — a private tab's choices are its session's.
+        wantsDesktop = { url -> desktopSites.isDesktop(desktopSiteKey(url), state.private) }
 
         settings.apply {
             javaScriptEnabled = true
@@ -1959,6 +1973,10 @@ private fun buildRefreshableWebView(
         // R2-F1), and by a main-frame request of the page's own
         // ([UserNamedChain]).
         val userNamedChain = UserNamedChain()
+        // The last main-frame request's URL and method (#180): a document
+        // committed with the wrong user agent is only fetched again if it
+        // was a GET. Written from WebView's network thread.
+        val lastMainFrameRequest = java.util.concurrent.atomic.AtomicReference<Pair<String, String>?>(null)
         // The URL of the document on screen, as last committed (or moved
         // by history.pushState): tells the page's own `load` event from
         // the end of a navigation that never commits
@@ -2187,6 +2205,19 @@ private fun buildRefreshableWebView(
                 // Home and error pages aren't sites: they get the default.
                 val zoomSite = zoomSiteKey(url)
                 state.zoomSite = zoomSite
+                // …and asked for with its site's user agent (#180). A
+                // navigation nothing of ours saw start — the page's own
+                // `history.back()` or `location.reload()`, or a page from
+                // before the remembered sites were read — can commit with
+                // the other one: it is fetched again, with the right one,
+                // if that is safe to repeat (a GET). Only for a site; the
+                // next load puts the right one back for anything else.
+                if (view is PageWebView && url != null && desktopSiteOf(zoomSite) != null &&
+                    view.needsOtherUserAgentFor(url) &&
+                    lastMainFrameRequest.get().let { it == null || (it.first == url && it.second.equals("GET", true)) }
+                ) {
+                    view.post { if (view.url == url && view.needsOtherUserAgentFor(url)) view.reload() }
+                }
                 // Relative to the system font scale, which is what
                 // WebView's own default text zoom is.
                 view?.let {
@@ -2665,6 +2696,25 @@ private fun buildRefreshableWebView(
                     onSubmitUrl(state, target)
                     return true
                 }
+                // A site on the other side of "Desktop site" (#180) than
+                // the page's (a link, or a redirect, between a desktop
+                // site and a mobile one): WebView can't swap the user
+                // agent under a navigation it has started, so it goes
+                // again as a load of ours, with the right one — keeping
+                // what the page's own navigation carried for the app-link
+                // checks (#85, #173). A GET: WebView never asks about a
+                // POST, which keeps the user agent it started with.
+                if (request.isForMainFrame && view is PageWebView && view.needsOtherUserAgentFor(target)) {
+                    val gesture = request.hasGesture() || (request.isRedirect && navigationHadGesture)
+                    val userNamed = userNamedAsker != null
+                    // Posted: not from inside the callback of the
+                    // navigation being cancelled.
+                    view.post {
+                        if (userNamed) view.loadUrlNamedByUser(target) else view.loadUrl(target)
+                        navigationHadGesture = gesture
+                    }
+                    return true
+                }
                 // The WebView follows it: a page a service worker answers
                 // commits with no answer the interceptor saw, and prunes
                 // the tab's origins from here instead (#125, R5-F1).
@@ -2684,6 +2734,7 @@ private fun buildRefreshableWebView(
                 val mainFrame = request?.isForMainFrame == true
                 if (mainFrame) {
                     request!!.url?.toString()?.let {
+                        lastMainFrameRequest.set(it to request.method.orEmpty())
                         pendingNavigationUrls.add(it)
                         // Not a hop of the user's named load: the page's
                         // own navigation (R1-F1).
@@ -3085,6 +3136,51 @@ internal class PageWebView(context: Context) : WebView(context) {
     val documents = TabDocuments()
 
     /**
+     * Whether a page at this URL is to be requested as a desktop site
+     * (#180, [DesktopSites]); set by the tab that owns this WebView.
+     */
+    var wantsDesktop: (url: String?) -> Boolean = { false }
+
+    // Built on first use, before anything has changed the user agent,
+    // so it captures the WebView's own. Lazy: the settings aren't
+    // there before WebView's constructor has run.
+    private val userAgentSwitch by lazy { UserAgentSwitch(this) }
+
+    /**
+     * Puts the user agent a navigation to [url] should be requested
+     * with in place (#180) — before it starts: WebView reads the user
+     * agent when the navigation's request goes out. True if it changed.
+     */
+    fun matchUserAgentTo(url: String?): Boolean {
+        // A `javascript:` URL runs in the page on screen: no request.
+        // The chrome's Back / Forward steps are ones, to the entry
+        // they step to.
+        when (url) {
+            HISTORY_BACK_JS -> return matchUserAgentTo(historyEntryUrl(-1) ?: return false)
+            HISTORY_FORWARD_JS -> return matchUserAgentTo(historyEntryUrl(1) ?: return false)
+        }
+        if (url != null && url.startsWith("javascript:", ignoreCase = true)) return false
+        val desktop = wantsDesktop(url)
+        if (desktop == userAgentSwitch.desktop) return false
+        // Chromium reloads the page on screen, with the new user agent,
+        // if the user agent changes while anything is loading — which
+        // would replace the navigation about to start with a reload of
+        // the page it leaves. Whatever is loading is superseded by that
+        // navigation anyway. Not [stopLoading]: this is no user's Stop.
+        super.stopLoading()
+        return userAgentSwitch.set(desktop)
+    }
+
+    /**
+     * Whether a main-frame navigation to [url] the page started needs a
+     * different user agent than the one in place (#180). WebView can't
+     * change it under a navigation already started (see
+     * [matchUserAgentTo]), so such a navigation is cancelled and started
+     * again as this app's own load.
+     */
+    fun needsOtherUserAgentFor(url: String): Boolean = wantsDesktop(url) != userAgentSwitch.desktop
+
+    /**
      * Gets the tab off a document a sweep left stale — a reload, then a
      * GET of the same address, then `about:blank`, until one commits
      * (#125, R6-F1; see [SweptReload]).
@@ -3212,18 +3308,21 @@ internal class PageWebView(context: Context) : WebView(context) {
     // [TabDocuments.navigationStarted]); the page's own go through
     // `shouldOverrideUrlLoading`.
     override fun loadUrl(url: String) {
+        matchUserAgentTo(url)
         documents.navigationStarted(url)
         browserInitiatedLoad(url)
         super.loadUrl(url)
     }
 
     override fun loadUrl(url: String, additionalHttpHeaders: MutableMap<String, String>) {
+        matchUserAgentTo(url)
         documents.navigationStarted(url)
         browserInitiatedLoad(url)
         super.loadUrl(url, additionalHttpHeaders)
     }
 
     override fun postUrl(url: String, postData: ByteArray) {
+        matchUserAgentTo(url)
         documents.navigationStarted(url)
         browserInitiatedLoad(url)
         super.postUrl(url, postData)
@@ -3242,6 +3341,7 @@ internal class PageWebView(context: Context) : WebView(context) {
     }
 
     override fun reload() {
+        matchUserAgentTo(url)
         url?.let(documents::navigationStarted)
         browserInitiatedLoad()
         super.reload()
@@ -3266,10 +3366,19 @@ internal class PageWebView(context: Context) : WebView(context) {
     }
 
     private fun historyStepStarting(steps: Int) {
+        val url = historyEntryUrl(steps) ?: return
+        // The entry is fetched again with whatever user agent is in
+        // place: the one its site asks for now (#180).
+        matchUserAgentTo(url)
+        documents.navigationStarted(url)
+    }
+
+    /** The URL of the history entry [steps] away from the current one, if there is one. */
+    private fun historyEntryUrl(steps: Int): String? {
         val history = copyBackForwardList()
         val index = history.currentIndex + steps
-        if (index !in 0 until history.size) return
-        history.getItemAtIndex(index)?.url?.let(documents::navigationStarted)
+        if (index !in 0 until history.size) return null
+        return history.getItemAtIndex(index)?.url
     }
 
     /** "Search" on the text-selection toolbar, with the selected text (#84). */

@@ -21,8 +21,8 @@ import kotlinx.coroutines.Job
  * WebView runs on the throwaway [PrivateProfile] (its own cookies,
  * storage and cache, deleted once the last private tab closes), and
  * nothing it browses is written to history, the favicon cache,
- * remembered zoom levels, remembered site permissions or the download
- * list on disk. It never goes on the reopen-closed-tab stack.
+ * remembered zoom levels, remembered desktop sites, remembered site
+ * permissions or the download list on disk. It never goes on the reopen-closed-tab stack.
  */
 class BrowserState(val id: Long, val private: Boolean = false) {
     /**
