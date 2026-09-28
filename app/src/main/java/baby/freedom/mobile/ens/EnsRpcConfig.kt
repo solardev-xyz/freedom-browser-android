@@ -1,5 +1,7 @@
 package baby.freedom.mobile.ens
 
+import baby.freedom.mobile.chains.Chain
+import baby.freedom.mobile.chains.RpcUrls
 import java.net.URI
 import org.json.JSONArray
 import org.json.JSONObject
@@ -30,6 +32,21 @@ data class KeyedRpcProvider(
  * key set, then the built-in public endpoints that aren't switched off.
  * Public endpoints are stored as the set the user *disabled*, so one
  * added to [PUBLIC_ENDPOINTS] by a later release is on by default.
+ *
+ * How this relates to the per-chain RPCs (#108, #189):
+ *
+ * - [customEndpoints] *are* Ethereum mainnet's own RPCs
+ *   ([baby.freedom.mobile.chains.Chain.userRpcUrls], kept by
+ *   `ChainStore`): one list, edited from either page, that every
+ *   mainnet read — names here, `web3://` apps and the chain-data router
+ *   there — puts first.
+ * - [apiKeys] stay name resolution's own for now: the chain-data router
+ *   only takes key-free RPCs (a key in a URL is what its chainlist
+ *   filter strips out), and giving it keyed providers needs its own
+ *   decision about which of its reads may spend them.
+ * - [PUBLIC_ENDPOINTS] stay a separate list because the resolver's
+ *   quorum is built for, and has been tested against, these endpoints'
+ *   ENS/CCIP behaviour; the chain page's public RPCs are chainlist's.
  */
 data class EnsRpcConfig(
     val customEndpoints: List<String> = emptyList(),
@@ -42,11 +59,6 @@ data class EnsRpcConfig(
     data class Source(val kind: Kind, val label: String, val url: String)
 
     enum class Kind { CUSTOM, KEYED, PUBLIC }
-
-    /** Why [validateEndpoint] refuses an endpoint URL. */
-    enum class Rejection { EMPTY, TOO_LONG, NOT_A_URL, SCHEME, USER_INFO }
-
-    class Validation(val url: String?, val rejection: Rejection?)
 
     val enabledPublicEndpoints: List<String>
         get() = PUBLIC_ENDPOINTS.filter { it !in disabledPublicEndpoints }
@@ -135,28 +147,17 @@ data class EnsRpcConfig(
             ),
         )
 
-        const val MAX_CUSTOM_ENDPOINTS = 10
-        private const val MAX_URL_LENGTH = 2048
+        /** Your own endpoints are Ethereum mainnet's own RPCs ([baby.freedom.mobile.data.ChainStore]). */
+        const val MAX_CUSTOM_ENDPOINTS = Chain.MAX_USER_RPC_URLS
 
         /**
-         * Check a user-typed RPC endpoint: an absolute `https://` (or
-         * `http://`, for a node of your own on the local network) URL
-         * with a host and no user name or password. Returns the trimmed
-         * URL, or why it was refused.
+         * Check a user-typed RPC endpoint by the rules every chain's RPC
+         * is held to ([RpcUrls.validate]): `https://` to a public host,
+         * or `http://` to a node on this device; no user name or
+         * password. Your endpoints *are* mainnet's own RPCs, so they
+         * pass the same check wherever they're added.
          */
-        fun validateEndpoint(raw: String): Validation {
-            val text = raw.trim()
-            fun no(r: Rejection) = Validation(null, r)
-            if (text.isEmpty()) return no(Rejection.EMPTY)
-            if (text.length > MAX_URL_LENGTH) return no(Rejection.TOO_LONG)
-            if (text.any { it.isWhitespace() }) return no(Rejection.NOT_A_URL)
-            val uri = runCatching { URI(text) }.getOrNull() ?: return no(Rejection.NOT_A_URL)
-            val scheme = uri.scheme?.lowercase() ?: return no(Rejection.NOT_A_URL)
-            if (scheme != "https" && scheme != "http") return no(Rejection.SCHEME)
-            if (uri.rawUserInfo != null) return no(Rejection.USER_INFO)
-            if (uri.host.isNullOrEmpty()) return no(Rejection.NOT_A_URL)
-            return Validation(text, null)
-        }
+        fun validateEndpoint(raw: String): RpcUrls.Validation = RpcUrls.validate(raw)
 
         /**
          * What two endpoint URLs are compared by to tell whether they
@@ -175,7 +176,7 @@ data class EnsRpcConfig(
         }
 
         /** `null` if [validateEndpoint] refuses [raw]. */
-        fun normalizeEndpoint(raw: String): String? = validateEndpoint(raw).url
+        fun normalizeEndpoint(raw: String): String? = RpcUrls.normalize(raw)
 
         /**
          * [url] with everything after the host dropped — keyed endpoints
@@ -197,8 +198,6 @@ data class EnsRpcConfig(
         }
 
         // ---- storage encoding (see NodeSettings) ----
-
-        internal fun encodeList(list: List<String>): String = JSONArray(list).toString()
 
         internal fun decodeList(json: String?): List<String> {
             if (json.isNullOrBlank()) return emptyList()

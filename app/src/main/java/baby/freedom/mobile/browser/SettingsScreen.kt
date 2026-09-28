@@ -258,7 +258,23 @@ fun SettingsScreen(
                 ChainDetailPage(
                     chain = chain,
                     onAddRpc = { chainStore.addUserRpc(chain.id, it) },
-                    onRemoveRpc = { chainStore.removeUserRpc(chain.id, it) },
+                    onRemoveRpc = { url ->
+                        if (chain.id == BuiltInChains.ETHEREUM.id) {
+                            // Mainnet's own RPCs are name resolution's
+                            // "Your endpoints" too (#102): the same
+                            // last-endpoint check applies.
+                            when (settings.removeEnsRpcEndpoint(url)) {
+                                NodeSettings.EnsEdit.DONE -> null
+                                NodeSettings.EnsEdit.LAST_ENDPOINT ->
+                                    "Not removed: it's the last RPC names resolve through (Settings → RPC providers)"
+                                NodeSettings.EnsEdit.FAILED -> "Couldn't remove the RPC. Try again."
+                            }
+                        } else if (chainStore.removeUserRpc(chain.id, url)) {
+                            null
+                        } else {
+                            "Couldn't remove the RPC. Try again."
+                        }
+                    },
                     onRemove = { confirmRemoveChain = chain },
                     onBack = { chainPage = null },
                 )

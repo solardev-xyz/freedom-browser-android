@@ -276,7 +276,8 @@ private fun plural(n: Int, word: String) = if (n == 1) "1 $word" else "$n ${word
 internal fun ChainDetailPage(
     chain: Chain,
     onAddRpc: suspend (String) -> ChainStore.RpcAddResult,
-    onRemoveRpc: suspend (String) -> Boolean,
+    /** Removes an RPC of yours; the reason it didn't, or `null` once it did. */
+    onRemoveRpc: suspend (String) -> String?,
     onRemove: () -> Unit,
     onBack: () -> Unit,
 ) {
@@ -347,7 +348,7 @@ internal fun ChainDetailPage(
                         )
                         IconButton(onClick = {
                             scope.launch {
-                                rpcError = if (onRemoveRpc(url)) null else "Couldn't remove the RPC. Try again."
+                                rpcError = onRemoveRpc(url)
                             }
                         }) {
                             Icon(

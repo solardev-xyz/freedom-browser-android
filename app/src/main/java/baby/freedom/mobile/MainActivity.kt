@@ -199,6 +199,18 @@ class MainActivity : ComponentActivity() {
         // Name resolution reads the user's RPC settings for every
         // lookup, so a change in Settings applies to the next name.
         Gateways.ensRpcConfig = { settings.ensRpcConfig.first() }
+        // The first read moves what an earlier build kept in the settings
+        // file — API keys in plain text among them — to where they now
+        // live (encrypted); do it now rather than at the first name.
+        lifecycleScope.launch(Dispatchers.IO) {
+            try {
+                settings.ensRpcConfig.first()
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                android.util.Log.w("MainActivity", "reading name-resolution settings failed (${e.javaClass.simpleName})")
+            }
+        }
 
         // Honor the persisted preference on cold start. If the user had
         // the node enabled, start + bind right away; otherwise leave

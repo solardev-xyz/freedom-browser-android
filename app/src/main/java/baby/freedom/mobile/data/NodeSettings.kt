@@ -1,6 +1,7 @@
 package baby.freedom.mobile.data
 
 import android.content.Context
+import android.util.Log
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
@@ -13,8 +14,15 @@ import baby.freedom.mobile.browser.ExternalEndpoints
 import baby.freedom.mobile.browser.SearchEngines
 import baby.freedom.mobile.browser.normalizeAllowlistHost
 import baby.freedom.mobile.ens.EnsRpcConfig
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.emitAll
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 /**
  * Persistent toggles the user controls from the node details panel and
@@ -45,12 +53,15 @@ import kotlinx.coroutines.flow.map
  *
  * ## Name resolution keys (#102)
  *
- * `ens_rpc_custom_endpoints` (JSON array of URLs, each passed
- * [EnsRpcConfig.normalizeEndpoint]), `ens_rpc_disabled_public` (the
- * built-in public endpoints switched off), `ens_rpc_api_keys` (JSON
- * object, keyed-provider id → API key) and `ens_ccip_read`. Read
- * together as [ensRpcConfig]; the resolver reads that for every lookup,
- * so edits apply without a restart.
+ * `ens_rpc_disabled_public` (the built-in public endpoints switched
+ * off) and `ens_ccip_read`. The rest of what name resolution reads is
+ * kept elsewhere: your own endpoints are Ethereum mainnet's own RPCs in
+ * [ChainStore] (#108 — one list for every mainnet read), and the keyed
+ * providers' API keys are encrypted in [RpcKeyStore]. Read together as
+ * [ensRpcConfig]; the resolver reads that for every lookup, so edits
+ * apply without a restart. Earlier builds kept both here
+ * (`ens_rpc_custom_endpoints`, and `ens_rpc_api_keys` in plain text);
+ * the first read moves them.
  *
  * ## External node keys
  *
@@ -76,6 +87,10 @@ import kotlinx.coroutines.flow.map
  */
 class NodeSettings private constructor(
     private val store: DataStore<Preferences>,
+    // Lazy: the `:node` process reads this file too, and never needs
+    // (or should open) the chain list or the Keystore.
+    chains: () -> ChainStore,
+    keys: () -> RpcKeyStore,
 ) {
     /**
      * Whether the embedded Swarm node should be running. Defaults to
@@ -201,94 +216,207 @@ class NodeSettings private constructor(
         return true
     }
 
-    /** Everything name resolution reads, as one value (see class kdoc). */
-    val ensRpcConfig: Flow<EnsRpcConfig> = store.data.map(::readEnsRpc)
+    private val chainStore: ChainStore by lazy(chains)
+    private val keyStore: RpcKeyStore by lazy(keys)
 
-    private fun readEnsRpc(prefs: Preferences) = EnsRpcConfig(
-        customEndpoints = EnsRpcConfig.decodeList(prefs[Keys.ENS_RPC_CUSTOM]),
-        disabledPublicEndpoints = prefs[Keys.ENS_RPC_DISABLED_PUBLIC].orEmpty(),
-        apiKeys = EnsRpcConfig.decodeKeys(prefs[Keys.ENS_RPC_API_KEYS]),
-        ccipRead = prefs[Keys.ENS_CCIP_READ] ?: true,
-    )
+    /** Serializes every name-resolution write, so the last-endpoint check holds across the stores. */
+    private val ensLock = Mutex()
+
+    @Volatile
+    private var ensMigrated = false
+
+    /** Your own Ethereum mainnet RPCs ([ChainStore], #108) — "Your endpoints" here. */
+    private fun mainnetUserRpcs(): Flow<List<String>> = chainStore.chains
+        .map { chains -> chains.firstOrNull { it.id == MAINNET }?.userRpcUrls.orEmpty() }
 
     /**
-     * Apply [change] to the stored settings. `false`, writing nothing,
-     * if the result would leave the resolver no endpoint to ask: the
-     * page greys those controls out, this is the backstop for a write
-     * that races past it (a double tap before recomposition), and the
+     * Everything name resolution reads, as one value (see class kdoc):
+     * this file's switches, your own mainnet RPCs from [ChainStore] and
+     * the API keys from [RpcKeyStore]. The first read moves anything an
+     * earlier build kept here ([migrateEnsRpc]).
+     */
+    val ensRpcConfig: Flow<EnsRpcConfig> = flow {
+        migrateEnsRpc()
+        emitAll(combine(store.data, mainnetUserRpcs(), keyStore.apiKeys, ::readEnsRpc))
+    }
+
+    private fun readEnsRpc(prefs: Preferences, mine: List<String>, apiKeys: Map<String, String>) =
+        EnsRpcConfig(
+            customEndpoints = mine,
+            disabledPublicEndpoints = prefs[Keys.ENS_RPC_DISABLED_PUBLIC].orEmpty(),
+            apiKeys = apiKeys,
+            ccipRead = prefs[Keys.ENS_CCIP_READ] ?: true,
+        )
+
+    private suspend fun currentEnsRpc(): EnsRpcConfig =
+        readEnsRpc(store.data.first(), mainnetUserRpcs().first(), keyStore.apiKeys.first())
+
+    /**
+     * Move what builds before the encrypted key store and the shared
+     * mainnet RPC list kept in this file:
+     *
+     * - `ens_rpc_api_keys`, the API keys in plain text, into
+     *   [RpcKeyStore] (encrypted; a key already saved there wins), and
+     *   only once that write landed is the plain-text copy deleted;
+     * - `ens_rpc_custom_endpoints`, the user's own endpoints, onto
+     *   Ethereum mainnet's own RPCs in [ChainStore] — one list for
+     *   name resolution, `web3://` apps and every other mainnet read.
+     *   One that list doesn't take (a LAN `http://` address, which
+     *   [baby.freedom.mobile.chains.RpcUrls] refuses for every chain;
+     *   one past its cap) is dropped, counted in the log but never
+     *   named there (a URL can carry a key).
+     *
+     * A write that fails leaves the old value in place, and the next
+     * read tries again.
+     */
+    private suspend fun migrateEnsRpc() {
+        if (ensMigrated) return
+        ensLock.withLock {
+            if (ensMigrated) return
+            var done = true
+            try {
+                val prefs = store.data.first()
+                prefs[RpcKeyStore.LEGACY_KEY]?.let { json ->
+                    val legacy = EnsRpcConfig.decodeKeys(json)
+                    if (keyStore.edit { saved -> if (legacy.isEmpty()) null else legacy + saved }) {
+                        store.edit { it.remove(RpcKeyStore.LEGACY_KEY) }
+                    } else {
+                        done = false
+                    }
+                }
+                prefs[Keys.LEGACY_ENS_RPC_CUSTOM]?.let { json ->
+                    val skipped = chainStore.importUserRpcs(MAINNET, EnsRpcConfig.decodeList(json))
+                    if (skipped == null) {
+                        done = false
+                    } else {
+                        if (skipped.isNotEmpty()) {
+                            Log.w(TAG, "${skipped.size} name-resolution endpoint(s) not taken by Ethereum's RPC list")
+                        }
+                        store.edit { it.remove(Keys.LEGACY_ENS_RPC_CUSTOM) }
+                    }
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.w(TAG, "moving name-resolution settings failed (${e.javaClass.simpleName})")
+                done = false
+            }
+            ensMigrated = done
+        }
+    }
+
+    /** What a name-resolution write did. */
+    enum class EnsEdit {
+        DONE,
+
+        /** Refused, nothing written: it would leave the resolver no endpoint to ask. */
+        LAST_ENDPOINT,
+
+        /** The write didn't land. */
+        FAILED,
+    }
+
+    /**
+     * Run [write] if [change] still leaves the resolver an endpoint:
+     * the page greys those controls out, this is the backstop for a
+     * write that races past it (a double tap before recomposition, or
+     * the Ethereum chain page removing one of the same RPCs), and the
      * caller tells the user it didn't happen.
      */
-    private suspend fun editEnsRpc(change: (EnsRpcConfig) -> EnsRpcConfig): Boolean {
-        var applied = false
-        store.edit { prefs ->
-            val next = change(readEnsRpc(prefs))
-            if (next.endpoints.isEmpty()) return@edit
-            applied = true
-            prefs[Keys.ENS_RPC_CUSTOM] = EnsRpcConfig.encodeList(next.customEndpoints)
-            prefs[Keys.ENS_RPC_DISABLED_PUBLIC] = next.disabledPublicEndpoints
-            prefs[Keys.ENS_RPC_API_KEYS] = EnsRpcConfig.encodeKeys(next.apiKeys)
-            prefs[Keys.ENS_CCIP_READ] = next.ccipRead
+    private suspend fun editEnsRpc(
+        change: (EnsRpcConfig) -> EnsRpcConfig,
+        write: suspend () -> Boolean,
+    ): EnsEdit {
+        migrateEnsRpc()
+        return ensLock.withLock {
+            val ok = try {
+                if (change(currentEnsRpc()).endpoints.isEmpty()) return@withLock EnsEdit.LAST_ENDPOINT
+                write()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.w(TAG, "saving name-resolution settings failed (${e.javaClass.simpleName})")
+                false
+            }
+            if (ok) EnsEdit.DONE else EnsEdit.FAILED
         }
-        return applied
     }
 
     /** Why [addEnsRpcEndpoint] didn't add. */
-    enum class AddEndpointResult { ADDED, INVALID, DUPLICATE, FULL }
+    enum class AddEndpointResult { ADDED, INVALID, DUPLICATE, PUBLIC, FULL, FAILED }
 
     /**
-     * Add [url] to the user's own endpoints (after the ones already
-     * there), unless it isn't a valid endpoint, is already listed
-     * ([EnsRpcConfig.endpointKey]), or the list is full.
+     * Add [url] to your own mainnet RPCs (after the ones already there),
+     * unless it isn't a valid endpoint, is already listed
+     * ([EnsRpcConfig.endpointKey]) or is one of Ethereum's public RPCs,
+     * or the list is full.
      */
     suspend fun addEnsRpcEndpoint(url: String): AddEndpointResult {
         val normalized = EnsRpcConfig.normalizeEndpoint(url) ?: return AddEndpointResult.INVALID
-        var result = AddEndpointResult.ADDED
-        editEnsRpc { c ->
-            when {
-                c.hasCustomEndpoint(normalized) -> c.also { result = AddEndpointResult.DUPLICATE }
-                c.customEndpoints.size >= EnsRpcConfig.MAX_CUSTOM_ENDPOINTS ->
-                    c.also { result = AddEndpointResult.FULL }
-                else -> c.copy(customEndpoints = c.customEndpoints + normalized)
+        migrateEnsRpc()
+        return ensLock.withLock {
+            val current = try {
+                currentEnsRpc()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                return@withLock AddEndpointResult.FAILED
+            }
+            if (current.hasCustomEndpoint(normalized)) return@withLock AddEndpointResult.DUPLICATE
+            when (chainStore.addUserRpc(MAINNET, normalized)) {
+                ChainStore.RpcAddResult.ADDED -> AddEndpointResult.ADDED
+                ChainStore.RpcAddResult.INVALID -> AddEndpointResult.INVALID
+                ChainStore.RpcAddResult.DUPLICATE -> AddEndpointResult.DUPLICATE
+                ChainStore.RpcAddResult.PUBLIC -> AddEndpointResult.PUBLIC
+                ChainStore.RpcAddResult.FULL -> AddEndpointResult.FULL
+                ChainStore.RpcAddResult.NO_CHAIN, ChainStore.RpcAddResult.FAILED -> AddEndpointResult.FAILED
             }
         }
-        return result
-    }
-
-    /** `false`, changing nothing, if it was the last endpoint. */
-    suspend fun removeEnsRpcEndpoint(url: String): Boolean =
-        editEnsRpc { it.copy(customEndpoints = it.customEndpoints - url) }
-
-    /** Move one of the user's endpoints up (-1) or down (+1) the order. */
-    suspend fun moveEnsRpcEndpoint(url: String, by: Int): Boolean = editEnsRpc { c ->
-        val list = c.customEndpoints.toMutableList()
-        val from = list.indexOf(url)
-        val to = from + by
-        if (from < 0 || to !in list.indices) return@editEnsRpc c
-        list.add(to, list.removeAt(from))
-        c.copy(customEndpoints = list)
-    }
-
-    /** `false`, changing nothing, if it would switch off the last endpoint. */
-    suspend fun setPublicEnsRpcEnabled(url: String, enabled: Boolean): Boolean = editEnsRpc { c ->
-        c.copy(
-            disabledPublicEndpoints = if (enabled) {
-                c.disabledPublicEndpoints - url
-            } else {
-                c.disabledPublicEndpoints + url
-            },
-        )
     }
 
     /**
-     * Save (or, with a blank [key], remove) a keyed provider's API key.
-     * `false`, changing nothing, if removing it would leave no endpoint.
+     * Remove one of your own mainnet RPCs — from here or from the
+     * Ethereum chain page, which share the list. Refused if it was the
+     * resolver's last endpoint.
      */
-    suspend fun setRpcApiKey(providerId: String, key: String): Boolean = editEnsRpc { c ->
-        val trimmed = key.trim()
-        c.copy(apiKeys = if (trimmed.isEmpty()) c.apiKeys - providerId else c.apiKeys + (providerId to trimmed))
+    suspend fun removeEnsRpcEndpoint(url: String): EnsEdit =
+        editEnsRpc({ it.copy(customEndpoints = it.customEndpoints - url) }) {
+            chainStore.removeUserRpc(MAINNET, url)
+        }
+
+    /** Move one of your mainnet RPCs up (-1) or down (+1) the order. */
+    suspend fun moveEnsRpcEndpoint(url: String, by: Int): EnsEdit =
+        editEnsRpc({ it }) { chainStore.moveUserRpc(MAINNET, url, by) }
+
+    /** Refused if it would switch off the last endpoint. */
+    suspend fun setPublicEnsRpcEnabled(url: String, enabled: Boolean): EnsEdit {
+        fun Set<String>.with() = if (enabled) this - url else this + url
+        return editEnsRpc({ it.copy(disabledPublicEndpoints = it.disabledPublicEndpoints.with()) }) {
+            store.edit { prefs ->
+                prefs[Keys.ENS_RPC_DISABLED_PUBLIC] = prefs[Keys.ENS_RPC_DISABLED_PUBLIC].orEmpty().with()
+            }
+            true
+        }
     }
 
-    suspend fun setEnsCcipRead(enabled: Boolean): Boolean = editEnsRpc { it.copy(ccipRead = enabled) }
+    /**
+     * Save (or, with a blank [key], remove) a keyed provider's API key,
+     * encrypted ([RpcKeyStore]). Refused if removing it would leave no
+     * endpoint.
+     */
+    suspend fun setRpcApiKey(providerId: String, key: String): EnsEdit {
+        val trimmed = key.trim()
+        fun Map<String, String>.with() = if (trimmed.isEmpty()) this - providerId else this + (providerId to trimmed)
+        return editEnsRpc({ it.copy(apiKeys = it.apiKeys.with()) }) {
+            keyStore.edit { it.with() }
+        }
+    }
+
+    suspend fun setEnsCcipRead(enabled: Boolean): EnsEdit =
+        editEnsRpc({ it }) {
+            store.edit { it[Keys.ENS_CCIP_READ] = enabled }
+            true
+        }
 
     /**
      * External Swarm endpoint (#125): the base URL of a bee/ant HTTP API
@@ -383,9 +511,9 @@ class NodeSettings private constructor(
         val IPFS_ROUTING_MODE = stringPreferencesKey("ipfs_routing_mode")
         val SEARCH_ENGINE = stringPreferencesKey("search_engine")
         val SEARCH_CUSTOM_TEMPLATE = stringPreferencesKey("search_custom_template")
-        val ENS_RPC_CUSTOM = stringPreferencesKey("ens_rpc_custom_endpoints")
+        /** Moved onto Ethereum mainnet's own RPCs in [ChainStore]; see [migrateEnsRpc]. */
+        val LEGACY_ENS_RPC_CUSTOM = stringPreferencesKey("ens_rpc_custom_endpoints")
         val ENS_RPC_DISABLED_PUBLIC = stringSetPreferencesKey("ens_rpc_disabled_public")
-        val ENS_RPC_API_KEYS = stringPreferencesKey("ens_rpc_api_keys")
         val ENS_CCIP_READ = booleanPreferencesKey("ens_ccip_read")
         val EXTERNAL_SWARM_ENDPOINT = stringPreferencesKey("external_swarm_endpoint")
         val EXTERNAL_IPFS_GATEWAY = stringPreferencesKey("external_ipfs_gateway")
@@ -418,13 +546,23 @@ class NodeSettings private constructor(
         @Volatile
         private var instance: NodeSettings? = null
 
-        /** Over an arbitrary [store], for unit tests. */
-        internal fun forTesting(store: DataStore<Preferences>): NodeSettings = NodeSettings(store)
+        private const val TAG = "NodeSettings"
+        private const val MAINNET = 1L
+
+        /** Over arbitrary stores, for unit tests. */
+        internal fun forTesting(
+            store: DataStore<Preferences>,
+            chains: ChainStore,
+            keys: RpcKeyStore,
+        ): NodeSettings = NodeSettings(store, { chains }, { keys })
 
         fun get(context: Context): NodeSettings =
             instance ?: synchronized(this) {
+                val app = context.applicationContext
                 instance ?: NodeSettings(
-                    context.applicationContext.nodeSettingsStore,
+                    app.nodeSettingsStore,
+                    { ChainStore.get(app) },
+                    { RpcKeyStore.get(app) },
                 ).also { instance = it }
             }
     }

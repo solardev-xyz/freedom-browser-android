@@ -3,7 +3,11 @@ package baby.freedom.mobile.data
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.emptyPreferences
+import androidx.datastore.preferences.core.mutablePreferencesOf
+import androidx.datastore.preferences.core.stringPreferencesKey
+import baby.freedom.mobile.chains.BuiltInChains
 import baby.freedom.mobile.ens.EnsRpcConfig
+import javax.crypto.KeyGenerator
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
@@ -12,18 +16,22 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * The name-resolution writes (#102) report whether they happened: a
- * write that would leave the resolver no endpoint is refused, and the
- * settings page tells the user instead of closing as though it saved.
+ * The name-resolution settings (#102) across the three stores they live
+ * in: this file's switches, Ethereum mainnet's own RPCs in [ChainStore]
+ * (your endpoints) and the encrypted API keys in [RpcKeyStore]. Writes
+ * report whether they happened: one that would leave the resolver no
+ * endpoint is refused, and the settings page tells the user instead of
+ * closing as though it saved.
  */
 class NodeSettingsEnsRpcTest {
 
-    private class MemoryStore : DataStore<Preferences> {
-        private val state = MutableStateFlow(emptyPreferences())
+    internal class MemoryStore(initial: Preferences = emptyPreferences()) : DataStore<Preferences> {
+        val state = MutableStateFlow(initial)
         private val lock = Mutex()
         override val data: Flow<Preferences> = state
         override suspend fun updateData(
@@ -31,40 +39,139 @@ class NodeSettingsEnsRpcTest {
         ): Preferences = lock.withLock { transform(state.value).also { state.value = it } }
     }
 
-    private val settings = NodeSettings.forTesting(MemoryStore())
+    private val aes = KeyGenerator.getInstance("AES").apply { init(256) }.generateKey()
+    private val settingsFile = MemoryStore()
+    private val chainFile = MemoryStore()
+    private val secretsFile = MemoryStore()
+    private val chains = ChainStore(chainFile)
+    private val keys = RpcKeyStore(secretsFile, AesGcmCipher { aes })
+    private val settings = NodeSettings.forTesting(settingsFile, chains, keys)
     private fun config() = runBlocking { settings.ensRpcConfig.first() }
+    private fun mainnetRpcs() = runBlocking {
+        chains.chains.first().first { it.id == BuiltInChains.ETHEREUM.id }.userRpcUrls
+    }
 
     @Test
     fun `switching off the last endpoint is refused and reported`() = runBlocking {
         val all = EnsRpcConfig.PUBLIC_ENDPOINTS
-        for (url in all.dropLast(1)) assertTrue(settings.setPublicEnsRpcEnabled(url, false))
+        for (url in all.dropLast(1)) {
+            assertEquals(NodeSettings.EnsEdit.DONE, settings.setPublicEnsRpcEnabled(url, false))
+        }
         // The last one: refused, nothing written.
-        assertFalse(settings.setPublicEnsRpcEnabled(all.last(), false))
+        assertEquals(NodeSettings.EnsEdit.LAST_ENDPOINT, settings.setPublicEnsRpcEnabled(all.last(), false))
         assertEquals(listOf(all.last()), config().endpoints)
     }
 
     @Test
     fun `removing the last own endpoint or key is refused and reported`() = runBlocking {
         assertEquals(NodeSettings.AddEndpointResult.ADDED, settings.addEnsRpcEndpoint("https://my.node"))
-        for (url in EnsRpcConfig.PUBLIC_ENDPOINTS) assertTrue(settings.setPublicEnsRpcEnabled(url, false))
-        assertFalse(settings.removeEnsRpcEndpoint("https://my.node"))
+        for (url in EnsRpcConfig.PUBLIC_ENDPOINTS) {
+            assertEquals(NodeSettings.EnsEdit.DONE, settings.setPublicEnsRpcEnabled(url, false))
+        }
+        assertEquals(NodeSettings.EnsEdit.LAST_ENDPOINT, settings.removeEnsRpcEndpoint("https://my.node"))
         assertEquals(listOf("https://my.node"), config().customEndpoints)
 
-        assertTrue(settings.setRpcApiKey("infura", "KEY"))
-        assertTrue(settings.removeEnsRpcEndpoint("https://my.node"))
-        assertFalse(settings.setRpcApiKey("infura", ""))
+        assertEquals(NodeSettings.EnsEdit.DONE, settings.setRpcApiKey("infura", "KEY"))
+        assertEquals(NodeSettings.EnsEdit.DONE, settings.removeEnsRpcEndpoint("https://my.node"))
+        assertEquals(NodeSettings.EnsEdit.LAST_ENDPOINT, settings.setRpcApiKey("infura", ""))
         assertEquals(mapOf("infura" to "KEY"), config().apiKeys)
     }
 
     @Test
-    fun `add reports duplicates, including a trailing slash, and a full list`() = runBlocking {
+    fun `add reports duplicates, including a trailing slash, public RPCs and a full list`() = runBlocking {
         assertEquals(NodeSettings.AddEndpointResult.ADDED, settings.addEnsRpcEndpoint("https://my.node/rpc"))
         assertEquals(NodeSettings.AddEndpointResult.DUPLICATE, settings.addEnsRpcEndpoint("https://MY.node/rpc/"))
         assertEquals(NodeSettings.AddEndpointResult.INVALID, settings.addEnsRpcEndpoint("ftp://x"))
+        // A LAN address is refused for every chain's RPCs, this list included.
+        assertEquals(NodeSettings.AddEndpointResult.INVALID, settings.addEnsRpcEndpoint("http://192.168.1.5:8545"))
+        assertEquals(
+            NodeSettings.AddEndpointResult.PUBLIC,
+            settings.addEnsRpcEndpoint(BuiltInChains.ETHEREUM.rpcUrls.first()),
+        )
         for (i in 2..EnsRpcConfig.MAX_CUSTOM_ENDPOINTS) {
             assertEquals(NodeSettings.AddEndpointResult.ADDED, settings.addEnsRpcEndpoint("https://n$i.node"))
         }
         assertEquals(NodeSettings.AddEndpointResult.FULL, settings.addEnsRpcEndpoint("https://one-more.node"))
         assertEquals(EnsRpcConfig.MAX_CUSTOM_ENDPOINTS, config().customEndpoints.size)
+    }
+
+    @Test
+    fun `your endpoints are Ethereum mainnet's own RPCs, both ways`() = runBlocking {
+        // Added here: on the chain's list, for every mainnet read.
+        settings.addEnsRpcEndpoint("https://a.node")
+        assertEquals(listOf("https://a.node"), mainnetRpcs())
+        // Added on the chain page: first in the resolution order here.
+        assertEquals(ChainStore.RpcAddResult.ADDED, chains.addUserRpc(1, "https://b.node"))
+        assertEquals(listOf("https://a.node", "https://b.node"), config().customEndpoints)
+        assertEquals(listOf("https://a.node", "https://b.node"), config().endpoints.take(2))
+        // Reordered here: that's the chain's order too.
+        assertEquals(NodeSettings.EnsEdit.DONE, settings.moveEnsRpcEndpoint("https://b.node", -1))
+        assertEquals(listOf("https://b.node", "https://a.node"), mainnetRpcs())
+        // Another chain's RPCs aren't names' business.
+        assertEquals(ChainStore.RpcAddResult.ADDED, chains.addUserRpc(100, "https://gnosis.node"))
+        assertEquals(listOf("https://b.node", "https://a.node"), config().customEndpoints)
+    }
+
+    @Test
+    fun `API keys are stored encrypted, never in plain text`() = runBlocking {
+        val secret = "sk_live_0123456789abcdefSECRET"
+        assertEquals(NodeSettings.EnsEdit.DONE, settings.setRpcApiKey("alchemy", secret))
+        assertEquals(mapOf("alchemy" to secret), config().apiKeys)
+        assertTrue(config().endpoints.any { secret in it })
+        // Nothing on "disk" spells it out: not the settings file, not the secrets file.
+        for (file in listOf(settingsFile, secretsFile, chainFile)) {
+            assertFalse(file.state.value.asMap().values.joinToString().contains(secret))
+        }
+        assertTrue(secretsFile.state.value.asMap().isNotEmpty())
+        assertNull(settingsFile.state.value[RpcKeyStore.LEGACY_KEY])
+    }
+
+    @Test
+    fun `plain-text keys and endpoints from an earlier build move on first read`() = runBlocking {
+        val oldSettings = MemoryStore(
+            mutablePreferencesOf(
+                RpcKeyStore.LEGACY_KEY to """{"infura":"OLDKEY","drpc":"DKEY"}""",
+                stringPreferencesKey("ens_rpc_custom_endpoints") to
+                    """["https://mine.node","http://192.168.1.5:8545","https://mine.node"]""",
+            ),
+        )
+        // A key saved in the new store already wins over the old copy.
+        assertTrue(keys.edit { mapOf("drpc" to "NEWER") })
+        val upgraded = NodeSettings.forTesting(oldSettings, chains, keys)
+
+        val c = upgraded.ensRpcConfig.first()
+        assertEquals(mapOf("infura" to "OLDKEY", "drpc" to "NEWER"), c.apiKeys)
+        // Onto mainnet's list; the LAN address it refuses, and the repeat, are dropped.
+        assertEquals(listOf("https://mine.node"), c.customEndpoints)
+        assertEquals(listOf("https://mine.node"), mainnetRpcs())
+        // And gone from the settings file: no plain-text key left behind.
+        assertNull(oldSettings.state.value[RpcKeyStore.LEGACY_KEY])
+        assertNull(oldSettings.state.value[stringPreferencesKey("ens_rpc_custom_endpoints")])
+        assertFalse(secretsFile.state.value.asMap().values.joinToString().contains("OLDKEY"))
+
+        // A later start reads the same, and moves nothing twice.
+        val again = NodeSettings.forTesting(oldSettings, chains, keys)
+        assertEquals(c, again.ensRpcConfig.first())
+        assertEquals(listOf("https://mine.node"), mainnetRpcs())
+    }
+
+    @Test
+    fun `a key store that fails to save keeps the plain-text copy until it can`() = runBlocking {
+        val oldSettings = MemoryStore(mutablePreferencesOf(RpcKeyStore.LEGACY_KEY to """{"infura":"OLDKEY"}"""))
+        var broken = true
+        val failing = object : SecretCipher {
+            val real = AesGcmCipher { aes }
+            override fun encrypt(plain: ByteArray): ByteArray =
+                if (broken) throw IllegalStateException("keystore unavailable") else real.encrypt(plain)
+            override fun decrypt(blob: ByteArray): ByteArray = real.decrypt(blob)
+        }
+        val upgraded = NodeSettings.forTesting(oldSettings, chains, RpcKeyStore(secretsFile, failing))
+        upgraded.ensRpcConfig.first()
+        // Not lost: still where it was, to move next time.
+        assertEquals("""{"infura":"OLDKEY"}""", oldSettings.state.value[RpcKeyStore.LEGACY_KEY])
+
+        broken = false
+        assertEquals(mapOf("infura" to "OLDKEY"), upgraded.ensRpcConfig.first().apiKeys)
+        assertNull(oldSettings.state.value[RpcKeyStore.LEGACY_KEY])
     }
 }

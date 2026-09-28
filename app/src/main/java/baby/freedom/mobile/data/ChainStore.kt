@@ -140,6 +140,64 @@ class ChainStore internal constructor(
     }
 
     /**
+     * Move [url] one place up (`by = -1`) or down (`+1`) chain [id]'s own
+     * RPCs — their order is the order they're asked in, and for Ethereum
+     * mainnet the name-resolution order too (#102). `false` only when the
+     * write failed; a move off either end changes nothing.
+     */
+    suspend fun moveUserRpc(id: Long, url: String, by: Int): Boolean = try {
+        store.edit { prefs ->
+            val list = decodeRpcs(prefs[rpcsKeyOf(id)]).toMutableList()
+            val from = list.indexOf(url)
+            val to = from + by
+            if (from < 0 || to !in list.indices) return@edit
+            list.add(to, list.removeAt(from))
+            prefs[rpcsKeyOf(id)] = JSONArray(list).toString()
+        }
+        true
+    } catch (e: CancellationException) {
+        throw e
+    } catch (e: Exception) {
+        Log.w(TAG, "moving RPC failed", e)
+        false
+    }
+
+    /**
+     * Append [urls] to built-in chain [id]'s own RPCs in one write — for
+     * moving a list kept elsewhere in, not for user input: each is
+     * [RpcUrls.normalize]d, and one that's invalid, a public RPC of the
+     * chain, already there or past [Chain.MAX_USER_RPC_URLS] is skipped.
+     * Returns the URLs it skipped, or `null` when the write failed.
+     */
+    internal suspend fun importUserRpcs(id: Long, urls: List<String>): List<String>? {
+        val chain = BuiltInChains.ALL.firstOrNull { it.id == id } ?: return urls
+        val skipped = ArrayList<String>()
+        return try {
+            store.edit { prefs ->
+                skipped.clear()
+                val list = decodeRpcs(prefs[rpcsKeyOf(id)]).toMutableList()
+                for (raw in urls) {
+                    val url = RpcUrls.normalize(raw)
+                    if (url == null || url in list || url in chain.rpcUrls ||
+                        list.size >= Chain.MAX_USER_RPC_URLS
+                    ) {
+                        skipped += raw
+                    } else {
+                        list += url
+                    }
+                }
+                if (list.isNotEmpty()) prefs[rpcsKeyOf(id)] = JSONArray(list).toString()
+            }
+            skipped
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.w(TAG, "importing RPCs failed", e)
+            null
+        }
+    }
+
+    /**
      * Add [chain] as a custom chain, unless its ID is built in or
      * already added — checked inside the same write, so two quick adds
      * can't both land.

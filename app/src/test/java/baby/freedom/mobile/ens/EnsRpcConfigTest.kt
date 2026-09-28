@@ -1,5 +1,6 @@
 package baby.freedom.mobile.ens
 
+import baby.freedom.mobile.chains.RpcUrls
 import java.io.IOException
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -104,18 +105,23 @@ class EnsRpcConfigTest {
     }
 
     @Test
-    fun `endpoint validation`() {
+    fun `endpoint validation is the chains' RPC validation`() {
         assertEquals("https://my.node:8545/rpc", EnsRpcConfig.normalizeEndpoint("  https://my.node:8545/rpc "))
-        assertEquals("http://192.168.1.5:8545", EnsRpcConfig.normalizeEndpoint("http://192.168.1.5:8545"))
+        // Your endpoints are mainnet's own RPCs: http only to this device.
+        assertEquals("http://127.0.0.1:8545", EnsRpcConfig.normalizeEndpoint("http://127.0.0.1:8545"))
+        assertEquals("http://localhost:8545", EnsRpcConfig.normalizeEndpoint("http://localhost:8545"))
         fun rejection(s: String) = EnsRpcConfig.validateEndpoint(s).rejection
-        assertEquals(EnsRpcConfig.Rejection.EMPTY, rejection("   "))
-        assertEquals(EnsRpcConfig.Rejection.SCHEME, rejection("wss://my.node"))
-        assertEquals(EnsRpcConfig.Rejection.SCHEME, rejection("ftp://my.node"))
-        assertEquals(EnsRpcConfig.Rejection.NOT_A_URL, rejection("my.node"))
-        assertEquals(EnsRpcConfig.Rejection.NOT_A_URL, rejection("https://my node"))
-        assertEquals(EnsRpcConfig.Rejection.NOT_A_URL, rejection("https:///path"))
-        assertEquals(EnsRpcConfig.Rejection.USER_INFO, rejection("https://u:p@my.node"))
-        assertEquals(EnsRpcConfig.Rejection.TOO_LONG, rejection("https://a.b/" + "x".repeat(2100)))
+        assertEquals(RpcUrls.Rejection.SCHEME, rejection("http://my.node:8545"))
+        assertEquals(RpcUrls.Rejection.INTERNAL_HOST, rejection("https://192.168.1.5:8545"))
+        assertEquals(RpcUrls.Rejection.EMPTY, rejection("   "))
+        assertEquals(RpcUrls.Rejection.SCHEME, rejection("wss://my.node"))
+        assertEquals(RpcUrls.Rejection.SCHEME, rejection("ftp://my.node"))
+        assertEquals(RpcUrls.Rejection.NOT_A_URL, rejection("my.node"))
+        assertEquals(RpcUrls.Rejection.NOT_A_URL, rejection("https://my node"))
+        assertEquals(RpcUrls.Rejection.NOT_A_URL, rejection("https:///path"))
+        assertEquals(RpcUrls.Rejection.CREDENTIALS, rejection("https://u:p@my.node"))
+        assertEquals(RpcUrls.Rejection.TOO_LONG, rejection("https://a.b/" + "x".repeat(2100)))
+        assertEquals(RpcUrls.Rejection.PLACEHOLDER, rejection("https://a.b/v3/{API_KEY}"))
     }
 
     @Test
@@ -129,8 +135,7 @@ class EnsRpcConfigTest {
 
     @Test
     fun `storage round-trips and drops unknown providers`() {
-        val list = listOf("https://a.node", "https://b.node/x?y=1")
-        assertEquals(list, EnsRpcConfig.decodeList(EnsRpcConfig.encodeList(list)))
+        assertEquals(listOf("https://a.node", "https://b.node/x?y=1"), EnsRpcConfig.decodeList("""["https://a.node","https://b.node/x?y=1"]"""))
         assertEquals(emptyList<String>(), EnsRpcConfig.decodeList("not json"))
         val keys = EnsRpcConfig.decodeKeys("""{"alchemy":"k1","nope":"k2","drpc":"  "}""")
         assertEquals(mapOf("alchemy" to "k1"), keys)

@@ -48,6 +48,7 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.dp
+import baby.freedom.mobile.chains.RpcUrls
 import baby.freedom.mobile.data.NodeSettings
 import baby.freedom.mobile.ens.EnsQuorum
 import baby.freedom.mobile.ens.EnsRpcConfig
@@ -79,7 +80,7 @@ private const val CCIP_HELP =
     "Some names (base.eth and cb.id subnames, NameStone names) are answered by a gateway their resolver names. The gateway sees the name you look up. Off: those names don't resolve."
 
 private const val SUB_CUSTOM = "Your endpoints"
-private const val CUSTOM_HELP = "First in the resolution order, as listed here. An Ethereum mainnet JSON-RPC URL."
+private const val CUSTOM_HELP = "First in the resolution order, as listed here. These are Ethereum's own RPCs (Settings → Chains → Ethereum), so every mainnet read uses them too."
 private const val ROW_ADD_ENDPOINT = "Add endpoint"
 private const val SUB_KEYED = "Keyed providers"
 private const val KEYED_HELP = "Next in the resolution order, with your own API key."
@@ -208,9 +209,11 @@ internal fun RpcProvidersSection(
 
     // `NodeSettings` refuses a write that would leave no endpoint (the
     // greyed-out controls can still race it, e.g. a double tap before
-    // recomposition); say so rather than look as if it was saved.
-    fun refused() {
-        Toast.makeText(context, "Not changed: $LAST_ENDPOINT_HELP", Toast.LENGTH_SHORT).show()
+    // recomposition), and a write can fail; say so rather than look as
+    // if it was saved.
+    fun report(edit: NodeSettings.EnsEdit) {
+        val why = ensEditError(edit) ?: return
+        Toast.makeText(context, "Not changed: $why", Toast.LENGTH_SHORT).show()
     }
 
     SectionCard(title = SECTION_RPC) {
@@ -235,17 +238,17 @@ internal fun RpcProvidersSection(
                     )
                     if (custom.size > 1) {
                         IconButton(
-                            onClick = { scope.launch { settings.moveEnsRpcEndpoint(url, -1) } },
+                            onClick = { scope.launch { report(settings.moveEnsRpcEndpoint(url, -1)) } },
                             enabled = i > 0,
                         ) { Icon(Icons.Filled.ArrowUpward, contentDescription = "Move $url up") }
                         IconButton(
-                            onClick = { scope.launch { settings.moveEnsRpcEndpoint(url, +1) } },
+                            onClick = { scope.launch { report(settings.moveEnsRpcEndpoint(url, +1)) } },
                             enabled = i < custom.lastIndex,
                         ) { Icon(Icons.Filled.ArrowDownward, contentDescription = "Move $url down") }
                     }
                     IconButton(
                         onClick = {
-                            scope.launch { if (!settings.removeEnsRpcEndpoint(url)) refused() }
+                            scope.launch { report(settings.removeEnsRpcEndpoint(url)) }
                         },
                         enabled = config.canRemoveCustom(url),
                     ) { Icon(Icons.Filled.Close, contentDescription = "Remove $url") }
@@ -317,7 +320,7 @@ internal fun RpcProvidersSection(
                         enabled = !locked,
                         onCheckedChange = { enable ->
                             scope.launch {
-                                if (!settings.setPublicEnsRpcEnabled(url, enable)) refused()
+                                report(settings.setPublicEnsRpcEnabled(url, enable))
                             }
                         },
                     )
@@ -344,9 +347,12 @@ internal fun RpcProvidersSection(
                             null
                         }
                         NodeSettings.AddEndpointResult.DUPLICATE -> "Not added: already in your endpoints"
+                        NodeSettings.AddEndpointResult.PUBLIC ->
+                            "Not added: already one of Ethereum's public RPCs (Settings → Chains)"
                         NodeSettings.AddEndpointResult.FULL ->
                             "Not added: at most ${EnsRpcConfig.MAX_CUSTOM_ENDPOINTS} endpoints"
                         NodeSettings.AddEndpointResult.INVALID -> "Not added: not a valid endpoint URL"
+                        NodeSettings.AddEndpointResult.FAILED -> "Not added: couldn't save it. Try again."
                     }
                 }
             },
@@ -365,11 +371,9 @@ internal fun RpcProvidersSection(
                 keyError = null
                 scope.launch {
                     // The dialog closes only once the change is saved.
-                    if (settings.setRpcApiKey(provider.id, key)) {
-                        editingProvider = null
-                    } else {
-                        keyError = "Not removed: $LAST_ENDPOINT_HELP"
-                    }
+                    val edit = settings.setRpcApiKey(provider.id, key)
+                    keyError = ensEditError(edit)?.let { "Not saved: $it" }
+                    if (keyError == null) editingProvider = null
                 }
             },
             onDismiss = { editingProvider = null },
@@ -431,13 +435,16 @@ private fun SwitchRow(
     }
 }
 
-private fun endpointHint(rejection: EnsRpcConfig.Rejection): String = when (rejection) {
-    EnsRpcConfig.Rejection.EMPTY -> "An Ethereum mainnet JSON-RPC URL"
-    EnsRpcConfig.Rejection.TOO_LONG -> "Too long: at most 2048 characters"
-    EnsRpcConfig.Rejection.NOT_A_URL -> "Not a full URL: start with https:// and a host name"
-    EnsRpcConfig.Rejection.SCHEME -> "Needs https:// (or http:// for a node on your network)"
-    EnsRpcConfig.Rejection.USER_INFO -> "Remove the user name or password before the host"
+/** Why a name-resolution write didn't happen, for the user; `null` once it did. */
+internal fun ensEditError(edit: NodeSettings.EnsEdit): String? = when (edit) {
+    NodeSettings.EnsEdit.DONE -> null
+    NodeSettings.EnsEdit.LAST_ENDPOINT -> LAST_ENDPOINT_HELP
+    NodeSettings.EnsEdit.FAILED -> "couldn't save it. Try again."
 }
+
+/** The same hints as the chain page's RPC field: it's the same list ([rpcUrlHint]). */
+private fun endpointHint(rejection: RpcUrls.Rejection): String =
+    if (rejection == RpcUrls.Rejection.EMPTY) "An Ethereum mainnet JSON-RPC URL" else rpcUrlHint(rejection)
 
 /** The "Test" button's verdict, as the dialogs show it. */
 private fun checkLabel(outcome: RpcEndpointCheck.Outcome): String = when (outcome) {
@@ -515,7 +522,7 @@ private fun AddEndpointDialog(
                                 draft.isNotBlank() && validation.rejection != null ->
                                     endpointHint(validation.rejection)
                                 url != null && url.startsWith("http://", ignoreCase = true) ->
-                                    "Unencrypted: the names you look up are visible on the network"
+                                    "Unencrypted http://, allowed only to a node on this device"
                                 else -> "An Ethereum mainnet JSON-RPC URL"
                             },
                         )
