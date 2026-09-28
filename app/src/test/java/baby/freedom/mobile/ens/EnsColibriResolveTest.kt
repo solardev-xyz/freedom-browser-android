@@ -98,6 +98,9 @@ class EnsColibriResolveTest {
         val calls: MutableList<String> = Collections.synchronizedList(mutableListOf())
         val gateway: MutableList<String> = Collections.synchronizedList(mutableListOf())
         var gatewayReply: EnsHttp.Reply? = null
+        /** How long each gateway fetch hangs before answering (a black-holed gateway). */
+        @Volatile
+        var gatewayDelayMs = 0L
         override fun request(
             method: String,
             url: String,
@@ -109,6 +112,7 @@ class EnsColibriResolveTest {
         ): EnsHttp.Reply {
             if (url != "https://rpc.test/") {
                 gateway += url
+                Thread.sleep(gatewayDelayMs)
                 return gatewayReply ?: EnsHttp.Reply(503, "down")
             }
             val params = JSONObject(body!!).getJSONArray("params").getJSONObject(0)
@@ -127,12 +131,14 @@ class EnsColibriResolveTest {
         colibri: Boolean = true,
         ccipRead: Boolean = true,
         waitMs: Long = 2_000,
+        gatewayMs: Long = 20_000,
         clock: () -> Long = System::currentTimeMillis,
     ) = EnsResolver(
         settings = { EnsResolver.Settings(listOf(rpc), ccipRead = ccipRead, colibri = colibri) },
         http = http,
         colibri = EnsColibri(prover, proverHttp),
         colibriWaitMs = waitMs,
+        colibriGatewayMs = gatewayMs,
         clock = clock,
     )
 
@@ -408,6 +414,25 @@ class EnsColibriResolveTest {
     }
 
     @Test
+    fun `a stalled gateway fails a proven lookup within the quorum's read budget, not the whole CCIP budget`() {
+        val prover = Prover({ _, _ -> reverted(fixtureRevert()) })
+        val http = Rpc { _, _ ->
+            EnsHttp.Reply(200, """{"jsonrpc":"2.0","id":1,"error":{"code":3,"message":"execution reverted","data":"${fixtureRevert()}"}}""")
+        }.apply { gatewayDelayMs = 10_000 }
+
+        val t0 = System.currentTimeMillis()
+        val result = resolve(resolver(prover, http, gatewayMs = 500), "1.offchainexample.eth")
+        val took = System.currentTimeMillis() - t0
+
+        require(result is EnsResult.Error) { "got $result" }
+        assertEquals("CCIP_GATEWAY_FAILED", result.reason)
+        // Held to the gateway deadline (counted from the lookup's start),
+        // not to the gateway's own hang or the 30 s proven-pass budget.
+        assertTrue("took ${took}ms", took < 3_000)
+        assertTrue(http.calls.isEmpty())
+    }
+
+    @Test
     fun `a gateway answer whose callback can't be proven hands the lookup to the servers`() {
         val prover = Prover({ _, data ->
             if (data.startsWith("0x9061b923")) reverted(fixtureRevert()) else JSONObject().put("status", "error").put("error", "bad proof")
@@ -422,15 +447,18 @@ class EnsColibriResolveTest {
     }
 
     @Test
-    fun `a re-check's proof allowance is the wait, only while the verifier would be asked`() {
+    fun `a re-check's proof allowance is the wait, only while the verifier would be asked for that name`() {
         val on = EnsResolver.Settings(listOf(rpc), colibri = true)
         val r = resolver(Prover({ _, _ -> returned("0x") }), rpcAnswers(), waitMs = 1_234)
-        assertEquals(1_234L, r.colibriWaitFor(on))
-        assertEquals(0L, r.colibriWaitFor(on.copy(colibri = false)))
+        assertEquals(1_234L, r.colibriWaitFor(on, "proven.eth"))
+        assertEquals(1_234L, r.colibriWaitFor(on, "name.wei"))
+        // A `.tez` name never goes to the verifier, so it gets no wait.
+        assertEquals(0L, r.colibriWaitFor(on, "name.tez"))
+        assertEquals(0L, r.colibriWaitFor(on.copy(colibri = false), "proven.eth"))
         r.colibriBackoff.failed()
-        assertEquals(0L, r.colibriWaitFor(on))
+        assertEquals(0L, r.colibriWaitFor(on, "proven.eth"))
         r.colibriBackoff.succeeded()
-        assertEquals(0L, resolver(Prover({ _, _ -> returned("0x") }, available = false), rpcAnswers()).colibriWaitFor(on))
+        assertEquals(0L, resolver(Prover({ _, _ -> returned("0x") }, available = false), rpcAnswers()).colibriWaitFor(on, "proven.eth"))
     }
 
     @Test

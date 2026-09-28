@@ -190,18 +190,21 @@ object Gateways {
      * earlier answer and open [reverifyFailureWindowMs] for a network
      * that is working fine. A stalled network then costs one Back up to
      * both (~9 s) — the verifier backs off after that, and the window
-     * spares the next documents.
+     * spares the next documents. A `.tez` name is never proven, so its
+     * re-check gets the RPC share alone.
      */
     @Volatile
     internal var reverifyDeadlineMs: Long = 3_000
 
     /**
-     * How long a lookup under these settings may spend on the proven
-     * tier first ([EnsResolver.colibriWaitFor]); 0 when it would skip
-     * it. A seam for tests.
+     * How long a lookup of a name under these settings may spend on the
+     * proven tier first ([EnsResolver.colibriWaitFor]); 0 when it would
+     * skip it (a `.tez` name always does). A seam for tests.
      */
     @Volatile
-    internal var colibriAllowanceMs: (EnsResolver.Settings) -> Long = { ensResolver.colibriWaitFor(it) }
+    internal var colibriAllowanceMs: (EnsResolver.Settings, String) -> Long = { settings, name ->
+        ensResolver.colibriWaitFor(settings, name)
+    }
 
     /**
      * After a re-check that failed or ran out of time, later documents
@@ -617,7 +620,7 @@ object Gateways {
                 lookupFailedAt[key]?.let {
                     System.currentTimeMillis() - it < reverifyFailureWindowMs
                 } == true -> 0L
-                else -> reverifyDeadlineMs + (key.settings?.let(colibriAllowanceMs) ?: 0L)
+                else -> reverifyDeadlineMs + (key.settings?.let { colibriAllowanceMs(it, key.name) } ?: 0L)
             }
             // [lookupWithin] keeps [lookupFailedAt] — see [reverifyFailureWindowMs].
             return lookupWithin(key, name, deadline)

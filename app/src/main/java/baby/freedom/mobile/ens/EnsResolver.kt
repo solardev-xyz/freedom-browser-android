@@ -101,6 +101,12 @@ class EnsResolver internal constructor(
     private val colibri: EnsColibri? = null,
     /** How long a lookup waits for a proof ([COLIBRI_WAIT_MS]); shorter in tests. */
     private val colibriWaitMs: Long = COLIBRI_WAIT_MS,
+    /**
+     * How long after a proven lookup starts its CCIP gateways must have
+     * answered ([LEG_TIMEOUT_MS], the quorum's own read budget); shorter
+     * in tests.
+     */
+    private val colibriGatewayMs: Long = LEG_TIMEOUT_MS,
     private val clock: () -> Long = System::currentTimeMillis,
 ) {
     /**
@@ -169,15 +175,23 @@ class EnsResolver internal constructor(
     internal val colibriBackoff = ColibriBackoff()
 
     /**
-     * How long a lookup under [settings] may wait on the proven tier
-     * before it asks the RPC servers: [colibriWaitMs] when the verifier
-     * would be asked now, 0 when the lookup would skip it (switched off,
-     * not in this build, or backing off). A caller holding a document
+     * How long a lookup of [name] under [settings] may wait on the
+     * proven tier before it asks the RPC servers: [colibriWaitMs] when
+     * the verifier would be asked now, 0 when the lookup would skip it
+     * (a `.tez` name, which never goes to the verifier; switched off;
+     * not in this build; or backing off). A caller holding a document
      * for a bounded re-check adds this to its own deadline, so a normal
      * proof doesn't miss it just for taking longer than an RPC read.
      */
-    internal fun colibriWaitFor(settings: Settings): Long =
-        if (settings.colibri && colibriBackoff.remainingMs() == null && colibri?.available == true) colibriWaitMs else 0
+    internal fun colibriWaitFor(settings: Settings, name: String): Long {
+        if (!settings.colibri || colibri?.available != true || colibriBackoff.remainingMs() != null) return 0
+        val normalized = try {
+            EnsNormalize.fastNormalize(name.trim())
+        } catch (e: EnsNormalize.InvalidNameException) {
+            return 0
+        }
+        return if (NameSystem.forName(normalized) == NameSystem.TEZOS) 0 else colibriWaitMs
+    }
 
     /**
      * Everything a lookup learns about the servers — answer cache,
@@ -359,7 +373,10 @@ class EnsResolver internal constructor(
      *   servers — and so does a gateway that fails or runs out the
      *   [COLIBRI_CCIP_BUDGET_MS] budget (`CCIP_GATEWAY_FAILED`, not
      *   cached): the quorum would fetch the very same gateway again,
-     *   doubling the wait and showing it the name twice.
+     *   doubling the wait and showing it the name twice. The gateway
+     *   fetches themselves must be done within [LEG_TIMEOUT_MS] of the
+     *   lookup's start — the quorum read's own budget — so a black-holed
+     *   gateway fails the name no later than it would without Colibri.
      */
     private suspend fun resolveByColibri(
         config: Settings,
@@ -440,7 +457,11 @@ class EnsResolver internal constructor(
             val atGateway = AtomicBoolean(false)
             val followed = io.async {
                 runCatchingCancellable {
-                    followOffchainLookup(revert, atGateway) { to, data ->
+                    // The gateways get what the quorum's read would have
+                    // (its [LEG_TIMEOUT_MS], counted from this lookup's
+                    // start), so a dead gateway fails here no later than
+                    // it would there; a proven callback still gets its wait.
+                    followOffchainLookup(revert, atGateway, gatewayDeadline = started + colibriGatewayMs) { to, data ->
                         when (val o = prove(to, data, colibriWaitMs)) {
                             is EnsColibri.Outcome.Returned -> CallOutcome(data = o.data, revertData = null)
                             is EnsColibri.Outcome.Reverted -> CallOutcome(data = null, revertData = o.data)
@@ -1098,10 +1119,14 @@ class EnsResolver internal constructor(
      * given, is `true` while a gateway is being asked and stays `true`
      * when the gateways failed, so a caller can tell a gateway failure
      * (or a budget spent waiting on one) from a failed callback.
+     * [gatewayDeadline] (wall clock, ms), if given, is when every
+     * gateway fetch must have answered by; one still running then fails
+     * the pass as if the gateways were down.
      */
     private suspend fun followOffchainLookup(
         firstRevert: String,
         atGateway: AtomicBoolean? = null,
+        gatewayDeadline: Long? = null,
         call: suspend (to: String, data: ByteArray) -> CallOutcome,
     ): CallOutcome {
         var revert = firstRevert
@@ -1115,8 +1140,20 @@ class EnsResolver internal constructor(
                 throw IllegalStateException("OffchainLookup sender is not the Universal Resolver")
             }
             atGateway?.set(true)
-            val response = ccipFetch(lookup.sender, lookup.urls, lookup.callData)
-                ?: throw IllegalStateException("CCIP gateways unavailable or returned invalid data")
+            val response = if (gatewayDeadline == null) {
+                ccipFetch(lookup.sender, lookup.urls, lookup.callData)
+            } else {
+                // [ccipFetch] blocks; wait on it from here so the deadline
+                // holds even while a read is stalled inside it.
+                val fetch = io.async { ccipFetch(lookup.sender, lookup.urls, lookup.callData) }
+                val left = (gatewayDeadline - System.currentTimeMillis()).coerceAtLeast(0)
+                try {
+                    withTimeoutOrNull(left) { fetch.await() }
+                        ?: throw IllegalStateException("CCIP gateways didn't answer within the lookup's budget")
+                } finally {
+                    if (fetch.isActive) fetch.cancel()
+                }
+            } ?: throw IllegalStateException("CCIP gateways unavailable or returned invalid data")
             atGateway?.set(false)
             val callbackData = lookup.callback + abiEncodeTwoBytes(response, lookup.extraData)
             val outcome = call(lookup.sender, callbackData)

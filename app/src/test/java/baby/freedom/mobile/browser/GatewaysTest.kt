@@ -278,7 +278,7 @@ class GatewaysTest {
         val allowance = Gateways.colibriAllowanceMs
         val asked = java.util.concurrent.atomic.AtomicReference<baby.freedom.mobile.ens.EnsResolver.Settings?>()
         Gateways.reverifyDeadlineMs = 100
-        Gateways.colibriAllowanceMs = { asked.set(it); 1_000 }
+        Gateways.colibriAllowanceMs = { settings, _ -> asked.set(settings); 1_000 }
         try {
             withLookup({ name ->
                 Thread.sleep(400) // longer than the RPC share, well inside the proof's
@@ -292,7 +292,7 @@ class GatewaysTest {
             }
             // With the verifier not being asked (off, backing off), the
             // deadline is the RPC share alone again.
-            Gateways.colibriAllowanceMs = { 0 }
+            Gateways.colibriAllowanceMs = { _, _ -> 0 }
             KnownEnsNames.record("bzz://$ref64", "slowrpc.eth", EnsTrust.ASSUMED)
             withLookup({ name ->
                 Thread.sleep(400)
