@@ -126,6 +126,14 @@ class MyotisNode internal constructor(
      * parking again.
      */
     private class Release(var at: Long, val status: MyotisChainStatus)
+
+    /**
+     * Chains whose engine last reported itself paused, read from the engine
+     * rather than from the published row: a released chain's row is its
+     * parked snapshot (never `paused`), so a failed resume after a release
+     * would otherwise go unretried until the grace ran out.
+     */
+    private val enginePaused = HashSet<MyotisNetwork>()
     private var foreground = true
     private var polls = 0
 
@@ -253,7 +261,10 @@ class MyotisNode internal constructor(
                 for ((network, handle) in retry) {
                     // A failed warm restart leaves the engine PAUSED and
                     // retryable; try again on every poll while in front.
-                    Log.i(TAG, "${network.engineName}: still paused, resume → ${engine.resume(handle)}")
+                    val resumed = engine.resume(handle)
+                    Log.i(TAG, "${network.engineName}: still paused, resume → $resumed")
+                    // A release's grace counts from the engine actually running again.
+                    if (resumed) released[network]?.at = upClock()
                 }
                 refreshStatus()
                 if (++polls % LOG_DRAIN_EVERY == 0) drainEngineLogs()
@@ -315,6 +326,7 @@ class MyotisNode internal constructor(
         startErrors.clear()
         parked.clear()
         released.clear()
+        enginePaused.clear()
         for ((network, handle) in stopping) {
             engine.stop(handle)
             Log.i(TAG, "${network.engineName}: stopped")
@@ -322,12 +334,10 @@ class MyotisNode internal constructor(
         _state.value = MyotisInfo()
     }
 
-    private fun pausedChains(): List<Pair<MyotisNetwork, Long>> {
-        val info = _state.value
-        return handles.mapNotNull { (network, handle) ->
-            if (network !in parked && info.chain(network)?.paused == true) network to handle else null
+    private fun pausedChains(): List<Pair<MyotisNetwork, Long>> =
+        handles.mapNotNull { (network, handle) ->
+            if (network !in parked && network in enginePaused) network to handle else null
         }
-    }
 
     private fun refreshStatus() {
         val chains = networks.mapNotNull { network ->
@@ -345,9 +355,13 @@ class MyotisNode internal constructor(
     /** A running (unparked) chain's status as its row should show it; parks it on a stale anchor. */
     private fun engineStatus(network: MyotisNetwork, handle: Long): MyotisChainStatus {
         val status = MyotisChainStatus.decode(network.chainId, engine.statusJson(handle) ?: "{}")
+        if (status.paused) enginePaused += network else enginePaused -= network
         if (foreground && status.staleAnchor && !status.paused) park(network, handle, status)
         parked[network]?.let { return it.status }
         val release = released[network] ?: return status
+        // A paused engine (a resume that failed, retried on the next poll)
+        // re-judges nothing: its grace starts when it's actually running.
+        if (status.paused) release.at = upClock()
         if (status.anchorAccepted || (foreground && upClock() - release.at >= REJUDGE_GRACE_MS)) {
             released.remove(network)
             return status

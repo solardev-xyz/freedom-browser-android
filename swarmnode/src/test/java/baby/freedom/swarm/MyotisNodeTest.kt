@@ -448,6 +448,58 @@ class MyotisNodeTest {
     }
 
     @Test
+    fun `a failed resume after a release is retried on the next poll without flashing the row`() {
+        val engine = FakeEngine()
+        val clocks = Clocks()
+        val parkedJson = """{"running":true,"beaconState":"STALE_ANCHOR","currentPeriod":1500,"targetPeriod":1535,"wsBoundPeriods":13}"""
+        engine.status[1L] = """{"running":true,"beaconState":"SYNCED"}"""
+        engine.status[2L] = parkedJson
+        val node = node(engine, clocks)
+        node.start()
+        idle(node)
+        val parkedRow = node.state.value.chain(MyotisNetwork.Gnosis)!!
+
+        // Clock corrected, but the warm restart fails: the engine stays paused.
+        clocks.wall -= 40L * 86_400_000L
+        engine.resumeAnswer = false
+        engine.status[2L] = """{"running":false,"paused":true,"beaconState":"STALE_ANCHOR"}"""
+        engine.calls.clear()
+        node.pollNow()
+        idle(node)
+        assertEquals(listOf("resume 2"), engine.pausesAndResumes())
+        assertEquals(parkedRow, node.state.value.chain(MyotisNetwork.Gnosis))
+
+        // The next poll retries it, well inside the grace, even though the
+        // row shows the (unpaused) parked snapshot.
+        clocks.up += 3_000L
+        clocks.wall += 3_000L
+        engine.resumeAnswer = true
+        engine.status[2L] = """{"running":true,"beaconState":"SYNCING"}"""
+        node.pollNow()
+        idle(node)
+        assertEquals(listOf("resume 2", "resume 2"), engine.pausesAndResumes())
+        assertEquals(parkedRow, node.state.value.chain(MyotisNetwork.Gnosis))
+
+        // Running now, passing through SYNCING: the grace counts from the
+        // successful resume, not the release, so the row doesn't flash.
+        clocks.up += 12_000L
+        clocks.wall += 12_000L
+        node.pollNow()
+        idle(node)
+        assertEquals(listOf("resume 2", "resume 2"), engine.pausesAndResumes())
+        assertEquals(parkedRow, node.state.value.chain(MyotisNetwork.Gnosis))
+
+        // Still stale after a full grace of running time: parked again.
+        engine.status[2L] = parkedJson
+        clocks.up += MyotisNode.REJUDGE_GRACE_MS
+        clocks.wall += MyotisNode.REJUDGE_GRACE_MS
+        node.pollNow()
+        idle(node)
+        assertEquals(listOf("resume 2", "resume 2", "pause 2"), engine.pausesAndResumes())
+        assertEquals(parkedRow, node.state.value.chain(MyotisNetwork.Gnosis))
+    }
+
+    @Test
     fun `a released chain still syncing when the grace runs out shows its real state`() {
         val engine = FakeEngine()
         val clocks = Clocks()
