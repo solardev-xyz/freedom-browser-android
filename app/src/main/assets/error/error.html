@@ -241,6 +241,18 @@
           titleEl.textContent = 'Unsupported content format';
           descriptionEl.innerHTML =
             'This ' + nameLabel + ' name resolves to a content format Freedom Browser cannot load yet on mobile.';
+        } else if (error === 'ens_invalid_name') {
+          titleEl.textContent = 'Not a valid ' + nameLabel + ' name';
+          descriptionEl.innerHTML =
+            'This name breaks the ENSIP-15 naming rules ' +
+            '(a disallowed character, mixed scripts, a lookalike, &hellip;), so Freedom Browser ' +
+            "won't look it up &mdash; other " + nameLabel + ' apps refuse it too, and it could be ' +
+            'mistaken for a different name. Check the spelling.';
+        } else if (error === 'ens_name_too_long') {
+          titleEl.textContent = nameLabel + ' name too long';
+          descriptionEl.innerHTML =
+            'A label of this name is longer than the 255 bytes an ' + nameLabel + ' lookup can ' +
+            'carry, so Freedom Browser can\'t ask a resolver about it. Check the address.';
         } else if (error === 'ens_unverified') {
           // #96: only one RPC server's word for where the name leads.
           document.body.classList.add('warn');

@@ -23,6 +23,7 @@ import androidx.core.view.WindowCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import baby.freedom.mobile.browser.BrowserScreen
+import baby.freedom.mobile.browser.DeepLinkQueue
 import baby.freedom.mobile.browser.Gateways
 import baby.freedom.mobile.browser.HOME_URL
 import baby.freedom.mobile.browser.Adblock
@@ -33,6 +34,7 @@ import baby.freedom.mobile.browser.UnverifiedOrigins
 import baby.freedom.mobile.browser.VirtualOrigin
 import baby.freedom.mobile.browser.statusBarIconsDark
 import baby.freedom.mobile.data.NodeSettings
+import baby.freedom.mobile.ens.EnsNormalize
 import baby.freedom.mobile.node.IMyotisCallback
 import baby.freedom.mobile.node.IMyotisService
 import baby.freedom.mobile.node.INodeCallback
@@ -84,11 +86,16 @@ class MainActivity : ComponentActivity() {
     private lateinit var settings: NodeSettings
 
     /**
-     * An App Link that arrived after the UI was already composed (see
-     * [onNewIntent]), waiting to be opened in a tab. Cold-start links
+     * App Links that arrived after the UI was already composed (see
+     * [onNewIntent]), waiting to be opened in tabs, oldest first. Cold-start links
      * don't use this — they're passed straight in as the initial URL.
      */
-    private val deepLinkFlow = MutableStateFlow<String?>(null)
+    private val deepLinkQueue = DeepLinkQueue()
+
+    /** Publishes [onNewIntent] links into [deepLinkQueue] in arrival order. */
+    private val deepLinks = OrderedDeepLinks(lifecycleScope, Dispatchers.Default) {
+        deepLinkQueue.offer(it)
+    }
 
     // The page theme colour the browser paints behind the status bar,
     // as ARGB, or null when it shows the app background there (#92).
@@ -243,6 +250,9 @@ class MainActivity : ComponentActivity() {
         // idempotent and thread-safe, so a label that arrives first
         // just does the load itself, exactly as it does today.
         lifecycleScope.launch(Dispatchers.Default) { PublicSuffixList.warm() }
+        // Same for ENSIP-15's spec tables (a few hundred ms on a cold
+        // ART): the first non-ASCII name must not decode them on Main.
+        lifecycleScope.launch(Dispatchers.Default) { EnsNormalize.warm() }
 
         // Ad and tracker blocking (#126): compile the enabled filter
         // lists off the main thread and follow Settings from here on.
@@ -251,9 +261,27 @@ class MainActivity : ComponentActivity() {
         Adblock.start(this)
 
         // A cold start from an App Link opens straight at the shared
-        // content instead of the home surface.
-        val startUrl = displayUrlForDeepLink(intent) ?: HOME_URL
+        // content instead of the home surface. A Unicode ENS link
+        // (`xn--…` host) needs the ENSIP-15 tables to map back to its
+        // name, and the warm-up above has only just started — so parse
+        // it on Default once they're decoded and compose then, rather
+        // than decode them on Main here (every later main-thread parse
+        // is cheap once the tables are warm).
+        val link = intent
+        if (!EnsNormalize.isWarm && VirtualOrigin.needsEnsTables(deepLinkData(link))) {
+            lifecycleScope.launch {
+                val startUrl = withContext(Dispatchers.Default) {
+                    EnsNormalize.warm()
+                    displayUrlForDeepLink(link)
+                }
+                showBrowser(startUrl ?: HOME_URL)
+            }
+        } else {
+            showBrowser(displayUrlForDeepLink(link) ?: HOME_URL)
+        }
+    }
 
+    private fun showBrowser(startUrl: String) {
         setContent {
             FreedomTheme {
                 SystemBarsForScheme()
@@ -271,7 +299,7 @@ class MainActivity : ComponentActivity() {
                     val myotisInfo by myotisInfoFlow.collectAsState()
                     val myotisEnabled by settings.myotisEnabled
                         .collectAsState(initial = false)
-                    val deepLink by deepLinkFlow.collectAsState()
+                    val pendingLinks by deepLinkQueue.pending.collectAsState()
                     BrowserScreen(
                         nodeInfo = info,
                         ipfsInfo = ipfsInfo,
@@ -290,8 +318,8 @@ class MainActivity : ComponentActivity() {
                             onUnseed = ::onRadicleUnseed,
                         ),
                         initialUrl = startUrl,
-                        deepLinkUrl = deepLink,
-                        onDeepLinkHandled = { deepLinkFlow.value = null },
+                        deepLink = pendingLinks.firstOrNull(),
+                        onDeepLinkHandled = deepLinkQueue::handled,
                         onRecoverNodes = ::onRecoverNodes,
                         ipfsProgressSnapshot = ::ipfsProgressSnapshot,
                         ipfsCounters = ::ipfsCounters,
@@ -348,8 +376,18 @@ class MainActivity : ComponentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
-        displayUrlForDeepLink(intent)?.let { deepLinkFlow.value = it }
+        // Same off-Main parse as a cold-start link if the ENSIP-15
+        // tables are still decoding (a link tapped right after launch);
+        // [deepLinks] keeps a later ASCII link from overtaking it.
+        val slow = !EnsNormalize.isWarm && VirtualOrigin.needsEnsTables(deepLinkData(intent))
+        deepLinks.submit(slow) {
+            if (slow) EnsNormalize.warm()
+            displayUrlForDeepLink(intent)
+        }
     }
+
+    private fun deepLinkData(intent: Intent?): String? =
+        intent?.takeIf { it.action == Intent.ACTION_VIEW }?.dataString
 
     /**
      * The user-facing display URL for an incoming `VIEW` intent, or
@@ -363,8 +401,7 @@ class MainActivity : ComponentActivity() {
      * ignored rather than loaded.
      */
     private fun displayUrlForDeepLink(intent: Intent?): String? {
-        if (intent?.action != Intent.ACTION_VIEW) return null
-        return intent.dataString?.let { VirtualOrigin.displayUrlFor(it) }
+        return deepLinkData(intent)?.let { VirtualOrigin.displayUrlFor(it) }
     }
 
     /**

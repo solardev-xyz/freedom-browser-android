@@ -45,6 +45,26 @@ class NameResolutionErrorTest {
     }
 
     @Test
+    fun `every refusal code gets its own copy, not the RPC-unreachable fallback`() {
+        val fallback = nameResolutionRefusalCopy("vitalik.eth", "ens_lookup_failed")
+        for (code in listOf("ens_not_found", "ens_unsupported_codec", "ens_invalid_name", "ens_name_too_long")) {
+            assertTrue(code, nameResolutionRefusalCopy("vitalik.eth", code) != fallback)
+            assertFalse(code, nameResolutionRefusalCopy("vitalik.eth", code).second.contains("RPC"))
+        }
+        assertEquals("Not a valid ENS name", nameResolutionRefusalCopy("vitalik.eth", "ens_invalid_name").first)
+        assertEquals("ENS name too long", nameResolutionRefusalCopy("vitalik.eth", "ens_name_too_long").first)
+    }
+
+    @Test
+    fun `name refusals map to their own pages and lookup failures don't`() {
+        assertEquals("ens_invalid_name", refusedNameErrorCode("INVALID_NAME"))
+        assertEquals("ens_name_too_long", refusedNameErrorCode("NAME_TOO_LONG"))
+        assertNull(refusedNameErrorCode("PROVIDER_ERROR"))
+        assertEquals(404, statusForNameResolutionError("ens_invalid_name"))
+        assertEquals(404, statusForNameResolutionError("ens_name_too_long"))
+    }
+
+    @Test
     fun `a tez refusal names the Tezos RPC servers, not Ethereum's`() {
         val conflict = nameResolutionRefusalHtml("alice.tez", "ens_conflict")
         assertTrue(conflict.contains("The Tezos RPC servers"))

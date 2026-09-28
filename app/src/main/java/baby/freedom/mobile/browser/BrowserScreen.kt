@@ -407,8 +407,8 @@ fun BrowserScreen(
     onIpfsToggle: (Boolean) -> Unit,
     radicle: RadicleControls = RadicleControls(),
     initialUrl: String = HOME_URL,
-    deepLinkUrl: String? = null,
-    onDeepLinkHandled: () -> Unit = {},
+    deepLink: DeepLink? = null,
+    onDeepLinkHandled: (DeepLink) -> Unit = {},
     onRecoverNodes: () -> Unit = {},
     ipfsProgressSnapshot: () -> String? = { null },
     ipfsCounters: () -> LongArray? = { null },
@@ -1099,12 +1099,15 @@ fun BrowserScreen(
                                     result.trust,
                                 ),
                             )
-                        is EnsResult.Error ->
-                            ensError(
-                                "ens_lookup_failed",
-                                // `.tez` says what failed.
-                                detail = if (name.endsWith(".tez")) "${result.reason}: ${result.error}" else result.reason,
-                            )
+                        // The name itself was refused: no lookup ran, so
+                        // "couldn't reach an RPC endpoint" would be a lie.
+                        is EnsResult.Error -> refusedNameErrorCode(result.reason)?.let {
+                            ensError(it, detail = result.error)
+                        } ?: ensError(
+                            "ens_lookup_failed",
+                            // `.tez` says what failed.
+                            detail = if (name.endsWith(".tez")) "${result.reason}: ${result.error}" else result.reason,
+                        )
                         // RPC servers disagreed (#96): nothing to load.
                         is EnsResult.Conflict ->
                             ensError("ens_conflict", detail = EnsGate.conflictDetail(result))
@@ -1253,10 +1256,11 @@ fun BrowserScreen(
     // MainActivity.onNewIntent). Cold start doesn't come through here —
     // it's the [initialUrl] above — so a link tapped now is a second
     // destination and gets its own tab rather than replacing whatever
-    // the user was reading. [onDeepLinkHandled] clears the pending URL
-    // so a config change doesn't re-open it.
-    LaunchedEffect(deepLinkUrl) {
-        val url = deepLinkUrl ?: return@LaunchedEffect
+    // the user was reading. [deepLink] is the head of a queue (several
+    // links can arrive in one frame); [onDeepLinkHandled] pops it so a
+    // config change doesn't re-open it and the next link gets its turn.
+    LaunchedEffect(deepLink) {
+        val link = deepLink ?: return@LaunchedEffect
         // Whatever full-screen overlay was up would otherwise hide the
         // tab we just opened.
         showSettings = false
@@ -1266,8 +1270,8 @@ fun BrowserScreen(
         showHistory = false
         showBookmarks = false
         showDownloads = false
-        submit(tabs.newTab(), url)
-        onDeepLinkHandled()
+        submit(tabs.newTab(), link.url)
+        onDeepLinkHandled(link)
     }
 
     // The chrome is a floating capsule layered *over* an edge-to-edge

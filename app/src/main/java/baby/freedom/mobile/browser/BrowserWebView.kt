@@ -69,6 +69,7 @@ import androidx.webkit.WebMessageCompat
 import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
 import baby.freedom.mobile.data.BrowsingRepository
+import baby.freedom.mobile.ens.EnsNormalize
 import baby.freedom.mobile.ens.EnsResult
 import baby.freedom.mobile.ens.NameSystem
 import baby.freedom.mobile.ens.TezosDomainsResolver
@@ -193,13 +194,16 @@ internal fun nameResolutionRefusal(name: String, code: String): WebResourceRespo
         ByteArrayInputStream(nameResolutionRefusalHtml(name, code).toByteArray(Charsets.UTF_8)),
     )
 
-/** [nameResolutionRefusal]'s page. */
-internal fun nameResolutionRefusalHtml(name: String, code: String): String {
+/**
+ * Title and description (HTML) of [nameResolutionRefusal]'s page for
+ * [code] — the same wording `error.html` uses for that code.
+ */
+internal fun nameResolutionRefusalCopy(name: String, code: String): Pair<String, String> {
     val system = NameSystem.forName(name)
     val label = system.label
     val tezos = system == NameSystem.TEZOS
     val chain = if (tezos) "Tezos" else "Ethereum"
-    val (title, description) = when (code) {
+    return when (code) {
         "ens_not_found" -> "No content for this $label name" to
             if (tezos) {
                 "This $label name doesn't point at a website any more. The owner may " +
@@ -211,6 +215,15 @@ internal fun nameResolutionRefusalHtml(name: String, code: String): String {
         "ens_unsupported_codec" -> "Unsupported content format" to
             "This $label name now resolves to a content format Freedom Browser " +
             "cannot load yet on mobile."
+        // ENSIP-15 refused the name ([EnsNormalize]): no lookup ran.
+        "ens_invalid_name" -> "Not a valid $label name" to
+            "This name breaks the ENSIP-15 naming rules " +
+            "(a disallowed character, mixed scripts, a lookalike, &hellip;), so Freedom Browser " +
+            "won't look it up &mdash; other $label apps refuse it too, and it could be " +
+            "mistaken for a different name. Check the spelling."
+        "ens_name_too_long" -> "$label name too long" to
+            "A label of this name is longer than the 255 bytes an $label lookup can " +
+            "carry, so Freedom Browser can't ask a resolver about it. Check the address."
         // [Gateways.reverifyEnsDocument] lands here for one server's
         // record that isn't what this tab or session had — including when
         // they had nothing yet (an iframe of a name never resolved) — and
@@ -231,7 +244,20 @@ internal fun nameResolutionRefusalHtml(name: String, code: String): String {
             "Couldn't reach ${if (tezos) "a Tezos" else "an Ethereum"} RPC endpoint to resolve this name. " +
             "Check your connection and try again."
     }
-    val safeName = name.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+}
+
+/** [nameResolutionRefusal]'s page. */
+internal fun nameResolutionRefusalHtml(name: String, code: String): String {
+    val (title, description) = nameResolutionRefusalCopy(name, code)
+    fun esc(t: String) = t.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    val safeName = esc(name)
+    // The spec's reason, as the address-bar path shows it in the details box.
+    val reason = if (code == "ens_invalid_name") {
+        (runCatching { EnsNormalize.normalize(name) }.exceptionOrNull() as? EnsNormalize.InvalidNameException)
+            ?.message?.let { "\n" + esc(it) }.orEmpty()
+    } else {
+        ""
+    }
     return """<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'">
@@ -251,7 +277,7 @@ p{color:#57606a}.d{background:#f6f8fa;color:#cf222e}a{background:#f6f8fa;border-
 </style></head><body><div class="c"><h1>$title</h1><p>$description</p>
 <div class="d">ens://$safeName
 
-$code</div><a href="">Try again</a></div></body></html>"""
+$code$reason</div><a href="">Try again</a></div></body></html>"""
 }
 
 /** Where [nameWebRecordNavigation] sends a request for [pathAndQuery] on the name's origin. */

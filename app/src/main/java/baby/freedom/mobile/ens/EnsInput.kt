@@ -11,6 +11,9 @@ package baby.freedom.mobile.ens
  *   - `foo.box/path`
  *   - `alice.wei` (WNS) and `name.gwei` (GNS) — see [NameSystem]
  *   - `alice.tez` (Tezos Domains)
+ *   - non-ASCII / emoji names (`🦊.eth`), returned ENSIP-15 normalized
+ *     (Ethereum systems only: a `.tez` name gets Tezos Domains' own
+ *     UTS-46 form instead, see [EnsNormalize.tezosForm])
  *
  * Returns `null` for anything that doesn't end in one of
  * [NameSystem.navigableSuffixes] (`.eth`, `.box`, `.wei`, `.gwei`, `.tez`).
@@ -43,10 +46,28 @@ object EnsInput {
         val name = match.groupValues[1]
         val suffix = match.groupValues[2]
 
-        val lower = name.lowercase()
-        if (NameSystem.navigableSuffixes.none { lower.endsWith(it) }) return null
+        // The ENSIP-15 form ([EnsNormalize]) where there is one, so the
+        // address bar, the `ens://` origin and the resolver's cache all
+        // key on the one spelling every client hashes (`Ⓥitalik.eth` and
+        // `vitalik.eth` are the same name). A name ENSIP-15 rejects is
+        // still a name — lowercased as typed, it goes on to the resolver
+        // and comes back as an `INVALID_NAME` error page rather than
+        // falling through to web search.
+        //
+        // Pure-ASCII input skips the library: ENSIP-15 maps an ASCII
+        // name it accepts to its lowercase, and a rejected one falls back
+        // to the lowercase anyway — so the answer is the same, and the
+        // address bar's per-composition checks (every `https://…` URL
+        // goes through here via [looksLikeEns]) never trigger the
+        // library's spec decode on the main thread.
+        val canonical = if (name.all { it.code < 0x80 }) {
+            name.lowercase()
+        } else {
+            EnsNormalize.normalizeOrNull(name) ?: name.lowercase()
+        }
+        if (NameSystem.navigableSuffixes.none { canonical.endsWith(it) }) return null
 
-        return Parsed(name = lower, suffix = suffix)
+        return Parsed(name = canonical, suffix = suffix)
     }
 
     /** `foo.eth` or `ens://foo.eth` → true. Fast pre-check before hitting network. */

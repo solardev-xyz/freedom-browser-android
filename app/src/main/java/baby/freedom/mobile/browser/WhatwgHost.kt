@@ -93,9 +93,26 @@ internal object WhatwgHost {
          */
         fun toUnicode(domain: String): String? = null
 
+        /**
+         * The UTS-46 *mapping* of [domain] (nontransitional: case fold,
+         * NFC, fullwidth → ASCII, `。` → `.`, U+FE0F and other ignored
+         * characters dropped) — the processing half of ToUnicode, with
+         * validation errors (hyphens, bidi, joiners) ignored — or `null`
+         * if a label holds a character UTS-46 disallows outright (ICU
+         * puts U+FFFD there). `null` too where there's no ICU.
+         */
+        fun map(domain: String): String? = null
+
         companion object {
-            /** Chromium's `url_idna_icu` options: nontransitional, CheckBidi, (and WHATWG's) CheckJoiners. */
-            const val OPTIONS = IDNA.NONTRANSITIONAL_TO_ASCII or IDNA.CHECK_BIDI or IDNA.CHECK_CONTEXTJ
+            /**
+             * Chromium's `url_idna_icu` options: nontransitional, CheckBidi,
+             * (and WHATWG's) CheckJoiners. Nontransitional both ways — ICU
+             * defaults ToUnicode (and so [map]) to *transitional*, which
+             * would turn `straße.tez` into `strasse.tez`, `ς` into `σ`
+             * and drop ZWJ/ZWNJ.
+             */
+            const val OPTIONS = IDNA.NONTRANSITIONAL_TO_ASCII or IDNA.NONTRANSITIONAL_TO_UNICODE or
+                IDNA.CHECK_BIDI or IDNA.CHECK_CONTEXTJ
 
             /** Errors WHATWG ignores: CheckHyphens and VerifyDnsLength are both off. */
             val IGNORED_ERRORS = setOf(
@@ -124,6 +141,12 @@ internal object WhatwgHost {
             if (info.hasErrors()) return null
             return out.toString()
         }
+
+        override fun map(domain: String): String? {
+            val out = StringBuilder()
+            idna.nameToUnicode(domain, out, IDNA.Info())
+            return out.toString().takeIf { '\uFFFD' !in it }
+        }
     }
 
     /** Swapped for icu4j in JVM unit tests, where `android.icu` is a stub. */
@@ -145,7 +168,7 @@ internal object WhatwgHost {
         return ascii
     }
 
-    private fun percentDecode(s: String): String {
+    internal fun percentDecode(s: String): String {
         if ('%' !in s) return s
         fun Byte.isHexByte() = toInt().toChar().isHex()
         val raw = s.toByteArray(Charsets.UTF_8)

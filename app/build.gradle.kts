@@ -147,6 +147,11 @@ dependencies {
 
     implementation("androidx.datastore:datastore-preferences:1.2.1")
 
+    // ENSIP-15 name normalization: the Java port of desktop's
+    // @adraffy/ens-normalize, by the spec's author. Pure JVM, no
+    // dependencies, ~60 KB with its spec tables.
+    implementation("io.github.adraffy:ens-normalize:0.3.1")
+
     val roomVersion = "2.8.4"
     implementation("androidx.room:room-runtime:$roomVersion")
     implementation("androidx.room:room-ktx:$roomVersion")
