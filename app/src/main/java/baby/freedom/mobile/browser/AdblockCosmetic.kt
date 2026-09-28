@@ -4,6 +4,10 @@ import android.webkit.WebView
 import androidx.webkit.WebMessageCompat
 import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 
 /**
  * Cosmetic filtering (#126): hiding the ad slots, cookie notices and
@@ -28,6 +32,9 @@ import androidx.webkit.WebViewFeature
  * taken off it before the page's own scripts run, and has a random name.
  */
 internal object AdblockCosmetic {
+    /** For a frame's first answer held back until the first engine build (#192). */
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+
     fun isSupported(): Boolean = runCatching {
         WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER) &&
             WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)
@@ -49,8 +56,25 @@ internal object AdblockCosmetic {
             val page = pageUrl() ?: frameOrigin
             when {
                 data == COSMETIC_HELLO -> {
-                    val css = Adblock.initialCosmetics(frameOrigin, page, private)
-                    reply.postMessage(if (css == null) COSMETIC_OFF else COSMETIC_CSS + css)
+                    val answer = {
+                        val css = Adblock.initialCosmetics(frameOrigin, page, private)
+                        reply.postMessage(if (css == null) COSMETIC_OFF else COSMETIC_CSS + css)
+                    }
+                    // Before the first engine build, "no engine" would
+                    // answer [COSMETIC_OFF] and the frame would stop
+                    // asking for good: a tab restored after process
+                    // death would get no hiding at all (#192). Answer
+                    // once the build lands (or its deadline passes)
+                    // instead; this is the main thread, so wait off it.
+                    if (Adblock.firstBuildPending) {
+                        scope.launch {
+                            Adblock.awaitFirstBuild()
+                            // The frame may be gone by now (tab closed).
+                            runCatching { answer() }
+                        }
+                    } else {
+                        answer()
+                    }
                 }
                 data.startsWith(COSMETIC_TOKENS) -> {
                     val tokens = parseCosmeticTokens(data) ?: return@addWebMessageListener

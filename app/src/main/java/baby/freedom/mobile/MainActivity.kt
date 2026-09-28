@@ -163,7 +163,8 @@ class MainActivity : ComponentActivity() {
 
         // Ad and tracker blocking (#126): compile the enabled filter
         // lists off the main thread and follow Settings from here on.
-        // Until the first build lands, requests simply aren't filtered.
+        // Until the first build lands, requests wait for it (bounded,
+        // see [FirstBuildGate]) — a restored tab loads straight away.
         Adblock.start(this)
 
         // A cold start from an App Link opens straight at the shared
