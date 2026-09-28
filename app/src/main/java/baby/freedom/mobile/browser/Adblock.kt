@@ -19,7 +19,10 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.io.ByteArrayInputStream
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 
 private const val TAG = "Adblock"
 
@@ -158,6 +161,18 @@ internal fun adblockSiteState(
     else -> AdblockSiteState.BLOCKING
 }
 
+/**
+ * Whether a tap on the page menu's switch in state [current] must drop
+ * the renderer's in-memory cache before the page reloads: when it
+ * turns blocking back on ([AdblockSiteState.ALLOWED]). Blink reuses a
+ * resource it still holds in memory without a network request, so
+ * `shouldInterceptRequest` never sees it, and an ad image the page
+ * loaded while the site was allowed would come back on the reload.
+ * Allowing a site needs nothing: a blocked request's empty 403 is
+ * `no-store`.
+ */
+internal fun dropsMemoryCache(current: AdblockSiteState): Boolean = current == AdblockSiteState.ALLOWED
+
 /** An allowlist change to write to Settings: [add] or remove [host]. */
 internal data class AllowlistWrite(val add: Boolean, val host: String)
 
@@ -256,6 +271,87 @@ internal class AllowlistStore(
     }
 }
 
+/**
+ * How long after [Adblock.start] requests may wait for the first engine
+ * build (#192). About 1 s on the AVD in a debug build, ~0.5 s in a
+ * release one; the rest is headroom for a slow device, and the most a
+ * page's requests can stall on a cold start if the build never lands.
+ */
+internal const val FIRST_BUILD_WAIT_MS = 5_000L
+
+/**
+ * The first engine build, for the requests that arrive before it (#192):
+ * a tab restored after process death, or opened by a VIEW intent, loads
+ * straight away, inside the build. They wait for it, up to one deadline
+ * shared by every waiter and fixed when the build starts ([open]) — so
+ * however many requests queue up, a cold start stalls by at most
+ * [waitMs] in all, not per request.
+ *
+ * Nothing waits before [open] (no build under way) or after [ready] (the
+ * first build landed, engine or none). A later rebuild never waits: the
+ * previous engine keeps answering until the swap.
+ */
+internal class FirstBuildGate(
+    private val waitMs: Long = FIRST_BUILD_WAIT_MS,
+    private val clock: () -> Long = SystemClock::elapsedRealtime,
+) {
+    private val latch = CountDownLatch(1)
+
+    /** Completed with [latch], for [awaitSuspending]: waiting on it parks no thread. */
+    private val landed = CompletableDeferred<Unit>()
+
+    /** When waiting stops, on [clock]; 0 before [open]. */
+    @Volatile
+    private var deadline = 0L
+
+    /** The first build has started. Idempotent. */
+    fun open() {
+        if (deadline == 0L) deadline = clock() + waitMs
+    }
+
+    /** The first build has landed. */
+    fun ready() {
+        latch.countDown()
+        landed.complete(Unit)
+    }
+
+    val isReady: Boolean get() = latch.count == 0L
+
+    /**
+     * Would a caller wait now: the build started, hasn't landed, and the
+     * deadline hasn't passed?
+     */
+    val pending: Boolean get() = !isReady && deadline != 0L && deadline > clock()
+
+    /** Block until the first build lands or the deadline passes; true if it landed. For WebView's IO threads. */
+    fun await(): Boolean {
+        if (isReady) return true
+        if (deadline == 0L) return false
+        val left = deadline - clock()
+        if (left <= 0) return false
+        return try {
+            latch.await(left, TimeUnit.MILLISECONDS)
+        } catch (e: InterruptedException) {
+            Thread.currentThread().interrupt()
+            false
+        }
+    }
+
+    /**
+     * [await] for a coroutine (a frame's deferred cosmetic answer on the
+     * main thread): suspends instead of blocking, so however many frames
+     * wait, none holds a thread — not the main one, not one of
+     * [Dispatchers.IO]'s.
+     */
+    suspend fun awaitSuspending(): Boolean {
+        if (isReady) return true
+        if (deadline == 0L) return false
+        val left = deadline - clock()
+        if (left <= 0) return false
+        return withTimeoutOrNull(left) { landed.await() } != null
+    }
+}
+
 /** What Settings shows about the engine. */
 internal data class AdblockStatus(val loading: Boolean, val filterCount: Int)
 
@@ -264,9 +360,14 @@ internal data class AdblockStatus(val loading: Boolean, val filterCount: Int)
  * categories switched on in Settings, and the per-site allowlist.
  *
  * The engine is compiled from the bundled lists off the main thread at
- * startup, and again whenever the categories change; until the first
- * build lands (about a second), requests go through unfiltered rather
- * than wait. The swap is atomic — a request sees the old engine or the
+ * startup, and again whenever the categories change. Until the first
+ * build lands (about a second), requests wait for it, bounded by
+ * [FIRST_BUILD_WAIT_MS] from startup ([FirstBuildGate], #192): a tab
+ * restored after process death or opened by a VIEW intent loads inside
+ * that window, and would otherwise go unfiltered. Past the deadline they
+ * go through unfiltered rather than stall the page further. A later
+ * rebuild never waits: the previous engine answers until the swap,
+ * which is atomic — a request sees the old engine or the
  * new one. The allowlist is followed by its own collector, so a
  * rebuild never delays it, and the first engine waits for the first
  * allowlist read, so an allowlisted site is never blocked while
@@ -303,6 +404,8 @@ internal object Adblock {
 
     private var started = false
 
+    private val firstBuild = FirstBuildGate()
+
     /** Set in [start]; allowlist writes made before it queue up. */
     @Volatile
     private var settings: NodeSettings? = null
@@ -327,6 +430,7 @@ internal object Adblock {
         val app = context.applicationContext
         val settings = NodeSettings.get(app)
         this.settings = settings
+        firstBuild.open()
         scope.launch { store.run() }
         val allowlistRead = CompletableDeferred<Unit>()
         scope.launch {
@@ -348,6 +452,7 @@ internal object Adblock {
                 engine = built
                 _status.value = AdblockStatus(loading = false, filterCount = built?.filterCount ?: 0)
                 _revision.value++
+                firstBuild.ready()
             }
         }
     }
@@ -429,15 +534,30 @@ internal object Adblock {
      * top-level document, [private] whether the tab is private.
      * Called on WebView's IO threads for every request; never blocks a
      * main-frame load, the local nodes' gateways, or a virtual origin.
+     * Before the first engine build lands, waits for it ([FirstBuildGate]).
      */
     fun shouldBlock(url: String, headers: Map<String, String>?, pageUrl: String?, private: Boolean): Boolean {
-        val e = engine ?: return false
         if (!url.startsWith("http://") && !url.startsWith("https://")) return false
         val host = hostOfUrl(url) ?: return false
         if (isExempt(host) || Gateways.isLocalGateway(url)) return false
+        if (engine == null) firstBuild.await()
+        val e = engine ?: return false
         val pageHost = pageUrl?.let(::hostOfUrl)
         if (pageHost != null && isAllowlisted(pageHost, private)) return false
         return e.shouldBlock(url, host, requestTypes(url, headers), pageUrl, pageHost)
+    }
+
+    /**
+     * Is the first engine build still under way, within its deadline? A
+     * frame's first cosmetic answer is then held back ([awaitFirstBuild])
+     * rather than given as "no hiding here", which would stop the frame
+     * asking for good.
+     */
+    val firstBuildPending: Boolean get() = firstBuild.pending
+
+    /** Suspend until the first engine build lands or its deadline passes. */
+    suspend fun awaitFirstBuild() {
+        firstBuild.awaitSuspending()
     }
 
     /** The first CSS for a frame on [frameOrigin], or `null` when there's to be no hiding there. */
