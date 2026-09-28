@@ -347,6 +347,14 @@ internal class PutBackHold {
     }
 }
 
+/**
+ * Whether the restored page's current finish puts that page's address in
+ * the bar. Not when it releases a held put-back load ([PutBackHold]): the
+ * bar keeps that load's address, the one the user typed, for its flight,
+ * as the deadline's release and any typed load do (R3-F1).
+ */
+internal fun finishShowsPageAddress(putBackGoesIn: Boolean): Boolean = !putBackGoesIn
+
 /** The longest a [PutBackHold] waits for its page's finish (R2-F1). */
 internal const val PUT_BACK_HOLD_MS = 5_000L
 

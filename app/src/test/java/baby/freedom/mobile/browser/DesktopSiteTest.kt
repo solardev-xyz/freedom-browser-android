@@ -485,4 +485,16 @@ class DesktopSiteTest {
         h.deadline(fourth)
         assertEquals(3, loads)
     }
+
+    @Test
+    fun `a finish that releases the put-back load leaves the typed address in the bar`() {
+        // R3-F1: the restored page's finish releases the hold; the bar
+        // keeps the put-back load's address for its flight.
+        val h = PutBackHold()
+        h.hold { }
+        assertFalse(finishShowsPageAddress(putBackGoesIn = h.pageFinished()))
+        h.release()
+        // With nothing held, a finish shows its page's address as ever.
+        assertTrue(finishShowsPageAddress(putBackGoesIn = h.pageFinished()))
+    }
 }

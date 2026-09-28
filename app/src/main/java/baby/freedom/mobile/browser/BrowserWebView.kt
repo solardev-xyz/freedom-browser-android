@@ -2584,14 +2584,20 @@ private fun buildRefreshableWebView(
                 // unless the user started one of their own on the page
                 // meanwhile, which dropped it (#180, [PutBackHold]).
                 // Posted, after this finish's bookkeeping.
-                if (isCurrent && view is PageWebView && view.putBackHold.pageFinished()) {
-                    view.post { view.putBackHold.release() }
+                val putBackGoesIn = isCurrent && view is PageWebView && view.putBackHold.pageFinished()
+                if (putBackGoesIn) {
+                    view.post { (view as PageWebView).putBackHold.release() }
                 }
                 if (isCurrent) {
-                    state.url = uiDisplay
                     lastLoadedDisplayUrl = display
                     state.title = sanitizeTitle(view?.title, url)
-                    state.addressBarText = uiDisplay
+                    // The bar keeps the address of the load going in now,
+                    // as for the deadline's release or any typed load,
+                    // not the page it's about to replace (R3-F1).
+                    if (finishShowsPageAddress(putBackGoesIn)) {
+                        state.url = uiDisplay
+                        state.addressBarText = uiDisplay
+                    }
                     // A theme colour a script set after first paint (#92).
                     // A current finish is the document on screen even if
                     // it never reported a paint. Through the detector even
@@ -2601,7 +2607,8 @@ private fun buildRefreshableWebView(
                 }
                 state.canGoBack = view?.canGoBack() == true
                 state.canGoForward = view?.canGoForward() == true
-                state.progress = -1
+                // Still busy with the put-back load going in (R2-F1).
+                state.progress = if (putBackGoesIn) PUT_BACK_HOLD_PROGRESS else -1
                 // Record the *displayed* URL (bzz://, ens://, https://) — not
                 // the gateway-rewritten one — so history reflects what the
                 // user actually visited. The local home page is hidden from
