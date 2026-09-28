@@ -49,6 +49,8 @@ import org.json.JSONObject
 class RadicleNode internal constructor(
     private val config: Config,
     private val ops: Ops,
+    /** How long a stop waits for a cancelled seed to roll back; shortened in tests. */
+    private val seedStopWaitMs: Long = SEED_STOP_WAIT_MS,
 ) {
     constructor(config: Config) : this(config, Ops.Native)
 
@@ -138,9 +140,20 @@ class RadicleNode internal constructor(
     /** The generation [dialJob] dials for. Guarded by `this`. */
     private var dialGen = -1L
 
-    /** One seed-by-RID fetch; [dismissed] once the user unseeds it mid-fetch. */
-    private class SeedRun(val rid: String) {
+    /**
+     * Bumped on every boot and every shutdown, on [lifecycle]: which node
+     * instance a seed-by-RID fetch was started against. A fetch from an
+     * earlier instance neither blocks a new seed nor touches the new node.
+     */
+    private val nodeEpoch = AtomicLong(0L)
+
+    /**
+     * One seed-by-RID fetch on node instance [epoch]; [dismissed] once the
+     * user unseeds it mid-fetch, [stopping] once a [stop] cancels it.
+     */
+    private class SeedRun(val rid: String, val epoch: Long) {
         @Volatile var dismissed = false
+        @Volatile var stopping = false
     }
 
     /** The seed-by-RID fetch in flight, or null. */
@@ -185,6 +198,7 @@ class RadicleNode internal constructor(
             val failure = runCatching { bootNode() }
                 .fold(onSuccess = { it }, onFailure = { it.message ?: it.javaClass.simpleName })
             booted = failure == null
+            if (booted) nodeEpoch.incrementAndGet()
             if (gen != generation.get()) return@launch
             if (failure != null) {
                 Log.e(TAG, "radicle start failed: $failure")
@@ -237,21 +251,32 @@ class RadicleNode internal constructor(
             dialJob = null
             generation.incrementAndGet()
         }
-        seedRun.get()?.let { run -> runCatching { ops.cancelClone(run.rid) } }
+        val run = seedRun.get()?.also { run ->
+            run.stopping = true
+            runCatching { ops.cancelClone(run.rid) }
+        }
         _state.update { it.copy(status = RadicleStatus.Stopping) }
         scope.launch(lifecycle) {
             var error = ""
             if (booted) {
                 // Let a cancelled seed finish its rollback while the node is
                 // still up. Blocking (not suspending) keeps [lifecycle] held,
-                // so a later start can't slip in ahead of this shutdown. A
+                // so a later start can't slip in ahead of this shutdown. The
+                // cancel above is a no-op if it landed before the native
+                // fetch registered, so keep asking until it's confirmed. A
                 // fetch that won't wind down in time is rolled back on the
                 // next boot instead (see [pendingUnseedFile]).
                 seedJob?.let { job ->
-                    runBlocking { withTimeoutOrNull(SEED_STOP_WAIT_MS) { job.join() } }
+                    runBlocking {
+                        withTimeoutOrNull(seedStopWaitMs) {
+                            run?.let { cancelFetch(it) }
+                            job.join()
+                        }
+                    }
                 }
                 error = runCatching { json(ops.shutdown())?.optString("error").orEmpty() }
                     .getOrElse { it.message ?: it.javaClass.simpleName }
+                nodeEpoch.incrementAndGet()
                 booted = false
                 if (error.isNotEmpty()) Log.w(TAG, "radicle shutdown: $error")
             }
@@ -280,7 +305,9 @@ class RadicleNode internal constructor(
     /**
      * Seed and fetch the repository [input] names (`rad:z…`, `rad://z…` or
      * a bare `z…`), reporting phase progress through [RadicleInfo.seed].
-     * Ignored while another seed is in flight or the node isn't running.
+     * Ignored while another seed is in flight or the node isn't running;
+     * a fetch left over from before a stop that wouldn't wind down in time
+     * doesn't count as in flight.
      *
      * A fetch that fails or is cancelled takes back the seeding policy it
      * added, so a mistyped or unreachable RID doesn't sit in the seeded
@@ -288,7 +315,9 @@ class RadicleNode internal constructor(
      * seeded before this call keeps its policy.
      */
     fun seed(input: String) {
-        if (_state.value.status != RadicleStatus.Running || seedRun.get() != null) return
+        if (_state.value.status != RadicleStatus.Running) return
+        val current = seedRun.get()
+        if (current != null && current.epoch == nodeEpoch.get()) return
         val rid = normalizeRid(input)
         if (rid == null) {
             _state.update {
@@ -297,8 +326,8 @@ class RadicleNode internal constructor(
             return
         }
         val gen = generation.get()
-        val run = SeedRun(rid)
-        if (!seedRun.compareAndSet(null, run)) return
+        val run = SeedRun(rid, nodeEpoch.get())
+        if (!seedRun.compareAndSet(current, run)) return
         _state.update { it.copy(seed = RadicleSeed(rid, PHASE_RESOLVING)) }
         val job = scope.launch(start = CoroutineStart.LAZY) {
             // Unknown (the list call failed) counts as seeded: never drop a
@@ -306,7 +335,10 @@ class RadicleNode internal constructor(
             val wasSeeded = runCatching { parseRepos(ops.listSeededRepos()) }.getOrNull()
                 ?.any { it.rid == rid } ?: true
             if (!wasSeeded) editPendingUnseeds { it + rid }
-            val result = try {
+            // Stopped, unseeded or superseded before the fetch began: don't
+            // start it (a cancel that early never reaches the native fetch).
+            val skipped = run.stopping || run.dismissed || run.epoch != nodeEpoch.get()
+            val result = if (skipped) JSONObject().put("cancelled", true) else try {
                 json(
                     ops.cloneRepoWithProgress(rid, SEED_TIMEOUT_MS) { event ->
                         val parsed = json(event) ?: return@cloneRepoWithProgress
@@ -316,9 +348,8 @@ class RadicleNode internal constructor(
                 )
             } catch (t: Throwable) {
                 JSONObject().put("error", t.message ?: t.javaClass.simpleName)
-            } finally {
-                seedRun.set(null)
             }
+            seedRun.compareAndSet(run, null)
             val settled = when {
                 result == null -> RadicleSeed(rid, PHASE_FAILED, "unreadable fetch response", active = false)
                 result.optBoolean("ok") -> RadicleSeed(rid, PHASE_DONE, active = false)
@@ -326,8 +357,10 @@ class RadicleNode internal constructor(
                 else -> RadicleSeed(rid, PHASE_FAILED, result.optString("error"), active = false)
             }
             Log.i(TAG, "seed $rid → ${settled.phase} ${settled.detail}")
-            if (!wasSeeded) {
-                if (settled.phase == PHASE_DONE || unseedNow(rid)) editPendingUnseeds { it - rid }
+            // Roll back only on the node instance the fetch ran against; one
+            // that has since been shut down is rolled back at its next boot.
+            if (!wasSeeded && run.epoch == nodeEpoch.get()) {
+                if (skipped || settled.phase == PHASE_DONE || unseedNow(rid)) editPendingUnseeds { it - rid }
             }
             _state.update {
                 when {
@@ -351,16 +384,36 @@ class RadicleNode internal constructor(
     }
 
     /**
+     * Cancel [run]'s fetch, asking again until the node confirms it or the
+     * fetch is over: a cancel that lands before the native fetch registered
+     * its cancel token is a silent no-op (`{"cancelled":false}`).
+     */
+    private suspend fun cancelFetch(run: SeedRun) {
+        while (seedRun.get() === run) {
+            val confirmed = runCatching { json(ops.cancelClone(run.rid))?.optBoolean("cancelled") == true }
+                .getOrDefault(false)
+            if (confirmed) return
+            delay(CANCEL_RETRY_MS)
+        }
+    }
+
+    /**
      * Roll back what a seed call couldn't before the last shutdown (see
      * [pendingUnseedFile]). Runs right after boot, before the node is shown
-     * as running, so no new seed can race it. Each RID is tried once: the
-     * node is up, so an error means there was nothing left to take back.
+     * as running, so no new seed can race it. A RID whose unseed failed
+     * stays pending for the next boot while the node still lists it as
+     * seeded (or the list can't be read); one it doesn't list had nothing
+     * left to take back.
      */
     private fun replayPendingUnseeds() {
         val rids = readPendingUnseeds()
         if (rids.isEmpty()) return
-        rids.forEach { unseedNow(it) }
-        editPendingUnseeds { it - rids }
+        val failed = rids.filterNot { unseedNow(it) }.toSet()
+        val keep = if (failed.isEmpty()) emptySet() else {
+            val listed = runCatching { parseRepos(ops.listSeededRepos()) }.getOrNull()?.map { it.rid }?.toSet()
+            if (listed == null) failed else failed intersect listed
+        }
+        editPendingUnseeds { it - (rids - keep) }
     }
 
     private fun readPendingUnseeds(): Set<String> =
@@ -389,7 +442,7 @@ class RadicleNode internal constructor(
             val inFlight = seedRun.get()?.takeIf { it.rid == rid }
             if (inFlight != null) {
                 inFlight.dismissed = true
-                runCatching { ops.cancelClone(rid) }
+                withTimeoutOrNull(SEED_STOP_WAIT_MS) { cancelFetch(inFlight) }
             }
             val result = runCatching { json(ops.unseedRepo(rid)) }.getOrNull()
             Log.i(TAG, "unseed $rid: $result")
@@ -457,6 +510,8 @@ class RadicleNode internal constructor(
         internal const val SEED_TIMEOUT_MS = 120_000
         /** How long a stop waits for a cancelled seed to roll back before shutting down anyway. */
         internal const val SEED_STOP_WAIT_MS = 10_000L
+        /** How often an unconfirmed fetch cancel is asked again. */
+        internal const val CANCEL_RETRY_MS = 50L
         internal const val PENDING_UNSEED_FILE = "pending-unseed"
         internal const val POLL_INTERVAL_MS = 5_000L
 
