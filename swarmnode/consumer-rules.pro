@@ -19,3 +19,6 @@
 -keepclasseswithmembernames class baby.freedom.swarm.MyotisNative {
     native <methods>;
 }
+-keepclasseswithmembernames class baby.freedom.swarm.TorNative {
+    native <methods>;
+}

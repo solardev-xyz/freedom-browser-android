@@ -51,6 +51,7 @@ import androidx.compose.material.icons.filled.HourglassTop
 import androidx.compose.material.icons.filled.PowerSettingsNew
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.Tune
+import androidx.compose.material.icons.filled.VpnLock
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DropdownMenu
@@ -176,6 +177,8 @@ fun SettingsScreen(
     val adblockUpdate by Adblock.updateState.collectAsState()
     val adblockAutoUpdate by settings.adblockAutoUpdate.collectAsState(initial = true)
     var addAllowlistSite by remember { mutableStateOf(false) }
+    val torEnabled by settings.torEnabled.collectAsState(initial = false)
+    val torStartOnLaunch by settings.torStartOnLaunch.collectAsState(initial = false)
 
     var confirmClearHistory by remember { mutableStateOf(false) }
     var confirmClearBookmarks by remember { mutableStateOf(false) }
@@ -222,6 +225,7 @@ fun SettingsScreen(
         query, SECTION_NODES,
         nodeRows(externalSwarm, externalIpfs, showIpfsUi) + radicleSettingsRow(radicle),
     )
+    val torRows = visibleSettingsRows(query, SECTION_TOR, torRows(torEnabled, torStartOnLaunch))
     val chainRows = visibleSettingsRows(query, SECTION_CHAINS, chainSettingsRows(chains))
     val aboutRows = visibleSettingsRows(
         query, SECTION_ABOUT, aboutRows(appVersion, context.packageName),
@@ -232,6 +236,7 @@ fun SettingsScreen(
     } else emptySet()
     val nothingMatches = listOf(
         walletRows, searchRows, adblockRows, ensRows, rpcRows, browsingRows, permissionRows, nodeRows,
+        torRows,
         chainRows, aboutRows, otherRows, ipfsRows,
     ).all { it.isEmpty() }
 
@@ -378,6 +383,15 @@ fun SettingsScreen(
                         onEdit = { editEndpoint = it },
                         radicle = radicle,
                         onOpenRadicle = onOpenRadicle,
+                    )
+                }
+                if (torRows.isNotEmpty()) item("tor") {
+                    TorSettingsSection(
+                        visible = torRows,
+                        enabled = torEnabled,
+                        startOnLaunch = torStartOnLaunch,
+                        onEnabled = { on -> scope.launch { settings.setTorEnabled(on) } },
+                        onStartOnLaunch = { on -> scope.launch { settings.setTorStartOnLaunch(on) } },
                     )
                 }
                 if (chainRows.isNotEmpty()) item("chains") {
@@ -532,6 +546,7 @@ private const val SECTION_ADBLOCK = "Ad blocking"
 private const val SECTION_BROWSING = "Browsing data"
 private const val SECTION_PERMISSIONS = "Site permissions"
 private const val SECTION_NODES = "Nodes"
+private const val SECTION_TOR = "Tor"
 private const val SECTION_ABOUT = "About"
 private const val SECTION_OTHER = "Other"
 private const val SECTION_IPFS = "IPFS"
@@ -798,6 +813,56 @@ internal fun nodeRows(externalSwarm: String, externalIpfs: String, showIpfsUi: B
             "External gateway",
         ) else null,
     )
+
+private const val TOR_ENABLED = "Tor for .onion sites"
+private const val TOR_ENABLED_DETAIL =
+    "Only .onion sites use Tor; every other site connects directly. While off, onion sites are refused."
+private const val TOR_ON_LAUNCH = "Start Tor at launch"
+private const val TOR_ON_LAUNCH_SUBTITLE = "Otherwise start it on the Nodes page"
+
+/** Settings → Tor (#143), for settings search. */
+internal fun torRows(enabled: Boolean, startOnLaunch: Boolean) = listOf(
+    settingsRow("tor-enabled", TOR_ENABLED, if (enabled) "On" else "Off", TOR_ENABLED_DETAIL, "Arti"),
+    settingsRow("tor-launch", TOR_ON_LAUNCH, TOR_ON_LAUNCH_SUBTITLE, if (startOnLaunch) "On" else "Off", "onion"),
+)
+
+/**
+ * Settings → Tor (#143): the integration switch (off by default) and
+ * start-at-launch. Starting and stopping Tor itself, and its status, are
+ * on the node page. Start-at-launch is greyed out while Tor is off.
+ */
+@Composable
+private fun TorSettingsSection(
+    visible: Set<Any>,
+    enabled: Boolean,
+    startOnLaunch: Boolean,
+    onEnabled: (Boolean) -> Unit,
+    onStartOnLaunch: (Boolean) -> Unit,
+) {
+    SectionCard(title = SECTION_TOR) {
+        if ("tor-enabled" in visible) PageRow(
+            title = TOR_ENABLED,
+            subtitle = if (enabled) "On" else "Off",
+            // Wraps: the whole explanation is readable on a phone.
+            thirdLine = TOR_ENABLED_DETAIL,
+            style = PageRowStyle.Inset,
+            leadingIcon = Icons.Filled.VpnLock,
+            onClick = { onEnabled(!enabled) },
+            trailing = { Switch(checked = enabled, onCheckedChange = onEnabled) },
+        )
+        if ("tor-launch" in visible) PageRow(
+            title = TOR_ON_LAUNCH,
+            subtitle = TOR_ON_LAUNCH_SUBTITLE,
+            style = PageRowStyle.Inset,
+            leadingIcon = Icons.Filled.PowerSettingsNew,
+            enabled = enabled,
+            onClick = { onStartOnLaunch(!startOnLaunch) },
+            trailing = {
+                Switch(checked = startOnLaunch, onCheckedChange = onStartOnLaunch, enabled = enabled)
+            },
+        )
+    }
+}
 
 @Composable
 private fun NodesSection(

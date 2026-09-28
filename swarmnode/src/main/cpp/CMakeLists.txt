@@ -1,5 +1,5 @@
 # Builds libfreedom_jni.so — the JNI shims for the embedded nodes
-# (ant_jni.c for Swarm, freedom_ipfs_jni.c for IPFS, myotis_jni.c for
+# (ant_jni.c for Swarm, freedom_ipfs_jni.c for IPFS, tor_jni.c for Tor, myotis_jni.c for
 # the Myotis Ethereum light client) — and links it
 # against the prebuilt combined libfreedom_mobile_ffi.so that
 # `scripts/build-android.sh` (solardev-xyz/freedom-mobile-ffi) drops
@@ -11,7 +11,7 @@ project(freedom_jni C)
 # IMPORTED target: the build script stamps a SONAME these days, but
 # link-by-name keeps us safe against ever regressing to a cargo-bare
 # .so whose DT_NEEDED would otherwise capture the build-host path.
-add_library(freedom_jni SHARED ant_jni.c freedom_ipfs_jni.c myotis_jni.c)
+add_library(freedom_jni SHARED ant_jni.c freedom_ipfs_jni.c myotis_jni.c tor_jni.c)
 # 16 KB page-size compatibility. NDK r27 links with 4 KB LOAD alignment by
 # default; a device booted with 16 KB pages then refuses to dlopen this
 # library ("not page-aligned"), the :node process never comes up, and
