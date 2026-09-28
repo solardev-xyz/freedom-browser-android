@@ -65,8 +65,9 @@ import org.json.JSONObject
  * client; a non-ASCII name ENSIP-15 rejects is an `INVALID_NAME` error,
  * never a lookup. Plain `[a-z0-9.-]` names skip the pass, as on desktop,
  * so legacy `xn--…`/`ab--c` registrations still resolve. A `.tez` name
- * isn't ENS and skips it too ([EnsNormalize.appliesTo]): it is only
- * lowercased, as [TezosDomainsResolver] has always taken it.
+ * isn't ENS and skips it too ([EnsNormalize.appliesTo]): it gets Tezos
+ * Domains' own UTS-46 form ([EnsNormalize.tezosForm]; plain lowercase for
+ * an ASCII name) and is never refused here.
  */
 class EnsResolver internal constructor(
     private val rpcEndpoints: List<String>,

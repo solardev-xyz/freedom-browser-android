@@ -12,8 +12,8 @@ package baby.freedom.mobile.ens
  *   - `alice.wei` (WNS) and `name.gwei` (GNS) — see [NameSystem]
  *   - `alice.tez` (Tezos Domains)
  *   - non-ASCII / emoji names (`🦊.eth`), returned ENSIP-15 normalized
- *     (Ethereum systems only: a `.tez` name is only lowercased, see
- *     [EnsNormalize.appliesTo])
+ *     (Ethereum systems only: a `.tez` name gets Tezos Domains' own
+ *     UTS-46 form instead, see [EnsNormalize.tezosForm])
  *
  * Returns `null` for anything that doesn't end in one of
  * [NameSystem.navigableSuffixes] (`.eth`, `.box`, `.wei`, `.gwei`, `.tez`).
