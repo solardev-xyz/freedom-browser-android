@@ -378,12 +378,9 @@ class TabsState(
      */
     private fun rememberClosed(index: Int, placeholderId: Long?) {
         val tab = tabs[index]
-        // A popup nothing has committed in yet shows its `about:blank`
-        // as a page (see [BrowserState.blankIsPage]); that's the blank
-        // home entry to the reopened tab, which isn't a popup.
-        val popupBlank = tab.blankIsPage && tab.url == ABOUT_BLANK
-        val url = if (popupBlank) "" else tab.url
-        val address = if (popupBlank && tab.addressBarText == ABOUT_BLANK) "" else tab.addressBarText
+        // A popup nothing has committed in yet comes back as the blank
+        // home entry (see [BrowserState.restorableAddress]).
+        val (url, address) = tab.restorableAddress()
         if (url.isBlank() && address.isBlank() && !tab.canGoBack && !tab.canGoForward) return
         closedTabs.add(
             ClosedTab(
@@ -417,15 +414,15 @@ class TabsState(
             addressBarText = closed.addressBarText
             override = closed.override
             thumbnail = closed.thumbnail
-            pendingRestore = BrowserState.PendingRestore(
+            // Closed before its page committed: the saved state ends on
+            // the blank entry, so the address goes back — and is
+            // submitted again, unless the user had stopped that load
+            // (the bar then showed it with Reload).
+            pendingRestore = BrowserState.PendingRestore.of(
+                url = closed.url,
+                address = closed.addressBarText,
+                loadStopped = closed.loadStopped,
                 webViewState = closed.webViewState,
-                fallbackUrl = closed.addressBarText.ifBlank { closed.url },
-                // Closed before its page committed: the saved state
-                // ends on the blank entry, so put the address back —
-                // and submit it again, unless the user had stopped
-                // that load (the bar then showed it with Reload).
-                resubmitUrl = closed.addressBarText.takeIf { closed.url.isBlank() }.orEmpty(),
-                submit = !(closed.url.isBlank() && closed.loadStopped),
             )
         }
         // Undoing the close of the last tab: the blank tab [closeTab]
@@ -447,6 +444,106 @@ class TabsState(
     /** Still the fresh home overlay it was created as. */
     private fun BrowserState.isUntouched(): Boolean =
         isHome && !canGoBack && !canGoForward && !resolving && progress < 0
+
+    /**
+     * The first load of this tab list — the homepage, or the App Link
+     * the app was cold-started from — has been submitted. Kept here
+     * rather than in the screen, so a screen rebuilt over tabs that
+     * outlived it (#183) doesn't submit it again into the active tab.
+     */
+    var initialLoadDone: Boolean = false
+
+    /**
+     * Every tab's WebView is about to be destroyed while the tabs
+     * themselves live on: the Activity is being relaunched for a change
+     * `configChanges` can't cover, such as a resource-overlay switch
+     * (navigation mode, wallpaper colours; #183). [saveState] is the
+     * WebView's own [android.webkit.WebView.saveState] for a tab, which
+     * the next host restores the tab from, as for [reopenClosedTab] —
+     * the tab comes back on its page with its back/forward history.
+     *
+     * Fullscreen and the page context menu belonged to the destroyed
+     * views and are dropped.
+     */
+    fun parkForRelaunch(saveState: (BrowserState) -> Bundle?) {
+        exitFullscreen()
+        pageContextMenu = null
+        for (tab in tabs) {
+            // Reopened, and the host never got to build its WebView:
+            // what it was to be rebuilt from still stands.
+            if (tab.pendingRestore == null) {
+                val (url, address) = tab.restorableAddress()
+                tab.pendingRestore = BrowserState.PendingRestore.of(
+                    url = url,
+                    address = address,
+                    loadStopped = tab.loadAborted,
+                    webViewState = saveState(tab),
+                )
+            }
+            tab.webViewLost()
+        }
+    }
+
+    /**
+     * What survives the app's process being killed in the background
+     * (#183): each regular tab's page and title, and which of them was
+     * active. Private tabs are left out — nothing of theirs outlives
+     * the process (#86). Their back/forward history and the reopen stack
+     * aren't kept either: WebView state bundles are too large for the
+     * saved-instance-state transaction.
+     */
+    class SavedTabs(val tabs: List<SavedTab>, val activeIndex: Int)
+
+    class SavedTab(
+        val url: String,
+        val title: String,
+        val address: String,
+        val loadStopped: Boolean,
+    )
+
+    fun saveForProcessDeath(): SavedTabs {
+        val kept = tabs.filter { !it.private }
+        val at = activeIndex.coerceIn(0, tabs.lastIndex)
+        val before = tabs.take(at).count { !it.private }
+        // A private tab was on screen: the regular tab before it (or the
+        // first) comes back active.
+        val activeAt = if (tabs[at].private) (before - 1).coerceAtLeast(0) else before
+        return SavedTabs(
+            tabs = kept.map { tab ->
+                val (url, address) = tab.restorableAddress()
+                SavedTab(url = url, title = tab.title, address = address, loadStopped = tab.loadAborted)
+            },
+            activeIndex = activeAt,
+        )
+    }
+
+    /**
+     * Replace the tab list with [saved], from a process killed in the
+     * background (#183). Each tab shows its page's address and title
+     * from the first frame and loads that address once its WebView is
+     * up (see [BrowserState.PendingRestore]). The initial load is done:
+     * these are the tabs the user had.
+     */
+    fun restoreAfterProcessDeath(saved: SavedTabs) {
+        if (saved.tabs.isEmpty()) return
+        val restored = saved.tabs.map { s ->
+            newBlankTab().apply {
+                url = s.url
+                title = s.title
+                addressBarText = s.address
+                pendingRestore = BrowserState.PendingRestore.of(
+                    url = s.url,
+                    address = s.address,
+                    loadStopped = s.loadStopped,
+                    webViewState = null,
+                )
+            }
+        }
+        tabs.clear()
+        tabs.addAll(restored)
+        activeIndex = saved.activeIndex.coerceIn(0, tabs.lastIndex)
+        initialLoadDone = true
+    }
 
     /**
      * Forget every closed tab. Their saved WebView state carries

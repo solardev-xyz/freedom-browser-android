@@ -372,6 +372,59 @@ class BrowserState(val id: Long, val private: Boolean = false) {
             val onBlank = currentEntryUrl == null || currentEntryUrl == ABOUT_BLANK
             return if (address.isNotBlank() && onBlank) AfterBlank(address, submit) else null
         }
+
+        companion object {
+            /**
+             * What to rebuild a tab from, given its committed [url], its
+             * [address] and its Stop latch ([loadStopped]) as
+             * [restorableAddress] reports them. A tab whose page hadn't
+             * committed yet gets its address back — submitted again,
+             * unless the user had stopped that load.
+             */
+            fun of(url: String, address: String, loadStopped: Boolean, webViewState: Bundle?) =
+                PendingRestore(
+                    webViewState = webViewState,
+                    fallbackUrl = address.ifBlank { url },
+                    resubmitUrl = address.takeIf { url.isBlank() }.orEmpty(),
+                    submit = !(url.isBlank() && loadStopped),
+                )
+        }
+    }
+
+    /**
+     * This tab's committed URL and address as a rebuilt tab should get
+     * them back. A popup nothing has committed in yet shows its
+     * `about:blank` as a page (see [blankIsPage]); rebuilt, that's the
+     * blank home entry, not an address to load.
+     */
+    internal fun restorableAddress(): Pair<String, String> {
+        val popupBlank = blankIsPage && url == ABOUT_BLANK
+        val restoredUrl = if (popupBlank) "" else url
+        val address = if (popupBlank && addressBarText == ABOUT_BLANK) "" else addressBarText
+        return restoredUrl to address
+    }
+
+    /**
+     * The [navCounter] of the last navigation the tab's WebView was
+     * handed. Survives with the tab when its WebView doesn't (#183, see
+     * [TabsState.parkForRelaunch]), so the rebuilt WebView isn't handed
+     * that same navigation again on top of its restored state.
+     */
+    internal var handedNavCounter: Int = 0
+
+    /**
+     * The tab's WebView is being destroyed while the tab lives on (#183,
+     * an Activity relaunch). What only mirrored that WebView goes with
+     * it: a load in flight (the rebuilt WebView reports its own), a
+     * name still being resolved (its job belonged to the screen being
+     * torn down), find-in-page matches, playing audio.
+     */
+    internal fun webViewLost() {
+        cancelPendingProbe()
+        progress = -1
+        resolving = false
+        find.close()
+        playingAudio = false
     }
 
     internal var pendingRestore: PendingRestore? = null

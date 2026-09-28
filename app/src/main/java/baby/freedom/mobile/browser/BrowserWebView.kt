@@ -693,8 +693,10 @@ fun BrowserWebViewHost(
             },
             onCloseWindow = { tabs.closePopup(tab) },
             // Handed to Chromium by `onCreateWindow`, which needs it
-            // never to have navigated.
-            isPopup = tab.openerId != null,
+            // never to have navigated. Not a popup rebuilt after a
+            // relaunch (#183): its first navigation is the restore, not
+            // one its opener asked for.
+            isPopup = tab.openerId != null && tab.pendingRestore == null,
             popupOpener = {
                 val openerId = tab.openerId
                 val opener = tabs.tabs.firstOrNull { it.id == openerId }
@@ -739,10 +741,21 @@ fun BrowserWebViewHost(
             val wv = attach(tab)
             if (restore == null) continue
             tab.pendingRestore = null
+            // A tab that outlived its WebView (#183) keeps its mute.
+            if (tab.audioMuted) {
+                if (WebViewFeature.isFeatureSupported(WebViewFeature.MUTE_AUDIO)) {
+                    WebViewCompat.setAudioMuted(wv, true)
+                } else {
+                    tab.audioMuted = false
+                }
+            }
             val restored = restore.webViewState?.let { wv.restoreState(it) } != null
             if (restored) {
                 tab.canGoBack = wv.canGoBack()
                 tab.canGoForward = wv.canGoForward()
+                // The WebView loads the restored entry itself: a load of
+                // its own for the IPFS phase line (#94).
+                tab.beginLoad(inWebView = true)
             } else {
                 wv.loadUrl(ABOUT_BLANK)
             }
@@ -808,8 +821,12 @@ fun BrowserWebViewHost(
             LaunchedEffect(tab.id) {
                 snapshotFlow { tab.navCounter to tab.pendingUrl }
                     .collectLatest { (counter, pending) ->
-                        if (counter > 0 && pending.isNotEmpty()) {
+                        // Not one this tab's WebView was already handed:
+                        // a tab that outlived its WebView (#183) comes
+                        // back from its saved state instead.
+                        if (counter > tab.handedNavCounter && pending.isNotEmpty()) {
                             val wv = webViews[tab.id] ?: return@collectLatest
+                            tab.handedNavCounter = counter
                             // Abort any in-flight load first. Without this,
                             // hitting Home (or otherwise navigating) mid-
                             // load lets Chromium keep firing late
@@ -855,11 +872,7 @@ fun BrowserWebViewHost(
         // also clears the counter itself so the capsule's edge trace
         // goes out on the same frame as the tap.
         tabs.stopLoading = { tab -> webViews[tab.id]?.stopLoading() }
-        tabs.saveWebViewState = { tab ->
-            webViews[tab.id]?.let { wv ->
-                Bundle().takeIf { runCatching { wv.saveState(it) }.getOrNull() != null }
-            }
-        }
+        tabs.saveWebViewState = { tab -> webViews[tab.id]?.let(::saveWebViewState) }
         // Find in page (#83). Results come back through the WebView's
         // FindListener into the tab's [FindInPageState] (see
         // [buildRefreshableWebView]).
@@ -977,9 +990,20 @@ fun BrowserWebViewHost(
 
     DisposableEffect(Unit) {
         onDispose {
-            // As when the last private tab closes (#86): the private
-            // cache goes through a private WebView, before they all do.
-            privateIds.firstNotNullOfOrNull { webViews[it] }?.let { runCatching { it.clearCache(true) } }
+            // The Activity is being relaunched (#183) and the tabs live
+            // on in [TabsSession] — the ViewModel store is kept on
+            // exactly this condition. Each tab keeps its WebView's state
+            // for the next host to restore it from, and anything its
+            // page had asked for is withdrawn with the page.
+            val relaunch = context.findActivity()?.isChangingConfigurations == true
+            if (relaunch) {
+                tabs.parkForRelaunch { tab -> webViews[tab.id]?.let(::saveWebViewState) }
+                for (tab in tabs.tabs) sitePermissions.onDocumentStarted(tab)
+            } else {
+                // As when the last private tab closes (#86): the private
+                // cache goes through a private WebView, before they all do.
+                privateIds.firstNotNullOfOrNull { webViews[it] }?.let { runCatching { it.clearCache(true) } }
+            }
             for (wv in webViews.values) {
                 UnverifiedOrigins.release(wv)
                 (wv as? PageWebView)?.sweptReload?.committed()
@@ -988,12 +1012,12 @@ fun BrowserWebViewHost(
             }
             webViews.clear()
             refreshLayouts.clear()
-            // The tabs don't outlive this host (a recreated screen
-            // starts from a fresh blank tab), so neither does a private
-            // session.
+            // Otherwise the tabs don't outlive this host, so neither does
+            // a private session. Across a relaunch it goes on with its
+            // tabs, whose WebViews the next host puts back on its profile.
             if (privateIds.isNotEmpty()) {
                 privateIds.clear()
-                endPrivateSession()
+                if (!relaunch) endPrivateSession()
             }
         }
     }
@@ -1161,6 +1185,7 @@ private fun buildRefreshableWebView(
 
     /** [THEME_COLOR_JS] in the page, for the read stamped [token]. */
     fun readThemeColorPageVisible(view: WebView, token: Int, onAnswer: ((Int?) -> Unit)?) {
+        if (view.isDestroyed) return
         view.evaluateJavascript(THEME_COLOR_JS) { result ->
             if (themeColor.accept(token)) {
                 val argb = themeColorArgb(result)
@@ -1186,7 +1211,9 @@ private fun buildRefreshableWebView(
      * away, which the page can see; [onAnswer] hears only such an answer.
      */
     fun readThemeColor(view: WebView?, onScreen: Boolean = false, onAnswer: ((Int?) -> Unit)? = null) {
-        view ?: return
+        // A read posted before the host destroyed the WebView (an
+        // Activity relaunch, #183) has no page to read any more.
+        if (view == null || view.isDestroyed) return
         val token = themeColor.beginRead(onScreen) ?: return
         if (themeColorFromDetector(view.url)) {
             // The detector's answer lands through the painted gate;
@@ -3076,6 +3103,15 @@ private class GestureArmingNodeProvider(
  * protected: Chromium's unconsumed overscroll, and the scroll range.
  */
 internal class PageWebView(context: Context) : WebView(context) {
+    /** [destroy] has been called: nothing may be asked of this WebView any more. */
+    var destroyed = false
+        private set
+
+    override fun destroy() {
+        destroyed = true
+        super.destroy()
+    }
+
     /**
      * Virtual origins this tab may have a live document on — the main
      * frame's and its frames' (see [TabDocuments]). What
@@ -3483,6 +3519,17 @@ private class SearchSelectionCallback(
         return true
     }
 }
+
+/**
+ * The host has destroyed this WebView ([PageWebView.destroy]); a
+ * callback it posted earlier can still run after that.
+ */
+internal val WebView.isDestroyed: Boolean
+    get() = (this as? PageWebView)?.destroyed == true
+
+/** [WebView.saveState] into a fresh bundle, or null if the WebView won't give one. */
+private fun saveWebViewState(wv: WebView): Bundle? =
+    Bundle().takeIf { runCatching { wv.saveState(it) }.getOrNull() != null }
 
 /**
  * When [SearchSelectionCallback] asks the page for its selection: the
