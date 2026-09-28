@@ -72,7 +72,10 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import baby.freedom.mobile.R
+import baby.freedom.mobile.chains.Chain
+import baby.freedom.mobile.chains.BuiltInChains
 import baby.freedom.mobile.data.BrowsingRepository
+import baby.freedom.mobile.data.ChainStore
 import baby.freedom.mobile.data.NodeSettings
 import baby.freedom.mobile.ui.isLight
 import baby.freedom.swarm.IpfsInfo
@@ -99,8 +102,11 @@ import kotlinx.coroutines.launch
  *     user runs (#125, [ExternalEndpoints]). The IPFS row shows only
  *     while advanced options are on, or once an external gateway is
  *     set — its unverified warning must stay in view while it's in use.
- *  4. **About** — app name, version, package, and a short blurb.
- *  5. **Other** — a single "Show advanced options" row. Tapping it
+ *  4. **Chains** — Ethereum, Gnosis and Base, plus the user's custom
+ *     chains, added from a chainlist.org search or by hand (#107, see
+ *     [ChainsSection]). Its Add chain pages replace the list while open.
+ *  5. **About** — app name, version, package, and a short blurb.
+ *  6. **Other** — a single "Show advanced options" row. Tapping it
  *     flips [NodeSettings.showIpfsUi] on, which reveals an "IPFS node
  *     (experimental)" card below (status, peers, gateway URL, and
  *     routing preferences). This gate exists so IPFS support stays a
@@ -149,6 +155,14 @@ fun SettingsScreen(
     val permissionEntries by remember(sitePermissions) { sitePermissions.entries }
         .collectAsState(initial = emptyList())
 
+    val chainStore = remember(context) { ChainStore.get(context) }
+    val chains by remember(chainStore) { chainStore.chains }
+        .collectAsState(initial = BuiltInChains.ALL)
+    var chainPage by remember { mutableStateOf<ChainPage?>(null) }
+    var chainQuery by rememberSaveable { mutableStateOf("") }
+    var openChain by remember { mutableStateOf<Chain?>(null) }
+    var confirmRemoveChain by remember { mutableStateOf<Chain?>(null) }
+
     val scope = rememberCoroutineScope()
     val appVersion = remember(context) { appVersionLabel(context) }
 
@@ -167,6 +181,7 @@ fun SettingsScreen(
     val nodeRows = visibleSettingsRows(
         query, SECTION_NODES, nodeRows(externalSwarm, externalIpfs, showIpfsUi),
     )
+    val chainRows = visibleSettingsRows(query, SECTION_CHAINS, chainSettingsRows(chains))
     val aboutRows = visibleSettingsRows(
         query, SECTION_ABOUT, aboutRows(appVersion, context.packageName),
     )
@@ -175,7 +190,7 @@ fun SettingsScreen(
         visibleSettingsRows(query, SECTION_IPFS, ipfsRows(ipfsInfo))
     } else emptySet()
     val nothingMatches = listOf(
-        searchRows, browsingRows, permissionRows, nodeRows, aboutRows, otherRows, ipfsRows,
+        searchRows, browsingRows, permissionRows, nodeRows, chainRows, aboutRows, otherRows, ipfsRows,
     ).all { it.isEmpty() }
 
     // A new query starts the results from the top, so the first match
@@ -185,7 +200,29 @@ fun SettingsScreen(
         snapshotFlow { query }.drop(1).collect { listState.scrollToItem(0) }
     }
 
-    FullScreenScaffold(
+    // The Chains sub-pages stand in for the list while open; everything
+    // above stays composed, so Back lands on the list as it was left.
+    when (val page = chainPage) {
+        ChainPage.Search -> ChainlistPage(
+            query = chainQuery,
+            onQueryChange = { chainQuery = it },
+            existingIds = chains.mapTo(HashSet()) { it.id },
+            onPick = { chainPage = ChainPage.Form(it.toChain()) },
+            onManual = { chainPage = ChainPage.Form(null) },
+            onBack = { chainPage = null },
+        )
+        is ChainPage.Form -> AddChainPage(
+            prefill = page.prefill,
+            onAdd = chainStore::add,
+            onAdded = {
+                chainPage = null
+                chainQuery = ""
+            },
+            onBack = { chainPage = if (page.prefill != null) ChainPage.Search else null },
+        )
+        null -> Unit
+    }
+    if (chainPage == null) FullScreenScaffold(
         title = "Settings",
         onDismiss = onDismiss,
     ) {
@@ -230,6 +267,15 @@ fun SettingsScreen(
                         externalSwarm = externalSwarm,
                         externalIpfs = externalIpfs,
                         onEdit = { editEndpoint = it },
+                    )
+                }
+                if (chainRows.isNotEmpty()) item("chains") {
+                    ChainsSection(
+                        visible = chainRows,
+                        chains = chains,
+                        onOpen = { openChain = it },
+                        onRemove = { confirmRemoveChain = it },
+                        onAdd = { chainPage = ChainPage.Search },
                     )
                 }
                 if (aboutRows.isNotEmpty()) item("about") {
@@ -292,6 +338,29 @@ fun SettingsScreen(
                 editEndpoint = null
             },
             onDismiss = { editEndpoint = null },
+        )
+    }
+    openChain?.let { chain ->
+        ChainDetailsDialog(
+            chain = chain,
+            onRemove = {
+                openChain = null
+                confirmRemoveChain = chain
+            },
+            onDismiss = { openChain = null },
+        )
+    }
+    confirmRemoveChain?.let { chain ->
+        ConfirmDialog(
+            title = "Remove ${chain.name}?",
+            message = "Removes chain ${chain.id} and its RPC endpoints from this device. " +
+                "You can add it again later.",
+            confirmLabel = "Remove",
+            onConfirm = {
+                scope.launch { chainStore.remove(chain.id) }
+                confirmRemoveChain = null
+            },
+            onDismiss = { confirmRemoveChain = null },
         )
     }
     if (confirmClearHistory) {

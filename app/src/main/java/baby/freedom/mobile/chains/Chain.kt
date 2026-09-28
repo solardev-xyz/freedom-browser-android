@@ -1,0 +1,102 @@
+package baby.freedom.mobile.chains
+
+/**
+ * An EVM chain the browser knows about (#107): one of the [BuiltInChains]
+ * it ships with, or a custom chain the user added in Settings → Chains —
+ * typed in by hand or picked from the chainlist.org catalog
+ * ([Chainlist]).
+ *
+ * [rpcUrls] are the chain's public, key-free JSON-RPC endpoints in the
+ * order they're tried; every one has passed [RpcUrls.validate].
+ */
+data class Chain(
+    /** EIP-155 chain ID. */
+    val id: Long,
+    val name: String,
+    /** Native currency ticker (`ETH`, `xDAI`). */
+    val symbol: String,
+    /** Native currency name (`Ether`); falls back to [symbol] when unknown. */
+    val currencyName: String = symbol,
+    val decimals: Int = 18,
+    /** Block explorer base URL, or `null` when the chain has none. */
+    val explorerUrl: String? = null,
+    val rpcUrls: List<String>,
+    val isTestnet: Boolean = false,
+    /** Ships with the app; can't be removed. */
+    val builtIn: Boolean = false,
+) {
+    /** `0x`-prefixed hex chain ID, the EIP-1193 wire format. */
+    val hexId: String get() = "0x" + id.toString(16)
+
+    companion object {
+        /** Real native assets stay in 0..36; a typo'd 1800 would overflow `10^decimals`. */
+        val DECIMALS_RANGE = 0..36
+
+        /** EIP-155 IDs are positive and, per EIP-2294, below `2^53` so JS can hold them. */
+        const val MAX_ID = (1L shl 53) - 1
+
+        const val MAX_NAME_LENGTH = 64
+        const val MAX_SYMBOL_LENGTH = 16
+        const val MAX_RPC_URLS = 16
+    }
+}
+
+/**
+ * The chains the browser ships with — the desktop browser's
+ * `src/shared/chains.json` (Ethereum, Gnosis, Base), with its key-free
+ * public RPCs from `endpoint-sources.json` (Blast API, shut down, and
+ * Ankr, now keyed, left out).
+ */
+object BuiltInChains {
+    val ETHEREUM = Chain(
+        id = 1,
+        name = "Ethereum",
+        symbol = "ETH",
+        currencyName = "Ether",
+        explorerUrl = "https://etherscan.io",
+        rpcUrls = listOf(
+            "https://ethereum.publicnode.com",
+            "https://1rpc.io/eth",
+            "https://eth.drpc.org",
+            "https://eth.merkle.io",
+            "https://cloudflare-eth.com",
+            "https://rpc.flashbots.net",
+            "https://eth.llamarpc.com",
+        ),
+        builtIn = true,
+    )
+
+    val GNOSIS = Chain(
+        id = 100,
+        name = "Gnosis Chain",
+        symbol = "xDAI",
+        explorerUrl = "https://gnosisscan.io",
+        rpcUrls = listOf(
+            "https://rpc.gnosischain.com",
+            "https://gnosis-rpc.publicnode.com",
+            "https://gnosis.drpc.org",
+        ),
+        builtIn = true,
+    )
+
+    val BASE = Chain(
+        id = 8453,
+        name = "Base",
+        symbol = "ETH",
+        currencyName = "Ether",
+        explorerUrl = "https://basescan.org",
+        rpcUrls = listOf(
+            "https://mainnet.base.org",
+            "https://base-rpc.publicnode.com",
+            "https://base.drpc.org",
+            "https://base.llamarpc.com",
+            "https://1rpc.io/base",
+        ),
+        builtIn = true,
+    )
+
+    /** In the order Settings lists them. */
+    val ALL: List<Chain> = listOf(ETHEREUM, GNOSIS, BASE)
+
+    fun isBuiltIn(id: Long): Boolean = ALL.any { it.id == id }
+}

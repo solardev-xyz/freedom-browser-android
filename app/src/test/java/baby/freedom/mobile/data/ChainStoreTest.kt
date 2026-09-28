@@ -1,0 +1,123 @@
+package baby.freedom.mobile.data
+
+import androidx.datastore.core.CorruptionException
+import androidx.datastore.core.DataStore
+import androidx.datastore.preferences.core.Preferences
+import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.emptyPreferences
+import androidx.datastore.preferences.core.stringPreferencesKey
+import baby.freedom.mobile.browser.Icu4jUts46
+import baby.freedom.mobile.browser.WhatwgHost
+import baby.freedom.mobile.chains.BuiltInChains
+import baby.freedom.mobile.chains.Chain
+import java.io.IOException
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.runBlocking
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
+import org.junit.Before
+import org.junit.Test
+
+class ChainStoreTest {
+    @Before
+    fun icu() {
+        WhatwgHost.uts46 = Icu4jUts46
+    }
+
+    private class MemoryStore : DataStore<Preferences> {
+        override val data = MutableStateFlow(emptyPreferences())
+        override suspend fun updateData(
+            transform: suspend (t: Preferences) -> Preferences,
+        ): Preferences = transform(data.value).also { data.value = it }
+    }
+
+    private class BrokenStore(error: IOException) : DataStore<Preferences> {
+        private val e = error
+        override val data: Flow<Preferences> = flow { throw e }
+        override suspend fun updateData(
+            transform: suspend (t: Preferences) -> Preferences,
+        ): Preferences = throw e
+    }
+
+    private val polygon = Chain(
+        id = 137, name = "Polygon", symbol = "POL", explorerUrl = "https://polygonscan.com",
+        rpcUrls = listOf("https://polygon.drpc.org", "https://polygon-rpc.com"),
+    )
+    private val amoy = Chain(
+        id = 80002, name = "Polygon Amoy", symbol = "POL", rpcUrls = listOf("https://rpc-amoy.polygon.technology"),
+        isTestnet = true,
+    )
+
+    @Test
+    fun listsBuiltInsFirst() = runBlocking {
+        val store = ChainStore(MemoryStore())
+        assertEquals(listOf(1L, 100L, 8453L), store.chains.first().map { it.id })
+        assertTrue(store.chains.first().all { it.builtIn })
+    }
+
+    @Test
+    fun addAndRemoveACustomChain() = runBlocking {
+        var now = 1000L
+        val store = ChainStore(MemoryStore(), clock = { now })
+        assertEquals(ChainStore.AddResult.ADDED, store.add(amoy))
+        now = 2000
+        assertEquals(ChainStore.AddResult.ADDED, store.add(polygon))
+        val listed = store.chains.first()
+        assertEquals(listOf(1L, 100L, 8453L, 80002L, 137L), listed.map { it.id })
+        assertEquals(polygon, listed.last())
+        assertEquals(amoy, listed[3])
+
+        assertTrue(store.remove(80002))
+        assertFalse(store.remove(80002))
+        assertEquals(listOf(1L, 100L, 8453L, 137L), store.chains.first().map { it.id })
+    }
+
+    @Test
+    fun builtInsCanNeitherBeAddedNorRemoved() = runBlocking {
+        val store = ChainStore(MemoryStore())
+        assertEquals(ChainStore.AddResult.BUILT_IN, store.add(polygon.copy(id = 8453)))
+        assertFalse(store.remove(1))
+        assertEquals(BuiltInChains.ALL, store.chains.first())
+    }
+
+    @Test
+    fun aDuplicateIdIsRefused() = runBlocking {
+        val store = ChainStore(MemoryStore())
+        assertEquals(ChainStore.AddResult.ADDED, store.add(polygon))
+        assertEquals(ChainStore.AddResult.DUPLICATE, store.add(polygon.copy(name = "Other")))
+        assertEquals("Polygon", store.chains.first().last().name)
+    }
+
+    @Test
+    fun aStoredEntryForABuiltInOrABadEntryIsIgnored() = runBlocking {
+        val mem = MemoryStore()
+        mem.edit {
+            it[stringPreferencesKey("chain:8453")] = ChainStore.encode(polygon.copy(id = 8453), 1)
+            it[stringPreferencesKey("chain:137")] = ChainStore.encode(polygon.copy(rpcUrls = listOf("http://10.0.0.1")), 1)
+            it[stringPreferencesKey("chain:5")] = "{not json"
+            it[stringPreferencesKey("chain:6")] = ChainStore.encode(amoy, 1) // key/id mismatch
+        }
+        val store = ChainStore(mem)
+        assertEquals(BuiltInChains.ALL, store.chains.first())
+    }
+
+    @Test
+    fun encodeDecodeRoundTrips() {
+        val (chain, at) = ChainStore.decode(ChainStore.encode(polygon, 42))!!
+        assertEquals(polygon, chain)
+        assertEquals(42L, at)
+        assertEquals(amoy, ChainStore.decode(ChainStore.encode(amoy, 0))!!.first)
+    }
+
+    @Test
+    fun storageTroubleNeverThrows() = runBlocking {
+        val store = ChainStore(BrokenStore(CorruptionException("bad")), backOff = {})
+        assertEquals(BuiltInChains.ALL, store.chains.first())
+        assertEquals(ChainStore.AddResult.FAILED, store.add(polygon))
+        assertFalse(store.remove(137))
+    }
+}
