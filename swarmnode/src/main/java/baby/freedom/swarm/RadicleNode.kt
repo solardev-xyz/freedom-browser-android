@@ -154,18 +154,38 @@ class RadicleNode internal constructor(
     private class SeedRun(val rid: String, val epoch: Long) {
         @Volatile var dismissed = false
         @Volatile var stopping = false
+        /** This call added the seeding policy (and a [pendingUnseedFile] line). */
+        @Volatile var added = false
+        /**
+         * The native fetch is transferring from a peer. libradicle checks
+         * its cancel token only between peers, so a cancel doesn't end it
+         * until that peer's fetch does.
+         */
+        @Volatile var fetching = false
+        /** A [stop] already took the policy back; the job leaves it alone. */
+        @Volatile var rolledBack = false
+        /** The coroutine running this call, rollback included. */
+        lateinit var job: Job
     }
 
     /** The seed-by-RID fetch in flight, or null. */
     private val seedRun = AtomicReference<SeedRun?>(null)
 
     /**
-     * The coroutine of the latest seed-by-RID call, rollback included. A
-     * [stop] waits for it before shutting the node down, so the rollback
-     * still has a node to talk to.
+     * The latest seed-by-RID call, kept after its fetch ends so a [stop]
+     * can wait for its rollback while the node is still up.
      */
     @Volatile
-    private var seedJob: Job? = null
+    private var lastRun: SeedRun? = null
+
+    /**
+     * Seed calls whose native fetch is still running, including ones left
+     * over from a shut-down node instance. libradicle keys its cancel
+     * tokens by RID in one process-wide map, and a fetch removes its RID's
+     * entry when it ends, so a second fetch of the same RID while an
+     * earlier one is alive would lose its token to the earlier one.
+     */
+    private val liveFetches: MutableSet<SeedRun> = java.util.concurrent.ConcurrentHashMap.newKeySet()
 
     /**
      * RIDs whose seeding policy a seed call added and hasn't yet confirmed
@@ -242,19 +262,18 @@ class RadicleNode internal constructor(
      * the UI's point of view either way; the error is kept.
      */
     fun stop() {
-        val gen = synchronized(this) {
+        // Under the same lock [seed] registers its run under: a seed either
+        // lands first (and is marked stopping here) or sees `wanted` false.
+        val (gen, run) = synchronized(this) {
             if (!wanted) return
             wanted = false
             poller?.cancel()
             poller = null
             dialJob?.cancel()
             dialJob = null
-            generation.incrementAndGet()
+            generation.incrementAndGet() to seedRun.get()?.also { it.stopping = true }
         }
-        val run = seedRun.get()?.also { run ->
-            run.stopping = true
-            runCatching { ops.cancelClone(run.rid) }
-        }
+        run?.let { runCatching { ops.cancelClone(it.rid) } }
         _state.update { it.copy(status = RadicleStatus.Stopping) }
         scope.launch(lifecycle) {
             var error = ""
@@ -263,15 +282,21 @@ class RadicleNode internal constructor(
                 // still up. Blocking (not suspending) keeps [lifecycle] held,
                 // so a later start can't slip in ahead of this shutdown. The
                 // cancel above is a no-op if it landed before the native
-                // fetch registered, so keep asking until it's confirmed. A
-                // fetch that won't wind down in time is rolled back on the
-                // next boot instead (see [pendingUnseedFile]).
-                seedJob?.let { job ->
+                // fetch registered, so keep asking until it's confirmed.
+                // A fetch already transferring from a peer ignores the
+                // cancel until that peer is done, so don't wait for it; nor
+                // past [seedStopWaitMs] for one that won't wind down. Either
+                // way the policy is taken back here, before the shutdown.
+                lastRun?.takeIf { it.epoch == nodeEpoch.get() && it.job.isActive }?.let { last ->
                     runBlocking {
                         withTimeoutOrNull(seedStopWaitMs) {
-                            run?.let { cancelFetch(it) }
-                            job.join()
+                            if (last === run) cancelFetch(last)
+                            while (last.job.isActive && !(last === run && last.fetching)) delay(CANCEL_RETRY_MS)
                         }
+                    }
+                    if (last.job.isActive && last.added && unseedNow(last.rid)) {
+                        last.rolledBack = true
+                        editPendingUnseeds { it - last.rid }
                     }
                 }
                 error = runCatching { json(ops.shutdown())?.optString("error").orEmpty() }
@@ -316,8 +341,6 @@ class RadicleNode internal constructor(
      */
     fun seed(input: String) {
         if (_state.value.status != RadicleStatus.Running) return
-        val current = seedRun.get()
-        if (current != null && current.epoch == nodeEpoch.get()) return
         val rid = normalizeRid(input)
         if (rid == null) {
             _state.update {
@@ -325,29 +348,50 @@ class RadicleNode internal constructor(
             }
             return
         }
-        val gen = generation.get()
-        val run = SeedRun(rid, nodeEpoch.get())
-        if (!seedRun.compareAndSet(current, run)) return
-        _state.update { it.copy(seed = RadicleSeed(rid, PHASE_RESOLVING)) }
-        val job = scope.launch(start = CoroutineStart.LAZY) {
+        val (gen, run) = synchronized(this) {
+            // Checked under the lock [stop] marks the run under; see there.
+            if (!wanted || _state.value.status != RadicleStatus.Running) return
+            val current = seedRun.get()
+            if (current != null && current.epoch == nodeEpoch.get()) return
+            if (liveFetches.any { it.rid == rid }) {
+                _state.update {
+                    it.copy(seed = RadicleSeed(rid, PHASE_FAILED, STALE_FETCH_DETAIL, active = false))
+                }
+                return
+            }
+            val run = SeedRun(rid, nodeEpoch.get())
+            seedRun.set(run)
+            lastRun = run
+            _state.update { it.copy(seed = RadicleSeed(rid, PHASE_RESOLVING)) }
+            generation.get() to run
+        }
+        run.job = scope.launch(start = CoroutineStart.LAZY) {
             // Unknown (the list call failed) counts as seeded: never drop a
             // policy this call can't prove it added.
             val wasSeeded = runCatching { parseRepos(ops.listSeededRepos()) }.getOrNull()
                 ?.any { it.rid == rid } ?: true
-            if (!wasSeeded) editPendingUnseeds { it + rid }
+            if (!wasSeeded) {
+                editPendingUnseeds { it + rid }
+                run.added = true
+            }
             // Stopped, unseeded or superseded before the fetch began: don't
             // start it (a cancel that early never reaches the native fetch).
             val skipped = run.stopping || run.dismissed || run.epoch != nodeEpoch.get()
+            if (!skipped) liveFetches += run
             val result = if (skipped) JSONObject().put("cancelled", true) else try {
                 json(
                     ops.cloneRepoWithProgress(rid, SEED_TIMEOUT_MS) { event ->
                         val parsed = json(event) ?: return@cloneRepoWithProgress
+                        run.fetching = parsed.optString("phase") == PHASE_FETCHING
                         val progress = RadicleSeed(rid, parsed.optString("phase"), progressDetail(parsed))
                         _state.update { if (gen == generation.get() && !run.dismissed) it.copy(seed = progress) else it }
                     },
                 )
             } catch (t: Throwable) {
                 JSONObject().put("error", t.message ?: t.javaClass.simpleName)
+            } finally {
+                run.fetching = false
+                liveFetches -= run
             }
             seedRun.compareAndSet(run, null)
             val settled = when {
@@ -359,7 +403,7 @@ class RadicleNode internal constructor(
             Log.i(TAG, "seed $rid → ${settled.phase} ${settled.detail}")
             // Roll back only on the node instance the fetch ran against; one
             // that has since been shut down is rolled back at its next boot.
-            if (!wasSeeded && run.epoch == nodeEpoch.get()) {
+            if (!wasSeeded && !run.rolledBack && run.epoch == nodeEpoch.get()) {
                 if (skipped || settled.phase == PHASE_DONE || unseedNow(rid)) editPendingUnseeds { it - rid }
             }
             _state.update {
@@ -372,8 +416,7 @@ class RadicleNode internal constructor(
             }
             refreshRepos(gen)
         }
-        seedJob = job
-        job.start()
+        run.job.start()
     }
 
     /** Take [rid]'s seeding policy back; true if the node confirmed it. */
@@ -514,8 +557,11 @@ class RadicleNode internal constructor(
         internal const val CANCEL_RETRY_MS = 50L
         internal const val PENDING_UNSEED_FILE = "pending-unseed"
         internal const val POLL_INTERVAL_MS = 5_000L
+        internal const val STALE_FETCH_DETAIL =
+            "An earlier fetch of this repository is still winding down. Try again in a moment."
 
         const val PHASE_RESOLVING = "resolving"
+        const val PHASE_FETCHING = "fetching"
         const val PHASE_DONE = "done"
         const val PHASE_FAILED = "failed"
         const val PHASE_CANCELLED = "cancelled"

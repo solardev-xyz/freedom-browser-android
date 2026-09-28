@@ -60,6 +60,11 @@ class RadicleNodeTest {
         @Volatile var ignoreCancel = false
         /** Whether a fetch has registered its cancel token (libradicle's CancelToken). */
         @Volatile var cancellable = false
+        /**
+         * The fetch reaches a peer transfer, during which (like libradicle)
+         * a cancel is recorded but not acted on until the fetch is released.
+         */
+        @Volatile var transferring = false
         /** How many upcoming [unseedRepo] calls fail. */
         @Volatile var unseedFailures = 0
 
@@ -71,6 +76,7 @@ class RadicleNodeTest {
             val listed = RadicleNode.parseRepos(repos).orEmpty()
             if (listed.none { it.rid == rid }) repos = reposJson(listed + RadicleRepo(rid, ""))
             onProgress("""{"phase":"connecting","nid":"z6MkSeed","addr":"seed.example:8776","index":1,"total":2}""")
+            if (transferring) onProgress("""{"phase":"fetching","nid":"z6MkSeed"}""")
             releaseClone.await(5, TimeUnit.SECONDS)
             cancellable = false
             lateProgress?.let(onProgress)
@@ -80,7 +86,7 @@ class RadicleNodeTest {
             calls += "cancel:$rid"
             // Like libradicle: nothing to cancel before the fetch registers.
             if (!cancellable) return """{"cancelled":false}"""
-            if (!ignoreCancel) releaseClone.countDown()
+            if (!ignoreCancel && !transferring) releaseClone.countDown()
             return """{"cancelled":true}"""
         }
         override fun unseedRepo(rid: String): String {
@@ -456,6 +462,85 @@ class RadicleNodeTest {
         Thread.sleep(200)
         assertEquals(unseedsBefore, ops.calls.count { it == "unseed:$rid" })
         node.dispose()
+    }
+
+    @Test
+    fun aStopMidTransferRollsBackWithoutWaitingOutThePeer() {
+        // libradicle only checks the cancel token between peers, so a fetch
+        // already transferring runs on; the stop mustn't sit out its wait.
+        val ops = FakeOps().apply { transferring = true }
+        val node = RadicleNode(config, ops)
+        node.start()
+        await("running", node) { it.status == RadicleStatus.Running }
+        node.seed(rid)
+        await("fetching", node) { it.seed?.phase == "fetching" }
+        val began = System.currentTimeMillis()
+        node.stop()
+        await("stopped", node) { it.status == RadicleStatus.Stopped && "shutdown" in ops.calls }
+        assertTrue("stop didn't wait out the transfer", System.currentTimeMillis() - began < 2_000)
+        val calls = ops.calls.toList()
+        assertTrue("cancel asked: $calls", "cancel:$rid" in calls)
+        assertTrue("rolled back before shutdown: $calls", calls.indexOf("unseed:$rid") in 0 until calls.indexOf("shutdown"))
+        assertFalse("nothing left to replay", pendingFile.exists())
+        ops.releaseClone.countDown()
+        Thread.sleep(200)
+        assertEquals("the fetch's own end doesn't unseed again", 1, ops.calls.count { it == "unseed:$rid" })
+        node.start()
+        await("running again", node) { it.status == RadicleStatus.Running }
+        assertTrue(node.state.value.seededRepos.isEmpty())
+        node.dispose()
+    }
+
+    @Test
+    fun aSameRidSeedWaitsForAStaleFetchOfIt() {
+        // libradicle's cancel tokens are keyed by RID in one global map, and a
+        // fetch removes its RID's entry when it ends: a new fetch of the same
+        // RID alongside a stale one would lose its token to it.
+        val ops = FakeOps().apply { ignoreCancel = true }
+        val node = RadicleNode(config, ops, seedStopWaitMs = 200)
+        node.start()
+        await("running", node) { it.status == RadicleStatus.Running }
+        node.seed(rid)
+        await("connecting", node) { it.seed?.phase == "connecting" }
+        node.stop()
+        await("stopped", node) { it.status == RadicleStatus.Stopped && "shutdown" in ops.calls }
+        node.start()
+        await("running again", node) { it.status == RadicleStatus.Running }
+        node.seed(rid)
+        await("refused while the stale fetch runs", node) {
+            it.seed?.rid == rid && it.seed?.phase == "failed" && it.seed?.detail == RadicleNode.STALE_FETCH_DETAIL
+        }
+        assertEquals(1, ops.calls.count { it == "clone:$rid" })
+        ops.releaseClone.countDown()
+        val until = System.currentTimeMillis() + 5_000
+        while (ops.calls.count { it == "clone:$rid" } < 2 && System.currentTimeMillis() < until) {
+            node.seed(rid)
+            Thread.sleep(20)
+        }
+        await("accepted once the stale fetch ended", node) { it.seed?.rid == rid && it.seed?.phase == "done" }
+        node.dispose()
+    }
+
+    @Test
+    fun aSeedRacingAStopIsAlwaysCancelled() {
+        // A seed landing at the same moment as a stop is either refused or
+        // cancelled by it, never left to run out the stop's whole wait.
+        repeat(40) { i ->
+            val ops = FakeOps()
+            val node = RadicleNode(config, ops)
+            node.start()
+            await("running #$i", node) { it.status == RadicleStatus.Running }
+            val go = CountDownLatch(1)
+            val seeder = Thread { go.await(); node.seed(rid) }.apply { start() }
+            val stopper = Thread { go.await(); node.stop() }.apply { start() }
+            val began = System.currentTimeMillis()
+            go.countDown()
+            seeder.join(); stopper.join()
+            await("stopped #$i", node) { it.status == RadicleStatus.Stopped && "shutdown" in ops.calls }
+            assertTrue("#$i stop waited out the fetch: ${ops.calls}", System.currentTimeMillis() - began < 2_000)
+            ops.releaseClone.countDown()
+            pendingFile.delete()
+        }
     }
 
     @Test
