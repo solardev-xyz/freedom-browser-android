@@ -24,6 +24,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -46,13 +47,14 @@ import baby.freedom.swarm.RadicleStatus
 /**
  * What the UI knows about the embedded Radicle node (#73) and what it can
  * ask of it: the node's state as broadcast from `:node`, the persisted
- * on/off setting, and the two actions the Radicle page offers.
+ * on/off setting, and the actions the Radicle page offers (seed, unseed).
  */
 data class RadicleControls(
     val info: RadicleInfo = RadicleInfo(),
     val enabled: Boolean = false,
     val onToggle: (Boolean) -> Unit = {},
     val onSeed: (String) -> Unit = {},
+    val onUnseed: (String) -> Unit = {},
 )
 
 internal const val RADICLE_ROW_KEY = "radicle"
@@ -132,7 +134,9 @@ fun RadicleScreen(
             }
             if (radicle.enabled && info.status == RadicleStatus.Running) {
                 item("identity") { RadicleIdentitySection(info) }
-                item("repos") { RadicleReposSection(info, onSeed = radicle.onSeed) }
+                item("repos") {
+                    RadicleReposSection(info, onSeed = radicle.onSeed, onUnseed = radicle.onUnseed)
+                }
             }
         }
     }
@@ -172,7 +176,7 @@ private fun RadicleStatusSection(
                             "Connected to ${peersLabel(info.connectedPeers)}"
                         info.status == RadicleStatus.Starting -> "Loading the identity and dialling seeds"
                         info.status == RadicleStatus.Stopping -> "Shutting the node down"
-                        info.status == RadicleStatus.Error -> "The node couldn’t start"
+                        info.status == RadicleStatus.Error -> "The node couldn’t start. Retry, or turn it off and on."
                         else -> "Waiting for the node service"
                     },
                     style = MaterialTheme.typography.bodySmall,
@@ -184,6 +188,13 @@ private fun RadicleStatusSection(
         val err = info.errorMessage
         if (enabled && !err.isNullOrBlank()) {
             DetailRow("Error", err, singleLine = false)
+        }
+        // A failed start isn't retried behind the user's back; this asks
+        // `:node` to boot again (as the next bind would).
+        if (enabled && runNodeEnabled && info.status == RadicleStatus.Error) {
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                TextButton(onClick = { onToggle(true) }) { Text("Retry") }
+            }
         }
     }
 }
@@ -213,7 +224,11 @@ private fun StackedValue(label: String, value: String) {
 }
 
 @Composable
-private fun RadicleReposSection(info: RadicleInfo, onSeed: (String) -> Unit) {
+private fun RadicleReposSection(
+    info: RadicleInfo,
+    onSeed: (String) -> Unit,
+    onUnseed: (String) -> Unit,
+) {
     var input by rememberSaveable { mutableStateOf("") }
     val focusManager = LocalFocusManager.current
     val seed = info.seed
@@ -233,24 +248,28 @@ private fun RadicleReposSection(info: RadicleInfo, onSeed: (String) -> Unit) {
             )
         } else {
             info.seededRepos.forEach { repo ->
-                Column(modifier = Modifier.padding(vertical = 4.dp)) {
-                    if (repo.name.isNotEmpty()) {
-                        Text(repo.name, fontWeight = FontWeight.Medium)
-                    } else {
-                        Text(
-                            "Awaiting first fetch",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(modifier = Modifier.weight(1f).padding(vertical = 4.dp)) {
+                        if (repo.name.isNotEmpty()) {
+                            Text(repo.name, fontWeight = FontWeight.Medium)
+                        } else {
+                            Text(
+                                "Awaiting first fetch",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        SelectionContainer {
+                            Text(
+                                repo.rid,
+                                fontFamily = FontFamily.Monospace,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
                     }
-                    SelectionContainer {
-                        Text(
-                            repo.rid,
-                            fontFamily = FontFamily.Monospace,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
+                    // Also the way out for a RID that never fetched.
+                    TextButton(onClick = { onUnseed(repo.rid) }) { Text("Stop seeding") }
                 }
             }
         }

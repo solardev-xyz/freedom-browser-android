@@ -39,9 +39,22 @@ class RadicleNodeTest {
         override fun identity() =
             """{"did":"did:key:z6MkTest","nid":"z6MkTest","alias":"freedom-android"}"""
         override fun status() = """{"connectedPeers":$peers}"""
-        override fun listSeededRepos() = repos
+        /** When set, the next [listSeededRepos] call parks here until released. */
+        @Volatile var listGate: CountDownLatch? = null
+        val listEntered = CountDownLatch(1)
+        override fun listSeededRepos(): String {
+            listGate?.let { gate ->
+                listGate = null
+                listEntered.countDown()
+                gate.await(5, TimeUnit.SECONDS)
+            }
+            return repos
+        }
         override fun cloneRepoWithProgress(rid: String, timeoutMs: Int, onProgress: (String) -> Unit): String {
             calls += "clone:$rid"
+            // Like libradicle: the seeding policy is set before the fetch.
+            val listed = RadicleNode.parseRepos(repos).orEmpty()
+            if (listed.none { it.rid == rid }) repos = reposJson(listed + RadicleRepo(rid, ""))
             onProgress("""{"phase":"connecting","nid":"z6MkSeed","addr":"seed.example:8776","index":1,"total":2}""")
             releaseClone.await(5, TimeUnit.SECONDS)
             return cloneResult
@@ -50,6 +63,14 @@ class RadicleNodeTest {
             calls += "cancel:$rid"
             releaseClone.countDown()
             return """{"cancelled":true}"""
+        }
+        override fun unseedRepo(rid: String): String {
+            calls += "unseed:$rid"
+            repos = reposJson(RadicleNode.parseRepos(repos).orEmpty().filter { it.rid != rid })
+            return """{"unseeded":true}"""
+        }
+        private fun reposJson(list: List<RadicleRepo>) = list.joinToString(",", "[", "]") {
+            if (it.name.isEmpty()) """{"rid":"${it.rid}","name":null}""" else """{"rid":"${it.rid}","name":"${it.name}"}"""
         }
         override fun shutdown(): String {
             calls += "shutdown"
@@ -95,6 +116,45 @@ class RadicleNodeTest {
         // Nothing booted, so nothing to shut down, and no stale error.
         assertFalse("shutdown" in ops.calls)
         assertNull(node.state.value.errorMessage)
+    }
+
+    @Test
+    fun aFailedStartIsRetriedByTheNextStart() {
+        val ops = FakeOps().apply { startResult = """{"error":"storage is locked"}""" }
+        val node = RadicleNode(config, ops)
+        node.start()
+        await("error", node) { it.status == RadicleStatus.Error }
+        // A re-bind (or Retry) asks again; it must boot, not be swallowed.
+        ops.startResult = """{"did":"did:key:z6MkTest"}"""
+        node.start()
+        await("running", node) { it.status == RadicleStatus.Running && it.connectedPeers == 3 }
+        assertEquals(2, ops.calls.count { it == "start" })
+        // While it's running, another start is still a no-op.
+        node.start()
+        Thread.sleep(200)
+        assertEquals(2, ops.calls.count { it == "start" })
+        node.stop()
+        await("stopped", node) { it.status == RadicleStatus.Stopped && "shutdown" in ops.calls }
+    }
+
+    @Test
+    fun aStopMidBootLeavesNoStaleDialToBlockTheNextBoot() {
+        val gate = CountDownLatch(1)
+        val ops = FakeOps().apply { listGate = gate }
+        val node = RadicleNode(config, ops)
+        node.start()
+        // Park the boot after its generation check, before the dial/poller
+        // launch, and stop it there.
+        assertTrue(ops.listEntered.await(5, TimeUnit.SECONDS))
+        node.stop()
+        gate.countDown()
+        await("stopped", node) { it.status == RadicleStatus.Stopped && "shutdown" in ops.calls }
+        Thread.sleep(200)
+        assertFalse("a superseded boot never dials", "connectSeeds" in ops.calls)
+        node.start()
+        await("running with peers", node) { it.status == RadicleStatus.Running && it.connectedPeers == 3 }
+        assertEquals(1, ops.calls.count { it == "connectSeeds" })
+        node.dispose()
     }
 
     @Test
@@ -158,6 +218,54 @@ class RadicleNodeTest {
         node.seed(rid)
         await("failed", node) { it.seed?.phase == "failed" }
         assertEquals("no seeds found", node.state.value.seed?.detail)
+        // The policy the failed fetch added is taken back, so the RID
+        // doesn't linger as "Awaiting first fetch".
+        await("rolled back", node) { "unseed:$rid" in ops.calls && it.seededRepos.isEmpty() }
+        node.dispose()
+    }
+
+    @Test
+    fun aFailedRefetchKeepsAnAlreadySeededRepo() {
+        val ops = FakeOps().apply {
+            repos = """[{"rid":"$rid","name":"heartwood"}]"""
+            cloneResult = """{"error":"no seeds found"}"""
+            releaseClone.countDown()
+        }
+        val node = RadicleNode(config, ops)
+        node.start()
+        await("running", node) { it.status == RadicleStatus.Running && it.seededRepos.isNotEmpty() }
+        node.seed(rid)
+        await("failed", node) { it.seed?.phase == "failed" }
+        Thread.sleep(200)
+        assertFalse("unseed:$rid" in ops.calls)
+        assertEquals(listOf(RadicleRepo(rid, "heartwood")), node.state.value.seededRepos)
+        node.dispose()
+    }
+
+    @Test
+    fun unseedingAnInFlightSeedCancelsItAndDropsIt() {
+        val ops = FakeOps().apply { cloneResult = """{"cancelled":true}""" }
+        val node = RadicleNode(config, ops)
+        node.start()
+        await("running", node) { it.status == RadicleStatus.Running }
+        node.seed(rid)
+        await("connecting", node) { it.seed?.phase == "connecting" }
+        node.unseed(rid)
+        await("dropped", node) { it.seededRepos.isEmpty() && it.seed?.active != true }
+        assertTrue("cancel:$rid" in ops.calls)
+        assertTrue("unseed:$rid" in ops.calls)
+        node.dispose()
+    }
+
+    @Test
+    fun unseedDropsARepoFromTheList() {
+        val ops = FakeOps().apply { repos = """[{"rid":"$rid","name":null}]""" }
+        val node = RadicleNode(config, ops)
+        node.start()
+        await("running", node) { it.status == RadicleStatus.Running && it.seededRepos.isNotEmpty() }
+        node.unseed(rid)
+        await("unseeded", node) { it.seededRepos.isEmpty() }
+        assertEquals(listOf("unseed:$rid"), ops.calls.filter { it.startsWith("unseed:") })
         node.dispose()
     }
 

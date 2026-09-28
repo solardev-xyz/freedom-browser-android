@@ -44,6 +44,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
 /**
@@ -63,6 +65,13 @@ class MainActivity : ComponentActivity() {
     private val infoFlow = MutableStateFlow(NodeInfo())
     private val ipfsInfoFlow = MutableStateFlow(IpfsInfo())
     private val radicleInfoFlow = MutableStateFlow(RadicleInfo())
+
+    /**
+     * Serializes relaying the Radicle setting to `:node`: a toggle's
+     * write-then-start/stop and a bind's read-then-start each run whole,
+     * so the service hears them in the order the setting changed (#73).
+     */
+    private val radicleRelay = Mutex()
     private lateinit var settings: NodeSettings
 
     /**
@@ -112,8 +121,13 @@ class MainActivity : ComponentActivity() {
             runCatching { b.radicleState?.let { radicleInfoFlow.value = it } }
             // The Radicle on/off setting lives here, in the UI process's
             // DataStore; a freshly (re)started `:node` hears it on bind.
+            // Under [radicleRelay], so a toggle landing at the same time
+            // can't have its stop overtaken by a start this bind read
+            // from the setting before the toggle wrote it.
             lifecycleScope.launch {
-                if (settings.radicleEnabled.first()) runCatching { b.startRadicle() }
+                radicleRelay.withLock {
+                    if (settings.radicleEnabled.first()) runCatching { b.startRadicle() }
+                }
             }
         }
 
@@ -212,6 +226,7 @@ class MainActivity : ComponentActivity() {
                             enabled = radicleEnabled,
                             onToggle = ::onRadicleToggle,
                             onSeed = ::onRadicleSeed,
+                            onUnseed = ::onRadicleUnseed,
                         ),
                         initialUrl = startUrl,
                         deepLinkUrl = deepLink,
@@ -376,9 +391,16 @@ class MainActivity : ComponentActivity() {
      */
     private fun onRadicleToggle(enabled: Boolean) {
         lifecycleScope.launch {
-            settings.setRadicleEnabled(enabled)
-            runCatching { if (enabled) binder?.startRadicle() else binder?.stopRadicle() }
+            radicleRelay.withLock {
+                settings.setRadicleEnabled(enabled)
+                runCatching { if (enabled) binder?.startRadicle() else binder?.stopRadicle() }
+            }
         }
+    }
+
+    /** Stop seeding a repository from the Radicle page's list. */
+    private fun onRadicleUnseed(rid: String) {
+        runCatching { binder?.unseedRadicleRepo(rid) }
     }
 
     /** Seed-by-RID from the Radicle page; progress comes back on the callback. */

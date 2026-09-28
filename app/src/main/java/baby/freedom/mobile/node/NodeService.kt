@@ -135,6 +135,11 @@ class NodeService : Service() {
             rid ?: return
             scope.launch { radicleNode.seed(rid) }
         }
+
+        override fun unseedRadicleRepo(rid: String?) {
+            rid ?: return
+            scope.launch { radicleNode.unseed(rid) }
+        }
     }
 
     /**

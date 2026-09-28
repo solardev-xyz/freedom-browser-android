@@ -72,6 +72,7 @@ class RadicleNode internal constructor(
         fun listSeededRepos(): String
         fun cloneRepoWithProgress(rid: String, timeoutMs: Int, onProgress: (String) -> Unit): String
         fun cancelClone(rid: String): String
+        fun unseedRepo(rid: String): String
         fun shutdown(): String
 
         object Native : Ops {
@@ -96,6 +97,7 @@ class RadicleNode internal constructor(
                 },
             )
             override fun cancelClone(rid: String) = uniffi.libradicle_uniffi.cancelClone(rid)
+            override fun unseedRepo(rid: String) = uniffi.libradicle_uniffi.unseedRepo(rid)
             override fun shutdown() = uniffi.libradicle_uniffi.shutdown()
         }
     }
@@ -113,7 +115,12 @@ class RadicleNode internal constructor(
     /** Bumped by every [start] / [stop]; see the class comment. */
     private val generation = AtomicLong(0L)
 
-    /** Whether the last lifecycle call was a start. Guarded by `this`. */
+    /**
+     * Whether the last lifecycle call was a start. Guarded by `this`, as
+     * are [poller] / [dialJob] assignments: a start's follow-up jobs are
+     * launched under the lock only while its generation is current, so a
+     * [stop] either sees (and cancels) them or supersedes them first.
+     */
     private var wanted = false
 
     /** Whether a node is up in this process. Touched only on [lifecycle]. */
@@ -125,16 +132,24 @@ class RadicleNode internal constructor(
     @Volatile
     private var dialJob: Job? = null
 
+    /** The generation [dialJob] dials for. Guarded by `this`. */
+    private var dialGen = -1L
+
     /** RID of the seed-by-RID fetch in flight, or null. */
     private val seedingRid = AtomicReference<String?>(null)
 
     private val _state = MutableStateFlow(RadicleInfo())
     val state: StateFlow<RadicleInfo> = _state.asStateFlow()
 
-    /** Idempotently start the node, then dial the seed book. */
+    /**
+     * Idempotently start the node, then dial the seed book. A start that
+     * failed (status [RadicleStatus.Error]) is retried: the next call
+     * (a re-bind, or the page's Retry) boots again instead of being
+     * swallowed as "already wanted".
+     */
     fun start() {
         val gen = synchronized(this) {
-            if (wanted) return
+            if (wanted && _state.value.status != RadicleStatus.Error) return
             wanted = true
             generation.incrementAndGet()
         }
@@ -155,7 +170,10 @@ class RadicleNode internal constructor(
             refreshRepos(gen)
             _state.update { if (gen == generation.get()) it.copy(status = RadicleStatus.Running) else it }
             Log.i(TAG, "radicle running as ${_state.value.did}")
-            poller = scope.launch { pollStatus(gen) }
+            synchronized(this@RadicleNode) {
+                if (gen != generation.get()) return@launch
+                poller = scope.launch { pollStatus(gen) }
+            }
             dial(gen)
         }
     }
@@ -187,12 +205,12 @@ class RadicleNode internal constructor(
         val gen = synchronized(this) {
             if (!wanted) return
             wanted = false
+            poller?.cancel()
+            poller = null
+            dialJob?.cancel()
+            dialJob = null
             generation.incrementAndGet()
         }
-        poller?.cancel()
-        poller = null
-        dialJob?.cancel()
-        dialJob = null
         seedingRid.get()?.let { rid -> runCatching { ops.cancelClone(rid) } }
         _state.update { it.copy(status = RadicleStatus.Stopping) }
         scope.launch(lifecycle) {
@@ -229,6 +247,11 @@ class RadicleNode internal constructor(
      * Seed and fetch the repository [input] names (`rad:z…`, `rad://z…` or
      * a bare `z…`), reporting phase progress through [RadicleInfo.seed].
      * Ignored while another seed is in flight or the node isn't running.
+     *
+     * A fetch that fails or is cancelled takes back the seeding policy it
+     * added, so a mistyped or unreachable RID doesn't sit in the seeded
+     * list forever as "Awaiting first fetch". A RID that was already
+     * seeded before this call keeps its policy.
      */
     fun seed(input: String) {
         if (_state.value.status != RadicleStatus.Running || seedingRid.get() != null) return
@@ -243,6 +266,10 @@ class RadicleNode internal constructor(
         if (!seedingRid.compareAndSet(null, rid)) return
         _state.update { it.copy(seed = RadicleSeed(rid, PHASE_RESOLVING)) }
         scope.launch {
+            // Unknown (the list call failed) counts as seeded: never drop a
+            // policy this call can't prove it added.
+            val wasSeeded = runCatching { parseRepos(ops.listSeededRepos()) }.getOrNull()
+                ?.any { it.rid == rid } ?: true
             val result = try {
                 json(
                     ops.cloneRepoWithProgress(rid, SEED_TIMEOUT_MS) { event ->
@@ -263,13 +290,43 @@ class RadicleNode internal constructor(
                 else -> RadicleSeed(rid, PHASE_FAILED, result.optString("error"), active = false)
             }
             Log.i(TAG, "seed $rid → ${settled.phase} ${settled.detail}")
+            if (settled.phase != PHASE_DONE && !wasSeeded) {
+                val undo = runCatching { ops.unseedRepo(rid) }.getOrElse { it.message.orEmpty() }
+                Log.i(TAG, "seed $rid rolled back: $undo")
+            }
             _state.update { if (gen == generation.get()) it.copy(seed = settled) else it }
             refreshRepos(gen)
         }
     }
 
-    private fun dial(gen: Long) {
-        if (dialJob?.isActive == true) return
+    /**
+     * Stop seeding [rid] (it drops out of the seeded list; the bare
+     * repository stays in storage). Cancels its fetch first if it's the
+     * one in flight. Ignored unless the node is running.
+     */
+    fun unseed(rid: String) {
+        if (_state.value.status != RadicleStatus.Running) return
+        val gen = generation.get()
+        scope.launch {
+            if (seedingRid.get() == rid) runCatching { ops.cancelClone(rid) }
+            val result = runCatching { json(ops.unseedRepo(rid)) }.getOrNull()
+            Log.i(TAG, "unseed $rid: $result")
+            _state.update {
+                if (gen == generation.get() && it.seed?.rid == rid && it.seed?.active == false) it.copy(seed = null) else it
+            }
+            refreshRepos(gen)
+        }
+    }
+
+    /**
+     * Dial the seed book for generation [gen]. Skipped only while a dial
+     * for that same generation is still going; a dial left over from an
+     * earlier boot never holds up a newer one.
+     */
+    private fun dial(gen: Long) = synchronized(this) {
+        if (gen != generation.get()) return
+        if (dialJob?.isActive == true && dialGen == gen) return
+        dialGen = gen
         dialJob = scope.launch {
             val report = runCatching { json(ops.connectSeeds(DIAL_TIMEOUT_MS)) }.getOrNull()
             Log.i(TAG, "radicle seed dial: $report")

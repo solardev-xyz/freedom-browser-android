@@ -88,4 +88,10 @@ interface INodeService {
      * callback. Ignored while another seed is in flight.
      */
     void seedRadicleRepo(String rid);
+
+    /**
+     * Stop seeding the repository `rid` (a `rad:z…` from the seeded
+     * list); it drops out of [RadicleInfo.seededRepos].
+     */
+    void unseedRadicleRepo(String rid);
 }
