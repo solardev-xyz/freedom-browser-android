@@ -253,6 +253,100 @@ class MyotisNodeTest {
         assertEquals(listOf("resume 1", "resume 2", "pause 2"), engine.calls.filter { it.startsWith("pause") || it.startsWith("resume") })
     }
 
+    private class Clocks(var wall: Long = 1_000_000_000L, var up: Long = 1_000L)
+
+    private fun node(engine: FakeEngine, clocks: Clocks) =
+        MyotisNode(tmp.root, engine, pollIntervalMs = 60_000L, wallClock = { clocks.wall }, upClock = { clocks.up })
+
+    private fun FakeEngine.pausesAndResumes() = calls.filter { it.startsWith("pause") || it.startsWith("resume") }
+
+    @Test
+    fun `a park taken on a wrong wall clock is released once the clock is corrected`() {
+        val engine = FakeEngine()
+        val clocks = Clocks(wall = 1_000_000_000L + 40L * 86_400_000L) // 40 days ahead
+        engine.status[1L] = """{"running":true,"beaconState":"STALE_ANCHOR","currentPeriod":1500,"targetPeriod":1535,"wsBoundPeriods":13}"""
+        val node = node(engine, clocks)
+        node.start()
+        idle(node)
+        assertEquals(listOf("pause 1"), engine.pausesAndResumes())
+
+        // Time passes normally: no reason to re-judge, it stays parked.
+        engine.status[1L] = """{"running":false,"paused":true,"beaconState":"STALE_ANCHOR"}"""
+        clocks.wall += 30_000L
+        clocks.up += 30_000L
+        node.pollNow()
+        idle(node)
+        assertEquals(listOf("pause 1"), engine.pausesAndResumes())
+
+        // NTP puts the clock back: the chain is resumed and judged afresh.
+        // Straight after the resume the engine may still say STALE_ANCHOR
+        // for a moment: that doesn't park it again inside the grace.
+        engine.status[1L] = """{"running":true,"beaconState":"STALE_ANCHOR"}"""
+        clocks.wall = 1_000_000_000L + 33_000L
+        clocks.up += 3_000L
+        engine.calls.clear()
+        node.pollNow()
+        idle(node)
+        assertEquals(listOf("resume 1"), engine.pausesAndResumes())
+        assertTrue(node.state.value.chain(MyotisNetwork.Mainnet)!!.staleAnchor)
+
+        clocks.up += 3_000L
+        clocks.wall += 3_000L
+        node.pollNow()
+        idle(node)
+        assertEquals(listOf("resume 1"), engine.pausesAndResumes())
+
+        engine.status[1L] = """{"running":true,"beaconState":"SYNCED"}"""
+        clocks.up += 3_000L
+        clocks.wall += 3_000L
+        node.pollNow()
+        idle(node)
+        assertEquals("SYNCED", node.state.value.chain(MyotisNetwork.Mainnet)?.beaconState)
+        assertFalse(node.state.value.chain(MyotisNetwork.Mainnet)!!.staleAnchor)
+    }
+
+    @Test
+    fun `a released chain that is still stale after the grace parks again`() {
+        val engine = FakeEngine()
+        val clocks = Clocks()
+        engine.status[2L] = """{"running":true,"beaconState":"STALE_ANCHOR"}"""
+        val node = node(engine, clocks)
+        node.start()
+        idle(node)
+        clocks.wall += 5L * 60_000L // clock set by hand, anchor really is old
+        engine.calls.clear()
+        node.pollNow()
+        idle(node)
+        assertEquals(listOf("resume 2"), engine.pausesAndResumes())
+
+        clocks.up += MyotisNode.REJUDGE_GRACE_MS
+        clocks.wall += MyotisNode.REJUDGE_GRACE_MS
+        node.pollNow()
+        idle(node)
+        assertEquals(listOf("resume 2", "pause 2"), engine.pausesAndResumes())
+        assertTrue(node.state.value.chain(MyotisNetwork.Gnosis)!!.staleAnchor)
+    }
+
+    @Test
+    fun `a clock corrected while in the background releases the park on foreground`() {
+        val engine = FakeEngine()
+        val clocks = Clocks()
+        engine.status[2L] = """{"running":true,"beaconState":"STALE_ANCHOR"}"""
+        val node = node(engine, clocks)
+        node.start()
+        idle(node)
+        node.enterBackground()
+        idle(node)
+        clocks.wall -= 40L * 86_400_000L
+        clocks.up += 60_000L
+        engine.calls.clear()
+        engine.status[2L] = """{"running":true,"beaconState":"SYNCING"}"""
+        node.enterForeground()
+        idle(node)
+        assertEquals(listOf("resume 1", "resume 2"), engine.pausesAndResumes())
+        assertEquals("SYNCING", node.state.value.chain(MyotisNetwork.Gnosis)?.beaconState)
+    }
+
     @Test
     fun `shutdown stops the engines and returns`() {
         val engine = FakeEngine()

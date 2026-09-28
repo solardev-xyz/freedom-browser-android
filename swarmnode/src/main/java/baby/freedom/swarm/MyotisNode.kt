@@ -1,5 +1,6 @@
 package baby.freedom.swarm
 
+import android.os.SystemClock
 import android.util.Log
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
@@ -15,6 +16,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
+import kotlin.math.abs
 
 /**
  * Kotlin wrapper around the embedded Myotis Ethereum light client
@@ -42,6 +44,10 @@ class MyotisNode internal constructor(
     private val engine: Engine,
     private val networks: List<MyotisNetwork> = MyotisNetwork.entries,
     private val pollIntervalMs: Long = POLL_INTERVAL_MS,
+    /** Wall clock, the one the engine judges an anchor's age by. */
+    private val wallClock: () -> Long = System::currentTimeMillis,
+    /** Monotonic clock that keeps counting through deep sleep. */
+    private val upClock: () -> Long = SystemClock::elapsedRealtime,
 ) {
     constructor(dataDir: File) : this(dataDir, NativeEngine)
 
@@ -79,13 +85,29 @@ class MyotisNode internal constructor(
     private val startErrors = LinkedHashMap<MyotisNetwork, String>()
 
     /**
-     * Chains parked on a stale trust anchor, with the status they reported
-     * when they parked. Nothing on Android can release that park yet
-     * (checkpoint recovery, #195), so the handle is paused — networking
-     * down, no peers held — and kept paused through foreground/background
-     * until the engines are stopped; its row keeps showing the stale state.
+     * Chains parked on a stale trust anchor. Android has no checkpoint
+     * recovery yet (#195), so the handle is paused — networking down, no
+     * peers held — and kept paused through foreground/background; its row
+     * keeps showing the status it parked with.
+     *
+     * The engine judges an anchor's age against the wall clock, so a park
+     * taken while the clock was wrong (set ahead, then corrected by NTP or
+     * by hand) isn't final: when the wall clock moves against [upClock] by
+     * more than [CLOCK_JUMP_MS] since the park, the chain is resumed and
+     * judged afresh ([releaseParksOnClockChange]). Otherwise it stays
+     * parked until the engines are stopped.
      */
-    private val parked = LinkedHashMap<MyotisNetwork, MyotisChainStatus>()
+    private val parked = LinkedHashMap<MyotisNetwork, Park>()
+
+    private class Park(val status: MyotisChainStatus, val clockOffset: Long)
+
+    /**
+     * Chains just released from a park, with the [upClock] time of the
+     * release: the engine needs a moment to re-judge its anchor, so a
+     * `STALE_ANCHOR` it still reports within [REJUDGE_GRACE_MS] doesn't
+     * park it again straight away.
+     */
+    private val released = LinkedHashMap<MyotisNetwork, Long>()
     private var foreground = true
     private var polls = 0
 
@@ -191,6 +213,7 @@ class MyotisNode internal constructor(
             }
             Op.Foreground -> {
                 foreground = true
+                releaseParksOnClockChange(resume = false)
                 for ((network, handle) in handles) {
                     if (network in parked) continue
                     val resumed = engine.resume(handle)
@@ -204,6 +227,7 @@ class MyotisNode internal constructor(
             Op.Poll -> {
                 pollQueued.set(false)
                 if (handles.isEmpty()) return
+                if (foreground) releaseParksOnClockChange(resume = true)
                 val retry = if (foreground) pausedChains() else emptyList()
                 for ((network, handle) in retry) {
                     // A failed warm restart leaves the engine PAUSED and
@@ -269,6 +293,7 @@ class MyotisNode internal constructor(
         handles.clear()
         startErrors.clear()
         parked.clear()
+        released.clear()
         for ((network, handle) in stopping) {
             engine.stop(handle)
             Log.i(TAG, "${network.engineName}: stopped")
@@ -287,7 +312,7 @@ class MyotisNode internal constructor(
         val chains = networks.mapNotNull { network ->
             val handle = handles[network]
             when {
-                handle != null -> parked[network] ?: MyotisChainStatus.decode(
+                handle != null -> parked[network]?.status ?: MyotisChainStatus.decode(
                     network.chainId,
                     engine.statusJson(handle) ?: "{}",
                 ).also { if (foreground && it.staleAnchor && !it.paused) park(network, handle, it) }
@@ -306,10 +331,36 @@ class MyotisNode internal constructor(
      * wasn't running is tried again on the next poll.
      */
     private fun park(network: MyotisNetwork, handle: Long, status: MyotisChainStatus) {
+        val releasedAt = released[network]
+        if (releasedAt != null) {
+            if (upClock() - releasedAt < REJUDGE_GRACE_MS) return
+            released.remove(network)
+        }
         if (!engine.pause(handle)) return
-        parked[network] = status
+        parked[network] = Park(status, clockOffset())
         Log.i(TAG, "${network.engineName}: trust anchor too old, parked (paused)")
     }
+
+    /**
+     * Resume every parked chain whose park was taken on a wall clock that
+     * has since been changed (see [parked]). With [resume] false the caller
+     * resumes it itself (the foreground op resumes every unparked chain).
+     */
+    private fun releaseParksOnClockChange(resume: Boolean) {
+        if (parked.isEmpty()) return
+        val offset = clockOffset()
+        val moved = parked.filterValues { abs(offset - it.clockOffset) > CLOCK_JUMP_MS }.keys
+        for (network in moved) {
+            parked.remove(network)
+            released[network] = upClock()
+            val handle = handles[network] ?: continue
+            val resumed = if (resume) " → ${engine.resume(handle)}" else ""
+            Log.i(TAG, "${network.engineName}: wall clock changed since parking, resuming to re-judge the anchor$resumed")
+        }
+    }
+
+    /** Wall clock minus the monotonic clock: constant unless someone sets the wall clock. */
+    private fun clockOffset(): Long = wallClock() - upClock()
 
     private fun publish(status: MyotisStatus, error: String? = null) {
         _state.value = MyotisInfo(
@@ -358,6 +409,12 @@ class MyotisNode internal constructor(
 
         /** eth/69 served-block window: the protocol minimum. */
         const val SERVED_BLOCK_WINDOW = 1
+
+        /** Wall-clock change since a park that makes it worth re-judging the anchor. */
+        const val CLOCK_JUMP_MS = 60_000L
+
+        /** How long a chain released from a park gets to re-judge its anchor before it can park again. */
+        const val REJUDGE_GRACE_MS = 15_000L
 
         private const val LOG_DRAIN_EVERY = 5
         private const val LOG_DRAIN_MAX = 50
