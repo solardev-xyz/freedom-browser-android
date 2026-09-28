@@ -14,8 +14,11 @@
 # FFI_REF pins which freedom-mobile-ffi tag supplies the embedded
 # nodes; bump it together with the vendored headers in
 # swarmnode/src/main/cpp/ (see README § Building libfreedom_mobile_ffi.so).
-# It must be a tag whose Cargo.toml pins its node deps by tag:
-# scripts/check-ffi-ref.sh enforces that here and on every PR (ffi-ref.yml).
+# It must be a tag whose Cargo.toml pins its node deps by tag, and the
+# README's clone lines must use it too: scripts/check-ffi-ref.sh enforces
+# that here (this workflow refuses to build otherwise) and reports it on
+# every PR (ffi-ref.yml — a status check only, since main has no branch
+# protection).
 # UNRELEASED: pinned to the alan/compose-tracing-layers commit that adds
 # freedom_mobile_init_logging (#156) until freedom-mobile-ffi tags it, so
 # that check fails (and this workflow refuses to build) until it's retagged.

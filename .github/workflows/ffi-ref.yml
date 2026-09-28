@@ -1,7 +1,13 @@
-# Guard against merging an UNRELEASED FFI_REF: release.yml must pin a
-# freedom-mobile-ffi tag whose own node deps are pinned by tag. A branch
-# commit stops being fetchable once upstream squash-merges and deletes
-# the branch (see scripts/check-ffi-ref.sh).
+# Flags an UNRELEASED FFI_REF: release.yml must pin a freedom-mobile-ffi
+# tag whose own node deps are pinned by tag, and the README's build steps
+# must check out that same ref. A branch commit stops being fetchable once
+# upstream squash-merges and deletes the branch (see
+# scripts/check-ffi-ref.sh).
+#
+# This is a status check, not a merge gate: main has no branch
+# protection, so a red run here does not stop a merge unless `ffi-ref`
+# is made a required check. What actually enforces the pin is the same
+# script as the first step of release.yml, which refuses to build.
 
 name: ffi-ref
 
@@ -15,5 +21,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: check-ffi-ref.sh rules (offline tests)
+        run: scripts/test-check-ffi-ref.sh
       - name: FFI_REF is a tagged freedom-mobile-ffi release
         run: scripts/check-ffi-ref.sh
