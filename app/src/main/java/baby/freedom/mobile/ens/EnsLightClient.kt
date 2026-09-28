@@ -70,12 +70,17 @@ interface EnsLightClient {
          * already running (possibly abandoned ones, see [ethCall]), not a
          * sign the light client can't serve; worth falling back once for,
          * never backing off for.
+         * [unreachable]: the call never got an answer through to this
+         * caller because the host went away or the wait was broken off (a
+         * dead binder, an interrupt) — nothing learnt about the name, though
+         * the host's health is still worth probing.
          */
         data class Unavailable(
             val reason: String,
             val notReady: Boolean = false,
             val timedOut: Boolean = false,
             val busy: Boolean = false,
+            val unreachable: Boolean = false,
         ) : Call()
     }
 

@@ -71,13 +71,13 @@ object MyotisLink : EnsLightClient {
             }
         } catch (e: InterruptedException) {
             Thread.currentThread().interrupt()
-            EnsLightClient.Call.Unavailable("interrupted")
+            EnsLightClient.Call.Unavailable("interrupted", unreachable = true)
         } catch (e: Exception) {
             // DeadObjectException (`:myotis` exited) and friends: the call
             // never reached the engine, or the engine is gone with it.
             runCatching { binder.unlinkToDeath(death, 0) }
             release()
-            EnsLightClient.Call.Unavailable("light client unreachable: ${e.javaClass.simpleName}")
+            EnsLightClient.Call.Unavailable("light client unreachable: ${e.javaClass.simpleName}", unreachable = true)
         }
     }
 

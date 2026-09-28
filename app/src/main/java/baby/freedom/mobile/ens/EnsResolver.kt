@@ -223,31 +223,60 @@ class EnsResolver internal constructor(
      * Names the light client recently couldn't serve (#101), and when:
      * the engine errored, reverted oddly, gave nothing decodable, ran out
      * of time, or the name's CCIP-Read failed on it — anything but a
-     * momentary refusal (`busy`, a closed read gate, readiness moving, the
-     * site's share taken). For [lightClientNameMissMs] (10 min, memory
-     * only) a lookup of such a name goes straight to Colibri/RPC instead
+     * momentary refusal (`busy`, a closed read gate or an unreachable
+     * `:myotis`, readiness moving, the site's share taken). For
+     * [lightClientNameMissMs] (10 min, memory only, on [clock]) a lookup
+     * of such a name goes straight to Colibri/RPC instead
      * of paying the miss time again on every revisit and document
      * re-check — the probe usually finds the engine healthy after such a
      * miss, so nothing else would spare it. Not while there's no RPC
      * server to go to instead.
+     *
+     * A miss that sent a probe ([NameMiss.awaitingProbe]) only stays
+     * remembered if that probe gets a real answer in the same stretch of
+     * readiness: then the miss was the name's. If it fails, times out,
+     * is inconclusive (`busy`) or readiness moves meanwhile, the miss may
+     * have been the engine's, and the generation-scoped back-off (or the
+     * new generation) decides instead — so a restart of Myotis gets the
+     * name asked again straight away rather than 10 min later. While the
+     * probe runs the name counts as missed, so its revisits don't wait
+     * for the probe.
      */
-    private val lightClientNameMisses = ConcurrentHashMap<String, Long>()
+    private class NameMiss(val at: Long, val awaitingProbe: Long?)
+
+    private val lightClientNameMisses = ConcurrentHashMap<String, NameMiss>()
 
     private fun lightClientMissedName(name: String, now: Long): Boolean {
-        val at = lightClientNameMisses[name] ?: return false
+        val miss = lightClientNameMisses[name] ?: return false
         // A miss stamped in the future (the clock since set back) is stale.
-        if (now - at in 0 until lightClientNameMissMs) return true
-        lightClientNameMisses.remove(name, at)
+        if (now - miss.at in 0 until lightClientNameMissMs) return true
+        lightClientNameMisses.remove(name, miss)
         return false
     }
 
-    private fun rememberLightClientMiss(name: String) {
-        val now = System.currentTimeMillis()
-        lightClientNameMisses.entries.removeIf { now - it.value !in 0 until lightClientNameMissMs }
+    /** [awaitingProbe]: the generation whose probe decides whether this miss was the name's. */
+    private fun rememberLightClientMiss(name: String, awaitingProbe: Long?) {
+        val now = clock()
+        lightClientNameMisses.entries.removeIf { now - it.value.at !in 0 until lightClientNameMissMs }
         if (lightClientNameMisses.size >= LIGHT_CLIENT_NAME_MISSES_MAX) {
-            lightClientNameMisses.entries.minByOrNull { it.value }?.let { lightClientNameMisses.remove(it.key, it.value) }
+            lightClientNameMisses.entries.minByOrNull { it.value.at }?.let { lightClientNameMisses.remove(it.key, it.value) }
         }
-        lightClientNameMisses[name] = now
+        lightClientNameMisses[name] = NameMiss(now, awaitingProbe)
+    }
+
+    /**
+     * [generation]'s probe has decided: keep the misses it was judging
+     * as the names' own ([namesOwn]), or forget them.
+     */
+    private fun settleLightClientMisses(generation: Long, namesOwn: Boolean) {
+        for ((name, miss) in lightClientNameMisses) {
+            if (miss.awaitingProbe != generation) continue
+            if (namesOwn) {
+                lightClientNameMisses.replace(name, miss, NameMiss(miss.at, awaitingProbe = null))
+            } else {
+                lightClientNameMisses.remove(name, miss)
+            }
+        }
     }
 
     /**
@@ -509,7 +538,7 @@ class EnsResolver internal constructor(
         }
         if (NameSystem.forName(normalized) == NameSystem.TEZOS) return 0
         if (settings.endpoints.isEmpty()) return lightClientDeadlineMs
-        if (lightClientMissedName(normalized, System.currentTimeMillis())) return 0
+        if (lightClientMissedName(normalized, clock())) return 0
         val probing = lightClientProbe?.takeIf { it.generation == generation && it.healthy.isActive } != null
         if (!probing && lightClientBackingOff(generation, System.currentTimeMillis())) return 0
         return lightClientDeadlineMs + if (probing) LIGHT_CLIENT_PROBE_TIMEOUT_MS else 0
@@ -612,16 +641,19 @@ class EnsResolver internal constructor(
 
         // The light client first (#101) — backing off after a miss, unless
         // it's the only source there is.
+        // A name it recently missed skips it — and, like
+        // [lightClientWaitFor] allowing it nothing, doesn't wait for a
+        // probe either: a re-check of it has only the RPC/Colibri share.
+        val missedName = generation != null && config.endpoints.isNotEmpty() &&
+            lightClientMissedName(normalized, clock())
         // A probe still judging an earlier miss is waited for (it's
         // bounded by [LIGHT_CLIENT_PROBE_TIMEOUT_MS]), so a struggling light
         // client costs this lookup no more than that before it's skipped.
-        if (generation != null && config.endpoints.isNotEmpty()) {
+        if (generation != null && config.endpoints.isNotEmpty() && !missedName) {
             lightClientProbe?.takeIf { it.generation == generation }?.let { probe ->
                 withTimeoutOrNull(LIGHT_CLIENT_PROBE_TIMEOUT_MS) { runCatchingCancellable { probe.healthy.await() } }
             }
         }
-        val missedName = generation != null && config.endpoints.isNotEmpty() &&
-            lightClientMissedName(normalized, System.currentTimeMillis())
         val askLightClient = generation != null && !missedName &&
             (config.endpoints.isEmpty() || !lightClientBackingOff(generation, System.currentTimeMillis()))
 
@@ -856,8 +888,15 @@ class EnsResolver internal constructor(
                 "[$name] light client: $miss after ${took}ms; falling back to RPC" +
                     if (suspect) " (probing it before skipping it)" else "",
             )
+            // Not the name's either when it says nothing about it, or when
+            // readiness moved meanwhile (the app went to the background,
+            // `:myotis` died): the new stretch of readiness asks afresh.
+            val momentary = (failure as? LightClientMiss)?.momentary == true ||
+                client.readyGeneration() != generation
+            // Remembered before the probe starts, so the probe's verdict
+            // always finds it (see [settleLightClientMisses]).
+            if (!momentary) rememberLightClientMiss(name, awaitingProbe = if (suspect) generation else null)
             if (suspect) probeLightClient(client, generation)
-            if ((failure as? LightClientMiss)?.momentary != true) rememberLightClientMiss(name)
             return null
         }
         lightClientMiss = null
@@ -942,7 +981,13 @@ class EnsResolver internal constructor(
                     }
                 }
                 // A new stretch of readiness isn't this probe's to judge.
-                if (client.readyGeneration() != generation) return@async true
+                if (client.readyGeneration() != generation) {
+                    settleLightClientMisses(generation, namesOwn = false)
+                    return@async true
+                }
+                // Only a real answer shows the engine could serve: the
+                // misses it was judging were the names' own.
+                settleLightClientMisses(generation, namesOwn = answer !is EnsLightClient.Call.Unavailable)
                 // Busy with no probe of ours in the engine (the engine's own
                 // admission, or a probe from an earlier stretch of
                 // readiness) says nothing about health.
@@ -1029,7 +1074,7 @@ class EnsResolver internal constructor(
                         answer.timedOut -> budget.engineOwnsTheTime()
                         else -> true
                     },
-                    momentary = answer.notReady || answer.busy,
+                    momentary = answer.notReady || answer.busy || answer.unreachable,
                 )
             }
             // A CCIP-Read callback checks the gateway's answer against the

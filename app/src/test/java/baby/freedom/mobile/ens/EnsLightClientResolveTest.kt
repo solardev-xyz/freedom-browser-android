@@ -100,10 +100,12 @@ class EnsLightClientResolveTest {
         backoffMs: Long = EnsResolver.LIGHT_CLIENT_BACKOFF_MS,
         establishedMs: Long = 0,
         nameMissMs: Long = EnsResolver.LIGHT_CLIENT_NAME_MISS_MS,
+        clock: () -> Long = System::currentTimeMillis,
     ) = EnsResolver(
         { settings() }, http, TezosDomainsResolver(), client, deadlineMs, backoffMs,
         lightClientEstablishedMs = establishedMs,
         lightClientNameMissMs = nameMissMs,
+        clock = clock,
     )
 
     private val lightClientOk = EnsLightClient.Call.Ok(wrapAsOuterInner(ipfsContenthash), block = 21_000_000L)
@@ -406,7 +408,8 @@ class EnsLightClientResolveTest {
             else lightClientOk
         }
         val http = OneServer { rpcResult(wrapAsOuterInner(ipfsContenthash)) }
-        val r = resolver(client, http, nameMissMs = 400)
+        var now = 1_000_000L
+        val r = resolver(client, http, nameMissMs = 400, clock = { now })
         val settings = EnsResolver.Settings(listOf(rpc))
 
         assertEquals(EnsResolver.LIGHT_CLIENT_DEADLINE_MS, r.lightClientWaitFor(settings, "evil.eth"))
@@ -420,14 +423,24 @@ class EnsLightClientResolveTest {
         val again = runBlocking { r.resolveContenthash("evil.eth") } as EnsResult.Ok
         assertFalse(again.trust.lightClient)
         assertEquals(1, client.calls.size)
-        // Other names still get the light client.
+        // Other names still get the light client (this one waits the
+        // probe out: it answers, so the miss was evil.eth's own).
         assertTrue((runBlocking { r.resolveContenthash("other.eth") } as EnsResult.Ok).trust.lightClient)
         assertEquals(2, client.calls.size)
+        assertEquals(1, client.probes.size)
+        now += 399
+        assertEquals(0L, r.lightClientWaitFor(settings, "evil.eth"))
         // Past the window it's asked again.
-        Thread.sleep(450)
+        now += 1
         assertEquals(EnsResolver.LIGHT_CLIENT_DEADLINE_MS, r.lightClientWaitFor(settings, "evil.eth"))
         runBlocking { r.resolveContenthash("evil.eth") }
         assertEquals(3, client.calls.size)
+        // A miss stamped in the future (the clock since set back) is stale.
+        assertEquals(0L, r.lightClientWaitFor(settings, "evil.eth"))
+        runBlocking { r.resolveContenthash("third.eth") } // waits the new probe out
+        assertEquals(0L, r.lightClientWaitFor(settings, "evil.eth"))
+        now -= 1
+        assertEquals(EnsResolver.LIGHT_CLIENT_DEADLINE_MS, r.lightClientWaitFor(settings, "evil.eth"))
     }
 
     @Test
@@ -447,6 +460,118 @@ class EnsLightClientResolveTest {
         answer = lightClientOk
         assertTrue((runBlocking { r.resolveContenthash("busy.eth") } as EnsResult.Ok).trust.lightClient)
         assertEquals(3, client.calls.size)
+    }
+
+    @Test
+    fun `a re-check of a name just missed doesn't wait for the probe`() {
+        // R1-F1: a struggling engine — the probe takes ~2 s. The name's
+        // re-check gets no light-client allowance, so it mustn't wait for
+        // the probe either: the RPC answer comes straight away.
+        val client = FakeLightClient { _, data ->
+            if (data == EnsResolver.PROBE_CALL_DATA) {
+                Thread.sleep(2_000)
+                lightClientOk
+            } else {
+                EnsLightClient.parse("""{"error":"state unavailable"}""")
+            }
+        }
+        val http = OneServer { rpcResult(wrapAsOuterInner(ipfsContenthash)) }
+        val r = resolver(client, http)
+        val settings = EnsResolver.Settings(listOf(rpc))
+
+        runBlocking { r.resolveContenthash("vitalik.eth") }
+        assertEquals(1, client.probes.size)
+        assertEquals(0L, r.lightClientWaitFor(settings, "vitalik.eth"))
+        val started = System.currentTimeMillis()
+        val again = runBlocking { r.resolveContenthash("vitalik.eth") } as EnsResult.Ok
+        val took = System.currentTimeMillis() - started
+        assertFalse(again.trust.lightClient)
+        assertTrue("took ${took}ms", took < 1_000)
+        assertEquals(1, client.calls.size)
+    }
+
+    @Test
+    fun `a miss the probe pins on the engine is not remembered against the name`() {
+        // R1-F2: the engine stalls, the probe fails too — the light client
+        // backs off for this generation only. Restarting Myotis (a new
+        // generation) asks the name again straight away.
+        var answer: EnsLightClient.Call = EnsLightClient.Call.Unavailable("all snap peers failed")
+        val client = FakeLightClient { _, _ -> answer }
+        val http = OneServer { rpcResult(wrapAsOuterInner(ipfsContenthash)) }
+        val r = resolver(client, http)
+        val settings = EnsResolver.Settings(listOf(rpc))
+
+        runBlocking { r.resolveContenthash("vitalik.eth") }
+        runBlocking { r.resolveContenthash("nick.eth") } // waits the probe out
+        assertEquals(1, client.probes.size)
+        assertEquals(0L, r.lightClientWaitFor(settings, "vitalik.eth"))
+        client.generation = 2L
+        answer = lightClientOk
+        assertEquals(EnsResolver.LIGHT_CLIENT_DEADLINE_MS, r.lightClientWaitFor(settings, "vitalik.eth"))
+        assertTrue((runBlocking { r.resolveContenthash("vitalik.eth") } as EnsResult.Ok).trust.lightClient)
+        assertEquals(2, client.calls.size)
+    }
+
+    @Test
+    fun `a miss whose probe sees readiness move is not remembered against the name`() {
+        // The engine errors on the name, and Myotis restarts while the probe runs.
+        lateinit var client: FakeLightClient
+        client = FakeLightClient { _, data ->
+            if (data == EnsResolver.PROBE_CALL_DATA) {
+                client.generation = 2L
+                lightClientOk
+            } else {
+                EnsLightClient.parse("""{"error":"state unavailable"}""")
+            }
+        }
+        val http = OneServer { rpcResult(wrapAsOuterInner(ipfsContenthash)) }
+        val r = resolver(client, http)
+        val settings = EnsResolver.Settings(listOf(rpc))
+
+        runBlocking { r.resolveContenthash("vitalik.eth") }
+        val deadline = System.currentTimeMillis() + 2_000
+        while (r.lightClientWaitFor(settings, "vitalik.eth") == 0L && System.currentTimeMillis() < deadline) Thread.sleep(10)
+        assertEquals(2L, client.generation)
+        assertEquals(EnsResolver.LIGHT_CLIENT_DEADLINE_MS, r.lightClientWaitFor(settings, "vitalik.eth"))
+    }
+
+    @Test
+    fun `an unreachable light client isn't remembered against the name`() {
+        // R1-F3: `:myotis` died mid-call (a dead binder) before the
+        // disconnect reached this side; the name had no part in it.
+        var answer: EnsLightClient.Call =
+            EnsLightClient.Call.Unavailable("light client unreachable: DeadObjectException", unreachable = true)
+        val client = FakeLightClient { _, data -> if (data == EnsResolver.PROBE_CALL_DATA) lightClientOk else answer }
+        val http = OneServer { rpcResult(wrapAsOuterInner(ipfsContenthash)) }
+        val r = resolver(client, http)
+        val settings = EnsResolver.Settings(listOf(rpc))
+
+        runBlocking { r.resolveContenthash("vitalik.eth") }
+        answer = lightClientOk
+        runBlocking { r.resolveContenthash("nick.eth") } // waits the probe out
+        assertEquals(1, client.probes.size) // still worth probing the engine
+        assertEquals(EnsResolver.LIGHT_CLIENT_DEADLINE_MS, r.lightClientWaitFor(settings, "vitalik.eth"))
+        assertTrue((runBlocking { r.resolveContenthash("vitalik.eth") } as EnsResult.Ok).trust.lightClient)
+    }
+
+    @Test
+    fun `running out of time while readiness moved isn't remembered against the name`() {
+        // R1-F3: the app went to the background while an engine call stalled.
+        lateinit var client: FakeLightClient
+        client = FakeLightClient { _, data ->
+            if (data != EnsResolver.PROBE_CALL_DATA) {
+                client.generation = 2L
+                Thread.sleep(1_000)
+            }
+            lightClientOk
+        }
+        val http = OneServer { rpcResult(wrapAsOuterInner(ipfsContenthash)) }
+        val r = resolver(client, http, deadlineMs = 200)
+        val settings = EnsResolver.Settings(listOf(rpc))
+
+        val first = runBlocking { r.resolveContenthash("vitalik.eth") } as EnsResult.Ok
+        assertFalse(first.trust.lightClient)
+        assertEquals(200L, r.lightClientWaitFor(settings, "vitalik.eth"))
     }
 
     @Test
