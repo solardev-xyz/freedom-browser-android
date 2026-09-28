@@ -43,9 +43,14 @@ object ColibriNative {
     /**
      * The only keys the verifier's storage keeps on disk — its consensus
      * state, never what it was asked (colibri_jni.c's `persisted_prefixes`,
-     * which filters the core's writes; keep the two in step). Anything
-     * else in the directory, e.g. an account cache an unfiltered build
-     * wrote, is deleted at [init].
+     * which filters the core's writes; keep the two in step). Everything
+     * else the core would store is dropped, not only the per-contract
+     * `call_*` account caches and `code_*` bytecode: also its
+     * `headers_*` block-header cache and `tx_cache_*`/`tx_pending_*`
+     * transaction caches, and any key a later core adds — the cost is
+     * only refetching that data after a restart. Anything else in the
+     * directory, e.g. a cache an unfiltered build wrote, is deleted at
+     * [init].
      */
     internal val PERSISTED_PREFIXES = listOf("states_", "sync_", "rdelay_")
 
@@ -102,7 +107,8 @@ object ColibriNative {
     /**
      * Delete every file in [statesDir] the verifier mustn't keep
      * ([PERSISTED_PREFIXES]) — per-contract `call_*` caches, which name
-     * every resolved name's storage slots, bytecode, anything unknown.
+     * every resolved name's storage slots, `code_*` bytecode, `headers_*`
+     * and `tx_cache_*`/`tx_pending_*` caches, anything unknown.
      */
     internal fun pruneStates(statesDir: File) {
         statesDir.listFiles()?.forEach { f ->

@@ -69,8 +69,14 @@ internal class EnsColibri(
         data class Reverted(val data: String) : Outcome()
     }
 
-    /** The verifier couldn't answer: a prover or network failure, or a proof that didn't check out. */
-    class Failure(message: String) : Exception(message)
+    /**
+     * The verifier couldn't answer: a prover or network failure, or a
+     * proof that didn't check out. [unreachable] when a request the core
+     * asked for couldn't be served by any of its servers during the call
+     * — the provers or RPCs not reachable, a problem every other call
+     * would hit too — rather than a failure of this one call's own proof.
+     */
+    class Failure(message: String, val unreachable: Boolean = false) : Exception(message)
 
     /**
      * A proven answer and the provers whose proofs it came from — the
@@ -102,6 +108,9 @@ internal class EnsColibri(
         )
         if (ctx == 0L) throw Failure("the verifier refused the call")
         val provers = LinkedHashSet<String>()
+        // Whether a request went unserved: then the core's own error (or
+        // its running out of rounds) is the network's, not this proof's.
+        var unserved = false
         try {
             engine.setMinLatestBlockTs(ctx, (clock() / 1000 - MAX_LATEST_AGE_SECONDS).coerceAtLeast(0))
             repeat(MAX_ROUNDS) {
@@ -114,7 +123,7 @@ internal class EnsColibri(
                         Outcome.Reverted(status.optString("data", "0x").ifEmpty { "0x" }),
                         provers.toList(),
                     )
-                    "error" -> throw Failure(status.optString("error", "verification failed").take(300))
+                    "error" -> throw Failure(status.optString("error", "verification failed").take(300), unreachable = unserved)
                     "pending" -> {
                         val requests = status.optJSONArray("requests") ?: JSONArray()
                         val answers = coroutineScope {
@@ -137,14 +146,17 @@ internal class EnsColibri(
                                     engine.setResponse(req, answer.body, answer.index)
                                     if (request.optString("type") == "prover") hostOf(answer.url)?.let(provers::add)
                                 }
-                                is Served.Failed -> engine.setError(req, answer.error, 0)
+                                is Served.Failed -> {
+                                    unserved = true
+                                    engine.setError(req, answer.error, 0)
+                                }
                             }
                         }
                     }
                     else -> throw Failure("unknown verifier status ${status.optString("status")}")
                 }
             }
-            throw Failure("the verifier didn't finish in $MAX_ROUNDS rounds")
+            throw Failure("the verifier didn't finish in $MAX_ROUNDS rounds", unreachable = unserved)
         } finally {
             engine.free(ctx)
         }

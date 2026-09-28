@@ -3,6 +3,7 @@ package baby.freedom.mobile.ens
 import android.util.Log
 import java.net.URL
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.coroutines.coroutineContext
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -129,10 +130,15 @@ class EnsResolver internal constructor(
     private data class Cached(val result: EnsResult, val expiresAt: Long)
 
     /**
-     * After a Colibri call fails or outlasts a lookup's wait, the
-     * verifier is skipped for [COLIBRI_BACKOFF_MS], doubling with each
-     * further failure up to [COLIBRI_BACKOFF_MAX_MS]; any proof that
-     * comes in (a background call included) resets it.
+     * After a Colibri call can't reach its provers / servers
+     * ([EnsColibri.Failure.unreachable], or an unexpected error) or
+     * outlasts a lookup's wait, the verifier is skipped for
+     * [COLIBRI_BACKOFF_MS], doubling with each further such call up to
+     * [COLIBRI_BACKOFF_MAX_MS]; any proof that comes in (a background
+     * call included) resets it. Each call counts at most once — one that
+     * misses the wait and then times out in the background is one
+     * failure — and one name's proof not checking out doesn't count at
+     * all: it says nothing about the other names.
      */
     internal inner class ColibriBackoff {
         private var failures = 0
@@ -320,11 +326,14 @@ class EnsResolver internal constructor(
      *   running then carries on in the background (up to
      *   [COLIBRI_BACKGROUND_MS]) rather than being cut off: on a first
      *   lookup that is the verifier bootstrapping its sync committee,
-     *   which the next lookup then needn't repeat. Either failure starts
+     *   which the next lookup then needn't repeat. An unreachable
+     *   prover / server or a missed wait (counted once per call) starts
      *   a back-off ([colibriBackoff]) during which lookups skip the
      *   verifier outright, so unreachable provers don't cost every new
      *   name the full wait, nor pile up background calls; a proof that
-     *   does come in ends it;
+     *   does come in ends it. A proof failure specific to this call
+     *   (the verifier rejecting it, a result that isn't return data)
+     *   falls through for this name only;
      * - a revert other than the Universal Resolver's own "no resolver"
      *   errors (a proven `ResolverNotFound` is a proven negative): no
      *   data at all is ambiguous (a degraded prover hop can look like
@@ -352,14 +361,25 @@ class EnsResolver internal constructor(
         val started = System.currentTimeMillis()
         val provers = LinkedHashSet<String>()
         suspend fun prove(to: String, data: ByteArray, waitMs: Long): EnsColibri.Outcome? {
+            // One call is one failure at most, whichever side (a missed
+            // wait here, or the background call's own end) sees it first.
+            val counted = AtomicBoolean(false)
+            fun failed() {
+                if (counted.compareAndSet(false, true)) colibriBackoff.failed()
+            }
             val call = io.async {
                 try {
                     withTimeoutOrNull(COLIBRI_BACKGROUND_MS) { colibri.ethCall(to, data, config.endpoints) }
-                        .also { if (it != null) colibriBackoff.succeeded() else colibriBackoff.failed() }
+                        .also { if (it != null) colibriBackoff.succeeded() else failed() }
                 } catch (e: CancellationException) {
                     throw e
+                } catch (e: EnsColibri.Failure) {
+                    // This call's own proof failing isn't the provers
+                    // being unreachable: other names may still prove.
+                    if (e.unreachable) failed()
+                    throw e
                 } catch (e: Throwable) {
-                    colibriBackoff.failed()
+                    failed()
                     throw e
                 }
             }
@@ -375,7 +395,7 @@ class EnsResolver internal constructor(
             if (proven == null) {
                 // The call runs on in the background and clears this if
                 // it does come in (a first lookup's bootstrap).
-                colibriBackoff.failed()
+                failed()
                 Log.i(TAG, "[$name] colibri: no proof within ${waitMs}ms, asking the RPC servers")
                 return null
             }

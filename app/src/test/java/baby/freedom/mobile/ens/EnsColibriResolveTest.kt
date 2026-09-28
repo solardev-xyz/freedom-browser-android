@@ -37,7 +37,11 @@ class EnsColibriResolveTest {
         val calls: MutableList<Pair<String, String>> = Collections.synchronizedList(mutableListOf())
         private val ctxs = HashMap<Long, Pair<String, String>>()
         private val served = HashSet<Long>()
+        private val unserved = HashSet<Long>()
         private var next = 1L
+
+        /** Contexts freed, i.e. calls that have ended (a background one included). */
+        val freed: MutableList<Long> = Collections.synchronizedList(mutableListOf())
 
         @Synchronized
         override fun create(method: String, params: String, chainId: Long, proverFlags: Int, verifyFlags: Int, proverMode: Int): Long {
@@ -52,6 +56,8 @@ class EnsColibriResolveTest {
         override fun execute(ctx: Long): String {
             Thread.sleep(delayMs)
             synchronized(this) {
+                // The core's answer to a request its servers couldn't serve.
+                if (ctx in unserved) return JSONObject().put("status", "error").put("error", "prover unreachable").toString()
                 if (ctx !in served) {
                     val req = JSONObject().put("req_ptr", (ctx * 100).toString()).put("type", "prover")
                         .put("method", "post").put("encoding", "ssz").put("url", "")
@@ -67,11 +73,23 @@ class EnsColibriResolveTest {
             served += req / 100
         }
 
-        override fun setError(req: Long, error: String, nodeIndex: Int) = Unit
-        override fun free(ctx: Long) = Unit
+        @Synchronized
+        override fun setError(req: Long, error: String, nodeIndex: Int) {
+            unserved += req / 100
+        }
+
+        override fun free(ctx: Long) {
+            freed += ctx
+        }
     }
 
-    private val proverHttp = EnsColibri.Http { _, _, _, _, _ -> EnsColibri.Http.Reply(200, ByteArray(8)) }
+    /** Whether the provers answer at all (a 503 from every one of them when not). */
+    @Volatile
+    private var proversUp = true
+
+    private val proverHttp = EnsColibri.Http { _, _, _, _, _ ->
+        if (proversUp) EnsColibri.Http.Reply(200, ByteArray(8)) else EnsColibri.Http.Reply(503, ByteArray(0))
+    }
 
     private fun returned(hex: String) = JSONObject().put("status", "success").put("result", hex)
     private fun reverted(hex: String) = JSONObject().put("status", "revert").put("data", hex)
@@ -216,10 +234,8 @@ class EnsColibriResolveTest {
     @Test
     fun `after a failure the verifier is skipped for a while, then asked again, and a proof resets it`() {
         var now = 1_000_000L
-        var fail = true
-        val prover = Prover({ _, _ ->
-            if (fail) JSONObject().put("status", "error").put("error", "prover down") else returned(wrapAsOuterInner("e40101fa011b20$provenRef"))
-        })
+        proversUp = false
+        val prover = Prover({ _, _ -> returned(wrapAsOuterInner("e40101fa011b20$provenRef")) })
         val r = resolver(prover, rpcAnswers(), clock = { now })
 
         assertFalse((resolve(r, "a.eth") as EnsResult.Ok).trust.proven)
@@ -235,10 +251,42 @@ class EnsColibriResolveTest {
         resolve(r, "d.eth")
         assertEquals(2, prover.calls.size)
         now += EnsResolver.COLIBRI_BACKOFF_MS
-        fail = false
+        proversUp = true
         assertTrue((resolve(r, "e.eth") as EnsResult.Ok).trust.proven)
         assertTrue((resolve(r, "f.eth") as EnsResult.Ok).trust.proven)
         assertEquals(4, prover.calls.size)
+    }
+
+    @Test
+    fun `one name's proof failing doesn't make the others skip the verifier`() {
+        val prover = Prover({ _, _ ->
+            JSONObject().put("status", "error").put("error", "proof doesn't check out")
+        })
+        val r = resolver(prover, rpcAnswers())
+
+        assertFalse((resolve(r, "a.eth") as EnsResult.Ok).trust.proven)
+        assertNull(r.colibriBackoff.remainingMs())
+        // The next name still asks the verifier.
+        resolve(r, "b.eth")
+        assertEquals(2, prover.calls.size)
+    }
+
+    @Test
+    fun `a missed wait whose background call then fails is one failure, not two`() {
+        var now = 1_000_000L
+        proversUp = false
+        val prover = Prover({ _, _ -> returned(wrapAsOuterInner("e40101fa011b20$provenRef")) }, delayMs = 400)
+        val r = resolver(prover, rpcAnswers(), waitMs = 100, clock = { now })
+
+        assertFalse((resolve(r, "a.eth") as EnsResult.Ok).trust.proven)
+        // Let the background call run to its own (unreachable) failure.
+        val deadline = System.currentTimeMillis() + 5_000
+        while (prover.freed.isEmpty() && System.currentTimeMillis() < deadline) Thread.sleep(20)
+        assertEquals(1, prover.freed.size)
+        // Counted once: the first, un-doubled back-off, and no longer.
+        assertEquals(EnsResolver.COLIBRI_BACKOFF_MS, r.colibriBackoff.remainingMs())
+        now += EnsResolver.COLIBRI_BACKOFF_MS
+        assertNull(r.colibriBackoff.remainingMs())
     }
 
     @Test

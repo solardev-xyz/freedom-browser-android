@@ -72,9 +72,12 @@ static jbyteArray take_bytes(JNIEnv *env, char *owned) {
  * a per-contract account cache (`call_<chain>_<address>`: every storage
  * slot a proven eth_call read, i.e. each resolved name's registry slot and
  * its contenthash) and contract bytecode (`code_<hash>`) — a browsing
- * trail no "clear site data" or private tab would reach. Those, and any
- * key a later core adds, stay unstored: the core then simply fetches and
- * proves the data again. Keep in step with ColibriNative.PERSISTED_PREFIXES.
+ * trail no "clear site data" or private tab would reach — as well as its
+ * block-header cache (`headers_<chain>`: the blocks proofs were anchored
+ * at, i.e. when lookups happened) and transaction caches (`tx_cache_*`,
+ * `tx_pending_*`). All of those, and any key a later core adds, stay
+ * unstored: the only cost is that after a restart the core fetches and
+ * proves that data again. Keep in step with ColibriNative.PERSISTED_PREFIXES.
  */
 static const char *const persisted_prefixes[] = {
     "states_", /* the sync-committee checkpoint per chain */
