@@ -61,17 +61,12 @@ class FileChooserTest {
     // threw SecurityException and every `capture` input fell back to the
     // picker (post-merge sweep, #181).
     @Test fun `a declared but ungranted camera permission is asked for before capture`() {
-        assertEquals(CameraGate.ASK, cameraGateFor(declared = true, granted = false, canAsk = true))
+        assertEquals(CameraGate.ASK, cameraGateFor(declared = true, granted = false))
     }
 
     @Test fun `the camera starts at once when the permission is held or not declared`() {
-        assertEquals(CameraGate.LAUNCH, cameraGateFor(declared = true, granted = true, canAsk = true))
-        assertEquals(CameraGate.LAUNCH, cameraGateFor(declared = false, granted = false, canAsk = true))
-        assertEquals(CameraGate.LAUNCH, cameraGateFor(declared = false, granted = false, canAsk = false))
-    }
-
-    @Test fun `with no way to ask, a capture uses the picker instead of a launch that must fail`() {
-        assertEquals(CameraGate.PICKER, cameraGateFor(declared = true, granted = false, canAsk = false))
+        assertEquals(CameraGate.LAUNCH, cameraGateFor(declared = true, granted = true))
+        assertEquals(CameraGate.LAUNCH, cameraGateFor(declared = false, granted = false))
     }
 
     @Test fun `an unmappable extension widens the picker but never opens the camera by itself`() {

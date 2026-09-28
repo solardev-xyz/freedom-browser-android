@@ -125,7 +125,6 @@ internal class FileChooser(
                 declared = declaresCamera,
                 granted = ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) ==
                     PackageManager.PERMISSION_GRANTED,
-                canAsk = true,
             )
             when (gate) {
                 CameraGate.LAUNCH -> if (tryCapture(launcher, callback, capture)) return true
@@ -135,7 +134,6 @@ internal class FileChooser(
                     permissions.requestUploadCamera(tabId) { onCameraPermission(ask, it) }
                     return true
                 }
-                CameraGate.PICKER -> Unit
             }
         }
         return launchPicker(launcher, callback, accept.pickerTypes, multiple)
@@ -417,9 +415,6 @@ internal enum class CameraGate {
 
     /** Ask for `CAMERA` first; the camera on a grant, else the picker. */
     ASK,
-
-    /** Use the document picker: the camera can't be started. */
-    PICKER,
 }
 
 /**
@@ -427,15 +422,14 @@ internal enum class CameraGate {
  * an app that [declared] `CAMERA` in its manifest but hasn't been
  * [granted] it (`SecurityException`, "revoked permission"). An app that
  * doesn't declare it can start the camera app freely. So with the
- * permission declared and not held, a capture asks for it when it
- * [canAsk], and otherwise falls back to the picker rather than
- * attempting a launch that can only fail.
+ * permission declared and not held, a capture asks for it first rather
+ * than attempting a launch that can only fail. There is no "can't ask"
+ * case here: when no screen is composed to ask with, the ask itself
+ * ends [AndroidPermissionAsk.REFUSED] ([askAndroidPermissionOnScreen])
+ * and the input gets the picker like any other refusal.
  */
-internal fun cameraGateFor(declared: Boolean, granted: Boolean, canAsk: Boolean): CameraGate = when {
-    !declared || granted -> CameraGate.LAUNCH
-    canAsk -> CameraGate.ASK
-    else -> CameraGate.PICKER
-}
+internal fun cameraGateFor(declared: Boolean, granted: Boolean): CameraGate =
+    if (!declared || granted) CameraGate.LAUNCH else CameraGate.ASK
 
 /**
  * The upload for a finished camera capture into [file] (served to the
