@@ -23,6 +23,7 @@ import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import org.json.JSONObject
 
 /**
  * Persistent toggles the user controls from the node details panel and
@@ -91,6 +92,7 @@ class NodeSettings private constructor(
     // (or should open) the chain list or the Keystore.
     chains: () -> ChainStore,
     keys: () -> RpcKeyStore,
+    private val clock: () -> Long = System::currentTimeMillis,
 ) {
     /**
      * Whether the embedded Swarm node should be running. Defaults to
@@ -225,6 +227,11 @@ class NodeSettings private constructor(
     @Volatile
     private var ensMigrated = false
 
+    /** After a failed [migrateEnsRpc], when it may try again, and how long it waits after the next failure. */
+    @Volatile
+    private var ensMigrateRetryAt = 0L
+    private var ensMigrateBackOffMs = MIGRATE_RETRY_MS
+
     /** Your own Ethereum mainnet RPCs ([ChainStore], #108) — "Your endpoints" here. */
     private fun mainnetUserRpcs(): Flow<List<String>> = chainStore.chains
         .map { chains -> chains.firstOrNull { it.id == MAINNET }?.userRpcUrls.orEmpty() }
@@ -240,11 +247,18 @@ class NodeSettings private constructor(
         emitAll(combine(store.data, mainnetUserRpcs(), keyStore.apiKeys, ::readEnsRpc))
     }
 
+    /**
+     * [apiKeys] are the encrypted store's; a key an earlier build left in
+     * plain text here ([RpcKeyStore.LEGACY_KEY]) is used too until
+     * [migrateEnsRpc] manages to move it — the encrypted copy wins — so
+     * a Keystore that keeps failing doesn't silently cost the user keys
+     * they saved.
+     */
     private fun readEnsRpc(prefs: Preferences, mine: List<String>, apiKeys: Map<String, String>) =
         EnsRpcConfig(
             customEndpoints = mine,
             disabledPublicEndpoints = prefs[Keys.ENS_RPC_DISABLED_PUBLIC].orEmpty(),
-            apiKeys = apiKeys,
+            apiKeys = EnsRpcConfig.decodeKeys(prefs[RpcKeyStore.LEGACY_KEY]) + apiKeys,
             ccipRead = prefs[Keys.ENS_CCIP_READ] ?: true,
         )
 
@@ -266,13 +280,15 @@ class NodeSettings private constructor(
      *   one past its cap) is dropped, counted in the log but never
      *   named there (a URL can carry a key).
      *
-     * A write that fails leaves the old value in place, and the next
-     * read tries again.
+     * A write that fails leaves the old value in place (still used, see
+     * [readEnsRpc]), and a read after [MIGRATE_RETRY_MS] — doubling on
+     * each further failure, up to [MIGRATE_RETRY_MAX_MS] — tries again,
+     * rather than every lookup repeating a failing Keystore write.
      */
     private suspend fun migrateEnsRpc() {
-        if (ensMigrated) return
+        if (ensMigrated || clock() < ensMigrateRetryAt) return
         ensLock.withLock {
-            if (ensMigrated) return
+            if (ensMigrated || clock() < ensMigrateRetryAt) return
             var done = true
             try {
                 val prefs = store.data.first()
@@ -302,6 +318,10 @@ class NodeSettings private constructor(
                 done = false
             }
             ensMigrated = done
+            if (!done) {
+                ensMigrateRetryAt = clock() + ensMigrateBackOffMs
+                ensMigrateBackOffMs = (ensMigrateBackOffMs * 2).coerceAtMost(MIGRATE_RETRY_MAX_MS)
+            }
         }
     }
 
@@ -343,13 +363,16 @@ class NodeSettings private constructor(
     }
 
     /** Why [addEnsRpcEndpoint] didn't add. */
-    enum class AddEndpointResult { ADDED, INVALID, DUPLICATE, PUBLIC, FULL, FAILED }
+    enum class AddEndpointResult { ADDED, INVALID, DUPLICATE, FULL, FAILED }
 
     /**
      * Add [url] to your own mainnet RPCs (after the ones already there),
      * unless it isn't a valid endpoint, is already listed
-     * ([EnsRpcConfig.endpointKey]) or is one of Ethereum's public RPCs,
-     * or the list is full.
+     * ([EnsRpcConfig.endpointKey]) or the list is full. One of the
+     * Ethereum chain page's public RPCs is taken: name resolution never
+     * asks those ([EnsRpcConfig.PUBLIC_ENDPOINTS] is its own list), so
+     * adding it here is the only way to have it resolve names, and it
+     * becomes yours on the chain page too, asked first.
      */
     suspend fun addEnsRpcEndpoint(url: String): AddEndpointResult {
         val normalized = EnsRpcConfig.normalizeEndpoint(url) ?: return AddEndpointResult.INVALID
@@ -363,13 +386,13 @@ class NodeSettings private constructor(
                 return@withLock AddEndpointResult.FAILED
             }
             if (current.hasCustomEndpoint(normalized)) return@withLock AddEndpointResult.DUPLICATE
-            when (chainStore.addUserRpc(MAINNET, normalized)) {
+            when (chainStore.addUserRpc(MAINNET, normalized, allowPublic = true)) {
                 ChainStore.RpcAddResult.ADDED -> AddEndpointResult.ADDED
                 ChainStore.RpcAddResult.INVALID -> AddEndpointResult.INVALID
                 ChainStore.RpcAddResult.DUPLICATE -> AddEndpointResult.DUPLICATE
-                ChainStore.RpcAddResult.PUBLIC -> AddEndpointResult.PUBLIC
                 ChainStore.RpcAddResult.FULL -> AddEndpointResult.FULL
-                ChainStore.RpcAddResult.NO_CHAIN, ChainStore.RpcAddResult.FAILED -> AddEndpointResult.FAILED
+                ChainStore.RpcAddResult.PUBLIC, ChainStore.RpcAddResult.NO_CHAIN,
+                ChainStore.RpcAddResult.FAILED -> AddEndpointResult.FAILED
             }
         }
     }
@@ -408,8 +431,19 @@ class NodeSettings private constructor(
         val trimmed = key.trim()
         fun Map<String, String>.with() = if (trimmed.isEmpty()) this - providerId else this + (providerId to trimmed)
         return editEnsRpc({ it.copy(apiKeys = it.apiKeys.with()) }) {
-            keyStore.edit { it.with() }
+            // A plain-text copy not yet moved ([migrateEnsRpc]) would
+            // otherwise keep answering for this provider.
+            keyStore.edit { it.with() } && dropLegacyKey(providerId)
         }
+    }
+
+    private suspend fun dropLegacyKey(providerId: String): Boolean {
+        store.edit { prefs ->
+            val legacy = prefs[RpcKeyStore.LEGACY_KEY] ?: return@edit
+            val left = EnsRpcConfig.decodeKeys(legacy) - providerId
+            if (left.isEmpty()) prefs.remove(RpcKeyStore.LEGACY_KEY) else prefs[RpcKeyStore.LEGACY_KEY] = JSONObject(left).toString()
+        }
+        return true
     }
 
     suspend fun setEnsCcipRead(enabled: Boolean): EnsEdit =
@@ -548,13 +582,16 @@ class NodeSettings private constructor(
 
         private const val TAG = "NodeSettings"
         private const val MAINNET = 1L
+        private const val MIGRATE_RETRY_MS = 30_000L
+        private const val MIGRATE_RETRY_MAX_MS = 30 * 60_000L
 
         /** Over arbitrary stores, for unit tests. */
         internal fun forTesting(
             store: DataStore<Preferences>,
             chains: ChainStore,
             keys: RpcKeyStore,
-        ): NodeSettings = NodeSettings(store, { chains }, { keys })
+            clock: () -> Long = System::currentTimeMillis,
+        ): NodeSettings = NodeSettings(store, { chains }, { keys }, clock)
 
         fun get(context: Context): NodeSettings =
             instance ?: synchronized(this) {

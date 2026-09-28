@@ -347,8 +347,6 @@ internal fun RpcProvidersSection(
                             null
                         }
                         NodeSettings.AddEndpointResult.DUPLICATE -> "Not added: already in your endpoints"
-                        NodeSettings.AddEndpointResult.PUBLIC ->
-                            "Not added: already one of Ethereum's public RPCs (Settings → Chains)"
                         NodeSettings.AddEndpointResult.FULL ->
                             "Not added: at most ${EnsRpcConfig.MAX_CUSTOM_ENDPOINTS} endpoints"
                         NodeSettings.AddEndpointResult.INVALID -> "Not added: not a valid endpoint URL"

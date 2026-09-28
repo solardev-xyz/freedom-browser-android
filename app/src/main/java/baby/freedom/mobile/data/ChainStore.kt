@@ -96,8 +96,13 @@ class ChainStore internal constructor(
      * Add [raw] to chain [id]'s own RPCs ([Chain.userRpcUrls]), after
      * [RpcUrls.normalize] — checked against the stored list inside the
      * same write, so two quick adds can't overflow it or add one twice.
+     *
+     * One of the chain's public RPCs is refused ([RpcAddResult.PUBLIC])
+     * unless [allowPublic]: the chain page already asks those, but name
+     * resolution doesn't (it has its own public list), so adding one
+     * from there makes it yours — asked first, here too.
      */
-    suspend fun addUserRpc(id: Long, raw: String): RpcAddResult {
+    suspend fun addUserRpc(id: Long, raw: String, allowPublic: Boolean = false): RpcAddResult {
         val url = RpcUrls.normalize(raw) ?: return RpcAddResult.INVALID
         var result = RpcAddResult.ADDED
         return try {
@@ -108,7 +113,7 @@ class ChainStore internal constructor(
                 result = when {
                     chain == null -> RpcAddResult.NO_CHAIN
                     url in current -> RpcAddResult.DUPLICATE
-                    url in chain.rpcUrls -> RpcAddResult.PUBLIC
+                    !allowPublic && url in chain.rpcUrls -> RpcAddResult.PUBLIC
                     current.size >= Chain.MAX_USER_RPC_URLS -> RpcAddResult.FULL
                     else -> {
                         prefs[rpcsKeyOf(id)] = JSONArray(current + url).toString()
@@ -165,8 +170,10 @@ class ChainStore internal constructor(
     /**
      * Append [urls] to built-in chain [id]'s own RPCs in one write — for
      * moving a list kept elsewhere in, not for user input: each is
-     * [RpcUrls.normalize]d, and one that's invalid, a public RPC of the
-     * chain, already there or past [Chain.MAX_USER_RPC_URLS] is skipped.
+     * [RpcUrls.normalize]d, and one that's invalid, already there or past
+     * [Chain.MAX_USER_RPC_URLS] is skipped. One of the chain's public
+     * RPCs is taken, as [addUserRpc] with `allowPublic` does: the list
+     * being moved in chose it on purpose.
      * Returns the URLs it skipped, or `null` when the write failed.
      */
     internal suspend fun importUserRpcs(id: Long, urls: List<String>): List<String>? {
@@ -178,8 +185,7 @@ class ChainStore internal constructor(
                 val list = decodeRpcs(prefs[rpcsKeyOf(id)]).toMutableList()
                 for (raw in urls) {
                     val url = RpcUrls.normalize(raw)
-                    if (url == null || url in list || url in chain.rpcUrls ||
-                        list.size >= Chain.MAX_USER_RPC_URLS
+                    if (url == null || url in list || list.size >= Chain.MAX_USER_RPC_URLS
                     ) {
                         skipped += raw
                     } else {
@@ -252,13 +258,14 @@ class ChainStore internal constructor(
         }.sortedWith(compareBy({ it.second }, { it.first.id })).map { it.first }
 
     /**
-     * [chain]'s own RPCs as stored, each re-validated, capped, and minus
-     * any that's also a public one — a hand-edited or stale entry is
-     * dropped rather than routed to.
+     * [chain]'s own RPCs as stored, each re-validated and capped — a
+     * hand-edited or stale entry is dropped rather than routed to. One
+     * that's also a public RPC stays: it was added as yours on purpose
+     * ([addUserRpc]'s `allowPublic`), which puts it first.
      */
     private fun userRpcs(prefs: Preferences, chain: Chain): List<String> =
         decodeRpcs(prefs[rpcsKeyOf(chain.id)])
-            .filter { RpcUrls.normalize(it) == it && it !in chain.rpcUrls }
+            .filter { RpcUrls.normalize(it) == it }
             .distinct()
             .take(Chain.MAX_USER_RPC_URLS)
 
