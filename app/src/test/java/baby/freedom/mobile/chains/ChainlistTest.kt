@@ -6,6 +6,7 @@ import java.io.File
 import java.io.IOException
 import java.nio.file.Files
 import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -354,7 +355,11 @@ class ChainlistTest {
         assertEquals(6, again.entries().size)
         assertEquals(1, net.calls)
 
+        // Stale: the old list comes back at once and a refresh runs behind it.
         now += 2000
+        assertEquals(6, service.entries().size)
+        service.refreshing!!.join()
+        assertEquals(2, net.calls)
         service.entries()
         assertEquals(2, net.calls)
     }
@@ -371,10 +376,13 @@ class ChainlistTest {
         // The clock was a month ahead when that was cached, and is now corrected.
         now -= 30 * Chainlist.CACHE_TTL_MS
         service.entries()
+        service.refreshing!!.join()
         assertEquals(2, net.calls)
         // Nor does a new process trust the future-dated file on disk.
         file.setLastModified(now + 30 * Chainlist.CACHE_TTL_MS)
-        ChainlistService(file, net::fetch) { now }.entries()
+        val fresh = ChainlistService(file, net::fetch) { now }
+        fresh.entries()
+        fresh.refreshing!!.join()
         assertEquals(3, net.calls)
     }
 
@@ -389,13 +397,75 @@ class ChainlistTest {
         net.body = { throw IOException("offline") }
         val offline = ChainlistService(file, net::fetch) { now }
         assertEquals(6, offline.entries().size)
+        offline.refreshing!!.join()
         assertEquals(2, net.calls)
+        assertEquals(6, offline.entries().size)
 
         // An error page doesn't replace a good cache either.
         net.body = { "<html>oops</html>" }
         val errorPage = ChainlistService(file, net::fetch) { now }
         assertEquals(6, errorPage.entries().size)
+        errorPage.refreshing!!.join()
+        assertEquals(6, errorPage.entries().size)
         assertTrue(file.readText().startsWith("["))
+    }
+
+    /**
+     * R5-F1: a stale cache is shown at once even when the refresh hangs
+     * (a blackholed route can take minutes), later visits don't queue
+     * another download behind it, and its result is picked up once it lands.
+     */
+    @Test
+    fun staleCacheIsShownWithoutWaitingForTheRefresh() = runBlocking {
+        var now = 1_700_000_000_000L
+        val file = File(dir, "rpcs.json")
+        ChainlistService(file, { catalog }) { now }.entries()
+        file.writeText(catalog.replace("\"Ethereum Mainnet\"", "\"Old Name\""))
+        file.setLastModified(now)
+
+        now += 2 * Chainlist.CACHE_TTL_MS
+        val network = CompletableDeferred<String>()
+        var calls = 0
+        val service = ChainlistService(file, { calls++; network.await() }) { now }
+        val stale = withTimeout(1_000) { service.entries() }
+        assertTrue(stale.any { it.name == "Old Name" })
+        assertEquals(stale, withTimeout(1_000) { service.entries() })
+        withTimeout(1_000) { while (calls == 0) delay(10) }
+        assertEquals(1, calls)
+
+        network.complete(catalog)
+        service.refreshing!!.join()
+        val fresh = service.entries()
+        assertFalse(fresh.any { it.name == "Old Name" })
+        assertEquals(1, calls)
+    }
+
+    /** A failed background refresh isn't retried on every visit. */
+    @Test
+    fun aFailedRefreshBacksOff() = runBlocking {
+        var now = 1_700_000_000_000L
+        val file = File(dir, "rpcs.json")
+        val net = Net { catalog }
+        ChainlistService(file, net::fetch) { now }.entries()
+
+        now += 2 * Chainlist.CACHE_TTL_MS
+        net.body = { throw IOException("offline") }
+        val service = ChainlistService(file, net::fetch) { now }
+        service.entries()
+        service.refreshing!!.join()
+        assertEquals(2, net.calls)
+
+        now += ChainlistService.RETRY_AFTER_MS - 1000
+        assertEquals(6, service.entries().size)
+        assertEquals(2, net.calls)
+
+        now += 2000
+        net.body = { catalog }
+        service.entries()
+        service.refreshing!!.join()
+        assertEquals(3, net.calls)
+        service.entries()
+        assertEquals(3, net.calls)
     }
 
     @Test

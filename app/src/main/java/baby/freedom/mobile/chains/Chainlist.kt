@@ -8,7 +8,11 @@ import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
 import kotlin.concurrent.thread
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -350,48 +354,86 @@ object Chainlist {
 
 /**
  * Loads [Chainlist] with a 24-hour disk cache ([Chainlist.CACHE_TTL_MS]),
- * like desktop: a fresh cache is used as is; a stale or missing one is
- * refreshed from the network; a failed refresh falls back to the stale
- * cache, whatever its age — a day-old chain list beats none — and only
- * fails when there's no cache at all. Concurrent callers share one
- * download.
+ * like desktop: a fresh cache is used as is. A stale one is returned
+ * straight away too — a day-old chain list beats a spinner — while a
+ * refresh runs in the background ([refreshInBackground]); the next
+ * Add chain gets its result. Only with no cache at all does the caller
+ * wait for the network, and only then does a failure reach it.
+ * Concurrent callers share one download.
  */
 class ChainlistService internal constructor(
     private val cacheFile: File,
     private val fetch: suspend () -> String,
+    private val background: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
     private val clock: () -> Long = System::currentTimeMillis,
 ) {
     private val mutex = Mutex()
     private var memo: Pair<Long, List<Chainlist.Entry>>? = null
 
+    /** The background refresh in flight, if any. Guarded by [mutex]. */
+    @Volatile
+    internal var refreshing: Job? = null
+        private set
+
+    /** When the last background refresh failed; none is retried before [RETRY_AFTER_MS]. */
+    private var failedAt: Long? = null
+
     /** The catalog; throws [IOException] only when there's neither network nor cache. */
     suspend fun entries(): List<Chainlist.Entry> = mutex.withLock {
         val now = clock()
-        memo?.let { (at, list) -> if (isFresh(at, now)) return@withLock list }
+        memo?.let { (at, list) ->
+            if (!isFresh(at, now)) refreshInBackground(now)
+            return@withLock list
+        }
 
         val cached = withContext(Dispatchers.IO) { readCache() }
-        if (cached != null && isFresh(cached.first, now)) {
-            memo = cached
-            return@withLock cached.second
-        }
-        val error: Exception = try {
-            val body = fetch()
-            val parsed = withContext(Dispatchers.Default) { Chainlist.parse(body) }
-            if (parsed != null && parsed.isNotEmpty()) {
-                withContext(Dispatchers.IO) { writeCache(body) }
-                memo = now to parsed
-                return@withLock parsed
-            }
-            IOException("chainlist response is not a chain list")
-        } catch (e: IOException) {
-            e
-        }
-        Log.w(TAG, "chainlist refresh failed: ${error.message}")
         if (cached != null) {
             memo = cached
+            if (!isFresh(cached.first, now)) refreshInBackground(now)
             return@withLock cached.second
         }
-        throw error
+        // Nothing to show: this caller waits (and can cancel, leaving no
+        // download behind).
+        val body = fetch()
+        parseOrThrow(body).also { store(body, it) }
+    }
+
+    /**
+     * Start refreshing a stale catalog without making anyone wait for it:
+     * the network's worst case (a blackholed route per chainlist.org
+     * address × [CONNECT_TIMEOUT_MS], or a slow link trickling the whole
+     * multi-MB body) is spent here, not on the Add chain spinner. One at a
+     * time, and not again within [RETRY_AFTER_MS] of a failure, so an
+     * offline device doesn't start a doomed download on every visit.
+     * Called under [mutex].
+     */
+    private fun refreshInBackground(now: Long) {
+        if (refreshing?.isActive == true) return
+        failedAt?.let { if (now - it in 0 until RETRY_AFTER_MS) return }
+        refreshing = background.launch {
+            try {
+                val body = fetch()
+                val parsed = parseOrThrow(body)
+                mutex.withLock {
+                    store(body, parsed)
+                    failedAt = null
+                }
+            } catch (e: IOException) {
+                Log.w(TAG, "chainlist refresh failed, keeping the stale copy: ${e.message}")
+                mutex.withLock { failedAt = clock() }
+            }
+        }
+    }
+
+    private suspend fun parseOrThrow(body: String): List<Chainlist.Entry> =
+        withContext(Dispatchers.Default) { Chainlist.parse(body) }
+            ?.takeIf { it.isNotEmpty() }
+            ?: throw IOException("chainlist response is not a chain list")
+
+    /** Called under [mutex]. */
+    private suspend fun store(body: String, parsed: List<Chainlist.Entry>) {
+        withContext(Dispatchers.IO) { writeCache(body) }
+        memo = clock() to parsed
     }
 
     /**
@@ -435,6 +477,7 @@ class ChainlistService internal constructor(
         private const val MAX_BYTES = 32L * 1024 * 1024
         private const val CONNECT_TIMEOUT_MS = 15_000
         private const val READ_TIMEOUT_MS = 30_000
+        internal const val RETRY_AFTER_MS = 5 * 60 * 1000L
 
         @Volatile
         private var instance: ChainlistService? = null
@@ -454,9 +497,10 @@ class ChainlistService internal constructor(
          * cancelled — releasing [entries]'s mutex straight away — while
          * the connection is disconnected from yet another thread (a
          * blocked read may not notice a disconnect issued from its own
-         * thread until it times out). So leaving the search page neither
-         * leaves a multi-MB download running nor makes the next Add chain
-         * wait for it.
+         * thread until it times out). So leaving the search page during a
+         * first, cache-less load neither leaves a multi-MB download running
+         * nor makes the next Add chain wait for it. (A background refresh of
+         * a stale cache isn't tied to the page, and runs to completion.)
          */
         internal suspend fun download(url: String = Chainlist.URL): String {
             val conn = (URL(url).openConnection() as HttpURLConnection).apply {
