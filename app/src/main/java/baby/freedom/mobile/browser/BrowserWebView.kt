@@ -3213,10 +3213,16 @@ private fun buildRefreshableWebView(
                 // proxy refused it. Reloading lands on the interceptor's
                 // "Tor isn't running" page in place, which can't fail
                 // again — nor loop, as the reload only happens while no
-                // Tor port is routed.
+                // Tor port is routed. A form POST's reload would only
+                // ask to resend (answered "don't"), so that one is
+                // loaded again as a GET (R2-F2).
                 if (isOnionHost(req.url?.host) && TorRouting.port == 0 && view != null) {
                     Log.i(LOG_TAG, "main-frame ${error?.errorCode} for $failed with Tor down → refusal page")
-                    view.post { view.reload() }
+                    if (onionRefusalByReload(req.method)) {
+                        view.post { view.reload() }
+                    } else {
+                        view.post { view.loadUrl(failed) }
+                    }
                     return
                 }
                 if (!isDwebPageUrl(failed)) return

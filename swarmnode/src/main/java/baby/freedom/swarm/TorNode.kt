@@ -133,7 +133,13 @@ class TorNode internal constructor(
         p.cancel()
         poller = null
         // Published before the native stop: the port is about to close,
-        // and nothing may be routed to it from here on.
+        // and nothing may be routed to it from here on. This only stops
+        // pollers in this process; the UI moves the WebView's `.onion`
+        // override off the port *before* it unbinds the service that
+        // gets here (MainActivity.unbindTor waits for that, R2-F1), so
+        // the port isn't freed while onion requests may still go to it.
+        // A `:tor` that's killed outright frees it at once — that gap
+        // can't be closed from either side.
         synchronized(this) {
             publishing = false
             _state.value = TorInfo(version = _state.value.version)

@@ -93,6 +93,15 @@ object TorRouting {
     private var generation = 0L
 
     /**
+     * Whether the WebView has confirmed the override naming [REFUSE_PORT],
+     * and none has been asked for since. Main thread.
+     */
+    private var refusing = false
+
+    /** [afterRefusing]'s actions waiting for that confirmation. Main thread. */
+    private val whenRefusing = mutableListOf<() -> Unit>()
+
+    /**
      * Put the refusing override in place, before any page loads. Main
      * thread; idempotent.
      */
@@ -128,6 +137,22 @@ object TorRouting {
         info = TorInfo()
         routedPort = 0
         targetPort = -1
+        refusing = false
+        whenRefusing.clear()
+    }
+
+    /**
+     * Run [action] once `*.onion` no longer points at a Tor port in the
+     * WebView either — the override naming [REFUSE_PORT] confirmed — or at
+     * once if it already is, or if there's no override to move. For
+     * letting the Tor client go (R2-F1): its port must not be freed while
+     * the WebView may still send onion hostnames to it, or another app
+     * binding that loopback port in the gap would receive them. An
+     * override that never confirms never runs it; the caller bounds the
+     * wait. Main thread.
+     */
+    fun afterRefusing(action: () -> Unit) {
+        if (supported != true || refusing) action() else whenRefusing += action
     }
 
     private val TOR_HOST: InetAddress = InetAddress.getByAddress(byteArrayOf(127, 0, 0, 1))
@@ -144,10 +169,12 @@ object TorRouting {
         val target = if (desired == 0) REFUSE_PORT else desired
         if (target == targetPort) return
         val gen = ++generation
+        refusing = false
         val config = proxyConfigFor(target)
         runCatching {
-            // Recorded only once the WebView took the override: after a
-            // failure the next apply() with the same target retries.
+            // Recorded before the call, so a confirmation arriving inside
+            // it is matched; reset below if the call throws, so the next
+            // apply() with the same target retries.
             targetPort = target
             setOverride(config, context) {
                 if (gen == generation && desired != 0) {
@@ -155,6 +182,10 @@ object TorRouting {
                     Log.i(TAG, ".onion → socks5://127.0.0.1:$desired")
                 } else if (gen == generation) {
                     Log.i(TAG, ".onion refused (socks5://127.0.0.1:$REFUSE_PORT)")
+                    refusing = true
+                    val waiting = whenRefusing.toList()
+                    whenRefusing.clear()
+                    waiting.forEach { it() }
                 }
             }
         }.onFailure {
@@ -367,6 +398,17 @@ object TorRouting {
  * `onion` (any case, trailing dot allowed) with a label before it — the
  * same test the Tor side applies (freedom-mobile-ffi `is_onion_host`).
  */
+/**
+ * Whether an onion page that failed with Tor down can be sent to the
+ * refusal page by `reload()`. Not one reached by a form POST (or any
+ * method but GET/HEAD): its reload asks `onFormResubmission`, answered
+ * "don't resend", and nothing loads (R2-F2). That one is loaded again as
+ * a GET instead — the same address, which the interceptor answers with
+ * the refusal page, and no form side effect repeated.
+ */
+internal fun onionRefusalByReload(method: String?): Boolean =
+    method == null || method.equals("GET", ignoreCase = true) || method.equals("HEAD", ignoreCase = true)
+
 internal fun isOnionHost(host: String?): Boolean {
     val h = host?.lowercase()?.removeSuffix(".") ?: return false
     if (!h.endsWith(".onion")) return false

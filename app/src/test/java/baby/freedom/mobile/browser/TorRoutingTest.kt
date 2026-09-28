@@ -265,6 +265,73 @@ class TorRoutingTest {
     }
 
     @Test
+    fun `letting Tor go waits for the WebView to refuse onion`() {
+        val context = android.content.ContextWrapper(null)
+        val real = TorRouting.setOverride
+        val pending = mutableListOf<Pair<String, Runnable>>()
+        TorRouting.setOverride = { config, _, done -> pending += config.proxyRules.single().url to done }
+        fun confirm() = pending.removeAt(0).second.run()
+        try {
+            TorRouting.resetForTest(supported = true)
+            TorRouting.setEnabled(context, true)
+            confirm() // refusing, from init
+            val running = TorInfo(status = TorStatus.Running, socksPort = 40123)
+            TorRouting.onState(context, running)
+            confirm()
+            assertEquals(40123, TorRouting.port)
+
+            // Tor switched off: routing stops at once, but the unbind
+            // waits until the WebView confirms the override moved.
+            TorRouting.onState(context, TorInfo())
+            assertEquals(0, TorRouting.port)
+            var released = 0
+            TorRouting.afterRefusing { released++ }
+            assertEquals(0, released)
+            assertEquals("socks5://127.0.0.1:${TorRouting.REFUSE_PORT}", pending.single().first)
+            confirm()
+            assertEquals(1, released)
+            // Already refusing: runs at once.
+            TorRouting.afterRefusing { released++ }
+            assertEquals(2, released)
+
+            // Back on before the refusal confirms: the stale confirmation
+            // doesn't release anything.
+            TorRouting.onState(context, running)
+            confirm()
+            TorRouting.onState(context, TorInfo())
+            TorRouting.afterRefusing { released++ }
+            TorRouting.onState(context, running)
+            confirm() // the superseded refusal
+            assertEquals(2, released)
+            confirm() // back on the Tor port
+            assertEquals(40123, TorRouting.port)
+            assertEquals(2, released)
+        } finally {
+            TorRouting.setOverride = real
+            TorRouting.resetForTest(supported = null)
+        }
+    }
+
+    @Test
+    fun `nothing to wait for without an override`() {
+        TorRouting.resetForTest(supported = false)
+        var released = false
+        TorRouting.afterRefusing { released = true }
+        assertTrue(released)
+        TorRouting.resetForTest(supported = null)
+    }
+
+    @Test
+    fun `a POST result is sent to the refusal page as a GET, not a reload`() {
+        assertTrue(onionRefusalByReload("GET"))
+        assertTrue(onionRefusalByReload("head"))
+        assertTrue(onionRefusalByReload(null))
+        assertFalse(onionRefusalByReload("POST"))
+        assertFalse(onionRefusalByReload("post"))
+        assertFalse(onionRefusalByReload("PUT"))
+    }
+
+    @Test
     fun `a typed onion address opens over http`() {
         val ddg = SearchEngines.DEFAULT.template
         assertEquals("http://$onion", UrlParser.toUrl(onion, ddg))

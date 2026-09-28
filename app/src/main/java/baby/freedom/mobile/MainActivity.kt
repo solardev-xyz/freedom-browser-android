@@ -5,7 +5,9 @@ import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
 import android.os.Bundle
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.fillMaxSize
@@ -174,6 +176,15 @@ class MainActivity : ComponentActivity() {
     private var torBound = false
     private var torRunning by mutableStateOf(false)
 
+    /**
+     * A binding [unbindTor] let go of but hasn't unbound yet: it waits
+     * for the WebView to move `.onion` off the Tor port first (R2-F1).
+     * Identifies that one unbind, so a rebind in the meantime (which
+     * keeps the binding) or the deadline can't act twice.
+     */
+    private var torUnbindPending: Any? = null
+    private val mainHandler = Handler(Looper.getMainLooper())
+
     private val torCallback = object : ITorCallback.Stub() {
         override fun onTorStateChanged(info: TorInfo?) {
             info ?: return
@@ -195,7 +206,7 @@ class MainActivity : ComponentActivity() {
             // gone, so stop routing to it at once; the binding brings a
             // fresh process back up, which reports its new port.
             torBinder = null
-            publishTor(TorInfo(status = TorStatus.Starting))
+            if (torBound) publishTor(TorInfo(status = TorStatus.Starting))
         }
     }
 
@@ -589,9 +600,23 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    /**
+     * Bound through the application context, so the deferred unbind in
+     * [unbindTor] still works when it outlives this Activity.
+     */
     private fun bindTor() {
         if (torBound) return
-        torBound = bindService(
+        if (torUnbindPending != null) {
+            // Switched back on before the last unbind went through: the
+            // service is still bound and running, keep it.
+            torUnbindPending = null
+            torBound = true
+            torRunning = true
+            publishTor(TorInfo(status = TorStatus.Starting))
+            torBinder?.let { b -> runCatching { b.registerCallback(torCallback) } }
+            return
+        }
+        torBound = applicationContext.bindService(
             Intent(this, TorService::class.java),
             torConnection,
             Context.BIND_AUTO_CREATE,
@@ -600,7 +625,7 @@ class MainActivity : ComponentActivity() {
             torRunning = true
             publishTor(TorInfo(status = TorStatus.Starting))
         } else {
-            runCatching { unbindService(torConnection) }
+            runCatching { applicationContext.unbindService(torConnection) }
             publishTor(TorInfo(status = TorStatus.Error, errorMessage = "Couldn't start the Tor service"))
         }
     }
@@ -608,7 +633,11 @@ class MainActivity : ComponentActivity() {
     /**
      * Unbinding the only client destroys [TorService], which stops the
      * client and exits `:tor`. Routing stops first: the port is about to
-     * close.
+     * close. And the unbind waits for the WebView to confirm the override
+     * that refuses `.onion` ([TorRouting.afterRefusing]), so the Tor port
+     * isn't freed — for another app to bind — while the WebView may still
+     * send onion requests to it (R2-F1); bounded by
+     * [TOR_UNBIND_TIMEOUT_MS], since the user asked for Tor to stop.
      */
     private fun unbindTor() {
         torRunning = false
@@ -619,8 +648,17 @@ class MainActivity : ComponentActivity() {
         torBound = false
         publishTor(TorInfo(version = torInfoFlow.value.version))
         runCatching { torBinder?.unregisterCallback(torCallback) }
-        runCatching { unbindService(torConnection) }
-        torBinder = null
+        val token = Any()
+        torUnbindPending = token
+        val finish = {
+            if (torUnbindPending === token) {
+                torUnbindPending = null
+                runCatching { applicationContext.unbindService(torConnection) }
+                torBinder = null
+            }
+        }
+        TorRouting.afterRefusing(finish)
+        mainHandler.postDelayed(finish, TOR_UNBIND_TIMEOUT_MS)
     }
 
     /** Unbinding the only client destroys [MyotisService], which stops the engines and exits `:myotis`. */
@@ -687,3 +725,9 @@ class MainActivity : ComponentActivity() {
         bound = false
     }
 }
+
+/**
+ * How long [MainActivity]'s Tor unbind waits for the WebView to confirm
+ * `.onion` is refused before letting `:tor` stop regardless.
+ */
+private const val TOR_UNBIND_TIMEOUT_MS = 2_000L
