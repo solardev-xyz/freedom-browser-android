@@ -1202,7 +1202,7 @@ fun BrowserWebViewHost(
                 tabs.parkForRelaunch { tab -> webViews[tab.id]?.let(::saveWebViewState) }
                 for (tab in tabs.tabs) {
                     sitePermissions.onDocumentStarted(tab)
-                    RadicleProviders.onDocumentStarted(tab)
+                    RadicleProviders.onDocumentStarted(tab, url = null)
                 }
             } else {
                 // As when the last private tab closes (#86): the private
@@ -2485,7 +2485,7 @@ private fun buildRefreshableWebView(
                 // document left standing: its requests are denied and
                 // a late answer can't land on this one (#81).
                 sitePermissions.onDocumentStarted(state)
-                RadicleProviders.onDocumentStarted(state)
+                RadicleProviders.onDocumentStarted(state, url)
                 // …and with the progress latch open again: whatever the
                 // last Stop aborted, this document is a load of its own
                 // and its percentages are worth drawing (#41).

@@ -315,10 +315,39 @@ class RadicleProviderTest {
 
     @Test
     fun `a late message from the outgoing document is not the new page's`() {
-        assertEquals(3, radicleDocumentFor(3, site, "$site/next"))
-        assertEquals(STALE_DOCUMENT, radicleDocumentFor(3, site, "https://other.example/"))
+        assertEquals(3, radicleDocumentFor(3, site, providerOriginKey("$site/next")))
+        assertEquals(STALE_DOCUMENT, radicleDocumentFor(3, site, providerOriginKey("https://other.example/")))
         assertEquals(STALE_DOCUMENT, radicleDocumentFor(3, site, null))
-        assertEquals(3, radicleDocumentFor(3, "http://localhost:8700", "http://localhost:8700/a"))
+        assertEquals(3, radicleDocumentFor(3, "http://localhost:8700", providerOriginKey("http://localhost:8700/a")))
+    }
+
+    @Test
+    fun `the page on screen is still current while a load it didn't start is pending`() {
+        // #201 R2-F2: the tab committed [site]; the user typed another
+        // address, which `WebView.getUrl()` already reports, but it hasn't
+        // committed. The page on screen still asks as the current document.
+        val committed = providerOriginKey("$site/app")
+        assertEquals(4, radicleDocumentFor(4, site, committed))
+        // Once the other address commits, the old page is stale.
+        assertEquals(STALE_DOCUMENT, radicleDocumentFor(5, site, providerOriginKey("https://other.example/")))
+    }
+
+    @Test
+    fun `with Radicle off, later documents lose the channel and get no provider`() {
+        val cx = RhinoContext.enter()
+        try {
+            cx.languageVersion = RhinoContext.VERSION_ES6
+            val scope = cx.initStandardObjects()
+            cx.evaluateString(scope, "var window = { abcdefghij: { postMessage: function () {} } };", "setup", 1, null)
+            cx.evaluateString(scope, radicleChannelClosingJs("abcdefghij"), "closing.js", 1, null)
+            assertEquals(
+                "undefined undefined",
+                cx.evaluateString(scope, "typeof window.abcdefghij + ' ' + typeof window.radicle", "check", 1, null),
+            )
+        } finally {
+            RhinoContext.exit()
+        }
+        assertTrue(runCatching { radicleChannelClosingJs("a'b") }.isFailure)
     }
 
     @Test

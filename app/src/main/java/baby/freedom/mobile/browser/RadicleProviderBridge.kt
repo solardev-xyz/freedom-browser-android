@@ -68,6 +68,9 @@ object RadicleProviders {
 
     /** Main thread only, like everything below. */
     private val documents = HashMap<Long, Int>()
+
+    /** Each tab's committed document's origin key, as of its [onDocumentStarted]. */
+    private val committedOrigins = HashMap<Long, String?>()
     private val promptLocks = HashMap<Long, Mutex>()
     private val pending = HashMap<Long, MutableSet<RadiclePromptRequest>>()
     private val blockedTabs = HashSet<Long>()
@@ -77,7 +80,11 @@ object RadicleProviders {
         var origin: String? = null
         var reply: JavaScriptReplyProxy? = null
 
-        /** The channel and script while attached ([setEnabled]). */
+        /**
+         * The channel, once attached, and the script on it: the provider
+         * while Radicle is on, [radicleChannelClosingJs] once it's been
+         * turned off ([setEnabled]).
+         */
         var channel: String? = null
         var script: ScriptHandler? = null
     }
@@ -143,29 +150,55 @@ object RadicleProviders {
     /**
      * Radicle was turned on or off: add or take away the provider on every
      * tab. It applies from each tab's next document; the one on screen
-     * keeps what it had (and answers 4900 once Radicle is off).
+     * keeps its `window.radicle`, which answers 4900 once Radicle is off
+     * (#201 R2-F1). For that the channel stays registered while off — a
+     * removed listener drops what the page sends, and its requests would
+     * hang until the script's own timeout — and the provider script is
+     * swapped for one that only takes the channel object off `window`
+     * before the page's own scripts run, so later documents still see no
+     * `window.radicle` and no channel.
      */
     fun setEnabled(on: Boolean) {
         if (on == enabled) return
         enabled = on
         for ((webView, bridge) in bridges.entries.toList()) {
-            if (on) attach(webView, bridge) else detach(webView, bridge)
+            if (on) attach(webView, bridge) else closeChannel(webView, bridge)
         }
     }
 
     private fun attach(webView: WebView, bridge: Bridge) {
-        if (bridge.channel != null) return
         val tab = bridge.tab
-        val channel = newBottomUiChannelName()
         try {
-            WebViewCompat.addWebMessageListener(webView, channel, setOf("*")) { view, message, sourceOrigin, isMainFrame, reply ->
-                onMessage(view, bridge, message, sourceOrigin.toString(), isMainFrame, reply)
+            val channel = bridge.channel ?: newBottomUiChannelName().also { channel ->
+                WebViewCompat.addWebMessageListener(webView, channel, setOf("*")) { _, message, sourceOrigin, isMainFrame, reply ->
+                    onMessage(bridge, message, sourceOrigin.toString(), isMainFrame, reply)
+                }
+                bridge.channel = channel
             }
-            bridge.channel = channel
+            bridge.script?.remove()
+            bridge.script = null
             bridge.script = WebViewCompat.addDocumentStartJavaScript(webView, radicleProviderJs(channel), setOf("*"))
         } catch (e: RuntimeException) {
             // A destroyed WebView: nothing to attach to.
             Log.w(TAG, "couldn't attach the provider to tab ${tab.id}", e)
+            detach(webView, bridge)
+        }
+    }
+
+    /**
+     * Radicle was turned off: the next documents get only the script that
+     * hides the channel; what spoke before hears no more events.
+     */
+    private fun closeChannel(webView: WebView, bridge: Bridge) {
+        val channel = bridge.channel ?: return
+        bridge.origin = null
+        bridge.reply = null
+        try {
+            bridge.script?.remove()
+            bridge.script = null
+            bridge.script = WebViewCompat.addDocumentStartJavaScript(webView, radicleChannelClosingJs(channel), setOf("*"))
+        } catch (e: RuntimeException) {
+            Log.w(TAG, "couldn't close the provider on tab ${bridge.tab.id}", e)
             detach(webView, bridge)
         }
     }
@@ -180,7 +213,6 @@ object RadicleProviders {
     }
 
     private fun onMessage(
-        view: WebView,
         bridge: Bridge,
         message: WebMessageCompat,
         sourceOrigin: String,
@@ -196,10 +228,27 @@ object RadicleProviders {
             answer(reply, request.id, RadicleProvider.Reply.Err(RadicleProvider.UNAUTHORIZED, why))
             return
         }
+        // A page from before Radicle was turned off (#201 R2-F1).
+        if (!enabled) {
+            answer(
+                reply,
+                request.id,
+                RadicleProvider.Reply.Err(RadicleProvider.UNAVAILABLE, "Radicle is turned off", RadicleClient.REASON_DISABLED),
+            )
+            return
+        }
         // Which of the tab's documents this is: not simply the current
         // one — a message from the outgoing document can arrive after the
-        // tab started the next (#201 R1-F5).
-        val doc = radicleDocumentFor(current = documents[tab.id] ?: 0, origin = origin, pageUrl = view.url)
+        // tab started the next (#201 R1-F5). Judged against the document
+        // the tab committed, not `view.url`: that is already the pending
+        // address while a load the browser started is still on its way,
+        // and the page still on screen would be taken for a stale one
+        // (#201 R2-F2).
+        val doc = radicleDocumentFor(
+            current = documents[tab.id] ?: 0,
+            origin = origin,
+            committedOrigin = committedOrigins[tab.id],
+        )
         if (doc != STALE_DOCUMENT) {
             bridge.origin = origin
             bridge.reply = reply
@@ -216,7 +265,7 @@ object RadicleProviders {
             }
             answer(reply, request.id, result)
         }
-}
+    }
 
     private fun answer(reply: JavaScriptReplyProxy, id: Long, result: RadicleProvider.Reply) {
         val body = JSONObject().put("id", id)
@@ -261,9 +310,13 @@ object RadicleProviders {
         }
     }
 
-    /** The tab started a new document: what the old one asked is refused. */
-    fun onDocumentStarted(tab: BrowserState) {
+    /**
+     * The tab started (committed) a new document on [url] — null when it's
+     * being torn down: what the old one asked is refused.
+     */
+    fun onDocumentStarted(tab: BrowserState, url: String?) {
         documents[tab.id] = (documents[tab.id] ?: 0) + 1
+        committedOrigins[tab.id] = providerOriginKey(url)
         withdraw(tab.id)
     }
 
@@ -271,6 +324,7 @@ object RadicleProviders {
     fun onTabClosed(tabId: Long) {
         withdraw(tabId)
         documents.remove(tabId)
+        committedOrigins.remove(tabId)
         promptLocks.remove(tabId)
         pending.remove(tabId)
         blockedTabs.remove(tabId)
@@ -294,15 +348,17 @@ internal const val STALE_DOCUMENT = -1
 /**
  * Which of a tab's documents (its [RadicleProviders] document number) a
  * message on [origin] came from: the [current] one — unless [origin]
- * isn't that of the page the tab shows now ([pageUrl]). Then it's the
- * outgoing document, still talking after the tab started the next one,
- * and it gets [STALE_DOCUMENT], so its prompt never shows over (and
- * names another site than) the new page. A late message from an outgoing
- * document on the *same* origin still counts as the current one; its
- * prompt names the site that is on screen.
+ * isn't that of the document the tab last committed ([committedOrigin],
+ * its [providerOriginKey]). Then it's the outgoing document, still
+ * talking after the tab started the next one, and it gets
+ * [STALE_DOCUMENT], so its prompt never shows over (and names another
+ * site than) the new page. A late message from an outgoing document on
+ * the *same* origin still counts as the current one; its prompt names
+ * the site that is on screen. A load that hasn't committed yet changes
+ * nothing: the page on screen is still the current document.
  */
-internal fun radicleDocumentFor(current: Int, origin: String, pageUrl: String?): Int =
-    if (providerOriginKey(pageUrl) == origin) current else STALE_DOCUMENT
+internal fun radicleDocumentFor(current: Int, origin: String, committedOrigin: String?): Int =
+    if (committedOrigin == origin) current else STALE_DOCUMENT
 
 /** One `window.radicle` request off the channel. */
 internal data class RadicleRequest(val id: Long, val method: String, val params: JSONObject)
@@ -346,6 +402,17 @@ internal fun providerOriginKey(raw: String?): String? {
         else hostPort.substringBefore(':')
     }.trimEnd('.')
     return key.takeIf { isLoopbackHost(host) }
+}
+
+/**
+ * What documents get on a channel whose provider was turned off
+ * ([RadicleProviders.setEnabled]): the channel object taken off `window`
+ * before the page's own scripts run, as [radicleProviderJs] does, and
+ * nothing else — no `window.radicle`.
+ */
+internal fun radicleChannelClosingJs(channel: String): String {
+    require(Regex("[a-z]{8,64}").matches(channel)) { "channel must be lower-case letters" }
+    return "(function () { try { delete window['$channel']; } catch (e) {} })();"
 }
 
 /**
