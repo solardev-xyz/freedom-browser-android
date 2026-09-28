@@ -212,6 +212,31 @@ class AdblockUpdatesTest {
     }
 
     @Test
+    fun `a damaged list on disk is fetched again from the version already applied`() {
+        publish(5, list("ads", "easylist", "||ads.example^"), list("privacy", "easyprivacy", "||t.example^"))
+        update("ads", "privacy")
+        File(tmp.root, "adblock/updated/easylist.txt").writeText("@@*\$document")
+        assertEquals(setOf("privacy"), store.intactCategories())
+        // The feed is still on version 5: the damaged copy is fetched
+        // again, the intact one reused, rather than "up to date".
+        downloaded.clear()
+        assertEquals(AdblockUpdateOutcome.Applied(5), update("ads", "privacy"))
+        assertEquals(listOf(ref("||ads.example^")), downloaded)
+        assertEquals("||ads.example^", text("ads"))
+        assertEquals("||t.example^", text("privacy"))
+        assertEquals(setOf("ads", "privacy"), store.intactCategories())
+        // …and once it's whole again, version 5 is up to date.
+        downloaded.clear()
+        assertEquals(AdblockUpdateOutcome.UpToDate(5), update("ads", "privacy"))
+        assertEquals(emptyList<String>(), downloaded)
+        // An older version still isn't accepted to repair one.
+        File(tmp.root, "adblock/updated/easylist.txt").writeText("@@*\$document")
+        publish(4, list("ads", "easylist", "||old.example^"))
+        assertEquals(AdblockUpdateOutcome.UpToDate(5), update("ads", "privacy"))
+        assertNull(text("ads"))
+    }
+
+    @Test
     fun `nothing is checked while every category is off`() {
         publish(5, list("ads", "easylist", "||ads.example^"))
         assertEquals(AdblockUpdateOutcome.NothingEnabled, update())
@@ -351,6 +376,29 @@ class AdblockUpdatesTest {
             "Using the built-in lists (EasyList newer than update 2's; update 2 doesn't include Fanboy's Cookie List)",
             adblockListsLine(
                 applied.copy(builtInLists = listOf("EasyList", "Fanboy's Cookie List"), newerBuiltInLists = listOf("EasyList")),
+            ),
+        )
+        // A copy that failed its hash check is named as such, not as
+        // one the update doesn't carry.
+        assertEquals(
+            "Using the built-in lists (update 2's copies failed their hash check)",
+            adblockListsLine(applied.copy(builtInLists = listOf("EasyList"), damagedLists = listOf("EasyList"))),
+        )
+        assertEquals(
+            "Using the built-in lists (EasyList newer than update 2's; update 2's EasyPrivacy failed its hash check; " +
+                "update 2 doesn't include Fanboy's Cookie List)",
+            adblockListsLine(
+                applied.copy(
+                    builtInLists = listOf("EasyList", "EasyPrivacy", "Fanboy's Cookie List"),
+                    newerBuiltInLists = listOf("EasyList"),
+                    damagedLists = listOf("EasyPrivacy"),
+                ),
+            ),
+        )
+        assertEquals(
+            "Using update 2 of 2026-09-28 for EasyPrivacy; the built-in EasyList (update 2's EasyList failed its hash check)",
+            adblockListsLine(
+                applied.copy(updatedLists = listOf("EasyPrivacy"), builtInLists = listOf("EasyList"), damagedLists = listOf("EasyList")),
             ),
         )
         assertEquals("Updated to version 2", adblockUpdateLine(AdblockUpdateState(last = AdblockUpdateOutcome.Applied(2))))

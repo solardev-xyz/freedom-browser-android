@@ -805,31 +805,49 @@ private const val ADBLOCK_CHECK_UPDATES_SUBTITLE = "Reads the update feed on Swa
  * The wrapping line under "Keep filter lists up to date": which lists
  * the engine uses now (#127) — the applied update's version and the day
  * it was built, and, where the bundled lists serve some categories
- * instead (the update doesn't carry them, or theirs is newer), which —
- * saying "newer" only of the lists that are.
+ * instead (the update doesn't carry them, its copy failed its hash
+ * check, or theirs is newer), which — giving each list its own reason.
  * (The subtitle is one ellipsised line, too short to be sure of showing
  * the version on a phone.)
  */
 internal fun adblockListsLine(status: AdblockStatus): String {
     val version = status.listsVersion ?: return "Using the built-in lists"
     if (status.updatedLists.isEmpty()) {
-        // Only claim "newer" for lists that actually beat the update's
-        // copy; the rest are ones it doesn't carry (or whose copy failed
-        // its hash check), e.g. a category switched on since it applied.
+        // Give each built-in list its real reason: newer than the
+        // update's copy, the update's copy failed its hash check (it's
+        // fetched again on the next check), or the update doesn't carry
+        // it (e.g. a category switched on since it applied).
+        val all = status.builtInLists
         val newer = status.newerBuiltInLists
-        val uncovered = status.builtInLists - newer.toSet()
-        return when {
-            uncovered.isEmpty() -> "Using the built-in lists (newer than update $version)"
-            newer.isEmpty() -> "Using the built-in lists (update $version doesn't include them)"
-            else -> "Using the built-in lists (${newer.joinToString(", ")} newer than update $version's; " +
-                "update $version doesn't include ${uncovered.joinToString(", ")})"
-        }
+        val damaged = status.damagedLists - newer.toSet()
+        val uncovered = all - newer.toSet() - damaged.toSet()
+        val reasons = listOfNotNull(
+            when {
+                newer.isEmpty() -> null
+                newer.size == all.size -> "newer than update $version"
+                else -> "${newer.joinToString(", ")} newer than update $version's"
+            },
+            when {
+                damaged.isEmpty() -> null
+                damaged.size == all.size -> "update $version's copies failed their hash check"
+                else -> "update $version's ${damaged.joinToString(", ")} failed its hash check"
+            },
+            when {
+                uncovered.isEmpty() -> null
+                uncovered.size == all.size -> "update $version doesn't include them"
+                else -> "update $version doesn't include ${uncovered.joinToString(", ")}"
+            },
+        )
+        if (reasons.isEmpty()) return "Using the built-in lists"
+        return "Using the built-in lists (${reasons.joinToString("; ")})"
     }
     val day = status.listsGeneratedAt?.take(10)?.takeIf { it.matches(Regex("\\d{4}-\\d{2}-\\d{2}")) }
     val update = "Using update $version" + (day?.let { " of $it" } ?: "")
     if (status.builtInLists.isEmpty()) return update
+    val damaged = status.damagedLists.filter { it in status.builtInLists }
     return "$update for ${status.updatedLists.joinToString(", ")}; " +
-        "the built-in ${status.builtInLists.joinToString(", ")}"
+        "the built-in ${status.builtInLists.joinToString(", ")}" +
+        (if (damaged.isEmpty()) "" else " (update $version's ${damaged.joinToString(", ")} failed its hash check)")
 }
 
 /** The Settings name of the category [key] ("ads" → "EasyList"). */

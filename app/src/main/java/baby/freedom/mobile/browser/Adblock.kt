@@ -270,7 +270,8 @@ internal class AllowlistStore(
  * those the bundled assets serve, because the update doesn't carry
  * them (or its copy no longer matches its hash) or its copy is older —
  * [newerBuiltInLists] is the subset of [builtInLists] for that last
- * reason only.
+ * reason only, [damagedLists] the subset whose update copy failed its
+ * hash check.
  */
 internal data class AdblockStatus(
     val loading: Boolean,
@@ -280,6 +281,7 @@ internal data class AdblockStatus(
     val updatedLists: List<String> = emptyList(),
     val builtInLists: List<String> = emptyList(),
     val newerBuiltInLists: List<String> = emptyList(),
+    val damagedLists: List<String> = emptyList(),
 )
 
 /** Where the engine's lists came from; see [AdblockStatus]. */
@@ -288,6 +290,7 @@ private data class AdblockListSources(
     val updated: List<String>,
     val builtIn: List<String>,
     val newerBuiltIn: List<String>,
+    val damaged: List<String>,
 )
 
 /** What Settings shows about list updates (#127): a check under way, and how the last one ended. */
@@ -417,6 +420,7 @@ internal object Adblock {
                         updatedLists = sources?.updated.orEmpty(),
                         builtInLists = sources?.builtIn.orEmpty(),
                         newerBuiltInLists = sources?.newerBuiltIn.orEmpty(),
+                        damagedLists = sources?.damaged.orEmpty(),
                     )
                     _revision.value++
                 }
@@ -456,6 +460,7 @@ internal object Adblock {
         val fromUpdate = ArrayList<String>()
         val fromBundle = ArrayList<String>()
         val bundleNewer = ArrayList<String>()
+        val damaged = ArrayList<String>()
         val texts = AdblockCategory.entries.filter { it in categories }.mapNotNull { category ->
             checkpoint()
             // A missing or unreadable list costs its own category only.
@@ -471,6 +476,9 @@ internal object Adblock {
                 }
                 Log.i(TAG, "bundled ${category.file} is newer than update ${update.version}'s; using it")
                 bundleNewer += category.listName
+            } ?: run {
+                // The update carries it, but its copy failed the hash check.
+                if (applied?.lists?.containsKey(category.key) == true) damaged += category.listName
             }
             if (bundled != null) fromBundle += category.listName
             bundled
@@ -482,7 +490,7 @@ internal object Adblock {
             "engine ready: ${categories.joinToString { it.key }}, ${built.filterCount} filters " +
                 "(update ${applied?.version}: $fromUpdate, bundled: $fromBundle) in ${SystemClock.elapsedRealtime() - t0} ms",
         )
-        return built to AdblockListSources(applied, fromUpdate, fromBundle, bundleNewer)
+        return built to AdblockListSources(applied, fromUpdate, fromBundle, bundleNewer, damaged)
     }
 
     /**

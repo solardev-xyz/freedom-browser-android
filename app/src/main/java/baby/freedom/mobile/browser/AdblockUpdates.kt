@@ -81,6 +81,20 @@ internal class AdblockListStore(val root: File) {
         bytes.toString(Charsets.UTF_8) to state
     }
 
+    /**
+     * The categories of the applied update whose list is on disk and
+     * still hashes to what `state.json` records — those
+     * [updatedList] can serve. Empty when nothing is applied.
+     */
+    fun intactCategories(): Set<String> = synchronized(lock) {
+        recoverLocked()
+        val state = readState(File(active, STATE)) ?: return emptySet()
+        state.lists.values.filterTo(LinkedHashSet()) { entry ->
+            runCatching { File(active, entry.file).readBytes() }.getOrNull()
+                ?.let { sha256Hex(it) == entry.sha256 } == true
+        }.mapTo(LinkedHashSet()) { it.category }
+    }
+
     /** The applied copy of [entry]'s list, if one is on disk with the same hash. */
     fun reusable(entry: AdblockManifestList): ByteArray? = synchronized(lock) {
         recoverLocked()
@@ -307,8 +321,10 @@ internal sealed interface AdblockUpdateOutcome {
  * A failure at any step leaves the lists in use untouched.
  *
  * A category switched on after the applied version landed isn't in
- * it; the bundled list serves it meanwhile, and the same version is
- * accepted again (never an older one) to fetch it. A category switched
+ * it, and one whose applied copy no longer matches its hash on disk
+ * can't be served from it; the bundled list serves either meanwhile,
+ * and the same version is accepted again (never an older one) to fetch
+ * it. A category switched
  * off keeps its applied copy while the new manifest still names the
  * same bytes, so switching it back on doesn't drop to the bundled list.
  *
@@ -338,7 +354,9 @@ internal suspend fun runAdblockUpdate(
     if (enabled.isEmpty()) return AdblockUpdateOutcome.NothingEnabled
     val applied = store.applied()
     val appliedVersion = applied?.version ?: 0L
-    val appliedCategories = applied?.lists?.keys.orEmpty()
+    // Only the copies that still hash right count as applied: a damaged
+    // one is fetched again, even at the same feed version.
+    val appliedCategories = if (applied == null) emptySet() else store.intactCategories()
     val needsBackfill = applied != null && enabled.any { it !in appliedCategories }
 
     val payload = readFeed() ?: return AdblockUpdateOutcome.FeedUnavailable
