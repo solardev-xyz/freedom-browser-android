@@ -115,6 +115,15 @@ class ChainDetailPageTest {
         assert("One you add is asked before the public RPCs" in userRpcsNote(eth, directOnly)) { userRpcsNote(eth, directOnly) }
         val directMine = userRpcsNote(eth.copy(userRpcUrls = listOf("https://mine.example")), directOnly)
         assert("It's asked before the public RPCs" in directMine) { directMine }
+        // Several of the user's own RPCs are "they", on both no-quorum paths.
+        val directTwo = userRpcsNote(eth.copy(userRpcUrls = listOf("https://m1.example", "https://m2.example")), directOnly)
+        assert("They're asked before the public RPCs" in directTwo && "It's asked" !in directTwo) { directTwo }
+        // Two keyed URLs of the chain's only provider: still one provider, no quorum.
+        val sameProvider = userRpcsNote(
+            lonely.copy(userRpcUrls = listOf("https://a.example/key1", "https://a.example/key2")),
+            ChainAccessPolicy.default(5),
+        )
+        assert("They're asked before the public RPCs" in sameProvider && "It's asked" !in sameProvider) { sameProvider }
     }
 
     @Test

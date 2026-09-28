@@ -234,8 +234,11 @@ internal fun userRpcsNote(chain: Chain, policy: ChainAccessPolicy): String {
     val pool = (chain.userRpcUrls + chain.rpcUrls).distinct()
     val providers = ChainDataRouter.quorumMembers(pool).size
     if (ChainSource.QUORUM !in policy.readOrder || providers < policy.quorumM) {
-        val order = if (chain.userRpcUrls.isEmpty()) "One you add is asked before the public RPCs. "
-        else "It's asked before the public RPCs. "
+        val order = when (chain.userRpcUrls.size) {
+            0 -> "One you add is asked before the public RPCs. "
+            1 -> "It's asked before the public RPCs. "
+            else -> "They're asked before the public RPCs. "
+        }
         return lead + order + tail
     }
     val members = ChainDataRouter.quorumMembers(pool, k)
