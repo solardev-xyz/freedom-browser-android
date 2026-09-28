@@ -15,6 +15,9 @@ import android.os.Build
 import android.os.IBinder
 import android.os.ParcelFileDescriptor
 import android.os.RemoteCallbackList
+import android.system.Os
+import android.system.OsConstants
+import android.system.StructPollfd
 import android.util.Log
 import baby.freedom.mobile.R
 import baby.freedom.mobile.data.NodeSettings
@@ -34,6 +37,8 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlin.system.exitProcess
 import org.json.JSONObject
 
@@ -52,6 +57,21 @@ class NodeService : Service() {
     private lateinit var swarmNode: SwarmNode
     private var ipfsNode: IpfsNode? = null
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+
+    /** `radicleCall`s running at once: the browser's reads and the provider's calls (#124). */
+    private val radicleCalls = Semaphore(MAX_RADICLE_CALLS)
+
+    /** Has the other end of the pipe [write] feeds been closed? (A pipe's write end polls POLLERR then.) */
+    private fun readerGone(write: ParcelFileDescriptor): Boolean = try {
+        val fd = StructPollfd().apply {
+            this.fd = write.fileDescriptor
+            events = 0
+        }
+        Os.poll(arrayOf(fd), 0)
+        fd.revents.toInt() and (OsConstants.POLLERR or OsConstants.POLLHUP) != 0
+    } catch (e: Exception) {
+        false
+    }
     private var swarmObserver: Job? = null
     private var ipfsObserver: Job? = null
 
@@ -146,13 +166,24 @@ class NodeService : Service() {
         override fun radicleCall(method: String?, argsJson: String?): ParcelFileDescriptor {
             val (read, write) = ParcelFileDescriptor.createPipe()
             scope.launch(Dispatchers.IO) {
-                val answer = runCatching {
-                    radicleNode.call(method.orEmpty(), JSONObject(argsJson ?: "{}"))
-                }.getOrElse { JSONObject().put("error", it.message ?: "bad call").toString() }
-                // The reader may have given up (its deadline, a closed
-                // page): the write then fails, which ends this job.
+                // A few at a time (#201 R1-F4); a call whose reader gave
+                // up (its deadline, a closed page) while it queued isn't
+                // run at all.
+                val answer = radicleCalls.withPermit {
+                    if (readerGone(write)) {
+                        null
+                    } else {
+                        runCatching {
+                            radicleNode.call(method.orEmpty(), JSONObject(argsJson ?: "{}"))
+                        }.getOrElse { JSONObject().put("error", it.message ?: "bad call").toString() }
+                    }
+                }
+                // The reader may have given up since: the write then
+                // fails, which ends this job.
                 runCatching {
-                    ParcelFileDescriptor.AutoCloseOutputStream(write).use { it.write(answer.toByteArray()) }
+                    ParcelFileDescriptor.AutoCloseOutputStream(write).use { out ->
+                        if (answer != null) out.write(answer.toByteArray())
+                    }
                 }
             }
             return read
@@ -452,6 +483,8 @@ class NodeService : Service() {
         }
 
     companion object {
+        private const val MAX_RADICLE_CALLS = 4
+
         private const val TAG = "NodeService"
         private const val CHANNEL_ID = "freedom_node"
         private const val NOTIFICATION_ID = 1

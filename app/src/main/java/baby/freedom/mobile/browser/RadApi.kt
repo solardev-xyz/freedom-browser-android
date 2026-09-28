@@ -31,18 +31,24 @@ import org.json.JSONObject
  *    /patches[/ID]       patches (same)
  *    ```
  *
- *    GET / HEAD only (plus an empty `OPTIONS` preflight answer); writes go
+ *    GET / HEAD only; writes go
  *    through the consented `window.radicle` provider, never here. Only the
  *    per-repository surface exists — the node's seeded list, identity and
  *    peers are the user's, not public — and a private repository is
- *    refused (403). CORS-open (`Access-Control-Allow-Origin: *`): the data
- *    is public P2P content anyone can fetch from a seed. Revisions are
+ *    refused (403). Only the repository browser itself reads it (see
+ *    [isFromViewer]): no CORS headers, and a request any other page makes
+ *    is refused with one fixed answer before the node is asked anything,
+ *    so an unconsented site can't learn which repositories this device
+ *    holds (the data is public, but *that the user has it* isn't — the
+ *    provider's `listSeededRepos` is behind a connection grant for the
+ *    same reason) (#201 R1-F1). Revisions are
  *    full 40-hex commit ids only. Path segments are checked so an encoded
  *    `/`, `.` / `..` or a control character can't climb out of the
  *    repository.
  *
  *    WebView has no custom schemes, so a page can't `fetch('rad:…')` the
- *    way it can on desktop; this is the same surface under an https URL.
+ *    way it can on desktop. Unlike desktop's `rad:` URLs this surface is
+ *    not open to other origins.
  *
  *  - `/_/viewer.js`, `/_/viewer.css` — the browser page's own script and
  *    style, from the app's assets.
@@ -88,11 +94,16 @@ object RadApi {
     internal fun intercept(request: WebResourceRequest, url: String): WebResourceResponse? {
         if (!RadUrl.isVirtualUrl(url) && !isUnderHost(url)) return null
         val reply = if (RadUrl.isVirtualUrl(url)) {
-            serve(request.method ?: "GET", url, RadicleClient::call)
+            serve(
+                request.method ?: "GET",
+                url,
+                RadicleClient::call,
+                fromViewer = isFromViewer(request.requestHeaders.orEmpty(), request.isForMainFrame),
+            )
         } else {
             // `http://rad.freedom.baby/`, a port, userinfo: another origin
             // on a host nobody else answers. Nothing is served there.
-            json(404, JSONObject().put("error", "not found"), cors = false)
+            json(404, JSONObject().put("error", "not found"))
         }
         return WebResourceResponse(
             reply.mime.substringBefore(';').trim(),
@@ -110,15 +121,41 @@ object RadApi {
         return m.groupValues[1].trimEnd('.').equals(RadUrl.HOST, ignoreCase = true)
     }
 
-    /** The whole routing, off Android: [url] is on [RadUrl.HOST]. */
-    fun serve(method: String, url: String, backend: Backend): Reply {
-        val path = RadUrl.pathOf(url) ?: return json(404, error("not found"), cors = false)
+    /**
+     * Did the repository browser itself make this request? Its pages send
+     * a same-origin `Referer` ([PAGE_HEADERS]' `Referrer-Policy:
+     * same-origin`), which no other origin's request can carry. Any
+     * `Origin` or `Sec-Fetch-Site` WebView passes along must agree. A
+     * top-level load with no referrer at all (the user typing an API URL)
+     * is let through too: it's a document of its own origin, which no
+     * other page can read. Everything else — another site's `fetch`,
+     * `<img>`, `<script>`, iframe, a `no-referrer` page's `window.open` —
+     * is not the viewer.
+     */
+    internal fun isFromViewer(headers: Map<String, String>, isForMainFrame: Boolean): Boolean {
+        fun header(name: String) = headers.entries.firstOrNull { it.key.equals(name, ignoreCase = true) }?.value
+        val origin = header("Origin")
+        if (origin != null && origin != RadUrl.ORIGIN) return false
+        val site = header("Sec-Fetch-Site")
+        if (site != null && site != "same-origin" && site != "none") return false
+        val referer = header("Referer")
+        if (referer.isNullOrEmpty()) return isForMainFrame && origin == null
+        return referer == RadUrl.ORIGIN || referer.startsWith("${RadUrl.ORIGIN}/")
+    }
+
+    /**
+     * The whole routing, off Android: [url] is on [RadUrl.HOST].
+     * [fromViewer] is [isFromViewer]'s verdict; the API refuses anything else.
+     */
+    fun serve(method: String, url: String, backend: Backend, fromViewer: Boolean): Reply {
+        val path = RadUrl.pathOf(url) ?: return json(404, error("not found"))
         val m = method.uppercase()
         val isApi = path.startsWith(RadUrl.API_PREFIX)
-        if (m == "OPTIONS") {
-            return if (isApi) Reply(204, "text/plain", ByteArray(0), CORS_HEADERS) else reply405(cors = false)
-        }
-        if (m != "GET" && m != "HEAD") return reply405(cors = isApi)
+        // Nothing but the viewer (same-origin, so it never preflights)
+        // reads the API: another page's request gets this one answer,
+        // whatever the repository, before the node is asked (R1-F1).
+        if (isApi && !fromViewer) return json(403, error("not available to other sites"))
+        if (m != "GET" && m != "HEAD") return reply405()
         val head = m == "HEAD"
         val reply = when {
             isApi -> serveApi(path.removePrefix(RadUrl.API_PREFIX), backend)
@@ -131,7 +168,7 @@ object RadApi {
     private fun serveFile(path: String): Reply {
         if (path == RadUrl.INVALID_PATH) return viewer()
         val file = VIEWER_FILES.firstOrNull { it.first == path && it.first != VIEWER_HTML }
-            ?: return json(404, error("not found"), cors = false)
+            ?: return json(404, error("not found"))
         return Reply(200, mimeFor(file.second), assets[path] ?: ByteArray(0), PAGE_HEADERS)
     }
 
@@ -401,22 +438,25 @@ object RadApi {
     private fun unavailable(reason: String): Reply = json(
         if (reason == RadicleClient.REASON_DISABLED) 403 else 503,
         error(RadicleClient.unavailableMessage(reason)).put("reason", reason),
-        cors = true,
     )
 
-    private fun ok(value: Any): Reply = json(200, value, cors = true)
+    private fun ok(value: Any): Reply = json(200, value)
 
-    private fun apiError(status: Int, message: String): Reply = json(status, error(message), cors = true)
+    private fun apiError(status: Int, message: String): Reply = json(status, error(message))
 
     private fun error(message: String) = JSONObject().put("error", message)
 
-    private fun reply405(cors: Boolean) = json(405, error("method not allowed"), cors)
+    private fun reply405() = json(405, error("method not allowed"))
 
-    private fun json(status: Int, value: Any, cors: Boolean): Reply = Reply(
+    /**
+     * No CORS headers: a cross-origin reader can't see the status or the
+     * body, and no page may frame or sniff it either.
+     */
+    private fun json(status: Int, value: Any): Reply = Reply(
         status,
         "application/json; charset=utf-8",
         value.toString().toByteArray(),
-        if (cors) CORS_HEADERS else NO_STORE,
+        API_HEADERS,
     )
 
     private fun reasonFor(status: Int): String = when (status) {
@@ -432,11 +472,11 @@ object RadApi {
 
     private val NO_STORE = mapOf("Cache-Control" to "no-store")
 
-    private val CORS_HEADERS = NO_STORE + mapOf(
-        "Access-Control-Allow-Origin" to "*",
-        "Access-Control-Allow-Methods" to "GET, HEAD, OPTIONS",
-        "Access-Control-Allow-Headers" to "Content-Type",
-        "Access-Control-Max-Age" to "600",
+    private val API_HEADERS = NO_STORE + mapOf(
+        "X-Content-Type-Options" to "nosniff",
+        "X-Frame-Options" to "DENY",
+        "Content-Security-Policy" to "default-src 'none'; frame-ancestors 'none'",
+        "Cross-Origin-Resource-Policy" to "same-origin",
     )
 
     /**
@@ -448,7 +488,7 @@ object RadApi {
             "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; " +
             "connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
         "X-Frame-Options" to "DENY",
-        "Referrer-Policy" to "no-referrer",
+        "Referrer-Policy" to "same-origin",
         "X-Content-Type-Options" to "nosniff",
     )
 

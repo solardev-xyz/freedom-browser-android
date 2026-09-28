@@ -281,6 +281,12 @@ class RadicleProvider(
     private fun follow(origin: String) = synchronized(lock) { followers.add(origin) }
 
     /**
+     * [origin]'s grant is gone (the user disconnected it from the Radicle
+     * page): it stops hearing `seedStatus` (#201 R1-F2).
+     */
+    fun forget(origin: String) = synchronized(lock) { followers.remove(origin) }
+
+    /**
      * Where [rid]'s replication stands (desktop's `getSeedStatus` shape).
      * Blocking: it may ask the node whether the repository is in storage.
      */
@@ -356,7 +362,15 @@ class RadicleProvider(
         }
         if (targets.isEmpty()) return
         val status = withContext(io) { status(line.rid) }
-        for (origin in targets) events.emit(origin, "seedStatus", status)
+        for (origin in targets) {
+            // A follower whose grant was dropped some other way (another
+            // process, a cleared store) doesn't hear it either.
+            if (grants.signingFor(origin) == null) {
+                forget(origin)
+                continue
+            }
+            events.emit(origin, "seedStatus", status)
+        }
     }
 
     // ---------------------------------------------------------------

@@ -235,7 +235,10 @@ class MainActivity : ComponentActivity() {
         RadApi.init(this)
         RadicleProviders.init(this)
         lifecycleScope.launch {
-            settings.radicleEnabled.collect { RadicleClient.enabled = it }
+            settings.radicleEnabled.collect {
+                RadicleClient.enabled = it
+                RadicleProviders.setEnabled(it)
+            }
         }
         Gateways.expectExternalEndpoints()
         lifecycleScope.launch {

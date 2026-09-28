@@ -186,6 +186,35 @@ class RadicleProviderTest {
     }
 
     @Test
+    fun `a site disconnected from the Radicle page stops hearing seedStatus`() {
+        grants.map[site] = false
+        grants.map["https://b.example"] = false
+        val heard = mutableListOf<String>()
+        provider.events = RadicleProvider.Events { o, e, _ -> if (e == "seedStatus") heard += o }
+        runBlocking {
+            val scope = kotlinx.coroutines.CoroutineScope(Dispatchers.Unconfined)
+            provider.start(scope)
+            req("radicle_seed", JSONObject().put("rid", rid))
+            req("radicle_getSeedStatus", JSONObject().put("rid", rid), origin = "https://b.example")
+            node.state.value = RadicleInfo(status = RadicleStatus.Running, seed = RadicleSeed(rid, "connecting", "a (1/3)"))
+            assertEquals(setOf(site, "https://b.example"), heard.toSet())
+            // The Radicle page's Disconnect: the store drops the grant, then
+            // the bridge tells the provider (MainActivity.onRadicleRevoke).
+            heard.clear()
+            grants.revoke(site)
+            provider.forget(site)
+            node.state.value = RadicleInfo(status = RadicleStatus.Running, seed = RadicleSeed(rid, "fetching", "b (2/3)"))
+            assertEquals(listOf("https://b.example"), heard)
+            // A grant dropped without forget() is caught at emit time too.
+            heard.clear()
+            grants.revoke("https://b.example")
+            node.state.value = RadicleInfo(status = RadicleStatus.Running, seed = RadicleSeed(rid, "done", "", active = false))
+            assertTrue(heard.isEmpty())
+            scope.coroutineContext[kotlinx.coroutines.Job]?.cancel()
+        }
+    }
+
+    @Test
     fun `sync is only for repositories already seeded`() {
         grants.map[site] = false
         assertEquals("not_seeded", err(req("radicle_sync", JSONObject().put("rid", rid))).reason)
@@ -282,6 +311,14 @@ class RadicleProviderTest {
         assertNull(providerOriginKey("https://rad.freedom.baby"))
         assertNull(providerOriginKey("null"))
         assertNull(providerOriginKey("file:///x"))
+    }
+
+    @Test
+    fun `a late message from the outgoing document is not the new page's`() {
+        assertEquals(3, radicleDocumentFor(3, site, "$site/next"))
+        assertEquals(STALE_DOCUMENT, radicleDocumentFor(3, site, "https://other.example/"))
+        assertEquals(STALE_DOCUMENT, radicleDocumentFor(3, site, null))
+        assertEquals(3, radicleDocumentFor(3, "http://localhost:8700", "http://localhost:8700/a"))
     }
 
     @Test

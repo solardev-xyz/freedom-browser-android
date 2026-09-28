@@ -11,6 +11,8 @@ import baby.freedom.mobile.node.INodeService
 import baby.freedom.swarm.RadicleInfo
 import baby.freedom.swarm.RadicleStatus
 import java.io.ByteArrayOutputStream
+import java.util.concurrent.Semaphore
+import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.flow.MutableStateFlow
 import org.json.JSONArray
 import org.json.JSONObject
@@ -67,6 +69,28 @@ object RadicleClient {
      */
     fun call(method: String, args: JSONObject = JSONObject(), timeoutMs: Long = READ_TIMEOUT_MS): Answer {
         unavailableReason()?.let { return Answer.Failed(unavailableMessage(it), it) }
+        // At most [MAX_CALLS] at once, each holding up to [MAX_ANSWER_BYTES]
+        // (#201 R1-F4). The wait counts against the call's deadline.
+        val start = SystemClock.uptimeMillis()
+        val permitted = try {
+            calls.tryAcquire(timeoutMs, TimeUnit.MILLISECONDS)
+        } catch (e: InterruptedException) {
+            Thread.currentThread().interrupt()
+            false
+        }
+        if (!permitted) return Answer.Failed("The Radicle node is busy", REASON_TIMEOUT)
+        try {
+            val left = timeoutMs - (SystemClock.uptimeMillis() - start)
+            if (left <= 0) return Answer.Failed("The Radicle node didn't answer in time", REASON_TIMEOUT)
+            return callNow(method, args, left)
+        } finally {
+            calls.release()
+        }
+    }
+
+    private val calls = Semaphore(MAX_CALLS, true)
+
+    private fun callNow(method: String, args: JSONObject, timeoutMs: Long): Answer {
         val binder = service ?: return Answer.Failed(unavailableMessage(REASON_STOPPED), REASON_STOPPED)
         val pipe = try {
             binder.radicleCall(method, args.toString())
@@ -174,6 +198,9 @@ object RadicleClient {
 
     /** A COB write's: it signs, stores and announces the new refs. */
     const val WRITE_TIMEOUT_MS = 60_000L
+
+    /** Calls waiting on the node at once (its own side runs as many). */
+    private const val MAX_CALLS = 4
 
     /** The biggest answer taken (a big repository's issue list, a blob). */
     private const val MAX_ANSWER_BYTES = 32 * 1024 * 1024

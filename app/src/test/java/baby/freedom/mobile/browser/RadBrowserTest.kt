@@ -108,11 +108,12 @@ class RadBrowserTest {
     private fun body(reply: RadApi.Reply) = String(reply.body)
 
     @Test
-    fun `repository root is httpd-shaped and CORS-open`() {
+    fun `repository root is httpd-shaped and not CORS-open`() {
         val node = FakeNode(answers = mapOf("seeders" to JSONObject().put("seeding", 7)))
         val reply = RadApi.serveApiWith(bare, node)
         assertEquals(200, reply.status)
-        assertEquals("*", reply.headers["Access-Control-Allow-Origin"])
+        assertTrue(reply.headers.keys.none { it.startsWith("Access-Control-") })
+        assertEquals("same-origin", reply.headers["Cross-Origin-Resource-Policy"])
         val json = JSONObject(body(reply))
         val project = json.getJSONObject("payloads").getJSONObject("xyz.radicle.project")
         assertEquals("demo", project.getJSONObject("data").getString("name"))
@@ -177,20 +178,49 @@ class RadBrowserTest {
 
     @Test
     fun `viewer pages carry a CSP that only runs their own script, and only GET HEAD reach the API`() {
-        val page = RadApi.serve("GET", "https://rad.freedom.baby/$bare/issues", FakeNode())
+        val page = RadApi.serve("GET", "https://rad.freedom.baby/$bare/issues", FakeNode(), fromViewer = false)
         assertEquals(200, page.status)
         assertTrue(page.mime.startsWith("text/html"))
         val csp = page.headers["Content-Security-Policy"]!!
         assertTrue(csp.contains("script-src 'self'"))
         assertTrue(csp.contains("frame-ancestors 'none'"))
-        assertEquals(405, RadApi.serve("POST", "https://rad.freedom.baby/_/api/$bare", FakeNode()).status)
-        assertEquals(204, RadApi.serve("OPTIONS", "https://rad.freedom.baby/_/api/$bare", FakeNode()).status)
-        assertEquals(404, RadApi.serve("GET", "https://rad.freedom.baby/_/secret", FakeNode()).status)
+        assertEquals("same-origin", page.headers["Referrer-Policy"])
+        assertEquals(405, RadApi.serve("POST", "https://rad.freedom.baby/_/api/$bare", FakeNode(), true).status)
+        assertEquals(405, RadApi.serve("OPTIONS", "https://rad.freedom.baby/_/api/$bare", FakeNode(), true).status)
+        assertEquals(404, RadApi.serve("GET", "https://rad.freedom.baby/_/secret", FakeNode(), true).status)
         // Radicle is off in a unit test: the API says so, with its reason.
-        val off = RadApi.serve("GET", "https://rad.freedom.baby/_/api/$bare", FakeNode())
+        val off = RadApi.serve("GET", "https://rad.freedom.baby/_/api/$bare", FakeNode(), true)
         assertEquals(403, off.status)
         assertEquals(RadicleClient.REASON_DISABLED, JSONObject(body(off)).getString("reason"))
-        assertEquals(0, RadApi.serve("HEAD", "https://rad.freedom.baby/$bare", FakeNode()).body.size)
+        assertEquals(0, RadApi.serve("HEAD", "https://rad.freedom.baby/$bare", FakeNode(), true).body.size)
+    }
+
+    @Test
+    fun `only the viewer itself reads the API, and another site learns nothing`() {
+        val viewer = "https://rad.freedom.baby/$bare/issues"
+        fun from(vararg h: Pair<String, String>, main: Boolean = false) = RadApi.isFromViewer(mapOf(*h), main)
+        assertTrue(from("Referer" to viewer))
+        assertTrue(from("referer" to "https://rad.freedom.baby"))
+        assertTrue(from("Referer" to viewer, "Sec-Fetch-Site" to "same-origin"))
+        assertTrue("the user typing an API URL", from(main = true))
+        assertFalse(from("Referer" to "https://evil.example/"))
+        assertFalse(from("Referer" to "https://rad.freedom.baby.evil.example/"))
+        assertFalse(from("Referer" to "http://rad.freedom.baby/x"))
+        assertFalse(from("Referer" to viewer, "Origin" to "https://evil.example"))
+        assertFalse(from("Referer" to viewer, "Sec-Fetch-Site" to "cross-site"))
+        assertFalse("a no-referrer page's fetch or <img>", from())
+        assertFalse(from("Origin" to "null", main = true))
+        assertFalse(from("Referer" to "https://evil.example/", main = true))
+        // Refused with one answer, whatever the repository, and the node isn't asked.
+        for (visibility in listOf("public", "private")) {
+            val node = FakeNode(visibility = visibility)
+            val r = RadApi.serve("GET", "https://rad.freedom.baby/_/api/$bare", node, fromViewer = false)
+            assertEquals(403, r.status)
+            assertEquals("""{"error":"not available to other sites"}""", body(r))
+            assertTrue(node.calls.isEmpty())
+            assertTrue(r.headers.keys.none { it.startsWith("Access-Control-") })
+        }
+        assertEquals(403, RadApi.serve("OPTIONS", "https://rad.freedom.baby/_/api/$bare", FakeNode(), false).status)
     }
 
     // ---- The client's parsing ----
