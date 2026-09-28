@@ -32,6 +32,22 @@ import java.net.URISyntaxException
  *    prompt — on load, from a timer, from an embedded frame (not even
  *    by navigating the top frame, `target=_top`), or turn one tap into
  *    a burst of launches.
+ *    One exception: the server-redirect chain of a load the *user*
+ *    named — an address typed or pasted into the bar, a bookmark, "Open
+ *    in new tab" — may end in an app link with no tap on any page
+ *    ([userNamedRedirect]). There is no page to have tapped: the user's
+ *    own submit is the gesture, good for the one app link that ends
+ *    that navigation. A Google Meet link is this case (#173):
+ *    `meet.google.com/<code>` answers Android with a redirect to
+ *    `meet.app.goo.gl`, which answers with an `intent:` for the Meet
+ *    app via Play services, and refusing it left the tab blank.
+ *    Chrome, likewise, launches an app from the redirect of a typed
+ *    URL. The chain ([UserNamedChain]) ends with that navigation —
+ *    at its commit, Stop, a download, or any main-frame request that
+ *    isn't one of its own hops (the page's own form post after a
+ *    `204`) — and the site asked is the hop whose answer was the app
+ *    link, not the address typed: an open redirect on a site the user
+ *    trusts can't borrow its remembered Allow.
  * 3. The site-permission prompt (#81), keyed by origin + scheme
  *    ([ExternalScheme], stored as `external:<scheme>` like desktop), so
  *    allowing `magnet:` for a site never allows `sms:` too. Remembered
@@ -146,20 +162,136 @@ internal enum class ExternalLinkVerdict {
 
     /** Ask the site-permission broker (prompt, or a remembered answer). */
     Ask,
+
+    /**
+     * Ask, for the redirect chain of a load the user named: no page tap
+     * to consume or confirm, and the site asking is the one the user
+     * named ([userNamedRedirect]).
+     */
+    AskUserNamed,
+}
+
+/**
+ * The server-redirect chain of a load the user named (#173): which
+ * main-frame redirect may end in an app link with no page tap, and the
+ * site asked for it. Started by that load, followed hop by hop through
+ * `shouldOverrideUrlLoading`, and ended by anything that ends the
+ * navigation — including its load stopping with no commit
+ * ([loadFinished]). `shouldInterceptRequest` reports main-frame requests from
+ * a WebView IO thread: one for any URL but the hop awaited is a new
+ * navigation — a page's form post, which never reaches
+ * `shouldOverrideUrlLoading` — and ends the chain before that
+ * navigation's redirects arrive. Thread-safe.
+ */
+internal class UserNamedChain {
+    // The URL whose answer is awaited: the named address, then each
+    // redirect hop let through. A redirect from it to an app link is
+    // asked for its site. Null: no chain.
+    private var hop: String? = null
+
+    /** A load the user named, of [url], starts. */
+    @Synchronized
+    fun started(url: String) {
+        hop = url
+    }
+
+    /** The navigation is over, or isn't the user's load. */
+    @Synchronized
+    fun ended() {
+        hop = null
+    }
+
+    /** The WebView follows a main-frame redirect to [url]. */
+    @Synchronized
+    fun redirected(url: String) {
+        if (hop != null) hop = url
+    }
+
+    /**
+     * The WebView requests [url] for the main frame. The awaited hop may
+     * be requested more than once (Chromium retries a first request on
+     * a fresh connection — seen on the AVD for every cold Meet load), or
+     * not at all for a redirect hop; a request for any other URL is a
+     * navigation of the page's own.
+     */
+    @Synchronized
+    fun mainFrameRequested(url: String) {
+        val awaited = hop ?: return
+        if (!sameRequestUrl(awaited, url)) ended()
+    }
+
+    /**
+     * `onPageFinished` for [url] while [committedUrl] is the document on
+     * screen. WebView reports it when loading stops — including for a
+     * navigation that ends without a commit, such as a `204` answer,
+     * with that navigation's URL — so the named load is over and no
+     * later redirect is one of its hops (R2-F1). A service worker's
+     * answer to the page's own form post never reaches
+     * `shouldInterceptRequest`, so [mainFrameRequested] can't be relied
+     * on to end the chain first. The one exception: the document on
+     * screen finishing its own load (its `load` event) while the named
+     * load is still in flight, which reports the committed page's URL
+     * rather than the awaited hop's — or the tab's blank entry (Home, a
+     * fresh tab), which no named load is.
+     */
+    @Synchronized
+    fun loadFinished(url: String?, committedUrl: String?) {
+        val awaited = hop ?: return
+        val onScreen = url == ABOUT_BLANK ||
+            (url != null && committedUrl != null && sameRequestUrl(url, committedUrl))
+        if (!onScreen || sameRequestUrl(awaited, url!!)) ended()
+    }
+
+    /**
+     * The URL whose answer redirected, for a main-frame redirect of the
+     * named load: the site to ask. Null when there is no chain.
+     */
+    @Synchronized
+    fun asker(): String? = hop
+}
+
+/**
+ * Whether two spellings name the same request: Chromium canonicalizes
+ * the URL it requests (lower-case scheme and host, no default port, `/`
+ * for an empty path, no fragment), so a typed address is compared the
+ * same way. Unparseable URLs compare as strings.
+ */
+internal fun sameRequestUrl(a: String, b: String): Boolean {
+    if (a == b) return true
+    fun canonical(url: String): String? = runCatching {
+        val u = java.net.URI(url)
+        val scheme = u.scheme?.lowercase() ?: return null
+        val host = u.host?.lowercase() ?: return null
+        val port = when {
+            u.port == -1 -> ""
+            scheme == "http" && u.port == 80 -> ""
+            scheme == "https" && u.port == 443 -> ""
+            else -> ":${u.port}"
+        }
+        val path = u.rawPath?.takeIf { it.isNotEmpty() } ?: "/"
+        val query = u.rawQuery?.let { "?$it" } ?: ""
+        "$scheme://$host$port$path$query"
+    }.getOrNull()
+    val ca = canonical(a) ?: return false
+    return ca == canonical(b)
 }
 
 /**
  * Applies the policy above to a navigation. [consumeGesture] is only
  * called — and so the tap only used up — once everything else passes.
+ * [userNamedRedirect]: a main-frame redirect hop of a load the user
+ * named themselves, whose chain hasn't ended in an app link yet.
  */
 internal fun externalLinkVerdict(
     url: String?,
     isForMainFrame: Boolean,
     hasGesture: Boolean,
+    userNamedRedirect: Boolean = false,
     consumeGesture: () -> Boolean,
 ): ExternalLinkVerdict {
     val scheme = externalLinkScheme(url) ?: return ExternalLinkVerdict.NotExternal
     if (!isExternalSchemeAllowed(scheme)) return ExternalLinkVerdict.Refuse
+    if (isForMainFrame && userNamedRedirect) return ExternalLinkVerdict.AskUserNamed
     if (!isForMainFrame || !hasGesture) return ExternalLinkVerdict.Refuse
     return if (consumeGesture()) ExternalLinkVerdict.Ask else ExternalLinkVerdict.Refuse
 }

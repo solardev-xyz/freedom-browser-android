@@ -678,6 +678,7 @@ fun BrowserScreen(
         displayPrefix: String?,
         displayUrl: String,
         loadUri: String = contentUri,
+        namedByUser: Boolean = false,
     ) {
         val generation = target.loadGeneration
         val isIpfs = contentUri.startsWith("ipfs://") || contentUri.startsWith("ipns://")
@@ -759,7 +760,8 @@ fun BrowserScreen(
             target.gatewayWork.finish(probeWork)
         }
         when (outcome) {
-            GatewayProbe.Outcome.Ok -> target.loadUrl(loadUri, displayPrefix = displayPrefix)
+            GatewayProbe.Outcome.Ok ->
+                target.loadUrl(loadUri, displayPrefix = displayPrefix, namedByUser = namedByUser)
             GatewayProbe.Outcome.Aborted -> { /* superseded by a later submit */ }
             is GatewayProbe.Outcome.Unreachable -> showError("ERR_CONNECTION_REFUSED")
             GatewayProbe.Outcome.NotFound, is GatewayProbe.Outcome.Other -> {
@@ -775,7 +777,21 @@ fun BrowserScreen(
         target: BrowserState,
         raw: String,
         source: SubmitSource = SubmitSource.User,
+        // An unverified ENS answer the user chose to load (#96): let
+        // through if the resolver still gives exactly this one.
+        approvedUri: String? = null,
     ) {
+        // "Continue once" on the tab's not-cross-checked warning (#96):
+        // the one navigation it was shown for, again, with its answer
+        // let through. Its token is the tab's own, so a page can't
+        // fake one ([EnsGate]); anything else is dropped here.
+        EnsGate.continueToken(raw)?.let { token ->
+            val gate = target.ensGate?.takeIf { it.token == token } ?: return
+            target.ensGate = null
+            submit(target, gate.retryUrl, SubmitSource.User, approvedUri = gate.uri)
+            return
+        }
+
         // A page submitting on top of a navigation the *user* asked for
         // is ignored outright: it may neither cancel their probe nor
         // start one of its own on the same tab (#35, see
@@ -806,6 +822,11 @@ fun BrowserScreen(
         // lifts a download block a declined offer left on it
         // ([DownloadOffers]); a page's own navigation doesn't.
         if (source == SubmitSource.User) downloads.allowOffers(target.id)
+        // And the load it schedules is theirs: its redirects may end in
+        // an app link without a tap on a page (#173). Handed to that
+        // load's own `loadUrl` below, never left for whichever load
+        // comes next (R2-F2).
+        val namedByUser = source == SubmitSource.User
 
         // Any new submit supersedes a probe that was still in flight on
         // this tab — otherwise switching URL mid-probe would let the
@@ -852,7 +873,12 @@ fun BrowserScreen(
             // [gateGatewayNavigation]) — the resolve itself is ENS's.
             target.ipfsLoad = false
 
-            fun ensError(errorCode: String, detail: String, retryUrl: String = retryDisplay) {
+            fun ensError(
+                errorCode: String,
+                detail: String,
+                retryUrl: String = retryDisplay,
+                continueUrl: String? = null,
+            ) {
                 target.clearEnsOverride()
                 target.loadUrl(
                     ErrorPage.url(
@@ -861,6 +887,7 @@ fun BrowserScreen(
                         protocol = "ens",
                         retryUrl = retryUrl,
                         detail = detail,
+                        continueUrl = continueUrl,
                     ),
                 )
             }
@@ -878,6 +905,18 @@ fun BrowserScreen(
                     // itself; this is the tab's own last word on it.
                     ensureActive()
                     when (result) {
+                        // Only one RPC server's word for it (#96): ask
+                        // first. The user's "Continue once" comes back
+                        // here with this very answer approved.
+                        is EnsResult.Ok if !result.trust.verified && result.uri != approvedUri -> {
+                            val gate = EnsGate.create(name, result.uri, retryDisplay)
+                            target.ensGate = gate
+                            ensError(
+                                errorCode = "ens_unverified",
+                                detail = EnsGate.unverifiedDetail(result),
+                                continueUrl = EnsGate.continueUrl(gate),
+                            )
+                        }
                         is EnsResult.Ok -> {
                             // Remember hash/cid → name for the whole session
                             // (cross-tab address-bar preservation). Safe for
@@ -909,6 +948,7 @@ fun BrowserScreen(
                                     // above), and per-site storage sticks
                                     // to the name across content updates.
                                     loadUri = "ens://$name$suffix",
+                                    namedByUser = namedByUser,
                                 )
                             } else {
                                 ensError(
@@ -917,12 +957,23 @@ fun BrowserScreen(
                                 )
                             }
                         }
+                        // Nothing to load either way, but say when it's
+                        // only one server's word for it (#96).
                         is EnsResult.NotFound ->
-                            ensError("ens_not_found", detail = result.reason)
+                            ensError(
+                                "ens_not_found",
+                                detail = EnsGate.withTrustNote(result.reason, result.trust),
+                            )
                         is EnsResult.Unsupported ->
-                            ensError("ens_unsupported_codec", detail = "codec ${result.codec}")
+                            ensError(
+                                "ens_unsupported_codec",
+                                detail = EnsGate.withTrustNote("codec ${result.codec}", result.trust),
+                            )
                         is EnsResult.Error ->
                             ensError("ens_lookup_failed", detail = result.reason)
+                        // RPC servers disagreed (#96): nothing to load.
+                        is EnsResult.Conflict ->
+                            ensError("ens_conflict", detail = EnsGate.conflictDetail(result))
                     }
                 } finally {
                     target.resolving = false
@@ -965,6 +1016,7 @@ fun BrowserScreen(
                         contentUri = contentUri,
                         displayPrefix = null,
                         displayUrl = contentUri,
+                        namedByUser = namedByUser,
                     )
                 } finally {
                     target.resolving = false
@@ -975,7 +1027,7 @@ fun BrowserScreen(
             return
         }
 
-        target.loadUrl(url)
+        target.loadUrl(url, namedByUser = namedByUser)
     }
 
     // "New private tab" (#86), from the menu and the tab switcher —

@@ -84,10 +84,33 @@ class ExternalAppsTest {
         main: Boolean = true,
         gesture: Boolean = true,
         tapped: Boolean = true,
+        userNamedRedirect: Boolean = false,
     ): Pair<ExternalLinkVerdict, Boolean> {
         var consumed = false
-        val v = externalLinkVerdict(url, main, gesture) { consumed = true; tapped }
+        val v = externalLinkVerdict(url, main, gesture, userNamedRedirect) { consumed = true; tapped }
         return v to consumed
+    }
+
+    // #173: meet.google.com → meet.app.goo.gl → this, on a typed URL.
+    private val meetIntent = "intent://meet.app.goo.gl/?link=https://meet.google.com/abc-defg-hij" +
+        "#Intent;package=com.google.android.gms;action=com.google.firebase.dynamiclinks.VIEW_DYNAMIC_LINK;" +
+        "scheme=https;S.browser_fallback_url=https://play.google.com/store/apps/details%3Fid%3Dx;end;"
+
+    @Test
+    fun `the redirect of a load the user named may ask without a page tap`() {
+        assertEquals(
+            ExternalLinkVerdict.AskUserNamed to false,
+            verdict(meetIntent, gesture = false, tapped = false, userNamedRedirect = true),
+        )
+        // Without it, the same typed load is refused, as before (#173's blank page).
+        assertEquals(ExternalLinkVerdict.Refuse to false, verdict(meetIntent, gesture = false))
+    }
+
+    @Test
+    fun `a user-named redirect opens nothing from a subframe or in a blocked scheme`() {
+        assertEquals(ExternalLinkVerdict.Refuse to false, verdict(meetIntent, main = false, gesture = false, userNamedRedirect = true))
+        assertEquals(ExternalLinkVerdict.Refuse to false, verdict("content://x/y", userNamedRedirect = true))
+        assertEquals(ExternalLinkVerdict.NotExternal to false, verdict("https://meet.google.com/x", userNamedRedirect = true))
     }
 
     @Test
@@ -595,5 +618,145 @@ class ExternalAppsTest {
     fun `log lines never carry the address`() {
         assertEquals("mailto:<redacted>", externalUrlForLog("mailto:someone@example.com"))
         assertEquals("unknown", externalUrlForLog("garbage"))
+    }
+
+    // R1-F1 / R1-F2 (#173): the chain a user-named load may end in an
+    // app link through, hop by hop.
+    @Test
+    fun `a user-named chain asks for the hop that redirected, not the address typed`() {
+        val chain = UserNamedChain()
+        chain.started("https://a.example/go")
+        chain.mainFrameRequested("https://a.example/go")
+        assertEquals("https://a.example/go", chain.asker())
+        // a.example is an open redirect to evil.example, which answers intent:.
+        chain.redirected("https://evil.example/x")
+        chain.mainFrameRequested("https://evil.example/x")
+        assertEquals("https://evil.example/x", chain.asker())
+    }
+
+    @Test
+    fun `a main-frame request of the page's own ends a user-named chain`() {
+        // Typed /stall answered 204 (or stopped); the page on screen then
+        // posts a form whose 302 goes to tel:.
+        val chain = UserNamedChain()
+        chain.started("http://10.0.2.2:8701/stall")
+        chain.mainFrameRequested("http://10.0.2.2:8701/stall")
+        chain.mainFrameRequested("http://10.0.2.2:8700/form")
+        assertNull(chain.asker())
+        // Nor does a later redirect start it again.
+        chain.redirected("http://10.0.2.2:8700/next")
+        assertNull(chain.asker())
+    }
+
+    @Test
+    fun `a repeated request for the awaited hop keeps the chain`() {
+        // A cold load: Chromium asked for the typed address twice.
+        val chain = UserNamedChain()
+        chain.started("https://meet.google.com/abc-defg-hij")
+        chain.mainFrameRequested("https://meet.google.com/abc-defg-hij")
+        chain.mainFrameRequested("https://meet.google.com/abc-defg-hij")
+        chain.redirected("https://meet.app.goo.gl/?link=x")
+        chain.mainFrameRequested("https://meet.app.goo.gl/?link=x")
+        assertEquals("https://meet.app.goo.gl/?link=x", chain.asker())
+    }
+
+    @Test
+    fun `a first request that isn't the named address ends the chain`() {
+        val chain = UserNamedChain()
+        chain.started("https://meet.google.com/abc-defg-hij")
+        chain.mainFrameRequested("https://other.example/")
+        assertNull(chain.asker())
+    }
+
+    @Test
+    fun `a redirect hop Chromium does or doesn't re-request keeps the chain`() {
+        val seen = UserNamedChain()
+        seen.started("https://Meet.Google.com")
+        seen.mainFrameRequested("https://meet.google.com/")
+        seen.redirected("https://meet.app.goo.gl/?link=x")
+        seen.mainFrameRequested("https://meet.app.goo.gl/?link=x")
+        assertEquals("https://meet.app.goo.gl/?link=x", seen.asker())
+
+        val unseen = UserNamedChain()
+        unseen.started("https://meet.google.com/abc")
+        unseen.mainFrameRequested("https://meet.google.com/abc")
+        unseen.redirected("https://meet.app.goo.gl/?link=x")
+        assertEquals("https://meet.app.goo.gl/?link=x", unseen.asker())
+        // But a request that is neither hop still ends it.
+        unseen.mainFrameRequested("https://page.example/post")
+        assertNull(unseen.asker())
+    }
+
+    @Test
+    fun `an ended chain stays ended`() {
+        val chain = UserNamedChain()
+        chain.started("https://a.example/")
+        chain.ended()
+        chain.mainFrameRequested("https://a.example/")
+        assertNull(chain.asker())
+    }
+
+    // R2-F1: a service worker answers the page's form post, so no
+    // main-frame request is seen — the named load's end must be.
+    @Test
+    fun `a named load that stops without a commit ends the chain`() {
+        val chain = UserNamedChain()
+        chain.started("http://localhost:8701/nc")
+        chain.mainFrameRequested("http://localhost:8701/nc")
+        // 204: WebView reports onPageFinished for the aborted navigation.
+        chain.loadFinished("http://localhost:8701/nc", "http://localhost:8700/p")
+        assertNull(chain.asker())
+        // The page's SW-answered post then redirects: not the chain's.
+        chain.redirected("tel:5551234")
+        assertNull(chain.asker())
+    }
+
+    @Test
+    fun `a named load's redirect hop that stops ends the chain`() {
+        val chain = UserNamedChain()
+        chain.started("https://a.example/go")
+        chain.redirected("https://b.example/nc")
+        chain.loadFinished("https://b.example/nc", "https://page.example/")
+        assertNull(chain.asker())
+    }
+
+    @Test
+    fun `the page on screen finishing its own load keeps a named chain in flight`() {
+        val chain = UserNamedChain()
+        chain.started("https://meet.google.com/abc")
+        chain.loadFinished("https://page.example/", "https://page.example/")
+        assertEquals("https://meet.google.com/abc", chain.asker())
+        // But the same URL as the awaited hop is the named load's end.
+        val same = UserNamedChain()
+        same.started("https://page.example/")
+        same.loadFinished("https://page.example/", "https://page.example/")
+        assertNull(same.asker())
+    }
+
+    @Test
+    fun `any other finished load ends a named chain`() {
+        val chain = UserNamedChain()
+        chain.started("https://meet.google.com/abc")
+        chain.loadFinished("tel:5551234", "https://page.example/")
+        assertNull(chain.asker())
+        // With nothing committed yet (a fresh tab), nothing is on screen.
+        val fresh = UserNamedChain()
+        fresh.started("https://meet.google.com/abc")
+        fresh.loadFinished("https://page.example/", null)
+        assertNull(fresh.asker())
+        // …but the blank entry of Home / a fresh tab finishing is no end.
+        val home = UserNamedChain()
+        home.started("https://meet.google.com/abc")
+        home.loadFinished(ABOUT_BLANK, null)
+        assertEquals("https://meet.google.com/abc", home.asker())
+    }
+
+    @Test
+    fun `request urls compare as Chromium canonicalizes them`() {
+        assertTrue(sameRequestUrl("https://Example.COM", "https://example.com/"))
+        assertTrue(sameRequestUrl("http://example.com:80/a?b=1#frag", "http://example.com/a?b=1"))
+        assertFalse(sameRequestUrl("https://example.com/a", "https://example.com/b"))
+        assertFalse(sameRequestUrl("https://example.com:8443/", "https://example.com/"))
+        assertFalse(sameRequestUrl("https://example.com/?a", "https://example.com/?b"))
     }
 }

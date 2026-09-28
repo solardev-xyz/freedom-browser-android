@@ -2,6 +2,7 @@ package baby.freedom.mobile.browser
 
 import baby.freedom.mobile.ens.EnsResolver
 import baby.freedom.mobile.ens.EnsResult
+import baby.freedom.mobile.ens.EnsTrust
 import baby.freedom.swarm.SwarmNode
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
@@ -360,7 +361,9 @@ object Gateways {
             VirtualOrigin.parseContentUrl(uri)?.let { return it.first }
         }
         val result = ensLookup(name)
-        if (result is EnsResult.Ok) {
+        // One server's word isn't served unasked (#96); the submit flow
+        // records what the user let through.
+        if (result is EnsResult.Ok && result.trust.verified) {
             KnownEnsNames.record(result.uri, name)
             return VirtualOrigin.parseContentUrl(result.uri)?.first
         }
@@ -402,6 +405,15 @@ object Gateways {
      * With no earlier answer the document waits for the resolver, as a
      * typed navigation does.
      *
+     * Two more refusals since the RPC cross-check (#96): servers that
+     * disagree (`ens_conflict`), and an answer only one server gave that
+     * isn't what this tab or the session already had
+     * (`ens_unverified`) — the same answer again is served, since it was
+     * cross-checked before or the user let it through. Neither forgets
+     * the name's earlier answer. That includes one server alone saying
+     * the name has no (loadable) content: with an earlier answer it's
+     * `ens_unverified`, not `ens_not_found`, and the answer is kept.
+     *
      * A main-frame document passes its incoming [page]
      * ([EnsDocumentPins.beginNavigation]); the answer is pinned there, and
      * reaches the page on screen only once that document commits. An
@@ -440,18 +452,36 @@ object Gateways {
             pins?.forgetLastAnswer(name)
             return code
         }
+        // "Nothing loadable here" on one server's word only (#96) — the
+        // others failed or never answered. With an earlier answer to
+        // lose, that's a claim to question, not to act on: one server
+        // mustn't turn a real record into "no resolver". Refused, the
+        // name's earlier answer kept.
+        fun noContent(code: String, trust: EnsTrust): String =
+            if (!trust.verified && last != null) "ens_unverified" else gone(code)
         return when (result) {
             is EnsResult.Ok -> {
                 if (VirtualOrigin.parseContentUrl(result.uri) == null) {
-                    gone("ens_unsupported_codec")
+                    noContent("ens_unsupported_codec", result.trust)
+                } else if (!result.trust.verified &&
+                    result.uri != pins?.lastAnswerFor(name) &&
+                    result.uri != KnownEnsNames.uriFor(name)
+                ) {
+                    // Only one RPC server's word, and not for what this
+                    // tab or the session already had — cross-checked
+                    // then, or let through by the user (#96).
+                    "ens_unverified"
                 } else {
                     KnownEnsNames.record(result.uri, name)
                     pins?.pin(name, result.uri, page)
                     null
                 }
             }
-            is EnsResult.NotFound -> gone("ens_not_found")
-            is EnsResult.Unsupported -> gone("ens_unsupported_codec")
+            is EnsResult.NotFound -> noContent("ens_not_found", result.trust)
+            is EnsResult.Unsupported -> noContent("ens_unsupported_codec", result.trust)
+            // Servers disagree about the name right now (#96). Not the
+            // name's answer to forget, but nothing to serve on either.
+            is EnsResult.Conflict -> "ens_conflict"
             // Failed, or still running at the deadline: not an answer.
             is EnsResult.Error, null -> {
                 if (last == null) {

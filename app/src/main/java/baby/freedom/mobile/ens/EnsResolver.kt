@@ -5,9 +5,17 @@ import java.net.URL
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.coroutines.coroutineContext
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONObject
 
 /**
@@ -32,11 +40,20 @@ import org.json.JSONObject
  * because the URLs come from the contract, not from us; see
  * [ccipFetch].
  *
+ * No single RPC server is taken at its word (#96): with three or more
+ * endpoints, servers first agree on a block ([EnsQuorum]'s anchor),
+ * then [EnsQuorum.K] of them read the record at it and the answer
+ * needs [EnsQuorum.M] byte-identical copies to be verified
+ * ([EnsTrust]). Servers that disagree give an [EnsResult.Conflict];
+ * an answer only one server gave — or any answer, when too few servers
+ * are reachable to fix a block — comes back unverified, for the browser
+ * to ask about before loading it.
+ *
  * WNS (`.wei`) and GNS (`.gwei`) names take the same path with a
  * different call target: `contenthash(namehash)` straight on the
  * system's NameNFT registry contract instead of `resolve()` on the
  * Universal Resolver (see [NameSystem]). Same namehash, same record
- * decoding, same cache and RPC rotation; no CCIP-Read.
+ * decoding, same cache and quorum; no CCIP-Read.
  *
  * Known limitations vs. the desktop resolver:
  *   - ENSIP-15 normalization is lowercased-ASCII only. Pure-ASCII names
@@ -50,7 +67,7 @@ class EnsResolver internal constructor(
     constructor(rpcEndpoints: List<String> = DEFAULT_RPC_ENDPOINTS) :
         this(rpcEndpoints, EnsHttp.Default)
 
-    private data class Cached(val result: EnsResult, val timestamp: Long)
+    private data class Cached(val result: EnsResult, val expiresAt: Long)
 
     private val cache = ConcurrentHashMap<String, Cached>()
 
@@ -58,8 +75,17 @@ class EnsResolver internal constructor(
     private var preferredRpcIndex: Int = 0
 
     /**
+     * Where the blocking RPC requests run. Detached from the caller on
+     * purpose: a wave that has its answer stops *waiting* for the
+     * stragglers at once, while their sockets finish (or time out) here
+     * — `HttpURLConnection` can't be interrupted.
+     */
+    private val io = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    /**
      * Resolve [rawName] (e.g. `swarm.eth`) to a content-addressed URI.
-     * Thread-safe; cached for [CACHE_TTL_MS] per normalized name.
+     * Thread-safe; cached per normalized name for as long as the answer
+     * deserves ([ttlFor]).
      *
      * Cancellation-honest: a caller whose coroutine was cancelled while
      * we were resolving gets a `CancellationException`, never an
@@ -79,6 +105,9 @@ class EnsResolver internal constructor(
         return result
     }
 
+    /** An answer, and whether a quorum of servers stands behind it. */
+    private class Verdict(val result: EnsResult, val verified: Boolean)
+
     private suspend fun resolve(rawName: String): EnsResult {
         val normalized = (rawName).trim().lowercase()
         if (normalized.isEmpty()) {
@@ -86,9 +115,7 @@ class EnsResolver internal constructor(
         }
 
         cache[normalized]?.let {
-            if (System.currentTimeMillis() - it.timestamp < CACHE_TTL_MS) {
-                return it.result
-            }
+            if (System.currentTimeMillis() < it.expiresAt) return it.result
         }
 
         val system = NameSystem.forName(normalized)
@@ -100,11 +127,359 @@ class EnsResolver internal constructor(
             buildResolveCallData(normalized)
         }
 
+        // Cross-checked across servers whenever there are enough of them
+        // to (#96); one server's word otherwise, labelled as such.
+        val verdict =
+            (if (rpcEndpoints.size >= EnsQuorum.MIN_PROVIDERS) resolveByQuorum(normalized, target, callData, contract) else null)
+                ?: resolveSingleSource(normalized, target, callData, contract)
+        val ttl = ttlFor(verdict)
+        if (ttl > 0) cache[normalized] = Cached(verdict.result, System.currentTimeMillis() + ttl)
+        Log.i(TAG, "[$normalized] → ${verdict.result}")
+        return verdict.result
+    }
+
+    /**
+     * How long an answer is reused. A cross-checked one for as long as
+     * resolutions always were; one server's word briefly, so the next
+     * visit soon gets the chance to verify it; a disagreement only for a
+     * moment (it may be a server catching up); a failure not at all.
+     */
+    private fun ttlFor(verdict: Verdict): Long = when (verdict.result) {
+        is EnsResult.Error -> 0
+        is EnsResult.Conflict -> CONFLICT_TTL_MS
+        else -> if (verdict.verified) CACHE_TTL_MS else UNVERIFIED_TTL_MS
+    }
+
+    // ---- Quorum (#96) ----
+
+    /**
+     * One corroborated block to read at — [EnsQuorum]'s anchor — as it
+     * is being settled. [number] is known once the heads are in; the
+     * hash vote may still be running, so the first wave's reads can
+     * start at [number] straight away and only be *counted* once [vote]
+     * says which hash that block has — and each server has said its
+     * block [number] is that one ([hashes]). That keeps a cold lookup
+     * at two round trips (heads, then block + record together) instead
+     * of three.
+     */
+    private class AnchorRound(
+        val number: Long,
+        /** Servers that reported a head, fastest first. */
+        val order: List<String>,
+        /** Each of those servers' hash for block [number]. */
+        val hashes: Map<String, Deferred<String>>,
+        val vote: Deferred<EnsQuorum.HashVote>,
+        val startedAt: Long,
+    ) {
+        val tag: String get() = "0x" + number.toString(16)
+    }
+
+    @Volatile
+    private var anchor: AnchorRound? = null
+
+    @Volatile
+    private var anchorInFlight: Deferred<AnchorRound?>? = null
+
+    /**
+     * The anchor to read at: the last one while it's younger than
+     * [ANCHOR_TTL_MS] and its vote hasn't failed, else a new one —
+     * shared by concurrent lookups. `null` when too few servers report a
+     * head to take a median.
+     */
+    private suspend fun anchorRound(): AnchorRound? {
+        anchor?.let { round ->
+            val fresh = System.currentTimeMillis() - round.startedAt < ANCHOR_TTL_MS
+            val usable = !round.vote.isCompleted || round.vote.await() is EnsQuorum.HashVote.Agreed
+            if (fresh && usable) return round
+        }
+        val job = synchronized(this) {
+            anchorInFlight?.takeIf { it.isActive } ?: io.async { newAnchorRound() }.also { anchorInFlight = it }
+        }
+        return job.await()
+    }
+
+    private suspend fun newAnchorRound(): AnchorRound? {
+        val startedAt = System.currentTimeMillis()
+        val probes = rpcEndpoints.associateWith { rpc -> io.async { blockNumber(rpc) } }
+        // Every server, not just a wave's worth: the more heads, the
+        // harder the median is to move. Waits for all of them — or,
+        // once enough are in for a median, a moment longer for the rest
+        // rather than for the slowest server's timeout.
+        val heads = gather<Long>(
+            tasks = probes.mapValues { (_, probe) -> suspend { probe.await() } },
+            timeoutMs = QUORUM_TIMEOUT_MS.toLong(),
+            graceMs = HEAD_GRACE_MS,
+            graceFrom = { got -> got.values.count { it != null } >= EnsQuorum.MIN_PROVIDERS },
+        ).filterValues { it != null }.mapValues { it.value!! }
+        val number = EnsQuorum.anchorNumber(heads.values.toList())
+        if (number == null) {
+            Log.w(TAG, "anchor infeasible: ${heads.size} of ${rpcEndpoints.size} servers reported a head")
+            return null
+        }
+        val tag = "0x" + number.toString(16)
+        val order = heads.keys.toList()
+        val hashes = order.associateWith { rpc -> io.async { blockHash(rpc, tag) } }
+        val vote = io.async {
+            var decided: EnsQuorum.HashVote? = null
+            val answers = gather<String>(
+                tasks = hashes.mapValues { (_, h) -> suspend { h.await() } },
+                timeoutMs = QUORUM_TIMEOUT_MS.toLong(),
+                done = { got ->
+                    decided = EnsQuorum.hashVote(got.answered(), order.size, settled = false)
+                    decided != null
+                },
+            )
+            val result = decided ?: EnsQuorum.hashVote(answers.answered(), order.size, settled = true)!!
+            if (result !is EnsQuorum.HashVote.Agreed) Log.w(TAG, "anchor #$number: $result")
+            result
+        }
+        return AnchorRound(number, order, hashes, vote, startedAt).also { anchor = it }
+    }
+
+    /**
+     * Resolve by [EnsQuorum]: a wave of [EnsQuorum.K] servers reads the
+     * record at the anchor, widened to the rest if it has no verdict.
+     * `null` when a quorum can't be formed at all — too few servers
+     * answering to fix a block — which falls back to one server's word.
+     */
+    private suspend fun resolveByQuorum(
+        name: String,
+        target: String,
+        callData: ByteArray,
+        contract: String?,
+    ): Verdict? {
+        val round = anchorRound() ?: return null
+        val outcomes = HashMap<String, CallOutcome>()
+        val legs = LinkedHashMap<String, EnsQuorum.Leg>()
+        val first = round.order.take(EnsQuorum.K)
+        // Reading before the block hash is settled; see [AnchorRound].
+        val calls = first.associateWith { startCall(it, target, callData, contract, round.tag) }
+        val hash = when (val vote = round.vote.await()) {
+            is EnsQuorum.HashVote.Agreed -> vote.hash
+            is EnsQuorum.HashVote.Disagreed -> {
+                calls.values.forEach { it.cancel() }
+                val groups = vote.byHash.map { (h, rpcs) -> EnsResult.Conflict.Group(h, rpcs.map(::hostOf)) }
+                return Verdict(
+                    EnsResult.Conflict(name, EnsResult.Conflict.Subject.BLOCK, groups, round.number),
+                    verified = false,
+                )
+            }
+            EnsQuorum.HashVote.Insufficient -> {
+                calls.values.forEach { it.cancel() }
+                return null
+            }
+        }
+        collectLegs(calls, round, hash, legs, outcomes)
+        var vote = EnsQuorum.waveVote(legs)
+        val rest = round.order.drop(EnsQuorum.K)
+        if (EnsQuorum.worthWidening(vote, asked = first.size) && rest.isNotEmpty()) {
+            Log.i(TAG, "[$name] widening the wave to ${rest.map(::hostOf)} after $vote")
+            val more = rest.associateWith { startCall(it, target, callData, contract, round.tag) }
+            collectLegs(more, round, hash, legs, outcomes)
+            vote = EnsQuorum.waveVote(legs)
+        }
+        Log.i(TAG, "[$name] block #${round.number}: $vote")
+        return when (vote) {
+            is EnsQuorum.WaveVote.Agreed -> Verdict(
+                decode(name, outcomes.getValue(vote.agreed.first()), contract).withTrust(
+                    EnsTrust(
+                        verified = true,
+                        agreed = vote.agreed.map(::hostOf),
+                        dissented = vote.dissented.map(::hostOf),
+                        block = round.number,
+                    ),
+                ),
+                verified = true,
+            )
+            is EnsQuorum.WaveVote.Unverified -> Verdict(
+                decode(name, outcomes.getValue(vote.hosts.first()), contract).withTrust(
+                    EnsTrust(verified = false, agreed = vote.hosts.map(::hostOf), block = round.number),
+                ),
+                verified = false,
+            )
+            is EnsQuorum.WaveVote.Conflict -> {
+                val groups = vote.byKey.values.map { rpcs ->
+                    EnsResult.Conflict.Group(
+                        describe(decode(name, outcomes.getValue(rpcs.first()), contract)),
+                        rpcs.map(::hostOf),
+                    )
+                }
+                Verdict(
+                    EnsResult.Conflict(name, EnsResult.Conflict.Subject.RECORD, groups, round.number),
+                    verified = false,
+                )
+            }
+            is EnsQuorum.WaveVote.AllFailed -> Verdict(
+                EnsResult.Error(
+                    name = name,
+                    reason = if (vote.ccip) "CCIP_GATEWAY_FAILED" else "PROVIDER_ERROR",
+                    error = "no RPC server answered",
+                    retryable = true,
+                ),
+                verified = false,
+            )
+        }
+    }
+
+    /** A gateway failure inside one server's read: not that server's fault. */
+    private class CcipFailure(cause: Throwable) : Exception(cause.message, cause)
+
+    /** One server's read of the record at [block], CCIP-Read followed. */
+    private fun startCall(
+        rpc: String,
+        target: String,
+        callData: ByteArray,
+        contract: String?,
+        block: String,
+    ): Deferred<CallOutcome> = io.async {
+        val call = ethCall(rpc, target, callData, block, QUORUM_TIMEOUT_MS)
+        // CCIP-Read is a Universal Resolver affair; a NameNFT registry
+        // is called directly and never defers offchain.
+        if (contract == null && call.revertData != null && isOffchainLookup(call.revertData)) {
+            try {
+                followOffchainLookup(rpc, call.revertData, block, QUORUM_TIMEOUT_MS)
+            } catch (e: Exception) {
+                throw CcipFailure(e)
+            }
+        } else {
+            call
+        }
+    }
+
+    /**
+     * Wait for [calls] (adding each to [legs] / [outcomes] as it lands)
+     * until [EnsQuorum.M] agree or all are in. A read only counts if its
+     * server also put block [AnchorRound.number] at [hash]: a server on
+     * another chain, or one that won't say, has no vote.
+     */
+    private suspend fun collectLegs(
+        calls: Map<String, Deferred<CallOutcome>>,
+        round: AnchorRound,
+        hash: String,
+        legs: LinkedHashMap<String, EnsQuorum.Leg>,
+        outcomes: MutableMap<String, CallOutcome>,
+    ) {
+        val judged = gather<EnsQuorum.Leg>(
+            tasks = calls.mapValues { (rpc, call) -> suspend { judge(rpc, call, round, hash, outcomes) } },
+            timeoutMs = LEG_TIMEOUT_MS,
+            done = { got -> EnsQuorum.waveDecided(legs + got.answered()) },
+        )
+        for ((rpc, leg) in judged) legs[rpc] = leg ?: EnsQuorum.Leg.Failed()
+        calls.values.forEach { if (it.isActive) it.cancel() }
+    }
+
+    /** One server's read as its vote — see [collectLegs]. */
+    private suspend fun judge(
+        rpc: String,
+        call: Deferred<CallOutcome>,
+        round: AnchorRound,
+        hash: String,
+        outcomes: MutableMap<String, CallOutcome>,
+    ): EnsQuorum.Leg {
+        // A CCIP failure only means "the gateway, not the server" once the
+        // server has shown it's on the agreed block: one that isn't has no
+        // vote at all, and mustn't count toward a gateway-only failure.
+        val outcome = try {
+            call.await()
+        } catch (e: CcipFailure) {
+            Log.w(TAG, "${hostOf(rpc)}: CCIP-Read failed: ${e.message}")
+            null
+        }
+        val theirs = (round.hashes[rpc] ?: io.async { blockHash(rpc, round.tag) }).await()
+        if (!theirs.equals(hash, ignoreCase = true)) {
+            Log.w(TAG, "${hostOf(rpc)}: block #${round.number} is $theirs, not $hash")
+            return EnsQuorum.Leg.Failed()
+        }
+        if (outcome == null) return EnsQuorum.Leg.Failed(ccip = true)
+        val key = keyOf(outcome) ?: return EnsQuorum.Leg.Failed()
+        synchronized(outcomes) { outcomes[rpc] = outcome }
+        return EnsQuorum.Leg.Answer(key)
+    }
+
+    /** The exact bytes a read returned, as its vote; `null` = no answer. */
+    private fun keyOf(outcome: CallOutcome): String? {
+        outcome.revertData?.let { return "revert:" + it.lowercase() }
+        val data = outcome.data?.lowercase()
+        return data?.takeIf { it.length > 2 && it.startsWith("0x") }
+    }
+
+    /** What an answer says, for a warning listing the disagreeing servers. */
+    private fun describe(result: EnsResult): String = when (result) {
+        is EnsResult.Ok -> result.uri
+        is EnsResult.NotFound -> "no content (${result.reason})"
+        is EnsResult.Unsupported -> "unsupported contenthash 0x${result.rawContentHash}"
+        is EnsResult.Error -> result.error
+        is EnsResult.Conflict -> "conflict"
+    }
+
+    /**
+     * Run [tasks] concurrently and collect what each returns in arrival
+     * order (`null` for a failure or one past [timeoutMs]), until they're
+     * all in or [done] says the rest don't matter. Once [graceFrom] holds,
+     * the rest get [graceMs] more at most.
+     */
+    private suspend fun <T : Any> gather(
+        tasks: Map<String, suspend () -> T>,
+        timeoutMs: Long,
+        graceMs: Long = 0,
+        graceFrom: (Map<String, T?>) -> Boolean = { false },
+        done: (Map<String, T?>) -> Boolean = { false },
+    ): LinkedHashMap<String, T?> = coroutineScope {
+        val arrivals = Channel<Pair<String, T?>>(Channel.UNLIMITED)
+        val waiters = tasks.map { (key, task) ->
+            launch {
+                val value = try {
+                    withTimeoutOrNull(timeoutMs) { task() }
+                } catch (t: Throwable) {
+                    // Ours cancelled: unwind. A task's own failure
+                    // (including a request cancelled under it): no answer.
+                    ensureActive()
+                    if (t !is CancellationException) Log.w(TAG, "$key: ${t.message}")
+                    null
+                }
+                arrivals.send(key to value)
+            }
+        }
+        val got = LinkedHashMap<String, T?>()
+        var graceEnd = Long.MAX_VALUE
+        while (got.size < tasks.size && !done(got)) {
+            val next = if (graceEnd == Long.MAX_VALUE) {
+                arrivals.receive()
+            } else {
+                withTimeoutOrNull((graceEnd - System.currentTimeMillis()).coerceAtLeast(1)) {
+                    arrivals.receive()
+                } ?: break
+            }
+            got[next.first] = next.second
+            if (graceEnd == Long.MAX_VALUE && graceFrom(got)) {
+                graceEnd = System.currentTimeMillis() + graceMs
+            }
+        }
+        waiters.forEach { it.cancel() }
+        got
+    }
+
+    private fun <T : Any> Map<String, T?>.answered(): Map<String, T> =
+        entries.mapNotNull { (k, v) -> v?.let { k to it } }.toMap(LinkedHashMap())
+
+    // ---- One server's word ----
+
+    /**
+     * The pre-#96 resolution: ask one server at `latest`, rotating to the
+     * next on transport failure. Used when a quorum can't be formed; its
+     * answers are unverified ([EnsTrust.verified] false).
+     */
+    private suspend fun resolveSingleSource(
+        normalized: String,
+        target: String,
+        callData: ByteArray,
+        contract: String?,
+    ): Verdict {
         var lastError: EnsResult.Error? = null
         val total = rpcEndpoints.size
-        // Try each endpoint up to MAX_RETRIES times, starting at the one
-        // that last worked. Rotates on failure so persistent provider
-        // outages fall through to the next one quickly.
+        // Try each endpoint once, starting at the one that last worked.
+        // Rotates on failure so persistent provider outages fall through
+        // to the next one quickly.
         for (attempt in 0 until total) {
             val idx = (preferredRpcIndex + attempt) % total
             val rpc = rpcEndpoints[idx]
@@ -138,11 +513,14 @@ class EnsResolver internal constructor(
                 val err = followed.exceptionOrNull()
                 if (err != null) {
                     Log.w(TAG, "[$normalized] CCIP-Read failed: ${err.message}")
-                    return EnsResult.Error(
-                        name = normalized,
-                        reason = "CCIP_GATEWAY_FAILED",
-                        error = err.message.orEmpty(),
-                        retryable = true,
+                    return Verdict(
+                        EnsResult.Error(
+                            name = normalized,
+                            reason = "CCIP_GATEWAY_FAILED",
+                            error = err.message.orEmpty(),
+                            retryable = true,
+                        ),
+                        verified = false,
                     )
                 }
                 call = followed.getOrThrow()
@@ -151,7 +529,8 @@ class EnsResolver internal constructor(
                 val mapped = if (contract == null) mapRevert(normalized, call.revertData) else null
                 if (mapped != null) {
                     preferredRpcIndex = idx
-                    return cacheAndReturn(normalized, mapped)
+                    val trust = EnsTrust(verified = false, agreed = listOf(hostOf(rpc)))
+                    return Verdict(mapped.withTrust(trust), verified = false)
                 }
                 lastError = EnsResult.Error(
                     name = normalized,
@@ -161,8 +540,7 @@ class EnsResolver internal constructor(
                 break
             }
 
-            val raw = call.data
-            if (raw == null) {
+            if (call.data == null) {
                 lastError = EnsResult.Error(
                     name = normalized,
                     reason = "RESOLUTION_ERROR",
@@ -172,28 +550,42 @@ class EnsResolver internal constructor(
             }
 
             preferredRpcIndex = idx
-            val decoded = if (contract != null) {
-                // The registry's own `contenthash(bytes32)` return: the
-                // ABI `bytes` the UR would have wrapped in its tuple.
-                decodeContenthashBytes(normalized, raw)
-            } else {
-                decodeContenthashResponse(normalized, raw)
-            }
-            return cacheAndReturn(normalized, decoded)
+            val trust = EnsTrust(verified = false, agreed = listOf(hostOf(rpc)))
+            return Verdict(decode(normalized, call, contract).withTrust(trust), verified = false)
         }
 
-        return lastError ?: EnsResult.Error(
-            name = normalized,
-            reason = "PROVIDER_ERROR",
-            error = "all RPC providers failed",
-            retryable = true,
+        return Verdict(
+            lastError ?: EnsResult.Error(
+                name = normalized,
+                reason = "PROVIDER_ERROR",
+                error = "all RPC providers failed",
+                retryable = true,
+            ),
+            verified = false,
         )
     }
 
-    private fun cacheAndReturn(name: String, result: EnsResult): EnsResult {
-        cache[name] = Cached(result, System.currentTimeMillis())
-        Log.i(TAG, "[$name] → $result")
-        return result
+    /** What a read of the record says, decoded. */
+    private fun decode(name: String, call: CallOutcome, contract: String?): EnsResult {
+        call.revertData?.let { revert ->
+            return (if (contract == null) mapRevert(name, revert) else null)
+                ?: EnsResult.Error(name = name, reason = "RESOLUTION_ERROR", error = "revert: $revert")
+        }
+        val raw = call.data.orEmpty()
+        return if (contract != null) {
+            // The registry's own `contenthash(bytes32)` return: the
+            // ABI `bytes` the UR would have wrapped in its tuple.
+            decodeContenthashBytes(name, raw)
+        } else {
+            decodeContenthashResponse(name, raw)
+        }
+    }
+
+    private fun EnsResult.withTrust(trust: EnsTrust): EnsResult = when (this) {
+        is EnsResult.Ok -> copy(trust = trust)
+        is EnsResult.NotFound -> copy(trust = trust)
+        is EnsResult.Unsupported -> copy(trust = trust)
+        is EnsResult.Conflict, is EnsResult.Error -> this
     }
 
     // ---- ABI / name encoding ----
@@ -227,7 +619,12 @@ class EnsResolver internal constructor(
      * Throws on gateway failure, a sender other than the Universal
      * Resolver, malformed revert data, or too many rounds.
      */
-    private fun followOffchainLookup(rpc: String, firstRevert: String): CallOutcome {
+    private fun followOffchainLookup(
+        rpc: String,
+        firstRevert: String,
+        block: String = "latest",
+        timeoutMs: Int = RPC_TIMEOUT_MS,
+    ): CallOutcome {
         var revert = firstRevert
         repeat(MAX_CCIP_ROUNDS) {
             val lookup = decodeOffchainLookup(revert)
@@ -241,7 +638,9 @@ class EnsResolver internal constructor(
             val response = ccipFetch(lookup.sender, lookup.urls, lookup.callData)
                 ?: throw IllegalStateException("CCIP gateways unavailable or returned invalid data")
             val callbackData = lookup.callback + abiEncodeTwoBytes(response, lookup.extraData)
-            val outcome = ethCall(rpc, lookup.sender, callbackData)
+            // At the same block as the call that deferred: the callback
+            // checks the gateway's answer against that state.
+            val outcome = ethCall(rpc, lookup.sender, callbackData, block, timeoutMs)
             val next = outcome.revertData
             if (next == null || !isOffchainLookup(next)) return outcome
             revert = next
@@ -321,7 +720,7 @@ class EnsResolver internal constructor(
             ?: return EnsResult.Error(name, "RESOLUTION_ERROR", "malformed UR outer response")
 
         if (outer.isEmpty()) {
-            return EnsResult.NotFound(name, "EMPTY_CONTENTHASH")
+            return EnsResult.NotFound(name, "EMPTY_CONTENTHASH", EnsTrust.UNCHECKED)
         }
 
         // Inner: the bytes returned by contenthash(bytes32) — themselves
@@ -341,7 +740,7 @@ class EnsResolver internal constructor(
                 name, "UNSUPPORTED_CONTENTHASH_FORMAT", "inner decode failed"
             )
         if (inner.isEmpty()) {
-            return EnsResult.NotFound(name, "EMPTY_CONTENTHASH")
+            return EnsResult.NotFound(name, "EMPTY_CONTENTHASH", EnsTrust.UNCHECKED)
         }
 
         return parseContentHash(name, inner)
@@ -349,6 +748,7 @@ class EnsResolver internal constructor(
                 name = name,
                 codec = inner.take(8).toByteArray().toHex(),
                 rawContentHash = inner.toHex(),
+                trust = EnsTrust.UNCHECKED,
             )
     }
 
@@ -364,6 +764,7 @@ class EnsResolver internal constructor(
                 protocol = "bzz",
                 uri = "bzz://$hash",
                 decoded = hash,
+                trust = EnsTrust.UNCHECKED,
             )
         }
 
@@ -384,6 +785,7 @@ class EnsResolver internal constructor(
                 protocol = "ipfs",
                 uri = "ipfs://$cid",
                 decoded = cid,
+                trust = EnsTrust.UNCHECKED,
             )
         }
 
@@ -399,6 +801,7 @@ class EnsResolver internal constructor(
                 protocol = "ipns",
                 uri = "ipns://$cid",
                 decoded = cid,
+                trust = EnsTrust.UNCHECKED,
             )
         }
 
@@ -433,7 +836,7 @@ class EnsResolver internal constructor(
         val selector = if (lower.length >= 10) lower.substring(0, 10) else return null
         return when (selector) {
             // ResolverNotFound(bytes), ResolverNotContract(bytes,address)
-            "0x77209fe8", "0x1e9535f2" -> EnsResult.NotFound(name, "NO_RESOLVER")
+            "0x77209fe8", "0x1e9535f2" -> EnsResult.NotFound(name, "NO_RESOLVER", EnsTrust.UNCHECKED)
             else -> null
         }
     }
@@ -442,7 +845,13 @@ class EnsResolver internal constructor(
 
     private data class CallOutcome(val data: String?, val revertData: String?)
 
-    private fun ethCall(rpc: String, to: String, callData: ByteArray): CallOutcome {
+    private fun ethCall(
+        rpc: String,
+        to: String,
+        callData: ByteArray,
+        block: String = "latest",
+        timeoutMs: Int = RPC_TIMEOUT_MS,
+    ): CallOutcome {
         val body = JSONObject().apply {
             put("jsonrpc", "2.0")
             put("id", 1)
@@ -456,7 +865,7 @@ class EnsResolver internal constructor(
                             put("data", "0x" + callData.toHex())
                         },
                     )
-                    put("latest")
+                    put(block)
                 },
             )
         }.toString()
@@ -466,7 +875,7 @@ class EnsResolver internal constructor(
             url = rpc,
             headers = mapOf("content-type" to "application/json", "accept" to "application/json"),
             body = body,
-            timeoutMs = RPC_TIMEOUT_MS,
+            timeoutMs = timeoutMs,
             maxBytes = RPC_MAX_RESPONSE_BYTES,
             followRedirects = true,
         )
@@ -488,9 +897,77 @@ class EnsResolver internal constructor(
         return CallOutcome(data = result, revertData = null)
     }
 
+    /** The server's head block number (`eth_blockNumber`). */
+    private fun blockNumber(rpc: String): Long {
+        val result = rpcRequest(rpc, "eth_blockNumber", org.json.JSONArray())
+        val hex = (result as? String)?.removePrefix("0x")
+            ?: throw RuntimeException("eth_blockNumber: no result")
+        return hex.toLong(16)
+    }
+
+    /** The server's hash for block [tag] (`eth_getBlockByNumber`). */
+    private fun blockHash(rpc: String, tag: String): String {
+        val result = rpcRequest(rpc, "eth_getBlockByNumber", org.json.JSONArray().put(tag).put(false))
+        val hash = (result as? JSONObject)?.optString("hash", "").orEmpty()
+        if (!isHexBytes(hash) || hash.length != 66) throw RuntimeException("eth_getBlockByNumber($tag): no hash")
+        return hash.lowercase()
+    }
+
+    private fun rpcRequest(rpc: String, method: String, params: org.json.JSONArray): Any? {
+        val body = JSONObject()
+            .put("jsonrpc", "2.0")
+            .put("id", 1)
+            .put("method", method)
+            .put("params", params)
+            .toString()
+        val reply = http.request(
+            method = "POST",
+            url = rpc,
+            headers = mapOf("content-type" to "application/json", "accept" to "application/json"),
+            body = body,
+            timeoutMs = QUORUM_TIMEOUT_MS,
+            maxBytes = RPC_MAX_RESPONSE_BYTES,
+            followRedirects = true,
+        )
+        if (reply.code !in 200..299) {
+            throw RuntimeException("HTTP ${reply.code}: ${reply.body.take(200)}")
+        }
+        val json = JSONObject(reply.body)
+        json.optJSONObject("error")?.let { err ->
+            throw RuntimeException("RPC error: ${err.optString("message", "unknown")}")
+        }
+        return json.opt("result")
+    }
+
     companion object {
         private const val TAG = "EnsResolver"
         private const val CACHE_TTL_MS = 15L * 60 * 1000
+
+        // #96: one server's word is reused briefly, a disagreement for
+        // a moment (iOS's and desktop's TTLs).
+        private const val UNVERIFIED_TTL_MS = 60L * 1000
+        private const val CONFLICT_TTL_MS = 10L * 1000
+
+        // How long an anchor block is reused. Desktop and iOS default
+        // to 30 s; longer here because settling a new one is the only
+        // extra round trip the cross-check adds to a lookup, and an
+        // anchor two minutes older (~18 blocks behind head, far inside
+        // what public servers keep state for) delays nothing that the
+        // 15-minute answer cache doesn't already.
+        private const val ANCHOR_TTL_MS = 2L * 60 * 1000
+
+        // Per-request bound on the quorum path (desktop's and iOS's
+        // `quorum.timeoutMs`): a wave doesn't wait 15 s on one server
+        // when others can answer.
+        private const val QUORUM_TIMEOUT_MS = 5_000
+
+        // A read's whole budget, CCIP-Read's gateway hops included.
+        private const val LEG_TIMEOUT_MS = 20_000L
+
+        // Once enough heads are in for a median, how much longer the
+        // rest get: a slow server shouldn't cost every cold lookup its
+        // timeout, but one a moment behind still gets its say.
+        private const val HEAD_GRACE_MS = 50L
 
         private const val RPC_TIMEOUT_MS = 15_000
         private const val RPC_MAX_RESPONSE_BYTES = 1L * 1024 * 1024
@@ -543,6 +1020,10 @@ class EnsResolver internal constructor(
 
         // bytes4(keccak256("contenthash(bytes32)"))
         private val CONTENTHASH_SELECTOR = "bc1c58d1".hexToBytes()
+
+        /** The server as a warning names it: host, and port if explicit. */
+        private fun hostOf(rpc: String): String =
+            runCatching { URL(rpc).authority }.getOrNull()?.takeIf { it.isNotEmpty() } ?: rpc
 
         val DEFAULT_RPC_ENDPOINTS: List<String> = listOf(
             "https://ethereum.publicnode.com",
