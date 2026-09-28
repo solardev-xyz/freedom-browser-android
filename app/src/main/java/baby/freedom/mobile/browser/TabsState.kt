@@ -137,6 +137,20 @@ class TabsState(
     var printPage: ((BrowserState) -> Unit)? = null
 
     /**
+     * Hook installed by the [BrowserWebViewHost]: drop the in-memory
+     * resource cache of the renderer behind the given tab's WebView
+     * (`WebView.clearCache(false)`; the disk cache stays). The page
+     * menu's ad-blocking switch calls it before the reload that turns
+     * blocking back on for a site: Blink reuses an image it already
+     * holds in memory without a request, so `shouldInterceptRequest`
+     * never sees it and an ad fetched while the site was allowed would
+     * otherwise stay on the page. `null` before the host has composed,
+     * or after it disposes.
+     */
+    @Volatile
+    var dropMemoryCache: ((BrowserState) -> Unit)? = null
+
+    /**
      * Hook installed by the [BrowserWebViewHost]: mute or unmute the
      * given tab's WebView (#91, `WebViewCompat.setAudioMuted`) — only the
      * host knows which WebView backs a tab. `null` before the host has

@@ -958,6 +958,9 @@ fun BrowserWebViewHost(
                 printWebView(wv, printJobName(tab.title, tab.addressBarText, tab.url))
             }
         }
+        tabs.dropMemoryCache = { tab ->
+            webViews[tab.id]?.let { wv -> runCatching { wv.clearCache(false) } }
+        }
         tabs.clearWebViewData = {
             // Globally-scoped stores: cookies and DOM storage / IndexedDB /
             // WebSQL are shared across every WebView in the process, so
@@ -995,6 +998,7 @@ fun BrowserWebViewHost(
             tabs.saveWebViewState = null
             tabs.find = null
             tabs.printPage = null
+            tabs.dropMemoryCache = null
             UnverifiedOrigins.onSweep = null
             tabs.setAudioMuted = null
         }

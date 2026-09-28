@@ -27,6 +27,16 @@ class AdblockSiteStateTest {
     }
 
     @Test
+    fun `turning blocking back on drops the renderer's memory cache, allowing doesn't`() {
+        // Allowlisted → tap blocks again: an ad image fetched while the
+        // site was allowed is still in Blink's memory cache and would be
+        // reused on the reload without reaching shouldInterceptRequest.
+        assertTrue(dropsMemoryCache(state("https://news.example/", allowlisted = true)))
+        assertFalse(dropsMemoryCache(state("https://news.example/")))
+        AdblockSiteState.entries.filter { !it.toggleable }.forEach { assertFalse(dropsMemoryCache(it)) }
+    }
+
+    @Test
     fun `with every category off the switch is off and can't be tapped`() {
         val s = state("https://news.example/", engine = null)
         assertEquals(AdblockSiteState.OFF, s)

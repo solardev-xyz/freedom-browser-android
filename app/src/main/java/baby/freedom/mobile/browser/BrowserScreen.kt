@@ -1684,6 +1684,7 @@ fun BrowserScreen(
                         val current = Adblock.siteState(state.url, state.private) ?: return@BottomToolbar
                         if (!current.toggleable) return@BottomToolbar
                         Adblock.setAllowlisted(site, allowed = current.checked, private = state.private)
+                        if (dropsMemoryCache(current)) tabs.dropMemoryCache?.invoke(state)
                         // Already-loaded ads (or already-blocked content)
                         // only change with the next load of the page.
                         val url = state.url.ifBlank { state.addressBarText }
