@@ -49,7 +49,13 @@ class EnsLightClientResolveTest {
             if (probe) {
                 assertTrue(to == EnsResolver.ENS_REGISTRY && data == EnsResolver.PROBE_CALL_DATA)
                 probes += timeoutMs
-                val task = FutureTask { answer(to, data) }
+                val task = FutureTask {
+                    try {
+                        answer(to, data)
+                    } finally {
+                        released?.invoke()
+                    }
+                }
                 Thread(task).apply { isDaemon = true }.start()
                 return try {
                     task.get(timeoutMs, TimeUnit.MILLISECONDS)
@@ -787,6 +793,7 @@ class EnsLightClientResolveTest {
      * cancel it — and only then is `released` called.
      */
     private class SlotClient(private val ok: EnsLightClient.Call, private val engineMs: (String) -> Long) : EnsLightClient {
+        @Volatile var engineMsOverride: Long? = null
         val lookupsHeld = java.util.concurrent.atomic.AtomicInteger()
         val probesHeld = java.util.concurrent.atomic.AtomicInteger()
         val busy = java.util.concurrent.atomic.AtomicInteger()
@@ -811,7 +818,7 @@ class EnsLightClientResolveTest {
             if (!probe) started += data
             val task = FutureTask {
                 try {
-                    Thread.sleep(engineMs(data))
+                    Thread.sleep(engineMsOverride ?: engineMs(data))
                     ok
                 } finally {
                     slots.decrementAndGet()
@@ -961,6 +968,110 @@ class EnsLightClientResolveTest {
         assertEquals("evil.eth", EnsResolver.siteOf("a1.b.evil.eth"))
         assertEquals("evil.eth", EnsResolver.siteOf("evil.eth"))
         assertEquals("alice.wei", EnsResolver.siteOf("x.alice.wei"))
+        // R1-F4: a subname registrar's names are each their own registration.
+        assertEquals("alice.base.eth", EnsResolver.siteOf("alice.base.eth"))
+        assertEquals("alice.base.eth", EnsResolver.siteOf("x.alice.base.eth"))
+        assertEquals("bob.base.eth", EnsResolver.siteOf("bob.base.eth"))
+        assertEquals("base.eth", EnsResolver.siteOf("base.eth"))
+        assertEquals("hayden.uni.eth", EnsResolver.siteOf("hayden.uni.eth"))
+        assertEquals("alice.cb.id", EnsResolver.siteOf("a.alice.cb.id"))
+        // A DNS name: its registrable domain, not its public suffix.
+        assertEquals("example.co.uk", EnsResolver.siteOf("shop.example.co.uk"))
+    }
+
+    /** Whether [data] asks about a name with the label [label] (its DNS-encoded form). */
+    private fun hasLabel(data: String, label: String) =
+        data.startsWith("0x9061b923") && ("%02x".format(label.length) + label.toByteArray().toHex()) in data
+
+    @Test
+    fun `a stuck engine stays backed off while the probe that failed is still in it`() {
+        // R1-F1: the engine sits on every call for 2 s (standing in for its
+        // ~90 s budget); the lookup deadline and the probe get 200 ms, the
+        // back-off 300 ms. Once the back-off runs out the failed probe is
+        // still in the engine: a lookup then must not pay the deadline
+        // again only to have its probe answered `busy` by the old probe's slot.
+        val client = SlotClient(lightClientOk) { 2_000 }
+        val http = OneServer { rpcResult(wrapAsOuterInner(ipfsContenthash)) }
+        val r = resolver(client, http, deadlineMs = 200, backoffMs = 300)
+
+        val paid = mutableListOf<Long>()
+        val until = System.currentTimeMillis() + 1_600
+        var i = 0
+        while (System.currentTimeMillis() < until) {
+            val started = System.currentTimeMillis()
+            val result = runBlocking { r.resolveContenthash("name${i++}.eth") }
+            require(result is EnsResult.Ok) { "got $result" }
+            assertFalse(result.trust.lightClient)
+            paid += System.currentTimeMillis() - started
+            Thread.sleep(50)
+        }
+        // Only the first lookup waited on the engine; every later one,
+        // well past the 300 ms back-off, went straight to RPC.
+        assertEquals("lookups that reached the engine (times: $paid)", 1, client.started.size)
+        assertTrue("lookups after the first: $paid", paid.drop(2).all { it < 150 })
+        assertTrue(i > 5)
+        // No probe was sent into the slot the stuck one holds.
+        assertTrue(client.probeAnswers.none { it is EnsLightClient.Call.Unavailable && it.busy })
+        assertEquals(1, client.probeAnswers.size)
+
+        // Once the engine lets go of it, the light client is tried again.
+        client.awaitIdle(3_000)
+        client.engineMsOverride = 20
+        val after = runBlocking { r.resolveContenthash("nick.eth") }
+        require(after is EnsResult.Ok) { "got $after" }
+        assertTrue(after.trust.lightClient)
+    }
+
+    @Test
+    fun `with no RPC endpoints a site at its share is still asked`() {
+        // R1-F2: two of evil.eth's names sit in the engine; with no RPC
+        // server to fall back to, a third is asked anyway, not refused.
+        val client = SlotClient(lightClientOk) { data -> if (hasLabel(data, "a1") || hasLabel(data, "a2")) 2_000 else 20 }
+        val http = OneServer { error("no RPC server should be asked") }
+        val r = resolver(client, http, settings = { EnsResolver.Settings(emptyList()) }, deadlineMs = 200)
+
+        val held = listOf("a1.evil.eth", "a2.evil.eth").map { n ->
+            Thread { runBlocking { r.resolveContenthash(n) } }.apply { start() }
+        }
+        held.forEach { it.join(2_000) }
+        assertEquals(EnsResolver.LIGHT_CLIENT_CALLS_PER_SITE, r.lightClientCallsHeld("evil.eth"))
+
+        val third = runBlocking { r.resolveContenthash("fast.evil.eth") }
+        require(third is EnsResult.Ok) { "got $third" }
+        assertTrue(third.trust.lightClient)
+        client.awaitIdle(5_000)
+    }
+
+    @Test
+    fun `slow names from several registrations share a few engine slots once they've outlived a lookup`() {
+        // R1-F3: a page loads two slow names from each of four
+        // registrations. The first wave can fill the engine (fresh sites
+        // look like any other); once they've outlived their lookups, every
+        // one of those sites is slow, and the next wave gets only the slow
+        // sites' shared slots — the user's own names keep the rest.
+        val client = SlotClient(lightClientOk) { data -> if (hasLabel(data, "a") || hasLabel(data, "b")) 1_000 else 20 }
+        val http = OneServer { rpcResult(wrapAsOuterInner(ipfsContenthash)) }
+        val r = resolver(client, http, deadlineMs = 200)
+        val names = (1..4).flatMap { listOf("a.x$it.eth", "b.x$it.eth") }
+        fun wave() = names.map { n -> Thread { runBlocking { r.resolveContenthash(n) } }.apply { start() } }
+
+        wave().forEach { it.join(3_000) }
+        (1..4).forEach { assertTrue("x$it.eth", r.lightClientSlowSite("x$it.eth")) }
+        client.awaitIdle(3_000)
+
+        val before = client.started.size
+        val second = wave()
+        second.forEach { it.join(3_000) }
+        assertTrue(
+            "second wave reached the engine ${client.started.size - before} times",
+            client.started.size - before <= EnsResolver.LIGHT_CLIENT_SLOW_CALLS,
+        )
+        val during = runBlocking { r.resolveContenthash("vitalik.eth") }
+        require(during is EnsResult.Ok) { "got $during" }
+        assertTrue(during.trust.lightClient)
+        // A name answered in time never makes its site slow.
+        assertFalse(r.lightClientSlowSite("vitalik.eth"))
+        client.awaitIdle(3_000)
     }
 
     @Test
