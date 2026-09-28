@@ -174,14 +174,16 @@ data class EnsRpcConfig(
          * are the same endpoint — the request the app would actually
          * send, not the spelling: scheme and host are case-insensitive
          * and a host's trailing `.` is dropped; a scheme's default port
-         * (`https://eth.drpc.org:443`) is no port; `.`/`..` path
-         * segments are resolved; a percent-escape of an unreserved
-         * character (`/%65th`) is that character and other escapes
-         * compare case-insensitively; a trailing `/` on the path, and
-         * any `#fragment` (never sent), make no difference.
+         * (`https://eth.drpc.org:443`) is no port; a percent-escape of
+         * an unreserved character (`/%65th`) is that character and other
+         * escapes compare case-insensitively; `.`/`..` path segments are
+         * then resolved — escaped ones (`/%2e%2e/`) too, since the HTTP
+         * client sends those resolved as well; a trailing `/` on the
+         * path, an empty `?` query, and any `#fragment` (never sent),
+         * make no difference.
          */
         fun endpointKey(url: String): String {
-            val uri = runCatching { URI(url.trim()).normalize() }.getOrNull()
+            val uri = runCatching { URI(url.trim()) }.getOrNull()
             val scheme = uri?.scheme?.lowercase()
             val host = uri?.host?.lowercase()?.trimEnd('.')
             if (uri == null || scheme == null || host == null) return url.trim().trimEnd('/')
@@ -191,9 +193,32 @@ data class EnsRpcConfig(
                 else -> -1
             }
             val port = if (uri.port >= 0 && uri.port != defaultPort) ":${uri.port}" else ""
-            val path = canonicalEscapes(uri.rawPath.orEmpty()).trimEnd('/')
-            val query = uri.rawQuery?.let { "?" + canonicalEscapes(it) }.orEmpty()
+            // Decode first, then resolve: `%2e%2e` is only a `..` segment once decoded.
+            val path = removeDotSegments(canonicalEscapes(uri.rawPath.orEmpty())).trimEnd('/')
+            val query = uri.rawQuery?.takeIf { it.isNotEmpty() }?.let { "?" + canonicalEscapes(it) }.orEmpty()
             return "$scheme://$host$port$path$query"
+        }
+
+        /**
+         * [path] with its `.` and `..` segments resolved (RFC 3986
+         * §5.2.4); a `..` above the root stays at the root.
+         */
+        private fun removeDotSegments(path: String): String {
+            if (!path.startsWith('/')) return path
+            val out = ArrayList<String>()
+            val segments = path.substring(1).split('/')
+            for ((i, seg) in segments.withIndex()) {
+                val last = i == segments.lastIndex
+                when (seg) {
+                    "." -> if (last) out.add("")
+                    ".." -> {
+                        if (out.isNotEmpty()) out.removeAt(out.lastIndex)
+                        if (last) out.add("")
+                    }
+                    else -> out.add(seg)
+                }
+            }
+            return "/" + out.joinToString("/")
         }
 
         /**

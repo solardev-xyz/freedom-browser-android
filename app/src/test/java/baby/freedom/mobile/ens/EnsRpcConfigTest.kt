@@ -115,11 +115,34 @@ class EnsRpcConfigTest {
         assertEquals(key("https://1rpc.io/eth"), key("https://1rpc.io/./x/../eth"))
         assertEquals(key("https://a.example/p?k=v"), key("https://a.example/p?%6B=%76"))
         assertEquals(key("https://a.example/a%2fb"), key("https://a.example/a%2Fb"))
+        // Escaped dot segments are dot segments once decoded.
+        assertEquals(key("https://1rpc.io/eth"), key("https://1rpc.io/x/%2e%2e/eth"))
+        assertEquals(key("https://1rpc.io/eth"), key("https://1rpc.io/x/%2E%2E/eth"))
+        assertEquals(key("https://1rpc.io/eth"), key("https://1rpc.io/x/.%2e/eth"))
+        assertEquals(key("https://1rpc.io/eth"), key("https://1rpc.io/%2e/eth"))
+        assertEquals(key("https://1rpc.io/eth"), key("https://1rpc.io/%2e%2e/%2e%2e/eth"))
+        assertEquals(key("https://1rpc.io/eth"), key("https://1rpc.io/eth/%2e"))
+        assertEquals(key("https://1rpc.io"), key("https://1rpc.io/eth/%2e%2e"))
+        // An empty query sends nothing more.
+        assertEquals(key("https://eth.drpc.org"), key("https://eth.drpc.org/?"))
+        assertEquals(key("https://eth.drpc.org"), key("https://eth.drpc.org?#x"))
         // Still different endpoints:
         assertFalse(key("https://eth.drpc.org") == key("https://eth.drpc.org:8443"))
         assertFalse(key("http://localhost/rpc") == key("http://localhost:443/rpc"))
         assertFalse(key("https://a.example/a%2Fb") == key("https://a.example/a/b"))
         assertFalse(key("https://1rpc.io/eth") == key("https://1rpc.io/ETH"))
+        assertFalse(key("https://1rpc.io/eth") == key("https://1rpc.io/x/%2e%2eeth"))
+        assertFalse(key("https://1rpc.io/eth") == key("https://1rpc.io/x%2f..%2feth"))
+        assertFalse(key("https://eth.drpc.org") == key("https://eth.drpc.org/?a"))
+    }
+
+    @Test
+    fun `an escaped dot segment doesn't make a public endpoint yours`() {
+        val c = EnsRpcConfig(customEndpoints = listOf("https://1rpc.io/x/%2e%2e/eth", "https://eth.drpc.org/?"))
+        assertTrue(c.isPublicEndpoint("https://1rpc.io/x/%2e%2e/eth"))
+        assertTrue(c.isPublicEndpoint("https://eth.drpc.org/?"))
+        assertEquals(1, c.sources.count { it.url.contains("1rpc.io") })
+        assertEquals(1, c.sources.count { it.url.contains("eth.drpc.org") })
     }
 
     @Test
