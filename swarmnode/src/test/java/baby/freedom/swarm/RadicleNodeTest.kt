@@ -89,8 +89,16 @@ class RadicleNodeTest {
             if (!ignoreCancel && !transferring) releaseClone.countDown()
             return """{"cancelled":true}"""
         }
+        /** When set, the next [unseedRepo] call parks here until released. */
+        @Volatile var unseedGate: CountDownLatch? = null
+        val unseedEntered = CountDownLatch(1)
         override fun unseedRepo(rid: String): String {
             calls += "unseed:$rid"
+            unseedGate?.let { gate ->
+                unseedGate = null
+                unseedEntered.countDown()
+                gate.await(5, TimeUnit.SECONDS)
+            }
             if (unseedFailures > 0) { unseedFailures--; return """{"error":"storage busy"}""" }
             // Like libradicle: nothing to talk to once the node is shut down.
             if (!running) return """{"error":"node not started"}"""
@@ -549,6 +557,46 @@ class RadicleNodeTest {
         Thread.sleep(200)
         assertEquals(other, node.state.value.seed?.rid)
         assertFalse(node.state.value.seededRepos.any { it.rid == rid })
+        node.dispose()
+    }
+
+    @Test
+    fun aSameRidRetryWaitsForTheUnseededFetchsRollback() {
+        // The unseeded fetch has ended but its rollback hasn't landed yet: a
+        // retry of the same RID in that gap must wait, or the rollback takes
+        // back the retry's policy and the RID silently stops being seeded.
+        val ops = FakeOps().apply { transferring = true; cloneResult = """{"cancelled":true}""" }
+        val node = RadicleNode(config, ops)
+        node.start()
+        await("running", node) { it.status == RadicleStatus.Running }
+        node.seed(rid)
+        await("fetching", node) { it.seed?.phase == "fetching" }
+        node.unseed(rid)
+        await("line dropped", node) { it.seed == null && "unseed:$rid" in ops.calls }
+        val rollback = CountDownLatch(1)
+        ops.unseedGate = rollback
+        ops.transferring = false
+        ops.releaseClone.countDown()
+        assertTrue("rollback reached", ops.unseedEntered.await(5, TimeUnit.SECONDS))
+        ops.cloneResult = """{"ok":true}"""
+        node.seed(rid)
+        await("retry refused while the rollback is pending", node) {
+            it.seed?.rid == rid && it.seed?.detail == RadicleNode.STALE_FETCH_DETAIL
+        }
+        assertEquals(1, ops.calls.count { it == "clone:$rid" })
+        rollback.countDown()
+        val until = System.currentTimeMillis() + 5_000
+        while (ops.calls.count { it == "clone:$rid" } < 2 && System.currentTimeMillis() < until) {
+            node.seed(rid)
+            Thread.sleep(20)
+        }
+        await("retry done and still seeded", node) {
+            it.seed?.rid == rid && it.seed?.phase == "done" && it.seededRepos.any { r -> r.rid == rid }
+        }
+        Thread.sleep(200)
+        assertTrue(node.state.value.seededRepos.any { it.rid == rid })
+        assertEquals("done", node.state.value.seed?.phase)
+        assertFalse(pendingFile.exists() && rid in pendingFile.readText())
         node.dispose()
     }
 

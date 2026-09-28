@@ -181,11 +181,16 @@ class RadicleNode internal constructor(
     private var lastRun: SeedRun? = null
 
     /**
-     * Seed calls whose native fetch is still running, including ones left
-     * over from a shut-down node instance. libradicle keys its cancel
+     * Seed calls that haven't fully settled, including ones left over from
+     * a shut-down node instance: registered when the call is accepted and
+     * dropped only after its fetch, its rollback and its outcome line are
+     * all done. Guarded by `this` for the add and the final drop. A second
+     * call for the same RID waits for this: libradicle keys its cancel
      * tokens by RID in one process-wide map, and a fetch removes its RID's
      * entry when it ends, so a second fetch of the same RID while an
-     * earlier one is alive would lose its token to the earlier one.
+     * earlier one is alive would lose its token to the earlier one; and an
+     * earlier call's rollback landing after a retry would take back the
+     * retry's policy and pending line.
      */
     private val liveFetches: MutableSet<SeedRun> = java.util.concurrent.ConcurrentHashMap.newKeySet()
 
@@ -338,7 +343,8 @@ class RadicleNode internal constructor(
      * mid-transfer runs on until that peer is done) counts as in flight: the
      * UI has dropped its line and offers Seed again. A new seed of the
      * *same* RID as such a fetch is refused with [STALE_FETCH_DETAIL] until
-     * it ends.
+     * it ends and its rollback and outcome have landed, so that rollback
+     * can't take back the new call's policy.
      *
      * A fetch that fails or is cancelled takes back the seeding policy it
      * added, so a mistyped or unreachable RID doesn't sit in the seeded
@@ -366,62 +372,73 @@ class RadicleNode internal constructor(
                 return
             }
             val run = SeedRun(rid, nodeEpoch.get())
+            liveFetches += run
             seedRun.set(run)
             lastRun = run
             _state.update { it.copy(seed = RadicleSeed(rid, PHASE_RESOLVING)) }
             generation.get() to run
         }
         run.job = scope.launch(start = CoroutineStart.LAZY) {
-            // Unknown (the list call failed) counts as seeded: never drop a
-            // policy this call can't prove it added.
-            val wasSeeded = runCatching { parseRepos(ops.listSeededRepos()) }.getOrNull()
-                ?.any { it.rid == rid } ?: true
-            if (!wasSeeded) {
-                editPendingUnseeds { it + rid }
-                run.added = true
-            }
-            // Stopped, unseeded or superseded before the fetch began: don't
-            // start it (a cancel that early never reaches the native fetch).
-            val skipped = run.stopping || run.dismissed || run.epoch != nodeEpoch.get()
-            if (!skipped) liveFetches += run
-            val result = if (skipped) JSONObject().put("cancelled", true) else try {
-                json(
-                    ops.cloneRepoWithProgress(rid, SEED_TIMEOUT_MS) { event ->
-                        val parsed = json(event) ?: return@cloneRepoWithProgress
-                        run.fetching = parsed.optString("phase") == PHASE_FETCHING
-                        val progress = RadicleSeed(rid, parsed.optString("phase"), progressDetail(parsed))
-                        _state.update { if (gen == generation.get() && !run.dismissed) it.copy(seed = progress) else it }
-                    },
-                )
-            } catch (t: Throwable) {
-                JSONObject().put("error", t.message ?: t.javaClass.simpleName)
-            } finally {
-                run.fetching = false
-                liveFetches -= run
-            }
-            run.fetchOver = true
-            seedRun.compareAndSet(run, null)
-            val settled = when {
-                result == null -> RadicleSeed(rid, PHASE_FAILED, "unreadable fetch response", active = false)
-                result.optBoolean("ok") -> RadicleSeed(rid, PHASE_DONE, active = false)
-                result.optBoolean("cancelled") -> RadicleSeed(rid, PHASE_CANCELLED, active = false)
-                else -> RadicleSeed(rid, PHASE_FAILED, result.optString("error"), active = false)
-            }
-            Log.i(TAG, "seed $rid → ${settled.phase} ${settled.detail}")
-            // Roll back only on the node instance the fetch ran against; one
-            // that has since been shut down is rolled back at its next boot.
-            if (!wasSeeded && !run.rolledBack && run.epoch == nodeEpoch.get()) {
-                if (skipped || settled.phase == PHASE_DONE || unseedNow(rid)) editPendingUnseeds { it - rid }
-            }
-            _state.update {
-                when {
-                    gen != generation.get() -> it
-                    // Unseeded mid-fetch: the user removed it, so no outcome line.
-                    run.dismissed -> if (it.seed?.rid == rid) it.copy(seed = null) else it
-                    else -> it.copy(seed = settled)
+            try {
+                // Unknown (the list call failed) counts as seeded: never drop a
+                // policy this call can't prove it added.
+                val wasSeeded = runCatching { parseRepos(ops.listSeededRepos()) }.getOrNull()
+                    ?.any { it.rid == rid } ?: true
+                if (!wasSeeded) {
+                    editPendingUnseeds { it + rid }
+                    run.added = true
                 }
+                // Stopped, unseeded or superseded before the fetch began: don't
+                // start it (a cancel that early never reaches the native fetch).
+                val skipped = run.stopping || run.dismissed || run.epoch != nodeEpoch.get()
+                val result = if (skipped) JSONObject().put("cancelled", true) else try {
+                    json(
+                        ops.cloneRepoWithProgress(rid, SEED_TIMEOUT_MS) { event ->
+                            val parsed = json(event) ?: return@cloneRepoWithProgress
+                            run.fetching = parsed.optString("phase") == PHASE_FETCHING
+                            val progress = RadicleSeed(rid, parsed.optString("phase"), progressDetail(parsed))
+                            _state.update { if (gen == generation.get() && !run.dismissed) it.copy(seed = progress) else it }
+                        },
+                    )
+                } catch (t: Throwable) {
+                    JSONObject().put("error", t.message ?: t.javaClass.simpleName)
+                } finally {
+                    run.fetching = false
+                }
+                run.fetchOver = true
+                seedRun.compareAndSet(run, null)
+                val settled = when {
+                    result == null -> RadicleSeed(rid, PHASE_FAILED, "unreadable fetch response", active = false)
+                    result.optBoolean("ok") -> RadicleSeed(rid, PHASE_DONE, active = false)
+                    result.optBoolean("cancelled") -> RadicleSeed(rid, PHASE_CANCELLED, active = false)
+                    else -> RadicleSeed(rid, PHASE_FAILED, result.optString("error"), active = false)
+                }
+                Log.i(TAG, "seed $rid → ${settled.phase} ${settled.detail}")
+                // Roll back only on the node instance the fetch ran against; one
+                // that has since been shut down is rolled back at its next boot.
+                if (!wasSeeded && !run.rolledBack && run.epoch == nodeEpoch.get()) {
+                    if (skipped || settled.phase == PHASE_DONE || unseedNow(rid)) editPendingUnseeds { it - rid }
+                }
+                // Settled under the lock [seed] checks [liveFetches] under: a retry
+                // of this RID lands either before (refused) or after this line.
+                synchronized(this@RadicleNode) {
+                    _state.update {
+                        when {
+                            gen != generation.get() -> it
+                            // Unseeded mid-fetch: the user removed it, so no outcome line.
+                            run.dismissed -> if (it.seed?.rid == rid) it.copy(seed = null) else it
+                            else -> it.copy(seed = settled)
+                        }
+                    }
+                    liveFetches -= run
+                }
+                refreshRepos(gen)
+            } finally {
+                // Never leave a crashed call blocking its RID for good.
+                run.fetchOver = true
+                seedRun.compareAndSet(run, null)
+                synchronized(this@RadicleNode) { liveFetches -= run }
             }
-            refreshRepos(gen)
         }
         run.job.start()
     }
