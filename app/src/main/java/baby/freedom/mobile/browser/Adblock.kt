@@ -158,6 +158,18 @@ internal fun adblockSiteState(
     else -> AdblockSiteState.BLOCKING
 }
 
+/**
+ * Whether a tap on the page menu's switch in state [current] must drop
+ * the renderer's in-memory cache before the page reloads: when it
+ * turns blocking back on ([AdblockSiteState.ALLOWED]). Blink reuses a
+ * resource it still holds in memory without a network request, so
+ * `shouldInterceptRequest` never sees it, and an ad image the page
+ * loaded while the site was allowed would come back on the reload.
+ * Allowing a site needs nothing: a blocked request's empty 403 is
+ * `no-store`.
+ */
+internal fun dropsMemoryCache(current: AdblockSiteState): Boolean = current == AdblockSiteState.ALLOWED
+
 /** An allowlist change to write to Settings: [add] or remove [host]. */
 internal data class AllowlistWrite(val add: Boolean, val host: String)
 
