@@ -180,6 +180,7 @@
           .toLowerCase();
         if (host.endsWith('.wei')) return 'WNS';
         if (host.endsWith('.gwei')) return 'GNS';
+        if (host.endsWith('.tez')) return 'Tezos Domains';
         return 'ENS';
       }
 
@@ -197,6 +198,8 @@
       const descriptionEl = document.getElementById('description');
       const titleEl = document.getElementById('title');
       const nameLabel = nameSystemLabel(url);
+      // Whose RPC servers answer for it: Tezos Domains isn't on Ethereum.
+      const chainLabel = nameLabel === 'Tezos Domains' ? 'Tezos' : 'Ethereum';
 
       async function checkSwarmStatus() {
         try {
@@ -216,18 +219,24 @@
           titleEl.textContent = 'No content for this ' + nameLabel + ' name';
           // ENS goes through a per-name resolver; WNS/GNS store records
           // straight on their registry, so there the other cause is the
-          // name not being registered.
+          // name not being registered. Tezos Domains publishes a website
+          // record rather than a contenthash, and names expire.
           const otherCause =
             nameLabel === 'ENS' ? 'the name has no resolver' : "the name isn't registered";
           descriptionEl.innerHTML =
-            "This " + nameLabel + " name doesn't point at any content yet. The owner may not have set a " +
-            '<code>contenthash</code> record, or ' + otherCause + '.';
+            nameLabel === 'Tezos Domains'
+              ? "This Tezos Domains name doesn't point at a website. The owner may not have set a " +
+                "<code>web:content_url</code> record, the name isn't registered, or it has expired."
+              : "This " + nameLabel + " name doesn't point at any content yet. The owner may not have set a " +
+                '<code>contenthash</code> record, or ' + otherCause + '.';
         } else if (error === 'ens_wrong_protocol') {
           titleEl.textContent = 'Name lives on a different network';
           descriptionEl.innerHTML =
             'This ' + nameLabel + ' name resolves to content on a different network than the ' +
             'scheme you typed asks for. Try the name on its own &mdash; the browser ' +
-            'will follow wherever its <code>contenthash</code> points.';
+            'will follow wherever its ' +
+            (nameLabel === 'Tezos Domains' ? 'website record' : '<code>contenthash</code>') +
+            ' points.';
         } else if (error === 'ens_unsupported_codec') {
           titleEl.textContent = 'Unsupported content format';
           descriptionEl.innerHTML =
@@ -237,21 +246,21 @@
           document.body.classList.add('warn');
           titleEl.textContent = 'Not cross-checked';
           descriptionEl.innerHTML =
-            'Only one Ethereum RPC server answered for this ' + nameLabel + ' name, so ' +
+            'Only one ' + chainLabel + ' RPC server answered for this ' + nameLabel + ' name, so ' +
             "Freedom couldn't check its answer against another server. The address " +
             'below may be right, but a single misbehaving server could have picked it.';
         } else if (error === 'ens_conflict') {
           // #96: the servers asked gave different answers.
           titleEl.textContent = 'RPC servers disagreed';
           descriptionEl.innerHTML =
-            'The Ethereum RPC servers Freedom asked gave different answers for this ' +
+            'The ' + chainLabel + ' RPC servers Freedom asked gave different answers for this ' +
             nameLabel + ' name. At least one of them is wrong &mdash; or lying &mdash; so ' +
             'nothing was loaded. Try again in a moment.';
         } else if (error === 'ens_lookup_failed') {
           titleEl.textContent = nameLabel + ' lookup failed';
           descriptionEl.innerHTML =
-            "Couldn't reach an Ethereum RPC endpoint to resolve this name. Check your " +
-            'connection and try again.';
+            "Couldn't reach " + (nameLabel === 'Tezos Domains' ? 'a Tezos' : 'an Ethereum') +
+            ' RPC endpoint to resolve this name. Check your connection and try again.';
         } else if (error === 'web3_unverified') {
           // #123: an onchain app's code only one RPC server returned.
           document.body.classList.add('warn');

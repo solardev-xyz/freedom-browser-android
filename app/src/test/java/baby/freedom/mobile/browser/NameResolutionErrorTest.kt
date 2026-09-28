@@ -1,5 +1,7 @@
 package baby.freedom.mobile.browser
 
+import baby.freedom.mobile.ens.EnsResult
+import baby.freedom.mobile.ens.EnsTrust
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -40,6 +42,27 @@ class NameResolutionErrorTest {
         assertEquals(502, statusForNameResolutionError("ens_lookup_failed"))
         assertEquals(404, statusForNameResolutionError("ens_not_found"))
         assertEquals(404, statusForNameResolutionError("ens_unsupported_codec"))
+    }
+
+    @Test
+    fun `a tez refusal names the Tezos RPC servers, not Ethereum's`() {
+        val conflict = nameResolutionRefusalHtml("alice.tez", "ens_conflict")
+        assertTrue(conflict.contains("The Tezos RPC servers"))
+        assertFalse(conflict.contains("Ethereum"))
+        assertTrue(nameResolutionRefusalHtml("alice.tez", "ens_unverified").contains("Only one Tezos RPC server"))
+        assertTrue(nameResolutionRefusalHtml("vitalik.eth", "ens_conflict").contains("The Ethereum RPC servers"))
+        assertTrue(nameResolutionRefusalHtml("alice.tez", "ens_not_found").contains("ens_not_found</div>"))
+    }
+
+    @Test
+    fun `a tez web record keeps the requested path unless it is a redirect`() {
+        val content = EnsResult.Ok(
+            "hen.tez", "https", "https://example.com/site?v=2", "https://example.com/site?v=2", EnsTrust.ASSUMED,
+        )
+        assertEquals("https://example.com/site?v=2", webRecordTarget(content, "/"))
+        assertEquals("https://example.com/site/docs?q=1", webRecordTarget(content, "/docs?q=1"))
+        val redirect = content.copy(uri = "https://kukai.app/", redirect = true)
+        assertEquals("https://kukai.app/", webRecordTarget(redirect, "/docs?q=1"))
     }
 
     private val navAccept =

@@ -624,6 +624,74 @@ class GatewaysTest {
     }
 
     @Test
+    fun `a Tezos provider conflict is refused like an ENS one, the last answer kept`() {
+        KnownEnsNames.record("ipfs://bafyold", "alice.tez")
+        val pins = EnsDocumentPins()
+        pins.pin("alice.tez", "ipfs://bafyold")
+        val conflict = { name: String ->
+            EnsResult.Conflict(
+                name,
+                EnsResult.Conflict.Subject.RECORD,
+                listOf(
+                    EnsResult.Conflict.Group("ipfs://bafyA", listOf("rpc.tzkt.io")),
+                    EnsResult.Conflict.Group("ipfs://bafyB", listOf("mainnet.tezos.ecadinfra.com")),
+                ),
+                15_133_172,
+            )
+        }
+        withLookup(conflict) {
+            assertEquals("ens_conflict", Gateways.reverifyEnsDocument("alice.tez", pins))
+            assertEquals("ipfs://bafyold", pins.lastAnswerFor("alice.tez"))
+            assertEquals("ipfs://bafyold", KnownEnsNames.uriFor("alice.tez"))
+        }
+    }
+
+    @Test
+    fun `an unverified tez answer on re-check goes through the not-cross-checked gate`() {
+        KnownEnsNames.record("ipfs://bafyold", "alice.tez")
+        val pins = EnsDocumentPins()
+        pins.pin("alice.tez", "ipfs://bafyold")
+        val lone = EnsTrust(verified = false, agreed = listOf("rpc.tzkt.io"))
+        withLookup({ EnsResult.Ok(it, "ipfs", "ipfs://bafynew", "bafynew", lone) }) {
+            val page = pins.beginNavigation("https://alice.tez.ens.freedom.baby/")
+            assertEquals("ens_unverified", Gateways.reverifyEnsDocument("alice.tez", pins, page))
+            assertEquals("ipfs://bafyold", pins.lastAnswerFor("alice.tez"))
+        }
+        // A lone web record isn't followed unasked either.
+        withLookup({ EnsResult.Ok(it, "https", "https://evil.example/", "https://evil.example/", lone) }) {
+            var web: EnsResult.Ok? = null
+            assertEquals(
+                "ens_unverified",
+                Gateways.reverifyEnsDocument("alice.tez", pins, onWebRecord = { web = it }),
+            )
+            assertNull(web)
+        }
+        // A verified one is served and remembered.
+        withLookup({ EnsResult.Ok(it, "ipfs", "ipfs://bafynew", "bafynew", EnsTrust.ASSUMED) }) {
+            assertNull(Gateways.reverifyEnsDocument("alice.tez", pins))
+            assertEquals("ipfs://bafynew", pins.lastAnswerFor("alice.tez"))
+        }
+    }
+
+    @Test
+    fun `a tez name whose record moved to the web sends the document there`() {
+        KnownEnsNames.record("ipfs://bafyold", "alice.tez")
+        val pins = EnsDocumentPins()
+        pins.pin("alice.tez", "ipfs://bafyold")
+        withLookup({ EnsResult.Ok(it, "https", "https://alice.example/", "https://alice.example/", EnsTrust.ASSUMED) }) {
+            var web: EnsResult.Ok? = null
+            assertEquals(
+                Gateways.ENS_WEB_RECORD,
+                Gateways.reverifyEnsDocument("alice.tez", pins, onWebRecord = { web = it }),
+            )
+            assertEquals("https://alice.example/", web?.uri)
+            // The old IPFS root no longer describes the name.
+            assertNull(KnownEnsNames.uriFor("alice.tez"))
+            assertNull(pins.lastAnswerFor("alice.tez"))
+        }
+    }
+
+    @Test
     fun `a failed lookup with no earlier answer is refused`() {
         withLookup({ EnsResult.Error(it, "PROVIDER_ERROR", "down", retryable = true) }) {
             assertEquals("ens_lookup_failed", Gateways.reverifyEnsDocument("swarm.eth"))

@@ -80,6 +80,20 @@ class NodeSettings private constructor(
     }
 
     /**
+     * Whether the embedded Myotis Ethereum / Gnosis light client runs
+     * (#72). Off by default — opt-in, as on desktop; switched on the node
+     * page. `MainActivity` binds [baby.freedom.mobile.node.MyotisService]
+     * while it's on.
+     */
+    val myotisEnabled: Flow<Boolean> = store.data.map { prefs ->
+        prefs[Keys.MYOTIS_ENABLED] ?: false
+    }
+
+    suspend fun setMyotisEnabled(enabled: Boolean) {
+        store.edit { it[Keys.MYOTIS_ENABLED] = enabled }
+    }
+
+    /**
      * Whether any IPFS UI is rendered. Off by default — IPFS support
      * is a hidden capability surfaced only from Settings → Other. The
      * IPFS node still runs regardless of this flag.
@@ -237,6 +251,7 @@ class NodeSettings private constructor(
 
     private object Keys {
         val RUN_NODE_ENABLED = booleanPreferencesKey("run_node_enabled")
+        val MYOTIS_ENABLED = booleanPreferencesKey("myotis_enabled")
         val SHOW_IPFS_UI = booleanPreferencesKey("show_ipfs_ui")
         val IPFS_LOW_POWER = booleanPreferencesKey("ipfs_low_power")
         val IPFS_ROUTING_MODE = stringPreferencesKey("ipfs_routing_mode")

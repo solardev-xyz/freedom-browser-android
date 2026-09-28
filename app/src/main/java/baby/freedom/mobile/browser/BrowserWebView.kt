@@ -69,6 +69,9 @@ import androidx.webkit.WebMessageCompat
 import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
 import baby.freedom.mobile.data.BrowsingRepository
+import baby.freedom.mobile.ens.EnsResult
+import baby.freedom.mobile.ens.NameSystem
+import baby.freedom.mobile.ens.TezosDomainsResolver
 import kotlinx.coroutines.flow.collectLatest
 import java.io.ByteArrayInputStream
 import java.io.FilterInputStream
@@ -183,13 +186,30 @@ internal fun refererOf(headers: Map<String, String>?): String? =
  * place, Back and Forward move past it as usual and Reload re-checks
  * the name. No script: the document is on the name's origin.
  */
-internal fun nameResolutionRefusal(name: String, code: String): WebResourceResponse {
+internal fun nameResolutionRefusal(name: String, code: String): WebResourceResponse =
+    WebResourceResponse(
+        "text/html", "utf-8", statusForNameResolutionError(code), "Name Resolution Failed",
+        mapOf(NAME_RESOLUTION_ERROR_HEADER to code, "Cache-Control" to "no-store"),
+        ByteArrayInputStream(nameResolutionRefusalHtml(name, code).toByteArray(Charsets.UTF_8)),
+    )
+
+/** [nameResolutionRefusal]'s page. */
+internal fun nameResolutionRefusalHtml(name: String, code: String): String {
+    val system = NameSystem.forName(name)
+    val label = system.label
+    val tezos = system == NameSystem.TEZOS
+    val chain = if (tezos) "Tezos" else "Ethereum"
     val (title, description) = when (code) {
-        "ens_not_found" -> "No content for this ENS name" to
-            "This ENS name doesn't point at any content any more. The owner may " +
-            "have removed its <code>contenthash</code> record, or the name has no resolver."
+        "ens_not_found" -> "No content for this $label name" to
+            if (tezos) {
+                "This $label name doesn't point at a website any more. The owner may " +
+                    "have removed its <code>web:content_url</code> record, or the name has expired."
+            } else {
+                "This $label name doesn't point at any content any more. The owner may " +
+                    "have removed its <code>contenthash</code> record, or the name has no resolver."
+            }
         "ens_unsupported_codec" -> "Unsupported content format" to
-            "This ENS name now resolves to a content format Freedom Browser " +
+            "This $label name now resolves to a content format Freedom Browser " +
             "cannot load yet on mobile."
         // [Gateways.reverifyEnsDocument] lands here for one server's
         // record that isn't what this tab or session had — including when
@@ -199,20 +219,20 @@ internal fun nameResolutionRefusal(name: String, code: String): WebResourceRespo
         // content" as "No content" with a trust note, so the copy neither
         // promises an answer to review nor claims an earlier one.
         "ens_unverified" -> "Not cross-checked" to
-            "Only one Ethereum RPC server answered for this name, so Freedom " +
+            "Only one $chain RPC server answered for this name, so Freedom " +
             "couldn't check its answer against another server. An answer only " +
             "one server gave is loaded here only if it matches one already " +
             "loaded in this session, so nothing was loaded. Try again, or " +
             "enter the name in the address bar to see what that server answered."
         "ens_conflict" -> "RPC servers disagreed" to
-            "The Ethereum RPC servers Freedom asked gave different answers for " +
+            "The $chain RPC servers Freedom asked gave different answers for " +
             "this name. At least one of them is wrong, so nothing was loaded."
-        else -> "ENS lookup failed" to
-            "Couldn't reach an Ethereum RPC endpoint to resolve this name. " +
+        else -> "$label lookup failed" to
+            "Couldn't reach ${if (tezos) "a Tezos" else "an Ethereum"} RPC endpoint to resolve this name. " +
             "Check your connection and try again."
     }
     val safeName = name.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-    val html = """<!doctype html><html lang="en"><head><meta charset="utf-8">
+    return """<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'">
 <title>$title</title><style>
@@ -232,9 +252,39 @@ p{color:#57606a}.d{background:#f6f8fa;color:#cf222e}a{background:#f6f8fa;border-
 <div class="d">ens://$safeName
 
 $code</div><a href="">Try again</a></div></body></html>"""
+}
+
+/** Where [nameWebRecordNavigation] sends a request for [pathAndQuery] on the name's origin. */
+internal fun webRecordTarget(result: EnsResult.Ok, pathAndQuery: String): String =
+    if (result.redirect) {
+        result.uri
+    } else {
+        // The origin's bare `/` is no path: keep the record's own.
+        TezosDomainsResolver.appendWebsiteSuffix(result.uri, pathAndQuery.takeUnless { it == "/" }.orEmpty())
+    }
+
+/**
+ * The interceptor's answer to a `.tez` document whose website record is
+ * now on the ordinary web (`http(s)`): a page that sends the frame
+ * there, as a typed `.tez` navigation does. A content URL keeps the
+ * requested [pathAndQuery]; a redirect record is the whole destination.
+ * A zero-delay meta refresh replaces the name's history entry, so Back
+ * doesn't land on it again; no script, as for [nameResolutionRefusal].
+ * It carries [NAME_RESOLUTION_ERROR_HEADER] only to stay out of history.
+ */
+internal fun nameWebRecordNavigation(result: EnsResult.Ok, pathAndQuery: String): WebResourceResponse {
+    val target = webRecordTarget(result, pathAndQuery)
+    val safe = target.replace("&", "&amp;").replace("\"", "&quot;")
+        .replace("<", "&lt;").replace(">", "&gt;")
+    val html = """<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="referrer" content="no-referrer">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'">
+<meta http-equiv="refresh" content="0;url=$safe">
+<title>${result.name.replace("<", "&lt;")}</title></head>
+<body><a href="$safe">$safe</a></body></html>"""
     return WebResourceResponse(
-        "text/html", "utf-8", statusForNameResolutionError(code), "Name Resolution Failed",
-        mapOf(NAME_RESOLUTION_ERROR_HEADER to code, "Cache-Control" to "no-store"),
+        "text/html", "utf-8", 200, "OK",
+        mapOf(NAME_RESOLUTION_ERROR_HEADER to Gateways.ENS_WEB_RECORD, "Cache-Control" to "no-store"),
         ByteArrayInputStream(html.toByteArray(Charsets.UTF_8)),
     )
 }
@@ -4615,7 +4665,9 @@ private fun interceptVirtualRequestFor(
         isDocumentRequest(req.isForMainFrame, req.requestHeaders) &&
         (req.isForMainFrame || page?.uriFor(root.name) == null)
     ) {
-        Gateways.reverifyEnsDocument(root.name, ensPins, page)?.let { code ->
+        var web: EnsResult.Ok? = null
+        Gateways.reverifyEnsDocument(root.name, ensPins, page, onWebRecord = { web = it })?.let { code ->
+            web?.let { return nameWebRecordNavigation(it, pathAndQuery) }
             return nameResolutionRefusal(root.name, code)
         }
     }

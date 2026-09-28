@@ -83,7 +83,9 @@ import baby.freedom.mobile.ui.PrivateTheme
 import baby.freedom.mobile.data.NodeSettings
 import baby.freedom.mobile.ens.EnsInput
 import baby.freedom.mobile.ens.EnsResult
+import baby.freedom.mobile.ens.TezosDomainsResolver
 import baby.freedom.swarm.IpfsInfo
+import baby.freedom.swarm.MyotisInfo
 import baby.freedom.swarm.IpfsStatus
 import baby.freedom.swarm.NodeInfo
 import baby.freedom.swarm.NodeStatus
@@ -398,6 +400,9 @@ fun BrowserScreen(
     ipfsInfo: IpfsInfo,
     runNodeEnabled: Boolean,
     onToggleRunNode: (Boolean) -> Unit,
+    myotisInfo: MyotisInfo = MyotisInfo(),
+    myotisEnabled: Boolean = false,
+    onToggleMyotis: (Boolean) -> Unit = {},
     onEnsureIpfsStarted: () -> Unit,
     onIpfsToggle: (Boolean) -> Unit,
     initialUrl: String = HOME_URL,
@@ -453,6 +458,7 @@ fun BrowserScreen(
     // text lives here until it is submitted.
     var addressQuery by remember { mutableStateOf("") }
     val snackbarHostState = remember { SnackbarHostState() }
+
     val sitePermissions = remember(context) { SitePermissionBroker.get(context) }
     SitePermissionAndroidBridge(sitePermissions, snackbarHostState)
     // Any full-screen panel over the browser (they're all opaque).
@@ -1017,11 +1023,14 @@ fun BrowserScreen(
                             )
                         }
                         is EnsResult.Ok -> {
+                            val webRecord = result.protocol == "http" || result.protocol == "https"
                             // Remember hash/cid → name for the whole session
                             // (cross-tab address-bar preservation). Safe for
                             // every protocol — bzz, ipfs, and ipns all round-
-                            // trip through [Gateways] + [DisplayUrl] now.
-                            KnownEnsNames.record(result.uri, name)
+                            // trip through [Gateways] + [DisplayUrl] now. A
+                            // `.tez` name's http(s) website is not content
+                            // the name's origin serves, so it isn't recorded.
+                            if (!webRecord) KnownEnsNames.record(result.uri, name)
                             if (requiredProtocol != null && result.protocol != requiredProtocol) {
                                 // Retry with the generic ens:// form: the
                                 // same constrained URL would fail forever,
@@ -1032,6 +1041,21 @@ fun BrowserScreen(
                                         "not $requiredProtocol://",
                                     retryUrl = "ens://$name$suffix",
                                 )
+                            } else if (webRecord) {
+                                // A `.tez` website record on the ordinary
+                                // web: navigate there directly, as desktop
+                                // does. A redirect record is the whole
+                                // destination; a content URL keeps the
+                                // typed path.
+                                val web = if (result.redirect) {
+                                    result.uri
+                                } else {
+                                    TezosDomainsResolver.appendWebsiteSuffix(result.uri, suffix)
+                                }
+                                target.clearEnsOverride()
+                                target.addressBarText =
+                                    pendingAddressBarText(target.addressBarText, web, source)
+                                target.loadUrl(web)
                             } else if (result.protocol == "bzz" ||
                                 result.protocol == "ipfs" ||
                                 result.protocol == "ipns"
@@ -1066,10 +1090,19 @@ fun BrowserScreen(
                         is EnsResult.Unsupported ->
                             ensError(
                                 "ens_unsupported_codec",
-                                detail = EnsGate.withTrustNote("codec ${result.codec}", result.trust),
+                                // A `.tez` record's "codec" is the reason
+                                // its website URI was refused.
+                                detail = EnsGate.withTrustNote(
+                                    if (name.endsWith(".tez")) result.codec else "codec ${result.codec}",
+                                    result.trust,
+                                ),
                             )
                         is EnsResult.Error ->
-                            ensError("ens_lookup_failed", detail = result.reason)
+                            ensError(
+                                "ens_lookup_failed",
+                                // `.tez` says what failed.
+                                detail = if (name.endsWith(".tez")) "${result.reason}: ${result.error}" else result.reason,
+                            )
                         // RPC servers disagreed (#96): nothing to load.
                         is EnsResult.Conflict ->
                             ensError("ens_conflict", detail = EnsGate.conflictDetail(result))
@@ -1884,6 +1917,9 @@ fun BrowserScreen(
             nodeInfo = nodeInfo,
             runNodeEnabled = runNodeEnabled,
             onToggleRunNode = onToggleRunNode,
+            myotisInfo = myotisInfo,
+            myotisEnabled = myotisEnabled,
+            onToggleMyotis = onToggleMyotis,
             onDismiss = { showNode = false },
         )
     }
