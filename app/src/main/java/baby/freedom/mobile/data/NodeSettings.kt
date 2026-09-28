@@ -6,9 +6,12 @@ import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
+import androidx.datastore.preferences.core.stringSetPreferencesKey
+import baby.freedom.mobile.browser.AdblockCategory
 import androidx.datastore.preferences.preferencesDataStore
 import baby.freedom.mobile.browser.ExternalEndpoints
 import baby.freedom.mobile.browser.SearchEngines
+import baby.freedom.mobile.browser.normalizeAllowlistHost
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 
@@ -44,6 +47,12 @@ import kotlinx.coroutines.flow.map
  * `external_swarm_endpoint` / `external_ipfs_gateway` hold a normalized
  * base URL, absent for the embedded node (#125). `MainActivity`
  * mirrors them into [baby.freedom.mobile.browser.Gateways].
+ *
+ * ## Ad-blocking keys
+ *
+ * `adblock_<category>` switches each [AdblockCategory] (#126), absent
+ * for its default; `adblock_allowlist` holds the sites ad blocking is
+ * off for, in [normalizeAllowlistHost] form.
  *
  * There is no persistent "run IPFS" flag by design. The IPFS node is
  * always off at cold launch (demo-surprise requirement) and driven
@@ -196,6 +205,36 @@ class NodeSettings private constructor(
         return true
     }
 
+    /** The ad-blocking categories switched on (#126). */
+    val adblockCategories: Flow<Set<AdblockCategory>> = store.data.map { prefs ->
+        AdblockCategory.entries.filterTo(LinkedHashSet()) { category ->
+            prefs[Keys.adblock(category)] ?: category.enabledByDefault
+        }
+    }
+
+    suspend fun setAdblockCategory(category: AdblockCategory, enabled: Boolean) {
+        store.edit { it[Keys.adblock(category)] = enabled }
+    }
+
+    /** Sites ad blocking is off for (#126), sorted. */
+    val adblockAllowlist: Flow<List<String>> = store.data.map { prefs ->
+        prefs[Keys.ADBLOCK_ALLOWLIST].orEmpty().sorted()
+    }
+
+    /**
+     * Turn ad blocking off for [site] (a host or URL) and its
+     * subdomains. Returns `false` (and changes nothing) if it isn't a host.
+     */
+    suspend fun addAdblockAllowlistHost(site: String): Boolean {
+        val host = normalizeAllowlistHost(site) ?: return false
+        store.edit { it[Keys.ADBLOCK_ALLOWLIST] = it[Keys.ADBLOCK_ALLOWLIST].orEmpty() + host }
+        return true
+    }
+
+    suspend fun removeAdblockAllowlistHost(host: String) {
+        store.edit { it[Keys.ADBLOCK_ALLOWLIST] = it[Keys.ADBLOCK_ALLOWLIST].orEmpty() - host }
+    }
+
     private object Keys {
         val RUN_NODE_ENABLED = booleanPreferencesKey("run_node_enabled")
         val SHOW_IPFS_UI = booleanPreferencesKey("show_ipfs_ui")
@@ -205,6 +244,9 @@ class NodeSettings private constructor(
         val SEARCH_CUSTOM_TEMPLATE = stringPreferencesKey("search_custom_template")
         val EXTERNAL_SWARM_ENDPOINT = stringPreferencesKey("external_swarm_endpoint")
         val EXTERNAL_IPFS_GATEWAY = stringPreferencesKey("external_ipfs_gateway")
+        val ADBLOCK_ALLOWLIST = stringSetPreferencesKey("adblock_allowlist")
+        private val ADBLOCK = AdblockCategory.entries.associateWith { booleanPreferencesKey("adblock_${it.key}") }
+        fun adblock(category: AdblockCategory) = ADBLOCK.getValue(category)
     }
 
     companion object {
