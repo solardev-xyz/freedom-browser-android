@@ -331,6 +331,14 @@ class EnsResolver internal constructor(
      * slowly but in time, a fresh subname after each, can hold every slot
      * without one ever doing so. Holding a full share while the engine is
      * full is what that looks like, whatever each call's own duration.
+     *
+     * Trade-off: this can't tell who filled the engine, so a site the user
+     * is really using that happens to hold its full share when some other
+     * page fills the engine is marked slow too. For
+     * [LIGHT_CLIENT_SLOW_SITE_MS] its lookups then share the slow sites'
+     * [LIGHT_CLIENT_SLOW_CALLS] slots, and one that finds them taken is
+     * resolved by the RPC quorum instead of the light client: a weaker
+     * check, never a failed lookup.
      */
     private fun markCrowdingSites() {
         synchronized(lightClientHeld) {
