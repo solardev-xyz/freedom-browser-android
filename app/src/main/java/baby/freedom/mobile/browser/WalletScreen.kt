@@ -57,6 +57,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import baby.freedom.mobile.ui.isLight
@@ -155,6 +156,32 @@ internal fun clipHoldsPhrase(clip: CharSequence?, words: List<String>): Boolean 
     if (clip.isNullOrBlank() || words.isEmpty()) return false
     val tokens = clip.toString().lowercase().split(Regex("[^\\p{L}]+")).filter { it.isNotEmpty() }
     return (0..tokens.size - words.size).any { start -> tokens.subList(start, start + words.size) == words }
+}
+
+/**
+ * How many characters an edit from [before] to [after] inserted. Unlike
+ * the net change in length it counts a paste that replaced a selection (a
+ * phrase pasted over a mistyped one of about the same length): when text
+ * was selected and the edit kept everything outside it, the whole
+ * replacement counts, even where it happens to match what it replaced;
+ * otherwise it's what's left of [after] once the text the two share at the
+ * start and at the end is taken off.
+ */
+internal fun insertedLength(before: TextFieldValue, after: TextFieldValue): Int {
+    val old = before.text
+    val new = after.text
+    if (old == new) return 0
+    val sel = before.selection
+    if (!sel.collapsed) {
+        val head = old.substring(0, sel.min)
+        val tail = old.substring(sel.max)
+        if (new.length >= head.length + tail.length && new.startsWith(head) && new.endsWith(tail)) {
+            return new.length - head.length - tail.length
+        }
+    }
+    val prefix = old.commonPrefixWith(new).length
+    val suffix = old.substring(prefix).commonSuffixWith(new.substring(prefix)).length
+    return new.length - prefix - suffix
 }
 
 /**
@@ -569,12 +596,15 @@ private fun ImportPhrasePage(
     SecureWindow()
     val context = LocalContext.current
     // Plain remember: the phrase must not reach saved instance state.
-    var phrase by remember { mutableStateOf("") }
-    // Something was pasted in (more than one character at once): the
+    // A TextFieldValue so a paste over a selection can be told from typing.
+    var field by remember { mutableStateOf(TextFieldValue("")) }
+    val phrase = field.text
+    // Something was pasted in (more than one character inserted at once,
+    // also over a selection it replaced): the
     // phrase may still be on the clipboard after the import.
     var pasted by remember { mutableStateOf(false) }
     val back = {
-        phrase = ""
+        field = TextFieldValue("")
         onBack()
     }
     BackHandler(onBack = back)
@@ -584,7 +614,7 @@ private fun ImportPhrasePage(
             runCatching { Mnemonic.parse(phrase) }.getOrNull()?.let { mnemonic ->
                 onImport(mnemonic) {
                     if (pasted) clearPhraseFromClipboard(context, mnemonic.words)
-                    phrase = ""
+                    field = TextFieldValue("")
                     pasted = false
                 }
             }
@@ -608,10 +638,10 @@ private fun ImportPhrasePage(
                     Spacer(Modifier.height(8.dp))
                     TabTextInput(private = true) {
                         OutlinedTextField(
-                            value = phrase,
+                            value = field,
                             onValueChange = {
-                                if (it.length - phrase.length > 1) pasted = true
-                                phrase = it
+                                if (insertedLength(field, it) > 1) pasted = true
+                                field = it
                             },
                             enabled = !busy,
                             minLines = 4,

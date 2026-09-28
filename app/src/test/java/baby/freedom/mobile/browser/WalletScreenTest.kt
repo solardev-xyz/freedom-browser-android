@@ -5,6 +5,8 @@ import baby.freedom.mobile.wallet.VaultAuthCancelledException
 import baby.freedom.mobile.wallet.VaultKeyLostException
 import baby.freedom.mobile.wallet.VaultProtection
 import baby.freedom.mobile.wallet.VaultUnreadableException
+import androidx.compose.ui.text.TextRange
+import androidx.compose.ui.text.input.TextFieldValue
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -29,6 +31,29 @@ class WalletScreenTest {
         // 12 words failing the checksum may be half of 24: not red yet.
         assertTrue(importHint(twelve.replace("about", "abandon")) is ImportHint.Neutral)
         assertTrue(importHint(List(24) { "abandon" }.joinToString(" ")) is ImportHint.Problem)
+    }
+
+    @Test
+    fun `a paste is seen even when it replaces a selection`() {
+        fun at(text: String, cursor: Int = text.length) = TextFieldValue(text, TextRange(cursor))
+        fun all(text: String) = TextFieldValue(text, TextRange(0, text.length))
+        // Typing and deleting aren't pastes.
+        assertEquals(1, insertedLength(at("aban"), at("aband")))
+        assertEquals(0, insertedLength(at("abandon"), at("abando")))
+        assertEquals(0, insertedLength(at("abandon"), at("abandon", 2)))
+        // A letter typed over a one-letter selection.
+        assertEquals(1, insertedLength(TextFieldValue("abandon", TextRange(0, 1)), at("xbandon", 1)))
+        // A plain paste into an empty field or at the cursor.
+        assertEquals(twelve.length, insertedLength(at(""), at(twelve)))
+        assertEquals(8, insertedLength(at("abandon "), at("abandon abandon ")))
+        // Select all over a mistyped phrase, paste one of the same length —
+        // even one differing by a single letter.
+        val typo = twelve.replace("about", "abouf")
+        assertEquals(twelve.length, insertedLength(all(typo), at(twelve)))
+        // Selecting all and deleting isn't a paste.
+        assertEquals(0, insertedLength(all(typo), at("")))
+        // Repeated text at the seam isn't double-counted.
+        assertEquals(8, insertedLength(at("abandon abandon"), at("abandon abandon abandon")))
     }
 
     @Test

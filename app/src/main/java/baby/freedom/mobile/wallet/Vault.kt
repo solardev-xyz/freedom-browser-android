@@ -226,8 +226,13 @@ class Vault internal constructor(
      */
     suspend fun remove() = ops.withLock {
         lock()
-        withContext(NonCancellable + io) { store.wipe() }
-        _state.value = State.Empty
+        // Empty is set inside the non-cancellable block: once the file and
+        // key are gone the state must say so, even if the caller's scope
+        // (the Wallet page) was cancelled meanwhile and the resume throws.
+        withContext(NonCancellable + io) {
+            store.wipe()
+            _state.value = State.Empty
+        }
     }
 
     /**

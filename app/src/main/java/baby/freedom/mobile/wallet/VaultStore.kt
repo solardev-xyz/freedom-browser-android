@@ -157,9 +157,14 @@ class KeystoreVaultStore(context: Context) : VaultStore {
         },
         // Opening a cipher to *encrypt* needs no authentication even for
         // an authentication-bound key, so it tells a dead key apart from
-        // one that merely refused this decryption.
+        // one that merely refused this decryption. The probe is finished
+        // with an empty doFinal so it doesn't leave a Keystore operation open.
         keyStillWorks = { key ->
-            runCatching { Cipher.getInstance(TRANSFORMATION).init(Cipher.ENCRYPT_MODE, key) }.isSuccess
+            runCatching {
+                val probe = Cipher.getInstance(TRANSFORMATION)
+                probe.init(Cipher.ENCRYPT_MODE, key)
+                probe.doFinal()
+            }.isSuccess
         },
     )
 

@@ -8,6 +8,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.yield
 import org.junit.After
@@ -49,7 +50,10 @@ class VaultTest {
             return Cipher.getInstance("AES/GCM/NoPadding").apply { init(Cipher.DECRYPT_MODE, k, GCMParameterSpec(128, record.iv)) }
         }
 
+        var onWipe: () -> Unit = {}
+
         override fun wipe() {
+            onWipe()
             record = null
             fileExists = false
             key = null
@@ -264,6 +268,27 @@ class VaultTest {
         assertNull(store.record)
         assertNull(store.key)
         assertEquals(Vault.State.Empty, vault().state.value)
+    }
+
+    @Test
+    fun `remove finishes even if its caller is cancelled during the wipe`() = runBlocking {
+        val v = Vault(store, scope, clock = { now }, io = Dispatchers.IO, compute = Dispatchers.Unconfined)
+        v.create(phrase, auth, imported = false)
+        v.lock()
+        val entered = java.util.concurrent.CountDownLatch(1)
+        val release = java.util.concurrent.CountDownLatch(1)
+        store.onWipe = {
+            entered.countDown()
+            release.await()
+        }
+        // The Wallet page's scope, torn down while Keystore deletes the key.
+        val page = CoroutineScope(Dispatchers.Default).launch { v.remove() }
+        assertTrue(entered.await(5, java.util.concurrent.TimeUnit.SECONDS))
+        page.cancel()
+        release.countDown()
+        page.join()
+        assertNull(store.record)
+        assertEquals(Vault.State.Empty, v.state.value)
     }
 
     @Test
