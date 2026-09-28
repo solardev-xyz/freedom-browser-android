@@ -236,7 +236,10 @@ class RadicleNode internal constructor(
             replayPendingUnseeds()
             refreshIdentity(gen)
             refreshRepos(gen)
-            _state.update { if (gen == generation.get()) it.copy(status = RadicleStatus.Running) else it }
+            // Under the lock, like [publish]: [stop] writes Stopping before it
+            // bumps the generation, so a lock-free check here could see
+            // Stopping with this generation still current and undo it.
+            publish(gen) { _state.value.copy(status = RadicleStatus.Running) }
             Log.i(TAG, "radicle running as ${_state.value.did}")
             synchronized(this@RadicleNode) {
                 if (gen != generation.get()) return@launch

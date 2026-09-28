@@ -261,6 +261,35 @@ class RadicleNodeTest {
     }
 
     @Test
+    fun aStopLandingAsTheBootFinishesNeverShowsRunningAgain() {
+        // On -> off right as the boot writes Running: once stop() has
+        // published Stopping, the boot must not put Running back over it
+        // (#197 R4-F2). Racy by nature, so hit the window many times over.
+        val ops = FakeOps()
+        val node = RadicleNode(config, ops)
+        repeat(300) { i ->
+            val gate = CountDownLatch(1)
+            ops.listGate = gate
+            node.start()
+            // The boot's refreshRepos parks just before the Running write.
+            val until = System.currentTimeMillis() + 5_000
+            while (ops.listGate != null && System.currentTimeMillis() < until) Thread.sleep(1)
+            val stopper = Thread { gate.countDown(); node.stop() }.apply { start() }
+            stopper.join(5_000)
+            val shown = mutableListOf<RadicleStatus>()
+            val deadline = System.currentTimeMillis() + 5_000
+            while (System.currentTimeMillis() < deadline) {
+                val s = node.state.value.status
+                if (shown.lastOrNull() != s) shown += s
+                if (s == RadicleStatus.Stopped) break
+            }
+            assertFalse("round $i: $shown", RadicleStatus.Running in shown)
+            assertEquals("round $i: $shown", RadicleStatus.Stopped, shown.last())
+        }
+        node.dispose()
+    }
+
+    @Test
     fun seedReportsProgressThenDoneAndRefreshesRepos() {
         val ops = FakeOps()
         val node = RadicleNode(config, ops)
