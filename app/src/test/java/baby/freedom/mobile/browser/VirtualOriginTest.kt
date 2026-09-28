@@ -439,4 +439,19 @@ class VirtualOriginTest {
             VirtualOrigin.parseContentUrl("ens://a%D9%A1b.eth"),
         )
     }
+
+    @Test
+    fun `a unicode tez name round-trips as typed, without ENSIP-15`() {
+        // ENSIP-15 would refuse this (mixed scripts) and NFC-compose the
+        // other; Tezos Domains isn't ENS, so both stay as they are.
+        for (name in listOf("a\u0661b.tez", "cafe\u0301.tez", "🦊.tez")) {
+            val host = VirtualOrigin.hostFor(ContentRoot.Ens(name))!!
+            assertTrue(host, host.startsWith("xn--"))
+            assertEquals(name, ContentRoot.Ens(name), VirtualOrigin.parseHost(host))
+        }
+        assertEquals(
+            ContentRoot.Ens("a\u0661b.tez") to "",
+            VirtualOrigin.parseContentUrl("ens://A%D9%A1b.tez"),
+        )
+    }
 }

@@ -182,4 +182,44 @@ class EnsNormalizeTest {
         // Rejected by ENSIP-15, but still a name: the resolver says why.
         assertEquals(EnsInput.Parsed("ab--c.eth", ""), EnsInput.parse("AB--c.eth"))
     }
+
+    @Test
+    fun `tez names are not ENS - ENSIP-15 neither rewrites nor refuses them`() {
+        // Refused by ENSIP-15 (`--` at 3-4, a mid-label `_`, mixed
+        // digits), or mapped by it (decomposed é, fullwidth letter).
+        for (name in listOf("Ab--C.tez", "a_b.tez", "a\u0661b.tez", "cafe\u0301.tez", "ａlice.tez")) {
+            assertEquals(name, name.lowercase(), EnsNormalize.normalizeOrNull(name))
+            assertEquals(name, name.lowercase(), EnsNormalize.fastNormalize(name))
+            assertTrue(name, EnsNormalize.isFastPath(name))
+            assertEquals(name, EnsInput.Parsed(name.lowercase(), "/x"), EnsInput.parse("$name/x"))
+        }
+        // An Ethereum name still gets the full pass.
+        assertNull(EnsNormalize.normalizeOrNull("a_b.eth"))
+    }
+
+    @Test
+    fun `resolver hands a tez name ENSIP-15 would refuse to Tezos Domains`() {
+        val eth = RecordingRpc()
+        val tezHosts = mutableListOf<String>()
+        val tezHttp = object : EnsHttp {
+            override fun request(
+                method: String,
+                url: String,
+                headers: Map<String, String>,
+                body: String?,
+                timeoutMs: Int,
+                maxBytes: Long,
+                followRedirects: Boolean,
+            ): EnsHttp.Reply {
+                tezHosts += url
+                return EnsHttp.Reply(500, "")
+            }
+        }
+        val tezos = TezosDomainsResolver(listOf("https://tez.test"), tezHttp)
+        val r = runBlocking { EnsResolver(listOf(rpc), eth, tezos).resolveContenthash("A_b.tez") }
+        assertTrue("$r", !(r is EnsResult.Error && r.reason == "INVALID_NAME"))
+        assertEquals("a_b.tez", r.name)
+        assertTrue(eth.calls.isEmpty())
+        assertTrue(tezHosts.isNotEmpty())
+    }
 }

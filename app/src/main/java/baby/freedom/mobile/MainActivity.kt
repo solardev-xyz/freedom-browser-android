@@ -15,27 +15,41 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalView
 import androidx.core.view.WindowCompat
+import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import baby.freedom.mobile.browser.BrowserScreen
 import baby.freedom.mobile.browser.DeepLinkQueue
 import baby.freedom.mobile.browser.Gateways
 import baby.freedom.mobile.browser.HOME_URL
+import baby.freedom.mobile.browser.Adblock
 import baby.freedom.mobile.browser.PublicSuffixList
+import baby.freedom.mobile.browser.OnchainApps
+import baby.freedom.mobile.browser.UnverifiedOrigins
 import baby.freedom.mobile.browser.VirtualOrigin
+import baby.freedom.mobile.browser.statusBarIconsDark
 import baby.freedom.mobile.data.NodeSettings
 import baby.freedom.mobile.ens.EnsNormalize
+import baby.freedom.mobile.node.IMyotisCallback
+import baby.freedom.mobile.node.IMyotisService
 import baby.freedom.mobile.node.INodeCallback
 import baby.freedom.mobile.node.INodeService
+import baby.freedom.mobile.node.MyotisService
 import baby.freedom.mobile.node.NodeService
 import baby.freedom.mobile.ui.FreedomTheme
 import baby.freedom.mobile.ui.isLight
 import baby.freedom.swarm.IpfsInfo
+import baby.freedom.swarm.MyotisInfo
+import baby.freedom.swarm.MyotisStatus
 import baby.freedom.swarm.NodeInfo
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -56,6 +70,7 @@ class MainActivity : ComponentActivity() {
 
     private val infoFlow = MutableStateFlow(NodeInfo())
     private val ipfsInfoFlow = MutableStateFlow(IpfsInfo())
+    private val myotisInfoFlow = MutableStateFlow(MyotisInfo())
     private lateinit var settings: NodeSettings
 
     /**
@@ -69,6 +84,10 @@ class MainActivity : ComponentActivity() {
     private val deepLinks = OrderedDeepLinks(lifecycleScope, Dispatchers.Default) {
         deepLinkQueue.offer(it)
     }
+
+    // The page theme colour the browser paints behind the status bar,
+    // as ARGB, or null when it shows the app background there (#92).
+    private var statusBarTint by mutableStateOf<Int?>(null)
 
     @Volatile
     private var binder: INodeService? = null
@@ -84,6 +103,41 @@ class MainActivity : ComponentActivity() {
                 ipfsInfoFlow.value = info
                 Gateways.setIpfsBase(info.gatewayUrl)
             }
+        }
+    }
+
+    // The Myotis light client (#72) lives in its own `:myotis` process,
+    // bound while [NodeSettings.myotisEnabled] is on — see [MyotisService].
+    @Volatile
+    private var myotisBinder: IMyotisService? = null
+
+    // Read by [myotisCallback] on a binder thread.
+    @Volatile
+    private var myotisBound = false
+
+    private val myotisCallback = object : IMyotisCallback.Stub() {
+        override fun onMyotisStateChanged(info: MyotisInfo?) {
+            if (info != null && myotisBound) myotisInfoFlow.value = info
+        }
+    }
+
+    private val myotisConnection = object : ServiceConnection {
+        override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
+            val b = IMyotisService.Stub.asInterface(service) ?: return
+            myotisBinder = b
+            runCatching { b.registerCallback(myotisCallback) }
+            // onStart/onStop may have run before the binding came up.
+            runCatching {
+                if (lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) b.onAppForeground()
+                else b.onAppBackground()
+            }
+        }
+
+        override fun onServiceDisconnected(name: ComponentName?) {
+            // `:myotis` died (or exited under a quick off → on); the
+            // binding brings a fresh process back up.
+            myotisBinder = null
+            myotisInfoFlow.value = MyotisInfo(status = MyotisStatus.Starting)
         }
     }
 
@@ -123,6 +177,42 @@ class MainActivity : ComponentActivity() {
             if (settings.runNodeEnabled.first()) startAndBindService()
         }
 
+        // The Myotis light client (#72, off by default) follows its
+        // switch live, independent of the Swarm node's.
+        lifecycleScope.launch {
+            settings.myotisEnabled.distinctUntilChanged().collect { enabled ->
+                if (enabled) bindMyotis() else unbindMyotis()
+            }
+        }
+
+        // External Swarm endpoint / IPFS gateway (#125), followed live
+        // so switching in Settings applies to the next request. Until
+        // the first value lands, the interceptor and the navigation gate
+        // wait for it (so a cold-start deep link or restored tab can't
+        // reach the embedded node's gateway first) — the main thread
+        // doesn't.
+        // Onchain apps (#123): a restored tab's app document is read by
+        // the interceptor, which needs the chain-data router wired first.
+        OnchainApps.init(this)
+        Gateways.expectExternalEndpoints()
+        lifecycleScope.launch {
+            withContext(Dispatchers.IO) { UnverifiedOrigins.init(this@MainActivity) }
+            combine(
+                settings.externalSwarmEndpoint,
+                settings.externalIpfsGateway,
+            ) { swarm, ipfs -> swarm to ipfs }.collect { (swarm, ipfs) ->
+                // What an unverified gateway left on the virtual origins
+                // goes before anything else is served there. The switch
+                // itself lands under the sweep's lock, so no request can
+                // record against the old gateway once it's swept.
+                UnverifiedOrigins.sweep(
+                    ipfs,
+                    apply = { Gateways.setExternalEndpoints(swarm, ipfs) },
+                    wipe = UnverifiedOrigins::wipeWebData,
+                )
+            }
+        }
+
         // The address label's resting form needs the vendored Public
         // Suffix List, and the first label that asks for it is composed
         // on a navigation-commit frame — a bad frame to spend a 150 KB
@@ -135,6 +225,12 @@ class MainActivity : ComponentActivity() {
         // Same for ENSIP-15's spec tables (a few hundred ms on a cold
         // ART): the first non-ASCII name must not decode them on Main.
         lifecycleScope.launch(Dispatchers.Default) { EnsNormalize.warm() }
+
+        // Ad and tracker blocking (#126): compile the enabled filter
+        // lists off the main thread and follow Settings from here on.
+        // Until the first build lands, requests wait for it (bounded,
+        // see [FirstBuildGate]) — a restored tab loads straight away.
+        Adblock.start(this)
 
         // A cold start from an App Link opens straight at the shared
         // content instead of the home surface. A Unicode ENS link
@@ -169,12 +265,18 @@ class MainActivity : ComponentActivity() {
                     val ipfsInfo by ipfsInfoFlow.collectAsState()
                     val runNodeEnabled by settings.runNodeEnabled
                         .collectAsState(initial = true)
+                    val myotisInfo by myotisInfoFlow.collectAsState()
+                    val myotisEnabled by settings.myotisEnabled
+                        .collectAsState(initial = false)
                     val pendingLinks by deepLinkQueue.pending.collectAsState()
                     BrowserScreen(
                         nodeInfo = info,
                         ipfsInfo = ipfsInfo,
                         runNodeEnabled = runNodeEnabled,
                         onToggleRunNode = ::onToggleRunNode,
+                        myotisInfo = myotisInfo,
+                        myotisEnabled = myotisEnabled,
+                        onToggleMyotis = ::onToggleMyotis,
                         onEnsureIpfsStarted = ::onEnsureIpfsStarted,
                         onIpfsToggle = ::onIpfsToggle,
                         initialUrl = startUrl,
@@ -183,6 +285,7 @@ class MainActivity : ComponentActivity() {
                         onRecoverNodes = ::onRecoverNodes,
                         ipfsProgressSnapshot = ::ipfsProgressSnapshot,
                         ipfsCounters = ::ipfsCounters,
+                        onStatusBarTint = { statusBarTint = it },
                     )
                 }
             }
@@ -205,15 +308,22 @@ class MainActivity : ComponentActivity() {
      * [androidx.compose.material3.ColorScheme] instead keeps them
      * right across a live switch, and keys them off the same thing
      * every other light/dark decision in the app reads.
+     *
+     * The status bar has a second input since #92: while the browser
+     * paints a page's theme colour behind it ([statusBarTint]), its icons
+     * follow that colour instead of the scheme ([statusBarIconsDark]).
+     * One effect decides both, so a live theme switch can't race a tint
+     * change into the wrong icons.
      */
     @Composable
     private fun SystemBarsForScheme() {
         val lightScheme = MaterialTheme.colorScheme.isLight
+        val darkStatusIcons = statusBarIconsDark(statusBarTint, lightScheme)
         val view = LocalView.current
-        LaunchedEffect(lightScheme, view) {
+        LaunchedEffect(lightScheme, darkStatusIcons, view) {
             if (view.isInEditMode) return@LaunchedEffect
             WindowCompat.getInsetsController(window, view).apply {
-                isAppearanceLightStatusBars = lightScheme
+                isAppearanceLightStatusBars = darkStatusIcons
                 isAppearanceLightNavigationBars = lightScheme
             }
         }
@@ -267,10 +377,12 @@ class MainActivity : ComponentActivity() {
     override fun onStart() {
         super.onStart()
         runCatching { binder?.onAppForeground() }
+        runCatching { myotisBinder?.onAppForeground() }
     }
 
     override fun onStop() {
         runCatching { binder?.onAppBackground() }
+        runCatching { myotisBinder?.onAppBackground() }
         super.onStop()
     }
 
@@ -286,6 +398,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onDestroy() {
         unbindFromService()
+        unbindMyotis()
         super.onDestroy()
     }
 
@@ -331,6 +444,38 @@ class MainActivity : ComponentActivity() {
     private fun onIpfsToggle(enabled: Boolean) {
         if (enabled) runCatching { binder?.ensureIpfsStarted() }
         else runCatching { binder?.stopIpfs() }
+    }
+
+    /** The light-client switch on the node page (#72): persisted, and followed in [onCreate]. */
+    private fun onToggleMyotis(enabled: Boolean) {
+        lifecycleScope.launch { settings.setMyotisEnabled(enabled) }
+    }
+
+    private fun bindMyotis() {
+        if (myotisBound) return
+        myotisInfoFlow.value = MyotisInfo(status = MyotisStatus.Starting)
+        myotisBound = bindService(
+            Intent(this, MyotisService::class.java),
+            myotisConnection,
+            Context.BIND_AUTO_CREATE,
+        )
+        if (!myotisBound) {
+            runCatching { unbindService(myotisConnection) }
+            myotisInfoFlow.value = MyotisInfo(
+                status = MyotisStatus.Error,
+                errorMessage = "Couldn't start the light client service",
+            )
+        }
+    }
+
+    /** Unbinding the only client destroys [MyotisService], which stops the engines and exits `:myotis`. */
+    private fun unbindMyotis() {
+        if (!myotisBound) return
+        runCatching { myotisBinder?.unregisterCallback(myotisCallback) }
+        runCatching { unbindService(myotisConnection) }
+        myotisBinder = null
+        myotisBound = false
+        myotisInfoFlow.value = MyotisInfo()
     }
 
     private fun startAndBindService() {

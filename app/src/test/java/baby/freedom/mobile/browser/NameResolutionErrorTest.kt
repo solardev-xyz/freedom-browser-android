@@ -1,5 +1,7 @@
 package baby.freedom.mobile.browser
 
+import baby.freedom.mobile.ens.EnsResult
+import baby.freedom.mobile.ens.EnsTrust
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -44,13 +46,13 @@ class NameResolutionErrorTest {
 
     @Test
     fun `every refusal code gets its own copy, not the RPC-unreachable fallback`() {
-        val fallback = nameResolutionRefusalCopy("ens_lookup_failed")
+        val fallback = nameResolutionRefusalCopy("vitalik.eth", "ens_lookup_failed")
         for (code in listOf("ens_not_found", "ens_unsupported_codec", "ens_invalid_name", "ens_name_too_long")) {
-            assertTrue(code, nameResolutionRefusalCopy(code) != fallback)
-            assertFalse(code, nameResolutionRefusalCopy(code).second.contains("RPC"))
+            assertTrue(code, nameResolutionRefusalCopy("vitalik.eth", code) != fallback)
+            assertFalse(code, nameResolutionRefusalCopy("vitalik.eth", code).second.contains("RPC"))
         }
-        assertEquals("Not a valid ENS name", nameResolutionRefusalCopy("ens_invalid_name").first)
-        assertEquals("ENS name too long", nameResolutionRefusalCopy("ens_name_too_long").first)
+        assertEquals("Not a valid ENS name", nameResolutionRefusalCopy("vitalik.eth", "ens_invalid_name").first)
+        assertEquals("ENS name too long", nameResolutionRefusalCopy("vitalik.eth", "ens_name_too_long").first)
     }
 
     @Test
@@ -60,6 +62,27 @@ class NameResolutionErrorTest {
         assertNull(refusedNameErrorCode("PROVIDER_ERROR"))
         assertEquals(404, statusForNameResolutionError("ens_invalid_name"))
         assertEquals(404, statusForNameResolutionError("ens_name_too_long"))
+    }
+
+    @Test
+    fun `a tez refusal names the Tezos RPC servers, not Ethereum's`() {
+        val conflict = nameResolutionRefusalHtml("alice.tez", "ens_conflict")
+        assertTrue(conflict.contains("The Tezos RPC servers"))
+        assertFalse(conflict.contains("Ethereum"))
+        assertTrue(nameResolutionRefusalHtml("alice.tez", "ens_unverified").contains("Only one Tezos RPC server"))
+        assertTrue(nameResolutionRefusalHtml("vitalik.eth", "ens_conflict").contains("The Ethereum RPC servers"))
+        assertTrue(nameResolutionRefusalHtml("alice.tez", "ens_not_found").contains("ens_not_found</div>"))
+    }
+
+    @Test
+    fun `a tez web record keeps the requested path unless it is a redirect`() {
+        val content = EnsResult.Ok(
+            "hen.tez", "https", "https://example.com/site?v=2", "https://example.com/site?v=2", EnsTrust.ASSUMED,
+        )
+        assertEquals("https://example.com/site?v=2", webRecordTarget(content, "/"))
+        assertEquals("https://example.com/site/docs?q=1", webRecordTarget(content, "/docs?q=1"))
+        val redirect = content.copy(uri = "https://kukai.app/", redirect = true)
+        assertEquals("https://kukai.app/", webRecordTarget(redirect, "/docs?q=1"))
     }
 
     private val navAccept =

@@ -16,8 +16,15 @@ import kotlinx.coroutines.Job
  * [id] is a process-unique, stable identifier so the multi-tab host can
  * map a tab to its physical [android.webkit.WebView] instance across
  * recompositions. It should never be reused within a session.
+ *
+ * [private] marks a private tab (#86), fixed for the tab's life: its
+ * WebView runs on the throwaway [PrivateProfile] (its own cookies,
+ * storage and cache, deleted once the last private tab closes), and
+ * nothing it browses is written to history, the favicon cache,
+ * remembered zoom levels, remembered desktop sites, remembered site
+ * permissions or the download list on disk. It never goes on the reopen-closed-tab stack.
  */
-class BrowserState(val id: Long) {
+class BrowserState(val id: Long, val private: Boolean = false) {
     /**
      * The tab whose page opened this one as a new window (`target=_blank`,
      * `window.open()`; see [TabsState.adoptPopup]), or null for a tab the
@@ -96,6 +103,20 @@ class BrowserState(val id: Long) {
      */
     var resolving by mutableStateOf(false)
         internal set
+
+    /**
+     * The "Continue once" the tab's *not cross-checked* warning offers,
+     * if that's what it is showing (#96, see [EnsGate]). Replaced by the
+     * next such warning; used up by the Continue it was made for.
+     */
+    internal var ensGate: EnsGate? = null
+
+    /**
+     * The tab's onchain-app documents (#123): the one its submit flow
+     * hands the interceptor, what it served last per app, and the one a
+     * not-cross-checked warning is asking about ([OnchainAppTab]).
+     */
+    val onchain = OnchainAppTab(private)
 
     /**
      * This tab's current (or pending) load is content the embedded IPFS
@@ -236,9 +257,10 @@ class BrowserState(val id: Long) {
      * can tell from the headers (an inline `application/zip`, say), so
      * the page on screen stayed after all: adopt its open requests the
      * way [mainFrameAnswered] does for a known non-replacing answer
-     * (R2-F1).
+     * (R2-F1). Likewise when a later redirect hop of that navigation is
+     * cancelled as a link to another app (#85): nothing commits.
      */
-    internal fun mainFrameBecameDownload() {
+    internal fun mainFrameKeptPage() {
         synchronized(documentLock) {
             val kept = replacedDocument ?: return
             replacedDocument = null
@@ -282,6 +304,22 @@ class BrowserState(val id: Long) {
         internal set
 
     /**
+     * The WebView URL of the navigation the user named, scheduled as
+     * [pendingUrl] by their submit's own [loadUrl] (`namedByUser`),
+     * until the WebView takes it ([takeUserNamedLoad]).
+     */
+    private var userNamedPendingUrl: String? = null
+
+    /**
+     * Whether the load of [url] the tab's WebView is starting from
+     * [pendingUrl] is the one the user named: its server redirects may
+     * then end in a link to another app without a tap on any page
+     * (#173, see [externalLinkVerdict]). One load's worth: taken here.
+     */
+    internal fun takeUserNamedLoad(url: String): Boolean =
+        (userNamedPendingUrl == url).also { userNamedPendingUrl = null }
+
+    /**
      * The site-permission prompt this tab is waiting on (#81), or null.
      * Owned by [SitePermissionBroker]; [BrowserScreen] shows it while
      * this tab is the active one, so a background tab can never put a
@@ -310,22 +348,25 @@ class BrowserState(val id: Long) {
         internal set
 
     /**
-     * What a tab brought back by [TabsState.reopenClosedTab] should be
-     * rebuilt from: the closed WebView's saved state, the URL to
+     * What a tab brought back by [TabsState.reopenClosedTab] (or whose
+     * WebView was rebuilt, #183) should be rebuilt from: the closed WebView's saved state, the URL to
      * bring back afresh if that state can't be restored, and — for a
      * tab closed before its page committed — the address to put back
      * even after a successful restore ([resubmitUrl], blank otherwise).
      * [submit] is false when that first navigation was one the user
      * had stopped: the address comes back in the bar, with Reload, but
-     * isn't fetched again. Consumed (and cleared) by
-     * [BrowserWebViewHost] when it creates this tab's WebView; null for
-     * every other tab.
+     * isn't fetched again. [overPage]: the tab had a committed page
+     * with a load still in flight over it (an Activity relaunch, #183
+     * R1-F2), so [resubmitUrl] goes in once that page is restored.
+     * Consumed (and cleared) by [BrowserWebViewHost] when it creates
+     * this tab's WebView; null for every other tab.
      */
     class PendingRestore(
         val webViewState: Bundle?,
         val fallbackUrl: String,
         val resubmitUrl: String = "",
         val submit: Boolean = true,
+        val overPage: Boolean = false,
     ) {
         /**
          * What the rebuilt WebView should do once its blank entry
@@ -338,9 +379,95 @@ class BrowserState(val id: Long) {
          */
         fun afterBlank(restored: Boolean, currentEntryUrl: String?): AfterBlank? {
             val address = if (restored) resubmitUrl else fallbackUrl
+            if (address.isBlank()) return null
             val onBlank = currentEntryUrl == null || currentEntryUrl == ABOUT_BLANK
-            return if (address.isNotBlank() && onBlank) AfterBlank(address, submit) else null
+            return when {
+                onBlank -> AfterBlank(address, submit)
+                // A load that hadn't committed over a real page yet
+                // (#183 R1-F2): the restored list ends on that page, so
+                // the address goes in once *its* reload has finished —
+                // whatever URL that ends on (a redirect, R2-F2) — and
+                // supersedes it as it did before the relaunch.
+                restored && overPage && submit -> AfterBlank(address, submit = true, overPage = true)
+                else -> null
+            }
         }
+
+        companion object {
+            /**
+             * What to rebuild a tab from, given its committed [url], its
+             * [address] and its Stop latch ([loadStopped]) as
+             * [restorableAddress] reports them. A tab whose page hadn't
+             * committed yet gets its address back — submitted again,
+             * unless the user had stopped that load. So does a tab with
+             * a load still [inFlight] over its committed page (see
+             * [uncommittedLoad]), once that page is back.
+             */
+            fun of(
+                url: String,
+                address: String,
+                loadStopped: Boolean,
+                webViewState: Bundle?,
+                inFlight: Boolean = false,
+            ): PendingRestore {
+                val overPage = url.isNotBlank() && inFlight && !loadStopped
+                return PendingRestore(
+                    webViewState = webViewState,
+                    fallbackUrl = address.ifBlank { url },
+                    resubmitUrl = address.takeIf { url.isBlank() || overPage }.orEmpty(),
+                    submit = !(url.isBlank() && loadStopped),
+                    overPage = overPage,
+                )
+            }
+        }
+    }
+
+    /**
+     * This tab's committed URL and address as a rebuilt tab should get
+     * them back. A popup nothing has committed in yet shows its
+     * `about:blank` as a page (see [blankIsPage]); rebuilt, that's the
+     * blank home entry, not an address to load.
+     */
+    internal fun restorableAddress(): Pair<String, String> {
+        val popupBlank = blankIsPage && url == ABOUT_BLANK
+        val restoredUrl = if (popupBlank) "" else url
+        val address = if (popupBlank && addressBarText == ABOUT_BLANK) "" else addressBarText
+        return restoredUrl to address
+    }
+
+    /**
+     * A navigation is under way over the committed page and hasn't
+     * committed yet: a submit still being resolved or probed, or one
+     * the WebView is fetching, whose address the bar already shows in
+     * place of the page's (#183 R1-F2). Not one the user stopped. A
+     * link the page follows itself keeps the page's address until it
+     * commits, so it doesn't count — there's no address to put back.
+     */
+    internal fun uncommittedLoad(): Boolean =
+        !loadAborted && url.isNotBlank() && addressBarText.isNotBlank() &&
+            addressBarText != url && (resolving || progress >= 0)
+
+    /**
+     * The [navCounter] of the last navigation the tab's WebView was
+     * handed. Survives with the tab when its WebView doesn't (#183, see
+     * [TabsState.parkForRelaunch]), so the rebuilt WebView isn't handed
+     * that same navigation again on top of its restored state.
+     */
+    internal var handedNavCounter: Int = 0
+
+    /**
+     * The tab's WebView is being destroyed while the tab lives on (#183,
+     * an Activity relaunch). What only mirrored that WebView goes with
+     * it: a load in flight (the rebuilt WebView reports its own), a
+     * name still being resolved (its job belonged to the screen being
+     * torn down), find-in-page matches, playing audio.
+     */
+    internal fun webViewLost() {
+        cancelPendingProbe()
+        progress = -1
+        resolving = false
+        find.close()
+        playingAudio = false
     }
 
     internal var pendingRestore: PendingRestore? = null
@@ -351,11 +478,120 @@ class BrowserState(val id: Long) {
      * [BrowserWebViewHost] for a reopened tab whose restored (or
      * unrestorable) state leaves the WebView *on* that entry, and
      * consumed by the first `onPageFinished` that follows, whichever
-     * entry it is for: only the blank one acts on it.
+     * entry it is for: only the blank one acts on it. With [overPage]
+     * set, the restored list ends on a real page instead, under a load
+     * that hadn't committed yet (#183 R1-F2): the commit of that page's
+     * own reload submits the address ([afterPageCommitted]).
+     *
+     * Either way it belongs to the restore's own load and nothing
+     * after it: any navigation handed to the WebView after the restore
+     * — the user's submit, Home, Back / Forward, Reload, Stop, a link
+     * the user taps on the page — drops it ([restoreLoadSuperseded],
+     * #185 R2-F1) before it has gone in.
      */
-    class AfterBlank(val address: String, val submit: Boolean)
+    class AfterBlank(val address: String, val submit: Boolean, val overPage: Boolean = false)
 
     internal var afterBlank: AfterBlank? = null
+        private set
+
+    internal fun armAfterRestore(after: AfterBlank?) {
+        afterBlank = after
+    }
+
+    /**
+     * A navigation other than the restore's own load was handed to this
+     * tab's WebView (or its load was stopped): the address the restore
+     * had waiting ([afterBlank]) is no longer the next thing to load.
+     */
+    internal fun restoreLoadSuperseded() {
+        afterBlank = null
+        putBackOverLoadingPage = false
+    }
+
+    /**
+     * The load put back over the restored page ([claimAfterPage]) is on
+     * its way to the WebView, which is still loading that page: it goes
+     * in without stopping it first (#185 R4-F1). The restored page's own
+     * reload committed a moment ago and its HTML and subresources are
+     * still coming in — a stop would leave it truncated, for good if the
+     * put-back load then doesn't commit (a Stop, a 204, a download).
+     * Before the relaunch the load was in flight over a complete page;
+     * Chromium keeps that page loading until the new one commits. One
+     * that needs the other user agent (#180) can't go in under a page
+     * still loading, so it waits for that page's finish instead, for at
+     * most a few seconds ([PutBackHold]).
+     *
+     * One handoff's worth, taken by the WebView's nav observer
+     * ([takePutBackKeepsPage]), and dropped by whatever supersedes the
+     * put-back before it gets there — the same things that drop
+     * [afterBlank] ([restoreLoadSuperseded]), the user's own submit or
+     * Home ([userNavigated]) — or by the restored page finishing, when
+     * there is nothing left to cut.
+     */
+    private var putBackOverLoadingPage = false
+
+    /** Whether the load being handed to the WebView now is the put-back one (see [putBackOverLoadingPage]). */
+    internal fun takePutBackKeepsPage(): Boolean =
+        putBackOverLoadingPage.also { putBackOverLoadingPage = false }
+
+    /**
+     * The user named a navigation of their own (a submit, Home): a load
+     * put back over the restored page and not yet handed to the WebView
+     * isn't the next one any more, so what's handed next stops the page
+     * first as usual.
+     */
+    internal fun userNavigated() {
+        putBackOverLoadingPage = false
+    }
+
+    /**
+     * The blank home entry finished: the address waiting for it, if it
+     * was armed for that entry. One armed over a restored page
+     * ([AfterBlank.overPage]) is dropped instead — the tab is Home.
+     */
+    internal fun takeAfterBlankEntry(): AfterBlank? =
+        afterBlank.also { afterBlank = null }?.takeUnless { it.overPage }
+
+    /**
+     * A real page finished. A pending blank-entry address is dropped: it
+     * can't apply to a later Home. One armed over the restored page
+     * ([AfterBlank.overPage]) was already taken at that page's commit
+     * ([afterPageCommitted]); if it's still here, nothing committed.
+     */
+    internal fun afterPageFinished() {
+        if (afterBlank?.overPage == false) afterBlank = null
+        putBackOverLoadingPage = false
+    }
+
+    /**
+     * A main-frame document committed. The address armed over the
+     * restored page ([AfterBlank.overPage]) is returned, still armed,
+     * for the caller to [claimAfterPage] once this commit has updated
+     * the tab: the first commit after the restore is that page's
+     * reload, under whatever URL it ended on (a redirect, #185 R2-F2).
+     * It goes in at the commit, not at the page's finish: the load was
+     * in flight over this page before the relaunch, and is again from
+     * before the page can take any input — so a navigation the user
+     * starts on it (a tapped link, a POST form, which never reaches
+     * `shouldOverrideUrlLoading`) replaces that load in the WebView
+     * itself, as it would have before, instead of being overwritten by
+     * it once the page finishes (#185 R3-F1).
+     */
+    internal fun afterPageCommitted(): AfterBlank? = afterBlank?.takeIf { it.overPage }
+
+    /**
+     * Whether [after] (from [afterPageCommitted]) is still the load to
+     * submit now: nothing superseded it in between, it wasn't claimed
+     * already, and the user hasn't stopped the tab. Disarms it either way.
+     * A claimed load goes to the WebView without stopping the restored
+     * page ([takePutBackKeepsPage]).
+     */
+    internal fun claimAfterPage(after: AfterBlank): Boolean {
+        if (afterBlank !== after) return false
+        afterBlank = null
+        putBackOverLoadingPage = !loadAborted
+        return putBackOverLoadingPage
+    }
 
     /**
      * Compact-on-scroll state of the floating capsule for this tab.
@@ -399,6 +635,17 @@ class BrowserState(val id: Long) {
         internal set
 
     /**
+     * The document on screen's `<meta name="theme-color">` as opaque
+     * ARGB, or null for none (#92): the band behind the status bar takes
+     * it. Set by the tab's WebView from [THEME_COLOR_JS] after first
+     * paint, load finished, same-document history changes and any
+     * `<meta>` change the bottom-UI detector sees (see
+     * [ThemeColorSlot]); cleared on the way home.
+     */
+    var themeColorArgb: Int? by mutableStateOf<Int?>(null)
+        internal set
+
+    /**
      * The chrome is busy with the address bar or the keyboard, so a push
      * at the end of the page doesn't reveal it (#65, [revealAllowed]).
      * Written by [BrowserScreen] for the active tab; read by the tab's
@@ -413,6 +660,20 @@ class BrowserState(val id: Long) {
      * see [bottomStripArgb]). Written by [BrowserScreen]; plain field.
      */
     internal var surfaceArgb: Int = 0xFF000000.toInt()
+
+    /**
+     * Something in this tab's pages is audible (#91): a media element
+     * playing, unmuted by the page, volume above zero — as the tab's
+     * frames report it (see [TabAudioFrames]). Stays true while the tab
+     * is muted with [audioMuted]: the page is still playing, the user just
+     * doesn't hear it.
+     */
+    var playingAudio by mutableStateOf(false)
+        internal set
+
+    /** The user muted this tab's WebView (#91, [TabsState.setAudioMuted]). */
+    var audioMuted by mutableStateOf(false)
+        internal set
 
     /**
      * Most recent page-preview bitmap for this tab, shown in the tab
@@ -525,8 +786,12 @@ class BrowserState(val id: Long) {
      * scheme-constrained ENS load. Passing `null` (the default) leaves
      * any existing override untouched — reload, back, and forward all
      * reuse the current override. Call [clearEnsOverride] to reset.
+     *
+     * [namedByUser]: this is the load a user's own submit scheduled
+     * (#173, [takeUserNamedLoad]). Only [BrowserScreen]'s submit passes
+     * it, at the load that submit makes.
      */
-    fun loadUrl(url: String, displayPrefix: String? = null) {
+    fun loadUrl(url: String, displayPrefix: String? = null, namedByUser: Boolean = false) {
         cancelPendingProbe()
         // A new load supersedes whatever the last Stop aborted, so the
         // progress latch opens again.
@@ -534,6 +799,10 @@ class BrowserState(val id: Long) {
         ipfsLoad = ipfsLoadFor(url, ipfsLoad)
         val loadable = Gateways.toLoadable(url)
         pendingUrl = loadable
+        // Named by the user only when their submit's own load says so
+        // (#173): never an error page, a restore, or a Back step that
+        // happens to come after it (R2-F2).
+        userNamedPendingUrl = loadable.takeIf { namedByUser }
         if (displayPrefix != null) {
             // The override base is the virtual origin the content is
             // served from — in-manifest navigation stays under it, so
@@ -587,6 +856,7 @@ class BrowserState(val id: Long) {
     fun navigateHome() {
         // Home is home, even for a popup whose opener left it blank.
         blankIsPage = false
+        userNavigated()
         cancelPendingProbe()
         capsuleCollapse.expand()
         override = null

@@ -41,7 +41,7 @@ class BottomUiDetectorScriptTest {
           compatMode: 'CSS1Compat', documentElement: html, body: body,
           scrollingElement: { get scrollHeight() { return scrollHeight; } },
           elementFromPoint: function (x, y) { this.lastProbe = [x, y]; return hit; },
-          querySelectorAll: function (sel) { return sel === 'meta[name="theme-color"]' ? metas : []; },
+          querySelectorAll: function (sel) { return sel === 'meta[name="theme-color" i]' ? metas : []; },
           createElement: function (t) {
             return { getContext: function () {
               var v = '#000000';
@@ -67,18 +67,55 @@ class BottomUiDetectorScriptTest {
         }
         function matchMedia(q) { return { matches: !!mediaMatches[q] }; }
         function setTimeout(f, ms) { timers.push({ f: f, ms: ms }); return ++timerSeq; }
-        var contextMenuListeners = [];
+        var contextMenuListeners = [], inputListeners = [];
+        // The page's clock, and Event's native timeStamp getter (which the page may later shadow).
+        var perfNow = 1000;
+        var performance = { now: function () { return perfNow; } };
+        function Event() {}
+        Object.defineProperty(Event.prototype, 'timeStamp', { configurable: true, get: function () { return this._ts; } });
+        // A trusted (or synthetic) input event of type [t] reaching this document.
+        function input(t, trusted) {
+          var e = new Event(); e.isTrusted = trusted; e._ts = perfNow - 7;
+          for (var i = 0; i < inputListeners.length; i++) if (inputListeners[i].t === t) inputListeners[i].f(e);
+        }
         function addEventListener(t, f, c) {
           if (t === 'contextmenu') { contextMenuListeners.push({ f: f, capture: c === true }); return; }
+          if (t === 'pointerdown' || t === 'keydown' || t === 'click') { inputListeners.push({ t: t, f: f, capture: c === true }); return; }
+          if (t === 'playing' || t === 'pagehide' || t === 'pageshow') { mediaListeners.push({ t: t, f: f, capture: c === true }); return; }
           windowListeners++; if (t === 'resize') resizeListeners.push(f);
         }
+        // Media (#91): elements that dispatch to their own listeners, and a
+        // `playing` that reaches window only while [connected].
+        var mediaListeners = [];
+        function EventTarget() {}
+        EventTarget.prototype.addEventListener = function (t, f) {
+          this.ls = this.ls || [];
+          for (var i = 0; i < this.ls.length; i++) if (this.ls[i].t === t && this.ls[i].f === f) return;
+          this.ls.push({ t: t, f: f });
+        };
+        // Chromium's decoded-audio counter; an element has sound unless the test says otherwise.
+        function HTMLMediaElement() {}
+        Object.defineProperty(HTMLMediaElement.prototype, 'webkitAudioDecodedByteCount', { configurable: true,
+          get: function () { return this.decoded === undefined ? 4096 : this.decoded; } });
+        function media() { var m = new EventTarget(); m.paused = true; m.ended = false; m.muted = false; m.volume = 1; m.connected = true; m.readyState = 4; return m; }
+        function fire(m, t) {
+          var e = { type: t, target: m, currentTarget: m, isTrusted: true };
+          if (m.connected) for (var i = 0; i < mediaListeners.length; i++) if (mediaListeners[i].t === t) mediaListeners[i].f(e);
+          var ls = m.ls || [];
+          for (var j = 0; j < ls.length; j++) if (ls[j].t === t) ls[j].f(e);
+        }
+        function play(m) { m.paused = false; fire(m, 'playing'); }
+        function pause(m) { m.paused = true; fire(m, 'pause'); }
+        function win(t, e) { for (var i = 0; i < mediaListeners.length; i++) if (mediaListeners[i].t === t) mediaListeners[i].f(e || {}); }
         // A trusted long-press's `contextmenu`: our listener, then the page's handlers, then tasks.
         function pressAndHold(e, pageCancels) {
           for (var i = 0; i < contextMenuListeners.length; i++) contextMenuListeners[i].f(e);
           if (pageCancels) e.defaultPrevented = true;
           flushTimers();
         }
-        function MutationObserver(cb) { mutationCb = cb; this.observe = function (n, o) { this.target = n; this.opts = o; }; }
+        var mutationObs = null;
+        function mutationCbOpts() { return mutationObs.opts; }
+        function MutationObserver(cb) { mutationCb = cb; mutationObs = this; this.observe = function (n, o) { this.target = n; this.opts = o; }; }
         function ResizeObserver(cb) { this.cb = cb; var self = this;
           this.observe = function (e) { observed.push({ kind: 'resize', el: e, cb: cb, obs: self }); };
           this.disconnect = function () { observed = observed.filter(function (o) { return o.obs !== self; }); }; }
@@ -282,6 +319,42 @@ class BottomUiDetectorScriptTest {
     }
 
     @Test
+    fun `a meta change sends Kotlin the theme colour, debounced, and nothing else does`() = page {
+        eval("hit = tab")
+        install()
+        val sentStr = { Context.toString(eval("sent.join('|')")) }
+        // It watches the attributes a theme-color change comes through.
+        assertEquals(
+            "class,style,hidden,open,content,media,name",
+            Context.toString(eval("mutationCbOpts().attributeFilter.join(',')")),
+        )
+        // A mutation elsewhere: no ping.
+        eval("mutationCb([{ type: 'attributes', target: { nodeName: 'DIV' } }, { type: 'childList', addedNodes: [{ nodeName: 'P' }], removedNodes: [] }])")
+        flush()
+        assertEquals(1, sent)
+        // A route setting its colour after a fetch: `content` changes, twice in one debounce.
+        eval("mutationCb([{ type: 'attributes', target: { nodeName: 'META' } }])")
+        eval("mutationCb([{ type: 'attributes', target: { nodeName: 'META' } }])")
+        assertEquals(1, timers)
+        flush()
+        assertEquals(2, sent)
+        val ping = Context.toString(eval("sent[1]"))
+        assertEquals("theme $token none", ping)
+        assertEquals(ThemeColorReport(null), parseThemeColorReport(ping, isMainFrame = true, expectedToken = token))
+        assertNull(parseThemeColorReport(ping, isMainFrame = false, expectedToken = token))
+        assertNull(parseThemeColorReport(ping, isMainFrame = true, expectedToken = "ffff"))
+        assertNull(parseThemeColorReport(ping, isMainFrame = true, expectedToken = null))
+        // A tag added, a tag removed, a `<head>` swapped: one ping each.
+        eval("mutationCb([{ type: 'childList', addedNodes: [{ nodeName: 'META' }], removedNodes: [] }])"); flush()
+        eval("mutationCb([{ type: 'childList', addedNodes: [], removedNodes: [{ nodeName: 'META' }] }])"); flush()
+        eval("mutationCb([{ type: 'childList', addedNodes: [{ nodeName: 'HEAD' }], removedNodes: [] }])"); flush()
+        assertEquals(5, sent)
+        // …and it's no probe report: the bottom-UI answer is unchanged, so none was sent.
+        assertNull(parseBottomUiMessage(ping, true, token))
+        assertTrue(sentStr().split('|').drop(1).all { it == ping })
+    }
+
+    @Test
     fun `mutations are debounced into one probe, at least 250 ms out`() = page {
         eval("hit = tab")
         install()
@@ -409,6 +482,213 @@ class BottomUiDetectorScriptTest {
         assertEquals(1, sent)
     }
 
+    // ---- audible media (#91) -------------------------------------------
+
+    private fun Page.audio(): String = Context.toString(eval("sent.filter(function (s) { return /^audio /.test(s); }).join('|')"))
+
+    @Test
+    fun `media becoming audible and falling silent is reported once each, from document start`() = page {
+        documentStart()
+        assertTrue(eval("mediaListeners.every(function (l) { return l.capture; })") as Boolean)
+        eval("var v = media(); play(v)")
+        assertEquals(AUDIO_AUDIBLE, audio())
+        assertEquals(true, parseAudioReport(audio()))
+        // A second `playing` (after buffering) says nothing new.
+        eval("fire(v, 'playing')")
+        assertEquals(AUDIO_AUDIBLE, audio())
+        eval("pause(v)")
+        assertEquals("$AUDIO_AUDIBLE|$AUDIO_SILENT", audio())
+        assertEquals(false, parseAudioReport(AUDIO_SILENT))
+    }
+
+    @Test
+    fun `muted or zero-volume media isn't audible until the page turns it up`() = page {
+        documentStart()
+        eval("var v = media(); v.muted = true; play(v)")
+        assertEquals("", audio())
+        eval("v.muted = false; fire(v, 'volumechange')")
+        assertEquals(AUDIO_AUDIBLE, audio())
+        eval("v.volume = 0; fire(v, 'volumechange')")
+        assertEquals("$AUDIO_AUDIBLE|$AUDIO_SILENT", audio())
+    }
+
+    @Test
+    fun `the frame stays audible while any of its elements is`() = page {
+        documentStart()
+        eval("var a = media(), b = media(); play(a); play(b); pause(a)")
+        assertEquals(AUDIO_AUDIBLE, audio())
+        eval("b.ended = true; b.paused = true; fire(b, 'ended')")
+        assertEquals("$AUDIO_AUDIBLE|$AUDIO_SILENT", audio())
+    }
+
+    @Test
+    fun `an element detached mid-play is still heard when it pauses`() = page {
+        documentStart()
+        eval("var v = media(); play(v); v.connected = false; pause(v)")
+        assertEquals("$AUDIO_AUDIBLE|$AUDIO_SILENT", audio())
+    }
+
+    @Test
+    fun `an element paused by being detached is heard again when it plays detached`() = page {
+        documentStart()
+        eval("var v = media(); play(v); v.connected = false; pause(v); play(v)")
+        assertEquals("$AUDIO_AUDIBLE|$AUDIO_SILENT|$AUDIO_AUDIBLE", audio())
+        eval("pause(v)")
+        assertEquals("$AUDIO_AUDIBLE|$AUDIO_SILENT|$AUDIO_AUDIBLE|$AUDIO_SILENT", audio())
+        // A synthetic `playing` dispatched on the detached element adds nothing.
+        eval("v.paused = false; v.ls.forEach(function (l) { if (l.t === 'playing') l.f({ type: 'playing', target: v, currentTarget: v, isTrusted: false }); })")
+        assertEquals("$AUDIO_AUDIBLE|$AUDIO_SILENT|$AUDIO_AUDIBLE|$AUDIO_SILENT", audio())
+    }
+
+    @Test
+    fun `leaving the document reports silence, and a synthetic playing is ignored`() = page {
+        documentStart()
+        eval("var v = media(); v.paused = false; fire({ connected: true, ls: [] }, 'playing')")
+        eval("mediaListeners.forEach(function (l) { if (l.t === 'playing') l.f({ target: v, isTrusted: false }); })")
+        assertEquals("", audio())
+        eval("play(v); win('pagehide')")
+        assertEquals("$AUDIO_AUDIBLE|$AUDIO_SILENT", audio())
+        // Back from the back/forward cache, still playing.
+        eval("win('pageshow', { persisted: true })")
+        assertEquals("$AUDIO_AUDIBLE|$AUDIO_SILENT|$AUDIO_AUDIBLE", audio())
+    }
+
+    @Test
+    fun `a stream starved of data isn't audible until it plays again`() = page {
+        documentStart()
+        eval("var v = media(); play(v); v.readyState = 2; fire(v, 'waiting')")
+        assertEquals("$AUDIO_AUDIBLE|$AUDIO_SILENT", audio())
+        // A stall with data still buffered keeps playing, and stays audible.
+        eval("v.readyState = 4; fire(v, 'playing'); fire(v, 'stalled')")
+        assertEquals("$AUDIO_AUDIBLE|$AUDIO_SILENT|$AUDIO_AUDIBLE", audio())
+        // Detached while starved: its own `playing` still brings it back.
+        eval("v.readyState = 1; fire(v, 'waiting'); v.connected = false; v.readyState = 4; fire(v, 'playing')")
+        assertEquals("$AUDIO_AUDIBLE|$AUDIO_SILENT|$AUDIO_AUDIBLE|$AUDIO_SILENT|$AUDIO_AUDIBLE", audio())
+    }
+
+    @Test
+    fun `an audible frame looks again on a timer, so a silence no event reports is still sent`() = page {
+        documentStart()
+        eval("var v = media(); play(v)")
+        assertEquals(1, timers)
+        assertEquals(AUDIO_AUDIBLE, audio())
+        assertEquals(AUDIO_RECHECK_MS, num("timers[0].ms"))
+        // Still playing: the check re-arms itself, and says so again (a
+        // Kotlin that forgot the frame on a main-frame ready gets it back).
+        assertEquals(1, flush())
+        assertEquals(1, timers)
+        assertEquals("$AUDIO_AUDIBLE|$AUDIO_AUDIBLE", audio())
+        // `document.open()`: every listener is erased and the element,
+        // removed from the document, pauses without anyone hearing it.
+        eval("mediaListeners = []; v.ls = []; v.paused = true")
+        flush()
+        assertEquals("$AUDIO_AUDIBLE|$AUDIO_AUDIBLE|$AUDIO_SILENT", audio())
+        // Silent now: nothing runs any more.
+        assertEquals(0, timers)
+    }
+
+    @Test
+    fun `a video with no audio track isn't audible, and stops being looked at`() = page {
+        documentStart()
+        eval("var v = media(); v.decoded = 0; play(v)")
+        assertEquals("", audio())
+        // Looked at again a few times, in case its sound isn't decoded yet…
+        assertEquals(AUDIO_SOUND_MS, num("timers[0].ms"))
+        var looks = 0
+        while (flush() > 0) looks++
+        assertEquals(AUDIO_SOUND_TRIES, looks)
+        // …then nothing runs, and nothing was said.
+        assertEquals(0, timers)
+        assertEquals("", audio())
+        // A later event on it looks again (new source, now with sound).
+        eval("v.decoded = 100; fire(v, 'playing')")
+        assertEquals(AUDIO_AUDIBLE, audio())
+    }
+
+    @Test
+    fun `sound decoded shortly after playing is picked up on a quick look`() = page {
+        documentStart()
+        eval("var v = media(); v.decoded = 0; play(v)")
+        assertEquals("", audio())
+        eval("v.decoded = 512")
+        flush()
+        assertEquals(AUDIO_AUDIBLE, audio())
+        assertEquals(AUDIO_RECHECK_MS, num("timers[0].ms"))
+    }
+
+    @Test
+    fun `a page shadowing the decoded-byte counter later can't make a silent video audible`() = page {
+        documentStart()
+        eval("Object.defineProperty(HTMLMediaElement.prototype, 'webkitAudioDecodedByteCount', { get: function () { return 1; } })")
+        eval("var v = media(); v.decoded = 0; play(v)")
+        assertEquals("", audio())
+    }
+
+    @Test
+    fun `a subframe reports its audio too`() = page {
+        eval("top = {}")
+        documentStart()
+        eval("var v = media(); play(v)")
+        assertEquals(AUDIO_AUDIBLE, audio())
+    }
+
+    // ---- input in the top document (#85) ------------------------------
+
+    private fun Page.inputs(): Int = num("sent.filter(function (s) { return s.indexOf('$TOP_DOCUMENT_INPUT') === 0; }).length")
+
+    @Test
+    fun `trusted input in the top document is reported at once, from document start`() = page {
+        documentStart()
+        assertEquals(3, num("inputListeners.length"))
+        assertTrue(eval("inputListeners.every(function (l) { return l.capture; })") as Boolean)
+        eval("input('pointerdown', true)")
+        // Synchronously, not a task later: it has to beat the navigation.
+        assertEquals(1, inputs())
+        assertEquals(0, timers)
+        eval("input('keydown', true); input('click', true)")
+        assertEquals(3, inputs())
+        // Each says which event it was and how long ago it happened, on
+        // the page's clock.
+        assertEquals(
+            "$TOP_DOCUMENT_INPUT pointerdown 7,$TOP_DOCUMENT_INPUT keydown 7,$TOP_DOCUMENT_INPUT click 7",
+            eval("sent.join(',')").toString(),
+        )
+    }
+
+    @Test
+    fun `the page can't skew the input's age after document start`() = page {
+        documentStart()
+        eval("performance.now = function () { return 1e9; }")
+        eval("Object.defineProperty(Event.prototype, 'timeStamp', { get: function () { return 0; } })")
+        eval("input('pointerdown', true)")
+        assertEquals(1, inputs())
+        assertEquals(TopDocumentInput(7L, isClick = false), parseTopDocumentInput(eval("sent[sent.length - 1]").toString()))
+    }
+
+    @Test
+    fun `the page can't pass a keydown off as a click`() = page {
+        documentStart()
+        eval("Object.defineProperty(Event.prototype, 'type', { get: function () { return 'click'; } })")
+        eval("input('keydown', true)")
+        assertEquals(TopDocumentInput(7L, isClick = false), parseTopDocumentInput(eval("sent[sent.length - 1]").toString()))
+    }
+
+    @Test
+    fun `synthetic input is not reported`() = page {
+        documentStart()
+        eval("input('pointerdown', false); input('click', false); input('keydown', false)")
+        assertEquals(0, inputs())
+    }
+
+    @Test
+    fun `a subframe never reports input`() = page {
+        eval("top = {}")
+        documentStart()
+        assertEquals(0, num("inputListeners.length"))
+        eval("input('pointerdown', true); input('click', true)")
+        assertEquals(0, inputs())
+    }
+
     @Test
     fun `before first paint it only says ready`() = page {
         eval("hit = tab")
@@ -525,5 +805,140 @@ class BottomUiDetectorScriptTest {
             throw AssertionError("accepted a non-letter channel name")
         } catch (_: IllegalArgumentException) {
         }
+    }
+
+    @Test
+    fun `Kotlin's theme-colour ask is answered with the current token only, once started`() = page {
+        eval("hit = tab; metas = [{ getAttribute: function (a) { return a === 'content' ? 'navy' : null; } }]")
+        documentStart()
+        // Before the start at first paint: no answer.
+        eval("kotlinSays('${themeColorRequest(token)}')")
+        assertEquals(0, sent)
+        firstPaint()
+        assertEquals(1, sent)
+        eval("kotlinSays('${themeColorRequest(token)}')")
+        assertEquals(2, sent)
+        val answer = Context.toString(eval("sent[1]"))
+        assertEquals("theme $token rgb(0, 0, 128)", answer)
+        assertEquals(ThemeColorReport(0xFF000080.toInt()), parseThemeColorReport(answer, true, token))
+        // Another document's ask: silence.
+        eval("kotlinSays('${themeColorRequest("ffff")}')")
+        assertEquals(2, sent)
+    }
+
+    @Test
+    fun `the theme-colour read goes only through functions saved at document start`() = page {
+        // Real-shaped prototypes, as the page would find them.
+        eval(
+            """
+            function Element() {}
+            Element.prototype.getAttribute = function (n) { return this.attrs[n] === undefined ? null : this.attrs[n]; };
+            function meta(attrs) { var m = Object.create(Element.prototype); m.attrs = attrs; return m; }
+            function MediaQueryList(q) { this.q = q; }
+            Object.defineProperty(MediaQueryList.prototype, 'matches', { configurable: true, get: function () { return !!mediaMatches[this.q]; } });
+            matchMedia = function (q) { return new MediaQueryList(q); };
+            metas = [meta({ media: '(prefers-color-scheme: dark)', content: '#112233' }), meta({ content: 'navy' })];
+            """,
+        )
+        documentStart()
+        // Then the page wraps everything the read uses, counting calls.
+        // (Not `RegExp.prototype.test`: the fake canvas's own setter uses it.)
+        eval(
+            """
+            var seen = [];
+            function spy(o, n) { var f = o[n]; o[n] = function () { seen.push(n); return f.apply(this, arguments); }; }
+            spy(document, 'querySelectorAll'); spy(document, 'createElement'); spy(window, 'matchMedia');
+            spy(Element.prototype, 'getAttribute'); spy(RegExp.prototype, 'exec');
+            spy(window, 'parseInt'); spy(window, 'parseFloat'); spy(Math, 'round');
+            Object.defineProperty(MediaQueryList.prototype, 'matches', { get: function () { seen.push('matches'); return !!mediaMatches[this.q]; } });
+            var realCall = Function.prototype.call;
+            Function.prototype.call = function () { seen.push('call'); return realCall.apply(this, arguments); };
+            """,
+        )
+        firstPaint()
+        eval("seen = []")
+        eval("kotlinSays('${themeColorRequest(token)}')")
+        assertEquals("theme $token rgb(0, 0, 128)", Context.toString(eval("sent[sent.length - 1]")))
+        eval("mediaMatches['(prefers-color-scheme: dark)'] = true")
+        eval("kotlinSays('${themeColorRequest(token)}')")
+        assertEquals("theme $token rgb(17, 34, 51)", Context.toString(eval("sent[sent.length - 1]")))
+        // Not one of the page's functions saw either read.
+        assertEquals("", Context.toString(eval("Function.prototype.call = realCall; seen.join(',')")))
+    }
+
+    // A page's re-issue of its own navigation (#180, R5-F3).
+
+    private val anchors = """
+        function HTMLElement() {}
+        HTMLElement.prototype.click = function () { clicked.push({ href: this._href, policy: this._policy, target: this._target, connected: false }); };
+        function HTMLAnchorElement() {}
+        HTMLAnchorElement.prototype = Object.create(HTMLElement.prototype);
+        ['href', 'referrerPolicy', 'target'].forEach(function (n) {
+          Object.defineProperty(HTMLAnchorElement.prototype, n, { configurable: true,
+            get: function () { return this['_' + ({ href: 'href', referrerPolicy: 'policy', target: 'target' })[n]]; },
+            set: function (v) { this['_' + ({ href: 'href', referrerPolicy: 'policy', target: 'target' })[n]] = v; } });
+        });
+        var clicked = [];
+        var fakeCreate = document.createElement;
+        document.createElement = function (t) { return t === 'a' ? new HTMLAnchorElement() : fakeCreate(t); };
+    """
+
+    @Test
+    fun `Kotlin's re-issue ask clicks a detached link, with the current token only`() = page {
+        eval(anchors)
+        eval("hit = tab")
+        documentStart()
+        val ask = pageReissueRequest(token, "http://127.0.0.1:8700/meet?x=1")!!
+        // Before the start at first paint: nothing.
+        eval("kotlinSays('$ask')")
+        assertEquals(0, num("clicked.length"))
+        firstPaint()
+        eval("kotlinSays('$ask')")
+        assertEquals(1, num("clicked.length"))
+        assertEquals(
+            "http://127.0.0.1:8700/meet?x=1 origin _self",
+            Context.toString(eval("[clicked[0].href, clicked[0].policy, clicked[0].target].join(' ')")),
+        )
+        // Another document's token, or a non-http address: nothing.
+        eval("kotlinSays('${pageReissueRequest("ffff", "http://127.0.0.1:8700/meet")}')")
+        eval("kotlinSays('go $token javascript:alert(1)')")
+        assertEquals(1, num("clicked.length"))
+        // Nor is anything posted back for it.
+        assertEquals(1, sent)
+    }
+
+    @Test
+    fun `the re-issue goes only through functions saved at document start`() = page {
+        eval(anchors)
+        eval("hit = tab")
+        documentStart()
+        // Then the page wraps everything the re-issue uses.
+        eval(
+            """
+            var seen = [];
+            function spy(o, n) { var f = o[n]; o[n] = function () { seen.push(n); return f.apply(this, arguments); }; }
+            spy(document, 'createElement'); spy(HTMLElement.prototype, 'click'); spy(RegExp.prototype, 'exec');
+            ['href', 'referrerPolicy', 'target'].forEach(function (n) {
+              Object.defineProperty(HTMLAnchorElement.prototype, n, { configurable: true,
+                get: function () { seen.push('get ' + n); }, set: function () { seen.push('set ' + n); } });
+            });
+            var realCall = Function.prototype.call;
+            Function.prototype.call = function () { seen.push('call'); return realCall.apply(this, arguments); };
+            """,
+        )
+        firstPaint()
+        eval("seen = []")
+        eval("kotlinSays('${pageReissueRequest(token, "http://127.0.0.1:8700/meet")}')")
+        assertEquals("http://127.0.0.1:8700/meet", Context.toString(eval("clicked[clicked.length - 1].href")))
+        assertEquals("", Context.toString(eval("Function.prototype.call = realCall; seen.join(',')")))
+    }
+
+    @Test
+    fun `without the natives it needs, there is no re-issue`() = page {
+        // No HTMLAnchorElement: nothing to build the link from untouched.
+        eval("hit = tab")
+        install()
+        eval("kotlinSays('${pageReissueRequest(token, "http://127.0.0.1:8700/meet")}')")
+        assertEquals(1, sent)
     }
 }

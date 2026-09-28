@@ -2,13 +2,18 @@ package baby.freedom.mobile.browser
 
 import baby.freedom.mobile.ens.EnsResolver
 import baby.freedom.mobile.ens.EnsResult
+import baby.freedom.mobile.ens.EnsTrust
 import baby.freedom.swarm.SwarmNode
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeoutOrNull
 import java.util.concurrent.ConcurrentHashMap
@@ -17,12 +22,18 @@ import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.withLock
 
 /**
- * Process-wide holder + router for the local content gateways.
+ * Process-wide holder + router for the content gateways.
  *
  * The ant gateway lives on a fixed port so [SwarmNode.GATEWAY_URL] is a
  * compile-time constant; the IPFS gateway binds to an ephemeral port at
- * startup, so the UI process mirrors it into [ipfsBase] whenever the
+ * startup, so the UI process mirrors it into [setIpfsBase] whenever the
  * `:node` process broadcasts a new [baby.freedom.swarm.IpfsInfo].
+ *
+ * Either can be replaced by an external endpoint the user configured
+ * in Settings (#125, [ExternalEndpoints]); `MainActivity` mirrors those
+ * into [setExternalEndpoints]. [swarmBase] / [ipfsBase] are what's in
+ * use right now — the external endpoint when one is set, the embedded
+ * node's gateway otherwise.
  *
  * Since the virtual-origin switch the WebView never loads gateway URLs
  * directly: [toLoadable] hands it a per-root `https://….freedom.baby`
@@ -32,23 +43,92 @@ import kotlin.concurrent.withLock
  * interceptor).
  */
 object Gateways {
-    const val SWARM_BASE: String = SwarmNode.GATEWAY_URL
+    /** The embedded ant node's gateway. */
+    const val EMBEDDED_SWARM_BASE: String = SwarmNode.GATEWAY_URL
 
-    /**
-     * Base URL of the embedded IPFS gateway (e.g.
-     * `http://127.0.0.1:58312`), or `""` when IPFS isn't running.
-     *
-     * `@Volatile` because the AIDL callback that writes this value runs
-     * on the Binder thread while readers (webview interceptors,
-     * suspend navigation gates) live on both the UI and IO threads.
+    /*
+     * `@Volatile` (and state flows below) because the writers (the AIDL
+     * callback on the Binder thread, the settings collector on the main
+     * thread) and the readers (webview interceptors, suspend navigation
+     * gates on the UI and IO threads) are all on different threads.
      */
     @Volatile
-    var ipfsBase: String = ""
-        private set
+    private var embeddedIpfsBase: String = ""
 
+    private val externalSwarm = MutableStateFlow("")
+    private val externalIpfs = MutableStateFlow("")
+
+    /** External Swarm endpoint base URL, or `""` for the embedded node. */
+    val externalSwarmBase: String get() = externalSwarm.value
+
+    /** External IPFS gateway base URL, or `""` for the embedded node. */
+    val externalIpfsBase: String get() = externalIpfs.value
+
+    /** [externalIpfsBase] as a flow, for UI that must follow a switch. */
+    val externalIpfsBaseFlow: StateFlow<String> = externalIpfs.asStateFlow()
+
+    /**
+     * Completed once the external endpoint settings are known.
+     * Already complete unless [expectExternalEndpoints] armed it (the
+     * app does, at start; tests that never load the settings don't).
+     */
+    @Volatile
+    private var endpointsKnown: CompletableDeferred<Unit> =
+        CompletableDeferred<Unit>().apply { complete(Unit) }
+
+    /** The Swarm gateway in use: the external endpoint, else the embedded node's. */
+    val swarmBase: String
+        get() = externalSwarmBase.ifEmpty { EMBEDDED_SWARM_BASE }
+
+    /**
+     * The IPFS gateway in use: the external gateway, else the embedded
+     * one's (e.g. `http://127.0.0.1:58312`), or `""` when there's no
+     * external gateway and the embedded IPFS node isn't running.
+     */
+    val ipfsBase: String
+        get() = externalIpfsBase.ifEmpty { embeddedIpfsBase }
+
+    /** The embedded IPFS gateway's base, `""` while it isn't running. */
     fun setIpfsBase(base: String) {
-        ipfsBase = base
+        embeddedIpfsBase = base
     }
+
+    /**
+     * The external endpoint settings are being loaded: until
+     * [setExternalEndpoints] lands, [awaitExternalEndpoints] waits. So a
+     * cold-start deep link or restored tab can't reach the embedded
+     * node's gateway before the setting is read — without blocking the
+     * main thread on the read.
+     */
+    fun expectExternalEndpoints() {
+        if (endpointsKnown.isCompleted) endpointsKnown = CompletableDeferred()
+    }
+
+    /** The user's external endpoints (`""` = embedded node); normalized base URLs. */
+    fun setExternalEndpoints(swarm: String, ipfs: String) {
+        externalSwarm.value = swarm
+        externalIpfs.value = ipfs
+        endpointsKnown.complete(Unit)
+    }
+
+    /** Wait until the external endpoint settings are known (see [expectExternalEndpoints]). */
+    suspend fun awaitExternalEndpoints() {
+        withTimeoutOrNull(ENDPOINTS_WAIT_MS) { endpointsKnown.await() }
+    }
+
+    /**
+     * [awaitExternalEndpoints] for the request interceptor, which runs
+     * on WebView's IO threads (never the main thread). Returns at once
+     * in the common case.
+     */
+    fun awaitExternalEndpointsBlocking() {
+        val known = endpointsKnown
+        if (known.isCompleted) return
+        runBlocking { withTimeoutOrNull(ENDPOINTS_WAIT_MS) { known.await() } }
+    }
+
+    /** A bound on [awaitExternalEndpoints]: a DataStore read takes milliseconds. */
+    private const val ENDPOINTS_WAIT_MS = 5_000L
 
     /**
      * Shared ENS resolver. One instance so the submit flow and the
@@ -169,19 +249,20 @@ object Gateways {
      */
     fun toLoadable(url: String): String {
         VirtualOrigin.toVirtualUrl(url)?.let { return it }
+        OnchainAppRef.toVirtualUrl(url)?.let { return it }
         return toGatewayUrl(url)
     }
 
     /**
-     * Rewrite a user-facing URL to the direct
-     * `http://127.0.0.1:<port>/…` gateway URL — the pre-virtual-origin
-     * [toLoadable]. Used by [GatewayProbe] (which polls the node, not
-     * the WebView) and as the malformed-id fallback above. IPFS URLs
-     * pass through unchanged while the IPFS node hasn't published a
-     * gateway yet.
+     * Rewrite a user-facing URL to the direct gateway URL
+     * (`http://127.0.0.1:<port>/…`, or the external endpoint's) — the
+     * pre-virtual-origin [toLoadable]. Used by [GatewayProbe] (which
+     * polls the node, not the WebView) and as the malformed-id fallback
+     * above. IPFS URLs pass through unchanged while no IPFS gateway is
+     * available yet.
      */
     fun toGatewayUrl(url: String): String {
-        if (url.startsWith("bzz://")) return SwarmResolver.toLoadable(url)
+        if (url.startsWith("bzz://")) return SwarmResolver.toLoadable(url, swarmBase)
         if (IpfsGateway.isIpfsScheme(url)) return IpfsGateway.toLoadable(url, ipfsBase)
         return url
     }
@@ -193,20 +274,49 @@ object Gateways {
      */
     fun toDisplay(url: String): String {
         VirtualOrigin.displayUrlFor(url)?.let { return it }
-        val swarm = SwarmResolver.toDisplay(url)
+        OnchainAppRef.displayUrlFor(url)?.let { return it }
+        val swarm = SwarmResolver.toDisplay(url, swarmBase)
         if (swarm != url) return swarm
-        if (ipfsBase.isNotEmpty()) {
-            val ipfs = IpfsGateway.toDisplay(url, ipfsBase)
+        val ipfsNow = ipfsBase
+        if (ipfsNow.isNotEmpty()) {
+            val ipfs = IpfsGateway.toDisplay(url, ipfsNow)
             if (ipfs != url) return ipfs
         }
         return url
     }
 
-    /** Does [url] belong to any currently-active local gateway origin? */
+    /**
+     * Does [url] belong to a gateway in use right now — the embedded
+     * nodes', or the external endpoints that replace them?
+     */
     fun isLocalGateway(url: String): Boolean {
-        if (url.startsWith("$SWARM_BASE/")) return true
+        if (url.startsWith("$swarmBase/")) return true
         val ipfs = ipfsBase
         return ipfs.isNotEmpty() && url.startsWith("$ipfs/")
+    }
+
+    /**
+     * Does [url] belong to one of the *embedded* nodes' gateways
+     * (`http://127.0.0.1:…`)? Unlike [isLocalGateway] this never matches
+     * an external endpoint (#125): the interceptor answers CORS
+     * preflights for the embedded node API itself, but an external node
+     * is somebody else's server with its own CORS policy, which a web
+     * page must not be able to skip.
+     */
+    fun isEmbeddedGateway(url: String): Boolean {
+        if (url.startsWith("$EMBEDDED_SWARM_BASE/")) return true
+        val ipfs = embeddedIpfsBase
+        return ipfs.isNotEmpty() && url.startsWith("$ipfs/")
+    }
+
+    /**
+     * The external IPFS gateway [gatewayUrl] (a [gatewayUrlFor] answer)
+     * is served from, or `null` when it isn't one — an embedded node's,
+     * or an external Swarm endpoint's.
+     */
+    fun externalIpfsGatewayOf(gatewayUrl: String): String? {
+        val ipfs = externalIpfsBase
+        return ipfs.takeIf { it.isNotEmpty() && gatewayUrl.startsWith("$it/") }
     }
 
     /**
@@ -226,15 +336,17 @@ object Gateways {
         pins: EnsDocumentPins? = null,
         page: EnsDocumentPins.Page? = null,
     ): String? = when (root) {
-        is ContentRoot.Bzz -> "$SWARM_BASE/bzz/${root.ref}$pathAndQuery"
+        is ContentRoot.Bzz -> "$swarmBase/bzz/${root.ref}$pathAndQuery"
         is ContentRoot.Ipfs -> ipfsBase.ifEmpty { null }?.let { "$it/ipfs/${root.cid}$pathAndQuery" }
         is ContentRoot.IpnsKey -> ipfsBase.ifEmpty { null }?.let { "$it/ipns/${root.key}$pathAndQuery" }
         is ContentRoot.IpnsName -> ipfsBase.ifEmpty { null }?.let { "$it/ipns/${root.name}$pathAndQuery" }
         is ContentRoot.Ens ->
             ((page?.uriFor(root.name) ?: pins?.uriFor(root.name))
-                ?.let { VirtualOrigin.parseContentUrl(it)?.first }
-                ?: resolveEnsRoot(root.name))
-                ?.let { gatewayUrlFor(it, pathAndQuery) }
+                ?.let { VirtualOrigin.parseContentUrl(it) }
+                ?: resolveEnsContent(root.name))
+                // A `.tez` website record may publish a base path
+                // (`ipfs://<cid>/site`); ENS contenthashes never carry one.
+                ?.let { (target, basePath) -> gatewayUrlFor(target, basePath.trimEnd('/') + pathAndQuery) }
     }
 
     /**
@@ -248,17 +360,26 @@ object Gateways {
      * uses the resolver's own TTL cache after the first call. Blocking
      * is fine — the interceptor never runs on the UI thread.
      */
-    internal fun resolveEnsRoot(name: String): ContentRoot? {
+    internal fun resolveEnsRoot(name: String): ContentRoot? = resolveEnsContent(name)?.first
+
+    /** [resolveEnsRoot] plus the base path the resolved URI carries (`""` for ENS). */
+    private fun resolveEnsContent(name: String): Pair<ContentRoot, String>? {
         KnownEnsNames.uriFor(name)?.let { uri ->
-            VirtualOrigin.parseContentUrl(uri)?.let { return it.first }
+            VirtualOrigin.parseContentUrl(uri)?.let { return it }
         }
         val result = ensLookup(name)
-        if (result is EnsResult.Ok) {
+        // One server's word isn't served unasked (#96); the submit flow
+        // records what the user let through.
+        if (result is EnsResult.Ok && result.trust.verified) {
+            val content = VirtualOrigin.parseContentUrl(result.uri) ?: return null
             KnownEnsNames.record(result.uri, name)
-            return VirtualOrigin.parseContentUrl(result.uri)?.first
+            return content
         }
         return null
     }
+
+    /** [reverifyEnsDocument]'s answer for a `.tez` name whose website is now on the web. */
+    const val ENS_WEB_RECORD = "ens_web_record"
 
     /**
      * Resolve [name] again for a document on its `<name>.ens.…` host
@@ -298,6 +419,15 @@ object Gateways {
      * With no earlier answer the document waits for the resolver, as a
      * typed navigation does.
      *
+     * Two more refusals since the RPC cross-check (#96): servers that
+     * disagree (`ens_conflict`), and an answer only one server gave that
+     * isn't what this tab or the session already had
+     * (`ens_unverified`) — the same answer again is served, since it was
+     * cross-checked before or the user let it through. Neither forgets
+     * the name's earlier answer. That includes one server alone saying
+     * the name has no (loadable) content: with an earlier answer it's
+     * `ens_unverified`, not `ens_not_found`, and the answer is kept.
+     *
      * A main-frame document passes its incoming [page]
      * ([EnsDocumentPins.beginNavigation]); the answer is pinned there, and
      * reaches the page on screen only once that document commits. An
@@ -311,11 +441,19 @@ object Gateways {
      * answers, so neither the address bar's protocol badge / hash-to-name
      * mapping nor a later failed lookup describes content the name no
      * longer points at. Pages already on screen keep their own pins.
+     *
+     * A `.tez` name whose website record is now on the ordinary web
+     * (`http(s)`) returns [ENS_WEB_RECORD] after handing the answer to
+     * [onWebRecord]: the document can't be served on the name's origin,
+     * so the caller sends the frame there instead. An unverified one is
+     * refused like any other (`ens_unverified`) unless the typed flow
+     * already let it through.
      */
     fun reverifyEnsDocument(
         name: String,
         pins: EnsDocumentPins? = null,
         page: EnsDocumentPins.Page? = null,
+        onWebRecord: (EnsResult.Ok) -> Unit = {},
     ): String? {
         val key = name.lowercase()
         val last = (pins?.lastAnswerFor(name) ?: KnownEnsNames.uriFor(name))
@@ -336,22 +474,48 @@ object Gateways {
             pins?.forgetLastAnswer(name)
             return code
         }
+        // "Nothing loadable here" on one server's word only (#96) — the
+        // others failed or never answered. With an earlier answer to
+        // lose, that's a claim to question, not to act on: one server
+        // mustn't turn a real record into "no resolver". Refused, the
+        // name's earlier answer kept.
+        fun noContent(code: String, trust: EnsTrust): String =
+            if (!trust.verified && last != null) "ens_unverified" else gone(code)
         return when (result) {
             is EnsResult.Ok -> {
-                if (VirtualOrigin.parseContentUrl(result.uri) == null) {
-                    gone("ens_unsupported_codec")
+                val web = result.protocol == "http" || result.protocol == "https"
+                if (!web && VirtualOrigin.parseContentUrl(result.uri) == null) {
+                    noContent("ens_unsupported_codec", result.trust)
+                } else if (!result.trust.verified &&
+                    result.uri != pins?.lastAnswerFor(name) &&
+                    result.uri != KnownEnsNames.uriFor(name)
+                ) {
+                    // Only one RPC server's word, and not for what this
+                    // tab or the session already had — cross-checked
+                    // then, or let through by the user (#96).
+                    "ens_unverified"
+                } else if (web) {
+                    // A `.tez` website on the ordinary web: not content
+                    // this origin serves, so drop the old root, as for any
+                    // answer that no longer loads here.
+                    onWebRecord(result)
+                    gone(ENS_WEB_RECORD)
                 } else {
                     KnownEnsNames.record(result.uri, name)
                     pins?.pin(name, result.uri, page)
                     null
                 }
             }
-            is EnsResult.NotFound -> gone("ens_not_found")
-            is EnsResult.Unsupported -> gone("ens_unsupported_codec")
+            is EnsResult.NotFound -> noContent("ens_not_found", result.trust)
+            is EnsResult.Unsupported -> noContent("ens_unsupported_codec", result.trust)
+            // Servers disagree about the name right now (#96). Not the
+            // name's answer to forget, but nothing to serve on either.
+            is EnsResult.Conflict -> "ens_conflict"
             // Failed, or still running at the deadline: not an answer —
             // unless the name itself was refused (ENSIP-15, or a label
             // too long to encode), which is as final as a NotFound (no
-            // lookup ran, and none ever will).
+            // lookup ran, and none ever will — so no server's word to
+            // cross-check either).
             is EnsResult.Error, null -> {
                 val refused = result?.let { refusedNameErrorCode(it.reason) }
                 if (refused != null) {

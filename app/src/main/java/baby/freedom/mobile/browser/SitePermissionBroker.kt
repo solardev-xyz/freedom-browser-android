@@ -26,7 +26,12 @@ import kotlinx.coroutines.sync.withLock
  */
 class PermissionPrompt internal constructor(
     val origin: String,
-    val permissions: List<SitePermission>,
+    val permissions: List<SiteCapability>,
+    /**
+     * Asked from a private tab (#86): the answer lasts for the private
+     * session only, so the prompt offers no "remember".
+     */
+    val private: Boolean = false,
 ) {
     internal val answer = CompletableDeferred<PromptAnswer>()
 
@@ -40,7 +45,8 @@ class PermissionPrompt internal constructor(
  * runtime permissions, and the stores (#81). One per process.
  *
  * Flow of a request (camera/mic via `onPermissionRequest`, location via
- * `onGeolocationPermissionsShowPrompt`):
+ * `onGeolocationPermissionsShowPrompt`, a link to another app via
+ * [onExternalLink]):
  *
  *  1. Key it by the requesting origin ([permissionOriginKey]); a
  *     non-http(s) origin or a capability we don't prompt for is denied.
@@ -68,6 +74,21 @@ class SitePermissionBroker private constructor(
     private val store: SitePermissionStore,
 ) {
     val session = PermissionSession()
+
+    /**
+     * Private tabs' decisions (#86): their own session tier, kept apart
+     * from [session] both ways — a private tab starts from nothing
+     * remembered or answered in normal tabs, and what it's told applies
+     * to private tabs only, is never written to the store, and isn't
+     * listed in Settings. Replaced when the private session ends
+     * ([onPrivateSessionEnded]). Since Settings can't show it, it never
+     * embargoes: a dismissed prompt is a deny-once, nothing more.
+     */
+    private var privateSession = PermissionSession(embargoes = false)
+
+    private fun sessionFor(tab: BrowserState): PermissionSession =
+        if (tab.private) privateSession else session
+
     private val scope = MainScope()
 
     /**
@@ -85,6 +106,14 @@ class SitePermissionBroker private constructor(
      */
     @Volatile
     var onAndroidPermissionMissing: ((List<SitePermission>) -> Unit)? = null
+
+    /**
+     * Installed by [BrowserScreen]: the user allowed a link to another
+     * app (#85), but no app on the device can open it — say so rather
+     * than doing nothing.
+     */
+    @Volatile
+    var onNoAppForLink: ((ExternalScheme) -> Unit)? = null
 
     /**
      * Set by [BrowserScreen]: the tab whose page is what's on screen —
@@ -173,6 +202,24 @@ class SitePermissionBroker private constructor(
         )
     }
 
+    /**
+     * A page in [tab] asked to hand a link to another app (#85), already
+     * vetted by [externalLinkVerdict] (blocked schemes, main frame, user
+     * gesture). [origin] is the page's permission key; [launch] starts
+     * the app, and only runs if the site is allowed [scheme] and the
+     * page that asked is still the tab's document.
+     */
+    fun onExternalLink(tab: BrowserState, origin: String, scheme: ExternalScheme, launch: () -> Unit) {
+        handle(
+            tab = tab,
+            origin = origin,
+            permissions = listOf(scheme),
+            token = Any(),
+            grant = launch,
+            deny = {},
+        )
+    }
+
     /** `WebChromeClient.onGeolocationPermissionsHidePrompt`. */
     fun onGeolocationHidden(tab: BrowserState) =
         withdraw(tab.id) { it.token is GeolocationPermissions.Callback }
@@ -194,6 +241,11 @@ class SitePermissionBroker private constructor(
         tabLocks.remove(tabId)
     }
 
+    /** The last private tab has closed (#86): forget its answers. */
+    fun onPrivateSessionEnded() {
+        privateSession = PermissionSession(embargoes = false)
+    }
+
     // ---------------------------------------------------------------
     // Settings
     // ---------------------------------------------------------------
@@ -205,14 +257,14 @@ class SitePermissionBroker private constructor(
     val entries: Flow<List<SitePermissionEntry>> =
         combine(store.all, session.version) { records, _ ->
             val stored = records.mapNotNull { r ->
-                val p = SitePermission.forKey(r.permission) ?: return@mapNotNull null
+                val p = SiteCapability.forKey(r.permission) ?: return@mapNotNull null
                 val d = PermissionDecision.fromStored(r.decision) ?: return@mapNotNull null
                 SitePermissionEntry(r.origin, p, d, remembered = true)
             }
             val storedKeys = stored.map { it.origin to it.permission }.toSet()
             stored + session.entries()
                 .filter { (it.origin to it.permission) !in storedKeys }
-                .sortedWith(compareBy({ it.origin }, { it.permission.ordinal }))
+                .sortedWith(compareBy({ it.origin }, { capabilityOrder(it.permission) }, { it.permission.key }))
         }
 
     /** Forget [entry] everywhere, so the site has to ask again. */
@@ -228,7 +280,7 @@ class SitePermissionBroker private constructor(
     private fun handle(
         tab: BrowserState,
         origin: String,
-        permissions: List<SitePermission>,
+        permissions: List<SiteCapability>,
         token: Any,
         grant: () -> Unit,
         deny: () -> Unit,
@@ -265,7 +317,7 @@ class SitePermissionBroker private constructor(
         tab: BrowserState,
         entry: Pending,
         origin: String,
-        permissions: List<SitePermission>,
+        permissions: List<SiteCapability>,
         live: () -> Boolean,
         finish: (Boolean) -> Unit,
     ) {
@@ -277,9 +329,9 @@ class SitePermissionBroker private constructor(
             var allowed: Boolean? = null
             while (allowed == null) {
                 if (!live()) return@withLock false
-                val stored = storedDecisions(origin)
+                val stored = storedDecisionsFor(tab, origin)
                 if (!live()) return@withLock false
-                allowed = when (val plan = planFor(origin, permissions, stored, session)) {
+                allowed = when (val plan = planFor(origin, permissions, stored, sessionFor(tab))) {
                     PermissionPlan.Deny -> false
                     PermissionPlan.Grant -> true
                     // null: settled by another tab's answer meanwhile — re-plan.
@@ -292,9 +344,13 @@ class SitePermissionBroker private constructor(
         finish(ensureAndroidPermissions(entry, permissions, live))
     }
 
-    private suspend fun storedDecisions(origin: String): Map<SitePermission, PermissionDecision> =
+    /** What's remembered for [origin], as [tab] sees it: nothing, in a private tab. */
+    private suspend fun storedDecisionsFor(tab: BrowserState, origin: String): Map<SiteCapability, PermissionDecision> =
+        if (tab.private) emptyMap() else storedDecisions(origin)
+
+    private suspend fun storedDecisions(origin: String): Map<SiteCapability, PermissionDecision> =
         store.decisionsFor(origin).mapNotNull { (k, v) ->
-            val p = SitePermission.forKey(k) ?: return@mapNotNull null
+            val p = SiteCapability.forKey(k) ?: return@mapNotNull null
             val d = PermissionDecision.fromStored(v) ?: return@mapNotNull null
             p to d
         }.toMap()
@@ -314,15 +370,16 @@ class SitePermissionBroker private constructor(
         tab: BrowserState,
         entry: Pending,
         origin: String,
-        undecided: List<SitePermission>,
+        undecided: List<SiteCapability>,
     ): Boolean? {
-        val prompt = PermissionPrompt(origin, undecided)
+        val prompt = PermissionPrompt(origin, undecided, private = tab.private)
+        val tier = sessionFor(tab)
         entry.prompt = prompt
         tab.permissionPrompt = prompt
         val answer = try {
             coroutineScope {
                 val watcher = launch {
-                    awaitPromptSuperseded(origin, undecided, session) { storedDecisions(origin) }
+                    awaitPromptSuperseded(origin, undecided, tier) { storedDecisionsFor(tab, origin) }
                     prompt.respond(PromptAnswer.Superseded)
                 }
                 try {
@@ -337,15 +394,15 @@ class SitePermissionBroker private constructor(
         }
         return when (answer) {
             is PromptAnswer.Allow -> {
-                record(origin, undecided, PermissionDecision.ALLOW, answer.remember)
+                record(tier, origin, undecided, PermissionDecision.ALLOW, answer.remember && !tab.private)
                 true
             }
             is PromptAnswer.Block -> {
-                record(origin, undecided, PermissionDecision.DENY, answer.remember)
+                record(tier, origin, undecided, PermissionDecision.DENY, answer.remember && !tab.private)
                 false
             }
             PromptAnswer.Dismiss -> {
-                for (p in undecided) session.dismiss(origin, p)
+                for (p in undecided) tier.dismiss(origin, p)
                 false
             }
             PromptAnswer.Withdrawn -> false
@@ -354,8 +411,9 @@ class SitePermissionBroker private constructor(
     }
 
     private suspend fun record(
+        tier: PermissionSession,
         origin: String,
-        permissions: List<SitePermission>,
+        permissions: List<SiteCapability>,
         decision: PermissionDecision,
         remember: Boolean,
     ) {
@@ -364,7 +422,7 @@ class SitePermissionBroker private constructor(
         // one) sees it while the store write is still in flight; a
         // remembered decision only leaves the session tier once the
         // store holds it.
-        for (p in permissions) session.record(origin, p, decision, remembered = false)
+        for (p in permissions) tier.record(origin, p, decision, remembered = false)
         if (!remember) return
         // A failed write (the store logs it) leaves the decision as a
         // session one: it still applies this run and Settings shows it
@@ -372,8 +430,8 @@ class SitePermissionBroker private constructor(
         val written = permissions.filter { store.set(origin, it.key, decision.stored) }
         for (p in written) {
             // Unless the user revoked or re-decided it meanwhile.
-            if (session.decisionFor(origin, p) == decision) {
-                session.record(origin, p, decision, remembered = true)
+            if (tier.decisionFor(origin, p) == decision) {
+                tier.record(origin, p, decision, remembered = true)
             }
         }
     }
@@ -394,9 +452,12 @@ class SitePermissionBroker private constructor(
      */
     private suspend fun ensureAndroidPermissions(
         entry: Pending,
-        permissions: List<SitePermission>,
+        requested: List<SiteCapability>,
         live: () -> Boolean,
     ): Boolean {
+        // Only device capabilities need anything from Android; a link to
+        // another app needs nothing.
+        val permissions = requested.filterIsInstance<SitePermission>()
         fun held(p: SitePermission) = p.androidPermissions.any {
             ContextCompat.checkSelfPermission(appContext, it) == PackageManager.PERMISSION_GRANTED
         }
@@ -426,6 +487,54 @@ class SitePermissionBroker private constructor(
         return false
     }
 
+    /**
+     * Whether tab [tabId]'s page is what's on screen now ([onScreenTab]):
+     * the gate for anything a page's tap opens over it, e.g. an upload's
+     * picker or camera ([FileChooser]).
+     */
+    fun isOnScreen(tabId: Long): Boolean = onScreenTab.value == tabId
+
+    /**
+     * An upload's `capture` input needs `CAMERA` before the camera app
+     * can start ([FileChooser]). Asked through the same Android dialog
+     * path as a site's camera request — [requestAndroidPermissions], one
+     * dialog at a time, only over the tab that asked — so a refusal here
+     * is recorded like any other and a later permanent one gets the
+     * "Turn it on in Android settings" notice. [done] runs on the main
+     * thread.
+     */
+    fun requestUploadCamera(tabId: Long, done: (AndroidPermissionAsk) -> Unit) {
+        val permission = android.Manifest.permission.CAMERA
+        scope.launch {
+            val outcome = try {
+                askAndroidPermissionOnScreen(
+                    lock = androidDialogLock,
+                    onScreenTab = onScreenTab,
+                    tabId = tabId,
+                    dialogUp = androidDialogUp,
+                    held = {
+                        ContextCompat.checkSelfPermission(appContext, permission) ==
+                            PackageManager.PERMISSION_GRANTED
+                    },
+                    launch = requestAndroidPermissions?.let { request -> { request(listOf(permission)) } },
+                )
+            } catch (e: Exception) {
+                Log.w(TAG, "camera permission request for upload failed", e)
+                AndroidPermissionAsk.REFUSED
+            }
+            done(outcome)
+        }
+    }
+
+    /**
+     * Tell the user Android has refused the app the camera for good, if
+     * it has ([onAndroidPermissionMissing] checks) — an upload's capture
+     * input fell back to the picker because of it.
+     */
+    fun noteUploadCameraRefused() {
+        onAndroidPermissionMissing?.invoke(listOf(SitePermission.CAMERA))
+    }
+
     private fun withdraw(tabId: Long, match: (Pending) -> Boolean) {
         for (p in pending.toList()) {
             if (p.tabId != tabId || !match(p)) continue
@@ -433,6 +542,10 @@ class SitePermissionBroker private constructor(
             p.prompt?.respond(PromptAnswer.Withdrawn)
         }
     }
+
+    /** Device capabilities in their declared order, then app links. */
+    private fun capabilityOrder(c: SiteCapability): Int =
+        (c as? SitePermission)?.ordinal ?: SitePermission.entries.size
 
     companion object {
         private const val TAG = "SitePermissions"

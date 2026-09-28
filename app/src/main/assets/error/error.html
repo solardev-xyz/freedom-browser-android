@@ -68,6 +68,26 @@
       button:active {
         background: #3a3a3a;
       }
+      .buttons {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 12px;
+        justify-content: center;
+      }
+      /* Not cross-checked (#96): a caution, not a failure. */
+      body.warn h1 {
+        color: #f0a030;
+      }
+      body.warn .error-details {
+        color: #f5c270;
+      }
+      #continue-btn {
+        background: #8a5a00;
+        border-color: #b07400;
+      }
+      #continue-btn:active {
+        background: #a06a00;
+      }
       .nodes-icon {
         display: inline-block;
         width: 1.2em;
@@ -99,6 +119,17 @@
         button:active {
           background: #e8eaed;
         }
+        body.warn h1 {
+          color: #9a6700;
+        }
+        body.warn .error-details {
+          color: #7d4e00;
+        }
+        #continue-btn {
+          background: #9a6700;
+          border-color: #7d4e00;
+          color: #fff;
+        }
       }
     </style>
   </head>
@@ -110,7 +141,10 @@
         invalid, the content may no longer exist, or no peers are serving it.
       </p>
       <div id="details" class="error-details"></div>
-      <button id="retry-btn">Try Again</button>
+      <div class="buttons">
+        <button id="continue-btn" hidden>Continue once</button>
+        <button id="retry-btn">Try Again</button>
+      </div>
     </div>
 
     <script>
@@ -146,6 +180,7 @@
           .toLowerCase();
         if (host.endsWith('.wei')) return 'WNS';
         if (host.endsWith('.gwei')) return 'GNS';
+        if (host.endsWith('.tez')) return 'Tezos Domains';
         return 'ENS';
       }
 
@@ -155,6 +190,7 @@
       const explicitProtocol = params.get('protocol');
       const retryUrl = params.get('retry') || url;
       const detail = params.get('detail');
+      const continueUrl = params.get('continue');
       const protocolUrl = toProtocolUrl(url);
       const protocol = explicitProtocol || detectProtocol(url);
 
@@ -162,6 +198,8 @@
       const descriptionEl = document.getElementById('description');
       const titleEl = document.getElementById('title');
       const nameLabel = nameSystemLabel(url);
+      // Whose RPC servers answer for it: Tezos Domains isn't on Ethereum.
+      const chainLabel = nameLabel === 'Tezos Domains' ? 'Tezos' : 'Ethereum';
 
       async function checkSwarmStatus() {
         try {
@@ -181,18 +219,24 @@
           titleEl.textContent = 'No content for this ' + nameLabel + ' name';
           // ENS goes through a per-name resolver; WNS/GNS store records
           // straight on their registry, so there the other cause is the
-          // name not being registered.
+          // name not being registered. Tezos Domains publishes a website
+          // record rather than a contenthash, and names expire.
           const otherCause =
             nameLabel === 'ENS' ? 'the name has no resolver' : "the name isn't registered";
           descriptionEl.innerHTML =
-            "This " + nameLabel + " name doesn't point at any content yet. The owner may not have set a " +
-            '<code>contenthash</code> record, or ' + otherCause + '.';
+            nameLabel === 'Tezos Domains'
+              ? "This Tezos Domains name doesn't point at a website. The owner may not have set a " +
+                "<code>web:content_url</code> record, the name isn't registered, or it has expired."
+              : "This " + nameLabel + " name doesn't point at any content yet. The owner may not have set a " +
+                '<code>contenthash</code> record, or ' + otherCause + '.';
         } else if (error === 'ens_wrong_protocol') {
           titleEl.textContent = 'Name lives on a different network';
           descriptionEl.innerHTML =
             'This ' + nameLabel + ' name resolves to content on a different network than the ' +
             'scheme you typed asks for. Try the name on its own &mdash; the browser ' +
-            'will follow wherever its <code>contenthash</code> points.';
+            'will follow wherever its ' +
+            (nameLabel === 'Tezos Domains' ? 'website record' : '<code>contenthash</code>') +
+            ' points.';
         } else if (error === 'ens_unsupported_codec') {
           titleEl.textContent = 'Unsupported content format';
           descriptionEl.innerHTML =
@@ -209,11 +253,64 @@
           descriptionEl.innerHTML =
             'A label of this name is longer than the 255 bytes an ' + nameLabel + ' lookup can ' +
             'carry, so Freedom Browser can\'t ask a resolver about it. Check the address.';
+        } else if (error === 'ens_unverified') {
+          // #96: only one RPC server's word for where the name leads.
+          document.body.classList.add('warn');
+          titleEl.textContent = 'Not cross-checked';
+          descriptionEl.innerHTML =
+            'Only one ' + chainLabel + ' RPC server answered for this ' + nameLabel + ' name, so ' +
+            "Freedom couldn't check its answer against another server. The address " +
+            'below may be right, but a single misbehaving server could have picked it.';
+        } else if (error === 'ens_conflict') {
+          // #96: the servers asked gave different answers.
+          titleEl.textContent = 'RPC servers disagreed';
+          descriptionEl.innerHTML =
+            'The ' + chainLabel + ' RPC servers Freedom asked gave different answers for this ' +
+            nameLabel + ' name. At least one of them is wrong &mdash; or lying &mdash; so ' +
+            'nothing was loaded. Try again in a moment.';
         } else if (error === 'ens_lookup_failed') {
           titleEl.textContent = nameLabel + ' lookup failed';
           descriptionEl.innerHTML =
-            "Couldn't reach an Ethereum RPC endpoint to resolve this name. Check your " +
-            'connection and try again.';
+            "Couldn't reach " + (nameLabel === 'Tezos Domains' ? 'a Tezos' : 'an Ethereum') +
+            ' RPC endpoint to resolve this name. Check your connection and try again.';
+        } else if (error === 'web3_unverified') {
+          // #123: an onchain app's code only one RPC server returned.
+          document.body.classList.add('warn');
+          titleEl.textContent = 'Not cross-checked';
+          descriptionEl.innerHTML =
+            "Only one RPC server returned this onchain app's code, so Freedom couldn't " +
+            'check it against another server. It may be the real app, but a single ' +
+            'misbehaving server could have changed it. Continue only if you trust that ' +
+            'server with this app.';
+        } else if (error === 'web3_conflict') {
+          titleEl.textContent = 'RPC servers disagreed';
+          descriptionEl.innerHTML =
+            "The RPC servers Freedom asked returned different code for this onchain app. " +
+            'At least one of them is wrong &mdash; or lying &mdash; so nothing was run. ' +
+            'Try again in a moment.';
+        } else if (error === 'web3_unknown_chain') {
+          titleEl.textContent = 'Unknown chain';
+          descriptionEl.innerHTML =
+            "This app lives on a chain that isn't in your chain list, so Freedom doesn't " +
+            'know which RPC servers to ask. Add the chain in Settings, then try again.';
+        } else if (error === 'web3_not_an_app') {
+          titleEl.textContent = 'Not an onchain app';
+          descriptionEl.innerHTML =
+            "The contract didn't return an ERC-8244 <code>html()</code> document on this " +
+            'chain. Check the address and the chain ID.';
+        } else if (error === 'web3_too_large') {
+          titleEl.textContent = 'App too large';
+          descriptionEl.innerHTML = "The app's document is larger than Freedom loads.";
+        } else if (error === 'web3_invalid') {
+          titleEl.textContent = 'Not a web3:// app address';
+          descriptionEl.innerHTML =
+            'Freedom loads web3:// apps by contract address: ' +
+            '<code>web3://0x&hellip;[:chainId]/</code>. Names are not supported yet.';
+        } else if (error === 'web3_lookup_failed') {
+          titleEl.textContent = "Couldn't read the app";
+          descriptionEl.innerHTML =
+            "Couldn't get an answer from the chain's RPC servers. Check your connection " +
+            'and try again.';
         } else if (error === 'swarm_content_not_found') {
           titleEl.textContent = 'Content not ready yet';
           descriptionEl.innerHTML =
@@ -251,6 +348,14 @@
       }
 
       displayError();
+
+      if (continueUrl) {
+        const continueBtn = document.getElementById('continue-btn');
+        continueBtn.hidden = false;
+        continueBtn.onclick = () => {
+          window.location.href = continueUrl;
+        };
+      }
 
       document.getElementById('retry-btn').onclick = () => {
         if (retryUrl) {

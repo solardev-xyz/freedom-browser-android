@@ -13,12 +13,29 @@ sealed class EnsResult {
     /** Successful resolution to a content-addressed URI. */
     data class Ok(
         override val name: String,
-        /** `bzz`, `ipfs`, `ipns` — the scheme of [uri]. */
+        /**
+         * `bzz`, `ipfs`, `ipns` — the scheme of [uri]. A `.tez` name's
+         * website record may also be `http` / `https`.
+         */
         val protocol: String,
-        /** `bzz://<hash>`, `ipfs://<cidv0>`, `ipns://<cidv0>`. */
+        /**
+         * `bzz://<hash>`, `ipfs://<cidv0>`, `ipns://<cidv0>`. A `.tez`
+         * record can add a base path (`ipfs://<cid>/site`), or be a web URL.
+         */
         val uri: String,
         /** Just the decoded hash / CID, for caching / display. */
         val decoded: String,
+        /**
+         * Whether independent RPC servers agreed on this answer (#96).
+         * No default: a result must say how it was checked, so a path
+         * that forgets to label one can't pass it off as verified.
+         */
+        val trust: EnsTrust,
+        /**
+         * Tezos Domains only: [uri] is an `http(s)` `web:redirect_url`,
+         * navigated to as is — no address-bar path appended.
+         */
+        val redirect: Boolean = false,
     ) : EnsResult()
 
     /**
@@ -28,6 +45,11 @@ sealed class EnsResult {
     data class NotFound(
         override val name: String,
         val reason: String,
+        /**
+         * Whether servers agreed there's nothing here (#96) — one
+         * server's "no resolver" is a claim like any other answer.
+         */
+        val trust: EnsTrust,
         val error: String? = null,
     ) : EnsResult()
 
@@ -40,7 +62,39 @@ sealed class EnsResult {
         override val name: String,
         val codec: String,
         val rawContentHash: String,
+        /** As for [Ok.trust] (#96). */
+        val trust: EnsTrust,
     ) : EnsResult()
+
+    /**
+     * RPC servers gave different answers at the same block and none of
+     * them had the agreement the quorum needs (#96). Not an answer: the
+     * browser shows a warning instead of loading anything.
+     */
+    data class Conflict(
+        override val name: String,
+        /** What they disagreed about. */
+        val subject: Subject,
+        /** One entry per distinct answer, largest first. */
+        val groups: List<Group>,
+        /** Block the answers were read at (the anchor's), if one was fixed. */
+        val block: Long?,
+    ) : EnsResult() {
+        enum class Subject {
+            /** The name's record, read at a block the servers agreed on. */
+            RECORD,
+            /** Which block that is: the servers' hashes for it differ. */
+            BLOCK,
+            /**
+             * Tezos Domains: which block is the chain's head — too far
+             * apart to share an anchor, with no majority either way.
+             */
+            HEAD,
+        }
+
+        /** [answer] in readable form, and the hosts that gave it. */
+        data class Group(val answer: String, val hosts: List<String>)
+    }
 
     /** Transport / RPC / decode failure — retryable if [retryable] is true. */
     data class Error(
@@ -49,4 +103,40 @@ sealed class EnsResult {
         val error: String,
         val retryable: Boolean = false,
     ) : EnsResult()
+}
+
+/**
+ * How far an answer ([EnsResult.Ok], [EnsResult.NotFound],
+ * [EnsResult.Unsupported]) was cross-checked (#96).
+ *
+ * [verified]: at least [EnsQuorum.M] independent RPC servers returned
+ * byte-identical answers at a block whose hash a majority of them agreed
+ * on. Otherwise only one server's word stands behind it — because only
+ * one answered, or because too few servers were reachable to agree on a
+ * block at all — and the browser asks before loading it.
+ */
+data class EnsTrust(
+    val verified: Boolean,
+    /** Hosts that returned this answer. */
+    val agreed: List<String> = emptyList(),
+    /** Hosts that returned a different one (outvoted). */
+    val dissented: List<String> = emptyList(),
+    /** Block number the answer was read at; `null` for `latest`. */
+    val block: Long? = null,
+) {
+    companion object {
+        /**
+         * Verified with no provenance: for results built outside the
+         * resolver (fixtures, test seams). Never a default — each use
+         * says so explicitly.
+         */
+        val ASSUMED = EnsTrust(verified = true)
+
+        /**
+         * Not (yet) cross-checked: what the resolver's decoding starts
+         * from before the vote labels the answer, so an unlabelled one
+         * fails closed.
+         */
+        val UNCHECKED = EnsTrust(verified = false)
+    }
 }

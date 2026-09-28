@@ -6,8 +6,12 @@ import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
+import androidx.datastore.preferences.core.stringSetPreferencesKey
+import baby.freedom.mobile.browser.AdblockCategory
 import androidx.datastore.preferences.preferencesDataStore
+import baby.freedom.mobile.browser.ExternalEndpoints
 import baby.freedom.mobile.browser.SearchEngines
+import baby.freedom.mobile.browser.normalizeAllowlistHost
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 
@@ -38,6 +42,18 @@ import kotlinx.coroutines.flow.map
  * [searchTemplate] resolves the pair to the template the address bar
  * searches with.
  *
+ * ## External node keys
+ *
+ * `external_swarm_endpoint` / `external_ipfs_gateway` hold a normalized
+ * base URL, absent for the embedded node (#125). `MainActivity`
+ * mirrors them into [baby.freedom.mobile.browser.Gateways].
+ *
+ * ## Ad-blocking keys
+ *
+ * `adblock_<category>` switches each [AdblockCategory] (#126), absent
+ * for its default; `adblock_allowlist` holds the sites ad blocking is
+ * off for, in [normalizeAllowlistHost] form.
+ *
  * There is no persistent "run IPFS" flag by design. The IPFS node is
  * always off at cold launch (demo-surprise requirement) and driven
  * live via AIDL: [baby.freedom.mobile.node.INodeService.ensureIpfsStarted]
@@ -61,6 +77,20 @@ class NodeSettings private constructor(
 
     suspend fun setRunNodeEnabled(enabled: Boolean) {
         store.edit { it[Keys.RUN_NODE_ENABLED] = enabled }
+    }
+
+    /**
+     * Whether the embedded Myotis Ethereum / Gnosis light client runs
+     * (#72). Off by default — opt-in, as on desktop; switched on the node
+     * page. `MainActivity` binds [baby.freedom.mobile.node.MyotisService]
+     * while it's on.
+     */
+    val myotisEnabled: Flow<Boolean> = store.data.map { prefs ->
+        prefs[Keys.MYOTIS_ENABLED] ?: false
+    }
+
+    suspend fun setMyotisEnabled(enabled: Boolean) {
+        store.edit { it[Keys.MYOTIS_ENABLED] = enabled }
     }
 
     /**
@@ -144,13 +174,94 @@ class NodeSettings private constructor(
         return true
     }
 
+    /**
+     * External Swarm endpoint (#125): the base URL of a bee/ant HTTP API
+     * that serves `bzz://` in place of the embedded node, or `""` for
+     * the embedded node. Stored normalized
+     * ([baby.freedom.mobile.browser.ExternalEndpoints.normalize]).
+     */
+    val externalSwarmEndpoint: Flow<String> = store.data.map { prefs ->
+        prefs[Keys.EXTERNAL_SWARM_ENDPOINT] ?: ""
+    }
+
+    /**
+     * External IPFS path gateway (#125) serving `ipfs://` / `ipns://`
+     * in place of the embedded freedom-ipfs reader, or `""` for the
+     * embedded one. Unverified — see
+     * [baby.freedom.mobile.browser.ExternalEndpoints].
+     */
+    val externalIpfsGateway: Flow<String> = store.data.map { prefs ->
+        prefs[Keys.EXTERNAL_IPFS_GATEWAY] ?: ""
+    }
+
+    /**
+     * Save [endpoint] (validated and normalized) as the external Swarm
+     * endpoint, or go back to the embedded node with `""`. Returns
+     * `false` (and changes nothing) if it's invalid.
+     */
+    suspend fun setExternalSwarmEndpoint(endpoint: String): Boolean =
+        setEndpoint(Keys.EXTERNAL_SWARM_ENDPOINT, endpoint)
+
+    /** [setExternalSwarmEndpoint] for the IPFS gateway. */
+    suspend fun setExternalIpfsGateway(endpoint: String): Boolean =
+        setEndpoint(Keys.EXTERNAL_IPFS_GATEWAY, endpoint)
+
+    private suspend fun setEndpoint(
+        key: Preferences.Key<String>,
+        endpoint: String,
+    ): Boolean {
+        if (endpoint.isBlank()) {
+            store.edit { it.remove(key) }
+            return true
+        }
+        val normalized = ExternalEndpoints.normalize(endpoint) ?: return false
+        store.edit { it[key] = normalized }
+        return true
+    }
+
+    /** The ad-blocking categories switched on (#126). */
+    val adblockCategories: Flow<Set<AdblockCategory>> = store.data.map { prefs ->
+        AdblockCategory.entries.filterTo(LinkedHashSet()) { category ->
+            prefs[Keys.adblock(category)] ?: category.enabledByDefault
+        }
+    }
+
+    suspend fun setAdblockCategory(category: AdblockCategory, enabled: Boolean) {
+        store.edit { it[Keys.adblock(category)] = enabled }
+    }
+
+    /** Sites ad blocking is off for (#126), sorted. */
+    val adblockAllowlist: Flow<List<String>> = store.data.map { prefs ->
+        prefs[Keys.ADBLOCK_ALLOWLIST].orEmpty().sorted()
+    }
+
+    /**
+     * Turn ad blocking off for [site] (a host or URL) and its
+     * subdomains. Returns `false` (and changes nothing) if it isn't a host.
+     */
+    suspend fun addAdblockAllowlistHost(site: String): Boolean {
+        val host = normalizeAllowlistHost(site) ?: return false
+        store.edit { it[Keys.ADBLOCK_ALLOWLIST] = it[Keys.ADBLOCK_ALLOWLIST].orEmpty() + host }
+        return true
+    }
+
+    suspend fun removeAdblockAllowlistHost(host: String) {
+        store.edit { it[Keys.ADBLOCK_ALLOWLIST] = it[Keys.ADBLOCK_ALLOWLIST].orEmpty() - host }
+    }
+
     private object Keys {
         val RUN_NODE_ENABLED = booleanPreferencesKey("run_node_enabled")
+        val MYOTIS_ENABLED = booleanPreferencesKey("myotis_enabled")
         val SHOW_IPFS_UI = booleanPreferencesKey("show_ipfs_ui")
         val IPFS_LOW_POWER = booleanPreferencesKey("ipfs_low_power")
         val IPFS_ROUTING_MODE = stringPreferencesKey("ipfs_routing_mode")
         val SEARCH_ENGINE = stringPreferencesKey("search_engine")
         val SEARCH_CUSTOM_TEMPLATE = stringPreferencesKey("search_custom_template")
+        val EXTERNAL_SWARM_ENDPOINT = stringPreferencesKey("external_swarm_endpoint")
+        val EXTERNAL_IPFS_GATEWAY = stringPreferencesKey("external_ipfs_gateway")
+        val ADBLOCK_ALLOWLIST = stringSetPreferencesKey("adblock_allowlist")
+        private val ADBLOCK = AdblockCategory.entries.associateWith { booleanPreferencesKey("adblock_${it.key}") }
+        fun adblock(category: AdblockCategory) = ADBLOCK.getValue(category)
     }
 
     companion object {

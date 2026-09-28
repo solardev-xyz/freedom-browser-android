@@ -13,6 +13,11 @@
  *   * `char*`          msg  owned by ant, freed by `ant_free_string`.
  *
  * None of the pointers may be passed to `free(3)` directly.
+ *
+ * The one pointer that travels the other way is the JSON-RPC response
+ * body an `ant_chain_transport` callback returns: the host `malloc`s
+ * it, ant takes ownership and releases it with `free(3)`. See
+ * `ant_set_chain_transport`.
  */
 
 #ifndef ANT_FFI_H
@@ -87,6 +92,60 @@ AntHandle *ant_init(const char *data_dir, char **out_err);
 AntHandle *ant_init_with_options(const char *data_dir,
                                  const char *source_root,
                                  char **out_err);
+
+/*
+ * Like ant_init_with_options, but the *host* owns the account key.
+ * `identity_json` carries the identity document (the shape
+ * ant_identity_generate returns) and the library neither reads nor
+ * writes `identity.json` in the data dir — so on iOS the key can live
+ * in the Keychain (optionally Secure-Enclave-wrapped) instead of the
+ * app container. This is the `KeyProvider` backend PLAN.md §5.10 plans
+ * for mobile. `source_root` behaves exactly as above (pass NULL to
+ * disable the rebase).
+ *
+ * Because the host can hand over a *different* account than last time
+ * (a restore-from-backup-key flow), every init re-scopes the data dir's
+ * account-owned state — postage batches, the chequebook association and
+ * both SWAP ledgers — to the account in `identity_json`: another
+ * account's copy is parked under `<data_dir>/accounts/<its address>/`
+ * (never deleted) and this account's parked copy, if any, is swapped
+ * back in. Stamps signed over someone else's batch and cheques drawn on
+ * someone else's chequebook are rejected by every peer, so the swap has
+ * to happen before the node loop starts rather than at first use.
+ *
+ * On success returns a non-NULL handle. On failure returns NULL and
+ * writes an allocated error string to *out_err (free with
+ * ant_free_string).
+ */
+AntHandle *ant_init_with_identity(const char *data_dir,
+                                  const char *source_root,
+                                  const char *identity_json,
+                                  char **out_err);
+
+/*
+ * Mint a fresh node identity without starting a node, so a host that
+ * keeps the key itself can create one on first run and hand it back to
+ * ant_init_with_identity.
+ *
+ * Returns an allocated JSON document
+ *   {"signing_key","overlay_nonce","libp2p_keypair"}
+ * — all hex, and all secret: `signing_key` *is* the account. Free with
+ * ant_free_string. On failure returns NULL and writes an allocated
+ * message into *out_err.
+ */
+char *ant_identity_generate(char **out_err);
+
+/*
+ * Rebuild a node identity from a backed-up account key (64 hex chars, a
+ * leading `0x` and surrounding whitespace are tolerated) — the "restore
+ * my account" path when the host's copy is gone but the user still has
+ * the key from ant_account_export_key. Returns the same JSON document
+ * as ant_identity_generate, with the overlay nonce derived from the
+ * account address so the restore is reproducible across devices.
+ * Malformed or out-of-range keys are rejected with an error rather than
+ * failing later at node startup.
+ */
+char *ant_identity_from_key(const char *signing_key_hex, char **out_err);
 
 /*
  * Download a Swarm reference. Accepted forms:
@@ -356,6 +415,42 @@ char *ant_storage_status(const AntHandle *handle, char **out_err);
 char *ant_storage_settlement_status(const AntHandle *handle, char **out_err);
 
 /*
+ * Settlement-deposit status as a JSON object:
+ *   {"enabled":bool,"chequebook":"0x…"|null,"deposit_plur","deposit_bzz",
+ *    "target_plur","target_bzz","shortfall_plur","shortfall_bzz",
+ *    "needs_top_up":bool,"xdai_required","xdai_required_display",
+ *    "xdai_to_send","xdai_to_send_display","sufficient_funds":bool}
+ * ant_storage_settlement_status says whether a chequebook is deployed;
+ * this says whether it actually backs the cheques it signs. A chequebook
+ * at deposit 0 publishes fine until the peers' payment tolerance runs
+ * out, then collapses into pushsync timeouts — so the Storage tab reads
+ * this to detect that and offer ant_storage_settlement_topup.
+ * `enabled=false` (zeroed, needs_top_up=false) when this account has no
+ * chequebook yet; buying/connecting a plan deploys one, funded. Reads
+ * chain (a few light eth_calls) — for an explicit refresh, not every
+ * status poll. Requires the `chain` cargo feature.
+ */
+char *ant_storage_settlement_deposit(const AntHandle *handle,
+                                     const char *gnosis_rpc,
+                                     char **out_err);
+
+/*
+ * Fund this account's chequebook up to the settlement deposit target
+ * (0.001 xBZZ), funding ONLY with xDAI: the node swaps the xBZZ
+ * shortfall on-chain if it doesn't already hold it, then transfers the
+ * deposit to the chequebook. The explicit top-up path — a chequebook's
+ * deposit is only read at deploy time, so an already-deployed one can be
+ * funded no other way. Idempotent (a chequebook at the target is a
+ * no-op); errors when this account has no chequebook yet. Returns the
+ * refreshed ant_storage_settlement_deposit JSON. SUBMITS REAL
+ * TRANSACTIONS AND SPENDS REAL FUNDS, and BLOCKS until they confirm.
+ * Requires the `chain` cargo feature.
+ */
+char *ant_storage_settlement_topup(const AntHandle *handle,
+                                   const char *gnosis_rpc,
+                                   char **out_err);
+
+/*
  * Deep read-back propagation check for an uploaded reference. Resolves
  * the manifest to its data root, enumerates the file's chunk tree
  * (fetching every interior node network-only, which proves the skeleton
@@ -471,12 +566,13 @@ char *ant_storage_discover(const AntHandle *handle,
  * Deploy (or return the already-persisted) node-owned chequebook so the
  * publish-setup checklist's "chequebook deployed" step can complete.
  * Idempotent: if this device already deployed a chequebook it's returned
- * as-is (no redeploy); otherwise this signs an on-chain
- * factory.deploySimpleSwap (issuer = node EOA) deployed UNFUNDED, persists
- * the association, and returns the new address. SUBMITS A REAL ON-CHAIN
- * TRANSACTION: spends gas (xDAI) only — zero xBZZ deposit, so the user's
- * xBZZ stays in their wallet (bee still accepts the cheques) — and BLOCKS
- * until the tx confirms. Light-mode only (requires the `chain` cargo feature;
+ * as-is (no redeploy — though one still short of its settlement deposit
+ * is topped up from spare xBZZ); otherwise this signs an on-chain
+ * factory.deploySimpleSwap (issuer = node EOA), funds it with the
+ * 0.001 xBZZ settlement deposit so its cheques are actually backed,
+ * persists the association, and returns the new address. SUBMITS REAL
+ * ON-CHAIN TRANSACTIONS: spends gas (xDAI) plus the deposit (xBZZ, capped
+ * to the wallet's balance) and BLOCKS until they confirm. Light-mode only (requires the `chain` cargo feature;
  * otherwise returns NULL + an error). Returns
  *   {"chequebookAddress":"0x<40hex>"}
  * (free with ant_free_string), or NULL with an error in *out_err. The
@@ -492,13 +588,19 @@ char *ant_deploy_chequebook(const AntHandle *handle,
  * (2^depth chunks × 4 KiB); `days` sets how long it should last.
  * Returns a JSON object:
  *   {"depth","days","amount_per_chunk","total_cost_plur",
- *    "total_cost_bzz","capacity_bytes","account_bzz",
+ *    "total_cost_bzz","settlement_deposit_plur","settlement_deposit_bzz",
+ *    "capacity_bytes","account_bzz",
  *    "account_bzz_display","account_xdai","account_xdai_display",
  *    "needed_bzz","needed_bzz_display","xdai_required",
  *    "xdai_required_display","xdai_to_send","xdai_to_send_display",
  *    "sufficient_funds"}
  * For the xDAI-only flow, `xdai_to_send_display` is exactly how much more
  * xDAI to send; the node swaps it to xBZZ and buys the plan itself.
+ * `settlement_deposit_*` is the one-time xBZZ deposit this purchase also
+ * puts behind the node's chequebook so its cheques are backed (0 once it
+ * is funded). It is part of the all-in figures (`needed_bzz`,
+ * `xdai_required`, `xdai_to_send`, `sufficient_funds`), not of
+ * `total_cost_*`, which stays the plan's own price.
  * Requires the `chain` cargo feature.
  */
 char *ant_storage_quote(const AntHandle *handle,
@@ -608,6 +710,9 @@ void ant_free_string(char *ptr);
  * and /stamps postage state (desktop `antd` parity). Honoured only when
  * the library is built with the `chain` feature; ignored otherwise.
  *
+ * The gateway's chain wiring is captured here, once. A host serving
+ * chain reads itself must call ant_set_chain_transport BEFORE this.
+ *
  * Returns true on success (or if a gateway is already running on this
  * handle). On failure returns false and writes an allocated message to
  * *out_err (free with ant_free_string). Idempotent: a second call while
@@ -627,8 +732,169 @@ bool ant_start_gateway(const AntHandle *handle,
 bool ant_stop_gateway(const AntHandle *handle);
 
 /*
+ * Host-provided JSON-RPC transport for ant's Gnosis chain access.
+ *
+ * `request_json` is a complete, NUL-terminated JSON-RPC request body
+ * ({"jsonrpc":"2.0","id":…,"method":…,"params":…}) owned by ant and
+ * valid only for the duration of the call — copy it if you need it
+ * longer. `host_ctx` is the pointer handed to ant_set_chain_transport,
+ * passed back untouched.
+ *
+ * Return a malloc(3)'d, NUL-terminated JSON-RPC response body: ant
+ * takes ownership and releases it with free(3). Return NULL for
+ * "can't serve" — ant then falls back to the configured gnosis_rpc URL
+ * exactly as if no transport were installed.
+ */
+typedef char *(*ant_chain_transport)(const char *request_json, void *host_ctx);
+
+/* ant_set_chain_transport return codes. */
+#define ANT_CHAIN_TRANSPORT_OK           0  /* installed (or cleared)   */
+#define ANT_CHAIN_TRANSPORT_NULL_HANDLE (-1) /* handle was NULL         */
+#define ANT_CHAIN_TRANSPORT_UNSUPPORTED (-2) /* built without `chain`   */
+
+/*
+ * Install (or, with transport == NULL, clear) a host-provided JSON-RPC
+ * transport for every chain request this handle makes: eth_call,
+ * eth_getBalance, eth_getLogs, eth_getTransactionReceipt,
+ * eth_sendRawTransaction, eth_getTransactionCount, eth_blockNumber,
+ * eth_getCode. Ant keeps issuing exactly the requests it issues without
+ * a transport — the transport only decides where they are answered.
+ *
+ * Can't-serve, both of which fall back to the configured gnosis_rpc URL:
+ *   * a NULL return from the callback; and
+ *   * a JSON-RPC error with code -32000 — the retryable "my index does
+ *     not cover this range yet" shape, carrying the covered block window
+ *     in error.data. Ant never surfaces that as an empty result, which
+ *     would silently truncate postage-batch discovery.
+ * Any other JSON-RPC error (an eth_call revert, say) is a genuine answer
+ * and is passed through to the caller.
+ *
+ * WARNING — emit -32000 ONLY for a coverage gap, never as a generic
+ * failure code. geth and Nethermind use -32000 as a catch-all for
+ * genuine, non-retryable failures too: "nonce too low", "already known",
+ * "insufficient funds for gas * price + value", "replacement transaction
+ * underpriced", and on some backends "execution reverted". A host whose
+ * verified ladder bottoms out at an RPC quorum and forwards backend
+ * replies verbatim therefore reclassifies every one of those as
+ * can't-serve, and ant replays the request against gnosis_rpc: for
+ * eth_sendRawTransaction that is a SECOND BROADCAST of an
+ * already-signed transaction, and the caller then sees the fallback
+ * URL's error instead of the real one. Map any failure that is not a
+ * coverage gap to a different error code, or answer authoritatively.
+ *
+ * Threading: the callback runs on ant's runtime blocking pool, so
+ * blocking inside it is fine and expected (verified reads, locks, a
+ * nested event loop). It may be invoked concurrently from several such
+ * threads, so `host_ctx` must be safe to use from any thread.
+ *
+ * Lifetime: `transport` must stay callable and `host_ctx` valid until
+ * the transport is replaced/cleared or ant_shutdown is called. Both of
+ * those drain before they return: no thread is inside the old callback
+ * once ant_set_chain_transport / ant_shutdown returns, and none can
+ * enter it again (chain requests fall back to gnosis_rpc), so freeing
+ * host_ctx right after the call is safe — including while a gateway is
+ * running. Two consequences: a callback that never returns wedges the
+ * replacing call, and calling ant_set_chain_transport from *inside* the
+ * callback deadlocks.
+ *
+ * Ordering: effective immediately for ant_storage_* / ant_settlement_* /
+ * ant_deploy_chequebook, which build a chain client per call. The
+ * in-process gateway captures its chain wiring at ant_start_gateway, so
+ * a transport installed while no transport was installed at its start
+ * is only guaranteed to reach it after a restart (ant_stop_gateway +
+ * ant_start_gateway) — install it first. Replacing or clearing a
+ * transport the gateway did start with takes effect in it immediately,
+ * per Lifetime above.
+ *
+ * Returns ANT_CHAIN_TRANSPORT_OK (0) on success,
+ * ANT_CHAIN_TRANSPORT_NULL_HANDLE (-1) if `handle` is NULL, or
+ * ANT_CHAIN_TRANSPORT_UNSUPPORTED (-2) when this build has no chain
+ * support at all (built without the `chain` feature — no chain request
+ * exists to route, and nothing was installed).
+ */
+int ant_set_chain_transport(AntHandle *handle,
+                            ant_chain_transport transport,
+                            void *host_ctx);
+
+/*
+ * Start the AntStream publisher throughput benchmark (issue #67 stage 1)
+ * on this node: a synthetic-segment publisher loop that measures
+ * sustained Mbit/s, chunks/s, per-segment publish latency, and how far
+ * behind the live edge the uploader falls.
+ *
+ * `config_json` is a BenchConfig document; only "label" is required:
+ *   {
+ *     "label":          "iPhone 15 Pro / LTE",   // required, the table row key
+ *     "bitrate_kbps":   3400,                    // target video bitrate
+ *     "segment_ms":     2000,                    // HLS segment cadence
+ *     "duration_s":     1800,                    // >= 1800 for a quotable number
+ *     "warmup_s":       30,                      // excluded from the average
+ *     "max_in_flight":  4,                       // bounded publish window
+ *     "gateway":        "http://127.0.0.1:1633", // ant_start_gateway's address
+ *     "batch_id":       "0x<64 hex>",            // omit -> no-network mode
+ *     "seed":           123,
+ *     "notes":          "iOS 26.0, battery 87%->81%, thermal nominal"
+ *   }
+ *
+ * With a batch_id, every segment is published with a real POST /bzz
+ * against `gateway` (start it first with ant_start_gateway) — that is
+ * the number the go/no-go gate is about. Without one, the run measures
+ * only the local chunk-split + postage-stamp pipeline, which needs no
+ * network and no batch (useful as a device CPU ceiling, and the only
+ * mode available before a storage plan is connected).
+ *
+ * Returns immediately; the run drives itself on the node's runtime.
+ * Only one run at a time per handle. Returns true on success, false
+ * with an allocated message in *out_err (free with ant_free_string).
+ */
+bool ant_bench_start(const AntHandle *handle,
+                     const char *config_json,
+                     char **out_err);
+
+/*
+ * Live progress of the run started by ant_bench_start, as an allocated
+ * JSON object (free with ant_free_string):
+ *   {"running":true,"elapsed_s":42.0,"configured_duration_s":1800,
+ *    "segments_total":21,"segments_ok":21,"segments_failed":0,
+ *    "sustained_mbit_s":3.4,"sustained_chunks_s":105.5,
+ *    "lag_ms_last":180,"peers":114}
+ * Non-blocking. Returns NULL + an error when no run has been started.
+ */
+char *ant_bench_progress(const AntHandle *handle, char **out_err);
+
+/*
+ * Stop the run and return its final report as an allocated JSON object
+ * (free with ant_free_string): the config it ran with plus
+ * sustained_mbit_s / sustained_chunks_s, publish_ms_p50|p95|max,
+ * lag_ms_p50|p95|max|final, peers_min|max, segments_ok|failed,
+ * measured_segments_total|ok, the first few error strings, and a
+ * "sustained" verdict (at least one segment measured AND every
+ * measured segment published AND the final lag still inside
+ * 3 x segment_ms). The verdict is scoped to the post-warm-up window:
+ * a segment that failed inside warmup_s is counted in segments_failed
+ * but does not fail the run, since excluding cold-start effects is
+ * what warmup_s is for.
+ *
+ * A run stopped before warmup_s has elapsed measures nothing:
+ * measured_segments_total is 0, every figure is 0, and "sustained" is
+ * false because there is no window to judge — not because the run fell
+ * behind. Hosts rendering a verdict should say so rather than showing
+ * such a run as a pass or a failure.
+ *
+ * BLOCKING: the cancel is cooperative, so this waits for the in-flight
+ * segments to land (bounded at ~65 s by the bench's own per-segment
+ * publish deadline) rather than truncating the measurement. Call it off
+ * the main thread. Safe to call on an already-finished run.
+ */
+char *ant_bench_stop(const AntHandle *handle, char **out_err);
+
+/*
  * Shut the embedded node down and free the handle. After this
  * returns, `handle` must not be used again.
+ *
+ * Clears any host chain transport first and waits for an in-flight
+ * callback to return (see ant_set_chain_transport), so the host_ctx
+ * handed to it may be freed once this returns.
  */
 void ant_shutdown(AntHandle *handle);
 

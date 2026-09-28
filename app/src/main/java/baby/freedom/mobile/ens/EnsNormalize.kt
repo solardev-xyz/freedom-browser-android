@@ -51,6 +51,16 @@ object EnsNormalize {
     private val pureAsciiHost = Regex("^[a-z0-9.-]+$")
 
     /**
+     * Is ENSIP-15 the rule for [name]? Not for a Tezos Domains (`.tez`)
+     * name: that registry isn't ENS, keys a name by its own bytes and
+     * has its own label rules, so ENSIP-15 would both rewrite names it
+     * owns (a mapped character → a different key, a different name) and
+     * refuse ones it allows (`ab--c.tez`). A `.tez` name stays lowercased
+     * only, as [TezosDomainsResolver] has always taken it.
+     */
+    fun appliesTo(name: String): Boolean = NameSystem.forName(name) != NameSystem.TEZOS
+
+    /**
      * Desktop's `fastNormalize` (`src/main/ens-resolver.js`): a name that
      * lowercases to `[a-z0-9.-]` only is taken as-is, anything else gets
      * the full [normalize]. Throws [InvalidNameException] like [normalize].
@@ -58,8 +68,12 @@ object EnsNormalize {
     fun fastNormalize(name: String): String =
         if (isFastPath(name)) name.lowercase() else normalize(name)
 
-    /** Does [fastNormalize] take [name] as-is, without the spec tables? */
-    fun isFastPath(name: String): Boolean = pureAsciiHost.matches(name.lowercase())
+    /**
+     * Does [fastNormalize] take [name] as-is (lowercased), without the
+     * spec tables? Also true of every `.tez` name ([appliesTo]).
+     */
+    fun isFastPath(name: String): Boolean =
+        pureAsciiHost.matches(name.lowercase()) || !appliesTo(name)
 
     @Volatile
     private var warmed = false
@@ -89,11 +103,16 @@ object EnsNormalize {
             .replace(Regex("[\\u200E\\u200F\\u202A-\\u202E\\u2066-\\u2069]"), "")
             .ifBlank { "invalid name" }
 
-    /** [normalize], or `null` when ENSIP-15 rejects [name]. */
-    fun normalizeOrNull(name: String): String? =
-        try {
+    /**
+     * [normalize], or `null` when ENSIP-15 rejects [name]. A `.tez` name
+     * ([appliesTo]) comes back lowercased, never refused.
+     */
+    fun normalizeOrNull(name: String): String? {
+        if (!appliesTo(name)) return name.lowercase()
+        return try {
             normalize(name)
         } catch (_: InvalidNameException) {
             null
         }
+    }
 }

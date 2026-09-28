@@ -57,6 +57,33 @@ class TabsStateTest {
         assertEquals(listOf("a", "b", "c"), tabs.titles)
     }
 
+    // Closing a background tab from the switcher used to make whatever
+    // tab slid into the closed slot active (post-merge sweep, #181).
+    @Test
+    fun `closing a background tab keeps the active tab active`() {
+        val tabs = threeTabs()
+        tabs.switchTo(2) // c
+        tabs.closeTab(0) // a, before the active tab
+        assertEquals(listOf("b", "c"), tabs.titles)
+        assertEquals("c", tabs.active.title)
+
+        tabs.newTab().visit("d") // [b, c, d], d active
+        tabs.switchTo(0) // b
+        tabs.closeTab(2) // d, after the active tab
+        assertEquals(listOf("b", "c"), tabs.titles)
+        assertEquals("b", tabs.active.title)
+    }
+
+    @Test
+    fun `closing the active tab activates its right neighbour, or the new last tab`() {
+        val tabs = threeTabs()
+        tabs.switchTo(1) // b
+        tabs.closeTab(1)
+        assertEquals("c", tabs.active.title)
+        tabs.closeTab(1) // c, the last one
+        assertEquals("a", tabs.active.title)
+    }
+
     @Test
     fun `reopen brings the last closed tab back where it was, active`() {
         val tabs = threeTabs()
@@ -307,5 +334,37 @@ class TabsStateTest {
         val restore = reopened.pendingRestore!!
         assertEquals("https://login.example/", restore.resubmitUrl)
         assertEquals("https://login.example/", restore.fallbackUrl)
+    }
+
+    @Test
+    fun `a closed private tab is not remembered for reopening`() {
+        val tabs = threeTabs()
+        tabs.newTab(private = true).visit("secret")
+        assertTrue(tabs.hasPrivateTabs)
+        tabs.closeTab(tabs.activeIndex)
+        assertFalse(tabs.hasPrivateTabs)
+        assertFalse(tabs.canReopenClosedTab)
+        // A normal tab still is.
+        tabs.closeTab(0)
+        assertEquals("a", tabs.reopenClosedTab()?.title)
+        assertNull(tabs.reopenClosedTab())
+    }
+
+    @Test
+    fun `a private tab's popup is private, a normal tab's isn't`() {
+        val tabs = threeTabs()
+        assertFalse(tabs.adoptPopup(opener = tabs.tabs[0]).private)
+        val opener = tabs.newTab(private = true)
+        assertTrue(tabs.adoptPopup(opener = opener).private)
+    }
+
+    @Test
+    fun `the last tab closing as a private one leaves a normal blank tab`() {
+        val tabs = TabsState(homepage = HOME_URL)
+        tabs.newTab(private = true).visit("secret")
+        tabs.closeTab(0)
+        tabs.closeTab(0)
+        assertEquals(1, tabs.tabs.size)
+        assertFalse(tabs.active.private)
     }
 }

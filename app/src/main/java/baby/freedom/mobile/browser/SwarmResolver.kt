@@ -12,18 +12,19 @@ import baby.freedom.swarm.SwarmNode
  * Both directions are pure string rewrites — no hex validation here, because
  * the gateway itself is the source of truth about what's resolvable.
  *
- * The gateway URL lives on [SwarmNode.GATEWAY_URL] — keep this file as the
- * only place that knows how `/bzz/...` nests under it.
+ * The embedded node's gateway URL lives on [SwarmNode.GATEWAY_URL]; an
+ * external Swarm endpoint (#125) replaces it, so every direction takes
+ * the gateway `base` to use ([Gateways.swarmBase] in production). Keep
+ * this file as the only place that knows how `/bzz/...` nests under it.
  */
 object SwarmResolver {
     private const val BZZ_PREFIX: String = "bzz://"
-    private const val GATEWAY_BZZ_PREFIX: String = "${SwarmNode.GATEWAY_URL}/bzz/"
 
-    /** `bzz://xyz[/path]` → `http://127.0.0.1:1633/bzz/xyz[/path]`, otherwise unchanged. */
-    fun toLoadable(url: String): String {
+    /** `bzz://xyz[/path]` → `<base>/bzz/xyz[/path]`, otherwise unchanged. */
+    fun toLoadable(url: String, base: String = SwarmNode.GATEWAY_URL): String {
         if (!url.startsWith(BZZ_PREFIX)) return url
         val rest = url.removePrefix(BZZ_PREFIX)
-        return GATEWAY_BZZ_PREFIX + rootSlash(rest)
+        return "$base/bzz/" + rootSlash(rest)
     }
 
     /**
@@ -39,13 +40,14 @@ object SwarmResolver {
     private fun rootSlash(rest: String): String =
         if (rest.isNotEmpty() && rest.none { it == '/' || it == '?' || it == '#' }) "$rest/" else rest
 
-    /** `http://127.0.0.1:1633/bzz/xyz[/path]` → `bzz://xyz[/path]`, otherwise unchanged. */
-    fun toDisplay(url: String): String {
-        if (!url.startsWith(GATEWAY_BZZ_PREFIX)) return url
-        val rest = url.removePrefix(GATEWAY_BZZ_PREFIX)
+    /** `<base>/bzz/xyz[/path]` → `bzz://xyz[/path]`, otherwise unchanged. */
+    fun toDisplay(url: String, base: String = SwarmNode.GATEWAY_URL): String {
+        val prefix = "$base/bzz/"
+        if (!url.startsWith(prefix)) return url
+        val rest = url.removePrefix(prefix)
         return BZZ_PREFIX + rest
     }
 
-    fun isSwarm(url: String): Boolean =
-        url.startsWith(BZZ_PREFIX) || url.startsWith(GATEWAY_BZZ_PREFIX)
+    fun isSwarm(url: String, base: String = SwarmNode.GATEWAY_URL): Boolean =
+        url.startsWith(BZZ_PREFIX) || url.startsWith("$base/bzz/")
 }

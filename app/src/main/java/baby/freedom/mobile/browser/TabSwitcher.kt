@@ -10,6 +10,7 @@ import androidx.compose.foundation.gestures.awaitLongPressOrCancellation
 import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -33,6 +34,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Restore
+import androidx.compose.material.icons.automirrored.filled.VolumeOff
+import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.IconButtonDefaults
@@ -48,6 +51,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import baby.freedom.mobile.ui.PrivateTheme
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.graphicsLayer
@@ -79,18 +83,24 @@ import kotlinx.coroutines.launch
  *
  * A top bar with "+ New tab" and an × to dismiss, followed by a 2-column
  * grid of tab cards. Each card shows its page title, a close (×) button,
- * and a preview thumbnail of the page (or a letter placeholder when no
+ * a speaker to mute / unmute a tab that is playing audio (#91), and a
+ * preview thumbnail of the page (or a letter placeholder when no
  * snapshot has been captured yet).
  *
  * Long-press a card and drag it to move the tab ([TabsState.moveTab]);
  * the header's "Reopen" brings back the most recently closed tab
  * ([TabsState.reopenClosedTab]) while there is one.
+ *
+ * "Private" opens a private tab (#86) — offered only where the WebView
+ * can run them ([onNewPrivateTab] non-null) — and private tabs' cards
+ * wear the private scheme and mark.
  */
 @Composable
 fun TabSwitcherScreen(
     tabs: TabsState,
     onDismiss: () -> Unit,
     onNewTab: () -> Unit,
+    onNewPrivateTab: (() -> Unit)? = null,
 ) {
     // Snapshot the currently-active tab right before we render so the
     // user sees an up-to-date preview of whatever they were last reading.
@@ -106,25 +116,48 @@ fun TabSwitcherScreen(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(horizontal = 8.dp, vertical = 4.dp),
-            verticalAlignment = Alignment.CenterVertically,
+            // Top: the × stays on the first line when the actions wrap
+            // (every control here is a 48dp touch target, so one line
+            // is centred either way).
+            verticalAlignment = Alignment.Top,
         ) {
-            TextButton(onClick = {
-                onNewTab()
-                onDismiss()
-            }) {
-                Icon(Icons.Filled.Add, contentDescription = null)
-                Spacer(Modifier.size(8.dp))
-                Text("New tab", fontWeight = FontWeight.Medium)
-            }
-            Spacer(Modifier.weight(1f))
-            if (tabs.canReopenClosedTab) {
+            // The actions wrap onto a second line rather than squeezing
+            // each other (or the ×) when they don't fit — a narrow
+            // screen or a large font with Private and Reopen both shown.
+            // The × sits outside the flow, so it's always there.
+            FlowRow(
+                modifier = Modifier.weight(1f),
+                itemVerticalAlignment = Alignment.CenterVertically,
+            ) {
                 TextButton(onClick = {
-                    tabs.reopenClosedTab()
+                    onNewTab()
                     onDismiss()
                 }) {
-                    Icon(Icons.Filled.Restore, contentDescription = null)
+                    Icon(Icons.Filled.Add, contentDescription = null)
                     Spacer(Modifier.size(8.dp))
-                    Text("Reopen", fontWeight = FontWeight.Medium)
+                    Text("New tab", fontWeight = FontWeight.Medium, softWrap = false)
+                }
+                if (onNewPrivateTab != null) {
+                    TextButton(onClick = {
+                        onNewPrivateTab()
+                        onDismiss()
+                    }) {
+                        Icon(PrivateTabIcon, contentDescription = null)
+                        Spacer(Modifier.size(8.dp))
+                        Text("Private", fontWeight = FontWeight.Medium, softWrap = false)
+                    }
+                }
+                if (tabs.canReopenClosedTab) {
+                    // Pushes Reopen to the end of its line.
+                    Spacer(Modifier.weight(1f))
+                    TextButton(onClick = {
+                        tabs.reopenClosedTab()
+                        onDismiss()
+                    }) {
+                        Icon(Icons.Filled.Restore, contentDescription = null)
+                        Spacer(Modifier.size(8.dp))
+                        Text("Reopen", fontWeight = FontWeight.Medium, softWrap = false)
+                    }
                 }
             }
             IconButton(onClick = onDismiss, shapes = IconButtonDefaults.shapes()) {
@@ -187,6 +220,7 @@ fun TabSwitcherScreen(
                         onDismiss()
                     },
                     onClose = { tabs.closeTab(index) },
+                    onToggleMute = tabs.setAudioMuted?.let { set -> { set(tab, !tab.audioMuted) } },
                     // The drag has no TalkBack equivalent, so the same
                     // moves are offered as accessibility actions.
                     moveActions = tabMoveTargets(index, tabs.tabs.size).map { (label, to) ->
@@ -409,9 +443,10 @@ private fun TabCard(
     isActive: Boolean,
     onClick: () -> Unit,
     onClose: () -> Unit,
+    onToggleMute: (() -> Unit)?,
     modifier: Modifier = Modifier,
     moveActions: List<CustomAccessibilityAction> = emptyList(),
-) {
+) = PrivateTheme(tab.private) {
     val borderColor = if (isActive) {
         MaterialTheme.colorScheme.primary
     } else {
@@ -442,7 +477,16 @@ private fun TabCard(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             val title = tab.title.ifBlank {
-                tab.url.ifBlank { "New tab" }
+                tab.url.ifBlank { if (tab.private) "Private tab" else "New tab" }
+            }
+            if (tab.private) {
+                Icon(
+                    PrivateTabIcon,
+                    contentDescription = "Private",
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(14.dp),
+                )
+                Spacer(Modifier.size(6.dp))
             }
             Text(
                 text = title,
@@ -453,6 +497,9 @@ private fun TabCard(
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.weight(1f),
             )
+            if (tab.playingAudio || tab.audioMuted) {
+                TabAudioButton(tab.audioMuted, onToggleMute)
+            }
             IconButton(
                 onClick = onClose,
                 shapes = IconButtonDefaults.shapes(),
@@ -488,6 +535,46 @@ private fun TabCard(
     }
 }
 
+/**
+ * The card's audio indicator (#91): a speaker while the tab's page is
+ * audible, a struck-out one while the tab is muted (shown whether or not
+ * the page is playing right now, so a muted tab can always be unmuted).
+ * A tap toggles the mute; without [onToggleMute] (a WebView that can't
+ * mute) it is only an indicator.
+ */
+@Composable
+private fun TabAudioButton(muted: Boolean, onToggleMute: (() -> Unit)?) {
+    val icon = if (muted) Icons.AutoMirrored.Filled.VolumeOff else Icons.AutoMirrored.Filled.VolumeUp
+    val tint = if (muted) {
+        MaterialTheme.colorScheme.onSurfaceVariant
+    } else {
+        MaterialTheme.colorScheme.primary
+    }
+    if (onToggleMute == null) {
+        Box(Modifier.size(36.dp), contentAlignment = Alignment.Center) {
+            Icon(
+                icon,
+                contentDescription = if (muted) "Tab muted" else "Tab playing audio",
+                tint = tint,
+                modifier = Modifier.size(16.dp),
+            )
+        }
+        return
+    }
+    IconButton(
+        onClick = onToggleMute,
+        shapes = IconButtonDefaults.shapes(),
+        modifier = Modifier.size(36.dp),
+    ) {
+        Icon(
+            icon,
+            contentDescription = if (muted) "Unmute tab" else "Mute tab",
+            tint = tint,
+            modifier = Modifier.size(16.dp),
+        )
+    }
+}
+
 @Composable
 private fun ThumbnailPlaceholder(tab: BrowserState) {
     val letter = firstLetterFor(tab)
@@ -504,12 +591,20 @@ private fun ThumbnailPlaceholder(tab: BrowserState) {
                 .background(MaterialTheme.colorScheme.primaryContainer),
             contentAlignment = Alignment.Center,
         ) {
-            Text(
-                letter,
-                color = MaterialTheme.colorScheme.onPrimaryContainer,
-                fontWeight = FontWeight.Bold,
-                fontSize = 22.sp,
-            )
+            if (tab.private && letter == "•") {
+                Icon(
+                    PrivateTabIcon,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                )
+            } else {
+                Text(
+                    letter,
+                    color = MaterialTheme.colorScheme.onPrimaryContainer,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 22.sp,
+                )
+            }
         }
     }
 }

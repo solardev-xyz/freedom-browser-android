@@ -1,8 +1,9 @@
 /*
- * JNI shim between `baby.freedom.swarm.AntNative` and the C surface of
- * `libant_ffi.so` (solardev-xyz/ant, header vendored as `ant.h`).
+ * JNI shim between `baby.freedom.swarm.AntNative` and ant's C surface,
+ * linked into `libfreedom_mobile_ffi.so` (freedom-hq/ant via
+ * solardev-xyz/freedom-mobile-ffi; header vendored as `ant.h`).
  *
- * The prebuilt JNI exports inside libant_ffi.so itself
+ * The prebuilt JNI exports inside ant-ffi itself
  * (`crates/ant-ffi/src/jni.rs`) are mangled for the upstream
  * download-smoke app's class and don't cover the gateway, so Freedom
  * carries this thin wrapper instead: init, start/stop the bee-shaped

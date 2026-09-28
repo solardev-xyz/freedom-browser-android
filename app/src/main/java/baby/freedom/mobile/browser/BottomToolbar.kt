@@ -33,7 +33,6 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
-import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.ArrowForward
@@ -41,11 +40,13 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Computer
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Print
+import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Remove
 import androidx.compose.material.icons.filled.Search
@@ -55,6 +56,7 @@ import androidx.compose.material.icons.filled.StarBorder
 import androidx.compose.material.icons.filled.ZoomIn
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.ColorScheme
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
 import androidx.compose.material3.Icon
@@ -63,6 +65,7 @@ import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -79,6 +82,7 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.drawWithCache
+import androidx.compose.ui.draw.scale
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
@@ -106,15 +110,18 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.isTraversalGroup
+import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.toggleableState
 import androidx.compose.ui.semantics.traversalIndex
+import androidx.compose.ui.state.ToggleableState
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
-import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextAlign
@@ -1417,10 +1424,18 @@ internal fun BottomToolbar(
     onStop: () -> Unit,
     onNewTab: () -> Unit,
     onPrint: () -> Unit,
+    /** The page menu's ad-blocking switch (#126), or null to leave it out. */
+    adblockState: AdblockSiteState? = null,
+    onToggleAdblock: () -> Unit = {},
+    /** "New private tab" (#86); null where private tabs can't run, and the menu doesn't offer it. */
+    onNewPrivateTab: (() -> Unit)? = null,
     onExpandCapsule: () -> Unit,
     onFindInPage: () -> Unit,
     zoomLevel: Int?,
     onZoom: (ZoomAction) -> Unit,
+    /** "Desktop site" is on for the page's site (#180); null where it can't apply. */
+    desktopSite: Boolean?,
+    onToggleDesktopSite: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     // Clamp rather than trust the caller: both fractions are driven by
@@ -1693,10 +1708,15 @@ internal fun BottomToolbar(
                     onOpenDownloads = onOpenDownloads,
                     onReload = onReload,
                     onNewTab = onNewTab,
+                    onNewPrivateTab = onNewPrivateTab,
                     onFindInPage = onFindInPage,
                     zoomLevel = zoomLevel,
                     onZoom = onZoom,
+                    desktopSite = desktopSite,
+                    onToggleDesktopSite = onToggleDesktopSite,
                     onPrint = onPrint,
+                    adblockState = adblockState,
+                    onToggleAdblock = onToggleAdblock,
                 )
             },
             modifier = Modifier
@@ -2438,189 +2458,200 @@ private fun AddressField(
                     .border(1.5.dp, outline, CircleShape),
             )
         }
-        BasicTextField(
-            value = fieldValue,
-            onValueChange = { newValue ->
-                val textChanged = newValue.text != fieldValue.text
-                fieldValue = newValue
-                if (textChanged) {
-                    // Typing feeds the suggestions query only. The
-                    // tab's committed address stays put until the user
-                    // actually submits (or the WebView navigates).
-                    onAddressQueryChanged(newValue.text)
-                    onAddressEditedChanged(true)
-                }
-            },
-            singleLine = true,
-            textStyle = textStyle,
-            cursorBrush = SolidColor(colors.primary),
-            modifier = Modifier
-                .fillMaxWidth()
-                .focusRequester(focusRequester)
-                .onFocusChanged { onAddressFocusChanged(it.isFocused) },
-            keyboardOptions = KeyboardOptions(
-                capitalization = KeyboardCapitalization.None,
-                autoCorrectEnabled = false,
-                imeAction = ImeAction.Go,
-            ),
-            keyboardActions = KeyboardActions(
-                onGo = { onSubmit(fieldValue.text) },
-            ),
-            decorationBox = { innerTextField ->
-                // Protocol badge: the pill grows a Swarm hex mark or
-                // the IPFS cube on the left whenever the *loaded*
-                // page origin is one of our embedded gateways. For
-                // `ens://` names we look at the active display
-                // override — its `baseUrl` is the gateway that
-                // actually served the page, which tells us whether
-                // the contenthash resolved to Swarm or IPFS.
-                // Mirrors `.protocol-icon[data-protocol='swarm'|'ipfs'|'ipns']`
-                // in freedom-browser's desktop address bar.
-                val badge = protocolBadgeFor(state)
-                Row(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        // Rides the same drawing shift as the surface it
-                        // sits on, so the content stays on the compact
-                        // pill's centre line rather than on the touch
-                        // box's ([addressPillTopShift]).
-                        .offset(y = pillTopShift)
-                        // Symmetric, because the field holds one control
-                        // at each end: 8 dp at rest and while editing,
-                        // [CapsuleCompactSidePadding] when compact, where
-                        // there is nothing left in the pill but the
-                        // domain (see [capsuleLabelInset]).
-                        .padding(horizontal = contentInset),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    // The overflow menu's reservation. Filled outside the
-                    // field for the same reason the trailing slot is (see
-                    // below) — what the row lays out is the empty box.
-                    if (slotScale > 0f) {
-                        Box(
-                            modifier = Modifier
-                                .capsuleFieldSlot(slotScale, towardsStart = true),
-                        )
+        NoSuggestionsTextInput {
+            BasicTextField(
+                value = fieldValue,
+                onValueChange = { newValue ->
+                    val textChanged = newValue.text != fieldValue.text
+                    fieldValue = newValue
+                    if (textChanged) {
+                        // Typing feeds the suggestions query only. The
+                        // tab's committed address stays put until the user
+                        // actually submits (or the WebView navigates).
+                        onAddressQueryChanged(newValue.text)
+                        onAddressEditedChanged(true)
                     }
-                    // The badge, on the runs where the text it marks is
-                    // this row's: the editor's full URL, which starts at
-                    // the leading edge, and the home tab's placeholder.
-                    // The resting domain is drawn one level up, centred
-                    // in the field, and the badge is drawn up there
-                    // beside it — a mark on the domain has to travel with
-                    // the domain (see [addressBadgeCenterOffset]). The
-                    // two conditions are complements, so the badge is on
-                    // screen exactly once in every state.
-                    //
-                    // Either way it is one slot with the gap after it,
-                    // retreating into the pill's leading edge as the bar
-                    // collapses — the compact pill shows the domain and
-                    // nothing else. Zero-width means not composed, so it
-                    // can't take a tap meant for the label.
-                    if (badge != null && (addressFocused || restingLabel.isEmpty()) &&
-                        slotScale > 0f
+                },
+                singleLine = true,
+                textStyle = textStyle,
+                cursorBrush = SolidColor(colors.primary),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .focusRequester(focusRequester)
+                    .onFocusChanged { onAddressFocusChanged(it.isFocused) },
+                // A URL field, like Chrome's and Safari's (#172): URI
+                // keyboard, no auto-correct / capitals, and — via the
+                // [NoSuggestionsTextInput] wrapper — no IME suggestion strip over our
+                // own suggestion list.
+                keyboardOptions = urlKeyboardOptions(
+                    // Always Go, as in Chrome's omnibox — never switched to
+                    // Search as the text turns into a search term (#171):
+                    // a new action key means restarting input, the IME
+                    // hides for a moment, and [imeDismissalEndsEditing]
+                    // rightly reads that as the user closing the keyboard
+                    // and ends the edit mid-word. The top suggestion row
+                    // says what Enter will do instead.
+                    imeAction = ImeAction.Go,
+                ),
+                keyboardActions = KeyboardActions(
+                    onGo = { onSubmit(fieldValue.text) },
+                ),
+                decorationBox = { innerTextField ->
+                    // Protocol badge: the pill grows a Swarm hex mark or
+                    // the IPFS cube on the left whenever the *loaded*
+                    // page origin is one of our embedded gateways. For
+                    // `ens://` names we look at the active display
+                    // override — its `baseUrl` is the gateway that
+                    // actually served the page, which tells us whether
+                    // the contenthash resolved to Swarm or IPFS.
+                    // Mirrors `.protocol-icon[data-protocol='swarm'|'ipfs'|'ipns']`
+                    // in freedom-browser's desktop address bar.
+                    val badge = protocolBadgeFor(state)
+                    Row(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            // Rides the same drawing shift as the surface it
+                            // sits on, so the content stays on the compact
+                            // pill's centre line rather than on the touch
+                            // box's ([addressPillTopShift]).
+                            .offset(y = pillTopShift)
+                            // Symmetric, because the field holds one control
+                            // at each end: 8 dp at rest and while editing,
+                            // [CapsuleCompactSidePadding] when compact, where
+                            // there is nothing left in the pill but the
+                            // domain (see [capsuleLabelInset]).
+                            .padding(horizontal = contentInset),
+                        verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        Row(
-                            modifier = Modifier
-                                .collapsingControl(slotScale, towardsStart = true),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            Image(
-                                painter = painterResource(badge.drawableRes),
-                                contentDescription = badge.contentDescription,
-                                modifier = Modifier.size(AddressPillBadgeSize),
-                            )
-                            Spacer(Modifier.width(AddressPillBadgeGap))
-                        }
-                    }
-                    // Resting vs editing text. At rest the domain is the
-                    // primary element (see [AddressLabel]); the moment
-                    // the field takes focus the full URL is back, still
-                    // select-alled, so nothing about editing changes.
-                    //
-                    // The text field itself stays composed and laid out
-                    // in both states — it is simply drawn transparent
-                    // under the domain label while resting — so a tap
-                    // anywhere on the pill still lands on it and focuses
-                    // it, exactly as before.
-                    //
-                    // The domain label itself is drawn one level up,
-                    // against the bar rather than against this row, so
-                    // that its geometry can be one function of the
-                    // collapse (#55) — see [BottomToolbar]. What is
-                    // left here is the box it used to share with the
-                    // field: the field, and the placeholder for when
-                    // there is no address to show.
-                    //
-                    // Blank label at rest means a blank address (the
-                    // home tab) — [AddressLabel.resting] passes
-                    // everything else through — so the placeholder is
-                    // the right thing to draw underneath.
-                    val showPlaceholder =
-                        if (addressFocused) fieldValue.text.isEmpty() else restingLabel.isEmpty()
-                    Box(modifier = Modifier.weight(1f)) {
-                        Box(
-                            modifier = Modifier.graphicsLayer {
-                                alpha = if (addressFocused) 1f else 0f
-                            },
-                        ) {
-                            innerTextField()
-                        }
-                        if (showPlaceholder) {
-                            Text(
-                                text = "Search or type URL",
-                                color = colors.onSurfaceVariant,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                                // Centred while resting, for the same
-                                // reason the domain it stands in for is:
-                                // the split bar's field is symmetric, and
-                                // a left-aligned placeholder in it reads
-                                // as text that failed to centre. Editing
-                                // hands the box back to the text field,
-                                // which starts at the leading edge.
-                                textAlign = if (addressFocused) TextAlign.Start
-                                else TextAlign.Center,
-                                modifier = Modifier.fillMaxWidth(),
+                        // The overflow menu's reservation. Filled outside the
+                        // field for the same reason the trailing slot is (see
+                        // below) — what the row lays out is the empty box.
+                        if (slotScale > 0f) {
+                            Box(
+                                modifier = Modifier
+                                    .capsuleFieldSlot(slotScale, towardsStart = true),
                             )
                         }
+                        // The badge, on the runs where the text it marks is
+                        // this row's: the editor's full URL, which starts at
+                        // the leading edge, and the home tab's placeholder.
+                        // The resting domain is drawn one level up, centred
+                        // in the field, and the badge is drawn up there
+                        // beside it — a mark on the domain has to travel with
+                        // the domain (see [addressBadgeCenterOffset]). The
+                        // two conditions are complements, so the badge is on
+                        // screen exactly once in every state.
+                        //
+                        // Either way it is one slot with the gap after it,
+                        // retreating into the pill's leading edge as the bar
+                        // collapses — the compact pill shows the domain and
+                        // nothing else. Zero-width means not composed, so it
+                        // can't take a tap meant for the label.
+                        if (badge != null && (addressFocused || restingLabel.isEmpty()) &&
+                            slotScale > 0f
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .collapsingControl(slotScale, towardsStart = true),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Image(
+                                    painter = painterResource(badge.drawableRes),
+                                    contentDescription = badge.contentDescription,
+                                    modifier = Modifier.size(AddressPillBadgeSize),
+                                )
+                                Spacer(Modifier.width(AddressPillBadgeGap))
+                            }
+                        }
+                        // Resting vs editing text. At rest the domain is the
+                        // primary element (see [AddressLabel]); the moment
+                        // the field takes focus the full URL is back, still
+                        // select-alled, so nothing about editing changes.
+                        //
+                        // The text field itself stays composed and laid out
+                        // in both states — it is simply drawn transparent
+                        // under the domain label while resting — so a tap
+                        // anywhere on the pill still lands on it and focuses
+                        // it, exactly as before.
+                        //
+                        // The domain label itself is drawn one level up,
+                        // against the bar rather than against this row, so
+                        // that its geometry can be one function of the
+                        // collapse (#55) — see [BottomToolbar]. What is
+                        // left here is the box it used to share with the
+                        // field: the field, and the placeholder for when
+                        // there is no address to show.
+                        //
+                        // Blank label at rest means a blank address (the
+                        // home tab) — [AddressLabel.resting] passes
+                        // everything else through — so the placeholder is
+                        // the right thing to draw underneath.
+                        val showPlaceholder =
+                            if (addressFocused) fieldValue.text.isEmpty() else restingLabel.isEmpty()
+                        Box(modifier = Modifier.weight(1f)) {
+                            Box(
+                                modifier = Modifier.graphicsLayer {
+                                    alpha = if (addressFocused) 1f else 0f
+                                },
+                            ) {
+                                innerTextField()
+                            }
+                            if (showPlaceholder) {
+                                Text(
+                                    text = "Search or type URL",
+                                    color = colors.onSurfaceVariant,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    // Centred while resting, for the same
+                                    // reason the domain it stands in for is:
+                                    // the split bar's field is symmetric, and
+                                    // a left-aligned placeholder in it reads
+                                    // as text that failed to centre. Editing
+                                    // hands the box back to the text field,
+                                    // which starts at the leading edge.
+                                    textAlign = if (addressFocused) TextAlign.Start
+                                    else TextAlign.Center,
+                                    modifier = Modifier.fillMaxWidth(),
+                                )
+                            }
+                        }
+                        // Trailing control slot — sized to the pill, never
+                        // pushes it taller, and *always* reserved at the same
+                        // 32 dp whatever it is currently holding. That fixed
+                        // reservation is what makes "no layout shifts" true
+                        // for the loading state: the Stop control appears
+                        // into a slot that was already there, and the URL
+                        // beside it doesn't re-wrap or re-ellipsise when a
+                        // load starts or finishes.
+                        //
+                        // Reserved here, *filled* outside the field: the
+                        // control has to sit above the pill's gesture surface
+                        // to keep its own taps, and that surface has to sit
+                        // above the text field (see below). So what the row
+                        // lays out is the empty slot, and the button is
+                        // composed over it with the same
+                        // [Modifier.capsuleFieldSlot] — one box, laid out
+                        // twice, so the two can't drift apart.
+                        //
+                        // The one thing that moves it is the collapse: the
+                        // slot retreats into the pill's trailing edge along
+                        // with the badge, because a minimised bar that is
+                        // the domain *and a button* is neither minimised nor
+                        // centred. Nothing is lost — the tap that brings the
+                        // bar back brings Reload/Stop back with it, the same
+                        // way it restores Back, the tab counter and the
+                        // menu — and the load's own progress keeps being
+                        // drawn on the compact pill's edge throughout.
+                        if (slotScale > 0f) {
+                            Box(
+                                modifier = Modifier
+                                    .capsuleFieldSlot(slotScale, towardsStart = false),
+                            )
+                        }
                     }
-                    // Trailing control slot — sized to the pill, never
-                    // pushes it taller, and *always* reserved at the same
-                    // 32 dp whatever it is currently holding. That fixed
-                    // reservation is what makes "no layout shifts" true
-                    // for the loading state: the Stop control appears
-                    // into a slot that was already there, and the URL
-                    // beside it doesn't re-wrap or re-ellipsise when a
-                    // load starts or finishes.
-                    //
-                    // Reserved here, *filled* outside the field: the
-                    // control has to sit above the pill's gesture surface
-                    // to keep its own taps, and that surface has to sit
-                    // above the text field (see below). So what the row
-                    // lays out is the empty slot, and the button is
-                    // composed over it with the same
-                    // [Modifier.capsuleFieldSlot] — one box, laid out
-                    // twice, so the two can't drift apart.
-                    //
-                    // The one thing that moves it is the collapse: the
-                    // slot retreats into the pill's trailing edge along
-                    // with the badge, because a minimised bar that is
-                    // the domain *and a button* is neither minimised nor
-                    // centred. Nothing is lost — the tap that brings the
-                    // bar back brings Reload/Stop back with it, the same
-                    // way it restores Back, the tab counter and the
-                    // menu — and the load's own progress keeps being
-                    // drawn on the compact pill's edge throughout.
-                    if (slotScale > 0f) {
-                        Box(
-                            modifier = Modifier
-                                .capsuleFieldSlot(slotScale, towardsStart = false),
-                        )
-                    }
-                }
-            },
-        )
+                },
+            )
+        }
 
         // The capsule's tap surface: the two-step tap and the long-press
         // URL actions, over the whole pill.
@@ -2891,10 +2922,15 @@ private fun OverflowMenuButton(
     onOpenDownloads: () -> Unit,
     onReload: () -> Unit,
     onNewTab: () -> Unit,
+    onNewPrivateTab: (() -> Unit)?,
     onFindInPage: () -> Unit,
     zoomLevel: Int?,
     onZoom: (ZoomAction) -> Unit,
+    desktopSite: Boolean?,
+    onToggleDesktopSite: () -> Unit,
     onPrint: () -> Unit,
+    adblockState: AdblockSiteState?,
+    onToggleAdblock: () -> Unit,
 ) {
     var menuExpanded by remember { mutableStateOf(false) }
     // We hand-roll the anchor positioning rather than rely on
@@ -2994,6 +3030,16 @@ private fun OverflowMenuButton(
                                 onNewTab()
                             },
                         )
+                        if (onNewPrivateTab != null) {
+                            DropdownMenuItem(
+                                text = { MenuItemLabel("New private tab") },
+                                leadingIcon = { Icon(PrivateTabIcon, contentDescription = null) },
+                                onClick = {
+                                    menuExpanded = false
+                                    onNewPrivateTab()
+                                },
+                            )
+                        }
                         DropdownMenuItem(
                             text = { MenuItemLabel("Reload") },
                             leadingIcon = { Icon(Icons.Filled.Refresh, contentDescription = null) },
@@ -3017,6 +3063,30 @@ private fun OverflowMenuButton(
                         // menu stays open across presses so the user
                         // can watch the page settle between steps.
                         ZoomMenuRow(level = zoomLevel, onZoom = onZoom)
+                        // Request desktop site (#180), per site, with a
+                        // checkmark. Disabled where there is no site to
+                        // ask as a desktop one (home, an error page, a
+                        // dweb page). The page reloads, so the menu closes.
+                        DropdownMenuItem(
+                            text = { MenuItemLabel("Desktop site") },
+                            leadingIcon = { Icon(Icons.Filled.Computer, contentDescription = null) },
+                            trailingIcon = {
+                                Checkbox(
+                                    checked = desktopSite == true,
+                                    onCheckedChange = null,
+                                    enabled = desktopSite != null,
+                                )
+                            },
+                            enabled = desktopSite != null,
+                            onClick = {
+                                menuExpanded = false
+                                onToggleDesktopSite()
+                            },
+                            modifier = Modifier.semantics {
+                                role = Role.Checkbox
+                                toggleableState = ToggleableState(desktopSite == true)
+                            },
+                        )
                         // Print or save as PDF (#89). Same rule as Find
                         // in page: the home tab is Compose rather than a
                         // page, so there is no document behind it to print.
@@ -3029,6 +3099,48 @@ private fun OverflowMenuButton(
                                 onPrint()
                             },
                         )
+                        // Ad blocking on this site (#126): the switch is on
+                        // only where filters really apply; a tap allowlists
+                        // the site (or lifts that) and reloads the page.
+                        // Where nothing is filtered for another reason (no
+                        // lists on, still loading, a list exempts the page)
+                        // it is off and disabled, and says why in a
+                        // sub-line. Only on a web page.
+                        if (adblockState != null) {
+                            DropdownMenuItem(
+                                text = {
+                                    Column(modifier = Modifier.padding(end = 32.dp)) {
+                                        Text("Block ads on this site")
+                                        adblockState.note?.let { note ->
+                                            Text(
+                                                text = note,
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            )
+                                        }
+                                    }
+                                },
+                                leadingIcon = { Icon(Icons.Filled.Shield, contentDescription = null) },
+                                trailingIcon = {
+                                    Switch(
+                                        checked = adblockState.checked,
+                                        onCheckedChange = null,
+                                        enabled = adblockState.toggleable,
+                                        modifier = Modifier.scale(0.8f),
+                                    )
+                                },
+                                enabled = adblockState.toggleable,
+                                onClick = {
+                                    menuExpanded = false
+                                    onToggleAdblock()
+                                },
+                                // Read out as the switch it looks like.
+                                modifier = Modifier.semantics {
+                                    role = Role.Switch
+                                    toggleableState = ToggleableState(adblockState.checked)
+                                },
+                            )
+                        }
                         DropdownMenuItem(
                             text = { MenuItemLabel("History") },
                             leadingIcon = { Icon(Icons.Filled.History, contentDescription = null) },

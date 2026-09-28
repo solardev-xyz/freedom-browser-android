@@ -13,8 +13,10 @@ import android.graphics.ColorFilter
 import android.graphics.PixelFormat
 import android.graphics.Rect
 import android.graphics.drawable.Drawable
-import android.os.Bundle
 import android.net.Uri
+import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.os.Message
 import android.os.SystemClock
 import android.util.Log
@@ -22,16 +24,21 @@ import android.view.ActionMode
 import android.view.Menu
 import android.view.MenuItem
 import android.view.PixelCopy
+import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewConfiguration
 import android.view.ViewGroup
+import android.view.accessibility.AccessibilityNodeInfo
+import android.view.accessibility.AccessibilityNodeProvider
 import android.view.animation.DecelerateInterpolator
 import android.webkit.CookieManager
 import android.webkit.MimeTypeMap
 import android.webkit.GeolocationPermissions
 import android.webkit.PermissionRequest
 import android.webkit.ValueCallback
+import android.webkit.JsPromptResult
+import android.webkit.JsResult
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
@@ -63,11 +70,15 @@ import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
 import baby.freedom.mobile.data.BrowsingRepository
 import baby.freedom.mobile.ens.EnsNormalize
+import baby.freedom.mobile.ens.EnsResult
+import baby.freedom.mobile.ens.NameSystem
+import baby.freedom.mobile.ens.TezosDomainsResolver
 import kotlinx.coroutines.flow.collectLatest
 import java.io.ByteArrayInputStream
 import java.io.FilterInputStream
 import java.io.InputStream
 import java.io.IOException
+import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
 import java.util.concurrent.atomic.AtomicBoolean
@@ -162,29 +173,9 @@ internal fun isDocumentRequest(
     return header("Accept")?.trim()?.lowercase()?.startsWith("text/html") == true
 }
 
-/**
- * Title and description (HTML) of [nameResolutionRefusal]'s page for
- * [code] — the same wording `error.html` uses for that code.
- */
-internal fun nameResolutionRefusalCopy(code: String): Pair<String, String> = when (code) {
-    "ens_not_found" -> "No content for this ENS name" to
-        "This ENS name doesn't point at any content any more. The owner may " +
-        "have removed its <code>contenthash</code> record, or the name has no resolver."
-    "ens_unsupported_codec" -> "Unsupported content format" to
-        "This ENS name now resolves to a content format Freedom Browser " +
-        "cannot load yet on mobile."
-    "ens_invalid_name" -> "Not a valid ENS name" to
-        "This name breaks the ENSIP-15 naming rules " +
-        "(a disallowed character, mixed scripts, a lookalike, &hellip;), so Freedom Browser " +
-        "won't look it up &mdash; other ENS apps refuse it too, and it could be " +
-        "mistaken for a different name. Check the spelling."
-    "ens_name_too_long" -> "ENS name too long" to
-        "A label of this name is longer than the 255 bytes an ENS lookup can " +
-        "carry, so Freedom Browser can't ask a resolver about it. Check the address."
-    else -> "ENS lookup failed" to
-        "Couldn't reach an Ethereum RPC endpoint to resolve this name. " +
-        "Check your connection and try again."
-}
+/** A request's `Referer` header, if it sent one (see [AdblockPage]). */
+internal fun refererOf(headers: Map<String, String>?): String? =
+    headers?.entries?.firstOrNull { it.key.equals("Referer", ignoreCase = true) }?.value?.trim()?.ifEmpty { null }
 
 /**
  * The interceptor's answer to an ENS document it refuses: the error
@@ -196,8 +187,68 @@ internal fun nameResolutionRefusalCopy(code: String): Pair<String, String> = whe
  * place, Back and Forward move past it as usual and Reload re-checks
  * the name. No script: the document is on the name's origin.
  */
-internal fun nameResolutionRefusal(name: String, code: String): WebResourceResponse {
-    val (title, description) = nameResolutionRefusalCopy(code)
+internal fun nameResolutionRefusal(name: String, code: String): WebResourceResponse =
+    WebResourceResponse(
+        "text/html", "utf-8", statusForNameResolutionError(code), "Name Resolution Failed",
+        mapOf(NAME_RESOLUTION_ERROR_HEADER to code, "Cache-Control" to "no-store"),
+        ByteArrayInputStream(nameResolutionRefusalHtml(name, code).toByteArray(Charsets.UTF_8)),
+    )
+
+/**
+ * Title and description (HTML) of [nameResolutionRefusal]'s page for
+ * [code] — the same wording `error.html` uses for that code.
+ */
+internal fun nameResolutionRefusalCopy(name: String, code: String): Pair<String, String> {
+    val system = NameSystem.forName(name)
+    val label = system.label
+    val tezos = system == NameSystem.TEZOS
+    val chain = if (tezos) "Tezos" else "Ethereum"
+    return when (code) {
+        "ens_not_found" -> "No content for this $label name" to
+            if (tezos) {
+                "This $label name doesn't point at a website any more. The owner may " +
+                    "have removed its <code>web:content_url</code> record, or the name has expired."
+            } else {
+                "This $label name doesn't point at any content any more. The owner may " +
+                    "have removed its <code>contenthash</code> record, or the name has no resolver."
+            }
+        "ens_unsupported_codec" -> "Unsupported content format" to
+            "This $label name now resolves to a content format Freedom Browser " +
+            "cannot load yet on mobile."
+        // ENSIP-15 refused the name ([EnsNormalize]): no lookup ran.
+        "ens_invalid_name" -> "Not a valid $label name" to
+            "This name breaks the ENSIP-15 naming rules " +
+            "(a disallowed character, mixed scripts, a lookalike, &hellip;), so Freedom Browser " +
+            "won't look it up &mdash; other $label apps refuse it too, and it could be " +
+            "mistaken for a different name. Check the spelling."
+        "ens_name_too_long" -> "$label name too long" to
+            "A label of this name is longer than the 255 bytes an $label lookup can " +
+            "carry, so Freedom Browser can't ask a resolver about it. Check the address."
+        // [Gateways.reverifyEnsDocument] lands here for one server's
+        // record that isn't what this tab or session had — including when
+        // they had nothing yet (an iframe of a name never resolved) — and
+        // for one server's "no content" for a name with an earlier answer.
+        // A typed navigation shows the record with Continue and "no
+        // content" as "No content" with a trust note, so the copy neither
+        // promises an answer to review nor claims an earlier one.
+        "ens_unverified" -> "Not cross-checked" to
+            "Only one $chain RPC server answered for this name, so Freedom " +
+            "couldn't check its answer against another server. An answer only " +
+            "one server gave is loaded here only if it matches one already " +
+            "loaded in this session, so nothing was loaded. Try again, or " +
+            "enter the name in the address bar to see what that server answered."
+        "ens_conflict" -> "RPC servers disagreed" to
+            "The $chain RPC servers Freedom asked gave different answers for " +
+            "this name. At least one of them is wrong, so nothing was loaded."
+        else -> "$label lookup failed" to
+            "Couldn't reach ${if (tezos) "a Tezos" else "an Ethereum"} RPC endpoint to resolve this name. " +
+            "Check your connection and try again."
+    }
+}
+
+/** [nameResolutionRefusal]'s page. */
+internal fun nameResolutionRefusalHtml(name: String, code: String): String {
+    val (title, description) = nameResolutionRefusalCopy(name, code)
     fun esc(t: String) = t.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
     val safeName = esc(name)
     // The spec's reason, as the address-bar path shows it in the details box.
@@ -207,7 +258,7 @@ internal fun nameResolutionRefusal(name: String, code: String): WebResourceRespo
     } else {
         ""
     }
-    val html = """<!doctype html><html lang="en"><head><meta charset="utf-8">
+    return """<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'">
 <title>$title</title><style>
@@ -227,9 +278,39 @@ p{color:#57606a}.d{background:#f6f8fa;color:#cf222e}a{background:#f6f8fa;border-
 <div class="d">ens://$safeName
 
 $code$reason</div><a href="">Try again</a></div></body></html>"""
+}
+
+/** Where [nameWebRecordNavigation] sends a request for [pathAndQuery] on the name's origin. */
+internal fun webRecordTarget(result: EnsResult.Ok, pathAndQuery: String): String =
+    if (result.redirect) {
+        result.uri
+    } else {
+        // The origin's bare `/` is no path: keep the record's own.
+        TezosDomainsResolver.appendWebsiteSuffix(result.uri, pathAndQuery.takeUnless { it == "/" }.orEmpty())
+    }
+
+/**
+ * The interceptor's answer to a `.tez` document whose website record is
+ * now on the ordinary web (`http(s)`): a page that sends the frame
+ * there, as a typed `.tez` navigation does. A content URL keeps the
+ * requested [pathAndQuery]; a redirect record is the whole destination.
+ * A zero-delay meta refresh replaces the name's history entry, so Back
+ * doesn't land on it again; no script, as for [nameResolutionRefusal].
+ * It carries [NAME_RESOLUTION_ERROR_HEADER] only to stay out of history.
+ */
+internal fun nameWebRecordNavigation(result: EnsResult.Ok, pathAndQuery: String): WebResourceResponse {
+    val target = webRecordTarget(result, pathAndQuery)
+    val safe = target.replace("&", "&amp;").replace("\"", "&quot;")
+        .replace("<", "&lt;").replace(">", "&gt;")
+    val html = """<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="referrer" content="no-referrer">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'">
+<meta http-equiv="refresh" content="0;url=$safe">
+<title>${result.name.replace("<", "&lt;")}</title></head>
+<body><a href="$safe">$safe</a></body></html>"""
     return WebResourceResponse(
-        "text/html", "utf-8", statusForNameResolutionError(code), "Name Resolution Failed",
-        mapOf(NAME_RESOLUTION_ERROR_HEADER to code, "Cache-Control" to "no-store"),
+        "text/html", "utf-8", 200, "OK",
+        mapOf(NAME_RESOLUTION_ERROR_HEADER to Gateways.ENS_WEB_RECORD, "Cache-Control" to "no-store"),
         ByteArrayInputStream(html.toByteArray(Charsets.UTF_8)),
     )
 }
@@ -590,6 +671,7 @@ fun BrowserWebViewHost(
     val repo = remember(context) { BrowsingRepository.get(context) }
     val sitePermissions = remember(context) { SitePermissionBroker.get(context) }
     val pageZoom = remember(context) { PageZoom.get(context) }
+    val desktopSites = remember(context) { DesktopSites.get(context) }
     val fileChooser = rememberFileChooser()
 
     // Enable Chrome DevTools inspection for debug builds so we can
@@ -605,19 +687,10 @@ fun BrowserWebViewHost(
         // interceptor as everything else (feature-gated no-op where the
         // WebView doesn't support SW interception).
         ServiceWorkerInterception.install()
+        // A private session a dead process left behind (#86) goes
+        // before any page — private or not — can load.
+        PrivateProfile.discardLeftovers()
         Unit
-    }
-
-    // Periodic cookie sweep (defense in depth against cookie tossing
-    // across virtual origins until the PSL entry propagates — and kept
-    // afterwards; see [CookieHygiene]). The on-navigation sweep in
-    // onPageStarted handles the common case; this catches long-lived
-    // pages that write document.cookie while sitting idle.
-    LaunchedEffect(Unit) {
-        while (true) {
-            CookieHygiene.sweepAsync()
-            kotlinx.coroutines.delay(CookieHygiene.SWEEP_INTERVAL_MS)
-        }
     }
 
     val frame = remember {
@@ -635,6 +708,50 @@ fun BrowserWebViewHost(
     // is what actually lives under [frame]; the WebView is its only child.
     val webViews = remember { mutableMapOf<Long, WebView>() }
     val refreshLayouts = remember { mutableMapOf<Long, SwipeRefreshLayout>() }
+    // The ids in [webViews] of private tabs (#86).
+    val privateIds = remember { mutableSetOf<Long>() }
+
+    // Periodic cookie sweep (defense in depth against cookie tossing
+    // across virtual origins until the PSL entry propagates — and kept
+    // afterwards; see [CookieHygiene]). The on-navigation sweep in
+    // onPageStarted handles the common case; this catches long-lived
+    // pages that write document.cookie while sitting idle, including
+    // one in a background tab re-planting a cookie after another app's
+    // document loaded (R3-F2). It reads at every open tab's current
+    // path, since a cookie tossed with a non-root `Path` is only
+    // visible there (R3-F1). Runs on the main thread: `WebView.url`.
+    LaunchedEffect(Unit) {
+        while (true) {
+            CookieHygiene.sweepAsync(webViews.values.mapNotNull { it.url })
+            kotlinx.coroutines.delay(CookieHygiene.SWEEP_INTERVAL_MS)
+        }
+    }
+    // A tab brought to the front: sweep at its document's path before
+    // the user interacts with it — it may have sat in the background
+    // while another tab planted cookies (R3-F2).
+    LaunchedEffect(tabs.active.id) {
+        val url = webViews[tabs.active.id]?.url
+        if (CookieHygiene.coversNavigation(url)) CookieHygiene.sweepAsync(url)
+    }
+
+    /**
+     * No private tab is left (#86): wipe the private profile's cookies
+     * and site storage (its HTTP cache was cleared through the last
+     * private WebView) and retire it for deletion, and drop
+     * what the app itself kept for the session in memory: its
+     * site-permission answers, zoom levels, downloads list (a private
+     * download still running is cancelled, as in Chrome) and the
+     * onchain apps let through despite a warning (#123).
+     */
+    fun endPrivateSession() {
+        PrivateProfile.discard()
+        sitePermissions.onPrivateSessionEnded()
+        Adblock.onPrivateSessionEnded()
+        pageZoom.clearPrivate()
+        desktopSites.clearPrivate()
+        DownloadManager.get(context).endPrivateSession()
+        OnchainApps.onPrivateSessionEnded()
+    }
 
     // Per-tab navigation observers (coroutine jobs, tracked so we can cancel
     // them if the tab is closed).
@@ -657,6 +774,7 @@ fun BrowserWebViewHost(
             repo = repo,
             sitePermissions = sitePermissions,
             pageZoom = pageZoom,
+            desktopSites = desktopSites,
             onSubmitUrl = { target, url ->
                 tabs.requestSubmit?.invoke(target, url)
             },
@@ -673,8 +791,16 @@ fun BrowserWebViewHost(
             },
             onCloseWindow = { tabs.closePopup(tab) },
             // Handed to Chromium by `onCreateWindow`, which needs it
-            // never to have navigated.
-            isPopup = tab.openerId != null,
+            // never to have navigated. Not a popup rebuilt after a
+            // relaunch (#183): its first navigation is the restore, not
+            // one its opener asked for.
+            isPopup = tab.openerId != null && tab.pendingRestore == null,
+            popupOpener = {
+                val openerId = tab.openerId
+                val opener = tabs.tabs.firstOrNull { it.id == openerId }
+                val view = openerId?.let { webViews[it] }
+                if (opener != null && view != null) opener to view else null
+            },
             // A reopened tab: its WebView's first navigation must be
             // the host's `restoreState` (see the creation loop below).
             restoring = tab.pendingRestore != null,
@@ -691,9 +817,10 @@ fun BrowserWebViewHost(
                 }
             },
             onContextMenu = { pin, target -> tabs.pageContextMenu = pin.request(target) },
-            onSearchSelection = { query -> tabs.requestSearchInNewTab?.invoke(query) },
+            onSearchSelection = { query -> tabs.requestSearchInNewTab?.invoke(query, tab.private) },
         )
         webViews[tab.id] = wv
+        if (tab.private) privateIds += tab.id
         refreshLayouts[tab.id] = layout
         frame.addView(layout)
         return wv
@@ -712,10 +839,24 @@ fun BrowserWebViewHost(
             val wv = attach(tab)
             if (restore == null) continue
             tab.pendingRestore = null
+            // The restored entry is fetched again: with its site's user
+            // agent (#180), in place before the fetch starts.
+            (wv as? PageWebView)?.matchUserAgentTo(tab.url)
+            // A tab that outlived its WebView (#183) keeps its mute.
+            if (tab.audioMuted) {
+                if (WebViewFeature.isFeatureSupported(WebViewFeature.MUTE_AUDIO)) {
+                    WebViewCompat.setAudioMuted(wv, true)
+                } else {
+                    tab.audioMuted = false
+                }
+            }
             val restored = restore.webViewState?.let { wv.restoreState(it) } != null
             if (restored) {
                 tab.canGoBack = wv.canGoBack()
                 tab.canGoForward = wv.canGoForward()
+                // The WebView loads the restored entry itself: a load of
+                // its own for the IPFS phase line (#94).
+                tab.beginLoad(inWebView = true)
             } else {
                 wv.loadUrl(ABOUT_BLANK)
             }
@@ -725,30 +866,44 @@ fun BrowserWebViewHost(
             // unless the user had stopped that load) once that entry
             // has finished — any earlier and the blank entry's
             // `onPageFinished` wipes the tab's address after the submit,
-            // and the tab loads behind the home overlay. Only armed if
-            // the WebView really is on the blank entry: a restored list
-            // that ends on a real page never finishes a blank load to
-            // consume it.
-            tab.afterBlank = restore.afterBlank(
+            // and the tab loads behind the home overlay. Only armed for
+            // the entry the WebView really is on: a restored list that
+            // ends on a real page never finishes a blank load, so there
+            // it waits for that page instead — for a load the tab had in
+            // flight over it (#183 R1-F2).
+            tab.armAfterRestore(restore.afterBlank(
                 restored = restored,
                 currentEntryUrl = if (restored) {
                     wv.copyBackForwardList().currentItem?.url
                 } else {
                     ABOUT_BLANK
                 },
-            )
+            ))
         }
         val toRemove = webViews.keys.filter { it !in idsNow }
+        var closedPrivate = false
         for (id in toRemove) {
             val wv = webViews.remove(id) ?: continue
+            if (privateIds.remove(id)) {
+                closedPrivate = true
+                // The last private WebView is the only handle on the
+                // private profile's HTTP cache (#86): clear it through
+                // this one before it goes.
+                if (privateIds.isEmpty()) runCatching { wv.clearCache(true) }
+            }
             val layout = refreshLayouts.remove(id)
             if (layout != null) frame.removeView(layout)
             // Take down any permission prompt the tab still had up;
             // its request is denied along with the page.
             sitePermissions.onTabClosed(id)
+            UnverifiedOrigins.release(wv)
+            (wv as? PageWebView)?.sweptReload?.committed()
             wv.stopLoading()
             wv.destroy()
         }
+        // The last private tab is gone (its WebView destroyed above):
+        // the private session ends, and everything it kept goes with it.
+        if (closedPrivate && privateIds.isEmpty()) endPrivateSession()
     }
 
     // Visibility: only the active tab draws. Toggle the SwipeRefreshLayout
@@ -768,8 +923,12 @@ fun BrowserWebViewHost(
             LaunchedEffect(tab.id) {
                 snapshotFlow { tab.navCounter to tab.pendingUrl }
                     .collectLatest { (counter, pending) ->
-                        if (counter > 0 && pending.isNotEmpty()) {
+                        // Not one this tab's WebView was already handed:
+                        // a tab that outlived its WebView (#183) comes
+                        // back from its saved state instead.
+                        if (counter > tab.handedNavCounter && pending.isNotEmpty()) {
                             val wv = webViews[tab.id] ?: return@collectLatest
+                            tab.handedNavCounter = counter
                             // Abort any in-flight load first. Without this,
                             // hitting Home (or otherwise navigating) mid-
                             // load lets Chromium keep firing late
@@ -777,11 +936,38 @@ fun BrowserWebViewHost(
                             // page, which flips the top progress bar back
                             // on after navigateHome() has already cleared
                             // it to -1.
-                            wv.stopLoading()
-                            // From here the WebView is on this load, not
-                            // the one it was showing (#94).
-                            tab.handLoadToWebView()
-                            wv.loadUrl(pending)
+                            // Not under the load a restore put back over
+                            // its page, which is still coming in: that
+                            // load was in flight over a complete page,
+                            // and Chromium keeps the page loading until
+                            // the new one commits (#185 R4-F1).
+                            val keepsPage = tab.takePutBackKeepsPage()
+                            if (!keepsPage) wv.stopLoading()
+                            // The user's submit scheduled this very load?
+                            // Then its redirects may end in an app link
+                            // (#173) — this load's, no other's.
+                            val namedByUser = tab.takeUserNamedLoad(pending) && wv is PageWebView
+                            val load = {
+                                // From here the WebView is on this load, not
+                                // the one it was showing (#94).
+                                tab.handLoadToWebView()
+                                if (namedByUser) {
+                                    (wv as PageWebView).loadUrlNamedByUser(pending)
+                                } else {
+                                    wv.loadUrl(pending)
+                                }
+                            }
+                            // One that needs the other user agent (#180)
+                            // would stop that page after all: it waits
+                            // for the page's finish ([PutBackHold]).
+                            if (keepsPage && wv is PageWebView && wv.needsOtherUserAgentFor(pending)) {
+                                wv.holdPutBack(load)
+                                // The tab is busy with it: not the page's
+                                // Reload under the typed address (R2-F1).
+                                if (tab.progress == -1 && !tab.loadAborted) tab.progress = PUT_BACK_HOLD_PROGRESS
+                            } else {
+                                load()
+                            }
                         }
                     }
             }
@@ -808,11 +994,7 @@ fun BrowserWebViewHost(
         // also clears the counter itself so the capsule's edge trace
         // goes out on the same frame as the tap.
         tabs.stopLoading = { tab -> webViews[tab.id]?.stopLoading() }
-        tabs.saveWebViewState = { tab ->
-            webViews[tab.id]?.let { wv ->
-                Bundle().takeIf { runCatching { wv.saveState(it) }.getOrNull() != null }
-            }
-        }
+        tabs.saveWebViewState = { tab -> webViews[tab.id]?.let(::saveWebViewState) }
         // Find in page (#83). Results come back through the WebView's
         // FindListener into the tab's [FindInPageState] (see
         // [buildRefreshableWebView]).
@@ -831,10 +1013,42 @@ fun BrowserWebViewHost(
                 }
             }
         }
+        // An external IPFS gateway was switched away from (#125): a tab
+        // still showing what it served would keep running it, unwarned,
+        // and could write to the origin again after its one-shot cleanup.
+        // Reload those tabs — falling back to a navigation that can't be
+        // refused if the reload doesn't commit, a POST result's say
+        // ([SweptReload]) — and hold the origins for cleanup until each
+        // has committed its next document.
+        UnverifiedOrigins.onSweep = { swept ->
+            // Frame documents a service worker fetched belong to no known
+            // tab: every tab whose document predates the fetch counts as
+            // having them.
+            val anyTab = UnverifiedOrigins.takeWorkerDocuments(swept)
+            for (wv in webViews.values) {
+                val stale = sweptDocuments(wv, swept, anyTab)
+                if (stale.isEmpty()) continue
+                UnverifiedOrigins.hold(wv, stale)
+                if (wv is PageWebView) wv.sweptReload.swept(wv.url) else wv.reload()
+            }
+        }
+        // Per-tab mute (#91). Only where the WebView can: without the
+        // hook the switcher shows the indicator but no toggle.
+        if (WebViewFeature.isFeatureSupported(WebViewFeature.MUTE_AUDIO)) {
+            tabs.setAudioMuted = { tab, muted ->
+                webViews[tab.id]?.let { wv ->
+                    WebViewCompat.setAudioMuted(wv, muted)
+                    tab.audioMuted = WebViewCompat.isAudioMuted(wv)
+                }
+            }
+        }
         tabs.printPage = { tab ->
             webViews[tab.id]?.let { wv ->
                 printWebView(wv, printJobName(tab.title, tab.addressBarText, tab.url))
             }
+        }
+        tabs.dropMemoryCache = { tab ->
+            webViews[tab.id]?.let { wv -> runCatching { wv.clearCache(false) } }
         }
         tabs.clearWebViewData = {
             // Globally-scoped stores: cookies and DOM storage / IndexedDB /
@@ -847,6 +1061,9 @@ fun BrowserWebViewHost(
             runCatching { CookieManager.getInstance().removeAllCookies(null) }
             runCatching { CookieManager.getInstance().flush() }
             runCatching { WebStorage.getInstance().deleteAllData() }
+            // …and a private session's own (#86), which lives in its
+            // profile's stores.
+            PrivateProfile.clearData()
             // Per-instance state: HTTP cache, autofill form data, and the
             // back/forward stack live on each WebView, so clear them on
             // every live tab.
@@ -860,6 +1077,8 @@ fun BrowserWebViewHost(
             runCatching { fileChooser.clearCaptures() }
             // Remembered zoom levels are keyed by the sites visited (#88).
             pageZoom.clearAll()
+            // …and so are the sites asked for as desktop sites (#180).
+            desktopSites.clearAll()
         }
         onDispose {
             tabs.captureActiveThumbnail = null
@@ -868,6 +1087,9 @@ fun BrowserWebViewHost(
             tabs.saveWebViewState = null
             tabs.find = null
             tabs.printPage = null
+            tabs.dropMemoryCache = null
+            UnverifiedOrigins.onSweep = null
+            tabs.setAudioMuted = null
         }
     }
 
@@ -883,7 +1105,7 @@ fun BrowserWebViewHost(
         snapshotFlow {
             val scale = fontScale.value
             tabs.tabs.map {
-                it.id to PageZoomLevels.textZoom(pageZoom.levelFor(it.zoomSite), scale)
+                it.id to PageZoomLevels.textZoom(pageZoom.levelFor(it.zoomSite, it.private), scale)
             }
         }
             .collect { zooms ->
@@ -896,12 +1118,35 @@ fun BrowserWebViewHost(
 
     DisposableEffect(Unit) {
         onDispose {
+            // The Activity is being relaunched (#183) and the tabs live
+            // on in [TabsSession] — the ViewModel store is kept on
+            // exactly this condition. Each tab keeps its WebView's state
+            // for the next host to restore it from, and anything its
+            // page had asked for is withdrawn with the page.
+            val relaunch = context.findActivity()?.isChangingConfigurations == true
+            if (relaunch) {
+                tabs.parkForRelaunch { tab -> webViews[tab.id]?.let(::saveWebViewState) }
+                for (tab in tabs.tabs) sitePermissions.onDocumentStarted(tab)
+            } else {
+                // As when the last private tab closes (#86): the private
+                // cache goes through a private WebView, before they all do.
+                privateIds.firstNotNullOfOrNull { webViews[it] }?.let { runCatching { it.clearCache(true) } }
+            }
             for (wv in webViews.values) {
+                UnverifiedOrigins.release(wv)
+                (wv as? PageWebView)?.sweptReload?.committed()
                 wv.stopLoading()
                 wv.destroy()
             }
             webViews.clear()
             refreshLayouts.clear()
+            // Otherwise the tabs don't outlive this host, so neither does
+            // a private session. Across a relaunch it goes on with its
+            // tabs, whose WebViews the next host puts back on its profile.
+            if (privateIds.isNotEmpty()) {
+                privateIds.clear()
+                if (!relaunch) endPrivateSession()
+            }
         }
     }
 }
@@ -913,6 +1158,7 @@ private fun buildRefreshableWebView(
     repo: BrowsingRepository,
     sitePermissions: SitePermissionBroker,
     pageZoom: PageZoom,
+    desktopSites: DesktopSites,
     onSubmitUrl: (BrowserState, String) -> Unit,
     onEnterFullscreen: (View, WebChromeClient.CustomViewCallback?) -> Unit,
     onExitFullscreen: () -> Unit,
@@ -922,6 +1168,7 @@ private fun buildRefreshableWebView(
     onCreateWindow: () -> WebView,
     onCloseWindow: () -> Unit,
     isPopup: Boolean = false,
+    popupOpener: () -> Pair<BrowserState, WebView>? = { null },
     onContextMenuPress: () -> PageContextMenuPin? = { null },
     onContextMenu: (PageContextMenuPin, PageContextTarget) -> Unit = { _, _ -> },
     onSearchSelection: (String) -> Unit = {},
@@ -1010,6 +1257,14 @@ private fun buildRefreshableWebView(
     // ([BottomUiChannels]).
     val bottomUiChannels = BottomUiChannels<JavaScriptReplyProxy>()
 
+    // Audio indicator (#91): the frames whose media is audible, as their
+    // detectors report it on the same channel (see [TabAudioFrames]).
+    val audioFrames = TabAudioFrames<JavaScriptReplyProxy>()
+    fun forgetTabAudio() {
+        audioFrames.clear()
+        state.playingAudio = false
+    }
+
     // Page context menu (#84): the long-press waiting on the page's
     // `contextmenu` verdict, which the detector's document-start script
     // reports on the same hidden channel as the bottom-UI reports (see
@@ -1024,6 +1279,107 @@ private fun buildRefreshableWebView(
         val token = bottomChrome.token ?: return
         val request = bottomUiProbeRequest(token)
         for (reply in targets) runCatching { reply.postMessage(request) }
+    }
+
+    /**
+     * Could the document at [url] answer theme-colour asks itself? Only
+     * where its detector can run: http(s) (the only origins the listener
+     * takes), past the detector's start. Whether it actually does is
+     * only known once it is heard ([ThemeColorSlot.heard]); a document
+     * whose detector never runs (a CSP `sandbox` one: opaque origin, no
+     * channel) never answers, so [readThemeColor] falls back for it.
+     */
+    fun themeColorFromDetector(url: String?): Boolean {
+        if (!bottomUiSupported || !bottomChrome.installed || !bottomUiApplies(url)) return false
+        val u = url!!.lowercase()
+        return u.startsWith("https://") || u.startsWith("http://")
+    }
+
+    /** Ask the current document's detector for its theme colour (#92). */
+    fun postThemeColorRequest(targets: List<JavaScriptReplyProxy> = bottomUiChannels.targets) {
+        val token = bottomChrome.token ?: return
+        val request = themeColorRequest(token)
+        for (reply in targets) runCatching { reply.postMessage(request) }
+    }
+
+    // The page's theme colour behind the status bar (#92). Read at first
+    // paint, when the load finishes (a tag a script adds late) and on a
+    // same-document history change (an SPA route with its own colour),
+    // and whenever the detector sees a `<meta>` change (a route that sets
+    // its colour only after its data arrives, [THEME_COLOR_PREFIX]);
+    // each read is stamped with its document and gated on that document
+    // having painted, so the outgoing page can't answer for the incoming
+    // one (see [ThemeColorSlot]).
+    val themeColor = ThemeColorSlot()
+
+    /** [THEME_COLOR_JS] in the page, for the read stamped [token]. */
+    fun readThemeColorPageVisible(view: WebView, token: Int, onAnswer: ((Int?) -> Unit)?) {
+        if (view.isDestroyed) return
+        view.evaluateJavascript(THEME_COLOR_JS) { result ->
+            if (themeColor.accept(token)) {
+                val argb = themeColorArgb(result)
+                state.themeColorArgb = argb
+                onAnswer?.invoke(argb)
+            }
+        }
+    }
+
+    /**
+     * Read the theme colour of the document on screen. A document whose
+     * detector can run is asked through its channel: the detector reads
+     * with functions it saved at document start, so the page can't see
+     * the read, and its answer is tagged with the document's token.
+     *
+     * The ask goes out even before the detector has been heard (its
+     * first report can land after `onPageFinished` on a fast load), and
+     * isn't given up on then: if the detector still hasn't spoken
+     * [DETECTOR_THEME_WAIT_MS] later, the document has none that runs
+     * and is read with [THEME_COLOR_JS] instead; if it has, the ask is
+     * repeated on its proved channel, since one sent before its start
+     * was dropped. Anything else is read with [THEME_COLOR_JS] straight
+     * away, which the page can see; [onAnswer] hears only such an answer.
+     */
+    fun readThemeColor(view: WebView?, onScreen: Boolean = false, onAnswer: ((Int?) -> Unit)? = null) {
+        // A read posted before the host destroyed the WebView (an
+        // Activity relaunch, #183) has no page to read any more.
+        if (view == null || view.isDestroyed) return
+        val token = themeColor.beginRead(onScreen) ?: return
+        if (themeColorFromDetector(view.url)) {
+            // The detector's answer lands through the painted gate;
+            // `onScreen` vouches for this document the same way.
+            if (onScreen) themeColor.painted()
+            postThemeColorRequest()
+            if (!themeColor.heard) {
+                view.postDelayed({
+                    if (themeColor.fallbackDue(token)) readThemeColorPageVisible(view, token, onAnswer)
+                    else if (themeColor.accept(token)) postThemeColorRequest()
+                }, DETECTOR_THEME_WAIT_MS)
+            }
+            return
+        }
+        readThemeColorPageVisible(view, token, onAnswer)
+    }
+
+    // A popup's blank document is the page's own while [BrowserState.blankIsPage]
+    // holds, and its opener can write a whole page into it
+    // (`window.open('')` + `document.write`) — which gets no navigation
+    // callback at all, not even `onPageCommitVisible` (verified on the
+    // AVD), and no detector either (#92). So while that document is the
+    // one on screen, the frames it draws ask for a read, at most one per
+    // [BLANK_PAGE_READ_MS], backing off while the answer stays the same
+    // so an animating page isn't re-read for as long as it is open
+    // ([BlankPageReads]).
+    val blankPageReads = BlankPageReads()
+
+    fun onBlankPageDrawn(view: WebView) {
+        if (!state.blankIsPage || state.url != ABOUT_BLANK) return
+        val delayMs = blankPageReads.drawn() ?: return
+        view.postDelayed({
+            blankPageReads.fired()
+            if (state.blankIsPage && state.url == ABOUT_BLANK) {
+                readThemeColor(view, onScreen = true, onAnswer = blankPageReads::answered)
+            }
+        }, delayMs)
     }
 
     /**
@@ -1113,7 +1469,16 @@ private fun buildRefreshableWebView(
     // recover again.
     var autoRecoveredUrl: String? = null
 
-    val webView = PageWebView(context).apply {
+    // A private tab's pickers and `<select>` lists open in windows of
+    // their own, built on this context: [PrivateWindowContext] makes
+    // them FLAG_SECURE like the Activity window (#86).
+    val webView = PageWebView(
+        if (state.private) PrivateWindowContext.of(context) else context,
+    ).apply {
+        // A private tab's WebView goes on the private session's profile
+        // (#86) before anything else touches it: Chromium only takes a
+        // profile change on a WebView that has never been used.
+        if (state.private) PrivateProfile.attach(this)
         layoutParams = ViewGroup.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.MATCH_PARENT,
@@ -1133,6 +1498,35 @@ private fun buildRefreshableWebView(
         // themselves (home page, most real sites) are unaffected; they
         // paint their own background over this base colour.
         setBackgroundColor(0xFFFFFFFF.toInt())
+
+        // "Desktop site" (#180): this tab's pages are requested with a
+        // desktop user agent on the sites the user asked for, and as
+        // the tab sees it — a private tab's choices are its session's.
+        wantsDesktop = { url -> desktopSites.isDesktop(desktopSiteKey(url), state.private) }
+        // A page's own tapped navigation across that line is re-issued
+        // by the page, through its detector (R5-F3): only once that
+        // detector has proved it is the document on screen's, with a
+        // report tagged with its token.
+        if (bottomUiSupported) {
+            pageReissue = object : PageReissueChannel {
+                private fun channel(): Pair<JavaScriptReplyProxy, String>? {
+                    val token = bottomChrome.token ?: return null
+                    if (!bottomChrome.installed) return null
+                    return (bottomUiChannels.proved ?: return null) to token
+                }
+
+                override fun ready(url: String): Boolean {
+                    val (_, token) = channel() ?: return false
+                    return pageReissueRequest(token, url) != null
+                }
+
+                override fun send(url: String): Boolean {
+                    val (reply, token) = channel() ?: return false
+                    val ask = pageReissueRequest(token, url) ?: return false
+                    return runCatching { reply.postMessage(ask) }.isSuccess
+                }
+            }
+        }
 
         settings.apply {
             javaScriptEnabled = true
@@ -1562,6 +1956,31 @@ private fun buildRefreshableWebView(
         // scroll range, or one already at the top) isn't going to reach
         // the end: the gesture is the page's, as before #138.
         onTopOverscroll = { reveal.onTopOverscroll() }
+        // A popup's written blank page tells us of itself only by drawing (#92).
+        onDrawn = { onBlankPageDrawn(this) }
+        // A `theme-color`'s `media` can ask about anything the page is
+        // rendered under: the colour scheme (a light/dark pair), but just
+        // as well the orientation, the width or the resolution (#92). The
+        // Activity handles those configuration changes itself, so no
+        // navigation follows a live light/dark switch, a rotation, a
+        // split-screen resize or a fold: read again once a frame drawn
+        // under the new environment is on screen — asked any earlier,
+        // `matchMedia` can still answer for the old one. Every tab's
+        // WebView stays attached to the one frame (a background tab is
+        // only hidden), so a background tab hears the change and
+        // re-reads too. A burst (a rotation is a configuration change
+        // and a resize) reads once, for its last change: each change asks
+        // for a frame, and only the latest ask's frame reads. (Not a
+        // "pending" flag — a hidden tab's frame may never come, and a
+        // stuck flag would silence it for good.)
+        var mediaChange = 0L
+        onMediaEnvironmentChanged = {
+            postVisualStateCallback(++mediaChange, object : WebView.VisualStateCallback() {
+                override fun onComplete(requestId: Long) {
+                    if (requestId == mediaChange) readThemeColor(this@apply)
+                }
+            })
+        }
         setOnTouchListener { _, event ->
             // The reveal owns this gesture (#65): the page follows the
             // finger by translation only, and Chromium sees none of it.
@@ -1604,6 +2023,20 @@ private fun buildRefreshableWebView(
             val listener = WebViewCompat.WebMessageListener { view, message, sourceOrigin, isMainFrame, replyProxy ->
                 if (sourceOrigin.scheme != "https" && sourceOrigin.scheme != "http") return@WebMessageListener
                 if (message.type != WebMessageCompat.TYPE_STRING) return@WebMessageListener
+                // A frame's media became audible or fell silent (#91):
+                // any frame, keyed by its reply proxy, folded into the
+                // tab's indicator.
+                parseAudioReport(message.data)?.let { audible ->
+                    state.playingAudio = audioFrames.onReport(replyProxy, audible)
+                    return@WebMessageListener
+                }
+                // Input the top document itself received (#85): only the
+                // main frame's word counts — an iframe's would let it
+                // vouch for a tap on itself ([UserGestureLatch]).
+                parseTopDocumentInput(message.data)?.let { input ->
+                    if (isMainFrame) userGestures.onTopDocumentInput(input.ageMs, input.isClick)
+                    return@WebMessageListener
+                }
                 // The page's say on a long-press (#84): any frame, since
                 // the press may land in an iframe. It can only ever open
                 // a menu for a press the user actually made.
@@ -1619,12 +2052,38 @@ private fun buildRefreshableWebView(
                     // document's own late ready (see [BottomUiChannels]);
                     // otherwise it waits for its document's first paint.
                     if (!isMainFrame) return@WebMessageListener
-                    postBottomUiProbe(bottomUiChannels.onReady(replyProxy, bottomChrome.installed))
+                    // A new main-frame document has replaced the last one,
+                    // and every frame of that one is gone (#91): nothing
+                    // they said about audio holds any more, whether or not
+                    // their `pagehide` silence made it here. Frames report
+                    // on their own pipes, so a new subframe's first
+                    // report can overtake this ready and be wiped too; an
+                    // audible frame re-sends it every [AUDIO_RECHECK_MS],
+                    // so the indicator comes back within one period.
+                    forgetTabAudio()
+                    val starts = bottomUiChannels.onReady(replyProxy, bottomChrome.installed)
+                    postBottomUiProbe(starts)
+                    // The theme-colour ask sent at first paint had no
+                    // channel to go to yet: ask again with the start (#92).
+                    if (starts.isNotEmpty() && themeColor.beginRead() != null) postThemeColorRequest(starts)
+                    return@WebMessageListener
+                }
+                // The current document's theme colour (#92): the answer
+                // to [readThemeColor]'s ask, or sent unasked when a
+                // `<meta>` changed (an SPA route that sets its colour
+                // only after its data arrives, well after
+                // `doUpdateVisitedHistory`'s read). Only for the current
+                // token, and only once that document has painted.
+                val theme = parseThemeColorReport(message.data, isMainFrame, bottomChrome.token)
+                if (theme != null) {
+                    themeColor.detectorHeard()
+                    if (themeColor.beginRead() != null) state.themeColorArgb = theme.argb
                     return@WebMessageListener
                 }
                 val report = parseBottomUiMessage(message.data, isMainFrame, bottomChrome.token)
                     ?: return@WebMessageListener
                 bottomUiChannels.onReport(replyProxy)
+                themeColor.detectorHeard()
                 val verdict = bottomChrome.accept(report, SystemClock.uptimeMillis())
                 if (verdict.changed) applyBottomChrome()
                 val confirmIn = verdict.confirmInMs
@@ -1645,6 +2104,17 @@ private fun buildRefreshableWebView(
             WebViewCompat.addWebMessageListener(this, channel, BOTTOM_UI_ORIGIN_RULES, listener)
             WebViewCompat.addDocumentStartJavaScript(this, bottomUiDetectorJs(channel), BOTTOM_UI_ORIGIN_RULES)
         }
+
+        // Ad blocking (#126): the tab's top-level document — the page
+        // the network filters' `third-party` / `domain=` options and the
+        // allowlist are judged against. The committed one, or one whose
+        // answer the browser itself just handed over and is about to
+        // commit, or — for a request whose Referer names it — the one a
+        // network navigation is fetching; never one that didn't commit
+        // (see [AdblockPage]).
+        // The cosmetic channel reads it on the main thread.
+        val adblockPage = AdblockPage()
+        AdblockCosmetic.install(this, state.private) { adblockPage.current() }
 
         // Force an initial paint so the WebView's compositor surface
         // is valid even before the user submits a URL. Not for a popup:
@@ -1667,6 +2137,83 @@ private fun buildRefreshableWebView(
         // shouldOverrideUrlLoading, emptied by onPageStarted.
         val pendingNavigationUrls = java.util.Collections.synchronizedSet(LinkedHashSet<String>())
 
+        // Whether the main-frame navigation in flight started with a user
+        // gesture. WebView reports `hasGesture()` false on every redirect
+        // hop, so a tapped link whose server redirects to another app's
+        // link (a meeting invite's tracking URL → `zoomus:`) would be
+        // refused without it (#85). Reset when a document starts, and
+        // when the navigation ends without one (handed to an app,
+        // detoured to the submit flow, or turned into a download), and
+        // when the browser starts a load of its own over it.
+        var navigationHadGesture = false
+        // The redirect chain of the main-frame navigation in flight when
+        // it is a load the user named ([BrowserState.takeUserNamedLoad]):
+        // it may end in an app link with no tap on a page, asked for the
+        // hop that redirected there (#173 — a Meet link redirects to the
+        // Meet app's `intent:`). Ended wherever [navigationHadGesture] is
+        // dropped, on Stop, when loading stops without a commit (a 204,
+        // R2-F1), and by a main-frame request of the page's own
+        // ([UserNamedChain]).
+        val userNamedChain = UserNamedChain()
+        // The URL of the document on screen, as last committed (or moved
+        // by history.pushState): tells the page's own `load` event from
+        // the end of a navigation that never commits
+        // ([UserNamedChain.loadFinished]).
+        var committedPageUrl: String? = null
+        // A load the browser starts itself (typed URL, reload, back /
+        // forward) replaces whatever navigation was in flight without a
+        // first hop through shouldOverrideUrlLoading: the replaced
+        // navigation's gesture mustn't carry over to its redirects (#85).
+        this.onBrowserInitiatedLoad = { url, userNamed ->
+            navigationHadGesture = false
+            // …nor does an address a restore had waiting for its own
+            // load (#185 R2-F1).
+            state.restoreLoadSuperseded()
+            if (url != null && userNamed) userNamedChain.started(url) else userNamedChain.ended()
+        }
+        // Stop (or a new load's stop first) ends the navigation in flight
+        // without a commit: neither its gesture nor the user's naming of
+        // it carries over to a navigation the page starts next (R1-F1).
+        this.onStopLoading = {
+            navigationHadGesture = false
+            // The stop finishes the restored page: the address waiting
+            // for that finish mustn't go in over what comes next — the
+            // user's own navigation, or nothing if they hit Stop
+            // (#185 R2-F1).
+            state.restoreLoadSuperseded()
+            userNamedChain.ended()
+        }
+
+        // Whether this WebView has started a document yet. A popup
+        // (`target=_blank`, `window.open()`) whose very first navigation
+        // is a link to another app was opened for that link alone: the
+        // link is its opener's (origin, tap, prompt), and the empty tab
+        // closes again, as in Chrome (#85).
+        var documentStartedOnce = false
+
+        // A link to another app (#85) that passed the scheme and gesture
+        // checks: the site-permission broker asks (or applies a
+        // remembered answer) for the page that asked, then the app is
+        // started. An `intent:` no app can take goes to its http(s)
+        // fallback instead, as a page navigation would.
+        fun offerExternalLink(view: WebView, pageUrl: String?, tab: BrowserState, url: String) {
+            val origin = permissionOriginKey(pageUrl)
+            val launch = externalAppLaunch(url, view.context.packageName)
+            if (origin == null || launch == null) {
+                Log.i(LOG_TAG, "external link refused: ${externalUrlForLog(url)}")
+                return
+            }
+            sitePermissions.onExternalLink(tab, origin, launch.scheme) {
+                if (startExternalApp(view.context, launch)) return@onExternalLink
+                val fallback = launch.fallbackUrl
+                if (fallback != null) {
+                    onSubmitUrl(tab, fallback)
+                } else {
+                    sitePermissions.onNoAppForLink?.invoke(launch.scheme)
+                }
+            }
+        }
+
         setDownloadListener { url, userAgent, contentDisposition, mimeType, contentLength ->
             // A download that is the response of a main-frame navigation
             // since the last commit (the typed URL or a redirect hop).
@@ -1678,9 +2225,14 @@ private fun buildRefreshableWebView(
             val wasPending = pendingNavigationUrls.remove(url)
             if (wasPending) {
                 pendingNavigationUrls.clear()
+                // Nor does its gesture carry over to the next load.
+                navigationHadGesture = false
+                userNamedChain.ended()
+                (this as? PageWebView)?.usersNavigation?.ended()
                 // The page on screen stays: its open requests are this
                 // load's, whatever the answer's headers suggested.
-                state.mainFrameBecameDownload()
+                state.mainFrameKeptPage()
+                adblockPage.kept()
             }
             // A main-frame navigation that turned out to be a file never
             // commits: no onPageStarted, no final progress callback. Left
@@ -1708,6 +2260,7 @@ private fun buildRefreshableWebView(
             )
             DownloadManager.get(context).start(
                 tabId = state.id,
+                private = state.private,
                 url = url,
                 userAgent = userAgent,
                 contentDisposition = contentDisposition,
@@ -1752,10 +2305,63 @@ private fun buildRefreshableWebView(
                 }
             }
 
+            // Reloading a page reached by POST asks here; the answer is
+            // always "don't resend" (WebView's default: resending would
+            // repeat the form's side effect). But a reload a sweep asked
+            // for must still get rid of the stale document, so that one
+            // moves straight on to a GET of the same address (#125,
+            // R6-F1, [SweptReload]) — posted, not run inside WebView's
+            // own callback. A prompt for a load started after the sweep's
+            // reload (the user's Back to a POST entry) is that load's, and
+            // [SweptReload.refused] leaves it alone (R1-F1).
+            override fun onFormResubmission(view: WebView?, dontResend: Message?, resend: Message?) {
+                dontResend?.sendToTarget()
+                if (view is PageWebView) view.post { view.sweptReload.refused() }
+            }
+
             override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
+                // Ad blocking judges requests against it from here on
+                // (a page back from the back/forward cache made none).
+                url?.let(adblockPage::committed)
                 // The pending navigation committed; it's no download.
                 pendingNavigationUrls.clear()
+                navigationHadGesture = false
+                userNamedChain.ended()
+                documentStartedOnce = true
+                committedPageUrl = url
+                // The previous document, and its frames, are gone: what a
+                // sweep held for them is cleared once more, now that they
+                // can't write to it again, and the tab no longer counts
+                // as being on their origins — only on those requested
+                // since this document's answer, which may already include
+                // its frames (#125, [TabDocuments.committed]).
+                if (view is PageWebView) {
+                    view.sweptReload.committed()
+                    UnverifiedOrigins.release(view)
+                    view.documents.committed(
+                        url,
+                        url?.let(VirtualOrigin::parseHostOfUrl)?.let(VirtualOrigin::originFor),
+                    )
+                }
                 state.documentCommitted()
+                // A load the tab had in flight over the restored page
+                // before its WebView was rebuilt (#183 R1-F2) goes back
+                // in flight over it now, at its reload's commit —
+                // whatever URL that ended on (#185 R2-F2) — before the
+                // page can take input, so a navigation the user starts
+                // on it replaces that load as it would have before the
+                // relaunch, POST form included (#185 R3-F1). Posted, so
+                // this commit has updated the tab first, and only if
+                // nothing has superseded it by then (#185 R2-F1). Handed
+                // over without stopping the page, whose HTML and
+                // subresources are still coming in (#185 R4-F1).
+                state.afterPageCommitted()?.let { after ->
+                    view?.post {
+                        if (!state.claimAfterPage(after)) return@post
+                        state.addressBarText = after.address
+                        onSubmitUrl(state, after.address)
+                    }
+                }
                 // The main-frame document committed: its ENS pins are now
                 // the page on screen's, and subresources held waiting on
                 // the commit go ahead (#99, [EnsDocumentPins]).
@@ -1774,6 +2380,11 @@ private fun buildRefreshableWebView(
                 // is none of this one's business, not even by way of a
                 // probe of its that is still in flight (#56).
                 rootPanProbe.startDocument()
+                // …and with its own theme colour once it has painted; the
+                // outgoing page keeps its tint until then, as it keeps
+                // the screen (#92).
+                themeColor.startDocument()
+                blankPageReads.reset()
                 // …and at full height again: a reveal belongs to the
                 // document it was pushed on (#65).
                 cancelReveal()
@@ -1783,6 +2394,12 @@ private fun buildRefreshableWebView(
                 // is dropped.
                 bottomChrome.startDocument()
                 bottomUiChannels.startDocument()
+                // A main-frame document no detector runs in (not
+                // http(s)) sends no ready to reset the tab's audio frames
+                // on (#91), so they are forgotten here. An http(s) one's
+                // ready does it instead: its subframes can report before
+                // this callback arrives.
+                if (!isHttpUrl(url)) forgetTabAudio()
                 state.bottomChromeMode = BottomChromeMode.Overlay
                 // …and with no permission prompt from the outgoing
                 // document left standing: its requests are denied and
@@ -1797,11 +2414,20 @@ private fun buildRefreshableWebView(
                 // Home and error pages aren't sites: they get the default.
                 val zoomSite = zoomSiteKey(url)
                 state.zoomSite = zoomSite
+                // …with the user agent it was fetched with (#180). One
+                // that crossed the desktop/mobile line was corrected
+                // before its request went out, where it could be (see
+                // [PageWebView.redirectCrossesUserAgent] and
+                // [PageWebView.pageHopRequested]); one that couldn't be
+                // (a page's redirect or script navigation) keeps the one
+                // it started with, and isn't fetched again: the server
+                // has answered it, and a GET may be single-use (R5-F1).
+                (view as? PageWebView)?.documentStarted(url)
                 // Relative to the system font scale, which is what
                 // WebView's own default text zoom is.
                 view?.let {
                     it.settings.textZoom = PageZoomLevels.textZoom(
-                        pageZoom.levelFor(zoomSite),
+                        pageZoom.levelFor(zoomSite, state.private),
                         it.resources.configuration.fontScale,
                     )
                 }
@@ -1834,6 +2460,9 @@ private fun buildRefreshableWebView(
                     }
                     state.title = ""
                     state.progress = -1
+                    // No page colour behind Home (#92). A popup's own
+                    // blank page keeps the old one until it draws.
+                    if (!state.blankIsPage) state.themeColorArgb = null
                     lastLoadedDisplayUrl = null
                     visitGate.startNavigation()
                     // Home is a navigation like any other: a page that
@@ -1855,10 +2484,11 @@ private fun buildRefreshableWebView(
                 // have flushed it). Dropping it here is what keeps the
                 // park single-shot: it cannot survive its own navigation.
                 pendingVisit.clear()
-                // Entering a virtual origin: expire anything page JS
-                // managed to plant via document.cookie before this
-                // page gets a chance to read it.
-                if (VirtualOrigin.isVirtualUrl(url)) CookieHygiene.sweepAsync(url)
+                // Entering a virtual origin or an onchain app (#123):
+                // expire anything page JS managed to plant via
+                // document.cookie before this page gets a chance to
+                // read it.
+                if (CookieHygiene.coversNavigation(url)) CookieHygiene.sweepAsync(url)
                 val display = url?.let { displayFor(it, state) }
                 if (display != null) {
                     // For error pages, surface the URL the user was
@@ -1905,6 +2535,12 @@ private fun buildRefreshableWebView(
                     // The bottom-nav detector starts here, once (#66).
                     installBottomUiDetector()
                 }
+                // …and its `<head>` is in: the theme colour is readable
+                // (#92) — a popup's blank page's too, which is a page.
+                if (url != ABOUT_BLANK || state.blankIsPage) {
+                    themeColor.painted()
+                    readThemeColor(view)
+                }
                 if (url == ABOUT_BLANK) return
                 visitGate.commit()
                 // A finish that beat this paint left its visit parked;
@@ -1918,12 +2554,21 @@ private fun buildRefreshableWebView(
                 // case in #53) would find the slot untouched and record
                 // the same visit again.
                 val flushed = pendingVisit.flush(url)
-                if (flushed != null && visitGate.recordOnce(flushed.display)) {
+                // A private tab (#86) claims the slot and writes nothing.
+                if (flushed != null && visitGate.recordOnce(flushed.display) && !state.private) {
                     repo.recordVisit(flushed.display, flushed.title)
                 }
             }
 
             override fun onPageFinished(view: WebView?, url: String?) {
+                // Chromium's synthetic finish for a navigation that never
+                // committed (a 204, Stop, superseded): the page on screen
+                // stays, and ad blocking goes on judging against it.
+                if (!finishedLoadIsCurrent(url, view?.url)) adblockPage.kept(url)
+                // Loading stopped: the user's named load, if this is its
+                // end (a 204, a cancelled hop), has no more hops (R2-F1).
+                userNamedChain.loadFinished(url, committedPageUrl)
+                (view as? PageWebView)?.usersNavigation?.loadFinished(url, committedPageUrl)
                 // Re-probe: a page's own stylesheet (or its first
                 // script) can be what sets `touch-action: none`, and
                 // that is not necessarily in place at first paint (#56).
@@ -1961,6 +2606,14 @@ private fun buildRefreshableWebView(
                     state.progress = -1
                     // …and no site to zoom as (#88), for the same reason.
                     state.zoomSite = null
+                    // …and no page colour behind the status bar (#92) —
+                    // unless the blank document is a popup's page, whose
+                    // colour is its own.
+                    if (state.blankIsPage) {
+                        readThemeColor(view, onScreen = true)
+                    } else {
+                        state.themeColorArgb = null
+                    }
                     // …and drop the park for the same reason as the
                     // `onPageStarted` branch: home has the screen now, so
                     // a page that finished but had not painted by the
@@ -1984,8 +2637,7 @@ private fun buildRefreshableWebView(
                     // the tab loads behind the home overlay. A load the
                     // user had stopped only gets its address back, and
                     // the Stop latch so the bar offers Reload.
-                    state.afterBlank?.let {
-                        state.afterBlank = null
+                    state.takeAfterBlankEntry()?.let {
                         state.addressBarText = it.address
                         if (it.submit) onSubmitUrl(state, it.address) else state.stopProgress()
                     }
@@ -1993,8 +2645,9 @@ private fun buildRefreshableWebView(
                 }
                 // The first page to finish after a restore consumes the
                 // pending blank-entry address too, even though it isn't
-                // the blank entry: it can't apply to a later Home.
-                state.afterBlank = null
+                // the blank entry: it can't apply to a later Home. (One
+                // armed over the restored page went in at its commit.)
+                state.afterPageFinished()
                 // Dismiss the pull-to-refresh spinner once the page has
                 // finished loading (or errored out). Happens regardless
                 // of whether the load was user-initiated reload or not.
@@ -2020,15 +2673,36 @@ private fun buildRefreshableWebView(
                 // and the content on screen all disagreeing until the
                 // next navigation happened to fix them (#39).
                 val isCurrent = finishedLoadIsCurrent(url, view?.url)
+                // A load put back over this restored page that needs the
+                // other user agent goes in now that the page is complete,
+                // unless the user started one of their own on the page
+                // meanwhile, which dropped it (#180, [PutBackHold]).
+                // Posted, after this finish's bookkeeping.
+                val putBackGoesIn = isCurrent && view is PageWebView && view.putBackHold.pageFinished()
+                if (putBackGoesIn) {
+                    view.post { (view as PageWebView).putBackHold.release() }
+                }
                 if (isCurrent) {
-                    state.url = uiDisplay
                     lastLoadedDisplayUrl = display
                     state.title = sanitizeTitle(view?.title, url)
-                    state.addressBarText = uiDisplay
+                    // The bar keeps the address of the load going in now,
+                    // as for the deadline's release or any typed load,
+                    // not the page it's about to replace (R3-F1).
+                    if (finishShowsPageAddress(putBackGoesIn)) {
+                        state.url = uiDisplay
+                        state.addressBarText = uiDisplay
+                    }
+                    // A theme colour a script set after first paint (#92).
+                    // A current finish is the document on screen even if
+                    // it never reported a paint. Through the detector even
+                    // if it hasn't reported yet (a fast load finishes
+                    // first); one that never does gets the fallback read.
+                    readThemeColor(view, onScreen = true)
                 }
                 state.canGoBack = view?.canGoBack() == true
                 state.canGoForward = view?.canGoForward() == true
-                state.progress = -1
+                // Still busy with the put-back load going in (R2-F1).
+                state.progress = if (putBackGoesIn) PUT_BACK_HOLD_PROGRESS else -1
                 // Record the *displayed* URL (bzz://, ens://, https://) — not
                 // the gateway-rewritten one — so history reflects what the
                 // user actually visited. The local home page is hidden from
@@ -2066,7 +2740,9 @@ private fun buildRefreshableWebView(
                     isCurrent
                 ) {
                     if (visitGate.isCommitted) {
-                        if (visitGate.recordOnce(display)) repo.recordVisit(display, state.title)
+                        if (visitGate.recordOnce(display) && !state.private) {
+                            repo.recordVisit(display, state.title)
+                        }
                     } else if (url != null) {
                         pendingVisit.park(PendingVisit(url, display, state.title))
                     }
@@ -2091,10 +2767,30 @@ private fun buildRefreshableWebView(
             // before first paint; the detector isn't installed yet then,
             // and this doesn't install it (see [requestBottomUiProbe]).
             override fun doUpdateVisitedHistory(view: WebView?, url: String?, isReload: Boolean) {
+                committedPageUrl = url
+                // Posted after `onPageStarted` for a new document, alone
+                // for a same-document step: either way the user's
+                // navigation is over, and a same-document one (the
+                // chrome's Back to a `pushState` entry) must not be left
+                // for a later navigation of the page's own (#180, R2-F1).
+                // Only a step to the address it was awaited at: the page
+                // on screen's own `replaceState` while the user's
+                // navigation is in flight isn't its end (R3-F2).
+                (view as? PageWebView)?.usersNavigation?.sameDocumentStep(url)
                 // A same-document step keeps the page on screen as the
                 // load's document for the IPFS phase line (#94, R3-F2).
                 state.historyUpdated(isHome = url == ABOUT_BLANK)
+                // A same-document move (`pushState`) to a new path on a
+                // virtual origin or onchain app can bring cookies tossed
+                // at that path into view (R3-F1): sweep there too.
+                if (CookieHygiene.coversNavigation(url)) CookieHygiene.sweepAsync(url)
                 if (view == null || !bottomUiApplies(url)) return
+                // An SPA route can bring its own theme colour (#92). Only
+                // once the document has painted: before that, this is the
+                // cross-document commit, and first paint reads it anyway.
+                // A colour the route sets later (after a fetch) comes in
+                // through the detector's `<meta>` ping.
+                readThemeColor(view)
                 requestBottomUiProbe()
             }
 
@@ -2103,6 +2799,136 @@ private fun buildRefreshableWebView(
                 request: WebResourceRequest?,
             ): Boolean {
                 val target = request?.url?.toString() ?: return false
+                // "Continue once" on the not-cross-checked ENS warning
+                // (#96): never a load, only a message for the submit
+                // flow, which checks it is this tab's ([EnsGate]).
+                if (EnsGate.continueToken(target) != null) {
+                    if (request.isForMainFrame) {
+                        // A stale warning (Back, tab restore) re-runs its
+                        // navigation rather than doing nothing.
+                        EnsGate.continueDestination(target, state.ensGate, view?.url)
+                            ?.let { onSubmitUrl(state, it) }
+                    }
+                    return true
+                }
+                // A redirect of a load of the app's to a site across the
+                // desktop/mobile line (#180): cancelled before its target
+                // is requested, and the target loaded with its own user
+                // agent — never fetched twice (R5-F1). The page on screen
+                // stays until that load, as for a cancelled app-link hop
+                // (#94).
+                if (request.isForMainFrame && request.isRedirect && view is PageWebView &&
+                    !(isPopup && !documentStartedOnce) &&
+                    view.redirectCrossesUserAgent(target, named = userNamedChain.asker() != null)
+                ) {
+                    pendingNavigationUrls.clear()
+                    state.mainFrameKeptPage()
+                    return true
+                }
+                // A link to another app (#85): never a page load. Main
+                // frame + user gesture only, then per-site consent.
+                if (request.isForMainFrame && !request.isRedirect) {
+                    navigationHadGesture = request.hasGesture()
+                    // The page's own navigation, not the user's load.
+                    userNamedChain.ended()
+                    // A link the user tapped on a restored page is where
+                    // they're going now, not the load a restore had
+                    // waiting (#185 R2-F1). A script's redirect without a
+                    // tap is still the restored page's own load.
+                    if (request.hasGesture()) {
+                        state.restoreLoadSuperseded()
+                        (view as? PageWebView)?.putBackHold?.dropped()
+                    }
+                }
+                // A popup's very first navigation: an app link there is
+                // its opener's, and the popup was opened for it alone.
+                val popupFirstNavigation = isPopup && !documentStartedOnce && request.isForMainFrame
+                val opener = if (popupFirstNavigation) popupOpener() else null
+                val askingView = opener?.second as? PageWebView ?: view as? PageWebView
+                var gesture: Int? = null
+                // The hop whose answer this redirect is, when it is one of
+                // a load the user named (#173).
+                val userNamedAsker = if (request.isRedirect && request.isForMainFrame) {
+                    userNamedChain.asker()
+                } else {
+                    null
+                }
+                val verdict = externalLinkVerdict(
+                    url = target,
+                    isForMainFrame = request.isForMainFrame,
+                    hasGesture = request.hasGesture() ||
+                        (request.isRedirect && request.isForMainFrame && navigationHadGesture),
+                    userNamedRedirect = userNamedAsker != null,
+                    consumeGesture = {
+                        gesture = askingView?.userGestures?.consume()
+                        gesture != null
+                    },
+                )
+                if (verdict != ExternalLinkVerdict.NotExternal) {
+                    // Cancelled here, so it never reaches onPageStarted:
+                    // its gesture mustn't carry over to the next load.
+                    if (request.isForMainFrame) {
+                        navigationHadGesture = false
+                        userNamedChain.ended()
+                        (view as? PageWebView)?.usersNavigation?.ended()
+                    }
+                    // A redirect hop cancelled here ends a navigation whose
+                    // first hop was already answered as a new document
+                    // (#94): none commits, so the page on screen stays and
+                    // its open requests are this load's — as for a
+                    // navigation that became a download. Its URLs go too.
+                    // A first hop was never answered: whatever navigation
+                    // is pending keeps its own bookkeeping.
+                    if (externalLinkKeepsPage(request.isForMainFrame, request.isRedirect, popupFirstNavigation)) {
+                        pendingNavigationUrls.clear()
+                        state.mainFrameKeptPage()
+                        adblockPage.kept()
+                    }
+                    val input = gesture
+                    val latch = askingView?.userGestures
+                    // The tap has to have been the top document's, not an
+                    // iframe's that navigates the top frame (target=_top):
+                    // the offer waits for the top document to say so
+                    // ([UserGestureLatch]). The page it is asked for is
+                    // the one on screen now, whatever commits meanwhile.
+                    val pageUrl = askingView?.url
+                    val offerTab = opener?.first ?: state
+                    val offer = askingView?.let { page -> { offerExternalLink(page, pageUrl, offerTab, target) } }
+                    val waiting = verdict == ExternalLinkVerdict.Ask && input != null && latch != null &&
+                        offer != null && latch.whenInTopDocument(input, offer)
+                    if (verdict == ExternalLinkVerdict.AskUserNamed && askingView != null) {
+                        // The load ends here, in another app or nowhere:
+                        // the tab goes back to what it shows — the page
+                        // before, or Home when there was none — instead
+                        // of a blank page under the named address (#173).
+                        // Not by loading Home: a new document would
+                        // withdraw the prompt below.
+                        state.stopProgress()
+                        state.addressBarText = state.url
+                        state.canGoBack = askingView.canGoBack()
+                        // The user's own submit was the gesture. The site
+                        // asking is the hop that answered with the app
+                        // link — not the page on screen, which didn't ask,
+                        // nor the address typed, which may have been an
+                        // open redirect to it (#173, R1-F2).
+                        offerExternalLink(askingView, userNamedAsker, state, target)
+                    } else if (waiting) {
+                        askingView.postDelayed({
+                            if (latch.giveUp(input, offer)) {
+                                Log.i(LOG_TAG, "external link refused: ${externalUrlForLog(target)}")
+                            }
+                        }, UserGestureLatch.CONFIRM_MS)
+                    } else {
+                        Log.i(LOG_TAG, "external link refused: ${externalUrlForLog(target)}")
+                    }
+                    // Posted: the tab (and this WebView) mustn't be torn
+                    // down from inside its own callback. Closed whether
+                    // or not the opener is still there to ask for it (a
+                    // closed or evicted opener refuses the link): either
+                    // way the popup would stay an empty tab.
+                    if (popupFirstNavigation) view?.post { onCloseWindow() }
+                    return true
+                }
                 // Redirect hops of a main-frame navigation come through
                 // here — the download a navigation turns into has the
                 // final hop's URL.
@@ -2128,9 +2954,51 @@ private fun buildRefreshableWebView(
                     state.beginLoad(inWebView = true)
                 }
                 if (detoured) {
+                    // The WebView's own navigation stops here; the submit
+                    // starts another, with an answer of its own.
+                    if (request.isForMainFrame) adblockPage.kept()
+                    navigationHadGesture = false
+                    userNamedChain.ended()
                     onSubmitUrl(state, target)
                     return true
                 }
+                // A page's own navigation — a link, a script's
+                // `location` change, or a redirect of either — goes on
+                // with the user agent in place, even across "Desktop
+                // site" (#180): WebView can't swap it under a navigation
+                // it has started, and cancelling it to start it again as
+                // a load of ours would lose its initiator (Chromium would
+                // send `Sec-Fetch-Site: none`, a forged `Sec-Fetch-User`,
+                // no `Referer` and SameSite=Strict cookies — R1-F1) and
+                // turn a `location.replace()` into a new history entry
+                // (R1-F2). A tapped one's first request may be held back
+                // and re-issued by the page instead (see
+                // `shouldInterceptRequest`). A redirect hop is the
+                // navigation it continues: it keeps its start's say.
+                if (request.isForMainFrame && view is PageWebView) {
+                    if (request.isRedirect) {
+                        view.usersNavigation.redirected(target)
+                    } else {
+                        view.navigationIsUsers(request.hasGesture(), target)
+                    }
+                }
+                // The WebView follows it: a page a service worker answers
+                // commits with no answer the interceptor saw, and prunes
+                // the tab's origins from here instead (#125, R5-F1).
+                if (request.isForMainFrame && view is PageWebView) {
+                    view.documents.navigationStarted(target)
+                }
+                // A new top-level navigation supersedes whatever was
+                // pending, which may never report back (an ERR_ABORTED
+                // fetch sends nothing): drop it, or a service worker's
+                // page couldn't adopt its frames (#178 R6-F1).
+                if (request.isForMainFrame && !request.isRedirect) adblockPage.kept()
+                // A server redirect of a navigation already answered as a
+                // new document: that document is the redirect target's.
+                if (request.isForMainFrame && request.isRedirect) adblockPage.redirected(target)
+                // A hop of the user's named load the WebView now follows:
+                // its answer is the next one that may be an app link.
+                if (request.isForMainFrame && request.isRedirect) userNamedChain.redirected(target)
                 return false
             }
 
@@ -2139,8 +3007,28 @@ private fun buildRefreshableWebView(
                 request: WebResourceRequest?,
             ): WebResourceResponse? {
                 val mainFrame = request?.isForMainFrame == true
+                // A page's tapped navigation across the desktop/mobile
+                // line (#180): its first request is answered here with a
+                // `204`, so it never reaches the server with the other
+                // site's user agent, and the page re-issues it with the
+                // right one (see [PageWebView.pageHopRequested]).
+                var heldBack = false
                 if (mainFrame) {
-                    request!!.url?.toString()?.let(pendingNavigationUrls::add)
+                    request!!.url?.toString()?.let {
+                        pendingNavigationUrls.add(it)
+                        // Not a hop of the user's named load: the page's
+                        // own navigation (R1-F1). Nor of the user's
+                        // navigation, for the user agent (#180, R2-F1).
+                        userNamedChain.mainFrameRequested(it)
+                        (view as? PageWebView)?.usersNavigation?.mainFrameRequested(it)
+                        // A form the user submitted (a POST never reaches
+                        // shouldOverrideUrlLoading) supersedes a held
+                        // put-back as a tapped link does (R2-F2).
+                        if (request.hasGesture() && request.method.equals("POST", ignoreCase = true)) {
+                            (view as? PageWebView)?.let { v -> v.post { v.putBackHold.dropped() } }
+                        }
+                        heldBack = (view as? PageWebView)?.pageHopRequested(it, request.requestHeaders) == true
+                    }
                 }
                 // Tagged with the load it belongs to, and open until
                 // Chromium closes the body, so the IPFS phase line can
@@ -2156,9 +3044,37 @@ private fun buildRefreshableWebView(
                 } else {
                     state.documentGeneration
                 }
+                if (view is PageWebView && request != null &&
+                    isDocumentRequest(request.isForMainFrame, request.requestHeaders)
+                ) {
+                    request.url?.toString()?.let(VirtualOrigin::parseHostOfUrl)
+                        ?.let(VirtualOrigin::originFor)?.let(view.documents::requested)
+                }
+                // Ad and tracker blocking (#126): a subresource the
+                // enabled filter lists name, unless the page's site is
+                // allowlisted. Never a navigation, a local gateway or a
+                // virtual origin (see [Adblock.shouldBlock]).
+                if (!mainFrame && request != null) {
+                    val url = request.url?.toString()
+                    // A frame of the page on screen: its requests aren't
+                    // a pending destination's (see [AdblockPage]).
+                    if (url != null && isDocumentRequest(false, request.requestHeaders)) {
+                        adblockPage.frameRequested(url, refererOf(request.requestHeaders))
+                    }
+                    if (url != null &&
+                        Adblock.shouldBlock(
+                            url,
+                            request.requestHeaders,
+                            adblockPage.current(refererOf(request.requestHeaders)),
+                            state.private,
+                        )
+                    ) {
+                        return Adblock.blockedResponse()
+                    }
+                }
                 val work = state.gatewayWork.start(generation)
-                val response = try {
-                    interceptVirtualRequest(request, ensPins)
+                val response = if (heldBack) heldBackResponse() else try {
+                    interceptVirtualRequest(request, ensPins, view, state.onchain)
                 } catch (t: Throwable) {
                     state.gatewayWork.finish(work)
                     throw t
@@ -2171,7 +3087,16 @@ private fun buildRefreshableWebView(
                         request!!.url.toString(),
                         response?.let { nameResolutionErrorIn(it.responseHeaders) },
                     )
-                    state.mainFrameAnswered(generation, mainFrameAnswerReplacesDocument(response))
+                    val replaces = mainFrameAnswerReplacesDocument(response)
+                    state.mainFrameAnswered(generation, replaces)
+                    adblockPage.answered(
+                        request!!.url.toString(),
+                        replaces,
+                        fetchedByWebView = response == null,
+                    )
+                    if (replaces && view is PageWebView) {
+                        view.documents.mainFrameAnswered(request!!.url.toString())
+                    }
                 }
                 state.gatewayWork.answered(work)
                 return trackedUntilClosed(
@@ -2265,16 +3190,74 @@ private fun buildRefreshableWebView(
                 // carrying the percentage it died at, and no callback
                 // ever after it, so adopting it would leave the capsule
                 // lit and stuck on Stop for good (#41).
-                state.progress = progressForCallback(
+                val progress = progressForCallback(
                     newProgress = newProgress,
                     isHomeSentinel = view?.url == ABOUT_BLANK,
                     aborted = state.loadAborted,
                 )
+                // The restored page finishing under a held put-back
+                // leaves the tab busy with that load, not idle (R2-F1).
+                val holding = progress == -1 && !state.loadAborted && view?.url != ABOUT_BLANK &&
+                    (view as? PageWebView)?.putBackHold?.held == true
+                state.progress = if (holding) PUT_BACK_HOLD_PROGRESS else progress
             }
 
             override fun onReceivedTitle(view: WebView?, title: String?) {
                 state.title = sanitizeTitle(title, view?.url)
             }
+
+            // JavaScript dialogs from a private tab (#86) go in a secure
+            // window of our own ([showPrivateJsDialog]); a normal tab's
+            // keep WebView's default dialog (false).
+            override fun onJsAlert(view: WebView?, url: String?, message: String?, result: JsResult?): Boolean =
+                state.private && result != null &&
+                    showPrivateJsDialog(context, JsDialogKind.ALERT, url, message, null, result)
+
+            override fun onJsConfirm(view: WebView?, url: String?, message: String?, result: JsResult?): Boolean =
+                state.private && result != null &&
+                    showPrivateJsDialog(context, JsDialogKind.CONFIRM, url, message, null, result)
+
+            override fun onJsPrompt(
+                view: WebView?,
+                url: String?,
+                message: String?,
+                defaultValue: String?,
+                result: JsPromptResult?,
+            ): Boolean =
+                state.private && result != null &&
+                    showPrivateJsDialog(context, JsDialogKind.PROMPT, url, message, defaultValue, result)
+
+            // Ours in every tab, not only a private one: Stay ends the
+            // navigation that asked without a commit, and nothing else
+            // tells (#180, R2-F2 — see [PageWebView.navigationDidNotLeave]).
+            override fun onJsBeforeUnload(view: WebView?, url: String?, message: String?, result: JsResult?): Boolean =
+                result != null && if ((view as? PageWebView)?.takeReissueBeforeUnload() == true) {
+                    // The page's re-issue of a navigation the user
+                    // already left for (#180, R4-F3): not asked twice.
+                    result.confirm()
+                    true
+                } else {
+                    showPrivateJsDialog(
+                        context, JsDialogKind.BEFORE_UNLOAD, url, message, null, result,
+                        secure = state.private,
+                        onAnswered = { leave ->
+                            if (!leave) {
+                                // Over, as after Stop: nothing will call
+                                // back for it, so the chrome's Back (or
+                                // a submit) would stay busy for good.
+                                (view as? PageWebView)?.let {
+                                    it.onStopLoading?.invoke()
+                                    it.navigationDidNotLeave()
+                                }
+                                state.stopProgress()
+                                state.addressBarText = addressBarTextAfterStop(
+                                    committedUrl = state.url,
+                                    pending = state.addressBarText,
+                                )
+                            }
+                        },
+                    )
+                }
 
             // HTML5 fullscreen (`element.requestFullscreen()`, and the
             // native `<video>` fullscreen button). Without these two
@@ -2333,7 +3316,7 @@ private fun buildRefreshableWebView(
                 fileChooserParams: FileChooserParams?,
             ): Boolean {
                 if (filePathCallback == null || fileChooserParams == null) return false
-                return fileChooser?.show(filePathCallback, fileChooserParams) ?: false
+                return fileChooser?.show(state.id, filePathCallback, fileChooserParams) ?: false
             }
 
             // A new window the page asked for (`target=_blank`,
@@ -2385,6 +3368,9 @@ private fun buildRefreshableWebView(
                 // a "page load failed" icon persisted against the
                 // origin the user was actually trying to visit.
                 if (ErrorPage.isErrorPage(display)) return
+                // Nor anything from a private tab (#86): the favicon
+                // cache is a list of sites visited.
+                if (state.private) return
                 val bytes = encodePngBytes(icon) ?: return
                 repo.storeFavicon(display, bytes)
             }
@@ -2454,10 +3440,543 @@ private const val REVEAL_SETTLE_MS = 160L
 private const val REVEAL_HANDOVER_TIMEOUT_MS = 1_000L
 
 /**
+ * Chromium's accessibility node provider for the page, passed through
+ * untouched except that an `ACTION_CLICK` on any node (a TalkBack
+ * double-tap, a Switch Access select) arms [latch] first, as a tap on
+ * the screen would (#85).
+ */
+private class GestureArmingNodeProvider(
+    private val inner: AccessibilityNodeProvider,
+    private val latch: UserGestureLatch,
+) : AccessibilityNodeProvider() {
+    override fun performAction(virtualViewId: Int, action: Int, arguments: Bundle?): Boolean {
+        if (accessibilityActionArmsGestureLatch(action)) {
+            latch.onInputStart(untilConfirmed = true)
+            latch.onInput()
+        }
+        return inner.performAction(virtualViewId, action, arguments)
+    }
+
+    override fun createAccessibilityNodeInfo(virtualViewId: Int): AccessibilityNodeInfo? =
+        inner.createAccessibilityNodeInfo(virtualViewId)
+
+    override fun addExtraDataToAccessibilityNodeInfo(
+        virtualViewId: Int, info: AccessibilityNodeInfo, extraDataKey: String, arguments: Bundle?,
+    ) = inner.addExtraDataToAccessibilityNodeInfo(virtualViewId, info, extraDataKey, arguments)
+
+    override fun findAccessibilityNodeInfosByText(
+        text: String, virtualViewId: Int,
+    ): MutableList<AccessibilityNodeInfo>? = inner.findAccessibilityNodeInfosByText(text, virtualViewId)
+
+    override fun findFocus(focus: Int): AccessibilityNodeInfo? = inner.findFocus(focus)
+}
+
+/**
  * The tab's WebView. A subclass only for what `WebView` keeps
  * protected: Chromium's unconsumed overscroll, and the scroll range.
  */
 internal class PageWebView(context: Context) : WebView(context) {
+    /** [destroy] has been called: nothing may be asked of this WebView any more. */
+    var destroyed = false
+        private set
+
+    override fun destroy() {
+        destroyed = true
+        super.destroy()
+    }
+
+    /**
+     * Virtual origins this tab may have a live document on — the main
+     * frame's and its frames' (see [TabDocuments]). What
+     * [sweptDocuments] checks after an external IPFS gateway is
+     * switched away from (#125).
+     */
+    val documents = TabDocuments()
+
+    /**
+     * Whether a page at this URL is to be requested as a desktop site
+     * (#180, [DesktopSites]); set by the tab that owns this WebView.
+     */
+    var wantsDesktop: (url: String?) -> Boolean = { false }
+
+    // Built on first use, before anything has changed the user agent,
+    // so it captures the WebView's own. Lazy: the settings aren't
+    // there before WebView's constructor has run.
+    private val userAgentSwitch by lazy { UserAgentSwitch(this) }
+
+    /**
+     * Puts the user agent a navigation to [url] should be requested
+     * with in place (#180) — before it starts: WebView reads the user
+     * agent when the navigation's request goes out. True if it changed.
+     */
+    fun matchUserAgentTo(url: String?, historyStep: Boolean = false): Boolean {
+        // A `javascript:` URL runs in the page on screen: no request.
+        // The chrome's Back / Forward steps are ones, to the entry
+        // they step to.
+        when (url) {
+            HISTORY_BACK_JS -> return matchUserAgentTo(historyEntryUrl(-1) ?: return false, historyStep = true)
+            HISTORY_FORWARD_JS -> return matchUserAgentTo(historyEntryUrl(1) ?: return false, historyStep = true)
+        }
+        if (url != null && url.startsWith("javascript:", ignoreCase = true)) return false
+        // Every load of the app's comes through here. A history step to
+        // an entry at the address on screen steps an iframe (or reloads
+        // the same site, whose user agent is in place): no main-frame
+        // commit may end it, so it isn't followed at all — or a later
+        // `location.reload()` of the page's would take it (R3-F3).
+        if (url != null && !(historyStep && this.url?.let { sameRequestUrl(it, url) } == true)) {
+            usersNavigation.started(url)
+            usersNavigationIsApps = true
+        } else {
+            usersNavigation.ended()
+        }
+        // Only [loadUrl] / [postUrl] say it's a load that makes an entry.
+        usersNavigationIsLoad = false
+        redirectCorrection.navigationStarted(url)
+        pageNavigationStart.ended()
+        reissueSkipsBeforeUnload = false
+        val desktop = wantsDesktop(url)
+        if (desktop == userAgentSwitch.desktop) return false
+        // Chromium reloads the page on screen, with the new user agent,
+        // if the user agent changes while anything is loading — which
+        // would replace the navigation about to start with a reload of
+        // the page it leaves. Whatever is loading is superseded by that
+        // navigation anyway. Not [stopLoading]: this is no user's Stop.
+        // (The one load that mustn't stop the page on screen, one a
+        // restore put back over its still-loading page, doesn't get here
+        // until that page has finished, or its hold's deadline passed:
+        // see [PutBackHold].)
+        super.stopLoading()
+        return userAgentSwitch.set(desktop)
+    }
+
+    /**
+     * The navigation last started, while it is the user's — a load of
+     * the app's, or a page's own navigation started by a user gesture —
+     * followed hop by hop to the address it is awaited at (see
+     * [UserNamedChain]; the client feeds it the redirects, main-frame
+     * requests and load stops). A navigation nothing of ours sees start
+     * (the page's own `history.back()` or `location.reload()`) must never
+     * inherit it: so it also ends with anything that ends the navigation
+     * without a commit — Stop, a download, a `204`, a same-document step,
+     * a Stay on a `beforeunload` prompt, a request for any other address
+     * (R2-F1).
+     */
+    val usersNavigation = UserNamedChain()
+
+    // Whether [usersNavigation] was started by a load of the app's
+    // (true) or a page's own tapped navigation (false).
+    private var usersNavigationIsApps = false
+
+    // Whether it is a [loadUrl] / [postUrl] of the app's — a new entry,
+    // so a redirect of it across the line can become a load of the
+    // target ([redirectCrossesUserAgent]). A reload or a history step
+    // can't: a load would add an entry, and cut off Forward (#149).
+    private var usersNavigationIsLoad = false
+
+    /**
+     * The document on screen's channel for re-issuing its own navigation
+     * ([PageReissueChannel]); set by the tab. Null: never re-issued.
+     */
+    var pageReissue: PageReissueChannel? = null
+
+    private val redirectCorrection = RedirectCorrection()
+
+    /**
+     * A load a restore put back over its page, waiting for that page to
+     * finish before the user agent changes under it (#180, #185).
+     */
+    val putBackHold = PutBackHold()
+
+    /** Holds [load] in [putBackHold], until its page's finish or [PUT_BACK_HOLD_MS] (R2-F1). */
+    fun holdPutBack(load: () -> Unit) {
+        val generation = putBackHold.hold(load)
+        postDelayed({ putBackHold.deadline(generation) }, PUT_BACK_HOLD_MS)
+    }
+
+    /**
+     * A page's own tapped navigation, while it's the user's: where it
+     * started, and with what `Referer` (R4-F1/F2). The interceptor feeds
+     * it the main-frame requests.
+     */
+    val pageNavigationStart = PageNavigationStart()
+
+    // The page's re-issue of its own navigation is asked for: the
+    // `beforeunload` prompt it raises is one the user already answered
+    // Leave (or never got) for the navigation it repeats, so it isn't
+    // asked again (R4-F3). Until that navigation starts, or its deadline.
+    private var reissueSkipsBeforeUnload = false
+
+    /**
+     * Whether a `beforeunload` prompt is the page's re-issue of the
+     * navigation the user already left for ([pageHopRequested]):
+     * answered Leave without asking again. Once.
+     */
+    fun takeReissueBeforeUnload(): Boolean = reissueSkipsBeforeUnload.also { reissueSkipsBeforeUnload = false }
+
+    // The document on screen's address, as it committed: the origin a
+    // page's re-issue is checked against.
+    private var documentUrl: String? = null
+
+    // The user agent the document on screen was fetched with: what its
+    // later requests should keep going out with, if the navigation that
+    // switched it away never leaves it (R2-F2). Null before any commit.
+    private var documentDesktop: Boolean? = null
+
+    /** A page's own main-frame navigation to [url] started, with a user gesture or not. */
+    fun navigationIsUsers(gesture: Boolean, url: String) {
+        reissueSkipsBeforeUnload = false
+        val reissue = redirectCorrection.isReissue(url)
+        redirectCorrection.navigationStarted(url)
+        usersNavigationIsLoad = false
+        if (gesture) {
+            usersNavigation.started(url)
+            usersNavigationIsApps = false
+        } else {
+            usersNavigation.ended()
+        }
+        // The re-issue itself has the right user agent: nothing to hold.
+        if (gesture && !reissue) {
+            val crosses = webOrigin(url) != null && needsOtherUserAgentFor(url) &&
+                pageReissue?.ready(url) == true
+            pageNavigationStart.started(url, documentUrl, crosses)
+        } else {
+            pageNavigationStart.ended()
+        }
+    }
+
+    /**
+     * A main-frame redirect to [target] is about to be followed (#180).
+     * True if it is a hop of a load of the app's ([loadUrl], [postUrl])
+     * whose site wants the other user agent: the caller cancels it before
+     * [target] is requested, and [target] is loaded instead, with its own
+     * user agent — as a load the user named (#173) if [named]. Once per
+     * navigation ([RedirectCorrection]). What the redirect would have
+     * sent is what the load sends: `Sec-Fetch-Site: none` and no
+     * `Referer`, as for the load's own first hop.
+     *
+     * Before the request, never after (R5-F1): the hop that answered with
+     * the redirect was fetched once, with the right user agent, and
+     * [target] is fetched once, with its own. A page's own navigation
+     * isn't loaded again by us (R1-F1), nor are a reload's or a history
+     * step's redirects (a load would add an entry): they go on with the
+     * user agent in place.
+     */
+    fun redirectCrossesUserAgent(target: String, named: Boolean): Boolean {
+        if (!usersNavigationIsApps || !usersNavigationIsLoad || usersNavigation.asker() == null) return false
+        if (webOrigin(target) == null) return false
+        if (!redirectCorrection.crossing(target, ::needsOtherUserAgentFor)) return false
+        usersNavigation.ended()
+        // Posted: not from inside the WebView's own callback, and after
+        // the redirect's cancellation has ended the navigation — the
+        // user agent must not change while anything is loading.
+        mainHandler.post {
+            val url = redirectCorrection.issue() ?: return@post
+            if (named) loadUrlNamedByUser(url) else loadUrl(url)
+        }
+        return true
+    }
+
+    /**
+     * The WebView is about to request [url] for the main frame, with
+     * [headers] (the interceptor's thread). True if the request is to be
+     * held back — the caller answers it with a `204`, so it never leaves
+     * the device — and the page on screen asked to re-issue it with its
+     * own site's user agent: the first hop of the page's tapped
+     * navigation across the desktop/mobile line ([PageNavigationStart]).
+     * The server sees one request, with the right user agent (R5-F1).
+     */
+    fun pageHopRequested(url: String, headers: Map<String, String>?): Boolean {
+        if (!pageNavigationStart.requested(url, headers)) return false
+        if (!redirectCorrection.crossing(url) { true }) return false
+        mainHandler.post(::reissueFromPage)
+        return true
+    }
+
+    // The held-back hop, asked for again by the page on screen, through
+    // its detector ([PageReissueChannel]). If the page never starts it —
+    // it cancelled it, or never got the ask — the user agent goes back
+    // to the one the page was fetched with, and nothing stays armed for
+    // it (R5-F2).
+    private fun reissueFromPage() {
+        val url = redirectCorrection.issue() ?: return
+        val generation = redirectCorrection.generation
+        // The held-back navigation may still be winding down: nothing may
+        // load while the user agent changes (see [matchUserAgentTo]).
+        super.stopLoading()
+        usersNavigation.ended()
+        pageNavigationStart.ended()
+        userAgentSwitch.set(wantsDesktop(url))
+        // The page's `beforeunload` runs again for it; its prompt was
+        // answered for the tap.
+        reissueSkipsBeforeUnload = true
+        if (pageReissue?.send(url) != true) {
+            navigationDidNotLeave()
+            return
+        }
+        mainHandler.postDelayed({
+            if (redirectCorrection.neverStarted(generation)) navigationDidNotLeave()
+        }, PAGE_REISSUE_START_MS)
+    }
+
+    /**
+     * A document at [url] committed, with the user agent in place. It
+     * isn't fetched again if that was the other site's (R5-F1): the
+     * server already answered it, and a second GET could find its
+     * one-time token spent. The next load puts the right one back.
+     */
+    fun documentStarted(url: String?) {
+        // Another document took the tab: no held put-back goes in over it.
+        putBackHold.dropped()
+        documentDesktop = userAgentSwitch.desktop
+        documentUrl = url
+        redirectCorrection.ended()
+        pageNavigationStart.ended()
+        reissueSkipsBeforeUnload = false
+        usersNavigation.ended()
+        usersNavigationIsLoad = false
+    }
+
+    /**
+     * The navigation in flight ended without leaving the document on
+     * screen — the user's Stop, or Stay on its `beforeunload` prompt. A
+     * user agent switched for it goes back to the one the document was
+     * fetched with (R2-F2), with nothing loading: Chromium would reload
+     * the page on screen otherwise (see [matchUserAgentTo]).
+     */
+    fun navigationDidNotLeave() {
+        usersNavigation.ended()
+        redirectCorrection.ended()
+        pageNavigationStart.ended()
+        reissueSkipsBeforeUnload = false
+        val desktop = documentDesktop ?: return
+        if (desktop == userAgentSwitch.desktop) return
+        super.stopLoading()
+        userAgentSwitch.set(desktop)
+    }
+
+    /**
+     * Whether a page at [url] needs a different user agent than the one
+     * in place (#180). WebView can't change it under a navigation
+     * already started (see [matchUserAgentTo]).
+     */
+    fun needsOtherUserAgentFor(url: String): Boolean = wantsDesktop(url) != userAgentSwitch.desktop
+
+    /**
+     * Gets the tab off a document a sweep left stale — a reload, then a
+     * GET of the same address, then `about:blank`, until one commits
+     * (#125, R6-F1; see [SweptReload]).
+     */
+    val sweptReload: SweptReload = SweptReload(
+        navigate = { step ->
+            when (step) {
+                SweptReload.Step.RELOAD -> reload()
+                SweptReload.Step.GET -> loadUrl(sweptReload.address ?: ABOUT_BLANK)
+                SweptReload.Step.BLANK -> loadUrl(ABOUT_BLANK)
+            }
+        },
+        schedule = { delayMs, action -> mainHandler.postDelayed(action, delayMs) },
+    )
+
+    private val mainHandler = Handler(Looper.getMainLooper())
+
+    /**
+     * The user's taps, key presses and accessibility clicks on this
+     * page, each good for one
+     * link to another app (#85, see [UserGestureLatch]). Recorded before
+     * Chromium sees the event, so the click it turns into — and the
+     * navigation that starts — find it already there.
+     */
+    val userGestures = UserGestureLatch(SystemClock::uptimeMillis)
+
+    /** Only a tap counts: not the lift at the end of a scroll or fling. */
+    private val taps = TapTracker(ViewConfiguration.get(context).scaledTouchSlop.toFloat())
+
+    override fun dispatchTouchEvent(event: MotionEvent): Boolean {
+        when (event.actionMasked) {
+            MotionEvent.ACTION_DOWN -> {
+                userGestures.onInputStart(event.eventTime)
+                taps.onDown(event.x, event.y)
+            }
+            MotionEvent.ACTION_MOVE -> taps.onMove(event.x, event.y)
+            MotionEvent.ACTION_POINTER_DOWN, MotionEvent.ACTION_CANCEL -> taps.onCancel()
+            MotionEvent.ACTION_UP -> {
+                userGestures.onInputContinues(event.eventTime)
+                if (taps.onUp(event.x, event.y)) userGestures.onInput()
+            }
+        }
+        return super.dispatchTouchEvent(event)
+    }
+
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        if (keyArmsGestureLatch(
+                action = event.action,
+                repeatCount = event.repeatCount,
+                isSystem = event.isSystem,
+                isModifier = KeyEvent.isModifierKey(event.keyCode),
+            )
+        ) {
+            userGestures.onInputStart(event.eventTime)
+            userGestures.onInputContinues(SystemClock.uptimeMillis())
+            userGestures.onInput()
+        }
+        return super.dispatchKeyEvent(event)
+    }
+
+    // TalkBack / Switch Access clicks: on the WebView itself when it has
+    // no virtual tree, else on one of Chromium's virtual nodes, through
+    // its node provider. Either way, armed before Chromium clicks.
+    override fun performAccessibilityAction(action: Int, arguments: Bundle?): Boolean {
+        if (accessibilityActionArmsGestureLatch(action)) {
+            userGestures.onInputStart(untilConfirmed = true)
+            userGestures.onInput()
+        }
+        return super.performAccessibilityAction(action, arguments)
+    }
+
+    private var a11yProvider: Pair<AccessibilityNodeProvider, AccessibilityNodeProvider>? = null
+
+    override fun getAccessibilityNodeProvider(): AccessibilityNodeProvider? {
+        val inner = super.getAccessibilityNodeProvider() ?: return null
+        a11yProvider?.let { (wrapped, wrapper) -> if (wrapped === inner) return wrapper }
+        return GestureArmingNodeProvider(inner, userGestures).also { a11yProvider = inner to it }
+    }
+
+    /**
+     * A load this app starts on the WebView (not the page): a typed URL,
+     * a reload, back / forward, a retry. Its first hop never reaches
+     * `shouldOverrideUrlLoading`, so the client hears of it here (#85).
+     * `url`: the URL loaded (`loadUrl`, `postUrl`), or `null` for a
+     * reload, a history step or inline data. `userNamed`: the load is
+     * the one a user's submit scheduled ([loadUrlNamedByUser], #173).
+     */
+    var onBrowserInitiatedLoad: (url: String?, userNamed: Boolean) -> Unit = { _, _ -> }
+
+    /** `stopLoading()`: the navigation in flight ends without a commit. */
+    // Nullable: read by an override WebView could call before this
+    // class's initializers have run.
+    var onStopLoading: (() -> Unit)? = null
+
+    // Set only for the duration of [loadUrlNamedByUser]'s own load.
+    private var loadingNamedByUser = false
+
+    private fun browserInitiatedLoad(url: String? = null) {
+        // This load, not a held put-back, is what the tab is on now.
+        // Null only while WebView's own constructor runs.
+        @Suppress("SENSELESS_COMPARISON")
+        if (putBackHold != null) putBackHold.dropped()
+        // Any load but a sweep's own step supersedes its reload: a later
+        // resubmission prompt is that load's, not the sweep's (R1-F1).
+        sweptReload.navigationStarted()
+        onBrowserInitiatedLoad(url, url != null && loadingNamedByUser)
+    }
+
+    /**
+     * Loads [url] as the address the user named (#173): the one load a
+     * user's submit scheduled, never any other `loadUrl` (a blank first
+     * paint, a retry, an error page) that happens to come first.
+     */
+    fun loadUrlNamedByUser(url: String) {
+        loadingNamedByUser = true
+        try {
+            loadUrl(url)
+        } finally {
+            loadingNamedByUser = false
+        }
+    }
+
+    override fun stopLoading() {
+        onStopLoading?.invoke()
+        super.stopLoading()
+        // Null only while WebView's own constructor runs.
+        @Suppress("SENSELESS_COMPARISON")
+        if (putBackHold != null) putBackHold.dropped()
+        @Suppress("SENSELESS_COMPARISON")
+        if (usersNavigation != null) navigationDidNotLeave()
+    }
+
+    // Navigations the app starts, noted before Chromium has them (see
+    // [TabDocuments.navigationStarted]); the page's own go through
+    // `shouldOverrideUrlLoading`.
+    override fun loadUrl(url: String) {
+        matchUserAgentTo(url)
+        // A `javascript:` URL runs in the page: no load, no entry.
+        if (!url.startsWith("javascript:", ignoreCase = true)) usersNavigationIsLoad = true
+        documents.navigationStarted(url)
+        browserInitiatedLoad(url)
+        super.loadUrl(url)
+    }
+
+    override fun loadUrl(url: String, additionalHttpHeaders: MutableMap<String, String>) {
+        matchUserAgentTo(url)
+        // A `javascript:` URL runs in the page: no load, no entry.
+        if (!url.startsWith("javascript:", ignoreCase = true)) usersNavigationIsLoad = true
+        documents.navigationStarted(url)
+        browserInitiatedLoad(url)
+        super.loadUrl(url, additionalHttpHeaders)
+    }
+
+    override fun postUrl(url: String, postData: ByteArray) {
+        matchUserAgentTo(url)
+        // A `javascript:` URL runs in the page: no load, no entry.
+        if (!url.startsWith("javascript:", ignoreCase = true)) usersNavigationIsLoad = true
+        documents.navigationStarted(url)
+        browserInitiatedLoad(url)
+        super.postUrl(url, postData)
+    }
+
+    override fun loadData(data: String, mimeType: String?, encoding: String?) {
+        browserInitiatedLoad()
+        super.loadData(data, mimeType, encoding)
+    }
+
+    override fun loadDataWithBaseURL(
+        baseUrl: String?, data: String, mimeType: String?, encoding: String?, historyUrl: String?,
+    ) {
+        browserInitiatedLoad()
+        super.loadDataWithBaseURL(baseUrl, data, mimeType, encoding, historyUrl)
+    }
+
+    override fun reload() {
+        matchUserAgentTo(url)
+        url?.let(documents::navigationStarted)
+        browserInitiatedLoad()
+        super.reload()
+    }
+
+    override fun goBack() {
+        historyStepStarting(-1)
+        browserInitiatedLoad()
+        super.goBack()
+    }
+
+    override fun goForward() {
+        historyStepStarting(1)
+        browserInitiatedLoad()
+        super.goForward()
+    }
+
+    override fun goBackOrForward(steps: Int) {
+        historyStepStarting(steps)
+        browserInitiatedLoad()
+        super.goBackOrForward(steps)
+    }
+
+    private fun historyStepStarting(steps: Int) {
+        val url = historyEntryUrl(steps) ?: return
+        // The entry is fetched again with whatever user agent is in
+        // place: the one its site asks for now (#180).
+        matchUserAgentTo(url, historyStep = true)
+        documents.navigationStarted(url)
+    }
+
+    /** The URL of the history entry [steps] away from the current one, if there is one. */
+    private fun historyEntryUrl(steps: Int): String? {
+        val history = copyBackForwardList()
+        val index = history.currentIndex + steps
+        if (index !in 0 until history.size) return null
+        return history.getItemAtIndex(index)?.url
+    }
+
     /** "Search" on the text-selection toolbar, with the selected text (#84). */
     var onSearchSelection: ((String) -> Unit)? = null
 
@@ -2483,6 +4002,31 @@ internal class PageWebView(context: Context) : WebView(context) {
     /** Chromium overscrolled past the top edge (see [overscrollPastTop]). */
     var onTopOverscroll: () -> Unit = {}
 
+    /**
+     * Something a media query can ask about changed while this WebView
+     * was attached: the configuration (light/dark, orientation, screen
+     * size, density, …) or the view's own size. The manifest keeps all
+     * of those in `configChanges`, so no Activity restart (and no
+     * reload) follows one, and this is the only word of it the page's
+     * owner gets. May fire more than once for one change.
+     */
+    var onMediaEnvironmentChanged: () -> Unit = {}
+    private var lastConfiguration = android.content.res.Configuration(context.resources.configuration)
+
+    override fun onConfigurationChanged(newConfig: android.content.res.Configuration?) {
+        super.onConfigurationChanged(newConfig)
+        newConfig ?: return
+        val changed = lastConfiguration.diff(newConfig)
+        lastConfiguration = android.content.res.Configuration(newConfig)
+        if (changed != 0) onMediaEnvironmentChanged()
+    }
+
+    override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
+        super.onSizeChanged(w, h, oldw, oldh)
+        // The first layout is no change: the first paint reads anyway.
+        if (oldw != 0 && oldh != 0) onMediaEnvironmentChanged()
+    }
+
     // The vertical delta of the overScrollBy call in progress (0 outside
     // one): onOverScrolled only says a clamp happened, not which edge.
     private var overScrollDeltaY = 0
@@ -2494,6 +4038,14 @@ internal class PageWebView(context: Context) : WebView(context) {
 
     /** Called at the start of each draw of this view, before Chromium's frame is recorded. */
     var onBeforeDraw: (() -> Unit)? = null
+
+    /** Called after each draw of this view: Chromium has a new frame for it. */
+    var onDrawn: () -> Unit = {}
+
+    override fun onDraw(canvas: Canvas) {
+        super.onDraw(canvas)
+        onDrawn()
+    }
 
     override fun computeScroll() {
         super.computeScroll()
@@ -2636,6 +4188,17 @@ private class SearchSelectionCallback(
         return true
     }
 }
+
+/**
+ * The host has destroyed this WebView ([PageWebView.destroy]); a
+ * callback it posted earlier can still run after that.
+ */
+internal val WebView.isDestroyed: Boolean
+    get() = (this as? PageWebView)?.destroyed == true
+
+/** [WebView.saveState] into a fresh bundle, or null if the WebView won't give one. */
+private fun saveWebViewState(wv: WebView): Bundle? =
+    Bundle().takeIf { runCatching { wv.saveState(it) }.getOrNull() != null }
 
 /**
  * When [SearchSelectionCallback] asks the page for its selection: the
@@ -2824,7 +4387,9 @@ internal fun submitDetourForNavigation(url: String, isForMainFrame: Boolean): Bo
     if (!isForMainFrame) return false
     val schemeEnd = url.indexOf("://")
     if (schemeEnd <= 0) return false
-    return url.substring(0, schemeEnd).lowercase() in CONTENT_SCHEMES
+    val scheme = url.substring(0, schemeEnd).lowercase()
+    // A `web3://` app (#123) is read, and gated, by the submit flow too.
+    return scheme in CONTENT_SCHEMES || scheme == OnchainAppRef.SCHEME
 }
 
 /**
@@ -2925,15 +4490,32 @@ private fun syntheticResponse(
  * Handing WebView an answer that renders in place only marks the page
  * delivered, so the subresources that race `onPageStarted` wait for it
  * rather than guess which page they belong to.
+ *
+ * [tab] is the requesting tab's WebView (null for a service worker): a
+ * cleanup page another tab's hold asks for is served to it only once
+ * ([UnverifiedOrigins.takeClearFor]).
+ *
+ * [onchain] is the requesting tab's onchain-app documents (#123, see
+ * [interceptOnchainAppRequest]); null for a service worker or a native
+ * re-fetch, which are refused on an app's origin anyway.
  */
 internal fun interceptVirtualRequest(
     request: WebResourceRequest?,
     ensPins: EnsDocumentPins? = null,
+    tab: Any? = null,
+    onchain: OnchainAppTab? = null,
 ): WebResourceResponse? {
     val req = request ?: return null
     val url = req.url?.toString() ?: return null
     val incoming = if (req.isForMainFrame) ensPins?.beginNavigation(url) else null
-    val response = interceptVirtualRequestFor(req, ensPins, incoming)
+    // A contract-hosted app's origin (#123) is answered by its own rules.
+    // Then an origin an unverified external IPFS gateway served before
+    // the user switched away from it (#125): its next document first
+    // clears what that gateway's pages left there, before anything else
+    // runs.
+    val response = interceptOnchainAppRequest(req, url, onchain)
+        ?: siteDataCleanupFor(req, url, tab)
+        ?: interceptVirtualRequestFor(req, ensPins, incoming)
     if (incoming != null && response != null &&
         rendersInPlace(response.statusCode, response.mimeType, response.responseHeaders)
     ) {
@@ -2988,6 +4570,59 @@ private val DOWNLOADED_TEXT_TYPES = setOf(
     "text/vnd.sun.j2me.app-descriptor",
 )
 
+/**
+ * The document that clears a swept origin's site data
+ * ([UnverifiedOrigins.takeClearFor]) — once, in place of the first
+ * document requested there after the switch — or `null`. It runs on
+ * the origin itself, which is the only way to reach its localStorage,
+ * sessionStorage, Cache Storage and service workers: neither
+ * `WebStorage.deleteOrigin` nor a `Clear-Site-Data` header on an
+ * intercepted response touches those. Then it reloads the URL in
+ * place, which is served normally.
+ */
+private fun siteDataCleanupFor(req: WebResourceRequest, url: String, tab: Any?): WebResourceResponse? {
+    if (!isDocumentRequest(req.isForMainFrame, req.requestHeaders)) return null
+    val origin = VirtualOrigin.parseHostOfUrl(url)?.let(VirtualOrigin::originFor) ?: return null
+    // At a cold start the origins left to clear are loaded, and swept,
+    // just before the endpoint settings land: a restored tab's first
+    // document must not get ahead of that.
+    Gateways.awaitExternalEndpointsBlocking()
+    if (!UnverifiedOrigins.takeClearFor(origin, tab)) return null
+    return WebResourceResponse(
+        "text/html", "utf-8", 200, "OK",
+        // `Vary: *`: a service worker's Cache Storage won't keep it.
+        mapOf("Cache-Control" to "no-store", "Vary" to "*"),
+        ByteArrayInputStream(SITE_DATA_CLEANUP_HTML.toByteArray(Charsets.UTF_8)),
+    )
+}
+
+internal const val SITE_DATA_CLEANUP_HTML = """<!doctype html><meta charset="utf-8"><script>
+(async () => {
+  const quietly = async (f) => { try { await f(); } catch (e) {} };
+  await quietly(() => localStorage.clear());
+  await quietly(() => sessionStorage.clear());
+  await quietly(async () => {
+    for (const db of await indexedDB.databases()) {
+      await new Promise((done) => {
+        const r = indexedDB.deleteDatabase(db.name);
+        r.onsuccess = r.onerror = r.onblocked = done;
+      });
+    }
+  });
+  await quietly(async () => { for (const k of await caches.keys()) await caches.delete(k); });
+  await quietly(async () => {
+    for (const r of await navigator.serviceWorker.getRegistrations()) await r.unregister();
+  });
+  await quietly(() => {
+    for (const c of document.cookie.split(';')) {
+      const name = c.split('=')[0].trim();
+      if (name) document.cookie = name + '=; Max-Age=0; path=/';
+    }
+  });
+  location.replace(location.href);
+})();
+</script>"""
+
 private fun interceptVirtualRequestFor(
     req: WebResourceRequest,
     ensPins: EnsDocumentPins?,
@@ -3004,8 +4639,9 @@ private fun interceptVirtualRequestFor(
     // node's own CORS configuration. The node must still stamp
     // `Access-Control-Allow-Origin` on the actual response (see
     // docs/virtual-origins-hardening.md for the ant/freedom-ipfs
-    // config status).
-    if (req.method == "OPTIONS" && isLocalGatewayUrl(url)) {
+    // config status). Only the embedded nodes: an external endpoint
+    // (#125) keeps its own CORS policy, so its preflights go through.
+    if (req.method == "OPTIONS" && Gateways.isEmbeddedGateway(url)) {
         return corsPreflightResponse(req)
     }
 
@@ -3035,7 +4671,7 @@ private fun interceptVirtualRequestFor(
         return syntheticResponse(
             405, "Method Not Allowed",
             "Virtual dweb origins are read-only (GET/HEAD). " +
-                "Send writes to the node API at ${Gateways.SWARM_BASE}.",
+                "Send writes to the node API at ${Gateways.swarmBase}.",
         )
     }
 
@@ -3055,31 +4691,131 @@ private fun interceptVirtualRequestFor(
         isDocumentRequest(req.isForMainFrame, req.requestHeaders) &&
         (req.isForMainFrame || page?.uriFor(root.name) == null)
     ) {
-        Gateways.reverifyEnsDocument(root.name, ensPins, page)?.let { code ->
+        var web: EnsResult.Ok? = null
+        Gateways.reverifyEnsDocument(root.name, ensPins, page, onWebRecord = { web = it })?.let { code ->
+            web?.let { return nameWebRecordNavigation(it, pathAndQuery) }
             return nameResolutionRefusal(root.name, code)
         }
     }
 
-    val target = Gateways.gatewayUrlFor(root, pathAndQuery, page = page)
-        ?: return syntheticResponse(
-            502, "Bad Gateway",
-            "No local gateway can serve this content root " +
-                "(node not running, or name resolution failed).",
-        )
+    // At a cold start the external endpoint settings (#125) are still
+    // being read: a restored tab must not reach the embedded gateway
+    // meanwhile. Immediate once they're known.
+    Gateways.awaitExternalEndpointsBlocking()
+    // Resolved again if the IPFS gateway is switched while this request
+    // is under way (see [UnverifiedOrigins.record]); a switch is a
+    // deliberate settings change, so more than one retry is a bound,
+    // not a path.
+    repeat(GATEWAY_SWITCH_RETRIES) {
+        val target = Gateways.gatewayUrlFor(root, pathAndQuery, page = page)
+            ?: return syntheticResponse(
+                502, "Bad Gateway",
+                "No local gateway can serve this content root " +
+                    "(node not running, or name resolution failed).",
+            )
 
-    val response = if (isMediaLikeUrl(target)) {
-        fetchMediaWithRangeSupport(req, target)
-    } else {
-        fetchWithRetry(req, target, url)
+        // An unverified external IPFS gateway (#125) shares the root's
+        // virtual origin with the verified embedded node: note the origin
+        // so its storage is wiped once this gateway is no longer in use,
+        // and don't let the gateway install a service worker there — one
+        // would keep answering the origin from its own code after the
+        // switch.
+        val external = Gateways.externalIpfsGatewayOf(target)
+        var token: Long? = null
+        if (external != null) {
+            val origin = VirtualOrigin.originFor(root)
+            if (origin != null) {
+                // Swept away from since `target` was resolved: resolve again.
+                token = UnverifiedOrigins.record(external, origin) ?: return@repeat
+            }
+            if (isServiceWorkerScript(req.requestHeaders)) {
+                return syntheticResponse(
+                    403, "Forbidden",
+                    "Service workers aren't installed from an external IPFS gateway: " +
+                        "its content isn't verified against the CID.",
+                )
+            }
+        }
+
+        val response = if (isMediaLikeUrl(target)) {
+            fetchMediaWithRangeSupport(req, target)
+        } else {
+            fetchWithRetry(req, target, url)
+        }
+        // Fetched from a gateway a sweep switched away from meanwhile:
+        // the origin was already wiped, so this must not land there.
+        if (token != null && !UnverifiedOrigins.isCurrent(token)) {
+            runCatching { response?.data?.close() }
+            return@repeat
+        }
+        if (external != null && response != null) withoutCacheStorage(response)
+        // A null here means the gateway socket itself is gone (connection
+        // refused / node stopped). Synthesize instead of returning null —
+        // null would send Chromium to DNS for a hostname that doesn't
+        // exist, which surfaces as a slow, confusing resolver error.
+        return response ?: syntheticResponse(
+            502, "Bad Gateway",
+            "The local gateway did not answer (is the node running?).",
+        )
     }
-    // A null here means the gateway socket itself is gone (connection
-    // refused / node stopped). Synthesize instead of returning null —
-    // null would send Chromium to DNS for a hostname that doesn't
-    // exist, which surfaces as a slow, confusing resolver error.
-    return response ?: syntheticResponse(
-        502, "Bad Gateway",
-        "The local gateway did not answer (is the node running?).",
+    return syntheticResponse(
+        503, "Service Unavailable",
+        "The IPFS gateway was switched while this request was under way.",
     )
+}
+
+private const val GATEWAY_SWITCH_RETRIES = 3
+
+/**
+ * Mark an external IPFS gateway's response (#125) `Vary: *`, which
+ * Cache Storage refuses to store (`cache.put`/`add` reject it). A
+ * service worker registered while on the embedded node could otherwise
+ * keep the unverified gateway's responses and serve them on the origin
+ * after the switch, from a cache the interceptor never sees. WebView
+ * doesn't HTTP-cache intercepted responses, so nothing else changes.
+ */
+private fun withoutCacheStorage(response: WebResourceResponse) {
+    response.responseHeaders = varyAll(response.responseHeaders)
+}
+
+/** [headers] with any `Vary` replaced by `Vary: *` (see [withoutCacheStorage]). */
+internal fun varyAll(headers: Map<String, String>?): Map<String, String> =
+    headers.orEmpty().filterKeys { !it.equals("Vary", ignoreCase = true) } + ("Vary" to "*")
+
+/**
+ * The [swept] origins [webView] may have a document on: its main
+ * frame's (a page a service worker answered never reaches the
+ * interceptor, so the committed URL is checked too), its frames', and
+ * those of [anyTab] — frame documents a service worker fetched, by the
+ * tick of the fetch, which can't be traced to a tab
+ * ([UnverifiedOrigins.noteWorkerDocument]) — fetched since the tab's
+ * document on screen was answered.
+ */
+internal fun sweptDocuments(
+    webView: WebView,
+    swept: Set<String>,
+    anyTab: Map<String, Long> = emptyMap(),
+): Set<String> {
+    val documents = (webView as? PageWebView)?.documents
+    return sweptOrigins(
+        swept = swept,
+        documentOrigins = documents?.origins().orEmpty(),
+        committedUrl = webView.url,
+        anyTab = anyTab.filterValues { documents?.mayHoldWorkerFetchAt(it) ?: true }.keys,
+    )
+}
+
+/** [sweptDocuments] without the WebView. */
+internal fun sweptOrigins(
+    swept: Set<String>,
+    documentOrigins: Set<String>,
+    committedUrl: String?,
+    anyTab: Set<String> = emptySet(),
+): Set<String> {
+    val onScreen = documentOrigins + anyTab + listOfNotNull(
+        committedUrl?.let(VirtualOrigin::parseHostOfUrl)?.let(VirtualOrigin::originFor),
+    )
+    return onScreen.intersect(swept)
 }
 
 // In-process LRU of fully-buffered media bodies keyed by bzz URL, so
@@ -3449,7 +5185,7 @@ private fun protocolForErrorPage(failedUrl: String): String {
         is ContentRoot.Ens -> return "ens"
         null -> {}
     }
-    if (failedUrl.startsWith("${Gateways.SWARM_BASE}/")) return "swarm"
+    if (failedUrl.startsWith("${Gateways.swarmBase}/")) return "swarm"
     val ipfsBase = Gateways.ipfsBase
     if (ipfsBase.isNotEmpty() && failedUrl.startsWith("$ipfsBase/")) {
         return if (failedUrl.startsWith("$ipfsBase/ipns/")) "ipns" else "ipfs"
@@ -3560,6 +5296,16 @@ internal fun mainFrameNoteApplies(requestGeneration: Int, currentGeneration: Int
     requestGeneration == currentGeneration
 
 /**
+ * The answer to a main-frame request held back for the page to re-issue
+ * with the other user agent (#180, [PageWebView.pageHopRequested]): a
+ * `204`, which ends the navigation and leaves the page on screen.
+ */
+internal fun heldBackResponse(): WebResourceResponse =
+    WebResourceResponse(
+        "text/plain", "utf-8", 204, "No Content", emptyMap(), java.io.ByteArrayInputStream(ByteArray(0)),
+    )
+
+/**
  * Whether Chromium turns the main-frame answer [response] into a new
  * document. A 204 / 205, an attachment, or an opaque binary body ends
  * the navigation instead, leaving the page on screen: a 204 / 205 is
@@ -3571,7 +5317,7 @@ internal fun mainFrameNoteApplies(requestGeneration: Int, currentGeneration: Int
  * A best guess from the headers only: Chromium also downloads any other
  * type it can't render (an inline `application/zip`, say), which this
  * counts as replacing. The download listener corrects that once the
- * answer reaches it ([BrowserState.mainFrameBecameDownload]).
+ * answer reaches it ([BrowserState.mainFrameKeptPage]).
  */
 internal fun mainFrameAnswerReplacesDocument(response: WebResourceResponse?): Boolean =
     response == null || mainFrameAnswerReplacesDocument(

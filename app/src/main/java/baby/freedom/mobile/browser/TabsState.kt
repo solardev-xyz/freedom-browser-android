@@ -137,6 +137,31 @@ class TabsState(
     var printPage: ((BrowserState) -> Unit)? = null
 
     /**
+     * Hook installed by the [BrowserWebViewHost]: drop the in-memory
+     * resource cache of the renderer behind the given tab's WebView
+     * (`WebView.clearCache(false)`; the disk cache stays). The page
+     * menu's ad-blocking switch calls it before the reload that turns
+     * blocking back on for a site: Blink reuses an image it already
+     * holds in memory without a request, so `shouldInterceptRequest`
+     * never sees it and an ad fetched while the site was allowed would
+     * otherwise stay on the page. `null` before the host has composed,
+     * or after it disposes.
+     */
+    @Volatile
+    var dropMemoryCache: ((BrowserState) -> Unit)? = null
+
+    /**
+     * Hook installed by the [BrowserWebViewHost]: mute or unmute the
+     * given tab's WebView (#91, `WebViewCompat.setAudioMuted`) — only the
+     * host knows which WebView backs a tab. `null` before the host has
+     * composed, after it disposes, and when the device's WebView doesn't
+     * support muting (then the tab switcher shows the audio indicator
+     * without a mute toggle). Snapshot state, so the switcher picks up
+     * the hook's arrival.
+     */
+    var setAudioMuted: ((BrowserState, Boolean) -> Unit)? by mutableStateOf(null)
+
+    /**
      * Hook installed by [BrowserScreen] so the WebView layer can bounce
      * `bzz://` / `ens://` navigations (in-page link clicks, error-page
      * "Try Again" button) back through the screen's probe-gated submit
@@ -165,11 +190,12 @@ class TabsState(
      * Hook installed by [BrowserScreen]: open a URL in a new tab through
      * the screen's submit flow — in the background (with a snackbar to
      * switch to it) or in front. Used by the page context menu and the
-     * text-selection "Search" (#84). `null` before the screen has
-     * composed.
+     * text-selection "Search" (#84). With `private` (asked from a
+     * private tab) the new tab is private too (#86). `null` before the
+     * screen has composed.
      */
     @Volatile
-    var requestOpenInNewTab: ((url: String, background: Boolean) -> Unit)? = null
+    var requestOpenInNewTab: ((url: String, background: Boolean, private: Boolean) -> Unit)? = null
 
     /**
      * Hook installed by [BrowserScreen]: search [query] with the engine
@@ -179,7 +205,7 @@ class TabsState(
      * screen has composed.
      */
     @Volatile
-    var requestSearchInNewTab: ((query: String) -> Unit)? = null
+    var requestSearchInNewTab: ((query: String, private: Boolean) -> Unit)? = null
 
     /**
      * The link / image menu currently raised over a page, set by
@@ -253,10 +279,11 @@ class TabsState(
      * blank and the caller is expected to load the homepage once the node
      * is running; otherwise [url] is submitted immediately (typical
      * "open link in new tab" flow). With [activate] false the tab opens
-     * behind the current one, which stays on screen.
+     * behind the current one, which stays on screen. With [private] it
+     * is a private tab (#86, see [BrowserState.private]).
      */
-    fun newTab(url: String? = null, activate: Boolean = true): BrowserState {
-        val tab = newBlankTab()
+    fun newTab(url: String? = null, activate: Boolean = true, private: Boolean = false): BrowserState {
+        val tab = newBlankTab(private)
         tabs.add(tab)
         if (activate) activeIndex = tabs.lastIndex
         if (url != null) tab.loadUrl(url)
@@ -271,9 +298,13 @@ class TabsState(
      * popup's URL into it itself: nothing is scheduled here, and the
      * `window.opener` link to the page that asked stays intact (OAuth-
      * style popups post their result back through it).
+     *
+     * A private tab's popup is private too: Chromium hands the popup
+     * the opener's session, and its WebView has to be on the same
+     * profile for that.
      */
     fun adoptPopup(opener: BrowserState): BrowserState {
-        val tab = newBlankTab()
+        val tab = newBlankTab(opener.private)
         tab.openerId = opener.id
         // Its blank document is the page's until something commits: not
         // the home overlay (see [BrowserState.blankIsPage]).
@@ -329,24 +360,32 @@ class TabsState(
     /**
      * Close the tab at [index]. With [remember] (the user closing it)
      * the tab goes onto the reopen stack ([reopenClosedTab]); a window
-     * the page closed itself ([closePopup]) doesn't.
+     * the page closed itself ([closePopup]) doesn't, and neither does a
+     * private tab: closing it is the end of it (#86).
      */
     fun closeTab(index: Int, remember: Boolean = true) {
         if (index !in tabs.indices) return
         // Let the WebView wind its fullscreen session down before the
         // host destroys it (see [BrowserWebViewHost]).
         if (fullscreen?.tabId == tabs[index].id) exitFullscreen()
+        val closingActive = index == activeIndex
         // The list is never empty: the last tab is replaced by a blank one.
         val placeholder = if (tabs.size == 1) newBlankTab() else null
-        if (remember) rememberClosed(index, placeholder?.id)
+        if (remember && !tabs[index].private) rememberClosed(index, placeholder?.id)
         tabs.removeAt(index)
         if (placeholder != null) {
             tabs.add(placeholder)
             activeIndex = 0
             return
         }
-        activeIndex = (if (index >= tabs.size) tabs.lastIndex else index)
-            .coerceIn(0, tabs.lastIndex)
+        // Closing the active tab moves to the one that slid into its
+        // place (or the new last one); closing any other keeps the
+        // active tab, which only shifts left if it came after.
+        activeIndex = when {
+            closingActive -> if (index >= tabs.size) tabs.lastIndex else index
+            index < activeIndex -> activeIndex - 1
+            else -> activeIndex
+        }.coerceIn(0, tabs.lastIndex)
     }
 
     /**
@@ -360,12 +399,9 @@ class TabsState(
      */
     private fun rememberClosed(index: Int, placeholderId: Long?) {
         val tab = tabs[index]
-        // A popup nothing has committed in yet shows its `about:blank`
-        // as a page (see [BrowserState.blankIsPage]); that's the blank
-        // home entry to the reopened tab, which isn't a popup.
-        val popupBlank = tab.blankIsPage && tab.url == ABOUT_BLANK
-        val url = if (popupBlank) "" else tab.url
-        val address = if (popupBlank && tab.addressBarText == ABOUT_BLANK) "" else tab.addressBarText
+        // A popup nothing has committed in yet comes back as the blank
+        // home entry (see [BrowserState.restorableAddress]).
+        val (url, address) = tab.restorableAddress()
         if (url.isBlank() && address.isBlank() && !tab.canGoBack && !tab.canGoForward) return
         closedTabs.add(
             ClosedTab(
@@ -399,15 +435,15 @@ class TabsState(
             addressBarText = closed.addressBarText
             override = closed.override
             thumbnail = closed.thumbnail
-            pendingRestore = BrowserState.PendingRestore(
+            // Closed before its page committed: the saved state ends on
+            // the blank entry, so the address goes back — and is
+            // submitted again, unless the user had stopped that load
+            // (the bar then showed it with Reload).
+            pendingRestore = BrowserState.PendingRestore.of(
+                url = closed.url,
+                address = closed.addressBarText,
+                loadStopped = closed.loadStopped,
                 webViewState = closed.webViewState,
-                fallbackUrl = closed.addressBarText.ifBlank { closed.url },
-                // Closed before its page committed: the saved state
-                // ends on the blank entry, so put the address back —
-                // and submit it again, unless the user had stopped
-                // that load (the bar then showed it with Reload).
-                resubmitUrl = closed.addressBarText.takeIf { closed.url.isBlank() }.orEmpty(),
-                submit = !(closed.url.isBlank() && closed.loadStopped),
             )
         }
         // Undoing the close of the last tab: the blank tab [closeTab]
@@ -429,6 +465,134 @@ class TabsState(
     /** Still the fresh home overlay it was created as. */
     private fun BrowserState.isUntouched(): Boolean =
         isHome && !canGoBack && !canGoForward && !resolving && progress < 0
+
+    /**
+     * The first load of this tab list — the homepage, or the App Link
+     * the app was cold-started from — has been submitted. Kept here
+     * rather than in the screen, so a screen rebuilt over tabs that
+     * outlived it (#183) doesn't submit it again into the active tab.
+     */
+    var initialLoadDone: Boolean = false
+
+    /**
+     * Every tab's WebView is about to be destroyed while the tabs
+     * themselves live on: the Activity is being relaunched for a change
+     * `configChanges` can't cover, such as a resource-overlay switch
+     * (navigation mode, wallpaper colours; #183). [saveState] is the
+     * WebView's own [android.webkit.WebView.saveState] for a tab, which
+     * the next host restores the tab from, as for [reopenClosedTab] —
+     * the tab comes back on its page with its back/forward history.
+     *
+     * Fullscreen and the page context menu belonged to the destroyed
+     * views and are dropped.
+     */
+    fun parkForRelaunch(saveState: (BrowserState) -> Bundle?) {
+        exitFullscreen()
+        pageContextMenu = null
+        for (tab in tabs) {
+            // Reopened, and the host never got to build its WebView:
+            // what it was to be rebuilt from still stands.
+            if (tab.pendingRestore == null) {
+                val (url, address) = tab.restorableAddress()
+                tab.pendingRestore = BrowserState.PendingRestore.of(
+                    url = url,
+                    address = address,
+                    loadStopped = tab.loadAborted,
+                    webViewState = saveState(tab),
+                    inFlight = tab.uncommittedLoad(),
+                )
+            }
+            tab.webViewLost()
+        }
+    }
+
+    /**
+     * What survives the app's process being killed in the background
+     * (#183): each regular tab's address and title, and which of them
+     * was active. Private tabs are left out — nothing of theirs outlives
+     * the process (#86). Their back/forward history and the reopen stack
+     * aren't kept either: WebView state bundles are too large for the
+     * saved-instance-state transaction. Neither is the tab's committed
+     * [BrowserState.url]: [committed] only says there was a page, whose
+     * [address] loads again.
+     */
+    class SavedTabs(val tabs: List<SavedTab>, val activeIndex: Int)
+
+    class SavedTab(
+        val title: String,
+        val address: String,
+        val committed: Boolean,
+        val loadStopped: Boolean,
+    )
+
+    /**
+     * The saved instance state goes through a binder transaction with a
+     * hard limit of about 1 MB shared by the whole process, and a page
+     * can make its own URL (`history.replaceState`) or title as long as
+     * it likes. So an address longer than [MAX_SAVED_ADDRESS] isn't
+     * kept — that tab doesn't come back — a title is cut to
+     * [MAX_SAVED_TITLE] (it's only shown until the page loads again),
+     * and the whole list stops at [MAX_SAVED_CHARS], the active tab
+     * counted first (R1-F1).
+     */
+    fun saveForProcessDeath(): SavedTabs {
+        val at = activeIndex.coerceIn(0, tabs.lastIndex)
+        val candidates = tabs.withIndex().filter { !it.value.private }.mapNotNull { (index, tab) ->
+            val (url, address) = tab.restorableAddress()
+            val saved = SavedTab(
+                title = tab.title.take(MAX_SAVED_TITLE),
+                address = address.ifBlank { url },
+                committed = url.isNotBlank(),
+                loadStopped = tab.loadAborted,
+            )
+            if (saved.address.length > MAX_SAVED_ADDRESS) null else index to saved
+        }
+        var budget = MAX_SAVED_CHARS
+        val fits = HashSet<Int>()
+        for ((index, saved) in candidates.sortedBy { (index, _) -> if (index == at) -1 else index }) {
+            val size = saved.address.length + saved.title.length
+            if (size > budget) continue
+            budget -= size
+            fits += index
+        }
+        val kept = candidates.filter { (index, _) -> index in fits }
+        // The active tab isn't kept (private, or too long): the kept tab
+        // before it (or the first) comes back active.
+        val activeAt = kept.indexOfLast { (index, _) -> index <= at }.coerceAtLeast(0)
+        return SavedTabs(tabs = kept.map { it.second }, activeIndex = activeAt)
+    }
+
+    /**
+     * Replace the tab list with [saved], from a process killed in the
+     * background (#183). Each tab shows its page's address and title
+     * from the first frame and loads that address once its WebView is
+     * up (see [BrowserState.PendingRestore]). Its [BrowserState.url]
+     * stays blank until that load commits: the previous process's
+     * fetch target can be a loopback gateway URL on a port that's gone
+     * (R1-F3). The initial load is done: these are the tabs the user
+     * had.
+     */
+    fun restoreAfterProcessDeath(saved: SavedTabs) {
+        if (saved.tabs.isEmpty()) return
+        val restored = saved.tabs.map { s ->
+            newBlankTab().apply {
+                title = s.title
+                addressBarText = s.address
+                pendingRestore = BrowserState.PendingRestore.of(
+                    // Only whether there was a page matters here: the
+                    // address is what loads.
+                    url = if (s.committed) s.address else "",
+                    address = s.address,
+                    loadStopped = s.loadStopped,
+                    webViewState = null,
+                )
+            }
+        }
+        tabs.clear()
+        tabs.addAll(restored)
+        activeIndex = saved.activeIndex.coerceIn(0, tabs.lastIndex)
+        initialLoadDone = true
+    }
 
     /**
      * Forget every closed tab. Their saved WebView state carries
@@ -460,11 +624,27 @@ class TabsState(
     val homepageUrl: String
         get() = homepage
 
-    private fun newBlankTab(): BrowserState = BrowserState(id = idSeq.incrementAndGet())
+    /** Any private tab (#86) is open. */
+    val hasPrivateTabs: Boolean
+        get() = tabs.any { it.private }
+
+    private fun newBlankTab(private: Boolean = false): BrowserState =
+        BrowserState(id = idSeq.incrementAndGet(), private = private)
 
     companion object {
         /** How many closed tabs [reopenClosedTab] can walk back through. */
         const val MAX_CLOSED_TABS = 20
+
+        /**
+         * Bounds on what [saveForProcessDeath] keeps, in chars (two bytes
+         * each in the parcel): 32k chars is 64 KB of the ~1 MB binder
+         * buffer. An address past 8k chars is rare (browsers and servers
+         * commonly cap URLs around there) and is what a page stuffing
+         * state into its URL produces.
+         */
+        const val MAX_SAVED_ADDRESS = 8 * 1024
+        const val MAX_SAVED_TITLE = 1024
+        const val MAX_SAVED_CHARS = 32 * 1024
 
         /**
          * Process-wide, not per [TabsState]: the process-scoped

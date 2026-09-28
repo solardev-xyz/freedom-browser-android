@@ -30,14 +30,17 @@ import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
 import androidx.compose.ui.semantics.Role
-import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.LocationOn
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Videocam
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Cookie
+import androidx.compose.material.icons.filled.Public
+import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.filled.DeleteForever
 import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.History
@@ -45,6 +48,7 @@ import androidx.compose.material.icons.filled.HourglassTop
 import androidx.compose.material.icons.filled.PowerSettingsNew
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.Tune
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -65,13 +69,18 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.res.vectorResource
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import baby.freedom.mobile.R
+import baby.freedom.mobile.chains.Chain
+import baby.freedom.mobile.chains.BuiltInChains
 import baby.freedom.mobile.data.BrowsingRepository
+import baby.freedom.mobile.data.ChainStore
 import baby.freedom.mobile.data.NodeSettings
+import baby.freedom.mobile.ui.isLight
 import baby.freedom.swarm.IpfsInfo
 import baby.freedom.swarm.IpfsStatus
 import kotlinx.coroutines.flow.drop
@@ -85,13 +94,25 @@ import kotlinx.coroutines.launch
  *
  *  0. **Search** — the address bar's search engine: the desktop set
  *     ([SearchEngines.BUILT_IN]) or a custom template (#87).
+ *  ½. **Ad blocking** — the filter-list categories and the sites ad
+ *     blocking is off for (#126, [Adblock]).
  *  1. **Browsing data** — wipe history, bookmarks, and WebView cookies /
  *     site storage / per-tab caches. Each action is guarded by a
  *     confirmation dialog.
  *  2. **Site permissions** — every camera / microphone / location
- *     decision (remembered, or this run's), each revocable (#81).
- *  3. **About** — app name, version, package, and a short blurb.
- *  4. **Other** — a single "Show advanced options" row. Tapping it
+ *     decision (remembered, or this run's), each revocable (#81), and
+ *     every "open <scheme>: links in another app" one (#85).
+ *  3. **Nodes** — where `bzz://` and `ipfs://` content comes from: the
+ *     embedded nodes, or an external Swarm endpoint / IPFS gateway the
+ *     user runs (#125, [ExternalEndpoints]). The IPFS row shows only
+ *     while advanced options are on, or once an external gateway is
+ *     set — its unverified warning must stay in view while it's in use.
+ *  4. **Chains** — Ethereum, Gnosis and Base, plus the user's custom
+ *     chains, added from a chainlist.org search or by hand (#107, see
+ *     [ChainsSection]). Its Add chain pages and each chain's page (its own
+ *     RPCs and how reads are checked, #108) replace the list while open.
+ *  5. **About** — app name, version, package, and a short blurb.
+ *  6. **Other** — a single "Show advanced options" row. Tapping it
  *     flips [NodeSettings.showIpfsUi] on, which reveals an "IPFS node
  *     (experimental)" card below (status, peers, gateway URL, and
  *     routing preferences). This gate exists so IPFS support stays a
@@ -128,6 +149,14 @@ fun SettingsScreen(
         .collectAsState(initial = SearchEngines.DEFAULT_ID)
     val customSearchTemplate by settings.customSearchTemplate.collectAsState(initial = "")
     var pickSearchEngine by remember { mutableStateOf(false) }
+    val externalSwarm by settings.externalSwarmEndpoint.collectAsState(initial = "")
+    val externalIpfs by settings.externalIpfsGateway.collectAsState(initial = "")
+    var editEndpoint by remember { mutableStateOf<NodeEndpoint?>(null) }
+    val adblockCategories by settings.adblockCategories
+        .collectAsState(initial = AdblockCategory.entries.filterTo(LinkedHashSet()) { it.enabledByDefault })
+    val adblockAllowlist by settings.adblockAllowlist.collectAsState(initial = emptyList())
+    val adblockStatus by Adblock.status.collectAsState()
+    var addAllowlistSite by remember { mutableStateOf(false) }
 
     var confirmClearHistory by remember { mutableStateOf(false) }
     var confirmClearBookmarks by remember { mutableStateOf(false) }
@@ -136,6 +165,14 @@ fun SettingsScreen(
     val sitePermissions = remember(context) { SitePermissionBroker.get(context) }
     val permissionEntries by remember(sitePermissions) { sitePermissions.entries }
         .collectAsState(initial = emptyList())
+
+    val chainStore = remember(context) { ChainStore.get(context) }
+    val chains by remember(chainStore) { chainStore.chains }
+        .collectAsState(initial = BuiltInChains.ALL)
+    var chainPage by remember { mutableStateOf<ChainPage?>(null) }
+    var chainQuery by rememberSaveable { mutableStateOf("") }
+    var confirmRemoveChain by remember { mutableStateOf<Chain?>(null) }
+    var removeChainFailed by remember { mutableStateOf<Chain?>(null) }
 
     val scope = rememberCoroutineScope()
     val appVersion = remember(context) { appVersionLabel(context) }
@@ -146,12 +183,19 @@ fun SettingsScreen(
     val searchRows = visibleSettingsRows(
         query, SECTION_SEARCH, searchSectionRows(searchEngine, customSearchTemplate),
     )
+    val adblockRows = visibleSettingsRows(
+        query, SECTION_ADBLOCK, adblockSectionRows(adblockCategories, adblockAllowlist),
+    )
     val browsingRows = visibleSettingsRows(
         query, SECTION_BROWSING, browsingDataRows(history.size, bookmarks.size),
     )
     val permissionRows = visibleSettingsRows(
         query, SECTION_PERMISSIONS, sitePermissionRows(permissionEntries),
     )
+    val nodeRows = visibleSettingsRows(
+        query, SECTION_NODES, nodeRows(externalSwarm, externalIpfs, showIpfsUi),
+    )
+    val chainRows = visibleSettingsRows(query, SECTION_CHAINS, chainSettingsRows(chains))
     val aboutRows = visibleSettingsRows(
         query, SECTION_ABOUT, aboutRows(appVersion, context.packageName),
     )
@@ -160,7 +204,8 @@ fun SettingsScreen(
         visibleSettingsRows(query, SECTION_IPFS, ipfsRows(ipfsInfo))
     } else emptySet()
     val nothingMatches = listOf(
-        searchRows, browsingRows, permissionRows, aboutRows, otherRows, ipfsRows,
+        searchRows, adblockRows, browsingRows, permissionRows, nodeRows, chainRows, aboutRows,
+        otherRows, ipfsRows,
     ).all { it.isEmpty() }
 
     // A new query starts the results from the top, so the first match
@@ -170,7 +215,44 @@ fun SettingsScreen(
         snapshotFlow { query }.drop(1).collect { listState.scrollToItem(0) }
     }
 
-    FullScreenScaffold(
+    // The Chains sub-pages stand in for the list while open; everything
+    // above stays composed, so Back lands on the list as it was left.
+    when (val page = chainPage) {
+        ChainPage.Search -> ChainlistPage(
+            query = chainQuery,
+            onQueryChange = { chainQuery = it },
+            existingIds = chains.mapTo(HashSet()) { it.id },
+            onPick = { chainPage = ChainPage.Form(it.toChain()) },
+            onManual = { chainPage = ChainPage.Form(null) },
+            onBack = { chainPage = null },
+        )
+        is ChainPage.Form -> AddChainPage(
+            prefill = page.prefill,
+            onAdd = chainStore::add,
+            onAdded = {
+                chainPage = null
+                chainQuery = ""
+            },
+            onBack = { chainPage = if (page.prefill != null) ChainPage.Search else null },
+        )
+        is ChainPage.Detail -> {
+            val chain = chains.firstOrNull { it.id == page.chainId }
+            if (chain != null) {
+                ChainDetailPage(
+                    chain = chain,
+                    onAddRpc = { chainStore.addUserRpc(chain.id, it) },
+                    onRemoveRpc = { chainStore.removeUserRpc(chain.id, it) },
+                    onRemove = { confirmRemoveChain = chain },
+                    onBack = { chainPage = null },
+                )
+            } else {
+                // Removed (from this page's Remove): back to the list.
+                LaunchedEffect(page) { chainPage = null }
+            }
+        }
+        null -> Unit
+    }
+    if (chainPage == null) FullScreenScaffold(
         title = "Settings",
         onDismiss = onDismiss,
     ) {
@@ -192,6 +274,21 @@ fun SettingsScreen(
                         onClick = { pickSearchEngine = true },
                     )
                 }
+                if (adblockRows.isNotEmpty()) item("adblock") {
+                    AdblockSection(
+                        visible = adblockRows,
+                        enabled = adblockCategories,
+                        allowlist = adblockAllowlist,
+                        status = adblockStatus,
+                        onToggle = { category, on ->
+                            scope.launch { settings.setAdblockCategory(category, on) }
+                        },
+                        onRemoveSite = { site ->
+                            Adblock.removeAllowlisted(site)
+                        },
+                        onAddSite = { addAllowlistSite = true },
+                    )
+                }
                 if (browsingRows.isNotEmpty()) item("browsing") {
                     BrowsingDataSection(
                         visible = browsingRows,
@@ -207,6 +304,23 @@ fun SettingsScreen(
                         visible = permissionRows,
                         entries = permissionEntries,
                         onRevoke = sitePermissions::revoke,
+                    )
+                }
+                if (nodeRows.isNotEmpty()) item("nodes") {
+                    NodesSection(
+                        visible = nodeRows,
+                        externalSwarm = externalSwarm,
+                        externalIpfs = externalIpfs,
+                        onEdit = { editEndpoint = it },
+                    )
+                }
+                if (chainRows.isNotEmpty()) item("chains") {
+                    ChainsSection(
+                        visible = chainRows,
+                        chains = chains,
+                        onOpen = { chainPage = ChainPage.Detail(it.id) },
+                        onRemove = { confirmRemoveChain = it },
+                        onAdd = { chainPage = ChainPage.Search },
                     )
                 }
                 if (aboutRows.isNotEmpty()) item("about") {
@@ -257,6 +371,56 @@ fun SettingsScreen(
             onDismiss = { pickSearchEngine = false },
         )
     }
+    editEndpoint?.let { endpoint ->
+        EndpointDialog(
+            endpoint = endpoint,
+            saved = if (endpoint == NodeEndpoint.Swarm) externalSwarm else externalIpfs,
+            onSave = { value ->
+                scope.launch {
+                    if (endpoint == NodeEndpoint.Swarm) settings.setExternalSwarmEndpoint(value)
+                    else settings.setExternalIpfsGateway(value)
+                }
+                editEndpoint = null
+            },
+            onDismiss = { editEndpoint = null },
+        )
+    }
+    confirmRemoveChain?.let { chain ->
+        ConfirmDialog(
+            title = "Remove ${chain.name}?",
+            message = "Removes chain ${chain.id} and its RPC endpoints from this device. " +
+                "You can add it again later.",
+            confirmLabel = "Remove",
+            onConfirm = {
+                scope.launch {
+                    if (chainStore.remove(chain.id) == ChainStore.RemoveResult.FAILED) {
+                        removeChainFailed = chain
+                    }
+                }
+                confirmRemoveChain = null
+            },
+            onDismiss = { confirmRemoveChain = null },
+        )
+    }
+    removeChainFailed?.let { chain ->
+        AlertDialog(
+            onDismissRequest = { removeChainFailed = null },
+            title = { Text("Couldn't remove ${chain.name}") },
+            text = { Text("Chain ${chain.id} is still on this device. Try again.") },
+            confirmButton = {
+                TextButton(onClick = { removeChainFailed = null }) { Text("OK") }
+            },
+        )
+    }
+    if (addAllowlistSite) {
+        AllowlistSiteDialog(
+            onAdd = { site ->
+                Adblock.setAllowlisted(site, allowed = true, private = false)
+                addAllowlistSite = false
+            },
+            onDismiss = { addAllowlistSite = false },
+        )
+    }
     if (confirmClearHistory) {
         ConfirmDialog(
             title = "Clear history?",
@@ -285,7 +449,7 @@ fun SettingsScreen(
     if (confirmClearSiteData) {
         ConfirmDialog(
             title = "Clear cookies and site data?",
-            message = "Signs you out of most sites and wipes cached page data, cookies, form autofill and remembered page zoom levels from every open tab.",
+            message = "Signs you out of most sites and wipes cached page data, cookies, form autofill, remembered page zoom levels and desktop-site choices from every open tab.",
             confirmLabel = "Clear site data",
             onConfirm = {
                 onClearWebViewData()
@@ -297,8 +461,10 @@ fun SettingsScreen(
 }
 
 private const val SECTION_SEARCH = "Search"
+private const val SECTION_ADBLOCK = "Ad blocking"
 private const val SECTION_BROWSING = "Browsing data"
 private const val SECTION_PERMISSIONS = "Site permissions"
+private const val SECTION_NODES = "Nodes"
 private const val SECTION_ABOUT = "About"
 private const val SECTION_OTHER = "Other"
 private const val SECTION_IPFS = "IPFS"
@@ -423,26 +589,25 @@ private fun SearchEngineDialog(
                     onClick = { customSelected = true },
                 )
                 if (customSelected) {
-                    OutlinedTextField(
-                        value = draft,
-                        onValueChange = { draft = it },
-                        label = { Text("Search URL") },
-                        placeholder = { Text("https://example.com/search?q={searchTerms}") },
-                        isError = draft.isNotBlank() && normalized == null,
-                        supportingText = {
-                            Text(
-                                validation.rejection
-                                    ?.takeIf { draft.isNotBlank() }
-                                    ?.let(::templateHint)
-                                    ?: "Your search replaces {searchTerms} (or %s)",
-                            )
-                        },
-                        keyboardOptions = KeyboardOptions(
-                            keyboardType = KeyboardType.Uri,
-                            autoCorrectEnabled = false,
-                        ),
-                        modifier = Modifier.fillMaxWidth(),
-                    )
+                    NoSuggestionsTextInput {
+                        OutlinedTextField(
+                            value = draft,
+                            onValueChange = { draft = it },
+                            label = { Text("Search URL") },
+                            placeholder = { Text("https://example.com/search?q={searchTerms}") },
+                            isError = draft.isNotBlank() && normalized == null,
+                            supportingText = {
+                                Text(
+                                    validation.rejection
+                                        ?.takeIf { draft.isNotBlank() }
+                                        ?.let(::templateHint)
+                                        ?: "Your search replaces {searchTerms} (or %s)",
+                                )
+                            },
+                            keyboardOptions = urlKeyboardOptions(),
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                    }
                 }
             }
         },
@@ -491,10 +656,386 @@ private fun EngineRadioRow(
     }
 }
 
+/** The two content sources an external endpoint can replace (#125). */
+internal enum class NodeEndpoint(
+    val key: String,
+    val title: String,
+    val embeddedLabel: String,
+    val placeholder: String,
+    val helper: String,
+    /** Shown while an external endpoint of this kind is in use. */
+    val warning: String?,
+) {
+    Swarm(
+        key = "swarm",
+        title = "Swarm endpoint",
+        embeddedLabel = "Embedded Swarm node",
+        placeholder = "http://192.168.1.10:1633",
+        helper = "A Bee or Ant node API that serves /bzz/",
+        warning = null,
+    ),
+    Ipfs(
+        key = "ipfs",
+        title = "IPFS gateway",
+        embeddedLabel = "Embedded IPFS node (verified)",
+        placeholder = "http://192.168.1.10:8080",
+        helper = "A path gateway serving /ipfs/ and /ipns/",
+        warning = ExternalEndpoints.IPFS_UNVERIFIED_WARNING,
+    ),
+}
+
+private const val EXTERNAL_LABEL = "External"
+
+private fun endpointSubtitle(endpoint: NodeEndpoint, external: String) =
+    if (external.isEmpty()) endpoint.embeddedLabel else EXTERNAL_LABEL
+
+/**
+ * The Swarm row always; the IPFS row while advanced options reveal
+ * IPFS, or whenever an external gateway is in use — so its unverified
+ * warning can't be hidden away with the rest of the IPFS settings.
+ */
+internal fun nodeRows(externalSwarm: String, externalIpfs: String, showIpfsUi: Boolean) =
+    listOfNotNull(
+        settingsRow(
+            NodeEndpoint.Swarm.key,
+            NodeEndpoint.Swarm.title,
+            endpointSubtitle(NodeEndpoint.Swarm, externalSwarm),
+            externalSwarm,
+            "External node",
+        ),
+        if (showIpfsUi || externalIpfs.isNotEmpty()) settingsRow(
+            NodeEndpoint.Ipfs.key,
+            NodeEndpoint.Ipfs.title,
+            endpointSubtitle(NodeEndpoint.Ipfs, externalIpfs),
+            externalIpfs,
+            externalIpfs.takeIf { it.isNotEmpty() }?.let { NodeEndpoint.Ipfs.warning },
+            "External gateway",
+        ) else null,
+    )
+
+@Composable
+private fun NodesSection(
+    visible: Set<Any>,
+    externalSwarm: String,
+    externalIpfs: String,
+    onEdit: (NodeEndpoint) -> Unit,
+) {
+    SectionCard(title = SECTION_NODES) {
+        if (NodeEndpoint.Swarm.key in visible) {
+            EndpointRow(
+                endpoint = NodeEndpoint.Swarm,
+                external = externalSwarm,
+                icon = ImageVector.vectorResource(R.drawable.ic_swarm),
+                onClick = { onEdit(NodeEndpoint.Swarm) },
+            )
+        }
+        if (NodeEndpoint.Ipfs.key in visible) {
+            EndpointRow(
+                endpoint = NodeEndpoint.Ipfs,
+                external = externalIpfs,
+                icon = ImageVector.vectorResource(R.drawable.ic_ipfs),
+                onClick = { onEdit(NodeEndpoint.Ipfs) },
+            )
+        }
+    }
+}
+
+@Composable
+private fun EndpointRow(
+    endpoint: NodeEndpoint,
+    external: String,
+    icon: ImageVector,
+    onClick: () -> Unit,
+) {
+    PageRow(
+        title = endpoint.title,
+        subtitle = endpointSubtitle(endpoint, external),
+        style = PageRowStyle.Inset,
+        leadingIcon = icon,
+        // The whole URL, wrapped — never cut, so it's readable on the
+        // narrowest screen.
+        thirdLine = external.ifEmpty { null },
+        onClick = onClick,
+    )
+    val warning = endpoint.warning
+    if (external.isNotEmpty() && warning != null) {
+        UnverifiedWarning(warning, Modifier.padding(start = 40.dp, end = 12.dp, bottom = 8.dp))
+    }
+}
+
+@Composable
+private fun UnverifiedWarning(text: String, modifier: Modifier = Modifier) {
+    // Amber, as the node-status "Starting…" state; a darker shade on the
+    // light scheme, where the bright one doesn't read on the pale card.
+    val color = if (MaterialTheme.colorScheme.isLight) Color(0xFFB45309) else Color(0xFFF59E0B)
+    Row(modifier = modifier, verticalAlignment = Alignment.Top) {
+        Icon(
+            Icons.Filled.Warning,
+            contentDescription = null,
+            tint = color,
+            modifier = Modifier.size(16.dp),
+        )
+        Spacer(Modifier.width(6.dp))
+        Text(
+            text,
+            style = MaterialTheme.typography.bodySmall,
+            color = color,
+        )
+    }
+}
+
+/**
+ * "Embedded node" or "External" + a base-URL field, like the search
+ * engine dialog: picking the embedded node applies at once; an
+ * external URL applies on Save, which stays disabled until
+ * [ExternalEndpoints.validate] accepts it. The IPFS dialog carries the
+ * unverified warning while External is picked.
+ */
+@Composable
+private fun EndpointDialog(
+    endpoint: NodeEndpoint,
+    saved: String,
+    onSave: (String) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var externalSelected by remember { mutableStateOf(saved.isNotEmpty()) }
+    var draft by remember { mutableStateOf(saved) }
+    val validation = ExternalEndpoints.validate(draft)
+    val normalized = validation.endpoint
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(endpoint.title) },
+        text = {
+            Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
+                EngineRadioRow(
+                    label = endpoint.embeddedLabel,
+                    selected = !externalSelected,
+                    onClick = { onSave("") },
+                )
+                EngineRadioRow(
+                    label = EXTERNAL_LABEL,
+                    selected = externalSelected,
+                    onClick = { externalSelected = true },
+                )
+                if (externalSelected) {
+                    NoSuggestionsTextInput {
+                        OutlinedTextField(
+                            value = draft,
+                            onValueChange = { draft = it },
+                            label = { Text("URL") },
+                            placeholder = { Text(endpoint.placeholder) },
+                            isError = draft.isNotBlank() && normalized == null,
+                            supportingText = {
+                                Text(
+                                    validation.rejection
+                                        ?.takeIf { draft.isNotBlank() }
+                                        ?.let(::endpointHint)
+                                        ?: endpoint.helper,
+                                )
+                            },
+                            singleLine = true,
+                            keyboardOptions = urlKeyboardOptions(),
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                    }
+                    endpoint.warning?.let {
+                        Spacer(Modifier.height(8.dp))
+                        UnverifiedWarning(it)
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            if (externalSelected) {
+                TextButton(
+                    onClick = { normalized?.let(onSave) },
+                    enabled = normalized != null,
+                ) { Text("Save") }
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Cancel") }
+        },
+    )
+}
+
+/** What to fix, for each reason [ExternalEndpoints.validate] refuses a URL. */
+private fun endpointHint(rejection: ExternalEndpoints.Rejection): String = when (rejection) {
+    ExternalEndpoints.Rejection.EMPTY,
+    ExternalEndpoints.Rejection.NOT_A_URL -> "Not a URL: e.g. http://192.168.1.10:1633"
+    ExternalEndpoints.Rejection.TOO_LONG -> "Too long: at most 2048 characters"
+    ExternalEndpoints.Rejection.SCHEME -> "Needs http:// or https://"
+    ExternalEndpoints.Rejection.QUERY_OR_FRAGMENT -> "Remove the ? or # part"
+    ExternalEndpoints.Rejection.CREDENTIALS -> "Remove the user name or password before the host"
+}
+
+private const val ADBLOCK_ALLOWLIST_EMPTY =
+    "Sites you allow ads on — from the page menu, or with Add site — appear here. Blocking is off for them and their subdomains."
+private const val ADBLOCK_ADD_SITE = "Add site"
+private const val ADBLOCK_ADD_SITE_SUBTITLE = "Turn ad blocking off for a site"
+private const val ADBLOCK_CREDITS =
+    "Filter lists: EasyList, EasyPrivacy and Fanboy's lists (easylist.to), © their authors, used under CC BY-SA 3.0. Changes apply to pages as they next load."
+
+/** The line under a category: its list, and while it's on, how the engine is doing. */
+internal fun adblockCategorySubtitle(category: AdblockCategory, on: Boolean, status: AdblockStatus): String =
+    if (on && status.loading) "${category.listName} · loading…" else category.listName
+
+private fun adblockSectionRows(enabled: Set<AdblockCategory>, allowlist: List<String>) = buildList {
+    for (category in AdblockCategory.entries) {
+        add(settingsRow(category, category.title, category.listName, if (category in enabled) "On" else "Off"))
+    }
+    add(settingsRow("allowlist-add", ADBLOCK_ADD_SITE, ADBLOCK_ADD_SITE_SUBTITLE, "allowlist", "allowed sites"))
+    if (allowlist.isEmpty()) {
+        add(settingsRow("allowlist-empty", ADBLOCK_ALLOWLIST_EMPTY))
+    } else {
+        for (site in allowlist) {
+            add(settingsRow("site:$site", allowlistHostForDisplay(site), allowlistSiteSubtitle(site), "allowlist", site))
+        }
+    }
+    add(settingsRow("credits", ADBLOCK_CREDITS))
+}
+
+/**
+ * The line under an allowed site: "Ads allowed", led by the stored
+ * punycode when the title shows the Unicode name
+ * ([allowlistHostForDisplay]), so both forms are on screen.
+ */
+internal fun allowlistSiteSubtitle(site: String): String {
+    val shown = allowlistHostForDisplay(site)
+    return if (shown == site) "Ads allowed" else "$site · Ads allowed"
+}
+
+/**
+ * Ad blocking (#126): a switch per filter-list category, the sites
+ * blocking is off for (each removable, and "Add site" for one typed in),
+ * and the lists' attribution. Every string is shown whole and wraps —
+ * a site's name is never cut.
+ */
+@Composable
+private fun AdblockSection(
+    visible: Set<Any>,
+    enabled: Set<AdblockCategory>,
+    allowlist: List<String>,
+    status: AdblockStatus,
+    onToggle: (AdblockCategory, Boolean) -> Unit,
+    onRemoveSite: (String) -> Unit,
+    onAddSite: () -> Unit,
+) {
+    SectionCard(title = SECTION_ADBLOCK) {
+        for (category in AdblockCategory.entries) {
+            if (category !in visible) continue
+            val on = category in enabled
+            PageRow(
+                title = category.title,
+                subtitle = adblockCategorySubtitle(category, on, status),
+                style = PageRowStyle.Inset,
+                leadingIcon = Icons.Filled.Shield,
+                onClick = { onToggle(category, !on) },
+                trailing = {
+                    Switch(checked = on, onCheckedChange = { onToggle(category, it) })
+                },
+            )
+        }
+        if ("allowlist-add" in visible) PageRow(
+            title = ADBLOCK_ADD_SITE,
+            subtitle = ADBLOCK_ADD_SITE_SUBTITLE,
+            style = PageRowStyle.Inset,
+            leadingIcon = Icons.Filled.Add,
+            onClick = onAddSite,
+        )
+        if (allowlist.isEmpty() && "allowlist-empty" in visible) {
+            Text(
+                ADBLOCK_ALLOWLIST_EMPTY,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+            )
+        }
+        for (site in allowlist) {
+            if ("site:$site" !in visible) continue
+            val shown = allowlistHostForDisplay(site)
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(start = 12.dp, top = 2.dp, bottom = 2.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(
+                    Icons.Filled.Public,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onSurface,
+                )
+                Spacer(Modifier.width(12.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(shown, fontWeight = FontWeight.Medium)
+                    Text(
+                        allowlistSiteSubtitle(site),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                IconButton(onClick = { onRemoveSite(site) }) {
+                    Icon(
+                        Icons.Filled.Close,
+                        contentDescription = "Block ads on $shown again",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+        }
+        if ("credits" in visible) {
+            Text(
+                ADBLOCK_CREDITS,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+            )
+        }
+    }
+}
+
+/** A host or URL to allow ads on; Add stays disabled until it is one ([normalizeAllowlistHost]). */
+@Composable
+private fun AllowlistSiteDialog(onAdd: (String) -> Unit, onDismiss: () -> Unit) {
+    var draft by remember { mutableStateOf("") }
+    val host = normalizeAllowlistHost(draft)
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Allow ads on a site") },
+        text = {
+            NoSuggestionsTextInput {
+                OutlinedTextField(
+                    value = draft,
+                    onValueChange = { draft = it },
+                    label = { Text("Site") },
+                    placeholder = { Text("example.com") },
+                    isError = draft.isNotBlank() && host == null,
+                    supportingText = {
+                        Text(
+                            if (draft.isNotBlank() && host == null) "Not a site: e.g. example.com"
+                            else "Its subdomains are included.",
+                        )
+                    },
+                    singleLine = true,
+                    keyboardOptions = urlKeyboardOptions(),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = { host?.let(onAdd) }, enabled = host != null) { Text("Add") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Cancel") }
+        },
+    )
+}
+
 private const val ROW_CLEAR_HISTORY = "Clear history"
 private const val ROW_CLEAR_BOOKMARKS = "Clear bookmarks"
 private const val ROW_CLEAR_SITE_DATA = "Clear cookies & site data"
-private const val ROW_CLEAR_SITE_DATA_SUBTITLE = "Cookies, DOM storage, cache, form data, and zoom levels"
+private const val ROW_CLEAR_SITE_DATA_SUBTITLE = "Cookies, DOM storage, cache, form data, zoom levels, and desktop sites"
 
 private fun historySubtitle(count: Int) =
     if (count == 0) "Nothing to clear" else "$count visit${if (count == 1) "" else "s"}"
@@ -502,7 +1043,7 @@ private fun historySubtitle(count: Int) =
 private fun bookmarksSubtitle(count: Int) =
     if (count == 0) "Nothing to clear" else "$count bookmark${if (count == 1) "" else "s"}"
 
-private fun browsingDataRows(historyCount: Int, bookmarkCount: Int) = listOf(
+internal fun browsingDataRows(historyCount: Int, bookmarkCount: Int) = listOf(
     settingsRow("history", ROW_CLEAR_HISTORY, historySubtitle(historyCount)),
     settingsRow("bookmarks", ROW_CLEAR_BOOKMARKS, bookmarksSubtitle(bookmarkCount)),
     settingsRow("site-data", ROW_CLEAR_SITE_DATA, ROW_CLEAR_SITE_DATA_SUBTITLE),
@@ -543,7 +1084,8 @@ private fun BrowsingDataSection(
 }
 
 /**
- * Site permissions (#81): one row per decision — the site, in full and
+ * Site permissions (#81), links to other apps included (#85): one row
+ * per decision — the site, in full and
  * wrapping (never ellipsised: the end of a host is the part that
  * matters), the permission and its state, and a Remove button that
  * makes the site ask again next time. Session-only decisions are listed
@@ -551,7 +1093,7 @@ private fun BrowsingDataSection(
  * without restarting the app.
  */
 private const val PERMISSIONS_EMPTY =
-    "Sites you allow or block from using your camera, microphone or location appear here."
+    "Sites you allow or block from using your camera, microphone or location, or from opening links in other apps, appear here."
 
 /** One row per decision, keyed by the entry; the explainer while there are none. */
 private fun sitePermissionRows(entries: List<SitePermissionEntry>) =
@@ -598,6 +1140,7 @@ private fun SitePermissionsSection(
                         SitePermission.CAMERA -> Icons.Filled.Videocam
                         SitePermission.MICROPHONE -> Icons.Filled.Mic
                         SitePermission.LOCATION -> Icons.Filled.LocationOn
+                        is ExternalScheme -> Icons.AutoMirrored.Filled.OpenInNew
                     },
                     contentDescription = null,
                     tint = MaterialTheme.colorScheme.onSurface,

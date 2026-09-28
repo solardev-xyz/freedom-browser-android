@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.LocationOn
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Videocam
@@ -78,6 +79,7 @@ fun SitePermissionPrompt(prompt: PermissionPrompt) {
         armed = true
     }
     val icon = when {
+        prompt.permissions.any { it is ExternalScheme } -> Icons.AutoMirrored.Filled.OpenInNew
         SitePermission.CAMERA in prompt.permissions -> Icons.Filled.Videocam
         SitePermission.MICROPHONE in prompt.permissions -> Icons.Filled.Mic
         else -> Icons.Filled.LocationOn
@@ -99,25 +101,35 @@ fun SitePermissionPrompt(prompt: PermissionPrompt) {
             Column {
                 Text("wants to ${describePermissionRequest(prompt.permissions)}")
                 Spacer(Modifier.height(12.dp))
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clickable { remember = !remember },
-                ) {
-                    Checkbox(checked = remember, onCheckedChange = { remember = it })
+                // A private tab's answer lasts the private session only
+                // (#86): there's nothing to remember it in.
+                if (prompt.private) {
                     Text(
-                        "Remember this decision",
+                        "Private tab: your answer lasts until you close your private tabs.",
                         style = MaterialTheme.typography.bodyMedium,
-                        modifier = Modifier.padding(end = 8.dp),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
+                } else {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { remember = !remember },
+                    ) {
+                        Checkbox(checked = remember, onCheckedChange = { remember = it })
+                        Text(
+                            "Remember this decision",
+                            style = MaterialTheme.typography.bodyMedium,
+                            modifier = Modifier.padding(end = 8.dp),
+                        )
+                    }
                 }
             }
         },
         confirmButton = {
             TextButton(
                 enabled = armed,
-                onClick = { if (guard.accepts()) prompt.respond(PromptAnswer.Allow(remember)) },
+                onClick = { if (guard.accepts()) prompt.respond(PromptAnswer.Allow(remember && !prompt.private)) },
             ) {
                 Text("Allow")
             }
@@ -125,7 +137,7 @@ fun SitePermissionPrompt(prompt: PermissionPrompt) {
         dismissButton = {
             TextButton(
                 enabled = armed,
-                onClick = { if (guard.accepts()) prompt.respond(PromptAnswer.Block(remember)) },
+                onClick = { if (guard.accepts()) prompt.respond(PromptAnswer.Block(remember && !prompt.private)) },
             ) {
                 Text("Block")
             }
@@ -195,7 +207,13 @@ fun SitePermissionAndroidBridge(
                 }
             }
         }
+        broker.onNoAppForLink = { scheme ->
+            scope.launch {
+                snackbarHostState.showSnackbar("No app on this device can open ${scheme.label}.")
+            }
+        }
         onDispose {
+            broker.onNoAppForLink = null
             broker.requestAndroidPermissions = null
             broker.onAndroidPermissionMissing = null
             // A dialog result that will never arrive must not strand
