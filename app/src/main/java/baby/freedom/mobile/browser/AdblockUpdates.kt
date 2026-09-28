@@ -7,6 +7,9 @@ import java.io.InputStream
 import java.net.HttpURLConnection
 import java.net.URL
 import java.security.MessageDigest
+import kotlin.coroutines.CoroutineContext
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.withContext
 
 private const val TAG = "AdblockUpdate"
 
@@ -421,6 +424,34 @@ internal suspend fun runAdblockUpdate(
     if (olderThanBuiltIn.size == wanted.size) return AdblockUpdateOutcome.BuiltInNewer(manifest.version)
     val order = wanted.map { it.category }
     return AdblockUpdateOutcome.Applied(manifest.version, olderThanBuiltIn.sortedBy { order.indexOf(it) })
+}
+
+/**
+ * Runs [check] on [context] and hands its outcome to [record] (a
+ * failure becomes [AdblockUpdateOutcome.Failed]) before returning it.
+ *
+ * [record] runs inside the [withContext] block, with no suspension
+ * point between [check] returning and it: a check cancelled while its
+ * blocking swap and `activate()` were already running (Keep up to date
+ * switched off mid-check) finishes them, and its outcome — an update
+ * that landed — is still recorded and stamped, even though the
+ * [withContext] call then throws the cancellation to the caller (#188 R6-F2).
+ */
+internal suspend fun runAndRecordAdblockCheck(
+    context: CoroutineContext,
+    check: suspend () -> AdblockUpdateOutcome,
+    record: (AdblockUpdateOutcome) -> Unit,
+): AdblockUpdateOutcome = withContext(context) {
+    val outcome = try {
+        check()
+    } catch (e: CancellationException) {
+        throw e
+    } catch (e: Exception) {
+        Log.w(TAG, "update check failed", e)
+        AdblockUpdateOutcome.Failed(e.message ?: e.javaClass.simpleName)
+    }
+    record(outcome)
+    outcome
 }
 
 /**

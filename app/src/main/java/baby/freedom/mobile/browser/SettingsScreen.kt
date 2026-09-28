@@ -879,9 +879,9 @@ internal fun adblockUpdateLine(update: AdblockUpdateState): String? {
         is AdblockUpdateOutcome.Rejected ->
             "Refused an update that failed verification (${last.reason}); the current lists stay"
         is AdblockUpdateOutcome.DownloadFailed ->
-            "Couldn't download the ${last.category} list; the current lists stay"
+            "Couldn't download ${adblockListName(last.category)}; the current lists stay"
         is AdblockUpdateOutcome.HashMismatch ->
-            "The ${last.category} list didn't match its signed hash; the current lists stay"
+            "${adblockListName(last.category)} didn't match its signed hash; the current lists stay"
         AdblockUpdateOutcome.NothingEnabled -> "Every filter list is off"
         is AdblockUpdateOutcome.Failed -> "The update failed (${last.message}); the current lists stay"
     }

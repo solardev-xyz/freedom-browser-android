@@ -11,6 +11,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -23,7 +24,6 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 import java.io.ByteArrayInputStream
 import java.io.File
 
@@ -523,32 +523,35 @@ internal object Adblock {
         }
         return updateMutex.withLock {
             _updateState.value = _updateState.value.copy(checking = true)
-            val outcome = try {
-                withContext(Dispatchers.IO) {
-                    val enabled = runCatching { settings.adblockCategories.first() }.getOrDefault(emptySet())
-                    Gateways.awaitExternalEndpoints()
-                    val base = Gateways.swarmBase
-                    runAdblockUpdate(
-                        store = lists,
-                        enabled = enabled.mapTo(HashSet()) { it.key },
-                        signer = AdblockFeed.SIGNER,
-                        readFeed = { readAdblockFeed(base) },
-                        download = { ref, max -> downloadSwarmBytes(base, ref, max) },
-                        bundledTime = { bundledListTime(app, it) },
-                        activate = { listsRevision.value++ },
-                    )
-                }
+            try {
+                runAndRecordAdblockCheck(
+                    context = Dispatchers.IO,
+                    check = {
+                        val enabled = runCatching { settings.adblockCategories.first() }.getOrDefault(emptySet())
+                        Gateways.awaitExternalEndpoints()
+                        val base = Gateways.swarmBase
+                        runAdblockUpdate(
+                            store = lists,
+                            enabled = enabled.mapTo(HashSet()) { it.key },
+                            signer = AdblockFeed.SIGNER,
+                            readFeed = { readAdblockFeed(base) },
+                            download = { ref, max -> downloadSwarmBytes(base, ref, max) },
+                            bundledTime = { bundledListTime(app, it) },
+                            activate = { listsRevision.value++ },
+                        )
+                    },
+                    record = { outcome ->
+                        if (outcome != AdblockUpdateOutcome.FeedUnavailable) stampLastCheck(lists)
+                        Log.i(TAG, "update check: $outcome")
+                        _updateState.value = AdblockUpdateState(checking = false, last = outcome)
+                    },
+                )
             } catch (e: CancellationException) {
+                // Cancelled before an outcome (or after one was recorded):
+                // the row keeps the last one it has.
                 _updateState.value = _updateState.value.copy(checking = false)
                 throw e
-            } catch (e: Exception) {
-                Log.w(TAG, "update check failed", e)
-                AdblockUpdateOutcome.Failed(e.message ?: e.javaClass.simpleName)
             }
-            if (outcome != AdblockUpdateOutcome.FeedUnavailable) stampLastCheck(lists)
-            Log.i(TAG, "update check: $outcome")
-            _updateState.value = AdblockUpdateState(checking = false, last = outcome)
-            outcome
         }
     }
 

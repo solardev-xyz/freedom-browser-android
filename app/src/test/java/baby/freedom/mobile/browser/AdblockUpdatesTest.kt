@@ -1,5 +1,11 @@
 package baby.freedom.mobile.browser
 
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -431,8 +437,62 @@ class AdblockUpdatesTest {
             adblockUpdateLine(AdblockUpdateState(last = AdblockUpdateOutcome.Rejected("wrong_signer"))),
         )
         assertEquals(
-            "The ads list didn't match its signed hash; the current lists stay",
+            "EasyList didn't match its signed hash; the current lists stay",
             adblockUpdateLine(AdblockUpdateState(last = AdblockUpdateOutcome.HashMismatch("ads"))),
         )
+    }
+
+    @Test
+    fun `a failed list is named by its list, not its category key`() {
+        assertEquals(
+            "Couldn't download EasyPrivacy; the current lists stay",
+            adblockUpdateLine(AdblockUpdateState(last = AdblockUpdateOutcome.DownloadFailed("privacy"))),
+        )
+        assertEquals(
+            "EasyList didn't match its signed hash; the current lists stay",
+            adblockUpdateLine(AdblockUpdateState(last = AdblockUpdateOutcome.HashMismatch("ads"))),
+        )
+        // A key no category has (a newer publisher's) is shown as is.
+        assertEquals(
+            "Couldn't download extra; the current lists stay",
+            adblockUpdateLine(AdblockUpdateState(last = AdblockUpdateOutcome.DownloadFailed("extra"))),
+        )
+    }
+
+    @Test
+    fun `an update that lands while its check is cancelled is still recorded`() = runBlocking {
+        // Keep up to date switched off while the swap is running: the
+        // blocking swap and activate() finish, then withContext throws.
+        val swapping = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        var activated = false
+        val recorded = ArrayList<AdblockUpdateOutcome>()
+        val check = async(Dispatchers.Default, start = CoroutineStart.UNDISPATCHED) {
+            runAndRecordAdblockCheck(
+                context = Dispatchers.IO,
+                check = {
+                    swapping.countDown()
+                    release.await(10, TimeUnit.SECONDS) // stageAndPromote: blocking, not cancellable
+                    activated = true
+                    AdblockUpdateOutcome.Applied(3)
+                },
+                record = { synchronized(recorded) { recorded += it } },
+            )
+        }
+        assertTrue(swapping.await(10, TimeUnit.SECONDS))
+        check.cancel()
+        release.countDown()
+        val thrown = runCatching { check.await() }.exceptionOrNull()
+        assertTrue(thrown is CancellationException)
+        assertTrue(activated)
+        assertEquals(listOf<AdblockUpdateOutcome>(AdblockUpdateOutcome.Applied(3)), synchronized(recorded) { recorded.toList() })
+    }
+
+    @Test
+    fun `a check that throws is recorded as failed`() = runBlocking {
+        val recorded = ArrayList<AdblockUpdateOutcome>()
+        val outcome = runAndRecordAdblockCheck(Dispatchers.IO, { throw java.io.IOException("disk full") }, { recorded += it })
+        assertEquals(AdblockUpdateOutcome.Failed("disk full"), outcome)
+        assertEquals(listOf(outcome), recorded)
     }
 }
