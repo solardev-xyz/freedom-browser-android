@@ -29,8 +29,10 @@ class RadicleNodeTest {
         @Volatile var running = false
 
         override fun setSocketPath(path: String) { movedSocket = path }
+        val starts = java.util.concurrent.atomic.AtomicInteger()
         override fun start(home: String, alias: String): String {
             calls += "start"
+            starts.incrementAndGet()
             startEntered.countDown()
             releaseStart.await(5, TimeUnit.SECONDS)
             if (startResult.contains("did")) running = true
@@ -108,8 +110,11 @@ class RadicleNodeTest {
         private fun reposJson(list: List<RadicleRepo>) = list.joinToString(",", "[", "]") {
             if (it.name.isEmpty()) """{"rid":"${it.rid}","name":null}""" else """{"rid":"${it.rid}","name":"${it.name}"}"""
         }
+        /** Run (on the lifecycle thread) as [shutdown] returns. */
+        @Volatile var afterShutdown: (() -> Unit)? = null
         override fun shutdown(): String {
             calls += "shutdown"
+            afterShutdown?.invoke()
             return if (running) { running = false; """{"ok":true}""" } else """{"error":"node not started"}"""
         }
     }
@@ -220,6 +225,38 @@ class RadicleNodeTest {
         Thread.sleep(200)
         assertEquals(RadicleStatus.Running, node.state.value.status)
         assertTrue(ops.running)
+        node.dispose()
+    }
+
+    @Test
+    fun anOnLandingAsTheStopFinishesKeepsStarting() {
+        // Off -> on right as the stop job wraps up: its Stopped must never
+        // overwrite the new start's Starting (#197 R3-F3). Racy by nature,
+        // so hit the window from another thread many times over.
+        val ops = FakeOps()
+        val node = RadicleNode(config, ops)
+        node.start()
+        await("running", node) { it.status == RadicleStatus.Running }
+        repeat(300) { i ->
+            val go = CountDownLatch(1)
+            ops.afterShutdown = { go.countDown() }
+            val starter = Thread {
+                go.await(5, TimeUnit.SECONDS)
+                node.start()
+            }.apply { start() }
+            // The new boot parks inside ops.start, so nothing it publishes
+            // can mask what the stop job left behind.
+            ops.releaseStart = CountDownLatch(1)
+            val boots = ops.starts.get()
+            node.stop()
+            starter.join(5_000)
+            val until = System.currentTimeMillis() + 5_000
+            while (ops.starts.get() == boots && System.currentTimeMillis() < until) Thread.sleep(1)
+            assertEquals("round $i", RadicleStatus.Starting, node.state.value.status)
+            ops.afterShutdown = null
+            ops.releaseStart.countDown()
+            await("running again", node) { it.status == RadicleStatus.Running }
+        }
         node.dispose()
     }
 

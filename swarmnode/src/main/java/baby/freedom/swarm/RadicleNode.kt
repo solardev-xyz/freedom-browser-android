@@ -216,9 +216,10 @@ class RadicleNode internal constructor(
         val gen = synchronized(this) {
             if (wanted && _state.value.status != RadicleStatus.Error) return
             wanted = true
+            // Published under the lock that bumps the generation; see [publish].
+            _state.value = RadicleInfo(status = RadicleStatus.Starting)
             generation.incrementAndGet()
         }
-        _state.value = RadicleInfo(status = RadicleStatus.Starting)
         scope.launch(lifecycle) {
             // Superseded by a later start/stop before it got here.
             if (gen != generation.get() || booted) return@launch
@@ -229,7 +230,7 @@ class RadicleNode internal constructor(
             if (gen != generation.get()) return@launch
             if (failure != null) {
                 Log.e(TAG, "radicle start failed: $failure")
-                _state.value = RadicleInfo(status = RadicleStatus.Error, errorMessage = failure)
+                publish(gen) { RadicleInfo(status = RadicleStatus.Error, errorMessage = failure) }
                 return@launch
             }
             replayPendingUnseeds()
@@ -278,10 +279,10 @@ class RadicleNode internal constructor(
             poller = null
             dialJob?.cancel()
             dialJob = null
+            _state.update { it.copy(status = RadicleStatus.Stopping) }
             generation.incrementAndGet() to seedRun.get()?.also { it.stopping = true }
         }
         run?.let { runCatching { ops.cancelClone(it.rid) } }
-        _state.update { it.copy(status = RadicleStatus.Stopping) }
         scope.launch(lifecycle) {
             var error = ""
             if (booted) {
@@ -312,10 +313,19 @@ class RadicleNode internal constructor(
                 booted = false
                 if (error.isNotEmpty()) Log.w(TAG, "radicle shutdown: $error")
             }
-            if (gen == generation.get()) {
-                _state.value = RadicleInfo(errorMessage = error.ifEmpty { null })
-            }
+            publish(gen) { RadicleInfo(errorMessage = error.ifEmpty { null }) }
         }
+    }
+
+    /**
+     * Replace the state with [next] only if [gen] is still the current
+     * generation. The check and the write happen under the lock [start] /
+     * [stop] bump the generation and publish Starting / Stopping under, so
+     * a start landing between them can't have its Starting overwritten by
+     * a superseded job's Stopped or Error.
+     */
+    private fun publish(gen: Long, next: () -> RadicleInfo) = synchronized(this) {
+        if (gen == generation.get()) _state.value = next()
     }
 
     /**
