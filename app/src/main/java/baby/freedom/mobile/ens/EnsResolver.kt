@@ -8,6 +8,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.channels.Channel
@@ -497,7 +498,10 @@ class EnsResolver internal constructor(
      * is rate-limited on `eth_call` doesn't take its public twin's vote
      * down with it. The stand-in replaces the seat in [legs], so the
      * provider still counts once. Not after a CCIP-Read failure: that
-     * was the name's gateway, which the twin would ask too.
+     * was the name's gateway, which the twin would ask too. The stand-in
+     * starts the moment its seat fails — not once the slowest seat is
+     * in — with its read and its block hash asked side by side, so it
+     * costs a lookup one read's time at most, alongside the others.
      */
     private suspend fun collectLegs(
         calls: Map<String, Deferred<CallOutcome>>,
@@ -509,30 +513,54 @@ class EnsResolver internal constructor(
         callData: ByteArray,
         contract: String?,
         ccipRead: Boolean,
-    ) {
+    ): Unit = coroutineScope {
         val tried = HashSet(legs.keys)
-        var pending = calls
-        while (pending.isNotEmpty()) {
-            tried += pending.keys
-            val judged = gather<EnsQuorum.Leg>(
-                tasks = pending.mapValues { (rpc, call) -> suspend { judge(rpc, call, round, hash, outcomes) } },
-                timeoutMs = LEG_TIMEOUT_MS,
-                done = { got -> EnsQuorum.waveDecided(legs + got.answered()) },
-            )
-            for ((rpc, leg) in judged) legs[rpc] = leg ?: EnsQuorum.Leg.Failed()
-            pending.values.forEach { if (it.isActive) it.cancel() }
-            if (EnsQuorum.waveDecided(legs)) return
-            val standIns = LinkedHashMap<String, String>()
-            for ((rpc, leg) in judged) {
+        val arrivals = Channel<Pair<String, EnsQuorum.Leg?>>(Channel.UNLIMITED)
+        val running = HashMap<String, Job>()
+        // Everything this call started, to cancel once the wave is
+        // decided: the reads, and a stand-in's own block-hash request
+        // (a seat's is [AnchorRound.hashes], shared with later lookups).
+        val started = ArrayList<Deferred<*>>(calls.values)
+
+        fun seat(rpc: String, call: Deferred<CallOutcome>, theirs: Deferred<String>) {
+            tried += rpc
+            running[rpc] = launch {
+                val leg = try {
+                    withTimeoutOrNull(LEG_TIMEOUT_MS) { judge(rpc, call, theirs, round, hash, outcomes) }
+                } catch (t: Throwable) {
+                    // Ours cancelled: unwind. The read's own failure: no vote.
+                    ensureActive()
+                    if (t !is CancellationException) Log.w(TAG, "${hostOf(rpc)}: ${t.message}")
+                    null
+                }
+                arrivals.send(rpc to leg)
+            }
+        }
+
+        try {
+            for ((rpc, call) in calls) {
+                seat(rpc, call, round.hashes[rpc] ?: io.async { blockHash(rpc, round.tag) }.also { started += it })
+            }
+            while (running.isNotEmpty()) {
+                val (rpc, leg) = arrivals.receive()
+                running.remove(rpc)
+                legs[rpc] = leg ?: EnsQuorum.Leg.Failed()
+                if (EnsQuorum.waveDecided(legs)) return@coroutineScope
                 if (leg is EnsQuorum.Leg.Answer || (leg is EnsQuorum.Leg.Failed && leg.ccip)) continue
+                // Stood in for at once, not after the slowest seat: the
+                // twin's read and its block hash go out together.
                 val twin = EnsQuorum.standIn(round.reported, rpc, tried) ?: continue
-                standIns[rpc] = twin
+                legs.remove(rpc)
+                Log.i(TAG, "${hostOf(rpc)}: no read; its provider votes through ${hostOf(twin)}")
+                val call = startCall(twin, target, callData, contract, round.tag, ccipRead)
+                val theirs = round.hashes[twin] ?: io.async { blockHash(twin, round.tag) }
+                started += call
+                started += theirs
+                seat(twin, call, theirs)
             }
-            for ((seat, twin) in standIns) {
-                legs.remove(seat)
-                Log.i(TAG, "${hostOf(seat)}: no read; its provider votes through ${hostOf(twin)}")
-            }
-            pending = standIns.values.associateWith { startCall(it, target, callData, contract, round.tag, ccipRead) }
+        } finally {
+            running.values.forEach { it.cancel() }
+            started.forEach { if (it.isActive) it.cancel() }
         }
     }
 
@@ -540,6 +568,7 @@ class EnsResolver internal constructor(
     private suspend fun judge(
         rpc: String,
         call: Deferred<CallOutcome>,
+        theirHash: Deferred<String>,
         round: AnchorRound,
         hash: String,
         outcomes: MutableMap<String, CallOutcome>,
@@ -553,7 +582,7 @@ class EnsResolver internal constructor(
             Log.w(TAG, "${hostOf(rpc)}: CCIP-Read failed: ${e.message}")
             null
         }
-        val theirs = (round.hashes[rpc] ?: io.async { blockHash(rpc, round.tag) }).await()
+        val theirs = theirHash.await()
         if (!theirs.equals(hash, ignoreCase = true)) {
             Log.w(TAG, "${hostOf(rpc)}: block #${round.number} is $theirs, not $hash")
             return EnsQuorum.Leg.Failed()

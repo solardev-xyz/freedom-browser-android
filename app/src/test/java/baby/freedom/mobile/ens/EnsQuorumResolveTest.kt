@@ -32,6 +32,9 @@ class EnsQuorumResolveTest {
         var record: (block: String, data: String) -> EnsHttp.Reply?,
         /** Milliseconds the head answer takes, to fix the arrival order. */
         var headDelayMs: Long = 0,
+        /** Milliseconds the block-hash and record answers take. */
+        var hashDelayMs: Long = 0,
+        var recordDelayMs: Long = 0,
     )
 
     private class Request(val url: String, val method: String, val params: JSONArray)
@@ -67,9 +70,13 @@ class EnsQuorumResolveTest {
                 }
                 "eth_getBlockByNumber" -> {
                     val n = params.getString(0).removePrefix("0x").toLong(16)
+                    Thread.sleep(server.hashDelayMs)
                     server.hashOf(n)?.let { result("""{"number":"0x${n.toString(16)}","hash":"$it"}""") } ?: down
                 }
-                "eth_call" -> server.record(params.getString(1), params.getJSONObject(0).getString("data")) ?: down
+                "eth_call" -> {
+                    Thread.sleep(server.recordDelayMs)
+                    server.record(params.getString(1), params.getJSONObject(0).getString("data")) ?: down
+                }
                 else -> error("unexpected method $rpcMethod")
             }
         }
@@ -661,6 +668,44 @@ class EnsQuorumResolveTest {
         assertEquals("bzz://$honestRef", result.uri)
         assertTrue(result.trust.verified)
         assertFalse(result.trust.agreed.any { "drpc" in it })
+    }
+
+    @Test
+    fun `a stand-in starts as soon as its seat fails, reading and hashing at once`() {
+        // Keyed DRPC's eth_call fails at once while rpc3 takes 3 s to fail
+        // its own. eth.drpc.org must not wait for rpc3, nor fetch its
+        // block hash only after its read (PR #169 R3-F1): its 800 ms read
+        // and 800 ms hash overlap, and the wave is decided with rpc2.
+        val limited = honest().apply { record = { _, _ -> null } }
+        val slowFail = honest().apply {
+            record = { _, _ -> null }
+            recordDelayMs = 3_000
+        }
+        val twin = honest().apply {
+            hashDelayMs = 800
+            recordDelayMs = 800
+        }
+        val servers = Servers(
+            listOf(
+                "https://lb.drpc.live/ethereum/KEY",
+                "https://eth.drpc.org",
+                "https://rpc2.test/",
+                "https://rpc3.test/",
+            ).zip(listOf(limited, twin, honest(), slowFail)).toMap(LinkedHashMap()),
+        )
+        val resolver = EnsResolver(servers.byUrl.keys.toList(), servers)
+        // Settle the anchor first so only the reads are timed.
+        runBlocking { resolver.resolveContenthash("warm.eth") }
+
+        val startedAt = System.currentTimeMillis()
+        val result = runBlocking { resolver.resolveContenthash("quorum.eth") }
+        val took = System.currentTimeMillis() - startedAt
+
+        require(result is EnsResult.Ok) { "got $result" }
+        assertTrue(result.trust.verified)
+        assertTrue("eth.drpc.org" in result.trust.agreed)
+        // Serial would be ≥ 3 s (rpc3) + 800 + 800; overlapped is ~800.
+        assertTrue("took $took ms", took < 1_500)
     }
 
     @Test
