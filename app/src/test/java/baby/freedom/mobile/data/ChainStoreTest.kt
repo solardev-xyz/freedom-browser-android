@@ -131,7 +131,8 @@ class ChainStoreTest {
         assertEquals(ChainStore.RpcAddResult.DUPLICATE, store.addUserRpc(1, mine))
         assertEquals(ChainStore.RpcAddResult.PUBLIC, store.addUserRpc(1, BuiltInChains.ETHEREUM.rpcUrls[0]))
         // Name resolution may add one as yours: it doesn't ask the chain's public RPCs.
-        val promoted = BuiltInChains.ETHEREUM.rpcUrls[1]
+        val promoted = "https://rpc.flashbots.net"
+        assertTrue(promoted in BuiltInChains.ETHEREUM.rpcUrls)
         assertEquals(ChainStore.RpcAddResult.ADDED, store.addUserRpc(1, promoted, allowPublic = true))
         assertEquals(listOf(mine, promoted), store.chains.first().first { it.id == 1L }.userRpcUrls)
         assertTrue(store.removeUserRpc(1, promoted))

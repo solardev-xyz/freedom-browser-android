@@ -400,6 +400,7 @@ class NodeSettings private constructor(
                 ChainStore.RpcAddResult.INVALID -> AddEndpointResult.INVALID
                 ChainStore.RpcAddResult.DUPLICATE -> AddEndpointResult.DUPLICATE
                 ChainStore.RpcAddResult.FULL -> AddEndpointResult.FULL
+                ChainStore.RpcAddResult.NAME_RESOLUTION_PUBLIC -> AddEndpointResult.PUBLIC
                 ChainStore.RpcAddResult.PUBLIC, ChainStore.RpcAddResult.NO_CHAIN,
                 ChainStore.RpcAddResult.FAILED -> AddEndpointResult.FAILED
             }

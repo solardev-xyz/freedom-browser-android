@@ -149,6 +149,38 @@ class NodeSettingsEnsRpcTest {
     }
 
     @Test
+    fun `the Ethereum chain page can't make name resolution's public endpoints yours either`() = runBlocking {
+        // Not on the chain's own list, but name resolution asks it: refused.
+        assertFalse("https://eth.merkle.io" in BuiltInChains.ETHEREUM.rpcUrls)
+        for (url in EnsRpcConfig.PUBLIC_ENDPOINTS - BuiltInChains.ETHEREUM.rpcUrls.toSet()) {
+            assertEquals(ChainStore.RpcAddResult.NAME_RESOLUTION_PUBLIC, chains.addUserRpc(1, url))
+            assertEquals(ChainStore.RpcAddResult.NAME_RESOLUTION_PUBLIC, chains.addUserRpc(1, url, allowPublic = true))
+        }
+        // Another spelling of one on both lists is still that one.
+        assertEquals(ChainStore.RpcAddResult.PUBLIC, chains.addUserRpc(1, "https://ETH.drpc.org/"))
+        assertEquals(
+            ChainStore.RpcAddResult.NAME_RESOLUTION_PUBLIC,
+            chains.addUserRpc(1, "https://ETH.drpc.org/", allowPublic = true),
+        )
+        assertEquals(emptyList<String>(), mainnetRpcs())
+        assertEquals(emptyList<String>(), config().customEndpoints)
+        // Other chains are name resolution's business not at all.
+        assertEquals(ChainStore.RpcAddResult.ADDED, chains.addUserRpc(100, "https://eth.merkle.io"))
+    }
+
+    @Test
+    fun `another spelling of a chain's public RPC is stored as the chain lists it`() = runBlocking {
+        assertEquals(NodeSettings.AddEndpointResult.ADDED, settings.addEnsRpcEndpoint("https://RPC.flashbots.net/"))
+        assertEquals(listOf("https://rpc.flashbots.net"), mainnetRpcs())
+        val eth = chains.chains.first().first { it.id == BuiltInChains.ETHEREUM.id }
+        assertFalse("https://rpc.flashbots.net" in eth.publicRpcUrls)
+        assertEquals(1, (eth.userRpcUrls + eth.rpcUrls).distinct().count { it == "https://rpc.flashbots.net" })
+        // And a respelling of one of yours is a duplicate, on either page.
+        assertEquals(ChainStore.RpcAddResult.DUPLICATE, chains.addUserRpc(1, "HTTPS://rpc.flashbots.net/"))
+        assertEquals(NodeSettings.AddEndpointResult.DUPLICATE, settings.addEnsRpcEndpoint("https://rpc.FLASHBOTS.net"))
+    }
+
+    @Test
     fun `API keys are stored encrypted, never in plain text`() = runBlocking {
         val secret = "sk_live_0123456789abcdefSECRET"
         assertEquals(NodeSettings.EnsEdit.DONE, settings.setRpcApiKey("alchemy", secret))
@@ -168,7 +200,8 @@ class NodeSettingsEnsRpcTest {
             mutablePreferencesOf(
                 RpcKeyStore.LEGACY_KEY to """{"infura":"OLDKEY","drpc":"DKEY"}""",
                 stringPreferencesKey("ens_rpc_custom_endpoints") to
-                    """["https://mine.node","http://192.168.1.5:8545","https://mine.node","https://rpc.flashbots.net"]""",
+                    """["https://mine.node","http://192.168.1.5:8545","https://MINE.node/","https://RPC.flashbots.net/",""" +
+                    """"https://eth.merkle.io","https://ETH.drpc.org/"]""",
             ),
         )
         // A key saved in the new store already wins over the old copy.
@@ -177,8 +210,10 @@ class NodeSettingsEnsRpcTest {
 
         val c = upgraded.ensRpcConfig.first()
         assertEquals(mapOf("infura" to "OLDKEY", "drpc" to "NEWER"), c.apiKeys)
-        // Onto mainnet's list; the LAN address it refuses, and the repeat, are
-        // dropped — one of the chain's public RPCs is kept, names never ask it otherwise.
+        // Onto mainnet's list; the LAN address it refuses, the repeat (by
+        // endpoint, not spelling) and name resolution's own public endpoints
+        // are dropped — one of the chain's other public RPCs is kept, as the
+        // chain lists it: names never ask it otherwise.
         val mine = listOf("https://mine.node", "https://rpc.flashbots.net")
         assertEquals(mine, c.customEndpoints)
         assertEquals(mine, mainnetRpcs())

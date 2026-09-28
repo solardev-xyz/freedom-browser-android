@@ -165,6 +165,8 @@ internal fun userRpcAddError(result: ChainStore.RpcAddResult): String? = when (r
     ChainStore.RpcAddResult.INVALID -> "Not a usable RPC URL."
     ChainStore.RpcAddResult.DUPLICATE -> "That RPC is already in your list."
     ChainStore.RpcAddResult.PUBLIC -> "That's already one of this chain's public RPCs."
+    ChainStore.RpcAddResult.NAME_RESOLUTION_PUBLIC ->
+        "That's one of name resolution's public RPCs, already asked under its own switch there — it can't be one of yours."
     ChainStore.RpcAddResult.FULL -> "At most ${Chain.MAX_USER_RPC_URLS} of your own RPCs per chain."
     ChainStore.RpcAddResult.NO_CHAIN -> "This chain was removed."
     ChainStore.RpcAddResult.FAILED -> "Couldn't save the RPC. Try again."

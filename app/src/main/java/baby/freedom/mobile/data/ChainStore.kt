@@ -13,6 +13,7 @@ import baby.freedom.mobile.chains.BuiltInChains
 import baby.freedom.mobile.chains.Chain
 import baby.freedom.mobile.chains.ChainInput
 import baby.freedom.mobile.chains.RpcUrls
+import baby.freedom.mobile.ens.EnsRpcConfig
 import java.io.IOException
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
@@ -67,9 +68,11 @@ class ChainStore internal constructor(
 
     /**
      * [addUserRpc]'s answer. [PUBLIC]: already one of the chain's public
-     * RPCs; [NO_CHAIN]: no such chain (removed meanwhile).
+     * RPCs; [NAME_RESOLUTION_PUBLIC]: one of name resolution's own
+     * built-in public endpoints ([isNameResolutionPublic]); [NO_CHAIN]: no
+     * such chain (removed meanwhile).
      */
-    enum class RpcAddResult { ADDED, INVALID, DUPLICATE, PUBLIC, FULL, NO_CHAIN, FAILED }
+    enum class RpcAddResult { ADDED, INVALID, DUPLICATE, PUBLIC, NAME_RESOLUTION_PUBLIC, FULL, NO_CHAIN, FAILED }
 
     /** Every chain: the built-ins, then custom chains in the order they were added. */
     val chains: Flow<List<Chain>> = flow {
@@ -96,11 +99,20 @@ class ChainStore internal constructor(
      * Add [raw] to chain [id]'s own RPCs ([Chain.userRpcUrls]), after
      * [RpcUrls.normalize] — checked against the stored list inside the
      * same write, so two quick adds can't overflow it or add one twice.
+     * Every comparison is by [EnsRpcConfig.endpointKey]
+     * (`https://ETH.drpc.org/` is `https://eth.drpc.org`).
      *
      * One of the chain's public RPCs is refused ([RpcAddResult.PUBLIC])
      * unless [allowPublic]: the chain page already asks those, but name
      * resolution doesn't (it has its own public list), so adding one
-     * from there makes it yours — asked first, here too.
+     * from there makes it yours — asked first, here too — stored as the
+     * chain lists it, so every reader sees the one URL. For Ethereum
+     * mainnet, whose own RPCs are name resolution's "your endpoints",
+     * one of name resolution's built-in public endpoints is always
+     * refused ([RpcAddResult.NAME_RESOLUTION_PUBLIC]), whichever page
+     * it's added from: the resolver already asks it under its own
+     * switch, and taking it as yours would label a third party's lone
+     * answer as your RPC's.
      */
     suspend fun addUserRpc(id: Long, raw: String, allowPublic: Boolean = false): RpcAddResult {
         val url = RpcUrls.normalize(raw) ?: return RpcAddResult.INVALID
@@ -110,13 +122,16 @@ class ChainStore internal constructor(
                 val chain = BuiltInChains.ALL.firstOrNull { it.id == id }
                     ?: prefs[keyOf(id)]?.let(::decode)?.first?.takeIf { it.id == id && !BuiltInChains.isBuiltIn(id) }
                 val current = chain?.let { userRpcs(prefs, it) }.orEmpty()
+                val key = EnsRpcConfig.endpointKey(url)
+                val listed = chain?.rpcUrls?.firstOrNull { EnsRpcConfig.endpointKey(it) == key }
                 result = when {
                     chain == null -> RpcAddResult.NO_CHAIN
-                    url in current -> RpcAddResult.DUPLICATE
-                    !allowPublic && url in chain.rpcUrls -> RpcAddResult.PUBLIC
+                    current.any { EnsRpcConfig.endpointKey(it) == key } -> RpcAddResult.DUPLICATE
+                    !allowPublic && listed != null -> RpcAddResult.PUBLIC
+                    isNameResolutionPublic(id, url) -> RpcAddResult.NAME_RESOLUTION_PUBLIC
                     current.size >= Chain.MAX_USER_RPC_URLS -> RpcAddResult.FULL
                     else -> {
-                        prefs[rpcsKeyOf(id)] = JSONArray(current + url).toString()
+                        prefs[rpcsKeyOf(id)] = JSONArray(current + (listed ?: url)).toString()
                         RpcAddResult.ADDED
                     }
                 }
@@ -170,10 +185,12 @@ class ChainStore internal constructor(
     /**
      * Append [urls] to built-in chain [id]'s own RPCs in one write — for
      * moving a list kept elsewhere in, not for user input: each is
-     * [RpcUrls.normalize]d, and one that's invalid, already there or past
-     * [Chain.MAX_USER_RPC_URLS] is skipped. One of the chain's public
-     * RPCs is taken, as [addUserRpc] with `allowPublic` does: the list
-     * being moved in chose it on purpose.
+     * [RpcUrls.normalize]d, and one that's invalid, already there
+     * ([EnsRpcConfig.endpointKey]), one of name resolution's own public
+     * endpoints ([isNameResolutionPublic]) or past
+     * [Chain.MAX_USER_RPC_URLS] is skipped. One of the chain's other
+     * public RPCs is taken, as the chain lists it, as [addUserRpc] with
+     * `allowPublic` does: the list being moved in chose it on purpose.
      * Returns the URLs it skipped, or `null` when the write failed.
      */
     internal suspend fun importUserRpcs(id: Long, urls: List<String>): List<String>? {
@@ -185,11 +202,13 @@ class ChainStore internal constructor(
                 val list = decodeRpcs(prefs[rpcsKeyOf(id)]).toMutableList()
                 for (raw in urls) {
                     val url = RpcUrls.normalize(raw)
-                    if (url == null || url in list || list.size >= Chain.MAX_USER_RPC_URLS
+                    val key = url?.let(EnsRpcConfig::endpointKey)
+                    if (url == null || list.any { EnsRpcConfig.endpointKey(it) == key } ||
+                        isNameResolutionPublic(id, url) || list.size >= Chain.MAX_USER_RPC_URLS
                     ) {
                         skipped += raw
                     } else {
-                        list += url
+                        list += chain.rpcUrls.firstOrNull { EnsRpcConfig.endpointKey(it) == key } ?: url
                     }
                 }
                 if (list.isNotEmpty()) prefs[rpcsKeyOf(id)] = JSONArray(list).toString()
@@ -273,6 +292,18 @@ class ChainStore internal constructor(
         private const val PREFIX = "chain:"
         private const val RPCS_PREFIX = "rpcs:"
         private const val TAG = "ChainStore"
+
+        /**
+         * Whether [url] may never be one of chain [id]'s own RPCs: on
+         * Ethereum mainnet, whose own RPCs are name resolution's "your
+         * endpoints", one of name resolution's built-in public endpoints
+         * ([EnsRpcConfig.isPublicEndpoint]).
+         */
+        fun isNameResolutionPublic(id: Long, url: String): Boolean =
+            id == BuiltInChains.ETHEREUM.id &&
+                EnsRpcConfig.endpointKey(url).let { key ->
+                    EnsRpcConfig.PUBLIC_ENDPOINTS.any { EnsRpcConfig.endpointKey(it) == key }
+                }
 
         private fun keyOf(id: Long) = stringPreferencesKey("$PREFIX$id")
         private fun rpcsKeyOf(id: Long) = stringPreferencesKey("$RPCS_PREFIX$id")
