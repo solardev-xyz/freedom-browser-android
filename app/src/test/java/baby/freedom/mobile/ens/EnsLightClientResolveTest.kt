@@ -99,9 +99,11 @@ class EnsLightClientResolveTest {
         deadlineMs: Long = EnsResolver.LIGHT_CLIENT_DEADLINE_MS,
         backoffMs: Long = EnsResolver.LIGHT_CLIENT_BACKOFF_MS,
         establishedMs: Long = 0,
+        nameMissMs: Long = EnsResolver.LIGHT_CLIENT_NAME_MISS_MS,
     ) = EnsResolver(
         { settings() }, http, TezosDomainsResolver(), client, deadlineMs, backoffMs,
         lightClientEstablishedMs = establishedMs,
+        lightClientNameMissMs = nameMissMs,
     )
 
     private val lightClientOk = EnsLightClient.Call.Ok(wrapAsOuterInner(ipfsContenthash), block = 21_000_000L)
@@ -369,7 +371,9 @@ class EnsLightClientResolveTest {
     fun `readiness flapping keeps the RPC epoch and its cache`() {
         val client = FakeLightClient(generation = null) { _, _ -> EnsLightClient.Call.Unavailable("all snap peers failed") }
         val http = OneServer { rpcResult(wrapAsOuterInner(ipfsContenthash)) }
-        val r = resolver(client, http)
+        // Without the per-name miss memory, which is time-scoped, not
+        // per generation (see the test on it below).
+        val r = resolver(client, http, nameMissMs = 0)
 
         runBlocking { r.resolveContenthash("vitalik.eth") }
         assertEquals(1, http.urls.size)
@@ -390,6 +394,72 @@ class EnsLightClientResolveTest {
         runBlocking { r.resolveContenthash("vitalik.eth") }
         assertEquals(2, client.calls.size)
         assertEquals(3, http.urls.size)
+    }
+
+    @Test
+    fun `a name the light client missed goes straight to RPC for a while`() {
+        // The engine can't serve this one name (its resolver reads state
+        // no snap peer serves); the probe answers, so nothing backs off.
+        val client = FakeLightClient { _, data ->
+            if (data == EnsResolver.PROBE_CALL_DATA) lightClientOk
+            else if (isEvil(data)) EnsLightClient.Call.Unavailable("all 3 snap peer(s) failed")
+            else lightClientOk
+        }
+        val http = OneServer { rpcResult(wrapAsOuterInner(ipfsContenthash)) }
+        val r = resolver(client, http, nameMissMs = 400)
+        val settings = EnsResolver.Settings(listOf(rpc))
+
+        assertEquals(EnsResolver.LIGHT_CLIENT_DEADLINE_MS, r.lightClientWaitFor(settings, "evil.eth"))
+        runBlocking { r.resolveContenthash("evil.eth") }
+        assertEquals(1, client.calls.size)
+        assertEquals(1, http.urls.size)
+        // Within the window: no light-client call, and a re-check gets no
+        // light-client share. One server's cached word is reused, as it
+        // is whenever the light client won't be asked.
+        assertEquals(0L, r.lightClientWaitFor(settings, "evil.eth"))
+        val again = runBlocking { r.resolveContenthash("evil.eth") } as EnsResult.Ok
+        assertFalse(again.trust.lightClient)
+        assertEquals(1, client.calls.size)
+        // Other names still get the light client.
+        assertTrue((runBlocking { r.resolveContenthash("other.eth") } as EnsResult.Ok).trust.lightClient)
+        assertEquals(2, client.calls.size)
+        // Past the window it's asked again.
+        Thread.sleep(450)
+        assertEquals(EnsResolver.LIGHT_CLIENT_DEADLINE_MS, r.lightClientWaitFor(settings, "evil.eth"))
+        runBlocking { r.resolveContenthash("evil.eth") }
+        assertEquals(3, client.calls.size)
+    }
+
+    @Test
+    fun `a momentary refusal isn't remembered against the name`() {
+        // `busy` and a closed read gate say nothing about the name.
+        var answer: EnsLightClient.Call = EnsLightClient.Call.Unavailable("busy", busy = true)
+        val client = FakeLightClient { _, _ -> answer }
+        val http = OneServer { rpcResult(wrapAsOuterInner(ipfsContenthash)) }
+        val r = resolver(client, http)
+        val settings = EnsResolver.Settings(listOf(rpc))
+
+        runBlocking { r.resolveContenthash("busy.eth") }
+        assertEquals(EnsResolver.LIGHT_CLIENT_DEADLINE_MS, r.lightClientWaitFor(settings, "busy.eth"))
+        answer = EnsLightClient.Call.Unavailable("not ready", notReady = true)
+        runBlocking { r.resolveContenthash("busy.eth") }
+        assertEquals(EnsResolver.LIGHT_CLIENT_DEADLINE_MS, r.lightClientWaitFor(settings, "busy.eth"))
+        answer = lightClientOk
+        assertTrue((runBlocking { r.resolveContenthash("busy.eth") } as EnsResult.Ok).trust.lightClient)
+        assertEquals(3, client.calls.size)
+    }
+
+    @Test
+    fun `with no RPC endpoints a name the light client missed is still asked`() {
+        var answer: EnsLightClient.Call = EnsLightClient.Call.Unavailable("all snap peers failed")
+        val client = FakeLightClient { _, data -> if (data == EnsResolver.PROBE_CALL_DATA) lightClientOk else answer }
+        val http = OneServer { error("no RPC server configured") }
+        val r = resolver(client, http, settings = { EnsResolver.Settings(emptyList()) })
+
+        runBlocking { r.resolveContenthash("vitalik.eth") }
+        answer = lightClientOk
+        assertTrue((runBlocking { r.resolveContenthash("vitalik.eth") } as EnsResult.Ok).trust.lightClient)
+        assertEquals(2, client.calls.size)
     }
 
     @Test

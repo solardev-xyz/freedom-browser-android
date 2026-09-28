@@ -200,14 +200,18 @@ object Gateways {
      * re-check gets the RPC share alone.
      *
      * The Myotis light client (#101) runs before both, for up to
-     * `EnsResolver.LIGHT_CLIENT_DEADLINE_MS`, so while a lookup would ask
-     * it the re-check waits that out too ([lightClientAllowanceMs]): an
-     * answer it gives after a few seconds — or a miss it falls back from
-     * to a quick RPC answer — must not time out onto the earlier answer
-     * either. A stalled engine can then cost one Back its whole budget
-     * (~20 s, plus a probe's 5 s wait if one is running, on top of the
-     * above); the miss makes it probe the engine and skip it while that
-     * fails, which drops the allowance to 0 for the next documents.
+     * `EnsResolver.LIGHT_CLIENT_DEADLINE_MS`. While a lookup would ask it,
+     * the re-check waits for it too ([lightClientAllowanceMs]), but only
+     * up to [reverifyLightClientShareMs] (3 s): an ordinary answer comes
+     * in by then, and with an earlier answer to serve, a stalled engine
+     * mustn't hold Back for its whole budget (#149's rule). A lookup still
+     * running then carries on in the background and refreshes the cache;
+     * as long as the light client may still be inside its own budget,
+     * that timeout isn't counted as a failed re-check
+     * ([reverifyFailureWindowMs]) — the lookup records its own outcome
+     * when it ends. A name the engine missed is skipped by the light
+     * client for a while (`EnsResolver.LIGHT_CLIENT_NAME_MISS_MS`), so
+     * its later re-checks get no light-client share at all.
      */
     @Volatile
     internal var reverifyDeadlineMs: Long = 3_000
@@ -221,6 +225,14 @@ object Gateways {
     internal var colibriAllowanceMs: (EnsResolver.Settings, String) -> Long = { settings, name ->
         ensResolver.colibriWaitFor(settings, name)
     }
+
+    /**
+     * The most of the light client's time ([lightClientAllowanceMs]) a
+     * re-check waits for; see [reverifyDeadlineMs]. `internal var` for
+     * tests.
+     */
+    @Volatile
+    internal var reverifyLightClientShareMs: Long = 3_000
 
     /**
      * How long a lookup of a name under these settings may spend on the
@@ -325,7 +337,7 @@ object Gateways {
      * flight, waiting at most [deadlineMs] (`null` = until it answers).
      * `null` when the deadline passed first; the lookup keeps running.
      */
-    private fun lookupWithin(key: LookupKey, name: String, deadlineMs: Long?): EnsResult? {
+    private fun lookupWithin(key: LookupKey, name: String, deadlineMs: Long?, recordTimeout: Boolean = true): EnsResult? {
         var started: Deferred<EnsResult>? = null
         val job = lookupsInFlight.computeIfAbsent(key) {
             lookupScope.async(start = CoroutineStart.LAZY) {
@@ -364,7 +376,7 @@ object Gateways {
         // shouldn't wait for it again. Not for a zero deadline — that
         // document skipped the wait, it didn't find the network any slower,
         // and the running lookup records its own outcome when it finishes.
-        if (result == null && deadlineMs != null && deadlineMs > 0 && !job.isCompleted) {
+        if (recordTimeout && result == null && deadlineMs != null && deadlineMs > 0 && !job.isCompleted) {
             recordLookupFailure(key)
         }
         return result
@@ -639,6 +651,7 @@ object Gateways {
         val last = fallback?.first
         val lastTrust = fallback?.second
         fun lookup(key: LookupKey): EnsResult? {
+            val lightClient = key.settings?.let { lightClientAllowanceMs(it, key.name) } ?: 0L
             // With something to fall back on, don't hold the document for
             // the resolver's worst case (see [reverifyDeadlineMs]).
             val deadline = when {
@@ -647,11 +660,14 @@ object Gateways {
                     System.currentTimeMillis() - it < reverifyFailureWindowMs
                 } == true -> 0L
                 else -> reverifyDeadlineMs + (
-                    key.settings?.let { lightClientAllowanceMs(it, key.name) + colibriAllowanceMs(it, key.name) } ?: 0L
+                    key.settings?.let { minOf(lightClient, reverifyLightClientShareMs) + colibriAllowanceMs(it, key.name) } ?: 0L
                 )
             }
             // [lookupWithin] keeps [lookupFailedAt] — see [reverifyFailureWindowMs].
-            return lookupWithin(key, name, deadline)
+            // Timing out while the light client may still be inside its own
+            // budget says nothing about the network yet: the lookup records
+            // its own outcome when it ends.
+            return lookupWithin(key, name, deadline, recordTimeout = lightClient <= reverifyLightClientShareMs)
         }
         var key = lookupKey(name)
         var result = lookup(key)
