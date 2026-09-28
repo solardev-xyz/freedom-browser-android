@@ -41,6 +41,8 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Cookie
 import androidx.compose.material.icons.filled.Public
 import androidx.compose.material.icons.filled.Shield
+import androidx.compose.material.icons.filled.Sync
+import androidx.compose.material.icons.filled.Update
 import androidx.compose.material.icons.filled.DeleteForever
 import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.History
@@ -149,6 +151,8 @@ fun SettingsScreen(
         .collectAsState(initial = AdblockCategory.entries.filterTo(LinkedHashSet()) { it.enabledByDefault })
     val adblockAllowlist by settings.adblockAllowlist.collectAsState(initial = emptyList())
     val adblockStatus by Adblock.status.collectAsState()
+    val adblockUpdate by Adblock.updateState.collectAsState()
+    val adblockAutoUpdate by settings.adblockAutoUpdate.collectAsState(initial = true)
     var addAllowlistSite by remember { mutableStateOf(false) }
 
     var confirmClearHistory by remember { mutableStateOf(false) }
@@ -169,7 +173,8 @@ fun SettingsScreen(
         query, SECTION_SEARCH, searchSectionRows(searchEngine, customSearchTemplate),
     )
     val adblockRows = visibleSettingsRows(
-        query, SECTION_ADBLOCK, adblockSectionRows(adblockCategories, adblockAllowlist),
+        query, SECTION_ADBLOCK,
+        adblockSectionRows(adblockCategories, adblockAllowlist, adblockStatus, adblockUpdate),
     )
     val browsingRows = visibleSettingsRows(
         query, SECTION_BROWSING, browsingDataRows(history.size, bookmarks.size),
@@ -226,9 +231,13 @@ fun SettingsScreen(
                         enabled = adblockCategories,
                         allowlist = adblockAllowlist,
                         status = adblockStatus,
+                        update = adblockUpdate,
+                        autoUpdate = adblockAutoUpdate,
                         onToggle = { category, on ->
                             scope.launch { settings.setAdblockCategory(category, on) }
                         },
+                        onAutoUpdate = { on -> scope.launch { settings.setAdblockAutoUpdate(on) } },
+                        onCheckUpdates = { Adblock.checkForUpdates() },
                         onRemoveSite = { site ->
                             Adblock.removeAllowlisted(site)
                         },
@@ -787,14 +796,62 @@ private const val ADBLOCK_ADD_SITE_SUBTITLE = "Turn ad blocking off for a site"
 private const val ADBLOCK_CREDITS =
     "Filter lists: EasyList, EasyPrivacy and Fanboy's lists (easylist.to), © their authors, used under CC BY-SA 3.0. Changes apply to pages as they next load."
 
+private const val ADBLOCK_AUTO_UPDATE = "Keep filter lists up to date"
+private const val ADBLOCK_AUTO_UPDATE_SUBTITLE = "Signed updates over Swarm"
+private const val ADBLOCK_CHECK_UPDATES = "Check for list updates"
+private const val ADBLOCK_CHECK_UPDATES_SUBTITLE = "Reads the update feed on Swarm now"
+
+/**
+ * The wrapping line under "Keep filter lists up to date": which lists
+ * the engine uses now — an update's version and the day it was built,
+ * or the bundled ones (#127). (The subtitle is one ellipsised line, too
+ * short to be sure of showing the version on a phone.)
+ */
+internal fun adblockListsLine(status: AdblockStatus): String {
+    val version = status.listsVersion ?: return "Using the built-in lists"
+    val day = status.listsGeneratedAt?.take(10)?.takeIf { it.matches(Regex("\\d{4}-\\d{2}-\\d{2}")) }
+    return "Using update $version" + (day?.let { " of $it" } ?: "")
+}
+
+/**
+ * The wrapping line under "Check for list updates": a check under way,
+ * or how the last one ended; `null` before the first check.
+ */
+internal fun adblockUpdateLine(update: AdblockUpdateState): String? {
+    if (update.checking) return "Checking…"
+    return when (val last = update.last) {
+        null -> null
+        is AdblockUpdateOutcome.Applied -> "Updated to version ${last.version}"
+        is AdblockUpdateOutcome.UpToDate ->
+            if (last.version > 0) "Up to date (version ${last.version})" else "Up to date"
+        AdblockUpdateOutcome.FeedUnavailable ->
+            "Couldn't reach the update feed on Swarm — is the Swarm node running? Tap to try again"
+        is AdblockUpdateOutcome.Rejected ->
+            "Refused an update that failed verification (${last.reason}); the current lists stay"
+        is AdblockUpdateOutcome.DownloadFailed ->
+            "Couldn't download the ${last.category} list; the current lists stay"
+        is AdblockUpdateOutcome.HashMismatch ->
+            "The ${last.category} list didn't match its signed hash; the current lists stay"
+        AdblockUpdateOutcome.NothingEnabled -> "Every filter list is off"
+        is AdblockUpdateOutcome.Failed -> "The update failed (${last.message}); the current lists stay"
+    }
+}
+
 /** The line under a category: its list, and while it's on, how the engine is doing. */
 internal fun adblockCategorySubtitle(category: AdblockCategory, on: Boolean, status: AdblockStatus): String =
     if (on && status.loading) "${category.listName} · loading…" else category.listName
 
-private fun adblockSectionRows(enabled: Set<AdblockCategory>, allowlist: List<String>) = buildList {
+private fun adblockSectionRows(
+    enabled: Set<AdblockCategory>,
+    allowlist: List<String>,
+    status: AdblockStatus,
+    update: AdblockUpdateState,
+) = buildList {
     for (category in AdblockCategory.entries) {
         add(settingsRow(category, category.title, category.listName, if (category in enabled) "On" else "Off"))
     }
+    add(settingsRow("auto-update", ADBLOCK_AUTO_UPDATE, ADBLOCK_AUTO_UPDATE_SUBTITLE, adblockListsLine(status), "filter list updates"))
+    add(settingsRow("update-check", ADBLOCK_CHECK_UPDATES, ADBLOCK_CHECK_UPDATES_SUBTITLE, adblockUpdateLine(update), "filter list updates"))
     add(settingsRow("allowlist-add", ADBLOCK_ADD_SITE, ADBLOCK_ADD_SITE_SUBTITLE, "allowlist", "allowed sites"))
     if (allowlist.isEmpty()) {
         add(settingsRow("allowlist-empty", ADBLOCK_ALLOWLIST_EMPTY))
@@ -828,7 +885,11 @@ private fun AdblockSection(
     enabled: Set<AdblockCategory>,
     allowlist: List<String>,
     status: AdblockStatus,
+    update: AdblockUpdateState,
+    autoUpdate: Boolean,
     onToggle: (AdblockCategory, Boolean) -> Unit,
+    onAutoUpdate: (Boolean) -> Unit,
+    onCheckUpdates: () -> Unit,
     onRemoveSite: (String) -> Unit,
     onAddSite: () -> Unit,
 ) {
@@ -847,6 +908,26 @@ private fun AdblockSection(
                 },
             )
         }
+        if ("auto-update" in visible) PageRow(
+            title = ADBLOCK_AUTO_UPDATE,
+            subtitle = ADBLOCK_AUTO_UPDATE_SUBTITLE,
+            thirdLine = adblockListsLine(status),
+            style = PageRowStyle.Inset,
+            leadingIcon = Icons.Filled.Update,
+            onClick = { onAutoUpdate(!autoUpdate) },
+            trailing = {
+                Switch(checked = autoUpdate, onCheckedChange = onAutoUpdate)
+            },
+        )
+        if ("update-check" in visible) PageRow(
+            title = ADBLOCK_CHECK_UPDATES,
+            subtitle = ADBLOCK_CHECK_UPDATES_SUBTITLE,
+            thirdLine = adblockUpdateLine(update),
+            style = PageRowStyle.Inset,
+            leadingIcon = Icons.Filled.Sync,
+            enabled = !update.checking,
+            onClick = onCheckUpdates,
+        )
         if ("allowlist-add" in visible) PageRow(
             title = ADBLOCK_ADD_SITE,
             subtitle = ADBLOCK_ADD_SITE_SUBTITLE,

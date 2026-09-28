@@ -14,12 +14,18 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.ByteArrayInputStream
+import java.io.File
 
 private const val TAG = "Adblock"
 
@@ -256,8 +262,20 @@ internal class AllowlistStore(
     }
 }
 
-/** What Settings shows about the engine. */
-internal data class AdblockStatus(val loading: Boolean, val filterCount: Int)
+/**
+ * What Settings shows about the engine: whether it's (re)building, its
+ * filter count, and the feed version its lists came from — `null` while
+ * every list is the bundled one (#127).
+ */
+internal data class AdblockStatus(
+    val loading: Boolean,
+    val filterCount: Int,
+    val listsVersion: Long? = null,
+    val listsGeneratedAt: String? = null,
+)
+
+/** What Settings shows about list updates (#127): a check under way, and how the last one ended. */
+internal data class AdblockUpdateState(val checking: Boolean = false, val last: AdblockUpdateOutcome? = null)
 
 /**
  * The ad blocker at runtime (#126): the [AdblockEngine] for the
@@ -281,6 +299,12 @@ internal data class AdblockStatus(val loading: Boolean, val filterCount: Int)
  * Private tabs (#86) see the saved allowlist, but a site they allow is
  * kept for the private session only, in memory, like their site
  * permissions — it never reaches the settings file.
+ *
+ * The lists update themselves over Swarm (#127, [runAdblockUpdate]):
+ * [AUTO_UPDATE_FIRST_DELAY_MS] after start, then every
+ * [AUTO_UPDATE_PERIOD_MS] while the app runs, and from Settings on
+ * request. An applied update rebuilds the engine the same way a
+ * category change does, so it takes effect without a restart.
  */
 internal object Adblock {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -302,6 +326,19 @@ internal object Adblock {
     val revision: StateFlow<Int> = _revision.asStateFlow()
 
     private var started = false
+
+    /** Set in [start]: where updates keep their lists. */
+    @Volatile
+    private var lists: AdblockListStore? = null
+
+    /** Bumped when an update lands, to rebuild the engine from it. */
+    private val listsRevision = MutableStateFlow(0)
+
+    private val _updateState = MutableStateFlow(AdblockUpdateState())
+    val updateState: StateFlow<AdblockUpdateState> = _updateState.asStateFlow()
+
+    /** One update check at a time: the scheduled one and a Settings tap share it. */
+    private val updateMutex = Mutex()
 
     /** Set in [start]; allowlist writes made before it queue up. */
     @Volatile
@@ -327,6 +364,8 @@ internal object Adblock {
         val app = context.applicationContext
         val settings = NodeSettings.get(app)
         this.settings = settings
+        val lists = AdblockListStore(File(app.filesDir, "adblock"))
+        this.lists = lists
         scope.launch { store.run() }
         val allowlistRead = CompletableDeferred<Unit>()
         scope.launch {
@@ -339,28 +378,61 @@ internal object Adblock {
         // Latest only: a newer category set abandons the build under way
         // (it checks in every thousand lines), so quick toggles don't
         // compile each stale set in turn before the last one applies.
+        // An applied list update (#127) rebuilds it too.
         scope.launch {
-            settings.adblockCategories.distinctUntilChanged().collectLatest { categories ->
-                _status.value = _status.value.copy(loading = true)
-                val built = withContext(Dispatchers.IO) { build(app, categories) { ensureActive() } }
-                // An allowlisted site is never blocked while settings load.
-                allowlistRead.await()
-                engine = built
-                _status.value = AdblockStatus(loading = false, filterCount = built?.filterCount ?: 0)
-                _revision.value++
+            combine(settings.adblockCategories.distinctUntilChanged(), listsRevision) { categories, _ -> categories }
+                .collectLatest { categories ->
+                    _status.value = _status.value.copy(loading = true)
+                    val built = withContext(Dispatchers.IO) { build(app, lists, categories) { ensureActive() } }
+                    // An allowlisted site is never blocked while settings load.
+                    allowlistRead.await()
+                    engine = built?.first
+                    _status.value = AdblockStatus(
+                        loading = false,
+                        filterCount = built?.first?.filterCount ?: 0,
+                        listsVersion = built?.second?.version,
+                        listsGeneratedAt = built?.second?.generatedAt,
+                    )
+                    _revision.value++
+                }
+        }
+        scope.launch {
+            settings.adblockAutoUpdate.distinctUntilChanged().collectLatest { on ->
+                if (!on) return@collectLatest
+                delay(AUTO_UPDATE_FIRST_DELAY_MS)
+                while (true) {
+                    val sinceLast = System.currentTimeMillis() - lastCheck(lists)
+                    if (sinceLast in 0 until AUTO_UPDATE_PERIOD_MS) delay(AUTO_UPDATE_PERIOD_MS - sinceLast)
+                    val outcome = checkForUpdatesNow()
+                    // Feed unavailable doesn't count as a check (the node
+                    // may still be finding peers): try again soon.
+                    if (outcome == AdblockUpdateOutcome.FeedUnavailable) delay(AUTO_UPDATE_RETRY_MS)
+                }
             }
         }
     }
 
+    /**
+     * The engine for [categories] and the update its lists came from
+     * (`null` if all are bundled). Each list is the applied update's
+     * copy when it has one that still matches its hash, else the bundled
+     * asset.
+     */
     private fun build(
         context: Context,
+        lists: AdblockListStore,
         categories: Set<AdblockCategory>,
         checkpoint: () -> Unit,
-    ): AdblockEngine? {
+    ): Pair<AdblockEngine, AppliedUpdate?>? {
         if (categories.isEmpty()) return null
         val t0 = SystemClock.elapsedRealtime()
+        var update: AppliedUpdate? = null
         val texts = AdblockCategory.entries.filter { it in categories }.mapNotNull { category ->
             checkpoint()
+            lists.updatedList(category.key)?.let { (text, applied) ->
+                update = applied
+                return@mapNotNull text
+            }
             // A missing or unreadable list costs its own category only.
             runCatching {
                 context.assets.open("adblock/${category.file}").bufferedReader().use { it.readText() }
@@ -371,10 +443,69 @@ internal object Adblock {
         Log.i(
             TAG,
             "engine ready: ${categories.joinToString { it.key }}, ${built.filterCount} filters " +
-                "in ${SystemClock.elapsedRealtime() - t0} ms",
+                "(lists ${update?.let { "update ${it.version}" } ?: "bundled"}) in ${SystemClock.elapsedRealtime() - t0} ms",
         )
-        return built
+        return built to update
     }
+
+    /** Settings' "Check for updates": run a check now, whatever the schedule. */
+    fun checkForUpdates() {
+        scope.launch { checkForUpdatesNow() }
+    }
+
+    private suspend fun checkForUpdatesNow(): AdblockUpdateOutcome? {
+        val lists = lists ?: return null
+        val settings = settings ?: return null
+        return updateMutex.withLock {
+            _updateState.value = _updateState.value.copy(checking = true)
+            val outcome = try {
+                withContext(Dispatchers.IO) {
+                    val enabled = runCatching { settings.adblockCategories.first() }.getOrDefault(emptySet())
+                    Gateways.awaitExternalEndpoints()
+                    val base = Gateways.swarmBase
+                    runAdblockUpdate(
+                        store = lists,
+                        enabled = enabled.mapTo(HashSet()) { it.key },
+                        signer = AdblockFeed.SIGNER,
+                        readFeed = { readAdblockFeed(base) },
+                        download = { ref, max -> downloadSwarmBytes(base, ref, max) },
+                        activate = { listsRevision.value++ },
+                    )
+                }
+            } catch (e: CancellationException) {
+                _updateState.value = _updateState.value.copy(checking = false)
+                throw e
+            } catch (e: Exception) {
+                Log.w(TAG, "update check failed", e)
+                AdblockUpdateOutcome.Failed(e.message ?: e.javaClass.simpleName)
+            }
+            if (outcome != AdblockUpdateOutcome.FeedUnavailable) stampLastCheck(lists)
+            Log.i(TAG, "update check: $outcome")
+            _updateState.value = AdblockUpdateState(checking = false, last = outcome)
+            outcome
+        }
+    }
+
+    private fun lastCheck(lists: AdblockListStore): Long =
+        runCatching { File(lists.root, LAST_CHECK).readText().trim().toLong() }.getOrDefault(0L)
+
+    private fun stampLastCheck(lists: AdblockListStore) {
+        runCatching {
+            lists.root.mkdirs()
+            File(lists.root, LAST_CHECK).writeText(System.currentTimeMillis().toString())
+        }
+    }
+
+    private const val LAST_CHECK = "last-check"
+
+    /** Let the Swarm node find peers before the first feed read. */
+    private const val AUTO_UPDATE_FIRST_DELAY_MS = 45_000L
+
+    /** Lists move daily-ish and carry 1–4 day expiries: every six hours keeps them fresh. */
+    private const val AUTO_UPDATE_PERIOD_MS = 6 * 60 * 60_000L
+
+    /** After an unreadable feed (node not up yet, no peers). */
+    private const val AUTO_UPDATE_RETRY_MS = 15 * 60_000L
 
     /**
      * The page menu switch's state for the page [pageUrl] in a tab that

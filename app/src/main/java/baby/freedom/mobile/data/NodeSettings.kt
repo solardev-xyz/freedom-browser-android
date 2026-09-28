@@ -52,7 +52,8 @@ import kotlinx.coroutines.flow.map
  *
  * `adblock_<category>` switches each [AdblockCategory] (#126), absent
  * for its default; `adblock_allowlist` holds the sites ad blocking is
- * off for, in [normalizeAllowlistHost] form.
+ * off for, in [normalizeAllowlistHost] form; `adblock_auto_update` (absent
+ * for on) lets the app fetch signed filter-list updates over Swarm (#127).
  *
  * There is no persistent "run IPFS" flag by design. The IPFS node is
  * always off at cold launch (demo-surprise requirement) and driven
@@ -235,6 +236,15 @@ class NodeSettings private constructor(
         store.edit { it[Keys.ADBLOCK_ALLOWLIST] = it[Keys.ADBLOCK_ALLOWLIST].orEmpty() - host }
     }
 
+    /** Whether filter lists update themselves over Swarm (#127); on by default. */
+    val adblockAutoUpdate: Flow<Boolean> = store.data.map { prefs ->
+        prefs[Keys.ADBLOCK_AUTO_UPDATE] ?: true
+    }
+
+    suspend fun setAdblockAutoUpdate(enabled: Boolean) {
+        store.edit { it[Keys.ADBLOCK_AUTO_UPDATE] = enabled }
+    }
+
     private object Keys {
         val RUN_NODE_ENABLED = booleanPreferencesKey("run_node_enabled")
         val SHOW_IPFS_UI = booleanPreferencesKey("show_ipfs_ui")
@@ -245,6 +255,7 @@ class NodeSettings private constructor(
         val EXTERNAL_SWARM_ENDPOINT = stringPreferencesKey("external_swarm_endpoint")
         val EXTERNAL_IPFS_GATEWAY = stringPreferencesKey("external_ipfs_gateway")
         val ADBLOCK_ALLOWLIST = stringSetPreferencesKey("adblock_allowlist")
+        val ADBLOCK_AUTO_UPDATE = booleanPreferencesKey("adblock_auto_update")
         private val ADBLOCK = AdblockCategory.entries.associateWith { booleanPreferencesKey("adblock_${it.key}") }
         fun adblock(category: AdblockCategory) = ADBLOCK.getValue(category)
     }
