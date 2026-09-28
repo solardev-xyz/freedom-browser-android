@@ -140,6 +140,13 @@ data class EnsTrust(
      * weaker claim: only the Colibri path says [Source.COLIBRI].
      */
     val source: Source = Source.RPC,
+    /**
+     * The record came from an off-chain gateway (CCIP-Read) and was taken
+     * because the resolver contract's callback accepted it; for a
+     * [Source.COLIBRI] answer that acceptance is what was proven, not
+     * that the chain itself holds the record.
+     */
+    val offchain: Boolean = false,
 ) {
     enum class Source {
         /** RPC servers' answers: cross-checked if [verified], one server's word if not. */

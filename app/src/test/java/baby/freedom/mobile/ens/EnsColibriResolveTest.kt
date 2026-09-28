@@ -109,11 +109,13 @@ class EnsColibriResolveTest {
         colibri: Boolean = true,
         ccipRead: Boolean = true,
         waitMs: Long = 2_000,
+        clock: () -> Long = System::currentTimeMillis,
     ) = EnsResolver(
         settings = { EnsResolver.Settings(listOf(rpc), ccipRead = ccipRead, colibri = colibri) },
         http = http,
         colibri = EnsColibri(prover, proverHttp),
         colibriWaitMs = waitMs,
+        clock = clock,
     )
 
     private fun resolve(r: EnsResolver, name: String = "proven.eth") = runBlocking { r.resolveContenthash(name) }
@@ -212,6 +214,50 @@ class EnsColibriResolveTest {
     }
 
     @Test
+    fun `after a failure the verifier is skipped for a while, then asked again, and a proof resets it`() {
+        var now = 1_000_000L
+        var fail = true
+        val prover = Prover({ _, _ ->
+            if (fail) JSONObject().put("status", "error").put("error", "prover down") else returned(wrapAsOuterInner("e40101fa011b20$provenRef"))
+        })
+        val r = resolver(prover, rpcAnswers(), clock = { now })
+
+        assertFalse((resolve(r, "a.eth") as EnsResult.Ok).trust.proven)
+        assertEquals(1, prover.calls.size)
+        // Backing off: a new name goes straight to the servers.
+        assertFalse((resolve(r, "b.eth") as EnsResult.Ok).trust.proven)
+        assertEquals(1, prover.calls.size)
+        // Past the back-off it is asked again; a second failure doubles it.
+        now += EnsResolver.COLIBRI_BACKOFF_MS
+        resolve(r, "c.eth")
+        assertEquals(2, prover.calls.size)
+        now += EnsResolver.COLIBRI_BACKOFF_MS
+        resolve(r, "d.eth")
+        assertEquals(2, prover.calls.size)
+        now += EnsResolver.COLIBRI_BACKOFF_MS
+        fail = false
+        assertTrue((resolve(r, "e.eth") as EnsResult.Ok).trust.proven)
+        assertTrue((resolve(r, "f.eth") as EnsResult.Ok).trust.proven)
+        assertEquals(4, prover.calls.size)
+    }
+
+    @Test
+    fun `a missed wait backs off until the background call comes in`() {
+        val prover = Prover({ _, _ -> returned(wrapAsOuterInner("e40101fa011b20$provenRef")) }, delayMs = 600)
+        val r = resolver(prover, rpcAnswers(), waitMs = 100)
+
+        assertFalse((resolve(r, "a.eth") as EnsResult.Ok).trust.proven)
+        assertFalse((resolve(r, "b.eth") as EnsResult.Ok).trust.proven)
+        assertEquals(1, prover.calls.size)
+        // The first call's proof arrives in the background and ends the back-off.
+        val deadline = System.currentTimeMillis() + 5_000
+        while (r.colibriBackoff.remainingMs() != null && System.currentTimeMillis() < deadline) Thread.sleep(20)
+        assertNull(r.colibriBackoff.remainingMs())
+        prover.delayMs = 0
+        assertTrue((resolve(r, "c.eth") as EnsResult.Ok).trust.proven)
+    }
+
+    @Test
     fun `a proven ResolverNotFound is a proven negative`() {
         val prover = Prover({ _, _ -> reverted("0x77209fe8" + "00".repeat(32)) })
         val http = rpcAnswers()
@@ -273,6 +319,8 @@ class EnsColibriResolveTest {
 
         require(result is EnsResult.Ok) { "got $result" }
         assertTrue(result.trust.proven)
+        // What was proven is the resolver's acceptance, not an on-chain record.
+        assertTrue(result.trust.offchain)
         assertEquals(listOf("https://ccip-v3.ens.xyz"), http.gateway)
         assertEquals(expectedCallback, prover.calls[1].second)
         assertEquals(ur.lowercase(), prover.calls[1].first.lowercase())

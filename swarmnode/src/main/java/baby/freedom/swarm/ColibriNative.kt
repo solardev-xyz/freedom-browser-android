@@ -40,6 +40,15 @@ object ColibriNative {
 
     private const val STATE_VERSION_MARKER = "freedom-colibri-storage-version"
 
+    /**
+     * The only keys the verifier's storage keeps on disk — its consensus
+     * state, never what it was asked (colibri_jni.c's `persisted_prefixes`,
+     * which filters the core's writes; keep the two in step). Anything
+     * else in the directory, e.g. an account cache an unfiltered build
+     * wrote, is deleted at [init].
+     */
+    internal val PERSISTED_PREFIXES = listOf("states_", "sync_", "rdelay_")
+
     private val lock = Any()
 
     @Volatile
@@ -60,7 +69,8 @@ object ColibriNative {
 
     /**
      * Load the library and keep the verifier's state (the sync committee
-     * it has checked, a few KB) in [statesDir]. Idempotent; the first
+     * it has checked, a few KB — and only that, [PERSISTED_PREFIXES]) in
+     * [statesDir]. Idempotent; the first
      * call decides. False when Colibri can't be used in this process.
      *
      * The state is tied to the library's version: an older verifier's
@@ -79,6 +89,7 @@ object ColibriNative {
                 statesDir.mkdirs()
                 marker.writeText(version)
             }
+            pruneStates(statesDir)
             nInit(statesDir.absolutePath.toByteArray())
         }.getOrElse {
             Log.w(TAG, "Colibri init failed: $it")
@@ -86,6 +97,17 @@ object ColibriNative {
         }
         initialized = ok
         ok
+    }
+
+    /**
+     * Delete every file in [statesDir] the verifier mustn't keep
+     * ([PERSISTED_PREFIXES]) — per-contract `call_*` caches, which name
+     * every resolved name's storage slots, bytecode, anything unknown.
+     */
+    internal fun pruneStates(statesDir: File) {
+        statesDir.listFiles()?.forEach { f ->
+            if (f.name != STATE_VERSION_MARKER && PERSISTED_PREFIXES.none(f.name::startsWith)) f.deleteRecursively()
+        }
     }
 
     /** The core's version as it reports it to provers (`major·65536 + minor·256 + patch`). */

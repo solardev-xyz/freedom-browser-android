@@ -101,9 +101,15 @@ internal data class NameTrust(val name: String, val trust: EnsTrust, val answer:
         get() = when (tier) {
             TrustTier.Proven -> {
                 val prover = trust.agreed.joinToString(" and ").ifEmpty { "the Colibri prover" }
-                "This device checked a proof from $prover against Ethereum's sync committee: " +
-                    "$name's $system record is what the chain itself holds at $block, " +
-                    "not just what RPC servers agree on."
+                if (trust.offchain) {
+                    "$name's $system record comes from an off-chain gateway (CCIP-Read). This device " +
+                        "checked a proof from $prover against Ethereum's sync committee that the name's " +
+                        "resolver contract accepted that answer at $block; the record itself isn't on chain."
+                } else {
+                    "This device checked a proof from $prover against Ethereum's sync committee: " +
+                        "$name's $system record is what the chain itself holds at $block, " +
+                        "not just what RPC servers agree on."
+                }
             }
             TrustTier.Verified -> {
                 val n = trust.agreed.size

@@ -343,6 +343,58 @@ class EnsColibriTest {
     }
 
     @Test
+    fun `a connection opened after the cancel is refused and closed, not left to its timeouts`() {
+        val engine = ScriptEngine(rounds = listOf(listOf(request(1, "prover"))), final = success)
+        val started = CountDownLatch(1)
+        val cancelled = CountDownLatch(1)
+        val aborted = CountDownLatch(1)
+        val proceeded = java.util.concurrent.atomic.AtomicBoolean(false)
+        val refused = CountDownLatch(1)
+        val http = object : EnsColibri.Http {
+            override fun request(
+                method: String,
+                url: String,
+                headers: Map<String, String>,
+                body: ByteArray?,
+                opened: (java.net.HttpURLConnection) -> Unit,
+            ): EnsColibri.Http.Reply {
+                started.countDown()
+                // Still resolving/queued when the cancel lands; only then opens.
+                cancelled.await(10, TimeUnit.SECONDS)
+                try {
+                    opened(object : java.net.HttpURLConnection(java.net.URL(url)) {
+                        override fun disconnect() = aborted.countDown()
+                        override fun usingProxy() = false
+                        override fun connect() = Unit
+                    })
+                } catch (e: IOException) {
+                    refused.countDown()
+                    throw e
+                }
+                proceeded.set(true)
+                return ok("never")
+            }
+        }
+        val colibri = EnsColibri(engine, http)
+
+        runBlocking {
+            val job = async(Dispatchers.Default) { colibri.ethCall("0x00", ByteArray(0), rpcs) }
+            assertTrue(started.await(5, TimeUnit.SECONDS))
+            job.cancel()
+            try {
+                withTimeout(1_000) { job.await() }
+                fail("expected cancellation")
+            } catch (e: CancellationException) {
+                // expected
+            }
+        }
+        cancelled.countDown()
+        assertTrue("late connection not refused", refused.await(2, TimeUnit.SECONDS))
+        assertTrue("late connection not closed", aborted.await(2, TimeUnit.SECONDS))
+        assertFalse(proceeded.get())
+    }
+
+    @Test
     fun `the core's request types map to corpus core's servers`() {
         val colibri = EnsColibri(ScriptEngine(emptyList(), success), ScriptHttp { ok("") })
         assertEquals(EnsColibri.PROVERS, colibri.serversFor(JSONObject().put("type", "prover"), rpcs))

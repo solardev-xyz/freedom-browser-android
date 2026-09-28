@@ -30,7 +30,8 @@
 /*
  * The core's storage plugin (src/util/plugin.h, not part of the public
  * header). The build keeps its in-memory default; nInit swaps in the
- * file-backed one so the verified sync-committee state survives restarts.
+ * file-backed one, filtered, so the verified sync-committee state survives
+ * restarts and nothing else is written.
  */
 typedef struct {
     bool (*get)(char *key, void *buffer);
@@ -66,7 +67,46 @@ static jbyteArray take_bytes(JNIEnv *env, char *owned) {
 }
 
 /*
- * Point the file storage at [states_dir] and make it the active backend.
+ * What may reach the disk: the verifier's own consensus state and nothing
+ * about what it was asked. The core also stores, through the same plugin,
+ * a per-contract account cache (`call_<chain>_<address>`: every storage
+ * slot a proven eth_call read, i.e. each resolved name's registry slot and
+ * its contenthash) and contract bytecode (`code_<hash>`) — a browsing
+ * trail no "clear site data" or private tab would reach. Those, and any
+ * key a later core adds, stay unstored: the core then simply fetches and
+ * proves the data again. Keep in step with ColibriNative.PERSISTED_PREFIXES.
+ */
+static const char *const persisted_prefixes[] = {
+    "states_", /* the sync-committee checkpoint per chain */
+    "sync_",   /* verified sync-committee periods */
+    "rdelay_", /* retry back-off per server category */
+};
+
+static c4_storage_plugin_t file_backend;
+
+static bool persisted(const char *key) {
+    if (key == NULL) return false;
+    for (size_t i = 0; i < sizeof(persisted_prefixes) / sizeof(persisted_prefixes[0]); i++) {
+        if (strncmp(key, persisted_prefixes[i], strlen(persisted_prefixes[i])) == 0) return true;
+    }
+    return false;
+}
+
+static bool kept_get(char *key, void *buffer) {
+    return persisted(key) && file_backend.get(key, buffer);
+}
+
+static void kept_set(char *key, bytes_t value) {
+    if (persisted(key)) file_backend.set(key, value);
+}
+
+static void kept_del(char *key) {
+    if (persisted(key)) file_backend.del(key);
+}
+
+/*
+ * Point the file storage at [states_dir] and make it the active backend,
+ * filtered to [persisted_prefixes].
  * Must run before the first context: the core reads C4_STATES_DIR once.
  */
 JNIEXPORT jboolean JNICALL
@@ -77,9 +117,13 @@ Java_baby_freedom_swarm_ColibriNative_nInit(JNIEnv *env, jobject thiz, jbyteArra
     int rc = setenv("C4_STATES_DIR", dir, 1);
     free(dir);
     if (rc != 0) return JNI_FALSE;
-    c4_storage_plugin_t plugin;
-    memset(&plugin, 0, sizeof(plugin));
-    c4_get_file_storage_plugin(&plugin);
+    memset(&file_backend, 0, sizeof(file_backend));
+    c4_get_file_storage_plugin(&file_backend);
+    if (file_backend.get == NULL || file_backend.set == NULL || file_backend.del == NULL) return JNI_FALSE;
+    c4_storage_plugin_t plugin = file_backend;
+    plugin.get = kept_get;
+    plugin.set = kept_set;
+    plugin.del = kept_del;
     c4_set_storage_config(&plugin);
     return JNI_TRUE;
 }

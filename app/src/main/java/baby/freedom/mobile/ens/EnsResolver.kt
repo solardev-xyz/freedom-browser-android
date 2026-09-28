@@ -100,6 +100,7 @@ class EnsResolver internal constructor(
     private val colibri: EnsColibri? = null,
     /** How long a lookup waits for a proof ([COLIBRI_WAIT_MS]); shorter in tests. */
     private val colibriWaitMs: Long = COLIBRI_WAIT_MS,
+    private val clock: () -> Long = System::currentTimeMillis,
 ) {
     /**
      * What the user configured (#102): the RPC endpoints to ask, in
@@ -126,6 +127,40 @@ class EnsResolver internal constructor(
     ) : this({ Settings(rpcEndpoints) }, http, tezos)
 
     private data class Cached(val result: EnsResult, val expiresAt: Long)
+
+    /**
+     * After a Colibri call fails or outlasts a lookup's wait, the
+     * verifier is skipped for [COLIBRI_BACKOFF_MS], doubling with each
+     * further failure up to [COLIBRI_BACKOFF_MAX_MS]; any proof that
+     * comes in (a background call included) resets it.
+     */
+    internal inner class ColibriBackoff {
+        private var failures = 0
+        private var until = 0L
+
+        /** How much longer to skip the verifier; `null` when it may be asked. */
+        @Synchronized
+        fun remainingMs(): Long? {
+            val left = until - clock()
+            // A clock set back mustn't stretch the back-off forever.
+            return left.takeIf { it > 0 && it <= COLIBRI_BACKOFF_MAX_MS }
+        }
+
+        @Synchronized
+        fun failed() {
+            failures = (failures + 1).coerceAtMost(16)
+            val span = (COLIBRI_BACKOFF_MS shl (failures - 1)).coerceAtMost(COLIBRI_BACKOFF_MAX_MS)
+            until = clock() + span
+        }
+
+        @Synchronized
+        fun succeeded() {
+            failures = 0
+            until = 0
+        }
+    }
+
+    internal val colibriBackoff = ColibriBackoff()
 
     /**
      * Everything a lookup learns about the servers — answer cache,
@@ -285,7 +320,11 @@ class EnsResolver internal constructor(
      *   running then carries on in the background (up to
      *   [COLIBRI_BACKGROUND_MS]) rather than being cut off: on a first
      *   lookup that is the verifier bootstrapping its sync committee,
-     *   which the next lookup then needn't repeat;
+     *   which the next lookup then needn't repeat. Either failure starts
+     *   a back-off ([colibriBackoff]) during which lookups skip the
+     *   verifier outright, so unreachable provers don't cost every new
+     *   name the full wait, nor pile up background calls; a proof that
+     *   does come in ends it;
      * - a revert other than the Universal Resolver's own "no resolver"
      *   errors (a proven `ResolverNotFound` is a proven negative): no
      *   data at all is ambiguous (a degraded prover hop can look like
@@ -306,11 +345,23 @@ class EnsResolver internal constructor(
         contract: String?,
     ): Verdict? {
         val colibri = colibri ?: return null
+        colibriBackoff.remainingMs()?.let {
+            Log.i(TAG, "[$name] colibri: backing off for ${it}ms after a failure, asking the RPC servers")
+            return null
+        }
         val started = System.currentTimeMillis()
         val provers = LinkedHashSet<String>()
         suspend fun prove(to: String, data: ByteArray, waitMs: Long): EnsColibri.Outcome? {
             val call = io.async {
-                withTimeoutOrNull(COLIBRI_BACKGROUND_MS) { colibri.ethCall(to, data, config.endpoints) }
+                try {
+                    withTimeoutOrNull(COLIBRI_BACKGROUND_MS) { colibri.ethCall(to, data, config.endpoints) }
+                        .also { if (it != null) colibriBackoff.succeeded() else colibriBackoff.failed() }
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Throwable) {
+                    colibriBackoff.failed()
+                    throw e
+                }
             }
             val proven = try {
                 withTimeoutOrNull(waitMs) { call.await() }
@@ -322,6 +373,9 @@ class EnsResolver internal constructor(
                 return null
             }
             if (proven == null) {
+                // The call runs on in the background and clears this if
+                // it does come in (a first lookup's bootstrap).
+                colibriBackoff.failed()
                 Log.i(TAG, "[$name] colibri: no proof within ${waitMs}ms, asking the RPC servers")
                 return null
             }
@@ -329,11 +383,13 @@ class EnsResolver internal constructor(
             return proven.outcome
         }
         val first = prove(target, callData, colibriWaitMs) ?: return null
+        var offchain = false
         val trust = {
             EnsTrust(
                 verified = true,
                 agreed = provers.ifEmpty { setOf(hostOf(EnsColibri.PROVERS.first())) }.toList(),
                 source = EnsTrust.Source.COLIBRI,
+                offchain = offchain,
             )
         }
         var outcome = when (first) {
@@ -365,6 +421,7 @@ class EnsResolver internal constructor(
                 Log.i(TAG, "[$name] colibri: CCIP-Read failed (${result?.exceptionOrNull()?.message ?: "timed out"})")
                 return null
             }
+            offchain = true
         }
         val verdict = when (val r = outcome.revertData) {
             null -> {
@@ -1343,6 +1400,11 @@ class EnsResolver internal constructor(
         // bootstrap for the next lookup.
         private const val COLIBRI_WAIT_MS = 6_000L
         private const val COLIBRI_BACKGROUND_MS = 60_000L
+
+        // How long the verifier is skipped after a failure or a missed
+        // wait, doubling per further failure (#100, R2-F2).
+        internal const val COLIBRI_BACKOFF_MS = 30_000L
+        internal const val COLIBRI_BACKOFF_MAX_MS = 5 * 60_000L
 
         // A proven CCIP-Read pass, gateway hops and proven callbacks
         // included (iOS's `provenCCIPBudget`).

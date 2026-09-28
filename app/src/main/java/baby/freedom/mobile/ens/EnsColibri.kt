@@ -8,6 +8,7 @@ import java.net.HttpURLConnection
 import java.net.URI
 import java.net.URL
 import java.util.concurrent.ConcurrentLinkedQueue
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.coroutines.resume
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -219,17 +220,33 @@ internal class EnsColibri(
      * caller resumes it at once and closes the connection from yet
      * another thread, so neither a stalled read nor a blocking
      * `disconnect()` holds the resolution (or the native context) up.
+     * A connection registered only after the cancel is refused on the
+     * spot (and closed), so it can't run on to its own timeouts either.
      */
     private suspend fun fetch(method: String, url: String, headers: Map<String, String>, body: ByteArray?): Http.Reply =
         suspendCancellableCoroutine { cont ->
             val open = ConcurrentLinkedQueue<HttpURLConnection>()
+            val cancelled = AtomicBoolean(false)
+            fun closeAll() {
+                aborts.launch { while (true) runCatching { (open.poll() ?: return@launch).disconnect() } }
+            }
+            // Register first, then check: either the canceller's sweep
+            // finds the connection, or this sees the flag.
+            val opened = { conn: HttpURLConnection ->
+                open.add(conn)
+                if (cancelled.get()) {
+                    closeAll()
+                    throw IOException("cancelled")
+                }
+            }
             val job = aborts.launch {
-                val result = runCatching { http.request(method, url, headers, body, open::add) }
+                val result = runCatching { http.request(method, url, headers, body, opened) }
                 if (cont.isActive) cont.resume(result)
             }
             cont.invokeOnCancellation {
+                cancelled.set(true)
                 job.cancel()
-                aborts.launch { open.forEach { runCatching { it.disconnect() } } }
+                closeAll()
             }
         }.getOrElse { e ->
             throw e as? IOException ?: IOException(e.message ?: e.javaClass.simpleName, e)

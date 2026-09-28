@@ -60,6 +60,16 @@ class TrustShieldTest {
                 "not just what RPC servers agree on.",
             trust.summary,
         )
+        // A CCIP-Read answer: the proof covers the resolver's acceptance, not an on-chain record.
+        KnownEnsNames.record("ipfs://$CID", "vitalik.eth", proven.copy(offchain = true))
+        val offchain = nameTrustFor("ipfs://vitalik.eth")!!
+        assertEquals(TrustTier.Proven, offchain.tier)
+        assertEquals(
+            "vitalik.eth's ENS record comes from an off-chain gateway (CCIP-Read). This device checked a " +
+                "proof from mainnet1.colibri-proof.tech against Ethereum's sync committee that the name's " +
+                "resolver contract accepted that answer at the latest block; the record itself isn't on chain.",
+            offchain.summary,
+        )
         // Servers agreeing is still the verified shield, never the seal.
         KnownEnsNames.record("ipfs://$CID", "vitalik.eth", verified)
         assertEquals(TrustTier.Verified, nameTrustFor("vitalik.eth")!!.tier)
