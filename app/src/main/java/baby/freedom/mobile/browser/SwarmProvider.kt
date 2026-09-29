@@ -1286,8 +1286,12 @@ sealed interface SwarmAsk {
         val needsWallet: Boolean = false,
     ) : SwarmAsk
 
-    /** The app's permission manifest (#122) has rows to decide: [consent]. Answered through [outcomeOf]. */
-    data class Manifest(override val origin: String, val consent: SwarmManifests.Consent) : SwarmAsk
+    /**
+     * The app's permission manifest (#122) has rows to decide: [consent],
+     * under the consent [token] (shared by the tabs that check the same
+     * state). Answered through [outcomeOf].
+     */
+    data class Manifest(override val origin: String, val consent: SwarmManifests.Consent, val token: String = "") : SwarmAsk
 }
 
 /**

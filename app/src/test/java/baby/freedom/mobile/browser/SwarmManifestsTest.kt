@@ -13,7 +13,10 @@ import baby.freedom.mobile.browser.ManifestProjection.Identity
 import java.io.IOException
 import java.net.InetAddress
 import java.net.ServerSocket
+import kotlinx.coroutines.async
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.yield
+import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -719,5 +722,132 @@ class SwarmManifestsTest {
             if (c is SwarmManifests.Check.Consent) env.decide(c, SwarmManifests.Outcome.Individual)
         }
         assertEquals(SwarmManifests.MAX_RECEIPTS, runBlocking { env.manifests.record(site) }!!.receipts.size)
+    }
+
+    @Test
+    fun `an unresolved fetch doesn't hold up a tracked origin whose manifest manages nothing (#226 R3-F3)`() {
+        val down = ManifestDiscovery.Unresolved("node stopped")
+        // Connected by hand, then Don't allow on the manifest sheet: a record, nothing managed.
+        val declined = Env()
+        declined.projections.on += site to Connection
+        val c = declined.check(site, found(Publish))
+        assertTrue(declined.decide(c, SwarmManifests.Outcome.Deny))
+        assertNotNull(runBlocking { declined.manifests.record(site) })
+        // After Ask each time, too.
+        val individual = Env()
+        individual.decide(individual.check(site, found(Publish)), SwarmManifests.Outcome.AllowAll)
+        runBlocking { individual.manifests.useIndividual(site) }
+        for (env in listOf(declined, individual)) {
+            assertEquals(SwarmManifests.Check.Legacy, env.check(site, down, eager = false))
+            // Within the backoff too.
+            assertEquals(SwarmManifests.Check.Legacy, env.check(site, found(Publish), eager = false))
+            assertTrue(env.has(site, Connection))
+        }
+        // A record that does manage something still waits.
+        val managed = Env()
+        managed.decide(managed.check(site, found(Publish)), SwarmManifests.Outcome.AllowAll)
+        assertTrue(managed.check(site, down, eager = false) is SwarmManifests.Check.Unresolved)
+    }
+
+    // -----------------------------------------------------------------
+    // The bridge's check: the sheet, the tab, and the document's cache
+    // -----------------------------------------------------------------
+
+    private val tabs = mutableListOf<BrowserState>()
+
+    @After
+    fun closeTabs() {
+        tabs.forEach { SwarmProviders.onTabClosed(it.id) }
+    }
+
+    private fun tab() = BrowserState(9_500L + tabs.size).also { tabs += it }
+
+    /** Runs the bridge's check on [tab], answering its sheet with [answer] (null: leave it to time out after [waitMs]). */
+    private fun bridgeCheck(
+        env: Env,
+        tab: BrowserState,
+        found: ManifestDiscovery,
+        answer: SwarmProvider.Answer?,
+        eager: Boolean = true,
+        waitMs: Long = SwarmProviders.SHEET_WAIT_MS,
+    ) = runBlocking {
+        val r = async { SwarmProviders.manifestCheck(env.manifests, tab, 0, site, eager, { waitMs }) { found } }
+        if (answer != null) {
+            while (tab.swarmPrompt == null && !r.isCompleted) yield()
+            tab.swarmPrompt?.respond(answer)
+        }
+        r.await()
+    }
+
+    @Test
+    fun `a manifest sheet nobody answered refuses only that request (#226 R3-F1)`() {
+        val env = Env()
+        val tab = tab()
+        val timedOut = bridgeCheck(env, tab, found(Publish), null, waitMs = 50)
+        assertEquals(SwarmProvider.USER_REJECTED, timedOut.error!!.code)
+        assertFalse("not the user's refusal: not held for the document", timedOut.holds)
+        // The next request asks again, and the user's answer counts.
+        val allowed = bridgeCheck(env, tab, found(Publish), SwarmProvider.Answer(true, always = true))
+        assertNull(allowed.error)
+        assertTrue(env.has(site, AutoPublish))
+        // The user's own Don't allow does hold, and blocks the tab.
+        val other = Env()
+        val t2 = tab()
+        val refused = bridgeCheck(other, t2, found(Publish), SwarmProvider.Answer.REJECTED)
+        assertEquals(SwarmProvider.USER_REJECTED, refused.error!!.code)
+        assertTrue(refused.holds)
+        assertFalse(runBlocking { SwarmProviders.askOnTab(t2, 0, SwarmAsk.Connect(site), waitMs = 50) }.allowed)
+        assertNull(t2.swarmPrompt)
+    }
+
+    @Test
+    fun `a shared consent decided in one tab takes the other tab's sheet down, which follows it (#226 R3-F2)`() {
+        for (first in listOf(SwarmProvider.Answer.REJECTED, SwarmProvider.Answer(true, always = true))) {
+            val env = Env()
+            val t1 = tab()
+            val t2 = tab()
+            runBlocking {
+                val a = async { SwarmProviders.manifestCheck(env.manifests, t1, 0, site, true, { SwarmProviders.SHEET_WAIT_MS }) { found(Publish) } }
+                val b = async { SwarmProviders.manifestCheck(env.manifests, t2, 0, site, true, { SwarmProviders.SHEET_WAIT_MS }) { found(Publish) } }
+                while ((t1.swarmPrompt == null || t2.swarmPrompt == null) && !a.isCompleted && !b.isCompleted) yield()
+                val shared = (t1.swarmPrompt!!.ask as SwarmAsk.Manifest).token
+                assertEquals(shared, (t2.swarmPrompt!!.ask as SwarmAsk.Manifest).token)
+                t1.swarmPrompt!!.respond(first)
+                val ra = a.await()
+                // Tab 2's sheet is gone without the user touching it, and its request follows the answer.
+                val rb = b.await()
+                assertNull(t2.swarmPrompt)
+                assertEquals(first.allowed, ra.error == null)
+                assertEquals(first.allowed, rb.error == null)
+                assertTrue(rb.holds)
+            }
+            assertEquals(first.allowed, env.has(site, AutoPublish))
+            // Tab 2's user refused nothing: its pages may still ask.
+            val connect = runBlocking {
+                val r = async { SwarmProviders.askOnTab(t2, 0, SwarmAsk.Connect(site)) }
+                while (t2.swarmPrompt == null && !r.isCompleted) yield()
+                t2.swarmPrompt?.respond(SwarmProvider.Answer(true))
+                r.await()
+            }
+            assertTrue(connect.allowed)
+        }
+    }
+
+    @Test
+    fun `Don't allow on an update lets the request's own sheets show (#226 R3-F4)`() {
+        val env = Env()
+        env.decide(env.check(site, found(Publish)), SwarmManifests.Outcome.AllowAll)
+        val tab = tab()
+        val declined = bridgeCheck(env, tab, found(Publish, Signing), SwarmProvider.Answer.REJECTED, eager = false)
+        assertNull("the request goes on under the authority the site had", declined.error)
+        // The request's own per-action sheet is still shown.
+        val sign = runBlocking {
+            val r = async { SwarmProviders.askOnTab(tab, 0, SwarmAsk.Connect(site)) }
+            while (tab.swarmPrompt == null && !r.isCompleted) yield()
+            assertNotNull("a sheet was shown", tab.swarmPrompt)
+            tab.swarmPrompt?.respond(SwarmProvider.Answer(true))
+            r.await()
+        }
+        assertTrue(sign.allowed)
     }
 }

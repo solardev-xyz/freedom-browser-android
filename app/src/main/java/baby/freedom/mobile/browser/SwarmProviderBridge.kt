@@ -126,7 +126,16 @@ object SwarmProviders {
     /** Tab → the document its manifest checks ran for, and each origin's shared check (#122). */
     private val manifestChecks = HashMap<Long, Pair<Int, HashMap<String, ManifestCheck>>>()
 
-    private class ManifestCheck(val eager: Boolean, val result: Deferred<SwarmProvider.Reply.Err?>)
+    private class ManifestCheck(val eager: Boolean, val result: Deferred<ManifestVerdict>)
+
+    /**
+     * A manifest check's result: [error] for the page (null: go on), and
+     * whether it [holds] for the rest of the document — a decision does
+     * (the user's own answer, or the one recorded for a consent they
+     * answered in another tab); anything else is checked again on the
+     * next request.
+     */
+    internal class ManifestVerdict(val error: SwarmProvider.Reply.Err?, val holds: Boolean)
 
     @Volatile
     private var manifests: SwarmManifests? = null
@@ -414,7 +423,10 @@ object SwarmProviders {
      * without a sheet or a block. [answered] hears the user's own answer
      * to the sheet, the moment there is one: a refusal that never reaches
      * it (no sheet, a timeout, a sheet withdrawn because the tab reloaded,
-     * navigated or closed) wasn't the user's.
+     * navigated or closed) wasn't the user's. With [blocks] false the
+     * user's refusal doesn't block the tab here: the caller decides that
+     * ([blockTab]) — a declined manifest update lets its request go on,
+     * so the sheets that follow must still be shown (#226 R3-F4).
      */
     internal suspend fun askOnTab(
         tab: BrowserState,
@@ -423,6 +435,7 @@ object SwarmProviders {
         waitMs: Long = SHEET_WAIT_MS,
         current: suspend (SwarmAsk) -> SwarmAsk? = { it },
         answered: (SwarmProvider.Answer) -> Unit = {},
+        blocks: Boolean = true,
         approved: () -> Unit = {},
     ): SwarmProvider.Answer {
         fun live() = (documents[tab.id] ?: 0) == doc && tab.id !in blockedTabs
@@ -457,7 +470,7 @@ object SwarmProviders {
                 }
                 val answer = ending.answer
                 if (ending.byUser) answered(answer)
-                if (!answer.allowed && live()) blockedTabs += tab.id
+                if (!answer.allowed && blocks && live()) blockedTabs += tab.id
                 if (answer.allowed && live()) answer else SwarmProvider.Answer.REJECTED
             } ?: return SwarmProvider.Answer.REJECTED
             if (!answer.allowed) return answer
@@ -472,6 +485,23 @@ object SwarmProviders {
             return if (set && live()) answer else SwarmProvider.Answer.REJECTED
         } finally {
             if (held) lock.unlock()
+        }
+    }
+
+    /** The user refused a sheet on [tab]'s document [doc]: its further asks are refused without one, while it's still that document. */
+    internal fun blockTab(tab: BrowserState, doc: Int) {
+        if ((documents[tab.id] ?: 0) == doc) blockedTabs += tab.id
+    }
+
+    /**
+     * Take down the manifest sheets still up for the consent [token] (in
+     * other tabs sharing it) once it's decided: they follow the answer
+     * given, rather than taking a second one that the recorded decision
+     * would silently replace (#226 R3-F2).
+     */
+    internal fun withdrawManifest(token: String) {
+        for (requests in pending.values.toList()) {
+            requests.toList().filter { (it.ask as? SwarmAsk.Manifest)?.token == token }.forEach { it.withdraw() }
         }
     }
 
@@ -491,7 +521,7 @@ object SwarmProviders {
         if (method !in MANIFEST_GATED) return null
         val tab = bridge.tab
         val eager = method == "swarm_requestAccess"
-        if (doc == STALE_DOCUMENT) return manifestCheck(m, bridge, doc, origin, eager, deadline)
+        if (doc == STALE_DOCUMENT) return manifestCheck(m, bridge, doc, origin, eager, deadline).error
         val slot = manifestChecks[tab.id]?.takeIf { it.first == doc }
             ?: (doc to HashMap<String, ManifestCheck>()).also { manifestChecks[tab.id] = it }
         var check = slot.second[origin]
@@ -499,11 +529,9 @@ object SwarmProviders {
             check = ManifestCheck(eager, scope.async { manifestCheck(m, bridge, doc, origin, eager, deadline) })
             slot.second[origin] = check
         }
-        val error = check.result.await()
-        if (error != null && error.code != SwarmProvider.USER_REJECTED && slot.second[origin] === check) {
-            slot.second.remove(origin)
-        }
-        return error
+        val verdict = check.result.await()
+        if (!verdict.holds && slot.second[origin] === check) slot.second.remove(origin)
+        return verdict.error
     }
 
     private suspend fun manifestCheck(
@@ -513,41 +541,87 @@ object SwarmProviders {
         origin: String,
         eager: Boolean,
         deadline: Long,
-    ): SwarmProvider.Reply.Err? = try {
-        when (val check = m.check(origin, eager) { discoverManifest(origin, bridge.ensPins) }) {
-            SwarmManifests.Check.Legacy, SwarmManifests.Check.Ready -> null
-            is SwarmManifests.Check.Unresolved -> SwarmProvider.Reply.Err(
-                SwarmProvider.UNAVAILABLE,
-                "Couldn't refresh this app's permission manifest",
-                JSONObject().put("reason", "manifest_unresolved"),
+    ): ManifestVerdict = manifestCheck(m, bridge.tab, doc, origin, eager, { deadline - SystemClock.elapsedRealtime() }) {
+        discoverManifest(origin, bridge.ensPins)
+    }
+
+    /**
+     * [manifestFresh]'s check itself, for [tab]'s document [doc]: [remaining]
+     * is the time left for the sheet once [discover] is done.
+     */
+    internal suspend fun manifestCheck(
+        m: SwarmManifests,
+        tab: BrowserState,
+        doc: Int,
+        origin: String,
+        eager: Boolean,
+        remaining: () -> Long,
+        discover: suspend () -> ManifestDiscovery,
+    ): ManifestVerdict = try {
+        when (val check = m.check(origin, eager, discover)) {
+            SwarmManifests.Check.Legacy, SwarmManifests.Check.Ready -> ManifestVerdict(null, holds = true)
+            is SwarmManifests.Check.Unresolved -> ManifestVerdict(
+                SwarmProvider.Reply.Err(
+                    SwarmProvider.UNAVAILABLE,
+                    "Couldn't refresh this app's permission manifest",
+                    JSONObject().put("reason", "manifest_unresolved"),
+                ),
+                holds = false,
             )
             is SwarmManifests.Check.Consent -> {
-                val ask = SwarmAsk.Manifest(origin, check.consent)
+                val token = check.token
+                val ask = SwarmAsk.Manifest(origin, check.consent, token)
                 var users: SwarmProvider.Answer? = null
-                val answer = askOnTab(bridge.tab, doc, ask, deadline - SystemClock.elapsedRealtime(), answered = { users = it })
+                val answer = askOnTab(
+                    tab, doc, ask, remaining(),
+                    // Answered in another tab while this one waited its turn: no sheet.
+                    current = { if (m.decided(token) != null) null else it },
+                    answered = { users = it },
+                    // Whether a refusal blocks the tab depends on what it decides (below).
+                    blocks = false,
+                )
                 // A refusal the user never gave (a withdrawn or timed-out
-                // sheet, a tab that moved on) refuses this request only: the
-                // consent may be shared with another tab, which can still
-                // answer it (#226 R1-F2).
+                // sheet, a tab that moved on) decides nothing: the consent
+                // may be shared with another tab, which can still answer
+                // it (#226 R1-F2) — unless another tab's user already did,
+                // and then this request follows that answer (R3-F2).
                 val outcome = manifestOutcome(ask, answer, users)
-                if (outcome != null && m.decide(check.token, outcome)) {
-                    null
+                val goesOn = if (outcome != null) {
+                    m.decide(token, outcome).also { withdrawManifest(token) }
                 } else {
-                    SwarmProvider.Reply.Err(SwarmProvider.USER_REJECTED, "User rejected the request")
+                    m.decided(token)
+                }
+                when (goesOn) {
+                    true -> ManifestVerdict(null, holds = true)
+                    false -> {
+                        // Don't allow on first contact: the tab's pages stop
+                        // asking, as after any refused sheet. A declined update
+                        // went on above instead, and its request's own sheets
+                        // are still shown (#226 R3-F4).
+                        if (users != null) blockTab(tab, doc)
+                        ManifestVerdict(SwarmProvider.Reply.Err(SwarmProvider.USER_REJECTED, "User rejected the request"), holds = true)
+                    }
+                    // Nobody decided (a sheet that timed out or never
+                    // showed): this request is refused, and the next one
+                    // asks again, as the Connect sheet would (#226 R3-F1).
+                    null -> ManifestVerdict(SwarmProvider.Reply.Err(SwarmProvider.USER_REJECTED, "User rejected the request"), holds = false)
                 }
             }
         }
     } catch (e: IllegalStateException) {
         // The decision was overtaken (another tab's answer, a redeploy): nothing was granted; the next request checks again.
-        SwarmProvider.Reply.Err(SwarmProvider.UNAVAILABLE, "This app's permissions changed; try again", JSONObject().put("reason", "manifest_stale"))
+        ManifestVerdict(
+            SwarmProvider.Reply.Err(SwarmProvider.UNAVAILABLE, "This app's permissions changed; try again", JSONObject().put("reason", "manifest_stale")),
+            holds = false,
+        )
     } catch (e: IOException) {
-        SwarmProvider.Reply.Err(SwarmProvider.INTERNAL, "Couldn't save this app's permissions on this device")
+        ManifestVerdict(SwarmProvider.Reply.Err(SwarmProvider.INTERNAL, "Couldn't save this app's permissions on this device"), holds = false)
     } catch (e: CancellationException) {
         throw e
     } catch (e: Exception) {
         // Answered, not thrown: a thrown check would stay in the document's cache and fail every later request.
         Log.w(TAG, "manifest check failed: ${e.javaClass.simpleName}")
-        SwarmProvider.Reply.Err(SwarmProvider.INTERNAL, "Internal error")
+        ManifestVerdict(SwarmProvider.Reply.Err(SwarmProvider.INTERNAL, "Internal error"), holds = false)
     }
 
     /**

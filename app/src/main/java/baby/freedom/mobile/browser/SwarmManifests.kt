@@ -438,7 +438,7 @@ class SwarmManifests(
         /** The manifest is fresh and nothing new needs deciding. */
         data object Ready : Check
 
-        /** A tracked origin's manifest couldn't be checked for now; its stored authority must wait. */
+        /** A tracked origin whose manifest granted something couldn't be checked for now; that authority must wait. */
         data class Unresolved(val retryAt: Long) : Check
 
         /** New rows need a decision: put [consent] to the user and [decide] with [token]. */
@@ -495,7 +495,7 @@ class SwarmManifests(
             val backoff = synchronized(backoffs) { backoffs[origin] }
             // A wall-clock step back can't stretch the wait past its own length.
             if (backoff != null && backoff.retryAt - now in 1..BACKOFF_MS.last()) {
-                return@withLock if (existing != null) Check.Unresolved(backoff.retryAt) else Check.Legacy
+                return@withLock unresolved(existing, backoff.retryAt)
             }
 
             val found = discover()
@@ -503,7 +503,7 @@ class SwarmManifests(
                 val failures = (backoff?.failures ?: 0) + 1
                 val retryAt = clock() + BACKOFF_MS[minOf(failures - 1, BACKOFF_MS.size - 1)]
                 synchronized(backoffs) { backoffs[origin] = Backoff(failures, retryAt) }
-                return@withLock if (existing != null) Check.Unresolved(retryAt) else Check.Legacy
+                return@withLock unresolved(existing, retryAt)
             }
             synchronized(backoffs) { backoffs.remove(origin) }
             if (found !is ManifestDiscovery.Found) {
@@ -567,6 +567,25 @@ class SwarmManifests(
             }
             Check.Consent(token, consentFor(origin, existing != null, manifest, changed, removed))
         }
+
+    /**
+     * What an unresolved fetch means for a request: only a record whose
+     * manifest actually granted something has authority that must wait
+     * ([Check.Unresolved]). An untracked origin — or a tracked one whose
+     * manifest manages nothing (every row individual or declined, after
+     * Ask each time or a declined update) — stays on the ordinary flow,
+     * where the user's own grants apply (#226 R3-F3).
+     */
+    private fun unresolved(existing: Record?, retryAt: Long): Check =
+        if (existing != null && existing.managed.values.any { it.isNotEmpty() }) Check.Unresolved(retryAt) else Check.Legacy
+
+    /**
+     * The answer already recorded for the consent [token] ([decide]'s
+     * result), or null if it hasn't been decided. A tab whose sheet for a
+     * shared consent was taken down because another tab's user answered
+     * it follows that answer (#226 R3-F2).
+     */
+    fun decided(token: String): Boolean? = synchronized(tokens) { completed[token] }
 
     /**
      * The user's answer to the consent [token] stands for: whether the
