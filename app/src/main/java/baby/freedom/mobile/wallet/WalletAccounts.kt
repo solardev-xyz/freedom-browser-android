@@ -257,7 +257,9 @@ class WalletAccounts internal constructor(
     /**
      * Derives the next account (one past the highest index so far, as
      * desktop numbers them) and makes it the active one. Throws
-     * [VaultLockedException] if the vault isn't open.
+     * [VaultLockedException] if the vault isn't open, and
+     * [DuplicateAccountException] if its address is already listed — as a
+     * Ledger account from a Ledger that holds this same phrase (#142).
      */
     suspend fun add(): WalletAccount = mutex.withLock {
         val tag = withContext(io) { vault.identityTag() } ?: throw VaultLockedException()
@@ -267,6 +269,10 @@ class WalletAccounts internal constructor(
         val indices = if (current == null) listOf(0, 1) else listOf(index)
         val addresses = withContext(compute) { vault.withSeed { seed -> indices.map { EthAccounts.address(seed, it) } } }
         val added = indices.mapIndexed { i, n -> WalletAccount(n, WalletAccount.defaultName(n), addresses[i]) }
+        // A Ledger holding this wallet's own phrase has the same address at the same
+        // path (Ledger Live's): one address is one entry, never two with two ways to sign.
+        val taken = current?.accounts.orEmpty().map { it.address.lowercase() }.toSet()
+        if (added.any { it.address.lowercase() in taken }) throw DuplicateAccountException()
         val list = WalletAccountList((current?.accounts ?: emptyList()) + added, added.last().index)
         withContext(io) { store.write(tag, list) }
         _accounts.value = list

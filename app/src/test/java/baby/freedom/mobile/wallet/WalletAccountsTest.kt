@@ -273,6 +273,25 @@ class WalletAccountsTest {
     }
 
     @Test
+    fun `the next account isn't added beside a Ledger account with its address`() = runBlocking {
+        val a = accounts()
+        vault.create(abandon12, auth, imported = true)
+        a.reconcile(vault.state.value)
+        // A Ledger holding this same phrase: its Ledger Live account 1 is the seed's account 1.
+        a.addLedger(ledgerKey.copy(path = "44'/60'/1'/0/0"), abandonAddresses[1], "")
+        try {
+            a.add()
+            fail("one address listed twice")
+        } catch (_: DuplicateAccountException) {
+        }
+        assertEquals(listOf(abandonAddresses[0], abandonAddresses[1]), a.accounts.value!!.accounts.map { it.address })
+        assertEquals(a.accounts.value, store.read(vault.identityTag()!!))
+        // With the Ledger's entry gone, the seed's own takes its address.
+        a.removeLedger(-1)
+        assertEquals(abandonAddresses[1], a.add().address)
+    }
+
+    @Test
     fun `removing a Ledger account leaves the seed's, which can't be removed`() = runBlocking {
         val a = accounts()
         vault.create(abandon12, auth, imported = true)

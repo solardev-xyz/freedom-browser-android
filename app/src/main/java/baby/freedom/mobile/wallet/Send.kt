@@ -388,8 +388,11 @@ data class SendStatus(val quote: SendQuote, val stage: Stage, val hash: String? 
          * it took the transaction, but one may have — Try again resends
          * the very same signed bytes, so it can't be sent twice.
          * Otherwise it certainly wasn't sent, and the send is reviewed again.
+         * [stale]: it wasn't sent because its quote got older than
+         * [WalletSender.QUOTE_TTL_MS] while it was being signed (a Ledger
+         * waited on): priced again, it can be confirmed again.
          */
-        data class Failed(val message: String, val mayHaveGone: Boolean) : Stage
+        data class Failed(val message: String, val mayHaveGone: Boolean, val stale: Boolean = false) : Stage
 
         data object Pending : Stage
         data class Confirmed(val block: Long, val feePaid: BigInteger?) : Stage
@@ -739,7 +742,11 @@ class WalletSender internal constructor(
      * it zeroes) and broadcasts it, then follows it to a receipt —
      * unless another send is still being signed or broadcast, or the
      * quote has gone [stale][isStale] (checked here, at the moment of
-     * signing, however long an unlock prompt kept the user before it).
+     * signing, however long an unlock prompt kept the user before it —
+     * and again once it's signed, since a Ledger's connect, unlock and
+     * on-device review all happen inside [sign]: a quote that aged past
+     * [QUOTE_TTL_MS] meanwhile is thrown away unsent and ends
+     * [SendStatus.Stage.Failed.stale], to be priced again).
      */
     fun submit(quote: SendQuote, sign: suspend (EthTransaction) -> EthTransaction.Signed): Submit {
         synchronized(this) {
@@ -753,6 +760,9 @@ class WalletSender internal constructor(
                     sign(quote.tx)
                 } catch (e: CancellationException) {
                     throw e
+                } catch (e: QuoteStaleException) {
+                    failStale(quote)
+                    return@launch
                 } catch (e: VaultLockedException) {
                     fail(quote, "The wallet locked before the transaction was signed. Nothing was sent; confirm again to unlock it.", false)
                     return@launch
@@ -764,6 +774,12 @@ class WalletSender internal constructor(
                 } catch (e: Exception) {
                     Log.w(TAG, "signing failed: ${e.javaClass.simpleName}")
                     fail(quote, "Couldn’t sign the transaction. Nothing was sent.", false)
+                    return@launch
+                }
+                // Signing may have taken minutes (a Ledger unlocked, opened, reviewed on):
+                // bytes whose fee cap was priced too long ago are dropped, never sent.
+                if (isStale(quote)) {
+                    failStale(quote)
                     return@launch
                 }
                 // On disk before it goes out: a process killed mid-broadcast
@@ -963,18 +979,26 @@ class WalletSender internal constructor(
     private suspend fun fail(quote: SendQuote, message: String, mayHaveGone: Boolean) =
         journalThenShow(quote) { it.copy(stage = SendStatus.Stage.Failed(message, mayHaveGone)) }
 
+    private suspend fun failStale(quote: SendQuote) = journalThenShow(quote) {
+        it.copy(stage = SendStatus.Stage.Failed(STALE_WHILE_SIGNING, mayHaveGone = false, stale = true))
+    }
+
     companion object {
         /**
          * Signs as [account]: on its Ledger if it's a Ledger's (#142),
-         * which the user confirms there; else [vaultSigner].
+         * which the user confirms there; else [vaultSigner]. [fresh] is
+         * asked once the Ledger is ready, before it shows the transaction:
+         * false (the quote aged while it was unlocked) ends it with
+         * [QuoteStaleException], so nothing is reviewed that would be dropped.
          */
         fun signerFor(
             context: android.content.Context,
             vault: Vault,
             account: WalletAccount,
+            fresh: () -> Boolean = { true },
         ): suspend (EthTransaction) -> EthTransaction.Signed = if (account.ledger != null) {
             val ledger = Ledger.get(context);
-            { tx -> ledger.signTransaction(account, tx) }
+            { tx -> ledger.signTransaction(account, tx, fresh) }
         } else {
             vaultSigner(vault, account)
         }
@@ -985,7 +1009,11 @@ class WalletSender internal constructor(
         internal const val INTERRUPTED = "The app closed while this was going out, so it may or may not have gone out. " +
             "Try again sends the very same transaction, so it can’t be paid twice."
 
-        /** A quote older than this is priced again before it's signed. */
+        /** Why a send was dropped unsent: its quote aged past [QUOTE_TTL_MS] while it was signed. */
+        internal const val STALE_WHILE_SIGNING = "The network fee was worked out over a minute ago, before this was signed, " +
+            "so it may no longer get the transaction in. Nothing was sent; review the new fee and confirm again."
+
+        /** A quote older than this is priced again before it's signed (and dropped if it got older while signing). */
         const val QUOTE_TTL_MS = 60_000L
 
         /** Between receipt reads: about a Gnosis block, under an Ethereum one. */
@@ -1188,3 +1216,6 @@ class WalletSender internal constructor(
         }
     }
 }
+
+/** A signer found the quote it was signing too old to use ([WalletSender.QUOTE_TTL_MS]): nothing was signed. */
+class QuoteStaleException : Exception("quote went stale before signing")

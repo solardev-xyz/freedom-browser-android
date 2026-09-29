@@ -309,11 +309,30 @@ internal object LedgerApdus {
         return ByteArray(size - tail.size) { 0xff.toByte() } + tail
     }
 
-    /** The data of an answer ([LedgerLink.exchange]'s bytes less the status word), or the failure its status word means. */
-    fun ok(answer: ByteArray): ByteArray {
+    /**
+     * Whether [apdu] is one the Ethereum app answers "incorrect data"
+     * (`0x6A80`) when Blind signing is off: a transaction (contract data it
+     * can't show), typed data by its hashes (INS 0x0C), and unfiltered typed
+     * data field by field — app-ethereum refuses that as it's about to show
+     * the first value (`ui_712_redraw_generic_step`), so on a value APDU
+     * (INS 0x1C; a value this app can't encode never gets there, it falls
+     * back to the hashes). Struct definitions, addresses and messages get
+     * that word only for data that's actually bad.
+     */
+    fun needsBlindSigning(apdu: ByteArray): Boolean {
+        val ins = if (apdu.size > 1) apdu[1].toInt() and 0xff else return false
+        return ins == INS_SIGN_TX || ins == INS_SIGN_EIP712 || ins == INS_EIP712_STRUCT_IMPL
+    }
+
+    /**
+     * The data of an answer ([LedgerLink.exchange]'s bytes less the status
+     * word), or the failure its status word means ([LedgerException.forStatus];
+     * [blindSigning] for an APDU only Blind signing lets through).
+     */
+    fun ok(answer: ByteArray, blindSigning: Boolean = false): ByteArray {
         if (answer.size < 2) throw LedgerException(LedgerException.Kind.UNKNOWN)
         val sw = ((answer[answer.size - 2].toInt() and 0xff) shl 8) or (answer[answer.size - 1].toInt() and 0xff)
-        if (sw != 0x9000) throw LedgerException.forStatus(sw)
+        if (sw != 0x9000) throw LedgerException.forStatus(sw, blindSigning)
         return answer.copyOfRange(0, answer.size - 2)
     }
 
@@ -413,7 +432,7 @@ internal class LedgerEthApp(private val link: LedgerLink) {
     /** Sends [apdus] in order, each only after the one before answered `0x9000`; the last one's data. */
     private suspend fun sendAll(apdus: List<ByteArray>): ByteArray {
         var last = ByteArray(0)
-        for (a in apdus) last = LedgerApdus.ok(link.exchange(a, CONFIRM_MS))
+        for (a in apdus) last = LedgerApdus.ok(link.exchange(a, CONFIRM_MS), LedgerApdus.needsBlindSigning(a))
         return last
     }
 

@@ -79,6 +79,7 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import baby.freedom.mobile.ui.isLight
 import baby.freedom.mobile.wallet.BiometricVaultAuthenticator
+import baby.freedom.mobile.wallet.DuplicateAccountException
 import baby.freedom.mobile.wallet.Mnemonic
 import baby.freedom.mobile.wallet.PublisherIdentityStore
 import baby.freedom.mobile.wallet.Vault
@@ -252,6 +253,8 @@ internal fun walletErrorMessage(e: Throwable, action: String, phraseBackedUp: Bo
     is VaultAuthFailedException -> "Couldn’t $action: ${e.message}"
     is VaultLockedException -> "Couldn’t $action: the wallet locked. Unlock it and try again."
     is TooManyAccountsException -> "Couldn’t $action: ${e.message}."
+    is DuplicateAccountException -> "Couldn’t $action: the next account of this wallet is already on the list, added from a " +
+        "Ledger that holds the same recovery phrase. Remove that Ledger account to add it here."
     is VaultKeyLostException -> "Android has erased this wallet’s key. That happens when the screen lock is removed. " +
         lostWalletAdvice(phraseBackedUp)
     is VaultUnreadableException -> "This wallet can’t be read. " + lostWalletAdvice(phraseBackedUp)

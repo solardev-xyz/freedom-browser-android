@@ -150,7 +150,7 @@ class LedgerProtocolTest {
             0x6982 to LedgerException.Kind.LOCKED,
             0x6985 to LedgerException.Kind.REJECTED,
             0x5501 to LedgerException.Kind.REJECTED,
-            0x6a80 to LedgerException.Kind.BLIND_SIGNING,
+            0x6a80 to LedgerException.Kind.INVALID_DATA,
             0x6511 to LedgerException.Kind.APP_NOT_OPEN,
             0x6d00 to LedgerException.Kind.APP_NOT_OPEN,
             0x6e00 to LedgerException.Kind.APP_NOT_OPEN,
@@ -166,6 +166,14 @@ class LedgerProtocolTest {
                 assertEquals(sw, (e.cause as LedgerException.StatusWord).sw)
             }
         }
+        // "Incorrect data" means Blind signing is off only for an APDU that needs it.
+        try {
+            LedgerApdus.ok(byteArrayOf(0x6a, 0x80.toByte()), blindSigning = true)
+            fail("0x6a80 accepted")
+        } catch (e: LedgerException) {
+            assertEquals(LedgerException.Kind.BLIND_SIGNING, e.kind)
+        }
+        assertEquals(LedgerException.Kind.LOCKED, LedgerException.kindForStatus(0x5515, blindSigning = true))
         assertArrayEquals(byteArrayOf(1, 2), LedgerApdus.ok(byteArrayOf(1, 2, 0x90.toByte(), 0)))
     }
 
@@ -253,6 +261,44 @@ class LedgerProtocolTest {
         } catch (e: LedgerException) {
             assertEquals(LedgerException.Kind.REJECTED, e.kind)
         }
+    }
+
+    @Test
+    fun `incorrect data asks for Blind signing only where Blind signing is what lets it through`() = runBlocking {
+        suspend fun kind(block: suspend () -> Unit): LedgerException.Kind = try {
+            block()
+            error("signed")
+        } catch (e: LedgerException) {
+            e.kind
+        }
+        val data = Eip712.parse(vectors.getJSONObject("eip712").getJSONObject("typed").toString())
+        val tx = vectors.keys().asSequence().first { it.startsWith("tx_") }
+        val payload = vectors.getJSONObject(tx).getString("payload")
+        val chunks = LedgerApdus.signTransaction(path, payload.hexToBytes()).size
+        assertEquals(
+            LedgerException.Kind.BLIND_SIGNING,
+            kind { LedgerEthApp(Scripted(List(chunks - 1) { "e004" to "9000" } + ("e004" to "6a80"))).signTransaction(path, payload.hexToBytes()) },
+        )
+        assertEquals(
+            LedgerException.Kind.BLIND_SIGNING,
+            kind { LedgerEthApp(Scripted(listOf("e01a" to "6d00", "e00c0000" to "6a80"))).signTypedData(path, data) },
+        )
+        // Field by field: a struct definition refused is bad data; the first value refused is
+        // Blind signing (app-ethereum refuses unfiltered data as it's about to show it), as is the sign step.
+        assertEquals(LedgerException.Kind.INVALID_DATA, kind { LedgerEthApp(Scripted(listOf("e01a" to "6a80"))).signTypedData(path, data) })
+        val full = LedgerApdus.signEip712Full(path, data)
+        assertEquals("e00c0001", full.last().toHex().take(8))
+        val valueAt = full.indexOfFirst { it.toHex().startsWith("e01c00ff") }
+        assertEquals(
+            LedgerException.Kind.BLIND_SIGNING,
+            kind { LedgerEthApp(Scripted(List(valueAt) { null to "9000" } + ("e01c00ff" to "6a80"))).signTypedData(path, data) },
+        )
+        assertEquals(
+            LedgerException.Kind.BLIND_SIGNING,
+            kind { LedgerEthApp(Scripted(List(full.size - 1) { null to "9000" } + ("e00c0001" to "6a80"))).signTypedData(path, data) },
+        )
+        assertEquals(LedgerException.Kind.INVALID_DATA, kind { LedgerEthApp(Scripted(listOf("e008" to "6a80"))).signPersonal(path, "hi".toByteArray()) })
+        assertEquals(LedgerException.Kind.INVALID_DATA, kind { LedgerEthApp(Scripted(listOf("e002" to "6a80"))).address(path) })
     }
 
     @Test

@@ -21,11 +21,13 @@ import baby.freedom.mobile.wallet.Eip712
 import baby.freedom.mobile.wallet.EthSigning
 import baby.freedom.mobile.wallet.EthTransaction
 import baby.freedom.mobile.wallet.MessageSigning
+import baby.freedom.mobile.wallet.QuoteStaleException
 import baby.freedom.mobile.wallet.Secp256k1Keys
 import baby.freedom.mobile.wallet.WalletAccount
 import java.math.BigInteger
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.async
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.coroutineScope
@@ -169,12 +171,17 @@ class Ledger internal constructor(private val context: Context) {
             (start until start + count).map { i -> scheme.path(i).let { it to app.address(it) } }
         }
 
-    /** [tx] signed on the Ledger holding [account], checked to recover to it. */
-    suspend fun signTransaction(account: WalletAccount, tx: EthTransaction): EthTransaction.Signed {
+    /**
+     * [tx] signed on the Ledger holding [account], checked to recover to
+     * it. [fresh] is asked once the Ledger is connected, unlocked and on
+     * the Ethereum app, before it shows [tx]: false ends it with
+     * [QuoteStaleException] — its fee was priced too long ago.
+     */
+    suspend fun signTransaction(account: WalletAccount, tx: EthTransaction, fresh: () -> Boolean = { true }): EthTransaction.Signed {
         val key = account.ledger ?: error("not a Ledger account")
         val payload = tx.signingPayload()
         val sig = session(key.device, key.deviceName, "Confirm the transaction on your Ledger") { app, stage ->
-            verified(app, key, account.address, stage)
+            verified(app, key, account.address, stage) { if (!fresh()) throw QuoteStaleException() }
             app.signTransaction(key.path, payload)
         }
         return tx.signedWith(recover(sig, Keccak256.digest(payload), account.address), account.address)
@@ -200,9 +207,14 @@ class Ledger internal constructor(private val context: Context) {
         return "0x" + recover(sig, digest, account.address).rsv().toHex()
     }
 
-    /** Waits for the Ledger to be ready and checks it holds [address] at [key]'s path, then asks for the confirmation. */
-    private suspend fun verified(app: LedgerEthApp, key: LedgerKey, address: String, stage: (Stage) -> Unit) {
+    /**
+     * Waits for the Ledger to be ready and checks it holds [address] at
+     * [key]'s path, runs [before] (which may still refuse), then asks for
+     * the confirmation.
+     */
+    private suspend fun verified(app: LedgerEthApp, key: LedgerKey, address: String, stage: (Stage) -> Unit, before: () -> Unit = {}) {
         if (!ready(app, key.path, stage).equals(address, ignoreCase = true)) throw LedgerException(LedgerException.Kind.WRONG_DEVICE)
+        before()
         stage(Stage.CONFIRM)
     }
 
@@ -242,22 +254,24 @@ class Ledger internal constructor(private val context: Context) {
     ): T = conversation.withLock {
         bluetoothProblem()?.takeUnless { LedgerDevLinks.handles(id) }?.let { throw it }
         coroutineScope {
+            var stage: (Stage) -> Unit = {}
             val cancelled = AtomicBoolean(false)
-            lateinit var cancel: () -> Unit
-            val stage = { s: Stage -> _activity.value = Activity(name, s, purpose, cancel) }
-            val work = async {
-                val link = open(id) { stage(Stage.PAIRING) }
+            // Created unstarted, so Cancel exists before anything can call stage() with it.
+            val work = async(start = CoroutineStart.LAZY) {
+                val link = open(id, onPairing = { stage(Stage.PAIRING) }, onPaired = { stage(Stage.CONNECTING) })
                 try {
                     block(LedgerEthApp(link), stage)
                 } finally {
                     link.close()
                 }
             }
-            cancel = {
+            val cancel = {
                 cancelled.set(true)
                 work.cancel()
             }
+            stage = { s: Stage -> _activity.value = Activity(name, s, purpose, cancel) }
             stage(Stage.CONNECTING)
+            work.start()
             try {
                 work.await()
             } catch (e: CancellationException) {
@@ -273,11 +287,11 @@ class Ledger internal constructor(private val context: Context) {
     }
 
     @SuppressLint("MissingPermission")
-    private suspend fun open(id: String, onPairing: () -> Unit): LedgerLink {
+    private suspend fun open(id: String, onPairing: () -> Unit, onPaired: () -> Unit): LedgerLink {
         LedgerDevLinks.open(context, id)?.let { return it }
         val a = adapter ?: throw LedgerException(LedgerException.Kind.BLUETOOTH_UNAVAILABLE)
         if (!BluetoothAdapter.checkBluetoothAddress(id)) throw LedgerException(LedgerException.Kind.NOT_FOUND)
-        return LedgerBleLink.open(context, a.getRemoteDevice(id), onPairing)
+        return LedgerBleLink.open(context, a.getRemoteDevice(id), onPairing, onPaired)
     }
 
     companion object {

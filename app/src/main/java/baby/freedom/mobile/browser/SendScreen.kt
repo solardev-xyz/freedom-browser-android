@@ -257,7 +257,7 @@ internal fun SendPage(
                                         // A Ledger account's key is on the Ledger: nothing to unlock here (#142).
                                         if (!q.request.from.isLedger && !vault.unlockedNow()) vault.unlock(auth)
                                         // submit checks the age again: the unlock prompt can have stood for minutes.
-                                        when (sender.submit(q, WalletSender.signerFor(context, vault, q.request.from))) {
+                                        when (sender.submit(q, WalletSender.signerFor(context, vault, q.request.from) { !sender.isStale(q) })) {
                                             WalletSender.Submit.STARTED -> {
                                                 quote = null
                                                 notice = null

@@ -185,7 +185,7 @@ object EthereumProviders {
      * chain), or why not.
      */
     private suspend fun submitAndWait(app: Context, sender: WalletSender, vault: Vault, quote: SendQuote): EthereumProvider.Submitted {
-        when (sender.submit(quote, WalletSender.signerFor(app, vault, quote.request.from))) {
+        when (sender.submit(quote, WalletSender.signerFor(app, vault, quote.request.from) { !sender.isStale(quote) })) {
             WalletSender.Submit.BUSY -> return EthereumProvider.Submitted.Busy
             WalletSender.Submit.STALE -> return EthereumProvider.Submitted.Stale
             WalletSender.Submit.STARTED -> Unit
@@ -197,7 +197,12 @@ object EthereumProviders {
             return EthereumProvider.Submitted.Failed("The transaction was discarded before it went out.", null)
         }
         return when (val stage = status.stage) {
-            is SendStatus.Stage.Failed -> EthereumProvider.Submitted.Failed(stage.message, status.hash.takeIf { stage.mayHaveGone })
+            // Aged while a Ledger was unlocked or reviewed on: nothing sent; priced again, the site's sheet asks again.
+            is SendStatus.Stage.Failed -> if (stage.stale) {
+                EthereumProvider.Submitted.Stale
+            } else {
+                EthereumProvider.Submitted.Failed(stage.message, status.hash.takeIf { stage.mayHaveGone })
+            }
             else -> status.hash?.let { EthereumProvider.Submitted.Sent(it) }
                 ?: EthereumProvider.Submitted.Failed("The transaction didn't go out.", null)
         }

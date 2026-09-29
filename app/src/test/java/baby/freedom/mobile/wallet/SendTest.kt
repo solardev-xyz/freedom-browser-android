@@ -1050,6 +1050,43 @@ class SendTest {
     }
 
     @Test
+    fun `a quote that went stale while a Ledger signed it is dropped, not broadcast`() = runBlocking<Unit> {
+        val chain = FakeChain()
+        var now = 1_000L
+        val s = sender(chain) { now }
+        val quote = s.prepare(request())
+        now += WalletSender.QUOTE_TTL_MS - 1
+        // Fresh when confirmed; the unlock and the review on the device took minutes.
+        assertEquals(
+            WalletSender.Submit.STARTED,
+            s.submit(quote) { tx ->
+                now += 150_000
+                tx.sign(key.copyOf(), from.address)
+            },
+        )
+        val failed = s.awaitStage { it is SendStatus.Stage.Failed }.stage as SendStatus.Stage.Failed
+        assertTrue(failed.stale)
+        assertFalse(failed.mayHaveGone)
+        assertEquals(WalletSender.STALE_WHILE_SIGNING, failed.message)
+        assertTrue(chain.sent.isEmpty())
+        // Nothing holds the next send back: priced again, it goes.
+        now += 1
+        assertEquals(WalletSender.Submit.STARTED, s.submit(s.prepare(request()), signer()))
+        s.awaitStage { it == SendStatus.Stage.Pending }
+        assertEquals(1, chain.sent.size)
+    }
+
+    @Test
+    fun `a signer that finds its quote stale before signing ends the send the same way`() = runBlocking<Unit> {
+        val chain = FakeChain()
+        val s = sender(chain) { 1_000L }
+        assertEquals(WalletSender.Submit.STARTED, s.submit(s.prepare(request())) { throw QuoteStaleException() })
+        val failed = s.awaitStage { it is SendStatus.Stage.Failed }.stage as SendStatus.Stage.Failed
+        assertTrue(failed.stale)
+        assertTrue(chain.sent.isEmpty())
+    }
+
+    @Test
     fun `what the pages show`() {
         assertEquals("0.00002101 xDAI", feeText(BigInteger.valueOf(21_000) * (gwei + BigInteger.valueOf(28)), gnosis))
         assertEquals("0 xDAI", feeText(BigInteger.ZERO, gnosis))

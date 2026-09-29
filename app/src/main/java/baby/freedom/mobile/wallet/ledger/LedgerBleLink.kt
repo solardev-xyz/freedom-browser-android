@@ -41,7 +41,8 @@ internal class LedgerBleLink private constructor(
     private var write: BluetoothGattCharacteristic? = null
     private var mtu = LedgerBleFraming.DEFAULT_MTU
 
-    /** The GATT operation in flight: Android allows one at a time. */
+    /** The GATT operation in flight: Android allows one at a time. Set here, completed on a binder thread. */
+    @Volatile
     private var op: CompletableDeferred<Int>? = null
     private val ops = Mutex()
     private val notifications = Channel<ByteArray>(Channel.UNLIMITED)
@@ -52,11 +53,14 @@ internal class LedgerBleLink private constructor(
 
     private val callback = object : BluetoothGattCallback() {
         override fun onConnectionStateChange(g: BluetoothGatt, status: Int, newState: Int) {
-            if (newState == BluetoothProfile.STATE_CONNECTED && status == BluetoothGatt.GATT_SUCCESS) {
+            if (status == BluetoothGatt.GATT_SUCCESS && newState == BluetoothProfile.STATE_CONNECTED) {
                 connected.complete(Unit)
-            } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
-                Log.i(TAG, "disconnected (status $status)")
-                fail(LedgerException(LedgerException.Kind.DISCONNECTED))
+            } else if (status != BluetoothGatt.GATT_SUCCESS || newState == BluetoothProfile.STATE_DISCONNECTED) {
+                // An error status ends the link whatever state it names: a connect that
+                // failed fails now, not when CONNECT_MS runs out.
+                Log.i(TAG, "link ended (state $newState, status $status)")
+                val reached = connected.isCompleted
+                fail(LedgerException(if (reached) LedgerException.Kind.DISCONNECTED else LedgerException.Kind.NOT_FOUND))
             }
         }
 
@@ -197,12 +201,14 @@ internal class LedgerBleLink private constructor(
         /**
          * Bonds with [device] if it isn't yet (the user confirms the code
          * on both screens), then connects and gets it ready for APDUs.
-         * [onPairing] is called while the pairing code is up.
+         * [onPairing] is called while the pairing code is up, [onPaired]
+         * once it's done and the connection is being made.
          */
-        suspend fun open(context: Context, device: BluetoothDevice, onPairing: () -> Unit): LedgerBleLink {
+        suspend fun open(context: Context, device: BluetoothDevice, onPairing: () -> Unit, onPaired: () -> Unit): LedgerBleLink {
             if (device.bondState != BluetoothDevice.BOND_BONDED) {
                 onPairing()
                 bond(context, device)
+                onPaired()
             }
             val link = LedgerBleLink(context.applicationContext, device)
             try {
@@ -214,6 +220,17 @@ internal class LedgerBleLink private constructor(
             return link
         }
 
+        /**
+         * Bonds with [device], waiting up to [PAIR_MS] for the user to
+         * confirm the code. The bond-state broadcast is sent by the system
+         * Bluetooth app — another UID — so the receiver has to be exported;
+         * since any app could then send it one too, "bonded" is taken only
+         * from the device's actual [BluetoothDevice.getBondState] (a forged
+         * "none" can at most end the wait early). Cancelled (the Ledger dialog's
+         * Cancel) or timed out, a pairing this started is called off where
+         * Android lets an app do that ([cancelBond]), so its pairing prompt
+         * doesn't stay up with nothing waiting.
+         */
         private suspend fun bond(context: Context, device: BluetoothDevice) {
             val bonded = CompletableDeferred<Boolean>()
             val receiver = object : BroadcastReceiver() {
@@ -225,9 +242,14 @@ internal class LedgerBleLink private constructor(
                         intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE)
                     }
                     if (d?.address != device.address) return
-                    when (intent.getIntExtra(BluetoothDevice.EXTRA_BOND_STATE, BluetoothDevice.ERROR)) {
-                        BluetoothDevice.BOND_BONDED -> bonded.complete(true)
-                        BluetoothDevice.BOND_NONE -> bonded.complete(false)
+                    val now = runCatching { device.bondState }.getOrNull() ?: return
+                    when {
+                        // Bonded only as the Bluetooth stack says it is, not as a broadcast claims.
+                        now == BluetoothDevice.BOND_BONDED -> bonded.complete(true)
+                        // Refused or failed on one side (a forged one only ends the wait early).
+                        now == BluetoothDevice.BOND_NONE &&
+                            intent.getIntExtra(BluetoothDevice.EXTRA_BOND_STATE, BluetoothDevice.ERROR) == BluetoothDevice.BOND_NONE ->
+                            bonded.complete(false)
                     }
                 }
             }
@@ -235,19 +257,40 @@ internal class LedgerBleLink private constructor(
                 context.applicationContext,
                 receiver,
                 IntentFilter(BluetoothDevice.ACTION_BOND_STATE_CHANGED),
-                ContextCompat.RECEIVER_NOT_EXPORTED,
+                ContextCompat.RECEIVER_EXPORTED,
             )
+            var started = false
             try {
                 if (device.bondState == BluetoothDevice.BOND_BONDED) return
-                if (device.bondState != BluetoothDevice.BOND_BONDING && !device.createBond()) {
-                    throw LedgerException(LedgerException.Kind.PAIRING_FAILED)
+                if (device.bondState != BluetoothDevice.BOND_BONDING) {
+                    if (!device.createBond()) throw LedgerException(LedgerException.Kind.PAIRING_FAILED)
+                    started = true
                 }
+                // Bonded between the check above and the receiver going up: no broadcast is coming.
+                if (device.bondState == BluetoothDevice.BOND_BONDED) return
                 if (!timed(PAIR_MS, LedgerException.Kind.PAIRING_FAILED) { bonded.await() }) {
                     throw LedgerException(LedgerException.Kind.PAIRING_FAILED)
                 }
+            } catch (e: Throwable) {
+                if (started && runCatching { device.bondState }.getOrNull() == BluetoothDevice.BOND_BONDING) cancelBond(device)
+                throw e
             } finally {
                 runCatching { context.applicationContext.unregisterReceiver(receiver) }
             }
+        }
+
+        /**
+         * Calls off a pairing in progress, taking Android's pairing prompt
+         * down with it. No public API does: `cancelBondProcess` is hidden,
+         * and from Android 13 it needs BLUETOOTH_PRIVILEGED, a system app's
+         * permission (seen on API 36: SecurityException). So it's tried on
+         * older versions only; elsewhere the prompt stays until the user
+         * answers it, and confirming it then just leaves the Ledger paired.
+         */
+        private fun cancelBond(device: BluetoothDevice) {
+            if (Build.VERSION.SDK_INT >= 33) return
+            val ok = runCatching { BluetoothDevice::class.java.getMethod("cancelBondProcess").invoke(device) as? Boolean }
+            Log.i(TAG, "pairing called off: ${ok.getOrNull() ?: ok.exceptionOrNull()?.javaClass?.simpleName}")
         }
 
         /** [block] within [ms], else [kind] — a [LedgerException], never a bare timeout. */
