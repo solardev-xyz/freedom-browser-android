@@ -46,6 +46,8 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.MutableState
+import androidx.compose.runtime.saveable.Saver
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -76,15 +78,38 @@ internal fun publishPageBlockedReason(node: NodeInfo): String? = when {
 
 /**
  * What the page says when no usable stamp has room for [stampBytes], or
- * null when one has: none yet, or none big enough.
+ * null when one has: none yet, or none big enough. Nothing publishes in
+ * less than [MIN_PUBLISH_STAMP_BYTES], so a [stampBytes] of 0 (the page,
+ * before anything is picked) asks for at least that: a stamp that's full
+ * is warned about up front, not after a file was picked and read.
  */
 internal fun noStampText(batches: List<PostageBatch>, stampBytes: Long): String? = when {
-    selectPublishBatch(batches, stampBytes) != null -> null
+    selectPublishBatch(batches, maxOf(stampBytes, MIN_PUBLISH_STAMP_BYTES)) != null -> null
     batches.none { it.usable } -> "Publishing needs a usable postage stamp, and the node has none yet. " +
         "Buy one, or find the ones this account already owns, under Postage stamps."
+    stampBytes <= 0 -> "The node's usable postage stamps are full or expired. Buy another one under Postage stamps."
     else -> "None of the node's usable stamps has room for ${formatStampBytes(stampBytes)} " +
         "(with a margin). Buy a bigger one under Postage stamps."
 }
+
+/** The least any publish stamps: one chunk of content and one of manifest. */
+internal val MIN_PUBLISH_STAMP_BYTES: Long = publishStampEstimate(listOf(0L))
+
+/**
+ * What of the text being written rides in saved instance state: all of
+ * it up to [MAX_SAVED_PUBLISH_TEXT_CHARS], else none (it's lost if the
+ * process dies, rather than crashing the app with a bundle past the
+ * ~1 MB binder limit, or restoring cut short and publishing half).
+ */
+internal fun savedPublishText(text: String): String? = text.takeIf { it.length <= MAX_SAVED_PUBLISH_TEXT_CHARS }
+
+/** 64k UTF-16 chars: 128 KiB of the bundle at most. */
+internal const val MAX_SAVED_PUBLISH_TEXT_CHARS = 64 * 1024
+
+private val PublishTextSaver = Saver<MutableState<String>, String>(
+    save = { savedPublishText(it.value) },
+    restore = { mutableStateOf(it) },
+)
 
 /** One history row's status line. */
 internal fun publishStatusText(r: PublishRecord): String = when (r.status) {
@@ -125,7 +150,7 @@ internal fun PublishScreen(
     }
 
     var writingText by rememberSaveable { mutableStateOf(false) }
-    var text by rememberSaveable { mutableStateOf("") }
+    var text by rememberSaveable(saver = PublishTextSaver) { mutableStateOf("") }
     // What was picked, read and waiting for the user's go-ahead.
     var plan by remember { mutableStateOf<PublishPlan?>(null) }
     var reading by remember { mutableStateOf(false) }

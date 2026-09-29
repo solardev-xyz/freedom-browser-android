@@ -101,6 +101,25 @@ class StampsTest {
     }
 
     @Test
+    fun `a search for owned stamps and a spend never start over each other`() {
+        val idle = StampClient.Discovery.Idle
+        val searching = StampClient.Discovery.Running
+        val found = StampClient.Discovery.Finished(Result.success(listOf(id)))
+        val buying = StampClient.Spend.Running(StampClient.Kind.Buy, null)
+        assertTrue(StampClient.canSpend(StampClient.Spend.Idle, idle))
+        assertTrue(StampClient.canSpend(StampClient.Spend.Idle, found))
+        assertFalse(StampClient.canSpend(buying, idle))
+        assertFalse(StampClient.canSpend(StampClient.Spend.Idle, searching))
+        assertNull(discoverStatusText(idle))
+        assertTrue(discoverStatusText(searching)!!.startsWith("Searching"))
+        assertEquals(discoverOutcomeText(1), discoverStatusText(found))
+        assertEquals(
+            "Couldn't look: no RPC",
+            discoverStatusText(StampClient.Discovery.Finished(Result.failure(IllegalStateException("no RPC")))),
+        )
+    }
+
+    @Test
     fun `a spend says what it's doing and how it ended`() {
         assertNull(spendStatusText(StampClient.Spend.Idle))
         assertTrue(spendStatusText(StampClient.Spend.Running(StampClient.Kind.Buy, null))!!.startsWith("Buying"))

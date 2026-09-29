@@ -278,7 +278,9 @@ class NodeService : Service() {
      * the process could leave a batch paid for but unregistered.
      */
     private fun <T> spending(block: () -> T): T {
-        check(!doomed && stopGate.begin()) { "The Swarm node is turning off" }
+        check(!doomed && stopGate.begin()) {
+            if (!doomed && stopGate.discoverRunning) "The node is searching for your stamps. Try again once it's done." else "The Swarm node is turning off"
+        }
         try {
             return block()
         } finally {
@@ -350,8 +352,16 @@ class NodeService : Service() {
                 }
                 swarmNode.storageTopupQuote(days())
             }
-            // Registers the stamps this account already owns (#118); sends nothing.
-            "discover" -> swarmNode.discoverStamps()
+            // Registers the stamps this account already owns (#118). Never
+            // alongside a spend, so no permit is open and it sends nothing.
+            "discover" -> {
+                check(stopGate.beginDiscover()) { "A stamp purchase or search is still running. Try again once it's done." }
+                try {
+                    swarmNode.discoverStamps()
+                } finally {
+                    stopGate.endDiscover()
+                }
+            }
             "buy" -> spending {
                 spendable()
                 val depth = args.getInt("depth").also { require(it in MIN_STAMP_DEPTH..MAX_STAMP_DEPTH) { "bad depth" } }

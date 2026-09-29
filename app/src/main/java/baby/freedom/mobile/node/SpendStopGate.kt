@@ -21,6 +21,13 @@ import baby.freedom.swarm.NodeStatus
  * spend hung inside ant can't keep a node the user turned off peering
  * indefinitely. Each stop carries a [stopGeneration], so a deadline timer
  * scheduled for one stop can't act on a later one ([overdue]).
+ *
+ * It also keeps a search for the account's own stamps (#118) apart from
+ * the spends ([beginDiscover]): ant's discover can deploy the chequebook
+ * and pay its deposit as it registers a batch, and while a spend's
+ * permit is open that would go out under it, taking the spend's slots.
+ * With neither overlapping, a discover only ever runs with no permit
+ * open, so it sends nothing.
  */
 internal class SpendStopGate(private val nanoTime: () -> Long = System::nanoTime) {
     private val monitor = Object()
@@ -29,12 +36,32 @@ internal class SpendStopGate(private val nanoTime: () -> Long = System::nanoTime
     private var stopWhenIdle = false
     private var stopAskedAt = 0L
     private var generation = 0L
+    private var discovering = false
 
-    /** A spend is about to start; false (don't start it) while the node is being turned off. */
+    /**
+     * A spend is about to start; false (don't start it) while the node is
+     * being turned off, or while a discover runs.
+     */
     fun begin(): Boolean = synchronized(monitor) {
-        if (stopping) return false
+        if (stopping || discovering) return false
         running++
         true
+    }
+
+    /** A discover is about to start; false (don't start it) while a spend or another discover runs. */
+    fun beginDiscover(): Boolean = synchronized(monitor) {
+        if (discovering || running > 0) return false
+        discovering = true
+        true
+    }
+
+    /** Whether a discover is running now (for saying why a spend didn't start). */
+    val discoverRunning: Boolean get() = synchronized(monitor) { discovering }
+
+    /** The discover [beginDiscover] let start has ended, however. */
+    fun endDiscover() = synchronized(monitor) {
+        check(discovering) { "endDiscover() without beginDiscover()" }
+        discovering = false
     }
 
     /** A spend [begin] let start has ended, however. True if the service should now stop itself. */

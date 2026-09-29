@@ -261,6 +261,25 @@ class PublishTest {
         assertTrue(noStampText(listOf(batch(batchA, depth = 17)), 100_000)!!.contains("room for 100 kB"))
     }
 
+    @Test
+    fun `the page warns up front when the only usable stamp is full`() {
+        val full = batch(batchA, depth = 17, utilization = 2)
+        assertFalse(batchHasRoom(full, MIN_PUBLISH_STAMP_BYTES))
+        assertTrue(noStampText(listOf(full), 0)!!.contains("full"))
+        // One with room still counts, and a fresh one is no warning.
+        assertNull(noStampText(listOf(full, batch(batchB)), 0))
+        assertNull(noStampText(listOf(batch(batchA)), 0))
+    }
+
+    @Test
+    fun `text past the cap isn't put into saved state, and never cut short`() {
+        assertEquals("hello", savedPublishText("hello"))
+        val atCap = "x".repeat(MAX_SAVED_PUBLISH_TEXT_CHARS)
+        assertEquals(atCap, savedPublishText(atCap))
+        assertNull(savedPublishText(atCap + "y"))
+        assertNull(savedPublishText("x".repeat(600_000)))
+    }
+
     // Folder archive
 
     /** The regular files in a tar, as ant's collection upload reads them: GNU long names applied, checksums checked. */

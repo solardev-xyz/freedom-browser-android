@@ -14,6 +14,28 @@ class SpendStopGateTest {
     private val gate = SpendStopGate()
 
     @Test
+    fun `a discover and a spend never overlap`() {
+        assertTrue(gate.beginDiscover())
+        assertTrue(gate.discoverRunning)
+        assertFalse("a spend's permit must not open under a running discover", gate.begin())
+        assertFalse("one discover at a time", gate.beginDiscover())
+        gate.endDiscover()
+        assertFalse(gate.discoverRunning)
+        assertTrue(gate.begin())
+        assertFalse("a discover must not run under a spend's open permit", gate.beginDiscover())
+        gate.end()
+        assertTrue(gate.beginDiscover())
+        gate.endDiscover()
+    }
+
+    @Test
+    fun `a discover doesn't count as a spend for a stop`() {
+        assertTrue(gate.beginDiscover())
+        assertFalse(gate.requestStop())
+        gate.endDiscover()
+    }
+
+    @Test
     fun `with no spend running a stop happens now`() {
         assertFalse(gate.requestStop())
         assertFalse(gate.shouldStopNow())

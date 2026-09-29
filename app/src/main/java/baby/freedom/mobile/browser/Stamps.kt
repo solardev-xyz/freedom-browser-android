@@ -252,13 +252,53 @@ internal object StampClient {
      * node (#118): bought on another device, or before a reinstall. No
      * transaction. Blocking; the ids it found, or why it couldn't look.
      */
-    fun discover(): Result<List<String>> = when (val a = call("discover", timeoutMs = DISCOVER_TIMEOUT_MS)) {
+    private fun discoverNow(): Result<List<String>> = when (val a = call("discover", timeoutMs = DISCOVER_TIMEOUT_MS)) {
         is Answer.Ok -> Result.success(
             a.json.optJSONArray("registered")?.let { ids -> (0 until ids.length()).mapNotNull { normalizeBatchId(ids.optString(it)) } }
                 .orEmpty(),
         )
         is Answer.Failed -> Result.failure(IllegalStateException(a.message))
     }
+
+    /** A search for the account's own stamps: none asked, one running, or what the last one found. */
+    sealed interface Discovery {
+        data object Idle : Discovery
+        data object Running : Discovery
+        data class Finished(val found: Result<List<String>>) : Discovery
+    }
+
+    private val _discovery = MutableStateFlow<Discovery>(Discovery.Idle)
+
+    /**
+     * The search, held here like [spend] so it outlives the list scrolling
+     * or the page closing, and so there's only ever one. It never runs
+     * alongside a spend (nor a spend alongside it): ant's discover can
+     * deploy the chequebook as it registers a batch, which must not go
+     * out under a buy's permit. `:node` enforces the same.
+     */
+    val discovery: StateFlow<Discovery> = _discovery.asStateFlow()
+
+    /** Starts a search for the account's own stamps. False if one, or a spend, is already running. */
+    fun discover(): Boolean {
+        synchronized(this) {
+            if (_spend.value is Spend.Running || _discovery.value is Discovery.Running) return false
+            _discovery.value = Discovery.Running
+        }
+        scope.launch {
+            val found = try {
+                discoverNow()
+            } catch (t: Throwable) {
+                Log.w(TAG, "stamp discover failed: ${t.javaClass.simpleName}")
+                Result.failure(IllegalStateException("Something went wrong"))
+            }
+            _discovery.compareAndSet(Discovery.Running, Discovery.Finished(found))
+        }
+        return true
+    }
+
+    /** Whether a buy or extend may start now: nothing else of the node's stamp work is running. */
+    fun canSpend(spend: Spend, discovery: Discovery): Boolean =
+        spend !is Spend.Running && discovery !is Discovery.Running
 
     enum class Kind { Buy, Extend }
 
@@ -273,7 +313,7 @@ internal object StampClient {
     val spend: StateFlow<Spend> = _spend.asStateFlow()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
-    /** Buys the batch [quote] priced, as the user just confirmed. False if a spend is already running. */
+    /** Buys the batch [quote] priced, as the user just confirmed. False if a spend or a discover is already running. */
     fun buy(quote: StampQuote): Boolean = start(Kind.Buy, null) {
         JSONObject()
             .put("depth", quote.depth)
@@ -297,7 +337,7 @@ internal object StampClient {
     private fun start(kind: Kind, batchId: String?, args: () -> JSONObject): Boolean {
         val running = Spend.Running(kind, batchId)
         synchronized(this) {
-            if (_spend.value is Spend.Running) return false
+            if (!canSpend(_spend.value, _discovery.value)) return false
             _spend.value = running
         }
         scope.launch {
