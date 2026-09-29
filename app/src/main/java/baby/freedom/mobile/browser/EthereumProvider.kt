@@ -78,6 +78,9 @@ sealed interface EthAsk {
 
     /** `wallet_addEthereumChain` for a chain the wallet doesn't have: add [chain] and switch the site to it. */
     data class AddChain(override val origin: String, val chain: Chain) : EthAsk
+
+    /** A page answered `402 Payment Required` with x402 terms (#140): pay it ([X402Payments]). */
+    data class Payment(override val origin: String, val payment: X402Ask) : EthAsk
 }
 
 /** The user's answer to an [EthAsk]. */
@@ -91,11 +94,16 @@ sealed interface EthAnswer {
     data object Paused : EthAnswer
 
     /**
-     * [account]: the one the user picked to share, for [EthAsk.Connect].
+     * [account]: the one the user picked to share, for [EthAsk.Connect];
+     * [payment]: the offer picked and any allowance granted, for [EthAsk.Payment];
      * [alwaysApprove]: for [EthAsk.SendTransaction], also turn its
      * [EthAsk.SendTransaction.autoApprove] rule on.
      */
-    data class Approved(val account: WalletAccount? = null, val alwaysApprove: Boolean = false) : EthAnswer
+    data class Approved(
+        val account: WalletAccount? = null,
+        val payment: X402Choice? = null,
+        val alwaysApprove: Boolean = false,
+    ) : EthAnswer
 }
 
 /**

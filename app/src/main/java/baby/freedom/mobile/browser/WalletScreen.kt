@@ -92,6 +92,7 @@ import baby.freedom.mobile.wallet.VaultLockedException
 import baby.freedom.mobile.wallet.WalletAccounts
 import baby.freedom.mobile.wallet.WalletSender
 import baby.freedom.mobile.wallet.TxHistory
+import baby.freedom.mobile.data.X402Store
 import baby.freedom.mobile.wallet.TokenRegistry
 import baby.freedom.mobile.wallet.TooManyAccountsException
 import baby.freedom.mobile.data.ChainStore
@@ -339,6 +340,11 @@ fun WalletScreen(
     val chainStore = remember(context) { ChainStore.get(context) }
     val dappGrantStore = remember(context) { DappGrantStore.get(context) }
     val dappGrants by dappGrantStore.all.collectAsState(initial = emptyList())
+    // x402 payments (#140): the sites allowed to pay without asking, and every payment.
+    val x402 = remember(context) { X402Store.get(context) }
+    val x402Allowances by x402.allowances.collectAsState(initial = emptyList())
+    val x402Payments by x402.history.collectAsState(initial = emptyList())
+    var x402HistoryOpen by remember { mutableStateOf(false) }
     // The connected site whose page is open (#111), by origin, so it follows the stored grant.
     var openSite by remember { mutableStateOf<String?>(null) }
     // The connected site whose Disconnect couldn't be saved: its line says so, as the site's page does.
@@ -573,6 +579,11 @@ fun WalletScreen(
     }
     // The wallet went away (removed, or unreadable) with the page up: nothing to show.
     LaunchedEffect(stored == null) { if (stored == null) showingPhrase = false }
+
+    if (x402HistoryOpen) {
+        X402HistoryPage(x402Payments, allChains.orEmpty(), onBack = { x402HistoryOpen = false })
+        return
+    }
 
     if (importing) {
         ImportPhrasePage(
@@ -823,6 +834,21 @@ fun WalletScreen(
                     },
                 )
             }
+            // Shown whatever the vault's state once there's anything in it, like the connected sites.
+            if (state is Vault.State.Locked || state is Vault.State.Unlocked || x402Allowances.isNotEmpty() || x402Payments.isNotEmpty()) {
+                item("x402") {
+                    X402Section(
+                        allowances = x402Allowances,
+                        payments = x402Payments.size,
+                        chains = allChains.orEmpty(),
+                        onRevoke = { a -> scope.launch { x402.revoke(a.origin, a.chainId, a.asset, a.account) } },
+                        onOpenHistory = {
+                            error = null
+                            x402HistoryOpen = true
+                        },
+                    )
+                }
+            }
             if (state is Vault.State.Locked || state is Vault.State.Unlocked) item("publishing") {
                 SectionCard(title = "Publishing") {
                     PageRow(
@@ -869,6 +895,8 @@ fun WalletScreen(
                             publishers.wipe()
                             history.wipeNow()
                             EthereumProviders.walletRemoved(context)
+                            // Its site allowances and payment history (#140).
+                            x402.clear()
                         },
                     )
                 }

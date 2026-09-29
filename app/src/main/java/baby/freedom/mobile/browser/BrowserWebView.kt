@@ -993,6 +993,7 @@ fun BrowserWebViewHost(
             sitePermissions.onTabClosed(id)
             RadicleProviders.onTabClosed(id)
             EthereumProviders.onTabClosed(id)
+            X402Payments.onTabClosed(id)
             UnverifiedOrigins.release(wv)
             (wv as? PageWebView)?.sweptReload?.committed()
             wv.stopLoading()
@@ -1245,6 +1246,7 @@ fun BrowserWebViewHost(
                     sitePermissions.onDocumentStarted(tab)
                     RadicleProviders.onDocumentStarted(tab, url = null)
                     EthereumProviders.onDocumentStarted(tab, url = null)
+                    X402Payments.onDocumentStarted(tab, view = null, url = null)
                 }
             } else {
                 // As when the last private tab closes (#86): the private
@@ -2295,6 +2297,13 @@ private fun buildRefreshableWebView(
             // load (#185 R2-F1).
             state.restoreLoadSuperseded()
             if (url != null && userNamed) userNamedChain.started(url) else userNamedChain.ended()
+            // …nor is what answers it a paid request's answer, or a 402
+            // noted before it (#218 R2-M2, R2-M3).
+            X402Payments.onNavigationSuperseded(state)
+            // The user's own: the address they named, or Reload /
+            // Back / Forward (no URL). A site's allowance may pay for
+            // it; not for the app's other loads (#218 R4-M3).
+            X402Payments.onNavigationStarted(state, byUser = userNamed || url == null, pageUrl = null, url = url)
         }
         // Stop (or a new load's stop first) ends the navigation in flight
         // without a commit: neither its gesture nor the user's naming of
@@ -2307,6 +2316,8 @@ private fun buildRefreshableWebView(
             // (#185 R2-F1).
             state.restoreLoadSuperseded()
             userNamedChain.ended()
+            // A 402 whose page never commits isn't paid for later (#218 R2-M2).
+            X402Payments.onNavigationSuperseded(state)
         }
 
         // Whether this WebView has started a document yet. A popup
@@ -2358,6 +2369,8 @@ private fun buildRefreshableWebView(
                 // load's, whatever the answer's headers suggested.
                 state.mainFrameKeptPage()
                 adblockPage.kept()
+                // A 402 that became a file never commits (#218 R2-M2).
+                X402Payments.onNavigationSuperseded(state)
             }
             // A main-frame navigation that turned out to be a file never
             // commits: no onPageStarted, no final progress callback. Left
@@ -2532,6 +2545,9 @@ private fun buildRefreshableWebView(
                 sitePermissions.onDocumentStarted(state)
                 RadicleProviders.onDocumentStarted(state, url)
                 EthereumProviders.onDocumentStarted(state, url)
+                // After it: an x402 payment the page asks for is put to
+                // the user against this document's number (#140).
+                X402Payments.onDocumentStarted(state, view, url)
                 // …and with the progress latch open again: whatever the
                 // last Stop aborted, this document is a load of its own
                 // and its percentages are worth drawing (#41).
@@ -2704,6 +2720,8 @@ private fun buildRefreshableWebView(
                 // end (a 204, a cancelled hop), has no more hops (R2-F1).
                 userNamedChain.loadFinished(url, committedPageUrl)
                 (view as? PageWebView)?.usersNavigation?.loadFinished(url, committedPageUrl)
+                // A 402 whose load ended without committing (#218 R2-M2).
+                X402Payments.onLoadFinished(state, url)
                 // Re-probe: a page's own stylesheet (or its first
                 // script) can be what sets `touch-action: none`, and
                 // that is not necessarily in place at first paint (#56).
@@ -3135,6 +3153,19 @@ private fun buildRefreshableWebView(
                 // A hop of the user's named load the WebView now follows:
                 // its answer is the next one that may be an app link.
                 if (request.isForMainFrame && request.isRedirect) userNamedChain.redirected(target)
+                // x402 (#140): a paid request's redirect hop may be where
+                // its answer comes from; the page's own navigation is not
+                // its answer, nor a 402's commit (#218 R2).
+                if (request.isForMainFrame) {
+                    if (request.isRedirect) {
+                        X402Payments.onRedirect(state, target)
+                    } else {
+                        X402Payments.onNavigationSuperseded(state)
+                        // Started by the page on screen: only that site's
+                        // own allowance may pay for it (#218 R4-M3).
+                        X402Payments.onNavigationStarted(state, byUser = false, pageUrl = committedPageUrl, url = target)
+                    }
+                }
                 return false
             }
 
@@ -3163,6 +3194,19 @@ private fun buildRefreshableWebView(
                         if (request.hasGesture() && request.method.equals("POST", ignoreCase = true)) {
                             (view as? PageWebView)?.let { v -> v.post { v.putBackHold.dropped() } }
                         }
+                        // x402 (#140): a form POST — gesture or not —
+                        // replaces a paid request in flight; its answer
+                        // is not the paid request's (#218 R3-M1) — if it
+                        // went out after that paid request, by the epoch
+                        // read here, not when the post runs (#218 R4-M1).
+                        // The paid GET itself is noted as seen here: one a
+                        // service worker answers never is (#218 R4-M2).
+                        // Posted now, so it lands before the request's own
+                        // redirect or commit callbacks.
+                        val requested = it
+                        val method = request.method
+                        val epoch = X402Payments.requestEpoch(state)
+                        view?.post { X402Payments.onMainFrameRequested(state, requested, method, epoch, committedPageUrl) }
                         heldBack = (view as? PageWebView)?.pageHopRequested(it, request.requestHeaders) == true
                     }
                 }
@@ -3251,6 +3295,8 @@ private fun buildRefreshableWebView(
                 val req = request ?: return
                 if (!req.isForMainFrame) return
                 val failed = req.url?.toString() ?: return
+                // A paid request (#140) that got no answer.
+                X402Payments.onMainFrameFailed(state, failed)
                 // Already on the error page? Don't loop.
                 if (ErrorPage.isErrorPage(failed)) return
                 // An onion page whose Tor went away mid-load (#143): the
@@ -3298,6 +3344,8 @@ private fun buildRefreshableWebView(
             ) {
                 val req = request ?: return
                 if (!req.isForMainFrame) return
+                // A 402 with x402 terms, or the answer to a paid request (#140).
+                X402Payments.onHttpError(state, req, errorResponse)
                 val failed = req.url?.toString() ?: return
                 if (ErrorPage.isErrorPage(failed)) return
                 if (!isDwebPageUrl(failed)) return
@@ -3539,6 +3587,11 @@ private fun buildRefreshableWebView(
         state.loadAborted = false
         // …and is a new load of its own for the IPFS phase line (#94).
         state.beginLoad(inWebView = true)
+        // It's the user's own reload, like the menu's: a sheet they
+        // rejected on the page (a wallet or x402 payment sheet, a
+        // `window.radicle` prompt) may ask again (#218 R1-M3).
+        EthereumProviders.allowPrompts(state.id)
+        RadicleProviders.allowPrompts(state.id)
         webView.reload()
     }
     // Who owns a downward drag — the refresh spinner or the page.

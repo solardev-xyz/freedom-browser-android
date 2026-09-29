@@ -198,10 +198,24 @@ class Ledger internal constructor(private val context: Context) {
     }
 
     /** `eth_signTypedData_v4` of [data] (whose digest is [digest]) on the Ledger holding [account]. */
-    suspend fun signTypedData(account: WalletAccount, data: Eip712.TypedData, digest: ByteArray): String {
+    suspend fun signTypedData(account: WalletAccount, data: Eip712.TypedData, digest: ByteArray): String =
+        signTypedData(account) { data to digest }
+
+    /**
+     * Typed data made by [prepare] (with its digest), signed on the Ledger
+     * holding [account]. [prepare] is called once the Ledger is connected,
+     * unlocked, on the Ethereum app and checked to hold [account], just
+     * before it shows the data: data with a deadline in it (an x402
+     * authorization's `validBefore`) starts its clock there, not before a
+     * Bluetooth connect and an unlock that can take most of it (#218 R1-F1).
+     */
+    suspend fun signTypedData(account: WalletAccount, prepare: () -> Pair<Eip712.TypedData, ByteArray>): String {
         val key = account.ledger ?: error("not a Ledger account")
+        var digest = ByteArray(0)
         val sig = session(key.device, key.deviceName, "Review and sign the data on your Ledger") { app, stage ->
             verified(app, key, account.address, stage)
+            val (data, d) = prepare()
+            digest = d
             app.signTypedData(key.path, data)
         }
         return "0x" + recover(sig, digest, account.address).rsv().toHex()

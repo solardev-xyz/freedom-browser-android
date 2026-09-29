@@ -28,6 +28,7 @@ import androidx.lifecycle.lifecycleScope
 import baby.freedom.mobile.browser.BrowserScreen
 import baby.freedom.mobile.browser.DeepLinkQueue
 import baby.freedom.mobile.browser.EthereumProviders
+import baby.freedom.mobile.browser.X402Payments
 import baby.freedom.mobile.browser.Gateways
 import baby.freedom.mobile.browser.HOME_URL
 import baby.freedom.mobile.browser.Adblock
@@ -398,6 +399,7 @@ class MainActivity : ComponentActivity() {
         RadicleProviders.init(this)
         // `window.ethereum` (#110): the dApp provider behind every normal tab.
         EthereumProviders.init(this)
+        X402Payments.init(this)
         lifecycleScope.launch {
             settings.radicleEnabled.collect {
                 RadicleClient.enabled = it
