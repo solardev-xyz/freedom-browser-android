@@ -228,24 +228,31 @@ internal fun SendPage(
                             error = null
                         },
                         onConfirm = {
-                            if (sender.isStale(q)) {
-                                // Priced too long ago to trust its fee: price it again and let the user look.
+                            // Priced too long ago to trust its fee: price it again and let the user look.
+                            val reprice = {
                                 prepare(q.request, sendAll = false) { fresh ->
                                     quote = fresh
                                     notice = "The fee estimate was over a minute old, so it’s been priced again. " +
                                         "Check it and confirm."
                                 }
+                            }
+                            if (sender.isStale(q)) {
+                                reprice()
                             } else {
                                 busy = true
                                 error = null
                                 scope.launch {
+                                    var stale = false
                                     try {
                                         if (!vault.unlockedNow()) vault.unlock(auth)
-                                        if (sender.submit(q, WalletSender.vaultSigner(vault, q.request.from))) {
-                                            quote = null
-                                            notice = null
-                                        } else {
-                                            error = "Another send is still going out. Wait for it to finish."
+                                        // submit checks the age again: the unlock prompt can have stood for minutes.
+                                        when (sender.submit(q, WalletSender.vaultSigner(vault, q.request.from))) {
+                                            WalletSender.Submit.STARTED -> {
+                                                quote = null
+                                                notice = null
+                                            }
+                                            WalletSender.Submit.BUSY -> error = "Another send is still going out. Wait for it to finish."
+                                            WalletSender.Submit.STALE -> stale = true
                                         }
                                     } catch (e: CancellationException) {
                                         throw e
@@ -254,6 +261,7 @@ internal fun SendPage(
                                     } finally {
                                         busy = false
                                     }
+                                    if (stale) reprice()
                                 }
                             }
                         },

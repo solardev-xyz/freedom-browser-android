@@ -273,7 +273,7 @@ class SendTest {
         val chain = FakeChain()
         val s = sender(chain)
         val quote = s.prepare(request())
-        assertTrue(s.submit(quote, signer()))
+        assertEquals(WalletSender.Submit.STARTED, s.submit(quote, signer()))
         val pending = s.awaitStage { it == SendStatus.Stage.Pending }
         val signed = quote.tx.sign(key.copyOf(), from.address)
         assertEquals(signed.hash, pending.hash)
@@ -355,8 +355,8 @@ class SendTest {
         assertTrue(s.status.value!!.stage is SendStatus.Stage.Failed)
 
         val gate = java.util.concurrent.CountDownLatch(1)
-        assertTrue(s.submit(quote) { tx -> gate.await(); tx.sign(key.copyOf(), from.address) })
-        assertFalse(s.submit(quote, signer()))
+        assertEquals(WalletSender.Submit.STARTED, s.submit(quote) { tx -> gate.await(); tx.sign(key.copyOf(), from.address) })
+        assertEquals(WalletSender.Submit.BUSY, s.submit(quote, signer()))
         // Acknowledging a send that's still being signed leaves it.
         s.acknowledge()
         assertNotNull(s.status.value)
@@ -383,7 +383,50 @@ class SendTest {
         check(ChainRpcException.AllSourcesFailed(emptyList(), rpc("replacement transaction underpriced")), "Not sent: another transaction with nonce 4", false)
         check(rpc("transaction underpriced"), "Not sent: its fee is below", false)
         check(rpc("max fee per gas less than block base fee"), "Not sent: its fee is below", false)
-        check(rpc("something odd‮"), "Not sent: the network refused it (something odd)", false)
+        check(rpc("nonce too high"), "Not sent: nonce 4 is ahead of what the network expects", false)
+        check(rpc("nonce too low"), "Not sent: nonce 4 was already used", false)
+        // An error this can't read proves nothing: a rate limit, a client's own "already have it" wording.
+        check(rpc("something odd‮"), "The RPC answered with an error (something odd), so it may or may not", true)
+        check(ChainRpcException.AllSourcesFailed(emptyList(), ChainRpcException.Rpc(-32005, "rate limited", null)), "The RPC answered with an error (rate limited)", true)
+        // One source never answered: whatever the rest said, it may have it.
+        for (refusal in listOf(rpc("rate limited"), rpc("nonce too low"), rpc("insufficient funds for gas * price + value"))) {
+            check(ChainRpcException.AllSourcesFailed(listOf("direct a.example: timed out"), refusal, unanswered = true), "One RPC didn’t answer and may have taken it", true)
+        }
+    }
+
+    @Test
+    fun `a node that timed out then others refusing is may-have-gone, and Try again resends the same bytes`() = runBlocking<Unit> {
+        val chain = FakeChain()
+        val s = sender(chain)
+        val quote = s.prepare(request())
+        // a.example takes it but its answer never comes; b and c are rate limited.
+        var calls = 0
+        chain.on["eth_sendRawTransaction"] = { req ->
+            synchronized(chain.sent) { chain.sent += req.getJSONArray("params").getString(0) }
+            if (synchronized(chain) { calls++ } == 0) throw IOException("timed out")
+            "\"error\":{\"code\":-32005,\"message\":\"rate limit exceeded\"}"
+        }
+        s.submit(quote, signer())
+        val failed = s.awaitStage { it is SendStatus.Stage.Failed }.stage as SendStatus.Stage.Failed
+        assertTrue(failed.message, failed.mayHaveGone)
+        chain.on.remove("eth_sendRawTransaction")
+        s.retry()
+        s.awaitStage { it == SendStatus.Stage.Pending }
+        assertEquals(1, chain.sent.toSet().size)
+    }
+
+    @Test
+    fun `a quote that went stale while the unlock prompt stood is not signed`() = runBlocking<Unit> {
+        val chain = FakeChain()
+        var now = 1_000L
+        val s = sender(chain) { now }
+        val quote = s.prepare(request())
+        now += WalletSender.QUOTE_TTL_MS + 1
+        var signed = false
+        assertEquals(WalletSender.Submit.STALE, s.submit(quote) { tx -> signed = true; tx.sign(key.copyOf(), from.address) })
+        assertFalse(signed)
+        assertNull(s.status.value)
+        assertTrue(chain.sent.isEmpty())
     }
 
     @Test
@@ -406,6 +449,10 @@ class SendTest {
         assertNull(WalletSender.revertReason("0x4e487b71" + "11".padStart(64, '0')))
         val data = "0x08c379a0" + "20".padStart(64, '0') + "2".padStart(64, '0') + "6869".padEnd(64, '0')
         assertEquals("hi", WalletSender.revertReason(data))
+        // A length or offset past the data is refused before anything is allocated for it.
+        assertNull(WalletSender.revertReason("0x08c379a0" + "20".padStart(64, '0') + "7fffffff".padStart(64, '0') + "6869".padEnd(64, '0')))
+        assertNull(WalletSender.revertReason("0x08c379a0" + "f".repeat(64) + "2".padStart(64, '0') + "6869".padEnd(64, '0')))
+        assertNull(WalletSender.revertReason("0x08c379a0" + "20".padStart(64, '0') + "21".padStart(64, '0') + "6869".padEnd(64, '0')))
     }
 
     private suspend fun assertMessage(start: String, block: suspend () -> Unit) {

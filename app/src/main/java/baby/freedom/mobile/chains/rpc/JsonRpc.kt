@@ -49,11 +49,15 @@ sealed class ChainRpcException(message: String) : Exception(message) {
      * No source answered. [failures] says why each tier didn't
      * (`"quorum: …"`), with hosts only — never a URL, which can carry a
      * key. [nodeError]: the last node that answered with an error of its
-     * own, e.g. a transaction rejection.
+     * own, e.g. a transaction rejection. [unanswered]: for a broadcast,
+     * some source was asked and never gave a verdict (a timeout, a
+     * dropped connection) — it may have taken the transaction whatever
+     * the others said.
      */
     class AllSourcesFailed(
         val failures: List<String>,
         val nodeError: Rpc?,
+        val unanswered: Boolean = false,
     ) : ChainRpcException(
         "No chain source answered (" + failures.joinToString("; ") + ")" +
             (nodeError?.let { " — ${it.message}" } ?: ""),

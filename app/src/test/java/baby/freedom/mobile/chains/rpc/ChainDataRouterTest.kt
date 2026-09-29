@@ -16,6 +16,8 @@ import kotlinx.coroutines.runBlocking
 import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
@@ -561,6 +563,7 @@ class ChainDataRouterTest {
             fail()
         } catch (e: ChainRpcException.AllSourcesFailed) {
             assertEquals("nonce too low", e.nodeError?.rpcMessage)
+            assertFalse(e.unanswered)
         }
         net.handlers[a] = { err(-32000, "insufficient funds for gas * price + value") }
         try {
@@ -568,6 +571,23 @@ class ChainDataRouterTest {
             fail()
         } catch (e: ChainRpcException.Rpc) {
             assertTrue(e.insufficientFunds)
+        }
+    }
+
+    @Test
+    fun aBroadcastWithAnRpcThatNeverAnsweredSaysSoWhateverTheOthersRefused() = runBlocking {
+        for (refusal in listOf(err(-32005, "rate limit exceeded"), err(-32000, "insufficient funds for gas * price + value"))) {
+            val net = Net()
+            net.handlers[a] = { throw IOException("timed out") }
+            net.handlers[b] = { refusal }
+            net.handlers[c] = { refusal }
+            try {
+                router(net, listOf(chain(rpcs = listOf(a, b, c)))).broadcast(137, rawTx)
+                fail()
+            } catch (e: ChainRpcException.AllSourcesFailed) {
+                assertTrue(refusal.toString(), e.unanswered)
+                assertNotNull(e.nodeError)
+            }
         }
     }
 

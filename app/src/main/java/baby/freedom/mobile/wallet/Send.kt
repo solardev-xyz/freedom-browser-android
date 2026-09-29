@@ -345,15 +345,30 @@ class WalletSender internal constructor(
     /** Whether [quote] is too old to sign as is (its fees may no longer get it mined). */
     fun isStale(quote: SendQuote): Boolean = clock() - quote.preparedAt !in 0 until QUOTE_TTL_MS
 
+    /** What [submit] did with a quote. */
+    enum class Submit {
+        /** Signing and broadcasting it; [status] follows it. */
+        STARTED,
+
+        /** Another send is still being signed or broadcast. */
+        BUSY,
+
+        /** Older than [QUOTE_TTL_MS]: nothing signed, price it again. */
+        STALE,
+    }
+
     /**
      * Signs [quote]'s transaction with [sign] (the account's key, which
-     * it zeroes) and broadcasts it, then follows it to a receipt. False
-     * if another send is still being signed or broadcast.
+     * it zeroes) and broadcasts it, then follows it to a receipt —
+     * unless another send is still being signed or broadcast, or the
+     * quote has gone [stale][isStale] (checked here, at the moment of
+     * signing, however long an unlock prompt kept the user before it).
      */
-    fun submit(quote: SendQuote, sign: (EthTransaction) -> EthTransaction.Signed): Boolean {
+    fun submit(quote: SendQuote, sign: (EthTransaction) -> EthTransaction.Signed): Submit {
         synchronized(this) {
             val current = _status.value?.stage
-            if (current == SendStatus.Stage.Signing || current == SendStatus.Stage.Broadcasting) return false
+            if (current == SendStatus.Stage.Signing || current == SendStatus.Stage.Broadcasting) return Submit.BUSY
+            if (isStale(quote)) return Submit.STALE
             job?.cancel()
             signed = null
             _status.value = SendStatus(quote, SendStatus.Stage.Signing)
@@ -374,7 +389,7 @@ class WalletSender internal constructor(
                 broadcast(quote, s)
             }
         }
-        return true
+        return Submit.STARTED
     }
 
     /** After a [SendStatus.Stage.Failed] that [SendStatus.Stage.Failed.mayHaveGone]: the same bytes again. */
@@ -553,27 +568,42 @@ class WalletSender internal constructor(
 
         /**
          * A broadcast that failed: what to tell the user, and whether it
-         * may have gone out anyway. A node's own verdict (insufficient
-         * funds, a used nonce, a fee too low) means it wasn't taken; no
-         * answer at all means it can't be told.
+         * may have gone out anyway. Only a verdict this recognises as a
+         * refusal (insufficient funds, a nonce, a fee too low), from a
+         * walk where every source asked gave one, means it wasn't taken.
+         * A source that never answered may have taken it whatever the
+         * others said, and an error this can't read (a rate limit, a
+         * client's own "already have it" wording) proves nothing either —
+         * both are "may have gone", where Try again resends the same bytes.
          */
         internal fun broadcastFailure(e: ChainRpcException, quote: SendQuote): Pair<String, Boolean> {
             val node = (e as? ChainRpcException.Rpc) ?: (e as? ChainRpcException.AllSourcesFailed)?.nodeError
+            val unanswered = (e as? ChainRpcException.AllSourcesFailed)?.unanswered == true
             val symbol = quote.request.chain.symbol
             val m = node?.rpcMessage?.lowercase().orEmpty()
+            val uncertain = "No RPC confirmed it took the transaction, so it may or may not have gone out. " +
+                "Try again sends the very same transaction, so it can’t be paid twice."
             return when {
-                node == null -> (
-                    "No RPC confirmed it took the transaction, so it may or may not have gone out. " +
+                node == null -> uncertain to true
+                unanswered -> (
+                    "One RPC didn’t answer and may have taken it; another refused it (${clip(node.rpcMessage)}). " +
                         "Try again sends the very same transaction, so it can’t be paid twice."
                     ) to true
                 node.insufficientFunds -> "Not sent: not enough $symbol for the amount and the fee any more." to false
-                "nonce too low" in m || "already been used" in m || "invalid nonce" in m || "nonce too high" in m ->
+                "nonce too high" in m ->
+                    "Not sent: nonce ${quote.tx.nonce} is ahead of what the network expects — an earlier transaction may not have reached it. Review it again." to false
+                "nonce too low" in m || "already been used" in m ->
                     "Not sent: nonce ${quote.tx.nonce} was already used — maybe by another wallet with this account. Review it again." to false
+                "invalid nonce" in m ->
+                    "Not sent: the network didn’t accept nonce ${quote.tx.nonce}. Review it again." to false
                 "replacement" in m && "underpriced" in m ->
                     "Not sent: another transaction with nonce ${quote.tx.nonce} is still waiting to be mined. Review it again." to false
                 "underpriced" in m || "fee cap" in m || "base fee" in m || "too low" in m ->
                     "Not sent: its fee is below what the network takes now. Review it again for a fresh fee." to false
-                else -> "Not sent: the network refused it (${clip(node.rpcMessage)})." to false
+                else -> (
+                    "The RPC answered with an error (${clip(node.rpcMessage)}), so it may or may not have gone out. " +
+                        "Try again sends the very same transaction, so it can’t be paid twice."
+                    ) to true
             }
         }
 
@@ -583,10 +613,14 @@ class WalletSender internal constructor(
             if (!hex.startsWith("08c379a0") || hex.length < 8 + 128) return null
             return runCatching {
                 val body = hex.substring(8)
-                val offset = BigInteger(body.substring(0, 64), 16).toInt()
-                val len = BigInteger(body.substring(offset * 2, offset * 2 + 64), 16).toInt()
-                val start = offset * 2 + 64
-                val bytes = ByteArray(len) { i -> body.substring(start + i * 2, start + i * 2 + 2).toInt(16).toByte() }
+                // Untrusted node data: bound every length by what's actually there before using it.
+                val offset = BigInteger(body.substring(0, 64), 16)
+                if (offset > BigInteger.valueOf((body.length / 2 - 32).toLong())) return null
+                val lenAt = offset.toInt() * 2
+                val len = BigInteger(body.substring(lenAt, lenAt + 64), 16)
+                val start = lenAt + 64
+                if (len > BigInteger.valueOf(((body.length - start) / 2).toLong())) return null
+                val bytes = ByteArray(len.toInt()) { i -> body.substring(start + i * 2, start + i * 2 + 2).toInt(16).toByte() }
                 String(bytes, Charsets.UTF_8)
             }.getOrNull()
         }

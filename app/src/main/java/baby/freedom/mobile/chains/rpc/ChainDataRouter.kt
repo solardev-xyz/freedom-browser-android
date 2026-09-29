@@ -172,6 +172,11 @@ class ChainDataRouter internal constructor(
      * timed out answering) counts as sent: the hash is the transaction's
      * own. A light client's uncertain outcome ends the walk
      * ([ChainRpcException.BroadcastUncertain]) — it may be propagating.
+     * A source that never gave a verdict (timed out, dropped) may have
+     * taken it too, so the walk's failure then says so
+     * ([ChainRpcException.AllSourcesFailed.unanswered]), and a
+     * deterministic refusal after one is reported the same way rather
+     * than thrown as the whole answer.
      */
     suspend fun broadcast(chainId: Long, rawTransaction: String): ChainDataResult {
         val chain = chain(chainId)
@@ -183,6 +188,11 @@ class ChainDataRouter internal constructor(
         val body = JsonRpc.body("eth_sendRawTransaction", JSONArray().put(raw))
         val failures = mutableListOf<String>()
         var nodeError: ChainRpcException.Rpc? = null
+        var unanswered = false
+        // A node's final word ends the walk — unless an earlier source may
+        // already have the transaction, when it's only one node's view.
+        fun refused(e: ChainRpcException.Rpc): Nothing =
+            if (unanswered) throw ChainRpcException.AllSourcesFailed(failures + "refused: ${e.message}", e, unanswered = true) else throw e
         for (source in policy.broadcastOrder) {
             when (source) {
                 ChainSource.MYOTIS, ChainSource.COLIBRI -> {
@@ -199,14 +209,16 @@ class ChainDataRouter internal constructor(
                         return ChainDataResult(hash, oneOf(source, ChainTrust.Level.VERIFIED, source.key))
                     } catch (e: CancellationException) {
                         currentCoroutineContext().ensureActive()
+                        unanswered = true
                         failures += "${source.key}: cancelled"
                     } catch (e: ChainRpcException.BroadcastUncertain) {
                         throw e
                     } catch (e: ChainRpcException.Rpc) {
-                        if (e.deterministic) throw e
+                        if (e.deterministic) refused(e)
                         nodeError = e
                         failures += "${source.key}: ${e.message}"
                     } catch (e: Exception) {
+                        unanswered = true
                         failures += "${source.key}: ${e.message}"
                     }
                 }
@@ -218,7 +230,7 @@ class ChainDataRouter internal constructor(
                                 if (echoed) "" else " (it answered a different hash)")
                             return ChainDataResult(hash, direct(chain, url))
                         }
-                        is Leg.Deterministic -> throw leg.error
+                        is Leg.Deterministic -> refused(leg.error)
                         is Leg.NodeError -> {
                             if (ALREADY_KNOWN.containsMatchIn(leg.error.rpcMessage)) {
                                 return ChainDataResult(hash, direct(chain, url))
@@ -226,13 +238,16 @@ class ChainDataRouter internal constructor(
                             nodeError = leg.error
                             failures += "direct ${hostOf(url)}: ${leg.error.message}"
                         }
-                        is Leg.Failed -> failures += "direct ${hostOf(url)}: ${leg.reason}"
+                        is Leg.Failed -> {
+                            unanswered = true
+                            failures += "direct ${hostOf(url)}: ${leg.reason}"
+                        }
                     }
                 }
                 ChainSource.QUORUM -> Unit // sanitized out: can't broadcast
             }
         }
-        throw ChainRpcException.AllSourcesFailed(failures, nodeError)
+        throw ChainRpcException.AllSourcesFailed(failures, nodeError, unanswered)
     }
 
     private suspend fun chain(chainId: Long): Chain =
