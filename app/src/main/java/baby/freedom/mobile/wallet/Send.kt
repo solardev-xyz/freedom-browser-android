@@ -256,14 +256,27 @@ class GasOracle(private val rpc: WalletRpc) {
      * agreed on — RPCs are a block apart, and clients put different
      * fields in a block — so this reads `eth_feeHistory` for one block
      * pinned a couple behind the head: a small answer that every RPC
-     * gives the same way for the same block. Which block is only one
-     * RPC's word, but that doesn't matter: the base fee it had is what
-     * has to agree. Null when nothing agreed, or the read failed.
+     * gives the same way for the same block.
+     *
+     * The head that block is pinned from is one RPC's word (a quorum on
+     * `eth_blockNumber` rarely forms), and an RPC that picks an old,
+     * congested block would have every honest RPC verify a base fee the
+     * chain paid years ago, lifting the tip's ceiling to it (R2-F1). So
+     * the block must also be recent: the RPCs must agree, the same
+     * trusted way, that block pinned + [RECENT_WINDOW] doesn't exist
+     * yet. A lying head can then move the pin back by no more than that
+     * window, onto a base fee the chain really had moments ago; a head
+     * in the future pins a block no honest RPC has, and nothing agrees.
+     * Null when nothing agreed, the read failed, or the pin isn't recent.
      */
     private suspend fun trustedBaseFee(chainId: Long): BigInteger? = try {
         val head = rpc.blockNumber(chainId).value
-        val read = rpc.baseFeeAt(chainId, maxOf(0L, head - PINNED_BEHIND))
-        read.value.takeIf { trusted(read.trust) }
+        val pinned = maxOf(0L, head - PINNED_BEHIND)
+        val read = rpc.baseFeeAt(chainId, pinned)
+        read.value?.takeIf { trusted(read.trust) }?.takeIf {
+            val later = rpc.blockExists(chainId, pinned + RECENT_WINDOW)
+            !later.value && trusted(later.trust)
+        }
     } catch (e: ChainRpcException) {
         null
     }
@@ -291,6 +304,15 @@ class GasOracle(private val rpc: WalletRpc) {
 
         /** How far behind the head [trustedBaseFee] reads, so RPCs a block or two behind have it too. */
         private const val PINNED_BEHIND = 2L
+
+        /**
+         * How many blocks past the pinned one must not exist yet for
+         * [trustedBaseFee] to take its base fee: room for honest RPCs a
+         * few blocks apart, and little enough that a lying head can only
+         * pin a base fee from moments ago. A chain whose blocks come
+         * faster than the reads finish just keeps the cap.
+         */
+        private const val RECENT_WINDOW = 16L
 
         /** A read that is more than one public RPC's word: verified, or from an RPC the user added. */
         internal fun trusted(trust: ChainTrust): Boolean = trust.level != ChainTrust.Level.UNVERIFIED

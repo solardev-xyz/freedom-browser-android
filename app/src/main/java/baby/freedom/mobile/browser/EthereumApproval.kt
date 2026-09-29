@@ -466,15 +466,17 @@ private fun AutoApproveSwitch(rule: AutoApproveRule, chain: String, checked: Boo
 /**
  * Why a send a rule covers still has a sheet. A high fee and a locked
  * wallet are both named when both hold, so the unlock prompt on confirm
- * isn't a surprise (R1-M1).
+ * isn't a surprise (R1-M1). Every reason is the caller's to state, so
+ * none is ever claimed by default (R2-M2).
  */
-internal fun autoApproveRuledNote(replaces: Boolean, highFee: Boolean = false, locked: Boolean = !highFee): String =
+internal fun autoApproveRuledNote(replaces: Boolean, highFee: Boolean, locked: Boolean): String =
     "An auto-approve rule you turned on covers this call. " + when {
         replaces -> "It's asked here because it takes the place of a send you stopped tracking."
         highFee && locked -> "It's asked here because its network fee is higher than a rule sends without asking, " +
             "and because the wallet is locked; it goes out once you confirm."
         highFee -> "It's asked here because its network fee is higher than a rule sends without asking."
-        else -> "It's asked here because the wallet is locked; it goes out once you confirm."
+        locked -> "It's asked here because the wallet is locked; it goes out once you confirm."
+        else -> "It's asked here for you to check before it goes out."
     }
 
 @Composable

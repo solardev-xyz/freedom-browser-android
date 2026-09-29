@@ -12,6 +12,7 @@ import baby.freedom.mobile.chains.rpc.ChainDataRouter
 import baby.freedom.mobile.chains.rpc.ChainRpcException
 import baby.freedom.mobile.chains.rpc.ChainSource
 import baby.freedom.mobile.chains.rpc.ChainTrust
+import baby.freedom.mobile.chains.rpc.JsonRpc
 import baby.freedom.mobile.chains.rpc.RpcTransport
 import baby.freedom.mobile.chains.rpc.WalletRpc
 import baby.freedom.mobile.ens.hexToBytes
@@ -68,6 +69,9 @@ class SendTest {
         /** The count of mined transactions (`latest`); null: the same as [nonce] (nothing pending). */
         var mined: Long? = null
         var baseFee: BigInteger? = BigInteger.valueOf(14)
+
+        /** The chain's head: blocks past it don't exist yet. */
+        var head = 0x10L
         var tip = BigInteger.ONE
         var estimate = 21_000L
         var receipt: String = "null"
@@ -80,9 +84,13 @@ class SendTest {
         /** One RPC's own answer to a method (by URL), over [on]: an RPC the others disagree with. */
         val onUrl = HashMap<String, (String) -> String?>()
 
+        /** Like [onUrl], seeing the request too; null falls through to [onUrl] and the defaults. */
+        val onUrlReq = HashMap<String, (String, JSONObject) -> String?>()
+
         fun answer(req: JSONObject, url: String = ""): String {
             val method = req.getString("method")
             synchronized(methods) { methods += method; requests += req }
+            onUrlReq[method]?.invoke(url, req)?.let { return it }
             onUrl[method]?.invoke(url)?.let { return it }
             on[method]?.let { return it(req) }
             fun q(v: BigInteger) = "\"result\":\"0x${v.toString(16)}\""
@@ -92,12 +100,14 @@ class SendTest {
                 "eth_getTransactionCount" -> q(
                     BigInteger.valueOf(if (req.getJSONArray("params").optString(1) == "latest") mined ?: nonce else nonce),
                 )
-                "eth_getBlockByNumber" -> "\"result\":" + JSONObject().apply {
-                    put("number", "0x10")
+                "eth_getBlockByNumber" -> req.getJSONArray("params").getString(0).let { tag ->
+                    if (tag.startsWith("0x") && tag.substring(2).toLong(16) > head) "\"result\":null" else null
+                } ?: "\"result\":" + JSONObject().apply {
+                    put("number", "0x" + head.toString(16))
                     baseFee?.let { put("baseFeePerGas", "0x" + it.toString(16)) }
                 }
                 "eth_maxPriorityFeePerGas" -> q(tip)
-                "eth_blockNumber" -> q(BigInteger.valueOf(0x10))
+                "eth_blockNumber" -> q(BigInteger.valueOf(head))
                 "eth_feeHistory" -> "\"result\":" + JSONObject()
                     .put("oldestBlock", req.getJSONArray("params").getString(1))
                     .put("baseFeePerGas", org.json.JSONArray().put("0x" + (baseFee ?: BigInteger.ZERO).toString(16)).put("0x1"))
@@ -225,9 +235,12 @@ class SendTest {
         val pinned = chain.requests.last { it.getString("method") == "eth_feeHistory" }.getJSONArray("params")
         assertEquals("0xe", pinned.getString(1))
         // The latest block can disagree across RPCs without costing the tip its trusted ceiling.
-        chain.onUrl["eth_getBlockByNumber"] = { url ->
-            val fee = listOf(base, base + BigInteger.ONE, base + BigInteger.TWO)[gnosis.rpcUrls.indexOf(url)]
-            "\"result\":" + JSONObject().put("number", "0x10").put("baseFeePerGas", "0x" + fee.toString(16))
+        chain.onUrlReq["eth_getBlockByNumber"] = { url, req ->
+            // The latest block only: whether a later block exists yet is still answered the same by all.
+            if (req.getJSONArray("params").getString(0) != "latest") null else {
+                val fee = listOf(base, base + BigInteger.ONE, base + BigInteger.TWO)[gnosis.rpcUrls.indexOf(url)]
+                "\"result\":" + JSONObject().put("number", "0x10").put("baseFeePerGas", "0x" + fee.toString(16))
+            }
         }
         assertEquals(BigInteger.valueOf(60) * gwei, (sender(chain).prepare(request()).tx.fees as EthTransaction.Fees.Eip1559).maxPriorityFeePerGas)
         // Only the first RPC reports the high base fee (the others: 14 and 15 wei, so no two agree), and
@@ -249,6 +262,64 @@ class SendTest {
         assertEquals(BigInteger.valueOf(60) * gwei, GasOracle.eip1559(base, BigInteger.valueOf(60) * gwei, gnosis.id, trustedBaseFee = base).maxPriorityFeePerGas)
         assertTrue(GasOracle.trusted(ChainTrust(ChainTrust.Level.USER_CONFIGURED, ChainSource.DIRECT, listOf("a"), emptyList(), listOf("a"), 1, 1, null)))
         assertFalse(GasOracle.trusted(ChainTrust(ChainTrust.Level.UNVERIFIED, ChainSource.DIRECT, listOf("a"), emptyList(), listOf("a"), 1, 1, null)))
+    }
+
+    @Test
+    fun `a head an RPC picks can't pin the tip's ceiling to an old congested block (#233 R2-F1)`() = runBlocking {
+        val base = BigInteger.valueOf(80) * gwei
+        // Every RPC agrees on the 80 gwei base fee of whatever block is asked for: a block the chain paid
+        // that for long ago, as eth_feeHistory for a 2021 block is today. Honest RPCs are a block apart on
+        // the head, so no quorum forms and the first RPC's head is the one used.
+        val chain = FakeChain().apply { head = 0x1000L; baseFee = base; tip = BigInteger.valueOf(5_000) * gwei }
+        chain.onUrl["eth_blockNumber"] = { url ->
+            q(BigInteger.valueOf(listOf(0x5L, 0x1000L, 0x1001L)[gnosis.rpcUrls.indexOf(url)]))
+        }
+        val fees = sender(chain).prepare(request()).tx.fees as EthTransaction.Fees.Eip1559
+        // Block 0x3 + 16 exists on every honest RPC: the pin isn't recent, so its base fee isn't trusted.
+        assertEquals(BigInteger.valueOf(5) * gwei, fees.maxPriorityFeePerGas)
+        // An honest first RPC a block behind still pins a recent block, and a real high tip is kept.
+        chain.tip = BigInteger.valueOf(60) * gwei
+        chain.onUrl["eth_blockNumber"] = { url ->
+            q(BigInteger.valueOf(listOf(0xFFFL, 0x1000L, 0x1001L)[gnosis.rpcUrls.indexOf(url)]))
+        }
+        val recent = sender(chain).prepare(request()).tx.fees as EthTransaction.Fees.Eip1559
+        assertEquals(BigInteger.valueOf(60) * gwei, recent.maxPriorityFeePerGas)
+        val asked = chain.requests.filter { it.getString("method") == "eth_getBlockByNumber" }
+            .map { it.getJSONArray("params").getString(0) }
+        assertTrue(asked.contains("0x" + (0xFFDL + 16).toString(16)))
+        // A head in the future pins a block no honest RPC has: nothing agrees, and the cap holds.
+        chain.onUrl["eth_blockNumber"] = { url ->
+            q(BigInteger.valueOf(listOf(0x9000L, 0x1000L, 0x1001L)[gnosis.rpcUrls.indexOf(url)]))
+        }
+        chain.onUrl["eth_feeHistory"] = { url ->
+            if (gnosis.rpcUrls.indexOf(url) == 0) null
+            else "\"error\":{\"code\":-32602,\"message\":\"request beyond head block\"}"
+        }
+        assertEquals(BigInteger.valueOf(5) * gwei, (sender(chain).prepare(request()).tx.fees as EthTransaction.Fees.Eip1559).maxPriorityFeePerGas)
+    }
+
+    @Test
+    fun `eth_feeHistory answers shaped differently by each provider still agree on the base fee (#233 R2-M1)`() = runBlocking {
+        val base = BigInteger.valueOf(80) * gwei
+        val chain = FakeChain().apply { baseFee = base; tip = BigInteger.valueOf(60) * gwei }
+        chain.onUrl["eth_feeHistory"] = { url ->
+            val fee = org.json.JSONArray().put("0x" + base.toString(16)).put("0x1")
+            val h = JSONObject().put("oldestBlock", "0xe").put("baseFeePerGas", fee)
+            when (gnosis.rpcUrls.indexOf(url)) {
+                0 -> h.put("gasUsedRatio", org.json.JSONArray().put(0.5)).put("reward", org.json.JSONArray().put(org.json.JSONArray()))
+                1 -> h.put("gasUsedRatio", org.json.JSONArray().put(0.5))
+                else -> h.put("gasUsedRatio", org.json.JSONArray().put(0.50001))
+                    .put("baseFeePerBlobGas", org.json.JSONArray().put("0x1").put("0x1"))
+                    .put("blobGasUsedRatio", org.json.JSONArray().put(0))
+            }.let { "\"result\":$it" }
+        }
+        val fees = sender(chain).prepare(request()).tx.fees as EthTransaction.Fees.Eip1559
+        assertEquals(BigInteger.valueOf(60) * gwei, fees.maxPriorityFeePerGas)
+        // Only the block and its base fees are compared, each quantity in one spelling.
+        assertEquals(
+            JsonRpc.stable(WalletRpc.feeHistoryBaseFees(JSONObject().put("oldestBlock", "0x0e").put("baseFeePerGas", org.json.JSONArray().put("0x00ff")))),
+            JsonRpc.stable(WalletRpc.feeHistoryBaseFees(JSONObject().put("oldestBlock", "0xe").put("baseFeePerGas", org.json.JSONArray().put("0xff")).put("reward", org.json.JSONArray()))),
+        )
     }
 
     @Test

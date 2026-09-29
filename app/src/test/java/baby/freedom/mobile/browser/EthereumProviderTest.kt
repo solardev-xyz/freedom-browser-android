@@ -1146,8 +1146,10 @@ class EthereumProviderTest {
         assertNull(locked.quote.replaces)
         // Confirming there doesn't grant it a second time.
         assertEquals(1, rules.rules.size)
-        assertTrue(autoApproveRuledNote(replaces = false).contains("the wallet is locked"))
-        assertTrue(autoApproveRuledNote(replaces = true).contains("a send you stopped tracking"))
+        assertTrue(autoApproveRuledNote(replaces = false, highFee = false, locked = true).contains("the wallet is locked"))
+        assertTrue(autoApproveRuledNote(replaces = true, highFee = false, locked = true).contains("a send you stopped tracking"))
+        // No reason is claimed that the caller didn't state (R2-M2).
+        assertFalse(autoApproveRuledNote(replaces = false, highFee = false, locked = false).contains("locked"))
     }
 
     @Test
