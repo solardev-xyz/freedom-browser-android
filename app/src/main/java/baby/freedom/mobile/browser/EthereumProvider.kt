@@ -637,12 +637,15 @@ class EthereumProvider(
             try {
                 val data = Eip712.parse(params.opt(1))
                 val digest = Eip712.digest(data)
-                val shown = Eip712.signedMessage(data).let { m -> runCatching { m.toString(2) }.getOrElse { m.toString() } }
-                Triple(data, digest, shown)
+                val json = Eip712.signedMessage(data).let { m -> runCatching { m.toString(2) }.getOrElse { m.toString() } }
+                Triple(data, digest, sheetJson(json))
             } catch (e: Eip712.Invalid) {
                 throw BadParams("Invalid typed data: ${e.message}")
             }
         }
+        // Too much to show is too much to sign, as desktop signing has it: the sheet
+        // lays out only the start, and a page could pad a spender past it (#229).
+        if (shown.length > SHEET_MAX_CHARS) throw BadParams("The typed data is too long to show on the phone")
         val chain = chainFor(origin)
         // Only a chainId the domain separator covers says which chain this is for; an undeclared one isn't signed.
         val chainBound = Eip712.chainBound(data)
@@ -655,8 +658,8 @@ class EthereumProvider(
             chain = chain,
             chainBound = chainBound,
             // Only what the domain separator covers: an undeclared key isn't signed.
-            domainName = Eip712.signedDomainString(data, "name"),
-            verifyingContract = Eip712.signedDomainString(data, "verifyingContract"),
+            domainName = Eip712.signedDomainString(data, "name")?.let(Eip712::visible),
+            verifyingContract = Eip712.signedDomainString(data, "verifyingContract")?.let(Eip712::visible),
             primaryType = data.primaryType,
             // Only what the signature covers: a key the types don't declare isn't signed.
             messageJson = shown,
@@ -881,6 +884,18 @@ class EthereumProvider(
             val mixed = digits.any { it in 'a'..'f' } && digits.any { it in 'A'..'F' }
             return if (mixed && sum != address) null else sum
         }
+
+        /**
+         * The typed-data sheet's text for [json] (the signed message, printed
+         * one field per line): every character that could hide or rearrange
+         * what's around it — a bidi override, a zero-width or tag character,
+         * a line separator, a stack of combining marks painting over the next
+         * row — in a key or a string written as a visible escape
+         * ([Eip712.visible]), line by line. Android's `org.json` escapes only
+         * U+0000–U+001F when printing, so the page's strings would otherwise
+         * reach the sheet as they are (#229).
+         */
+        internal fun sheetJson(json: String): String = json.lines().joinToString("\n") { Eip712.visible(it) }
 
         private fun ByteArray.hexString(): String = hexOf(this)
     }
