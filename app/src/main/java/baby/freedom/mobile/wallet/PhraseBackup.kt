@@ -96,29 +96,51 @@ interface WrittenHere {
         }
     }
 
-    /** One small file; a failed read or write reads as "not written here", which costs one rewrite. */
+    /**
+     * One small file, read once and then kept in memory: a file that can't
+     * be written (#244 R2-M4) costs one rewrite per app start, not one on
+     * every reconcile, and [writeFailed] says so. A file that can't be read
+     * reads as "not written here", which costs one rewrite.
+     */
     class InFile(private val file: File) : WrittenHere {
-        override suspend fun get(): Boolean? = withContext(Dispatchers.IO) {
-            runCatching { if (file.exists()) file.readText().trim() else null }.getOrNull()?.let {
-                when (it) {
-                    "cloud" -> true
-                    "device" -> false
-                    else -> null
+        @Volatile private var loaded = false
+        @Volatile private var value: Boolean? = null
+
+        /** Whether the last [set] didn't reach the file (the value still holds in memory). */
+        @Volatile var writeFailed = false
+            private set
+
+        override suspend fun get(): Boolean? {
+            if (!loaded) {
+                value = withContext(Dispatchers.IO) {
+                    runCatching { if (file.exists()) file.readText().trim() else null }.getOrNull()?.let {
+                        when (it) {
+                            "cloud" -> true
+                            "device" -> false
+                            else -> null
+                        }
+                    }
                 }
+                loaded = true
             }
+            return value
         }
 
-        override suspend fun set(cloud: Boolean?) = withContext(Dispatchers.IO) {
-            runCatching {
-                if (cloud == null) {
-                    file.delete()
-                } else {
-                    val tmp = File(file.path + ".tmp")
-                    tmp.writeText(if (cloud) "cloud" else "device")
-                    if (!tmp.renameTo(file)) file.delete()
-                }
+        override suspend fun set(cloud: Boolean?) {
+            value = cloud
+            loaded = true
+            writeFailed = !withContext(Dispatchers.IO) {
+                runCatching {
+                    if (cloud == null) {
+                        !file.exists() || file.delete()
+                    } else {
+                        val tmp = File(file.path + ".tmp")
+                        tmp.writeText(if (cloud) "cloud" else "device")
+                        // Never leave a stale value behind for the next start to trust.
+                        tmp.renameTo(file) || run { file.delete(); false }
+                    }
+                }.getOrDefault(false)
             }
-            Unit
         }
     }
 }
@@ -196,8 +218,14 @@ class PhraseBackup(
     val known: StateFlow<Known?> = _known.asStateFlow()
 
     enum class Availability {
-        /** No Google Play services (or Block Store didn't answer). */
+        /** No Google Play services, or Block Store refused the call. */
         UNSUPPORTED,
+
+        /**
+         * Play services is here but didn't answer in time (or is still busy
+         * with an earlier call): not the same as not having it (#244 R2-M1).
+         */
+        NO_ANSWER,
 
         /** Block Store is here, but can't end-to-end encrypt: no screen lock or no Google account. */
         NOT_ENCRYPTED,
@@ -225,6 +253,8 @@ class PhraseBackup(
 
     suspend fun availability(): Availability = try {
         if (blockStore.endToEndEncryptionAvailable()) Availability.READY else Availability.NOT_ENCRYPTED
+    } catch (_: BackupNoAnswerException) {
+        Availability.NO_ANSWER
     } catch (_: BackupUnavailableException) {
         Availability.UNSUPPORTED
     }
@@ -272,7 +302,16 @@ class PhraseBackup(
     }
 
     private suspend fun deleteHeld() {
-        blockStore.delete(KEY)
+        try {
+            blockStore.delete(KEY)
+        } catch (e: BackupNoAnswerException) {
+            // Like a store that got no answer, the delete may still land (#244 R2-M2): the
+            // entry is neither known to be there nor gone, and if it stays, this install's
+            // last write of it can't be vouched for either.
+            _known.value = null
+            writtenHere.set(null)
+            throw e
+        }
         writtenHere.set(null)
         _known.value = Known(Status.NONE, null)
     }
@@ -332,9 +371,13 @@ class PhraseBackup(
     /**
      * Runs [block] holding the entry lock, for a caller that also takes
      * another lock around its writes ([Vault]'s): this one is always taken
-     * first. A reconcile stuck on an unresponsive Play services can hold it
-     * for up to a minute, and whoever waits for it then must not be holding
-     * the vault's lock meanwhile, or unlocking queues behind it (#244 R4-F4).
+     * first. Each Block Store call takes at most [GmsBlockStore.TIMEOUT_MS]
+     * (20 s), waiting for an earlier one included, so with Play services
+     * unresponsive a reconcile (three calls) holds it for up to a minute, a
+     * Turn on that gets no answer (five, taking a late write back) for up to
+     * about 100 s, and Remove wallet's [Held.deleteIfOf] (two) for up to
+     * 40 s (#244 R2-M3). Whoever waits for it then must not be holding the
+     * vault's lock meanwhile, or unlocking queues behind it (#244 R4-F4).
      * Inside, write through the [Held] receiver: the lock isn't reentrant.
      */
     suspend fun <T> exclusive(block: suspend Held.() -> T): T = writes.withLock { Held().block() }
@@ -513,7 +556,7 @@ class GmsBlockStore(context: Context) : BlockStorePort {
         call { client.deleteBytes(request) }
     }
 
-    private val order = TaskOrder(TIMEOUT_MS)
+    private val order = TaskOrder(ABANDON_MS)
 
     private suspend fun <T> call(start: () -> Task<T>): T? = try {
         // Asked before every call, never cached: Play services can be installed, enabled
@@ -522,8 +565,9 @@ class GmsBlockStore(context: Context) : BlockStorePort {
         // work unless you enable Google Play services" notification, on every foreground
         // reconcile (#244 R4-F1), though the app works fine without it.
         if (!playServicesUsable(app)) throw BackupUnavailableException("Google Play services isn’t available")
-        val task = order.submit(start)
-        withTimeout(TIMEOUT_MS) { task.await() }
+        // One deadline for waiting on an earlier call and for this one's own answer, so
+        // no call takes longer than [TIMEOUT_MS] in all (#244 R2-M3).
+        withTimeout(TIMEOUT_MS) { order.submit(start).await() }
     } catch (e: TimeoutCancellationException) {
         throw BackupNoAnswerException()
     } catch (e: CancellationException) {
@@ -548,7 +592,11 @@ class GmsBlockStore(context: Context) : BlockStorePort {
     }
 
     internal companion object {
+        /** The longest any one call takes, waiting for an earlier one included. */
         const val TIMEOUT_MS = 20_000L
+
+        /** When a call Play services still hasn't answered stops holding later ones back ([TaskOrder]). */
+        const val ABANDON_MS = 120_000L
 
         /** Only answers; unlike a failed API call it shows the user nothing. */
         private fun playServicesUsable(context: Context): Boolean = runCatching {
@@ -562,22 +610,35 @@ class GmsBlockStore(context: Context) : BlockStorePort {
  * cancelled wait doesn't cancel the Play services `Task` behind it, so a
  * store can still land after its caller gave up — and after the entry lock
  * was released, over a delete made next (#244 R1-M2). So no call is sent
- * while an earlier one is still running: it waits for that one first, and
- * throws [BackupNoAnswerException] (sending nothing) if it doesn't finish
- * within [timeoutMs].
+ * while an earlier one is still running: [submit] waits for that one
+ * first, and the caller bounds that wait with its own deadline (cancelled
+ * there, nothing is sent).
+ *
+ * A Task still running [abandonMs] after it was sent is given up on
+ * (#244 R2-M1): Play services fails a call whose connection dies, so one
+ * that old has been lost, and waiting on for it would refuse every later
+ * call until the process dies — among them the reconcile that rewrites
+ * the entry device-only once end-to-end encryption is gone. The accepted
+ * cost: a write that does land later still than that isn't ordered.
  */
-internal class TaskOrder(private val timeoutMs: Long) {
+internal class TaskOrder(
+    private val abandonMs: Long,
+    private val now: () -> Long = { System.nanoTime() / 1_000_000 },
+) {
     private val lock = Mutex()
     private var last: Task<*>? = null
+    private var lastSentAt = 0L
 
     suspend fun <T> submit(start: () -> Task<T>): Task<T> = lock.withLock {
         val previous = last
-        if (previous != null && !previous.isComplete &&
-            withTimeoutOrNull(timeoutMs) { previous.settled() } == null
-        ) {
-            throw BackupNoAnswerException("Google Play services is still busy with an earlier request")
+        if (previous != null && !previous.isComplete) {
+            val abandonIn = abandonMs - (now() - lastSentAt)
+            if (abandonIn > 0) withTimeoutOrNull(abandonIn) { previous.settled() }
         }
-        start().also { last = it }
+        start().also {
+            last = it
+            lastSentAt = now()
+        }
     }
 
     private suspend fun Task<*>.settled() = suspendCancellableCoroutine { cont ->

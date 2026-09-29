@@ -74,6 +74,7 @@ internal fun googleBackupStatus(
             "account on this phone"
         PhraseBackup.Availability.UNSUPPORTED -> "Unavailable · needs Google Play services, which this " +
             "phone doesn’t have"
+        PhraseBackup.Availability.NO_ANSWER -> "Unavailable · Google Play services isn’t answering right now"
         null -> "Checking…"
     }.let { if (availability == PhraseBackup.Availability.READY && !entryKnown) "Checking…" else it }
 }

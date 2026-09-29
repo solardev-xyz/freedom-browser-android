@@ -31,6 +31,10 @@ class WalletBackupUiTest {
         assertTrue(googleBackupStatus(false, Availability.READY, null).startsWith("Off"))
         assertTrue(googleBackupStatus(false, Availability.NOT_ENCRYPTED, null).contains("screen lock"))
         assertTrue(googleBackupStatus(false, Availability.UNSUPPORTED, null).contains("Google Play services"))
+        // #244 R2-M1: not answering isn't "this phone doesn't have it".
+        assertTrue(googleBackupStatus(false, Availability.NO_ANSWER, null).contains("isn’t answering"))
+        assertFalse(googleBackupStatus(false, Availability.NO_ANSWER, null).contains("doesn’t have"))
+        assertFalse(googleBackupSwitchEnabled(false, Availability.NO_ANSWER, entryKnown = true))
         assertEquals("Checking…", googleBackupStatus(false, null, null))
     }
 

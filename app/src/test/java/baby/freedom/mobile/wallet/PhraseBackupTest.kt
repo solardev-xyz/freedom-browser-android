@@ -35,8 +35,12 @@ class PhraseBackupTest {
         var retrieveGate: CompletableDeferred<Unit>? = null
         val retrieving = CompletableDeferred<Unit>()
 
+        /** When set, every call throws [BackupNoAnswerException], as a timed-out Play services call does. */
+        var noAnswer = false
+
         private fun reach() {
             if (!reachable) throw BackupUnavailableException("Google Play services isn’t available")
+            if (noAnswer) throw BackupNoAnswerException()
         }
 
         override suspend fun endToEndEncryptionAvailable(): Boolean {
@@ -77,10 +81,15 @@ class PhraseBackupTest {
             return bytes
         }
 
+        /** When set, [delete] throws [BackupNoAnswerException] after deleting when true (it landed late), before when false. */
+        var deleteNoAnswer: Boolean? = null
+
         override suspend fun delete(key: String) {
             reach()
             if (failDelete) throw BackupUnavailableException("Google Play services didn’t answer")
+            if (deleteNoAnswer == false) throw BackupNoAnswerException()
             entries.remove(key)
+            if (deleteNoAnswer == true) throw BackupNoAnswerException()
         }
 
         fun entry(): Stored? = entries[PhraseBackup.KEY]
@@ -120,6 +129,40 @@ class PhraseBackupTest {
         blockStore.reachable = false
         assertEquals(PhraseBackup.Availability.UNSUPPORTED, backup.availability())
         assertNull(backup.exists())
+    }
+
+    @Test
+    fun `Play services not answering isn't reported as no Play services`() = runBlocking {
+        // #244 R2-M1: a stuck call must not read as "this phone doesn't have Play services".
+        blockStore.noAnswer = true
+        assertEquals(PhraseBackup.Availability.NO_ANSWER, backup.availability())
+        blockStore.noAnswer = false
+        assertEquals(PhraseBackup.Availability.READY, backup.availability())
+    }
+
+    @Test
+    fun `a delete Play services doesn't answer forgets the entry and its marker`() = runBlocking {
+        // #244 R2-M2: like a store, a delete that got no answer may still land.
+        for (landed in listOf(true, false)) {
+            val marker = WrittenHere.InMemory()
+            val b = PhraseBackup(blockStore, writtenHere = marker)
+            blockStore.deleteNoAnswer = null
+            b.store(phrase)
+            assertEquals(PhraseBackup.Status.CLOUD, b.known.value!!.status)
+            assertEquals(true, marker.get())
+            blockStore.deleteNoAnswer = landed
+            try {
+                b.delete()
+                fail("no answer, yet deleted")
+            } catch (_: BackupNoAnswerException) {
+            }
+            assertNull("still claims the entry ($landed)", b.known.value)
+            assertNull(marker.get())
+            blockStore.deleteNoAnswer = null
+            // The next reconcile finds out what happened.
+            assertEquals(if (landed) PhraseBackup.Status.NONE else PhraseBackup.Status.CLOUD, b.reconcile())
+            assertEquals(landed, blockStore.entry() == null)
+        }
     }
 
     @Test
@@ -502,7 +545,26 @@ class PhraseBackupTest {
             marker.set(null)
             assertNull(marker.get())
             file.writeText("junk")
-            assertNull(marker.get())
+            assertNull(WrittenHere.InFile(file).get())
+        } finally {
+            dir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `an unwritable marker costs one rewrite, not one on every reconcile`() = runBlocking {
+        // #244 R2-M4: the marker's directory doesn't exist, so the file can never be written.
+        val dir = java.nio.file.Files.createTempDirectory("written-here").toFile()
+        try {
+            val marker = WrittenHere.InFile(java.io.File(java.io.File(dir, "gone"), "m"))
+            blockStore.store(PhraseBackup.KEY, PhraseBackup.encode(PhraseBackup.Entry(phrase.phrase(), cloud = true)), true)
+            val b = PhraseBackup(blockStore, writtenHere = marker)
+            b.reconcile()
+            assertEquals("rewritten once from this install", 2, blockStore.stores)
+            assertTrue("the failed write is reported", marker.writeFailed)
+            assertEquals(true, marker.get())
+            repeat(3) { b.reconcile() }
+            assertEquals(2, blockStore.stores)
         } finally {
             dir.deleteRecursively()
         }
