@@ -439,6 +439,7 @@ class WalletSender internal constructor(
     private val pollMs: Long = POLL_MS,
     private val confirmTimeoutMs: Long = CONFIRM_TIMEOUT_MS,
     private val journal: SendJournal = SendJournal.None,
+    private val history: TxHistory? = null,
 ) {
     private val nonces = NonceTracker(rpc, clock, onAbandonedChange = { persistLater() })
     private val gas = GasOracle(rpc)
@@ -447,6 +448,16 @@ class WalletSender internal constructor(
 
     /** The current (or last) confirmed send; null once acknowledged. */
     val status: StateFlow<SendStatus?> = _status.asStateFlow()
+
+    /**
+     * Shows [value] and reports it to the [history] (#109), which records
+     * a send once it went out or may have. Under this object's lock; the
+     * history never blocks on storage there.
+     */
+    private fun show(value: SendStatus?) {
+        _status.value = value
+        value?.let { history?.note(it) }
+    }
 
     /** The signed bytes of the current send, kept so Try again resends exactly them. */
     private var signed: EthTransaction.Signed? = null
@@ -498,13 +509,20 @@ class WalletSender internal constructor(
                 state.send?.let { send ->
                     signed = send.signed
                     val status = send.status
-                    when (status.stage) {
-                        SendStatus.Stage.Broadcasting -> _status.value = status.copy(stage = SendStatus.Stage.Failed(INTERRUPTED, true))
-                        SendStatus.Stage.Pending -> {
-                            _status.value = status
-                            job = scope.launch { follow(status.quote, send.signed.hash) }
-                        }
-                        else -> _status.value = status
+                    val shown = if (status.stage == SendStatus.Stage.Broadcasting) {
+                        status.copy(stage = SendStatus.Stage.Failed(INTERRUPTED, true))
+                    } else {
+                        status
+                    }
+                    if (discardOnRestore) {
+                        // The wallet it came from was removed before this was read back, and
+                        // its history wiped with it: the discard below gives the send up
+                        // (abandoning its nonce) without recording it in the emptied history
+                        // or following it.
+                        _status.value = shown
+                    } else {
+                        show(shown)
+                        if (status.stage == SendStatus.Stage.Pending) job = scope.launch { follow(status.quote, send.signed.hash) }
                     }
                     Log.i(TAG, "restored ${send.signed.hash} chain=${send.signed.tx.chainId} nonce=${send.signed.tx.nonce}")
                 }
@@ -552,7 +570,7 @@ class WalletSender internal constructor(
      * up on that a restart brings back to be given up on again.
      */
     private fun publish(status: SendStatus?) {
-        synchronized(this) { _status.value = status }
+        synchronized(this) { show(status) }
         persistLater()
     }
 
@@ -573,7 +591,7 @@ class WalletSender internal constructor(
             journal.save(state)
             synchronized(this@WalletSender) {
                 if (_status.value !== was) return@withContext false
-                _status.value = now
+                show(now)
                 true
             }
         }
@@ -600,14 +618,14 @@ class WalletSender internal constructor(
                 if (_status.value?.quote !== quote) return@withContext false
                 if (saved) {
                     signed = s
-                    _status.value = broadcasting
+                    show(broadcasting)
                     return@withContext true
                 }
                 val failed = SendStatus(
                     quote,
                     SendStatus.Stage.Failed("Couldn’t save the transaction before sending it, so nothing was sent.", false),
                 )
-                _status.value = failed
+                show(failed)
                 snapshot(failed, null)
             }
             // A failed save may still have landed (renamed, just not known
@@ -727,7 +745,7 @@ class WalletSender internal constructor(
             if (isStale(quote)) return Submit.STALE
             job?.cancel()
             signed = null
-            _status.value = SendStatus(quote, SendStatus.Stage.Signing)
+            show(SendStatus(quote, SendStatus.Stage.Signing))
             job = scope.launch {
                 val s = try {
                     sign(quote.tx)
@@ -1098,6 +1116,7 @@ class WalletSender internal constructor(
                 rpc = WalletRpc(ChainDataRouter.get(context.applicationContext)),
                 scope = CoroutineScope(SupervisorJob() + Dispatchers.Default),
                 journal = FileSendJournal(journalFile(context)),
+                history = TxHistory.get(context),
             ).also { instance = it }
         }
 

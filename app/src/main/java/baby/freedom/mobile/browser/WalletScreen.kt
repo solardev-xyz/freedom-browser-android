@@ -88,6 +88,7 @@ import baby.freedom.mobile.wallet.VaultKeyLostException
 import baby.freedom.mobile.wallet.VaultLockedException
 import baby.freedom.mobile.wallet.WalletAccounts
 import baby.freedom.mobile.wallet.WalletSender
+import baby.freedom.mobile.wallet.TxHistory
 import baby.freedom.mobile.wallet.TokenRegistry
 import baby.freedom.mobile.wallet.TooManyAccountsException
 import baby.freedom.mobile.data.ChainStore
@@ -96,10 +97,15 @@ import baby.freedom.mobile.wallet.VaultProtection
 import baby.freedom.mobile.wallet.VaultUnreadableException
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 internal const val WALLET_ROW_KEY = "wallet"
+
+/** Between chain reads for a pending send while the wallet page is up: at first, doubling to [TX_HISTORY_POLL_MAX_MS]. */
+private const val TX_HISTORY_POLL_MS = 15_000L
+private const val TX_HISTORY_POLL_MAX_MS = 5 * 60_000L
 internal const val WALLET_TITLE = "Wallet"
 internal const val BACKUP_REMINDER = "Recovery phrase not backed up yet"
 internal const val SHOW_PHRASE = "Show recovery phrase"
@@ -291,6 +297,11 @@ fun WalletScreen(
     var sending by remember { mutableStateOf(false) }
     val sender = remember(context) { WalletSender.get(context) }
     val sendStatus by sender.status.collectAsState()
+    // The transaction history (#109) and its two pages: all sends, one send (by hash, so it follows the record).
+    val history = remember(context) { TxHistory.get(context) }
+    val txRecords by history.records.collectAsState()
+    var historyOpen by remember { mutableStateOf(false) }
+    var openTx by remember { mutableStateOf<String?>(null) }
     // The receive and scan pages (#106).
     var receiving by remember { mutableStateOf(false) }
     var scanning by remember { mutableStateOf(false) }
@@ -332,6 +343,23 @@ fun WalletScreen(
             walletAccounts.balances.refresh(address, chains.flatMap { TokenRegistry.tokens(it) })
         } finally {
             if (refreshGeneration[0] == mine) refreshing = false
+        }
+    }
+
+    // Pending sends the sender isn't following (stopped tracking, no receipt in time, an
+    // earlier run's) are settled from the chain: on opening, on Refresh, on a new pending
+    // send, and again while the page is up for as long as a refresh says one could still
+    // change — a pending send, or one judged replaced within the last minutes (whose receipt
+    // a node behind may not have had yet). The wait grows while nothing settles, so a send
+    // that never went out doesn't keep the page reading the chain every few seconds.
+    // refresh() waits for the history file to be read, so the first answer here already
+    // covers a replaced record the file brings back, even with nothing pending to restart this.
+    val pendingCount = txRecords.count { it.pending }
+    LaunchedEffect(refreshTick, pendingCount) {
+        var wait = TX_HISTORY_POLL_MS
+        while (history.refresh()) {
+            delay(wait)
+            wait = minOf(wait * 2, TX_HISTORY_POLL_MAX_MS)
         }
     }
 
@@ -387,10 +415,17 @@ fun WalletScreen(
             sending = false
             receiving = false
             scanning = false
+            historyOpen = false
+            openTx = null
         }
         // A send goes with the wallet it came from, settled or not (one that may
-        // still land leaves its nonce to be replaced, should that account come back).
-        if (state == Vault.State.Empty) sender.discard()
+        // still land leaves its nonce to be replaced, should that account come back),
+        // and so does its history — after the discard, so nothing the sender still
+        // had to report lands in the emptied list.
+        if (state == Vault.State.Empty) {
+            sender.discard()
+            history.wipe()
+        }
     }
 
     if (publishing && (state is Vault.State.Locked || state is Vault.State.Unlocked)) {
@@ -410,6 +445,20 @@ fun WalletScreen(
             onBack = { sending = false },
         )
         return
+    }
+    val historyAccount = accountList?.active
+    val accountTx = txRecordsFrom(txRecords, historyAccount?.address)
+    if (historyAccount != null && (state is Vault.State.Locked || state is Vault.State.Unlocked)) {
+        // Looked up again on every change, so an open send moves from Pending to Confirmed in place.
+        val tx = openTx?.let { hash -> accountTx.firstOrNull { it.hash == hash } }
+        if (tx != null) {
+            TxDetailPage(tx, onOpenUrl = onOpenUrl, onBack = { openTx = null })
+            return
+        }
+        if (historyOpen) {
+            TxHistoryPage(historyAccount.name, accountTx, onOpen = { openTx = it.hash }, onBack = { historyOpen = false })
+            return
+        }
     }
     val receivingAccount = accountList?.active
     if (receiving && receivingAccount != null && (state is Vault.State.Locked || state is Vault.State.Unlocked)) {
@@ -565,6 +614,19 @@ fun WalletScreen(
                             },
                         )
                     }
+                    item("history") {
+                        TxHistorySection(
+                            records = accountTx,
+                            onOpen = {
+                                error = null
+                                openTx = it.hash
+                            },
+                            onShowAll = {
+                                error = null
+                                historyOpen = true
+                            },
+                        )
+                    }
                     item("balances") {
                         BalancesSection(
                             chains = walletChains.orEmpty(),
@@ -672,13 +734,16 @@ fun WalletScreen(
             onConfirm = {
                 confirmRemove = false
                 run("remove the wallet") {
-                    // Its publisher identities go with it (maintainer decision 9), and so
-                    // do the sites connected to it (#110) — or importing the same phrase
-                    // later would quietly reconnect them — inside remove()'s own
-                    // non-cancellable wipe.
+                    // Its publisher identities (maintainer decision 9), its history and the
+                    // sites connected to it (#110) — or importing the same phrase later would
+                    // quietly reconnect them — go with it, inside remove()'s own
+                    // non-cancellable wipe: the history file is deleted there and then
+                    // (wipeNow), not by a write launched later that a process death could get
+                    // ahead of.
                     vault.remove(
                         alsoWipe = {
                             publishers.wipe()
+                            history.wipeNow()
                             EthereumProviders.walletRemoved(context)
                         },
                     )
