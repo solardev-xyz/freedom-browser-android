@@ -66,7 +66,7 @@ class SafeSelfCallTest {
         assertEquals(SafeSelfCall.SwapOwner(sentinel, owner, attacker), safeSelfCall(call("swapOwner", word(sentinel), word(owner), word(attacker))))
         assertEquals(SafeSelfCall.ChangeThreshold(BigInteger.ONE), safeSelfCall(call("changeThreshold", word(1))))
         assertEquals(SafeSelfCall.EnableModule(attacker), safeSelfCall(call("enableModule", word(attacker))))
-        assertEquals(SafeSelfCall.DisableModule(attacker), safeSelfCall(call("disableModule", word(sentinel), word(attacker))))
+        assertEquals(SafeSelfCall.DisableModule(sentinel, attacker), safeSelfCall(call("disableModule", word(sentinel), word(attacker))))
         assertEquals(SafeSelfCall.SetGuard(attacker), safeSelfCall(call("setGuard", word(attacker))))
         assertEquals(SafeSelfCall.SetFallbackHandler(attacker), safeSelfCall(call("setFallbackHandler", word(attacker))))
         for (c in SAFE_SELECTORS.keys) {
@@ -211,5 +211,76 @@ class SafeSelfCallTest {
         val accounts = listOf(WalletAccount(0, "Account 1", owner))
         assertEquals("Account 1 (this phone)", safeOwnAccountLabel(owner.lowercase(), accounts))
         assertNull(safeOwnAccountLabel(attacker, accounts))
+    }
+
+    @Test
+    fun `a module, guard or fallback handler call the Safe would revert says so`() {
+        val modules = listOf(owner, attacker)
+        val zero = SafeProtocol.ZERO_ADDRESS
+        // GS101: no address, whether or not the modules are read.
+        val noModule = "The module is no address: this transaction would fail."
+        assertEquals(noModule, safeSelfCallFailure(SafeSelfCall.EnableModule(zero), null, safe))
+        assertEquals(noModule, safeSelfCallFailure(SafeSelfCall.EnableModule(sentinel), null, safe))
+        assertEquals(noModule, safeSelfCallFailure(SafeSelfCall.DisableModule(sentinel, sentinel), null, safe))
+        // GS102: already enabled, in any case.
+        assertEquals(
+            "This module is already enabled on the Safe: this transaction would fail.",
+            safeSelfCallFailure(SafeSelfCall.EnableModule(attacker.lowercase()), null, safe, modules = modules),
+        )
+        assertNull(safeSelfCallFailure(SafeSelfCall.EnableModule(safe.replace("6d", "7d")), null, safe, modules = modules))
+        assertNull(safeSelfCallFailure(SafeSelfCall.EnableModule(attacker), null, safe))
+        // GS103: not enabled, or the wrong prevModule (the sentinel for the first).
+        assertNull(safeSelfCallFailure(SafeSelfCall.DisableModule(sentinel, owner), null, safe, modules = modules))
+        assertNull(safeSelfCallFailure(SafeSelfCall.DisableModule(owner, attacker), null, safe, modules = modules))
+        assertEquals(
+            "It names the wrong module before this one in the Safe’s module list: this transaction would fail.",
+            safeSelfCallFailure(SafeSelfCall.DisableModule(sentinel, attacker), null, safe, modules = modules),
+        )
+        assertEquals(
+            "This module isn’t enabled on the Safe: this transaction would fail.",
+            safeSelfCallFailure(SafeSelfCall.DisableModule(sentinel, safe), null, safe, modules = modules),
+        )
+        assertEquals(
+            "This module isn’t enabled on the Safe: this transaction would fail.",
+            safeSelfCallFailure(SafeSelfCall.DisableModule(sentinel, owner), null, safe, modules = emptyList()),
+        )
+        assertNull(safeSelfCallFailure(SafeSelfCall.DisableModule(sentinel, attacker), null, safe))
+        // GS300: a guard that doesn't declare itself one; removing the guard (zero) is never checked.
+        assertTrue(safeSelfCallFailure(SafeSelfCall.SetGuard(attacker), null, safe, guardSupported = false)!!.endsWith("this transaction would fail."))
+        assertNull(safeSelfCallFailure(SafeSelfCall.SetGuard(attacker), null, safe, guardSupported = true))
+        assertNull(safeSelfCallFailure(SafeSelfCall.SetGuard(attacker), null, safe))
+        assertNull(safeSelfCallFailure(SafeSelfCall.SetGuard(zero), null, safe, guardSupported = false))
+        // GS400: the Safe as its own fallback handler, in any case; anything else goes through.
+        assertEquals(
+            "The fallback handler is this Safe itself, which it refuses: this transaction would fail.",
+            safeSelfCallFailure(SafeSelfCall.SetFallbackHandler(safe.lowercase()), null, safe),
+        )
+        assertNull(safeSelfCallFailure(SafeSelfCall.SetFallbackHandler(zero), null, safe))
+        assertNull(safeSelfCallFailure(SafeSelfCall.SetFallbackHandler(attacker), null, safe))
+        // A self-call with nothing to refuse, and owner calls before owners are read.
+        assertNull(safeSelfCallFailure(SafeSelfCall.Unknown, listOf(owner), safe, modules, false))
+        assertNull(safeSelfCallFailure(SafeSelfCall.AddOwner(owner, BigInteger.ONE), null, safe, modules, false))
+    }
+
+    @Test
+    fun `the module list and guard check read the Safe's own ABI`() {
+        // `Guard`'s ERC-165 id, as Safe v1.4.1's `setGuard` asks for it.
+        assertEquals("e6d7a83a", SafeProtocol.GUARD_INTERFACE_ID.toHex())
+        assertEquals("0x01ffc9a7" + "e6d7a83a" + "0".repeat(56), SafeProtocol.SUPPORTS_GUARD_CALL)
+        assertEquals("0xcc2f8452" + word(sentinel) + word(64), SafeProtocol.MODULES_CALL)
+        // `(address[] array, address next)`: whole only when `next` is the sentinel.
+        fun modulesReturn(next: String, vararg modules: String) =
+            "0x" + word(64) + word(next) + word(modules.size.toLong()) + modules.joinToString("") { word(it) }
+        assertEquals(listOf(owner, attacker), SafeProtocol.decodeModules(modulesReturn(sentinel, owner, attacker)))
+        assertEquals(emptyList<String>(), SafeProtocol.decodeModules(modulesReturn(sentinel)))
+        assertNull(SafeProtocol.decodeModules(modulesReturn(attacker, owner, attacker)))
+        assertNull(SafeProtocol.decodeModules(modulesReturn(SafeProtocol.ZERO_ADDRESS)))
+        assertNull(SafeProtocol.decodeModules("0x"))
+        assertNull(SafeProtocol.decodeModules(modulesReturn(sentinel, owner) + "00"))
+        // abicoder v1 `bool`: any non-zero word is true; less than a word is no answer.
+        assertEquals(true, SafeProtocol.decodeBool("0x" + word(1)))
+        assertEquals(true, SafeProtocol.decodeBool("0x" + word(2)))
+        assertEquals(false, SafeProtocol.decodeBool("0x" + word(0)))
+        assertNull(SafeProtocol.decodeBool("0x"))
     }
 }

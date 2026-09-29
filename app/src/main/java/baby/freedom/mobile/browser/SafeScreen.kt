@@ -1456,6 +1456,9 @@ internal fun SafeCoSignPage(
     var nonce by remember { mutableStateOf<BigInteger?>(null) }
     // The Safe's own native balance, read only for a cancellation that sends some: whether it can execute at all.
     var safeBalance by remember { mutableStateOf<BigInteger?>(null) }
+    // For a module or guard self-call: the Safe's modules, and whether the new guard is one (null: not read).
+    var modules by remember { mutableStateOf<List<String>?>(null) }
+    var guardSupported by remember { mutableStateOf<Boolean?>(null) }
     var readError by remember { mutableStateOf<String?>(null) }
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
@@ -1490,14 +1493,18 @@ internal fun SafeCoSignPage(
             readError = safeErrorMessage(e, "read the Safe", phraseBackedUp)
             return@LaunchedEffect
         }
-        // Not a reason to refuse: an unread balance only leaves the cancellation's detail hedged.
-        if (r is SafeProtocol.Request.Tx && r.tx.value.signum() != 0 && safeSelfCall(r) == SafeSelfCall.Cancel) {
-            try {
-                safeBalance = chainReads.balance(c.id, r.safe)
-            } catch (e: CancellationException) {
-                throw e
-            } catch (_: Exception) {
+        // None of these is a reason to refuse: an unread value only leaves out the note it would give.
+        val call = safeSelfCall(r)
+        try {
+            when {
+                call == SafeSelfCall.Cancel && r is SafeProtocol.Request.Tx && r.tx.value.signum() != 0 -> safeBalance = chainReads.balance(c.id, r.safe)
+                call is SafeSelfCall.EnableModule || call is SafeSelfCall.DisableModule -> modules = chainReads.modules(c.id, r.safe)
+                call is SafeSelfCall.SetGuard && !call.guard.equals(SafeProtocol.ZERO_ADDRESS, ignoreCase = true) ->
+                    guardSupported = chainReads.guardSupported(c.id, call.guard)
             }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
         }
     }
 
@@ -1527,7 +1534,7 @@ internal fun SafeCoSignPage(
                             val token = TokenRegistry.builtins.firstOrNull { it.chainId == request.chainId && it.address.equals(tx.to, ignoreCase = true) }
                             val transfer = token?.let { erc20Transfer(tx.data) }
                             if (selfCall != null) {
-                                SafeSelfCallRows(selfCall, tx, chain, owners, accounts, safeBalance)
+                                SafeSelfCallRows(selfCall, tx, chain, owners, accounts, safeBalance, modules, guardSupported)
                             } else if (transfer != null) {
                                 ReviewRow("Sends", "${SendAmounts.exact(transfer.second, token.decimals)} ${token.symbol}", mono = true, address = token.address)
                                 ReviewRow("To", null, address = transfer.first)
@@ -1684,38 +1691,71 @@ internal val SafeSelfCall?.needsAcknowledgement: Boolean get() = this != null &&
 internal fun safeSelfCallCleared(call: SafeSelfCall?, acknowledged: Boolean): Boolean = !call.needsAcknowledgement || acknowledged
 
 /**
- * Why an owner self-call would revert, counted against [owners] (on chain, in
- * the Safe's own linked-list order, as `getOwners()` returns them; null until
- * read), or null if it can go through. The Safe refuses to add an address that
- * already owns it or is no address (GS203/GS204), to remove or replace one that
+ * Why a self-call would revert on a v1.4.1 Safe, or null if it can go
+ * through (or that isn't known yet). Owner calls are counted against [owners]
+ * (on chain, in the Safe's own linked-list order, as `getOwners()` returns
+ * them; null until read): the Safe refuses to add an address that already
+ * owns it or is no address (GS203/GS204), to remove or replace one that
  * doesn't own it (GS205), and a `prevOwner` that isn't the owner right before
  * it in that list (GS205): the first owner's is the list's sentinel `0x…01`.
+ * Module calls are counted against [modules] (`getModulesPaginated`, the same
+ * kind of list; null until read): it refuses to enable no address (GS101) or
+ * an enabled module (GS102), and to disable one that isn't enabled or with the
+ * wrong `prevModule` (GS103). It refuses a guard that doesn't declare itself
+ * one ([guardSupported] false; GS300) and itself as its fallback handler
+ * (GS400).
  */
-internal fun safeSelfCallFailure(call: SafeSelfCall, owners: List<String>?, safe: String): String? {
-    if (owners == null) return null
-    fun owns(address: String) = owners.any { it.equals(address, ignoreCase = true) }
-    fun invalid(address: String) = address.equals(SafeProtocol.ZERO_ADDRESS, ignoreCase = true) ||
-        address.equals(SAFE_OWNERS_SENTINEL, ignoreCase = true) || address.equals(safe, ignoreCase = true)
-    fun prevOf(address: String): String {
-        val i = owners.indexOfFirst { it.equals(address, ignoreCase = true) }
-        return if (i == 0) SAFE_OWNERS_SENTINEL else owners[i - 1]
+internal fun safeSelfCallFailure(
+    call: SafeSelfCall,
+    owners: List<String>?,
+    safe: String,
+    modules: List<String>? = null,
+    guardSupported: Boolean? = null,
+): String? {
+    fun has(list: List<String>, address: String) = list.any { it.equals(address, ignoreCase = true) }
+    fun prevIn(list: List<String>, address: String): String {
+        val i = list.indexOfFirst { it.equals(address, ignoreCase = true) }
+        return if (i == 0) SAFE_OWNERS_SENTINEL else list[i - 1]
     }
-    fun added(address: String) = when {
+    fun noAddress(address: String) = address.equals(SafeProtocol.ZERO_ADDRESS, ignoreCase = true) ||
+        address.equals(SAFE_OWNERS_SENTINEL, ignoreCase = true)
+    fun added(owners: List<String>, address: String) = when {
         address.equals(safe, ignoreCase = true) -> "The new owner is this Safe itself, which can’t own itself: this transaction would fail."
-        invalid(address) -> "The new owner is no address: this transaction would fail."
-        owns(address) -> "The new owner already owns this Safe: this transaction would fail."
+        noAddress(address) -> "The new owner is no address: this transaction would fail."
+        has(owners, address) -> "The new owner already owns this Safe: this transaction would fail."
         else -> null
     }
-    fun removed(prev: String, address: String, what: String) = when {
-        !owns(address) -> "The $what owner doesn’t own this Safe: this transaction would fail."
-        !prev.equals(prevOf(address), ignoreCase = true) -> "It names the wrong owner before the $what one in the Safe’s owner list: this transaction would fail."
+    fun removed(owners: List<String>, prev: String, address: String, what: String) = when {
+        !has(owners, address) -> "The $what owner doesn’t own this Safe: this transaction would fail."
+        !prev.equals(prevIn(owners, address), ignoreCase = true) -> "It names the wrong owner before the $what one in the Safe’s owner list: this transaction would fail."
         else -> null
     }
     return when (call) {
-        is SafeSelfCall.AddOwner -> added(call.owner)
-        is SafeSelfCall.RemoveOwner -> removed(call.prev, call.owner, "removed")
-        is SafeSelfCall.SwapOwner -> removed(call.prev, call.old, "replaced") ?: added(call.new)
-        else -> null
+        is SafeSelfCall.AddOwner -> owners?.let { added(it, call.owner) }
+        is SafeSelfCall.RemoveOwner -> owners?.let { removed(it, call.prev, call.owner, "removed") }
+        is SafeSelfCall.SwapOwner -> owners?.let { removed(it, call.prev, call.old, "replaced") ?: added(it, call.new) }
+        is SafeSelfCall.EnableModule -> when {
+            noAddress(call.module) -> "The module is no address: this transaction would fail."
+            modules != null && has(modules, call.module) -> "This module is already enabled on the Safe: this transaction would fail."
+            else -> null
+        }
+        is SafeSelfCall.DisableModule -> when {
+            noAddress(call.module) -> "The module is no address: this transaction would fail."
+            modules == null -> null
+            !has(modules, call.module) -> "This module isn’t enabled on the Safe: this transaction would fail."
+            !call.prev.equals(prevIn(modules, call.module), ignoreCase = true) ->
+                "It names the wrong module before this one in the Safe’s module list: this transaction would fail."
+            else -> null
+        }
+        is SafeSelfCall.SetGuard ->
+            if (!call.guard.equals(SafeProtocol.ZERO_ADDRESS, ignoreCase = true) && guardSupported == false) {
+                "This address doesn’t declare itself a transaction guard, and the Safe only accepts one that does: this transaction would fail."
+            } else {
+                null
+            }
+        is SafeSelfCall.SetFallbackHandler ->
+            if (call.handler.equals(safe, ignoreCase = true)) "The fallback handler is this Safe itself, which it refuses: this transaction would fail." else null
+        is SafeSelfCall.ChangeThreshold, SafeSelfCall.Cancel, SafeSelfCall.Unknown -> null
     }
 }
 
@@ -1761,7 +1801,7 @@ internal fun safeCancelDetail(nonce: BigInteger, value: BigInteger, balance: Big
         "A call from the Safe to itself with no data, sending $amount straight back to it. It uses up Safe nonce $nonce only if the Safe holds that much when it executes; otherwise it fails and the nonce stays open."
 }
 
-/** The head of a Safe's owner linked list: the `prevOwner` of its first owner. */
+/** The head of a Safe's owner (and module) linked list: the `prevOwner` of its first owner, the `prevModule` of its first module. */
 internal const val SAFE_OWNERS_SENTINEL = "0x0000000000000000000000000000000000000001"
 
 /** [address] named as one of this wallet's own [accounts] ("Account 1 (this phone)"), or null for anyone else's. */
@@ -1770,7 +1810,18 @@ internal fun safeOwnAccountLabel(address: String, accounts: List<WalletAccount>)
 
 /** The decoded rows of a SafeTx from the Safe to itself; [owners] (on chain, if read) to count the threshold against. */
 @Composable
-private fun SafeSelfCallRows(call: SafeSelfCall, tx: SafeProtocol.SafeTx, chain: Chain?, owners: List<String>?, accounts: List<WalletAccount>, safeBalance: BigInteger?) {
+private fun SafeSelfCallRows(
+    call: SafeSelfCall,
+    tx: SafeProtocol.SafeTx,
+    chain: Chain?,
+    owners: List<String>?,
+    accounts: List<WalletAccount>,
+    safeBalance: BigInteger?,
+    modules: List<String>?,
+    guardSupported: Boolean?,
+) {
+    // Whether the Safe would refuse a module, guard or handler call: on its Changes row, which has nothing else to say.
+    val fails = safeSelfCallFailure(call, owners, tx.to, modules, guardSupported)
     val amount = chain?.let { "${SendAmounts.exact(tx.value, it.decimals)} ${it.symbol}" } ?: "${tx.value} base units"
     fun none(address: String) = if (address.equals(SafeProtocol.ZERO_ADDRESS, ignoreCase = true)) "None" else null
     // A removed owner that is this wallet's own account is named, so signing yourself out can't pass as a bare address.
@@ -1795,7 +1846,7 @@ private fun SafeSelfCallRows(call: SafeSelfCall, tx: SafeProtocol.SafeTx, chain:
         }
         is SafeSelfCall.SwapOwner -> {
             // No threshold row to carry it: whether the Safe would refuse it goes on this one.
-            ReviewRow("Changes", "Replaces an owner", detail = safeSelfCallFailure(call, owners, tx.to))
+            ReviewRow("Changes", "Replaces an owner", detail = fails)
             Removed(call.old)
             ReviewRow("New owner", safeOwnAccountLabel(call.new, accounts), address = call.new)
         }
@@ -1804,19 +1855,19 @@ private fun SafeSelfCallRows(call: SafeSelfCall, tx: SafeProtocol.SafeTx, chain:
             ReviewRow("Threshold", call.threshold.toString(), mono = true, detail = safeSelfCallThreshold(call, owners, tx.to))
         }
         is SafeSelfCall.EnableModule -> {
-            ReviewRow("Changes", "Adds a module")
+            ReviewRow("Changes", "Adds a module", detail = fails)
             ReviewRow("Module", null, address = call.module)
         }
         is SafeSelfCall.DisableModule -> {
-            ReviewRow("Changes", "Removes a module")
+            ReviewRow("Changes", "Removes a module", detail = fails)
             ReviewRow("Module", null, address = call.module)
         }
         is SafeSelfCall.SetGuard -> {
-            ReviewRow("Changes", "The transaction guard")
+            ReviewRow("Changes", "The transaction guard", detail = fails)
             ReviewRow("Guard", none(call.guard), address = call.guard.takeIf { none(it) == null })
         }
         is SafeSelfCall.SetFallbackHandler -> {
-            ReviewRow("Changes", "The fallback handler")
+            ReviewRow("Changes", "The fallback handler", detail = fails)
             ReviewRow("Fallback handler", none(call.handler), address = call.handler.takeIf { none(it) == null })
         }
         SafeSelfCall.Unknown -> ReviewRow("Changes", "Unknown", detail = "A call to this Safe’s own functions that Freedom can’t read.")
@@ -1849,7 +1900,7 @@ internal sealed interface SafeSelfCall {
     data class SwapOwner(val prev: String, val old: String, val new: String) : SafeSelfCall
     data class ChangeThreshold(val threshold: BigInteger) : SafeSelfCall
     data class EnableModule(val module: String) : SafeSelfCall
-    data class DisableModule(val module: String) : SafeSelfCall
+    data class DisableModule(val prev: String, val module: String) : SafeSelfCall
     data class SetGuard(val guard: String) : SafeSelfCall
     data class SetFallbackHandler(val handler: String) : SafeSelfCall
     /** Anything else: a call into the Safe's own code this wallet can't read. */
@@ -1891,7 +1942,13 @@ internal fun safeSelfCall(data: ByteArray): SafeSelfCall {
         }
         SAFE_SELECTORS["changeThreshold"] -> if (args(1)) SafeSelfCall.ChangeThreshold(uint(0)) else null
         SAFE_SELECTORS["enableModule"] -> if (args(1)) address(0)?.let { SafeSelfCall.EnableModule(it) } else null
-        SAFE_SELECTORS["disableModule"] -> if (args(2) && address(0) != null) address(1)?.let { SafeSelfCall.DisableModule(it) } else null
+        SAFE_SELECTORS["disableModule"] -> if (args(2)) {
+            val prev = address(0)
+            val module = address(1)
+            if (prev != null && module != null) SafeSelfCall.DisableModule(prev, module) else null
+        } else {
+            null
+        }
         SAFE_SELECTORS["setGuard"] -> if (args(1)) address(0)?.let { SafeSelfCall.SetGuard(it) } else null
         SAFE_SELECTORS["setFallbackHandler"] -> if (args(1)) address(0)?.let { SafeSelfCall.SetFallbackHandler(it) } else null
         else -> null

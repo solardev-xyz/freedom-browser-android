@@ -4,6 +4,7 @@ import android.content.Context
 import android.util.Log
 import androidx.annotation.VisibleForTesting
 import baby.freedom.mobile.chains.rpc.ChainDataRouter
+import baby.freedom.mobile.chains.rpc.ChainRpcException
 import baby.freedom.mobile.chains.rpc.WalletRpc
 import baby.freedom.mobile.ens.toHex
 import baby.freedom.mobile.wallet.ledger.Ledger
@@ -671,6 +672,27 @@ class SafeChain(private val rpc: WalletRpc) {
         SafeProtocol.decodeAddresses(call(chainId, safe, SafeProtocol.OWNERS_CALL)) ?: throw SafeException("The Safe gave no owner list.")
 
     suspend fun balance(chainId: Long, address: String): BigInteger = rpc.balance(chainId, address).value
+
+    /** [safe]'s enabled modules, in its list order; null when the list is longer than one page or unreadable in shape. */
+    suspend fun modules(chainId: Long, safe: String): List<String>? =
+        SafeProtocol.decodeModules(call(chainId, safe, SafeProtocol.MODULES_CALL))
+
+    /**
+     * Whether [guard] passes a v1.4.1 Safe's `setGuard` check (GS300):
+     * it has code and answers `supportsInterface(Guard)` with true. A call
+     * the node says reverts is a no, as it is for the Safe; any other
+     * failure throws, and means "not known".
+     */
+    suspend fun guardSupported(chainId: Long, guard: String): Boolean {
+        if (rpc.code(chainId, guard).value.length <= 2) return false
+        val answer = try {
+            call(chainId, guard, SafeProtocol.SUPPORTS_GUARD_CALL)
+        } catch (e: ChainRpcException.Rpc) {
+            if (e.data != null || e.code == ChainRpcException.EXECUTION_REVERTED) return false
+            throw e
+        }
+        return SafeProtocol.decodeBool(answer) ?: false
+    }
 
     /** How many of [address]'s transactions are mined: an account nonce below it can't be mined any more. */
     suspend fun minedCount(chainId: Long, address: String): BigInteger = rpc.transactionCount(chainId, address, "latest").value
