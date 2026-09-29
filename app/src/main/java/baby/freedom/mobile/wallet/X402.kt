@@ -146,7 +146,7 @@ object X402 {
         val description = when (version) {
             2 -> resource?.opt("description") as? String
             else -> (accepts.opt(0) as? JSONObject)?.opt("description") as? String
-        }?.trim()?.takeIf { it.isNotEmpty() }?.take(MAX_DESCRIPTION_CHARS)
+        }?.let(::displayText)
         return Required(
             version = version,
             offers = offers,
@@ -158,6 +158,43 @@ object X402 {
     }
 
     private const val MAX_DESCRIPTION_CHARS = 500
+
+    /**
+     * A site's free text (the terms' description) as one plain line for
+     * the payment sheet, or null if nothing is left (#218 R4-M4): control
+     * characters and line breaks (which could fake a row of the sheet,
+     * "Amount 0.01 USDC", under "The site says"), format characters
+     * (bidi overrides and isolates, which reorder what's shown, and
+     * zero-width ones) become spaces; runs of whitespace fold into one;
+     * capped at [MAX_DESCRIPTION_CHARS] without splitting a surrogate pair.
+     */
+    internal fun displayText(raw: String): String? {
+        val sb = StringBuilder()
+        var i = 0
+        while (i < raw.length) {
+            val cp = raw.codePointAt(i)
+            i += Character.charCount(cp)
+            val hidden = when (Character.getType(cp)) {
+                Character.CONTROL.toInt(), Character.FORMAT.toInt(),
+                Character.LINE_SEPARATOR.toInt(), Character.PARAGRAPH_SEPARATOR.toInt(),
+                Character.SURROGATE.toInt(), Character.PRIVATE_USE.toInt(), Character.UNASSIGNED.toInt(),
+                -> true
+                else -> false
+            }
+            if (hidden || Character.isWhitespace(cp) || Character.isSpaceChar(cp)) {
+                if (sb.isNotEmpty() && sb.last() != ' ') sb.append(' ')
+            } else {
+                sb.appendCodePoint(cp)
+            }
+        }
+        var s = sb.toString().trim()
+        if (s.length > MAX_DESCRIPTION_CHARS) {
+            var end = MAX_DESCRIPTION_CHARS
+            if (Character.isHighSurrogate(s[end - 1])) end--
+            s = s.substring(0, end).trimEnd()
+        }
+        return s.ifEmpty { null }
+    }
 
     private sealed interface OfferResult {
         class Ok(val offer: Offer) : OfferResult

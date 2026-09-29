@@ -161,12 +161,32 @@ object X402Payments {
     fun onNavigationSuperseded(tab: BrowserState) = flow.superseded(tab.id)
 
     /**
-     * `shouldInterceptRequest` for a main-frame request on [tab] with
-     * [method], posted to the main thread: a form POST (never seen by
-     * `shouldOverrideUrlLoading`) supersedes a paid request as the
-     * page's other navigations do (#218 R3-M1).
+     * [tab] began a navigation (after [onNavigationSuperseded]): [byUser]
+     * — the address they named, their Reload or Back/Forward — or the
+     * page on screen's, at [pageUrl]. Only these may let a site's
+     * allowance pay without asking (#218 R4-M3).
      */
-    fun onMainFrameRequested(tab: BrowserState, method: String?) = flow.mainFrameRequested(tab.id, method)
+    fun onNavigationStarted(tab: BrowserState, byUser: Boolean, pageUrl: String?) =
+        flow.navigationStarted(tab.id, byUser, if (byUser) null else pageUrl?.let(::providerOriginKey))
+
+    /**
+     * [tab]'s payment epoch, read on the interceptor's thread as a
+     * main-frame request goes out and handed to [onMainFrameRequested]
+     * (#218 R4-M1).
+     */
+    fun requestEpoch(tab: BrowserState): Long = flow.epoch(tab.id)
+
+    /**
+     * `shouldInterceptRequest` for a main-frame request for [url] on [tab]
+     * with [method], seen in payment [epoch] ([requestEpoch]), posted to
+     * the main thread while [pageUrl] is still on screen: a form POST
+     * (never seen by `shouldOverrideUrlLoading`) supersedes a paid
+     * request as the page's other navigations do (#218 R3-M1) — unless it
+     * went out before that paid request did (#218 R4-M1); the paid GET
+     * itself is noted as seen by the interceptor (#218 R4-M2).
+     */
+    fun onMainFrameRequested(tab: BrowserState, url: String?, method: String?, epoch: Long, pageUrl: String?) =
+        flow.mainFrameRequested(tab.id, url, method, epoch, pageUrl?.let(::providerOriginKey))
 
     /** `onPageFinished` for [url] on [tab]. */
     fun onLoadFinished(tab: BrowserState, url: String?) = flow.loadFinished(tab.id, url)
@@ -182,13 +202,16 @@ object X402Payments {
      * document number is the new page's.
      */
     fun onDocumentStarted(tab: BrowserState, view: WebView?, url: String?) {
-        val detection = flow.committed(tab.id, url) ?: return
+        val committed = flow.committed(tab.id, url) ?: return
         if (url == null || view == null || tab.private) return
+        val detection = committed.value
+        // Another site's link, script or popup can't spend this site's allowance (#218 R4-M3).
+        val allowanceMayPay = committed.allowanceMayPay(detection.origin)
         val doc = EthereumProviders.currentDocument(tab.id)
         val webView = WeakReference(view)
         scope.launch {
             try {
-                handle(tab, doc, webView, detection)
+                handle(tab, doc, webView, detection, allowanceMayPay)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Throwable) {
@@ -206,7 +229,13 @@ object X402Payments {
         scope.launch { X402Store.get(app).settle(id, status, httpStatus) }
     }
 
-    private suspend fun handle(tab: BrowserState, doc: Int, webView: WeakReference<WebView>, d: Detection) {
+    private suspend fun handle(
+        tab: BrowserState,
+        doc: Int,
+        webView: WeakReference<WebView>,
+        d: Detection,
+        allowanceMayPay: Boolean,
+    ) {
         val app = context ?: return
         val store = X402Store.get(app)
         val vault = Vault.get(app)
@@ -218,8 +247,9 @@ object X402Payments {
         val unusable = d.required.unusable + unreadable
         val allowances = store.allowances.first()
 
-        // An allowance pays silently — only with the wallet open, never unlocking it for a site.
-        val covered = options.firstOrNull { o ->
+        // An allowance pays silently — only with the wallet open, never unlocking it for a site,
+        // and only for a navigation the user or the site itself started (#218 R4-M3).
+        val covered = if (!allowanceMayPay) null else options.firstOrNull { o ->
             store.covering(allowances, d.origin, o.offer.chainId, o.offer.asset, o.offer.amount) != null
         }
         if (covered != null && account != null && vault.unlockedNow()) {
@@ -336,6 +366,8 @@ object X402Payments {
         vault.noteActivity()
         // The load first: it's a browser load, which ends any earlier
         // navigation's bookkeeping ([onNavigationSuperseded]) — not this one's.
+        // Requests the interceptor saw before this one are the old page's (#218 R4-M1).
+        flow.sending(tab.id)
         view.loadUrl(d.url, mapOf(header to value))
         flow.paid(tab.id, d.url, payment.id)
         return Paid.SENT

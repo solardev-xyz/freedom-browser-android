@@ -224,4 +224,25 @@ class X402Test {
         assertEquals("7", body.getJSONObject("payload").getJSONObject("authorization").getString("value"))
         assertTrue(!body.has("accepted"))
     }
+
+    @Test
+    fun `R4-M4 a description can't carry bidi overrides or line breaks onto the sheet`() {
+        assertEquals("Article Amount 0.01 USDC", X402.displayText("Article\n\nAmount\t0.01 USDC"))
+        assertEquals("pay 01.0 USDC", X402.displayText("pay \u202E01.0 USDC\u202C"))
+        assertEquals("a b", X402.displayText("a\u2028\u2029b\u2066\u2069\u200B"))
+        assertEquals("caf\u00e9 \uD83D\uDE00", X402.displayText("  caf\u00e9 \uD83D\uDE00  "))
+        assertNull(X402.displayText("\u202E\n\u200F "))
+        val long = X402.displayText("x".repeat(499) + "\uD83D\uDE00" + "y")!!
+        assertEquals("x".repeat(499), long)
+    }
+
+    @Test
+    fun `R4-M4 a v2 description is cleaned when parsed`() {
+        val json = JSONObject()
+            .put("x402Version", 2)
+            .put("resource", JSONObject().put("url", "https://api.example/paid").put("description", "Report\nAmount 0.01 USDC\u202E"))
+            .put("accepts", org.json.JSONArray().put(JSONObject().put("scheme", "nope")))
+        val r = X402.parseRequired(java.util.Base64.getEncoder().encodeToString(json.toString().toByteArray()))!!
+        assertEquals("Report Amount 0.01 USDC", r.description)
+    }
 }

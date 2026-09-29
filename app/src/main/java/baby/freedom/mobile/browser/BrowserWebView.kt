@@ -2300,6 +2300,10 @@ private fun buildRefreshableWebView(
             // …nor is what answers it a paid request's answer, or a 402
             // noted before it (#218 R2-M2, R2-M3).
             X402Payments.onNavigationSuperseded(state)
+            // The user's own: the address they named, or Reload /
+            // Back / Forward (no URL). A site's allowance may pay for
+            // it; not for the app's other loads (#218 R4-M3).
+            X402Payments.onNavigationStarted(state, byUser = userNamed || url == null, pageUrl = null)
         }
         // Stop (or a new load's stop first) ends the navigation in flight
         // without a commit: neither its gesture nor the user's naming of
@@ -3153,8 +3157,14 @@ private fun buildRefreshableWebView(
                 // its answer comes from; the page's own navigation is not
                 // its answer, nor a 402's commit (#218 R2).
                 if (request.isForMainFrame) {
-                    if (request.isRedirect) X402Payments.onRedirect(state, target)
-                    else X402Payments.onNavigationSuperseded(state)
+                    if (request.isRedirect) {
+                        X402Payments.onRedirect(state, target)
+                    } else {
+                        X402Payments.onNavigationSuperseded(state)
+                        // Started by the page on screen: only that site's
+                        // own allowance may pay for it (#218 R4-M3).
+                        X402Payments.onNavigationStarted(state, byUser = false, pageUrl = committedPageUrl)
+                    }
                 }
                 return false
             }
@@ -3186,13 +3196,17 @@ private fun buildRefreshableWebView(
                         }
                         // x402 (#140): a form POST — gesture or not —
                         // replaces a paid request in flight; its answer
-                        // is not the paid request's (#218 R3-M1). Posted
-                        // now, so it lands before the POST's own
+                        // is not the paid request's (#218 R3-M1) — if it
+                        // went out after that paid request, by the epoch
+                        // read here, not when the post runs (#218 R4-M1).
+                        // The paid GET itself is noted as seen here: one a
+                        // service worker answers never is (#218 R4-M2).
+                        // Posted now, so it lands before the request's own
                         // redirect or commit callbacks.
-                        if (!request.method.equals("GET", ignoreCase = true)) {
-                            val method = request.method
-                            view?.post { X402Payments.onMainFrameRequested(state, method) }
-                        }
+                        val requested = it
+                        val method = request.method
+                        val epoch = X402Payments.requestEpoch(state)
+                        view?.post { X402Payments.onMainFrameRequested(state, requested, method, epoch, committedPageUrl) }
                         heldBack = (view as? PageWebView)?.pageHopRequested(it, request.requestHeaders) == true
                     }
                 }

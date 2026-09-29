@@ -1,6 +1,7 @@
 package baby.freedom.mobile.browser
 
 import baby.freedom.mobile.data.X402Store
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * Which navigation of a tab an x402 402 or a paid request belongs to
@@ -22,9 +23,21 @@ import baby.freedom.mobile.data.X402Store
  * link or script, Stop — is not its answer: the paid request is over,
  * unconfirmed, and what comes next is judged on its own (#218 R2-M3).
  * A form POST is one too, though only the interceptor sees it
- * ([mainFrameRequested], #218 R3-M1).
+ * ([mainFrameRequested], #218 R3-M1) — one the interceptor saw *before*
+ * the paid request went out is the old page's, which the paid load
+ * cancelled, so it's told apart by the payment [epoch] it was seen in
+ * (#218 R4-M1). A paid request is settled paid only when the interceptor
+ * saw it go out itself: a page a service worker controls answers its
+ * navigations — the paid GET, or a form POST to the paid URL — where the
+ * interceptor never sees them, so a commit there can't be told for the
+ * paid request's answer, and is left unconfirmed (#218 R4-M2).
  *
- * Main thread only.
+ * Who started the navigation a 402 commits in ([navigationStarted]) goes
+ * with it: a site's allowance pays silently only for the user's own load
+ * or a navigation from that site's own page, never one another site
+ * started — its link or script, or a popup it opened (#218 R4-M3).
+ *
+ * Main thread only, but for [epoch].
  */
 internal class X402Flow<D : Any>(
     /** Settles a paid request's history entry. */
@@ -32,13 +45,45 @@ internal class X402Flow<D : Any>(
 ) {
     private class Detection<D>(val url: String, val value: D)
 
-    private class Retry(url: String, val recordId: String) {
+    private class Retry(val url: String, val recordId: String) {
         /** The paid URL and every server-redirect hop it has taken. */
         val hops = linkedSetOf(url)
+
+        /** The interceptor saw the paid GET go out: no service worker answered it (#218 R4-M2). */
+        var seen = false
+    }
+
+    /** Who started a navigation: the user (their address, Reload, Back/Forward), or a page of [fromOrigin]. */
+    private class Initiator(val byUser: Boolean, val fromOrigin: String?)
+
+    /** A 402's terms at their commit, with who started the navigation that brought them. */
+    class Committed<D>(val value: D, private val byUser: Boolean, private val fromOrigin: String?) {
+        /**
+         * An allowance of [origin]'s may pay this without asking: the user
+         * named the load, or [origin]'s own page started it — not another
+         * site's link, script or popup, nor a navigation nobody was seen
+         * starting (#218 R4-M3).
+         */
+        fun allowanceMayPay(origin: String): Boolean = byUser || fromOrigin == origin
     }
 
     private val detections = HashMap<Long, Detection<D>>()
     private val retries = HashMap<Long, Retry>()
+    private val initiators = HashMap<Long, Initiator>()
+    private val epochs = ConcurrentHashMap<Long, Long>()
+
+    /**
+     * [tab]'s payment epoch, from any thread: the interceptor reads it
+     * as a main-frame request goes out, so [mainFrameRequested], posted
+     * to the main thread, can tell a request seen before the latest paid
+     * request went out ([sending]) from one after it (#218 R4-M1).
+     */
+    fun epoch(tab: Long): Long = epochs[tab] ?: 0L
+
+    /** [tab]'s paid request is about to be loaded: requests seen from here on are after it. */
+    fun sending(tab: Long) {
+        epochs.merge(tab, 1L, Long::plus)
+    }
 
     /**
      * A main-frame HTTP error answered [url] ([method]) on [tab]: true if
@@ -82,19 +127,39 @@ internal class X402Flow<D : Any>(
      */
     fun superseded(tab: Long) {
         detections.remove(tab)
+        initiators.remove(tab)
         retries.remove(tab)?.let { settle(it.recordId, X402Store.Status.UNCONFIRMED, null) }
     }
 
     /**
-     * A main-frame request with [method] went out on [tab]. The paid
-     * request is a GET, and so are its redirect hops: a POST is a form
-     * the page submitted — which WebView never shows
-     * `shouldOverrideUrlLoading` — replacing the paid request (and any
-     * 402 waiting for its commit), so its answer isn't the paid
-     * request's (#218 R3-M1).
+     * A navigation of [tab]'s began, [byUser] (their address, Reload,
+     * Back/Forward) or from the page of [fromOrigin] on screen (its link,
+     * script or form). Called after [superseded].
      */
-    fun mainFrameRequested(tab: Long, method: String?) {
-        if (!method.equals("GET", ignoreCase = true)) superseded(tab)
+    fun navigationStarted(tab: Long, byUser: Boolean, fromOrigin: String?) {
+        initiators[tab] = Initiator(byUser, fromOrigin)
+    }
+
+    /**
+     * A main-frame request for [url] with [method] went out on [tab], seen
+     * by the interceptor in payment [epoch], from the page of [fromOrigin].
+     * One seen before the latest paid request was sent is the old page's,
+     * which that load cancelled: nothing (#218 R4-M1). The paid request's
+     * own GET is noted as seen (#218 R4-M2). The paid request is a GET,
+     * and so are its redirect hops: a POST is a form the page submitted —
+     * which WebView never shows `shouldOverrideUrlLoading` — replacing the
+     * paid request (and any 402 waiting for its commit), so its answer
+     * isn't the paid request's (#218 R3-M1).
+     */
+    fun mainFrameRequested(tab: Long, url: String?, method: String?, epoch: Long, fromOrigin: String?) {
+        if (epoch != epoch(tab)) return
+        if (method.equals("GET", ignoreCase = true)) {
+            // The request carries no fragment; the page's URL may.
+            retries[tab]?.let { if (url != null && url.substringBefore('#') == it.url.substringBefore('#')) it.seen = true }
+            return
+        }
+        superseded(tab)
+        navigationStarted(tab, byUser = false, fromOrigin = fromOrigin)
     }
 
     /** `onPageFinished` for [url] on [tab]: a 402 noted for it that hasn't committed never will. */
@@ -113,17 +178,23 @@ internal class X402Flow<D : Any>(
 
     /**
      * [tab] committed [url] (null: it's being torn down): the paid
-     * request's answer if it's one of its hops, and the 402 noted for
-     * [url], if any, to be paid for.
+     * request's answer if it's one of its hops and it was seen going out
+     * (else unconfirmed), and the 402 noted for [url], if any, to be paid
+     * for, with who started the navigation.
      */
-    fun committed(tab: Long, url: String?): D? {
+    fun committed(tab: Long, url: String?): Committed<D>? {
+        val initiator = initiators.remove(tab)
         retries.remove(tab)?.let { retry ->
-            val status = if (url != null && url in retry.hops) X402Store.Status.PAID else X402Store.Status.UNCONFIRMED
-            settle(retry.recordId, status, null)
+            val answered = url != null && url in retry.hops && retry.seen
+            settle(retry.recordId, if (answered) X402Store.Status.PAID else X402Store.Status.UNCONFIRMED, null)
         }
         val detection = detections.remove(tab) ?: return null
-        return detection.value.takeIf { url != null && url == detection.url }
+        if (url == null || url != detection.url) return null
+        return Committed(detection.value, initiator?.byUser == true, initiator?.fromOrigin)
     }
 
-    fun closed(tab: Long) = superseded(tab)
+    fun closed(tab: Long) {
+        superseded(tab)
+        epochs.remove(tab)
+    }
 }

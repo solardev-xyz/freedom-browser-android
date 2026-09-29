@@ -14,24 +14,32 @@ class X402FlowTest {
     private val tab = 1L
     private val a = "https://pay.example/a"
     private val b = "https://pay.example/b"
+    private val origin = "https://pay.example"
+
+    /** Pay's order: the epoch moves, the paid GET is loaded, then noted; the interceptor sees the GET. */
+    private fun send(url: String, id: String, tabId: Long = tab) {
+        flow.sending(tabId)
+        flow.paid(tabId, url, id)
+        flow.mainFrameRequested(tabId, url, "GET", flow.epoch(tabId), origin)
+    }
 
     @Test
     fun `a 402 is paid for at its own commit`() {
         flow.detected(tab, a, "terms")
-        assertEquals("terms", flow.committed(tab, a))
+        assertEquals("terms", flow.committed(tab, a)?.value)
         assertNull(flow.committed(tab, a))
     }
 
     @Test
     fun `a paid request's own commit settles it paid`() {
-        flow.paid(tab, a, "r1")
+        send(a, "r1")
         assertNull(flow.committed(tab, a))
         assertEquals(listOf(Triple("r1", Status.PAID, null)), settled)
     }
 
     @Test
     fun `R2-M1 a paid request redirected to a 402 is refused, not paid again`() {
-        flow.paid(tab, a, "r1")
+        send(a, "r1")
         flow.redirected(tab, b)
         assertTrue(flow.httpError(tab, b, "GET", 402))
         // Its commit is the refused page's: nothing to pay.
@@ -41,7 +49,7 @@ class X402FlowTest {
 
     @Test
     fun `R2-M1 a paid request redirected to its page settles paid`() {
-        flow.paid(tab, a, "r1")
+        send(a, "r1")
         flow.redirected(tab, b)
         assertNull(flow.committed(tab, b))
         assertEquals(listOf(Triple("r1", Status.PAID, null)), settled)
@@ -71,26 +79,26 @@ class X402FlowTest {
 
     @Test
     fun `R2-M3 a reload while a paid request is in flight ends it unconfirmed`() {
-        flow.paid(tab, a, "r1")
+        send(a, "r1")
         flow.superseded(tab) // the user's Reload
         assertEquals(listOf(Triple("r1", Status.UNCONFIRMED, null)), settled)
         // The reload's own 402 is not the paid request's answer: it's asked about.
         assertFalse(flow.httpError(tab, a, "GET", 402))
         flow.detected(tab, a, "terms")
-        assertEquals("terms", flow.committed(tab, a))
+        assertEquals("terms", flow.committed(tab, a)?.value)
         assertEquals(1, settled.size)
     }
 
     @Test
     fun `a form POST's error isn't the paid request's answer`() {
-        flow.paid(tab, a, "r1")
+        send(a, "r1")
         assertFalse(flow.httpError(tab, a, "POST", 403))
         assertTrue(settled.isEmpty())
     }
 
     @Test
     fun `a network error on a hop settles unconfirmed, on another URL not`() {
-        flow.paid(tab, a, "r1")
+        send(a, "r1")
         flow.failed(tab, b)
         assertTrue(settled.isEmpty())
         flow.redirected(tab, b)
@@ -100,7 +108,7 @@ class X402FlowTest {
 
     @Test
     fun `tabs are apart`() {
-        flow.paid(tab, a, "r1")
+        send(a, "r1")
         flow.detected(2L, a, "terms")
         flow.superseded(2L)
         assertTrue(settled.isEmpty())
@@ -109,30 +117,142 @@ class X402FlowTest {
 
     @Test
     fun `R3-M1 a form POST during a paid request ends it unconfirmed, and its commit isn't Paid`() {
-        flow.paid(tab, a, "r1")
-        flow.mainFrameRequested(tab, "POST")
+        send(a, "r1")
+        flow.mainFrameRequested(tab, a, "POST", flow.epoch(tab), origin)
         assertNull(flow.committed(tab, a))
         assertEquals(listOf(Triple("r1", Status.UNCONFIRMED, null)), settled)
     }
 
     @Test
     fun `R3-M1 a POST's redirect to a 402 is a fresh 402, not the paid request refused`() {
-        flow.paid(tab, a, "r1")
-        flow.mainFrameRequested(tab, "POST")
+        send(a, "r1")
+        flow.mainFrameRequested(tab, a, "POST", flow.epoch(tab), origin)
         flow.redirected(tab, b)
         assertFalse(flow.httpError(tab, b, "GET", 402))
         flow.detected(tab, b, "terms")
-        assertEquals("terms", flow.committed(tab, b))
+        assertEquals("terms", flow.committed(tab, b)?.value)
         assertEquals(listOf(Triple("r1", Status.UNCONFIRMED, null)), settled)
     }
 
     @Test
     fun `R3-M1 the paid request's own GET and its hops don't end it`() {
-        flow.paid(tab, a, "r1")
-        flow.mainFrameRequested(tab, "GET")
+        send(a, "r1")
+        flow.mainFrameRequested(tab, a, "GET", flow.epoch(tab), origin)
         flow.redirected(tab, b)
-        flow.mainFrameRequested(tab, "GET")
+        flow.mainFrameRequested(tab, b, "GET", flow.epoch(tab), origin)
         assertNull(flow.committed(tab, b))
         assertEquals(listOf(Triple("r1", Status.PAID, null)), settled)
+    }
+
+    @Test
+    fun `R4-M1 a POST the interceptor saw before the paid request went out doesn't end it`() {
+        flow.detected(tab, a, "terms")
+        flow.committed(tab, a)
+        // The 402 page's form POST: seen, its post still queued...
+        val before = flow.epoch(tab)
+        // ...when Pay loads the paid request.
+        flow.sending(tab)
+        flow.paid(tab, a, "r1")
+        flow.mainFrameRequested(tab, a, "GET", flow.epoch(tab), origin)
+        flow.mainFrameRequested(tab, a, "POST", before, origin)
+        assertTrue(settled.isEmpty())
+        assertNull(flow.committed(tab, a))
+        assertEquals(listOf(Triple("r1", Status.PAID, null)), settled)
+    }
+
+    @Test
+    fun `R4-M1 a POST seen after the paid request went out still ends it`() {
+        send(a, "r1")
+        flow.mainFrameRequested(tab, a, "POST", flow.epoch(tab), origin)
+        assertEquals(listOf(Triple("r1", Status.UNCONFIRMED, null)), settled)
+    }
+
+    @Test
+    fun `R4-M1 epochs are per tab`() {
+        val before = flow.epoch(tab)
+        flow.sending(2L)
+        send(a, "r1")
+        flow.mainFrameRequested(tab, a, "POST", before + 1, origin)
+        assertEquals(listOf(Triple("r1", Status.UNCONFIRMED, null)), settled)
+    }
+
+    @Test
+    fun `R4-M2 a commit at the paid URL the interceptor never saw go out is unconfirmed`() {
+        // A service worker answered the paid GET, or a form POST to its URL.
+        flow.sending(tab)
+        flow.paid(tab, a, "r1")
+        assertNull(flow.committed(tab, a))
+        assertEquals(listOf(Triple("r1", Status.UNCONFIRMED, null)), settled)
+    }
+
+    @Test
+    fun `R4-M2 the paid GET is matched without the page's fragment`() {
+        flow.sending(tab)
+        flow.paid(tab, "$a#part", "r1")
+        flow.mainFrameRequested(tab, a, "GET", flow.epoch(tab), origin)
+        flow.committed(tab, "$a#part")
+        assertEquals(listOf(Triple("r1", Status.PAID, null)), settled)
+    }
+
+    @Test
+    fun `R4-M2 another GET doesn't count as the paid one seen`() {
+        flow.sending(tab)
+        flow.paid(tab, a, "r1")
+        flow.mainFrameRequested(tab, b, "GET", flow.epoch(tab), origin)
+        flow.committed(tab, a)
+        assertEquals(listOf(Triple("r1", Status.UNCONFIRMED, null)), settled)
+    }
+
+    @Test
+    fun `R4-M3 the user's own load lets an allowance pay`() {
+        flow.superseded(tab)
+        flow.navigationStarted(tab, byUser = true, fromOrigin = null)
+        flow.detected(tab, a, "terms")
+        assertTrue(flow.committed(tab, a)!!.allowanceMayPay(origin))
+    }
+
+    @Test
+    fun `R4-M3 the site's own page's navigation lets its allowance pay`() {
+        flow.navigationStarted(tab, byUser = false, fromOrigin = origin)
+        flow.redirected(tab, b) // before the 402: the site's own redirect
+        flow.detected(tab, a, "terms")
+        assertTrue(flow.committed(tab, a)!!.allowanceMayPay(origin))
+    }
+
+    @Test
+    fun `R4-M3 another site's link, script or popup can't spend the allowance`() {
+        flow.navigationStarted(tab, byUser = false, fromOrigin = "https://evil.example")
+        flow.detected(tab, a, "terms")
+        assertFalse(flow.committed(tab, a)!!.allowanceMayPay(origin))
+        // A popup's first navigation: no page on screen.
+        flow.navigationStarted(tab, byUser = false, fromOrigin = null)
+        flow.detected(tab, a, "terms")
+        assertFalse(flow.committed(tab, a)!!.allowanceMayPay(origin))
+    }
+
+    @Test
+    fun `R4-M3 a navigation nobody was seen starting can't spend it`() {
+        // The site's link started one navigation, which committed...
+        flow.navigationStarted(tab, byUser = false, fromOrigin = origin)
+        assertNull(flow.committed(tab, "https://evil.example/"))
+        // ...then evil's history.go() lands on the 402 with no start signal.
+        flow.detected(tab, a, "terms")
+        assertFalse(flow.committed(tab, a)!!.allowanceMayPay(origin))
+    }
+
+    @Test
+    fun `R4-M3 Stop forgets who started the navigation`() {
+        flow.navigationStarted(tab, byUser = true, fromOrigin = null)
+        flow.superseded(tab)
+        flow.detected(tab, a, "terms")
+        assertFalse(flow.committed(tab, a)!!.allowanceMayPay(origin))
+    }
+
+    @Test
+    fun `R4-M3 a form POST from another site can't spend it`() {
+        flow.navigationStarted(tab, byUser = true, fromOrigin = null)
+        flow.mainFrameRequested(tab, a, "POST", flow.epoch(tab), "https://evil.example")
+        flow.detected(tab, a, "terms")
+        assertFalse(flow.committed(tab, a)!!.allowanceMayPay(origin))
     }
 }
