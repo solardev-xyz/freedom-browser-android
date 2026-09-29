@@ -199,6 +199,8 @@ fun SettingsScreen(
     val walletAccounts = walletAccountList?.accounts.orEmpty()
     // The connected site whose page is open, by origin, so it follows the stored grant.
     var openSite by remember { mutableStateOf<String?>(null) }
+    // The connected site whose × couldn't be saved: its row says so, as the site's page does.
+    var disconnectFailed by remember { mutableStateOf<String?>(null) }
 
     val chainStore = remember(context) { ChainStore.get(context) }
     val chains by remember(chainStore) { chainStore.chains }
@@ -402,8 +404,12 @@ fun SettingsScreen(
                         accounts = walletAccounts,
                         chains = chains,
                         onOpenSite = { openSite = it },
+                        disconnectFailed = disconnectFailed,
                         onDisconnect = { origin ->
-                            scope.launch { EthereumProviders.disconnect(context, origin) }
+                            disconnectFailed = null
+                            scope.launch {
+                                if (!EthereumProviders.disconnect(context, origin)) disconnectFailed = origin
+                            }
                         },
                     )
                 }
@@ -1459,6 +1465,7 @@ private fun SitePermissionsSection(
     accounts: List<WalletAccount>,
     chains: List<Chain>,
     onOpenSite: (String) -> Unit,
+    disconnectFailed: String?,
     onDisconnect: (String) -> Unit,
 ) {
     SectionCard(title = SECTION_PERMISSIONS) {
@@ -1495,6 +1502,13 @@ private fun SitePermissionsSection(
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
+                    if (disconnectFailed == grant.origin) {
+                        Text(
+                            DISCONNECT_FAILED,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error,
+                        )
+                    }
                 }
                 IconButton(onClick = { onDisconnect(grant.origin) }) {
                     Icon(

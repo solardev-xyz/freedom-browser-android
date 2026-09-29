@@ -65,6 +65,8 @@ internal fun connectedSiteSummary(
  * account each was given and which network it's on. A site can drop its
  * own connection (`wallet_revokePermissions`); this is the user's way to
  * drop it for them. Tapping a site opens its page ([ConnectedSitePage]).
+ * [disconnectFailed] is the site whose Disconnect couldn't be saved; its
+ * line says so.
  */
 @Composable
 internal fun DappSitesSection(
@@ -73,6 +75,7 @@ internal fun DappSitesSection(
     accounts: List<WalletAccount>,
     onOpen: (String) -> Unit,
     onRevoke: (String) -> Unit,
+    disconnectFailed: String? = null,
 ) {
     SectionCard(title = "Connected sites") {
         grants.forEach { grant ->
@@ -89,6 +92,13 @@ internal fun DappSitesSection(
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
+                    if (disconnectFailed == grant.origin) {
+                        Text(
+                            DISCONNECT_FAILED,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error,
+                        )
+                    }
                 }
                 TextButton(onClick = { onRevoke(grant.origin) }) { Text("Disconnect") }
             }

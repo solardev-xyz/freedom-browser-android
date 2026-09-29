@@ -20,6 +20,7 @@ import java.math.BigInteger
 import kotlin.coroutines.CoroutineContext
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -250,36 +251,41 @@ class EthereumProvider(
      * it was on for the rest of this session — its pages were told that
      * chain and get no `chainChanged` — as a site that never connected
      * keeps the one it switched to. False if it couldn't be written.
+     *
+     * Runs to the end even if the caller is cancelled (a page closed while
+     * the write is in flight): the store commits the revoke regardless, and
+     * a revoke that commits must also tell the site's pages.
      */
-    suspend fun disconnect(origin: String): Boolean {
+    suspend fun disconnect(origin: String): Boolean = withContext(NonCancellable) {
         val grant = try {
             grants.grantFor(origin)
         } catch (e: GrantsUnreadable) {
-            return false
-        } ?: return true
-        if (!grants.revoke(origin)) return false
+            return@withContext false
+        } ?: return@withContext true
+        if (!grants.revoke(origin)) return@withContext false
         synchronized(sessionChains) { sessionChains[origin] = grant.chainId }
         events.emit(origin, "accountsChanged", JSONArray())
-        return true
+        true
     }
 
     /**
      * The wallet was removed: every site is disconnected, so importing the
      * same phrase later doesn't quietly reconnect them, and their open
      * pages see no accounts. Each keeps its chain for the session, as
-     * [disconnect]. False if the store couldn't be written.
+     * [disconnect]. False if the store couldn't be written. Not cancellable,
+     * as [disconnect].
      */
-    suspend fun disconnectAll(): Boolean {
+    suspend fun disconnectAll(): Boolean = withContext(NonCancellable) {
         // Unreadable: clear them all the same; only which pages to tell is unknown.
         val all = try {
             grants.all()
         } catch (e: GrantsUnreadable) {
             emptyMap()
         }
-        if (!grants.clear()) return false
+        if (!grants.clear()) return@withContext false
         synchronized(sessionChains) { all.forEach { (origin, g) -> sessionChains[origin] = g.chainId } }
         all.keys.forEach { events.emit(it, "accountsChanged", JSONArray()) }
-        return true
+        true
     }
 
     // ---- Chains ----

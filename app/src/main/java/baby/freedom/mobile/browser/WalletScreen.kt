@@ -328,6 +328,8 @@ fun WalletScreen(
     val dappGrants by dappGrantStore.all.collectAsState(initial = emptyList())
     // The connected site whose page is open (#111), by origin, so it follows the stored grant.
     var openSite by remember { mutableStateOf<String?>(null) }
+    // The connected site whose Disconnect couldn't be saved: its line says so, as the site's page does.
+    var disconnectFailed by remember { mutableStateOf<String?>(null) }
     val allChains by chainStore.chains.collectAsState(initial = null)
     val walletChains = allChains?.filter { it.id in TokenRegistry.WALLET_CHAIN_IDS }
     val activeAddress = accountList?.active?.address
@@ -713,8 +715,12 @@ fun WalletScreen(
                     chains = allChains.orEmpty(),
                     accounts = accountList?.accounts.orEmpty(),
                     onOpen = { openSite = it },
+                    disconnectFailed = disconnectFailed,
                     onRevoke = { origin ->
-                        scope.launch { EthereumProviders.disconnect(context, origin) }
+                        disconnectFailed = null
+                        scope.launch {
+                            if (!EthereumProviders.disconnect(context, origin)) disconnectFailed = origin
+                        }
                     },
                 )
             }
