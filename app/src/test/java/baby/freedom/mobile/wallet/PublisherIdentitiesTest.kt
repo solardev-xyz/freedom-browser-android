@@ -150,7 +150,7 @@ class PublisherIdentitiesTest {
     }
 
     @Test
-    fun `an unparseable floor with no file to go on refuses to allocate`() {
+    fun `an unparseable floor with no file to go on restarts a whole stride up`() {
         store.ensureSite(siteA)
         store.createAppScoped(siteA, "Two")
         store.wipe()
@@ -158,8 +158,43 @@ class PublisherIdentitiesTest {
         floor.writeText("garbage")
         tag = "vault-a-again"
         // Starting again at 0 would hand out a key an earlier site used.
-        assertThrows(IOException::class.java) { store.ensureSite(siteB) }
-        assertTrue(store.sites().isEmpty())
+        val stride = PublisherIdentityStore.RECOVERY_STRIDE
+        assertEquals("app-scoped:$stride", store.ensureSite(siteB).activeId)
+        assertEquals("${stride + 1}", floor.readText())
+        assertEquals("garbage", File(file.parentFile, "publisher-key-index-floor.corrupt").readText())
+        assertEquals("app-scoped:${stride + 1}", store.createAppScoped(siteB, "Next").activeId)
+
+        // Lost again: the next restart goes a stride further, and wipe keeps the count.
+        store.wipe()
+        floor.writeText("")
+        tag = "vault-a-third"
+        assertEquals("app-scoped:${2 * stride}", store.ensureSite(siteA).activeId)
+        assertTrue(File(file.parentFile, "publisher-key-index-floor.corrupt-1").exists())
+    }
+
+    @Test
+    fun `a restart over a lost floor is recorded before anything is saved`() {
+        val floor = File(file.parentFile, "publisher-key-index-floor")
+        file.parentFile!!.mkdirs()
+        floor.writeText("garbage")
+        // The identities file can't be written: a directory is in the way of its temp copy.
+        File(file.parentFile, "${file.name}.tmp").mkdirs()
+        assertThrows(IOException::class.java) { store.ensureSite(siteA) }
+        // The floor already says where to restart, so a retry can't fall back to 0.
+        val stride = PublisherIdentityStore.RECOVERY_STRIDE
+        assertTrue(floor.readText().toInt() >= stride)
+        File(file.parentFile, "${file.name}.tmp").delete()
+        assertTrue(store.ensureSite(siteA).active.publisherKeyIndex!! >= stride)
+    }
+
+    @Test
+    fun `a floor lost too many times refuses to allocate`() {
+        val dir = file.parentFile!!.apply { mkdirs() }
+        val floor = File(dir, "publisher-key-index-floor")
+        val strides = Int.MAX_VALUE / PublisherIdentityStore.RECOVERY_STRIDE
+        for (n in 0 until strides) File(dir, "${floor.name}.corrupt${if (n == 0) "" else "-$n"}").writeText("x")
+        floor.writeText("garbage")
+        assertThrows(IOException::class.java) { store.ensureSite(siteA) }
         assertEquals("garbage", floor.readText())
     }
 

@@ -258,9 +258,9 @@ class PublisherIdentityStore internal constructor(
         // An unparseable floor is only safe to overlook when this vault's
         // own file still holds a counter (the next save rewrites the floor
         // from it). With no file — straight after Remove wallet — it's the
-        // only record of the indexes already handed out, and 0 could be one.
-        val least = readFloor()
-            ?: if (stored != null) 0 else throw IOException("the publisher key index floor can't be read")
+        // only record of the indexes already handed out, and 0 could be one:
+        // skip well past anything it could have held instead (recoverFloor).
+        val least = readFloor() ?: if (stored != null) 0 else recoverFloor()
         val data = stored ?: Data(0, emptyMap())
         return if (data.nextIndex >= least) data else Data(least, data.sites)
     }
@@ -280,6 +280,39 @@ class PublisherIdentityStore internal constructor(
     }
 
     /**
+     * A new floor over one that can't be parsed, with no file of this
+     * vault's to rebuild it from: the lost number could have been
+     * anything handed out so far, so allocation restarts a whole
+     * [RECOVERY_STRIDE] above the last restart — indexes are handed out
+     * one per new identity, so no device gets through a stride. The
+     * unparseable floor is kept as `*.corrupt*` (wipe leaves those too),
+     * and their count says how many strides are already used. The new
+     * floor is written here, before anything is allocated from it, so a
+     * failed save can't leave no floor (which reads as 0) behind.
+     * Throws [IOException] if that can't be done, or every stride is
+     * used up.
+     */
+    private fun recoverFloor(): Int {
+        val dir = floor.parentFile ?: throw IOException("no directory")
+        var n = 0
+        var target: File
+        do {
+            target = File(dir, "${floor.name}.corrupt${if (n == 0) "" else "-$n"}")
+            n++
+        } while (target.exists())
+        // n is now how many restarts there have been, this one included.
+        if (n.toLong() * RECOVERY_STRIDE > Int.MAX_VALUE) {
+            throw IOException("the publisher key index floor was lost too many times to restart it")
+        }
+        Log.w(TAG, "publisher key index floor can't be parsed and there's nothing to rebuild it from; restarting at stride $n")
+        // Copied, not moved: the floor is only ever replaced in one step.
+        floor.copyTo(target)
+        val next = n * RECOVERY_STRIDE
+        writeFloor(next)
+        return next
+    }
+
+    /**
      * Raises [floor] to [next], written before the file that uses it; an
      * unparseable floor is replaced ([loadForWrite] only gets here then
      * with [next] from this vault's own counter).
@@ -287,6 +320,10 @@ class PublisherIdentityStore internal constructor(
     private fun raiseFloor(next: Int) {
         val current = readFloor()
         if (current != null && next <= current) return
+        writeFloor(next)
+    }
+
+    private fun writeFloor(next: Int) {
         val tmp = File(floor.parentFile, "${floor.name}.tmp")
         tmp.writeText(next.toString())
         if (!tmp.renameTo(floor)) {
@@ -400,6 +437,9 @@ class PublisherIdentityStore internal constructor(
     companion object {
         private const val TAG = "PublisherIdentities"
         private const val VERSION = 1
+
+        /** How far past a lost floor allocation restarts ([recoverFloor]). */
+        internal const val RECOVERY_STRIDE = 1 shl 24
 
         @Volatile
         private var instance: PublisherIdentityStore? = null
