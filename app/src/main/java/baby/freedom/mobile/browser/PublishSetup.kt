@@ -108,6 +108,15 @@ internal fun publishBlockedReason(node: NodeInfo): String? = when (node.status) 
 }
 
 /**
+ * The address to fund, or null while there's none to show: the node isn't
+ * running, or it still runs as the device-only key. That key can't be
+ * restored anywhere else and is replaced the moment a wallet is set up
+ * (step 1), so the checklist never offers it for funding.
+ */
+internal fun fundingAddress(node: NodeInfo): String? =
+    node.accountAddress.takeIf { node.status == NodeStatus.Running && node.walletIdentity && it.isNotBlank() }
+
+/**
  * The five steps. Each is done on its own evidence, whatever the order; the
  * first one not done is the one to work on (active, or waiting when there's
  * nothing for the user to do but wait), and the rest are pending. While the
@@ -117,11 +126,14 @@ internal fun publishSteps(r: PublishReadiness): List<PublishStep> {
     val running = r.node.status == NodeStatus.Running
     val light = running && r.node.lightMode
     val chequebookDeployed = !r.chequebook.isNullOrEmpty()
-    val funded = (r.xdaiWei?.signum() ?: 0) > 0 || chequebookDeployed
+    // Only the wallet identity's funds count: the device-only key's are
+    // about to be left behind (see [fundingAddress]).
+    val walletIdentity = running && r.node.walletIdentity
+    val funded = walletIdentity && ((r.xdaiWei?.signum() ?: 0) > 0 || chequebookDeployed)
     val stamped = (r.usableStamps ?: 0) > 0
 
     val done = mapOf(
-        PublishStepKey.Identity to (running && r.node.walletIdentity),
+        PublishStepKey.Identity to walletIdentity,
         PublishStepKey.LightMode to light,
         PublishStepKey.Fund to (running && funded),
         PublishStepKey.Chequebook to (light && chequebookDeployed),
@@ -164,6 +176,9 @@ internal fun publishSteps(r: PublishReadiness): List<PublishStep> {
             PublishStepKey.Fund,
             "Fund the node with xDAI",
             when {
+                !walletIdentity -> "Once the node runs as your wallet's identity (step 1), send xDAI on " +
+                    "Gnosis Chain to its address. Don't fund the node before that: its current key " +
+                    "exists only on this device and is replaced when you set up a wallet."
                 r.xdaiWei != null && r.xdaiWei.signum() > 0 -> "Funded with ${formatXdai(r.xdaiWei)}."
                 chequebookDeployed -> "Funded: the node has deployed its chequebook."
                 else -> "Send xDAI on Gnosis Chain to the node's address below. It pays the gas for the " +
@@ -259,7 +274,9 @@ internal fun PublishSetupScreen(
     BackHandler(onBack = onDismiss)
     val context = LocalContext.current
     val running = nodeInfo.status == NodeStatus.Running
-    val address = nodeInfo.accountAddress.takeIf { running && it.isNotBlank() }
+    // Null until the node runs as the wallet's identity: no balance, no
+    // address, nothing to copy for the device-only key.
+    val address = fundingAddress(nodeInfo)
     val light = running && nodeInfo.lightMode
 
     // The node account's xDAI, read through the app's own chain-data

@@ -79,8 +79,8 @@ class PublishSetupTest {
 
     @Test
     fun `each step is done on its own evidence, whatever came before`() {
-        // A funded node still on the device's identity and ultra-light.
-        assertEquals(s('a', 'p', 'd', 'p', 'p'), statuses(PublishReadiness(running, false, oneXdai)))
+        // A light, funded node run as the wallet but not yet in light mode.
+        assertEquals(s('d', 'a', 'd', 'p', 'p'), statuses(PublishReadiness(wallet, false, oneXdai)))
         // A deployed chequebook counts as funded even with the xDAI spent.
         assertEquals(
             s('d', 'd', 'd', 'd', 'p'),
@@ -92,6 +92,24 @@ class PublishSetupTest {
             s('d', 'a', 'd', 'p', 'p'),
             statuses(PublishReadiness(wallet, false, oneXdai, chequebook = "0x" + "2".repeat(40), usableStamps = 1)),
         )
+    }
+
+    @Test
+    fun `the device-only key is never offered for funding`() {
+        // No address to copy and no balance read until step 1 is done.
+        assertNull(fundingAddress(running))
+        assertNull(fundingAddress(running.copy(lightMode = true)))
+        assertNull(fundingAddress(wallet.copy(status = NodeStatus.Starting)))
+        assertEquals("0xabc", fundingAddress(wallet))
+        // Funds on the device key don't count, and the step says why not.
+        assertEquals(s('a', 'p', 'p', 'p', 'p'), statuses(PublishReadiness(running, false, oneXdai)))
+        assertEquals(
+            s('a', 'd', 'p', 'p', 'p'),
+            statuses(PublishReadiness(running.copy(lightMode = true), true, oneXdai)),
+        )
+        val fund = publishSteps(PublishReadiness(running, false))[2]
+        assertTrue(fund.detail.contains("step 1"))
+        assertTrue(fund.detail.contains("Don't fund"))
     }
 
     @Test

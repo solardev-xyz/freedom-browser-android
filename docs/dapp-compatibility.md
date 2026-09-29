@@ -79,7 +79,12 @@ request to `/stamps…`, `/chequebook…`, `/stake…`, `/wallet…` or
 resolve to loopback) is answered `403` by the app and never reaches the
 node (#114, `NodeChainWrites`) — in light mode those endpoints would sign
 and send transactions from the user's funded node account with no
-prompt. Buying stamps and funding the chequebook go through the app.
+prompt. The interceptor can't see every such request (a navigation's
+redirect is followed inside Chromium, and other apps reach the port
+directly), so the node itself also refuses to broadcast any transaction
+(`ant_jni.c`'s chain transport): an on-chain write that gets past the
+interceptor fails at the node instead. Buying stamps and funding the
+chequebook go through the app.
 
 ## Explicitly unsupported
 

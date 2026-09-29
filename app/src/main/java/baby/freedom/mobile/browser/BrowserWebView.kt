@@ -4674,7 +4674,7 @@ internal fun interceptVirtualRequest(
     // A page's on-chain write to the Swarm node — buying stamps, funding
     // the chequebook — is refused outright (#114, fail closed).
     NodeChainWrites.refusalFor(req)?.let { return it }
-    val incoming =if (req.isForMainFrame) ensPins?.beginNavigation(url) else null
+    val incoming = if (req.isForMainFrame) ensPins?.beginNavigation(url) else null
     // A contract-hosted app's origin (#123) is answered by its own rules.
     // Then an origin an unverified external IPFS gateway served before
     // the user switched away from it (#125): its next document first

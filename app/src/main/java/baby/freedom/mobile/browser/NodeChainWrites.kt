@@ -21,6 +21,13 @@ import java.io.ByteArrayInputStream
  * [interceptVirtualRequest] — is answered here with a 403 before it
  * reaches the network. Spending goes through the app's own screens.
  *
+ * This is the page-facing, readable refusal, not the enforcement: a
+ * navigation's redirect (a form POST that 307s to the gateway) is
+ * followed inside Chromium without asking the interceptor again, and
+ * other apps reach the port without a WebView at all. What keeps the
+ * funds safe from all of them is the node's own chain transport
+ * (`ant_jni.c`), which refuses every broadcast.
+ *
  * Matched by the gateway's port, not its host: any DNS name that resolves
  * to 127.0.0.1 reaches the node as well as `127.0.0.1` itself does, and
  * ant doesn't look at `Host`. The paths are bee's whole on-chain write
