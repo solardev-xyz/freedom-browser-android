@@ -91,6 +91,7 @@ import baby.freedom.mobile.wallet.WalletSender
 import baby.freedom.mobile.wallet.TokenRegistry
 import baby.freedom.mobile.wallet.TooManyAccountsException
 import baby.freedom.mobile.data.ChainStore
+import baby.freedom.mobile.data.DappGrantStore
 import baby.freedom.mobile.wallet.VaultProtection
 import baby.freedom.mobile.wallet.VaultUnreadableException
 import kotlinx.coroutines.CancellationException
@@ -312,6 +313,8 @@ fun WalletScreen(
     val accountSyncFailed by walletAccounts.syncFailed.collectAsState()
     val allBalances by walletAccounts.balances.byAddress.collectAsState()
     val chainStore = remember(context) { ChainStore.get(context) }
+    val dappGrantStore = remember(context) { DappGrantStore.get(context) }
+    val dappGrants by dappGrantStore.all.collectAsState(initial = emptyList())
     val allChains by chainStore.chains.collectAsState(initial = null)
     val walletChains = allChains?.filter { it.id in TokenRegistry.WALLET_CHAIN_IDS }
     val activeAddress = accountList?.active?.address
@@ -620,6 +623,17 @@ fun WalletScreen(
                     )
                     ScreenLockSettingsButton()
                 }
+            }
+            // Sites connected through `window.ethereum` (#110), and the way to disconnect them.
+            if ((state is Vault.State.Locked || state is Vault.State.Unlocked) && dappGrants.isNotEmpty()) item("dapps") {
+                DappSitesSection(
+                    grants = dappGrants,
+                    chains = allChains.orEmpty(),
+                    accounts = accountList?.accounts.orEmpty(),
+                    onRevoke = { origin ->
+                        scope.launch { if (dappGrantStore.revoke(origin)) EthereumProviders.revoked(origin) }
+                    },
+                )
             }
             if (state is Vault.State.Locked || state is Vault.State.Unlocked) item("publishing") {
                 SectionCard(title = "Publishing") {
@@ -1229,5 +1243,37 @@ private fun PhraseWord(
         )
         Spacer(Modifier.width(PHRASE_NUMBER_GAP))
         Text(word, style = wordStyle)
+    }
+}
+
+/**
+ * Sites connected to the wallet through `window.ethereum` (#110): which
+ * account each was given and which network it's on. A site can drop its
+ * own connection (`wallet_revokePermissions`); this is the user's way to
+ * drop it for them.
+ */
+@Composable
+private fun DappSitesSection(
+    grants: List<DappGrantStore.Grant>,
+    chains: List<baby.freedom.mobile.chains.Chain>,
+    accounts: List<baby.freedom.mobile.wallet.WalletAccount>,
+    onRevoke: (String) -> Unit,
+) {
+    SectionCard(title = "Connected sites") {
+        grants.forEach { grant ->
+            val account = accounts.firstOrNull { it.address.equals(grant.account, ignoreCase = true) }
+            val network = chains.firstOrNull { it.id == grant.chainId }?.name ?: "chain ${grant.chainId}"
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(modifier = Modifier.weight(1f).padding(vertical = 4.dp)) {
+                    Text(permissionOriginDisplay(grant.origin), fontWeight = FontWeight.Medium)
+                    Text(
+                        "${account?.name ?: "An account this wallet no longer has"} · ${shortAddress(grant.account)} · $network",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                TextButton(onClick = { onRevoke(grant.origin) }) { Text("Disconnect") }
+            }
+        }
     }
 }

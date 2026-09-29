@@ -586,6 +586,47 @@ class SendTest {
     }
 
     @Test
+    fun `a site's call goes out with its own data and no value, gas as it named, and survives a restart as the site's`() = runBlocking<Unit> {
+        val chain = FakeChain()
+        chain.estimate = 40_000
+        val s = sender(chain, journal = FileSendJournal(journalFile()))
+        val data = byteArrayOf(0xa9.toByte(), 0x05, 0x9c.toByte(), 0xbb.toByte())
+        val call = SendRequest(gnosis, xdai, from, to, BigInteger.ZERO, DappCall("https://app.example", data, BigInteger.valueOf(90_000)))
+        val quote = s.prepare(call)
+        assertEquals(BigInteger.ZERO, quote.tx.value)
+        assertTrue(quote.tx.data.contentEquals(data))
+        assertEquals(BigInteger.valueOf(90_000), quote.tx.gasLimit)
+        // A named gas limit below the estimate would only fail on chain: the estimate's headroom wins.
+        val low = s.prepare(call.copy(dapp = DappCall("https://app.example", data, BigInteger.valueOf(21_000))))
+        assertEquals(BigInteger.valueOf(48_000), low.tx.gasLimit)
+        chain.on["eth_getTransactionReceipt"] = { throw IOException("timed out") }
+        s.submit(quote, signer())
+        val pending = s.awaitStage { it == SendStatus.Stage.Pending }
+        assertEquals(1, chain.sent.size)
+
+        val again = sender(chain, journal = FileSendJournal(journalFile()))
+        val restored = again.status.value!!.quote.request
+        assertEquals("https://app.example", restored.dapp?.origin)
+        assertTrue(restored.dapp!!.data.contentEquals(data))
+        assertEquals(BigInteger.valueOf(90_000), restored.dapp!!.gasLimit)
+        assertEquals(pending.hash, again.status.value!!.hash)
+    }
+
+    @Test
+    fun `a site's call with no value still needs the fee, and a revert names the contract`() = runBlocking<Unit> {
+        val chain = FakeChain()
+        chain.balance = BigInteger.ZERO
+        val s = sender(chain)
+        val call = SendRequest(gnosis, xdai, from, to, BigInteger.ZERO, DappCall("https://app.example", byteArrayOf(1, 2, 3, 4), null))
+        val poor = runCatching { s.prepare(call) }.exceptionOrNull()
+        assertTrue(poor?.message, poor?.message?.startsWith("Not enough xDAI for the network fee") == true)
+        chain.balance = BigInteger.TEN.pow(18)
+        chain.on["eth_estimateGas"] = { """"error":{"code":3,"message":"execution reverted: nope","data":"0x"}""" }
+        val reverted = runCatching { s.prepare(call) }.exceptionOrNull()
+        assertTrue(reverted?.message, reverted?.message?.startsWith("The contract would refuse this transaction") == true)
+    }
+
+    @Test
     fun `a send the process died sending comes back as may-have-gone, and one waiting for its receipt goes on waiting`() = runBlocking<Unit> {
         val chain = FakeChain()
         // The first process's journal: it writes nothing once the process is "killed".

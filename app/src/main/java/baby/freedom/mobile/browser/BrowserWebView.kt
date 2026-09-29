@@ -992,6 +992,7 @@ fun BrowserWebViewHost(
             // its request is denied along with the page.
             sitePermissions.onTabClosed(id)
             RadicleProviders.onTabClosed(id)
+            EthereumProviders.onTabClosed(id)
             UnverifiedOrigins.release(wv)
             (wv as? PageWebView)?.sweptReload?.committed()
             wv.stopLoading()
@@ -1243,6 +1244,7 @@ fun BrowserWebViewHost(
                 for (tab in tabs.tabs) {
                     sitePermissions.onDocumentStarted(tab)
                     RadicleProviders.onDocumentStarted(tab, url = null)
+                    EthereumProviders.onDocumentStarted(tab, url = null)
                 }
             } else {
                 // As when the last private tab closes (#86): the private
@@ -2236,6 +2238,9 @@ private fun buildRefreshableWebView(
         // `window.radicle` (#124): the provider's page object and channel.
         RadicleProviders.install(this, state)
 
+        // `window.ethereum` (#110): the provider's page object, EIP-6963 announce and channel.
+        EthereumProviders.install(this, state)
+
         // Force an initial paint so the WebView's compositor surface
         // is valid even before the user submits a URL. Not for a popup:
         // Chromium rejects (crashes on) a popup WebView that has already
@@ -2526,6 +2531,7 @@ private fun buildRefreshableWebView(
                 // a late answer can't land on this one (#81).
                 sitePermissions.onDocumentStarted(state)
                 RadicleProviders.onDocumentStarted(state, url)
+                EthereumProviders.onDocumentStarted(state, url)
                 // …and with the progress latch open again: whatever the
                 // last Stop aborted, this document is a load of its own
                 // and its percentages are worth drawing (#41).
