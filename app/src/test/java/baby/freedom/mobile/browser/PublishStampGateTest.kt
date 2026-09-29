@@ -177,6 +177,45 @@ class PublishStampGateTest {
         assertEquals(Publisher.State.Idle, Publisher.state.value)
     }
 
+    @Test
+    fun `a publish whose node was switched off doesn't wait for it forever`() {
+        // Unbound from the start (the node switched off in Settings while
+        // it staged): a few asks for a rebind, no "waiting for the node"
+        // card, then it goes ahead and the upload fails on its own.
+        val unbound = StampClient.Answer.Failed("The Swarm node isn't running", unbound = true)
+        var asks = 0
+        var pauses = 0
+        var waiting = false
+        StampClient.awaitGatewayQuiet(
+            ask = { asks++; check(asks < 100) { "never gave up" }; unbound },
+            pause = { pauses++ },
+            onWaiting = { waiting = true },
+        )
+        assertEquals(StampClient.MAX_UNBOUND_ASKS + 1, asks)
+        assertEquals(StampClient.MAX_UNBOUND_ASKS, pauses)
+        assertFalse(waiting)
+
+        // Busy first, then switched off: it stops waiting just the same.
+        asks = 0
+        StampClient.awaitGatewayQuiet(
+            ask = { asks++; check(asks < 100) { "never gave up" }; if (asks == 1) StampClient.Answer.Ok(JSONObject().put("running", true)) else unbound },
+            pause = {},
+            onWaiting = { waiting = true },
+        )
+        assertEquals(StampClient.MAX_UNBOUND_ASKS + 2, asks)
+        assertTrue(waiting)
+
+        // A rebind in between (an Activity recreated) starts the count over.
+        val answers = ArrayDeque(
+            List(StampClient.MAX_UNBOUND_ASKS) { unbound } +
+                StampClient.Answer.Ok(JSONObject().put("running", true)) +
+                List(StampClient.MAX_UNBOUND_ASKS) { unbound } +
+                StampClient.Answer.Ok(JSONObject().put("running", false)),
+        )
+        StampClient.awaitGatewayQuiet(ask = { answers.removeFirst() }, pause = {})
+        assertTrue("waited through both short unbound spells", answers.isEmpty())
+    }
+
     private fun <T> assertNotNull(value: T?): T {
         assertTrue(value != null)
         return value!!

@@ -401,18 +401,44 @@ internal object StampClient {
      * `:node` was already doing. Nothing new can start meanwhile — this
      * process is the only one that starts stamp work, and it refuses to
      * while a publish runs ([canRestartGateway]) — so once this returns,
-     * the upload can't be cut off by one. [onWaiting] is called once, if
-     * it has to wait.
+     * the upload can't be cut off by one. [onWaiting] is called once, the
+     * first time `:node` says (or, busy, doesn't deny) that such work runs.
+     *
+     * Unlike a search's own wait ([nodeWorkStillRunning]), being unbound
+     * isn't taken as "still running" for long: it's most often the node
+     * switched off in Settings, and then there's no work to wait for and
+     * the upload should fail at once rather than hang under a false
+     * "waiting for the node" card (#222 R5-F1). A binder that's only gone
+     * while the Activity is recreated is back within a few asks, so an
+     * unbound answer is asked again at most [MAX_UNBOUND_ASKS] times in a
+     * row before the publish goes ahead (and fails on its own if `:node`
+     * is gone).
      */
     internal fun awaitGatewayQuiet(
         ask: () -> Answer = ::askGatewayWork,
         pause: () -> Unit = { Thread.sleep(DISCOVER_POLL_MS) },
         onWaiting: () -> Unit = {},
     ) {
-        if (!nodeWorkStillRunning(ask())) return
-        onWaiting()
-        awaitNodeWorkEnd(ask, pause)
+        var waited = false
+        var unboundAsks = 0
+        while (true) {
+            val a = ask()
+            if (a is Answer.Failed && a.unbound) {
+                if (++unboundAsks > MAX_UNBOUND_ASKS) return
+            } else {
+                if (!nodeWorkStillRunning(a)) return
+                unboundAsks = 0
+                if (!waited) {
+                    waited = true
+                    onWaiting()
+                }
+            }
+            pause()
+        }
     }
+
+    /** How many unbound answers in a row [awaitGatewayQuiet] waits through (~15 s). */
+    internal const val MAX_UNBOUND_ASKS = 3
 
     private fun askGatewayWork(): Answer = call("gatewayWork", timeoutMs = DISCOVERING_TIMEOUT_MS)
 
