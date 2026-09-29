@@ -51,6 +51,31 @@ internal object AntNative {
      */
     external fun agentString(handle: Long): String?
 
+    /**
+     * Postage stamps (#116), ant's storage calls; each returns ant's JSON
+     * and throws with its message. `ant_storage_status`: the connected
+     * batch (`batch_id`, `batch_depth`, …; `enabled=false` for none).
+     */
+    external fun storageStatus(handle: Long): String
+
+    /** `ant_storage_quote`: what a [depth]-deep batch lasting [days] costs. No transaction. */
+    external fun storageQuote(handle: Long, gnosisRpc: String, depth: Int, days: Long): String
+
+    /** `ant_storage_topup_quote`: what extending the connected batch by [days] costs. No transaction. */
+    external fun storageTopupQuote(handle: Long, gnosisRpc: String, days: Long): String
+
+    /** `ant_storage_validity`: the connected batch's remaining lifetime. */
+    external fun storageValidity(handle: Long, gnosisRpc: String): String
+
+    /**
+     * `ant_storage_buy_xdai`: SPENDS. Only through [SpendGuard.during]
+     * — the shim's chain transport refuses every broadcast otherwise.
+     */
+    external fun storageBuyXdai(handle: Long, gnosisRpc: String, depth: Int, amountPerChunk: String, immutable: Boolean): String
+
+    /** `ant_storage_topup_xdai` on the connected batch: SPENDS, likewise only through [SpendGuard.during]. */
+    external fun storageTopupXdai(handle: Long, gnosisRpc: String, amountPerChunk: String): String
+
     /** Tear the node down and free the handle — it must not be reused. */
     external fun shutdown(handle: Long)
 

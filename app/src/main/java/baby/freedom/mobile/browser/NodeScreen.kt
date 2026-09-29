@@ -57,8 +57,9 @@ import java.util.Locale
 
 /**
  * Full-screen node-details page: the Swarm node's live status, peer
- * count, gateway URL and run-node on/off toggle, its mode and the way into
- * publish setup (#114, [PublishSetupScreen]), the Tor client (#143)
+ * count, gateway URL and run-node on/off toggle, its mode and the ways into
+ * publish setup (#114, [PublishSetupScreen]) and the postage stamps (#116,
+ * [StampsScreen]), the Tor client (#143)
  * with its start/stop switch, status and version, then the Myotis
  * Ethereum / Gnosis light client (#72) with its own switch and per-chain
  * sync state. Shares the same [FullScreenScaffold] chrome as Settings /
@@ -91,13 +92,21 @@ fun NodeScreen(
     val scope = rememberCoroutineScope()
     val setLightMode: (Boolean) -> Unit = { light -> scope.launch { settings.setSwarmLightMode(light) } }
     var showPublishSetup by rememberSaveable { mutableStateOf(false) }
+    // The stamp pages (#116): "list", "buy" (from publish setup), or null.
+    var showStamps by rememberSaveable { mutableStateOf<String?>(null) }
 
+    showStamps?.let { start ->
+        // Back from the stamps lands on whichever page opened them.
+        StampsScreen(nodeInfo = nodeInfo, startWithBuy = start == "buy", onDismiss = { showStamps = null })
+        return
+    }
     if (showPublishSetup) {
         PublishSetupScreen(
             nodeInfo = nodeInfo,
             lightModeWanted = lightModeWanted == true,
             onSwitchToLightMode = { setLightMode(true) },
             onOpenWallet = onOpenWallet,
+            onBuyStamp = { showStamps = "buy" },
             onDismiss = { showPublishSetup = false },
         )
         return
@@ -130,6 +139,7 @@ fun NodeScreen(
                     lightModeWanted = lightModeWanted,
                     onSetLightMode = setLightMode,
                     onOpenSetup = { showPublishSetup = true },
+                    onOpenStamps = { showStamps = "list" },
                 )
             }
             item("gateway") {
@@ -230,6 +240,7 @@ private fun PublishingSection(
     lightModeWanted: Boolean?,
     onSetLightMode: (Boolean) -> Unit,
     onOpenSetup: () -> Unit,
+    onOpenStamps: () -> Unit,
 ) {
     SectionCard(title = "Publishing") {
         Row(
@@ -254,7 +265,13 @@ private fun PublishingSection(
             )
         }
         Spacer(Modifier.height(4.dp))
-        TextButton(onClick = onOpenSetup) { Text("Set up publishing") }
+        Row {
+            TextButton(onClick = onOpenSetup) { Text("Set up publishing") }
+            // Readable only from a light node's gateway.
+            if (nodeInfo.status == NodeStatus.Running && nodeInfo.lightMode) {
+                TextButton(onClick = onOpenStamps) { Text("Postage stamps") }
+            }
+        }
     }
 }
 

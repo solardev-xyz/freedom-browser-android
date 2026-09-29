@@ -2,6 +2,10 @@ package baby.freedom.swarm
 
 import android.util.Log
 import java.io.File
+import java.math.BigInteger
+import java.util.concurrent.locks.ReentrantReadWriteLock
+import kotlin.concurrent.read
+import kotlin.concurrent.write
 import org.json.JSONObject
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
@@ -48,6 +52,12 @@ class SwarmNode internal constructor(
         fun peerCount(handle: Long): Int
         fun stopGateway(handle: Long)
         fun shutdown(handle: Long)
+        fun storageStatus(handle: Long): String
+        fun storageQuote(handle: Long, gnosisRpc: String, depth: Int, days: Long): String
+        fun storageTopupQuote(handle: Long, gnosisRpc: String, days: Long): String
+        fun storageValidity(handle: Long, gnosisRpc: String): String
+        fun storageBuyXdai(handle: Long, gnosisRpc: String, depth: Int, amountPerChunk: String, immutable: Boolean): String
+        fun storageTopupXdai(handle: Long, gnosisRpc: String, amountPerChunk: String): String
 
         object Native : NodeOps {
             override fun seed(antDir: File) = BootnodeSeeder.seedIfEmpty(antDir)
@@ -61,6 +71,16 @@ class SwarmNode internal constructor(
             override fun peerCount(handle: Long) = AntNative.peerCount(handle)
             override fun stopGateway(handle: Long) = AntNative.stopGateway(handle)
             override fun shutdown(handle: Long) = AntNative.shutdown(handle)
+            override fun storageStatus(handle: Long) = AntNative.storageStatus(handle)
+            override fun storageQuote(handle: Long, gnosisRpc: String, depth: Int, days: Long) =
+                AntNative.storageQuote(handle, gnosisRpc, depth, days)
+            override fun storageTopupQuote(handle: Long, gnosisRpc: String, days: Long) =
+                AntNative.storageTopupQuote(handle, gnosisRpc, days)
+            override fun storageValidity(handle: Long, gnosisRpc: String) = AntNative.storageValidity(handle, gnosisRpc)
+            override fun storageBuyXdai(handle: Long, gnosisRpc: String, depth: Int, amountPerChunk: String, immutable: Boolean) =
+                AntNative.storageBuyXdai(handle, gnosisRpc, depth, amountPerChunk, immutable)
+            override fun storageTopupXdai(handle: Long, gnosisRpc: String, amountPerChunk: String) =
+                AntNative.storageTopupXdai(handle, gnosisRpc, amountPerChunk)
         }
     }
 
@@ -112,6 +132,17 @@ class SwarmNode internal constructor(
      */
     @Volatile
     private var handle: Long = 0L
+
+    /** The mode [handle] booted in; its RPC is the one the storage calls use. Guarded by [lock]. */
+    private var handleMode: Mode = Mode.ULTRA_LIGHT
+
+    /**
+     * Held (read) by every storage call for as long as it uses [handle],
+     * and (write) by the shutdown of a handle [stop] took down — so ant
+     * is never shut down under a call still inside it. A buy blocks until
+     * its transactions confirm, so a restart waits for it.
+     */
+    private val handleUse = ReentrantReadWriteLock()
     private var peerPoller: Job? = null
 
     /**
@@ -202,6 +233,7 @@ class SwarmNode internal constructor(
             val published = synchronized(lock) {
                 if (generation != gen) return@synchronized false
                 handle = h
+                handleMode = mode
                 _state.update {
                     it.copy(
                         status = NodeStatus.Running,
@@ -263,8 +295,11 @@ class SwarmNode internal constructor(
             // that follows this [stop] always sees it and waits for it.
             scope.launch(start = CoroutineStart.LAZY) {
                 runCatching {
-                    ops.stopGateway(h)
-                    ops.shutdown(h)
+                    // After any storage call still using it (#116).
+                    handleUse.write {
+                        ops.stopGateway(h)
+                        ops.shutdown(h)
+                    }
                 }.onFailure { Log.w(TAG, "shutdown threw", it) }
             }.also { pendingShutdown = it }
         }
@@ -310,6 +345,71 @@ class SwarmNode internal constructor(
         }
     }
 
+    /**
+     * Postage stamps (#116). ant's storage calls against the running light
+     * node, each returning ant's JSON. They block — the two that spend
+     * until their transactions confirm — so call them off the main thread.
+     * Each throws [IllegalStateException] while the node isn't running in
+     * light mode, and [RuntimeException] with ant's message (the RPC URL,
+     * which can carry an API key, replaced) when ant fails.
+     */
+    fun storageStatus(): String = withLightNode { h, _ -> ops.storageStatus(h) }
+
+    /** What a batch [depth] deep lasting [days] would cost, and whether the account covers it. */
+    fun storageQuote(depth: Int, days: Long): String =
+        withLightNode { h, rpc -> ops.storageQuote(h, rpc, depth, days) }
+
+    /** What extending the node's connected batch by [days] would cost. */
+    fun storageTopupQuote(days: Long): String = withLightNode { h, rpc -> ops.storageTopupQuote(h, rpc, days) }
+
+    /**
+     * Buys a batch as the user confirmed it: [depth], [amountPerChunk] from
+     * the quote they saw, swapping at most [maxSwapWei] of xDAI for the
+     * xBZZ it needs. SPENDS: only these transactions get out ([SpendGuard]).
+     */
+    fun buyStamp(depth: Int, amountPerChunk: BigInteger, immutable: Boolean, maxSwapWei: BigInteger): String =
+        withLightNode { h, rpc ->
+            val plan = SpendPlan.BuyStamp(owner(), depth, amountPerChunk, immutable, maxSwapWei)
+            SpendGuard.during(plan) { ops.storageBuyXdai(h, rpc, depth, amountPerChunk.toString(), immutable) }
+        }
+
+    /**
+     * Extends batch [batchId] (hex, `0x` optional) by [amountPerChunk] per
+     * chunk, swapping at most [maxSwapWei]. ant tops up its *connected*
+     * batch, so this refuses unless that's [batchId]; and the permit names
+     * [batchId], so even a batch switched in meanwhile can't be paid for.
+     * SPENDS. Returns ant's validity JSON for the batch.
+     */
+    fun extendStamp(batchId: String, amountPerChunk: BigInteger, maxSwapWei: BigInteger): String =
+        withLightNode { h, rpc ->
+            val want = normalizeBatchId(batchId) ?: throw IllegalArgumentException("not a batch id")
+            val connected = JSONObject(ops.storageStatus(h))
+            if (!connected.optBoolean("enabled") || normalizeBatchId(connected.optString("batch_id")) != want) {
+                throw IllegalStateException("this stamp isn't the node's active one")
+            }
+            val depth = connected.optInt("batch_depth", -1).takeIf { it in 17..64 }
+                ?: throw IllegalStateException("the node reported no depth for this stamp")
+            val plan = SpendPlan.ExtendStamp(owner(), want, depth, amountPerChunk, maxSwapWei)
+            SpendGuard.during(plan) { ops.storageTopupXdai(h, rpc, amountPerChunk.toString()) }
+        }
+
+    /** The node's account, as [SpendPlan.owner]. */
+    private fun owner(): String = _state.value.accountAddress.removePrefix("0x").lowercase()
+        .takeIf { it.length == 40 } ?: throw IllegalStateException("the node has no account")
+
+    private fun <T> withLightNode(block: (Long, String) -> T): T = handleUse.read {
+        val (h, mode) = synchronized(lock) { handle to handleMode }
+        check(h != 0L && _state.value.status == NodeStatus.Running) { "the Swarm node isn't running" }
+        check(mode.light) { "the Swarm node isn't in light mode" }
+        try {
+            block(h, mode.gnosisRpc)
+        } catch (e: IllegalStateException) {
+            throw e
+        } catch (e: RuntimeException) {
+            throw RuntimeException(scrubRpc(e.message ?: e.javaClass.simpleName, mode.gnosisRpc))
+        }
+    }
+
     /** Cancel the internal scope; call from Service.onDestroy after [stop]. */
     fun dispose() {
         stop()
@@ -342,5 +442,13 @@ class SwarmNode internal constructor(
         const val GATEWAY_URL: String = "http://$GATEWAY_ADDR"
 
         private const val TAG = "SwarmNode"
+
+        /** [id] as 64 lowercase hex without `0x`, or null if it isn't a batch id. */
+        fun normalizeBatchId(id: String): String? = id.trim().removePrefix("0x").removePrefix("0X").lowercase()
+            .takeIf { s -> s.length == 64 && s.all { it in '0'..'9' || it in 'a'..'f' } }
+
+        /** [message] with [rpc] (an endpoint that can carry an API key) taken out. */
+        internal fun scrubRpc(message: String, rpc: String): String =
+            if (rpc.isBlank()) message else message.replace(rpc, "the Gnosis RPC").replace(rpc.trimEnd('/'), "the Gnosis RPC")
     }
 }

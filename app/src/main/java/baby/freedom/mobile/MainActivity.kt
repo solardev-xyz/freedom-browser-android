@@ -34,6 +34,7 @@ import baby.freedom.mobile.browser.OnchainApps
 import baby.freedom.mobile.browser.PhraseClipboard
 import baby.freedom.mobile.browser.RadApi
 import baby.freedom.mobile.browser.RadicleClient
+import baby.freedom.mobile.browser.StampClient
 import baby.freedom.mobile.browser.RadicleProviders
 import baby.freedom.mobile.browser.RadicleControls
 import baby.freedom.mobile.browser.TorControls
@@ -252,6 +253,7 @@ class MainActivity : ComponentActivity() {
             val b = INodeService.Stub.asInterface(service) ?: return
             binder = b
             RadicleClient.service = b
+            StampClient.service = b
             runCatching { b.registerCallback(callback) }
             runCatching { b.state?.let { infoFlow.value = it } }
             runCatching {
@@ -283,6 +285,7 @@ class MainActivity : ComponentActivity() {
             // [setRunNodeEnabled] instead, which sets Stopped explicitly.
             binder = null
             RadicleClient.service = null
+            StampClient.service = null
             infoFlow.value = NodeInfo()
             ipfsInfoFlow.value = IpfsInfo()
             radicleInfoFlow.value = RadicleInfo()
@@ -846,6 +849,7 @@ class MainActivity : ComponentActivity() {
         runCatching { unbindService(connection) }
         binder = null
         RadicleClient.service = null
+        StampClient.service = null
         bound = false
     }
 }

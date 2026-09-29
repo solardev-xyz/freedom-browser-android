@@ -125,4 +125,15 @@ interface INodeService {
      * end early abandons it.
      */
     ParcelFileDescriptor radicleCall(String method, String argsJson);
+
+    /**
+     * Postage stamps (#116): `method` is one of NodeService.STAMP_CALLS —
+     * `status`, `quote`, `extendQuote` (no transaction) or `buy`,
+     * `extend` (SPEND, from the stamp screens' confirmation only) — with
+     * `argsJson` its arguments. Returns the read end of a pipe the answer
+     * (ant's JSON, or `{"error": …}`) is written to, like [radicleCall].
+     * A spend that has started runs to the end even if the read end is
+     * closed; one the reader gave up on before it started doesn't run.
+     */
+    ParcelFileDescriptor stampCall(String method, String argsJson);
 }

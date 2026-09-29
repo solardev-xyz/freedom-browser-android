@@ -44,6 +44,7 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlin.system.exitProcess
+import java.math.BigInteger
 import org.json.JSONObject
 
 /**
@@ -220,6 +221,70 @@ class NodeService : Service() {
                 }
             }
             return read
+        }
+
+        override fun stampCall(method: String?, argsJson: String?): ParcelFileDescriptor {
+            val (read, write) = ParcelFileDescriptor.createPipe()
+            scope.launch(Dispatchers.IO) {
+                // Nothing is started for a reader that already gave up.
+                val answer = if (readerGone(write)) {
+                    null
+                } else {
+                    runCatching { stampCallNow(method.orEmpty(), JSONObject(argsJson ?: "{}")) }
+                        .getOrElse { e ->
+                            Log.w(TAG, "stamp call $method failed: ${e.javaClass.simpleName}: ${e.message}")
+                            JSONObject().put("error", e.message ?: "the Swarm node couldn't do that").toString()
+                        }
+                }
+                runCatching {
+                    ParcelFileDescriptor.AutoCloseOutputStream(write).use { out ->
+                        if (answer != null) out.write(answer.toByteArray())
+                    }
+                }
+            }
+            return read
+        }
+    }
+
+    /**
+     * One [INodeService.stampCall] (#116), blocking. The spends are for
+     * the wallet identity's node only: the device-only key can't be
+     * restored anywhere, so nothing bought with it could be kept.
+     */
+    private fun stampCallNow(method: String, args: JSONObject): String {
+        fun days() = args.getLong("days").also { require(it in 1..MAX_STAMP_DAYS) { "bad duration" } }
+        fun amount() = BigInteger(args.getString("amountPerChunk")).also { require(it.signum() > 0) { "bad amount" } }
+        fun maxSwap() = BigInteger(args.getString("maxSwapWei")).also { require(it.signum() >= 0) { "bad xDAI total" } }
+        fun spendable() = check(swarmNode.state.value.walletIdentity) {
+            "The Swarm node isn't running as your wallet's identity"
+        }
+        return when (method) {
+            "status" -> swarmNode.storageStatus()
+            "quote" -> {
+                val depth = args.getInt("depth").also { require(it in MIN_STAMP_DEPTH..MAX_STAMP_DEPTH) { "bad depth" } }
+                swarmNode.storageQuote(depth, days())
+            }
+            "extendQuote" -> {
+                // ant prices its connected batch only; say so rather than price another.
+                val want = SwarmNode.normalizeBatchId(args.getString("batchId")) ?: throw IllegalArgumentException("bad batch id")
+                val connected = JSONObject(swarmNode.storageStatus())
+                check(SwarmNode.normalizeBatchId(connected.optString("batch_id")) == want) {
+                    "this stamp isn't the node's active one"
+                }
+                swarmNode.storageTopupQuote(days())
+            }
+            "buy" -> {
+                spendable()
+                val depth = args.getInt("depth").also { require(it in MIN_STAMP_DEPTH..MAX_STAMP_DEPTH) { "bad depth" } }
+                Log.i(TAG, "buying a postage batch (depth $depth), as the user confirmed")
+                swarmNode.buyStamp(depth, amount(), immutable = true, maxSwapWei = maxSwap())
+            }
+            "extend" -> {
+                spendable()
+                Log.i(TAG, "extending a postage batch, as the user confirmed")
+                swarmNode.extendStamp(args.getString("batchId"), amount(), maxSwap())
+            }
+            else -> throw IllegalArgumentException("unknown stamp call")
         }
     }
 
@@ -575,6 +640,13 @@ class NodeService : Service() {
         }
 
     companion object {
+        /** The stamp sizes the buy screen offers (#116): 2^17 chunks (ant's and bee's smallest) up to 2^24. */
+        const val MIN_STAMP_DEPTH = 17
+        const val MAX_STAMP_DEPTH = 24
+
+        /** A stamp bought or extended for at most ten years at a time. */
+        const val MAX_STAMP_DAYS = 3650L
+
         private const val MAX_RADICLE_CALLS = 4
 
         private const val TAG = "NodeService"

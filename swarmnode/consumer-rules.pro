@@ -27,3 +27,10 @@
 -keepclasseswithmembernames class baby.freedom.swarm.ColibriNative {
     native <methods>;
 }
+
+# ant_jni.c's chain transport calls SpendGuard.admit(String) by name from
+# JNI_OnLoad-resolved refs (#116). Renamed or stripped, it can't find the
+# gate and refuses every broadcast — safe, but no stamp could be bought.
+-keep class baby.freedom.swarm.SpendGuard {
+    public static boolean admit(java.lang.String);
+}

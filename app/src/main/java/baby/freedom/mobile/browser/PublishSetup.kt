@@ -65,9 +65,10 @@ import org.json.JSONObject
  * swarm-readiness.js and iOS's PublishSetupView / BeeReadiness, adapted to
  * ant. Unlike bee, ant switches to light mode without funds (it only
  * starts reading Gnosis) and deploys no chequebook by itself, so the order
- * differs: identity, light mode, xDAI, chequebook, postage stamp. Funding
- * in one transaction (#115), buying stamps (#116) and the chequebook
- * deposit (#117) come in their own issues; until then those steps say so.
+ * differs: identity, light mode, xDAI, chequebook, postage stamp. The
+ * stamp step opens the stamp pages (#116, [StampsScreen]); buying the
+ * first stamp also deploys the chequebook. Funding in one transaction
+ * (#115) and the chequebook deposit (#117) come in their own issues.
  */
 
 /** A checklist step's state, as on iOS: ○ pending, ▶ active (yours to do), ⏳ waiting, ✓ done. */
@@ -119,7 +120,8 @@ internal fun fundingAddress(node: NodeInfo): String? =
 /**
  * The five steps. Each is done on its own evidence, whatever the order; the
  * first one not done is the one to work on (active, or waiting when there's
- * nothing for the user to do but wait), and the rest are pending. While the
+ * nothing for the user to do but wait), and the rest are pending — except
+ * the chequebook, which the first stamp brings, so it's never the one. While the
  * node isn't running nothing is known, so every step not done is pending.
  */
 internal fun publishSteps(r: PublishReadiness): List<PublishStep> {
@@ -139,7 +141,13 @@ internal fun publishSteps(r: PublishReadiness): List<PublishStep> {
         PublishStepKey.Chequebook to (light && chequebookDeployed),
         PublishStepKey.Stamp to (light && stamped),
     )
-    val current = if (running) PublishStepKey.entries.firstOrNull { done[it] != true } else null
+    // The chequebook has nothing to do of its own: it comes with the first
+    // stamp, so the stamp step is the one to work on meanwhile.
+    val current = if (running) {
+        PublishStepKey.entries.firstOrNull { done[it] != true && it != PublishStepKey.Chequebook }
+    } else {
+        null
+    }
     fun status(key: PublishStepKey, waiting: Boolean = false) = when {
         done[key] == true -> StepStatus.Done
         key != current -> StepStatus.Pending
@@ -205,11 +213,10 @@ internal fun publishSteps(r: PublishReadiness): List<PublishStep> {
             "Buy a postage stamp",
             when {
                 stamped -> "${plural(r.usableStamps ?: 0, "usable postage batch", "usable postage batches")}."
-                else -> "Postage stamps pre-pay the network for storing your data. Buying one isn't " +
-                    "in this version of Freedom yet."
+                else -> "Postage stamps pre-pay the network for storing your data. The node buys one " +
+                    "with its xDAI, and deploys its chequebook with the first."
             },
-            // Not buyable here yet (#116): never shown as the user's to do.
-            if (done[PublishStepKey.Stamp] == true) StepStatus.Done else StepStatus.Pending,
+            status(PublishStepKey.Stamp),
         ),
     )
 }
@@ -239,12 +246,12 @@ internal fun usableStampsFrom(body: String): Int? {
 }
 
 /** GET [path] from the embedded node's gateway; the body of a 200, else null. */
-private suspend fun gatewayGet(path: String): String? = withContext(Dispatchers.IO) {
+internal suspend fun gatewayGet(path: String, timeoutMs: Int = GATEWAY_TIMEOUT_MS): String? = withContext(Dispatchers.IO) {
     try {
         val conn = URL(SwarmNode.GATEWAY_URL + path).openConnection() as HttpURLConnection
         try {
-            conn.connectTimeout = GATEWAY_TIMEOUT_MS
-            conn.readTimeout = GATEWAY_TIMEOUT_MS
+            conn.connectTimeout = timeoutMs
+            conn.readTimeout = timeoutMs
             conn.useCaches = false
             if (conn.responseCode != 200) return@withContext null
             conn.inputStream.use { it.readBytes().toString(Charsets.UTF_8) }
@@ -261,7 +268,7 @@ private suspend fun gatewayGet(path: String): String? = withContext(Dispatchers.
 /**
  * The publish setup page, over the node page. [lightModeWanted] is the
  * setting; [onSwitchToLightMode] turns it on, [onOpenWallet] opens the
- * wallet page for the identity step.
+ * wallet page for the identity step, [onBuyStamp] the stamp buy page.
  */
 @Composable
 internal fun PublishSetupScreen(
@@ -269,6 +276,7 @@ internal fun PublishSetupScreen(
     lightModeWanted: Boolean,
     onSwitchToLightMode: () -> Unit,
     onOpenWallet: () -> Unit,
+    onBuyStamp: () -> Unit,
     onDismiss: () -> Unit,
 ) {
     BackHandler(onBack = onDismiss)
@@ -358,6 +366,9 @@ internal fun PublishSetupScreen(
                                         Text("Copy address")
                                     }
                                 }
+                            }
+                            PublishStepKey.Stamp -> if (step.status == StepStatus.Active) {
+                                Button(onClick = onBuyStamp) { Text("Buy a postage stamp") }
                             }
                             else -> Unit
                         }
