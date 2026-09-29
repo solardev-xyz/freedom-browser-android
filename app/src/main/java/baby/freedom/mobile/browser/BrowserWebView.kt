@@ -993,6 +993,7 @@ fun BrowserWebViewHost(
             sitePermissions.onTabClosed(id)
             RadicleProviders.onTabClosed(id)
             EthereumProviders.onTabClosed(id)
+            SwarmProviders.onTabClosed(id)
             X402Payments.onTabClosed(id)
             UnverifiedOrigins.release(wv)
             (wv as? PageWebView)?.sweptReload?.committed()
@@ -1246,6 +1247,7 @@ fun BrowserWebViewHost(
                     sitePermissions.onDocumentStarted(tab)
                     RadicleProviders.onDocumentStarted(tab, url = null)
                     EthereumProviders.onDocumentStarted(tab, url = null)
+                    SwarmProviders.onDocumentStarted(tab, url = null)
                     X402Payments.onDocumentStarted(tab, view = null, url = null)
                 }
             } else {
@@ -2243,6 +2245,9 @@ private fun buildRefreshableWebView(
         // `window.ethereum` (#110): the provider's page object, EIP-6963 announce and channel.
         EthereumProviders.install(this, state)
 
+        // `window.swarm` (#120): publishing, chunks and feeds.
+        SwarmProviders.install(this, state)
+
         // Force an initial paint so the WebView's compositor surface
         // is valid even before the user submits a URL. Not for a popup:
         // Chromium rejects (crashes on) a popup WebView that has already
@@ -2545,6 +2550,7 @@ private fun buildRefreshableWebView(
                 sitePermissions.onDocumentStarted(state)
                 RadicleProviders.onDocumentStarted(state, url)
                 EthereumProviders.onDocumentStarted(state, url)
+                SwarmProviders.onDocumentStarted(state, url)
                 // After it: an x402 payment the page asks for is put to
                 // the user against this document's number (#140).
                 X402Payments.onDocumentStarted(state, view, url)
@@ -3592,6 +3598,7 @@ private fun buildRefreshableWebView(
         // `window.radicle` prompt) may ask again (#218 R1-M3).
         EthereumProviders.allowPrompts(state.id)
         RadicleProviders.allowPrompts(state.id)
+        SwarmProviders.allowPrompts(state.id)
         webView.reload()
     }
     // Who owns a downward drag — the refresh spinner or the page.

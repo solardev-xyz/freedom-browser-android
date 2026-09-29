@@ -39,6 +39,7 @@ import baby.freedom.mobile.browser.RadApi
 import baby.freedom.mobile.browser.RadicleClient
 import baby.freedom.mobile.browser.StampClient
 import baby.freedom.mobile.browser.RadicleProviders
+import baby.freedom.mobile.browser.SwarmProviders
 import baby.freedom.mobile.browser.RadicleControls
 import baby.freedom.mobile.browser.TorControls
 import baby.freedom.mobile.browser.TorRouting
@@ -399,6 +400,8 @@ class MainActivity : ComponentActivity() {
         RadicleProviders.init(this)
         // `window.ethereum` (#110): the dApp provider behind every normal tab.
         EthereumProviders.init(this)
+        // `window.swarm` (#120): publishing, chunks and feeds.
+        SwarmProviders.init(this)
         X402Payments.init(this)
         lifecycleScope.launch {
             settings.radicleEnabled.collect {
