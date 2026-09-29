@@ -1,6 +1,7 @@
 package baby.freedom.swarm
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.File
@@ -34,6 +35,20 @@ class SwarmNodeTest {
             releaseInit.await(5, TimeUnit.SECONDS)
             return h
         }
+        /** What [initWithIdentity] was handed, copied before the node zeroes it; and the array itself. */
+        val identities: MutableList<String> = Collections.synchronizedList(mutableListOf())
+        val identityArrays: MutableList<ByteArray> = Collections.synchronizedList(mutableListOf())
+        override fun initWithIdentity(dataDir: String, identity: ByteArray): Long {
+            identities += String(identity)
+            identityArrays += identity
+            val h = nextHandle++
+            calls += "initWithIdentity:$h"
+            initEntered.countDown()
+            releaseInit.await(5, TimeUnit.SECONDS)
+            return h
+        }
+        override fun accountInfo(handle: Long) =
+            """{"eth_address":"0xabc$handle","overlay":"ff$handle","peer_id":"16Uiu2","agent":"ant-test"}"""
         override fun startGateway(handle: Long, apiAddr: String, lightMode: Boolean, gnosisRpc: String) {
             calls += "gateway:$handle"
         }
@@ -129,6 +144,60 @@ class SwarmNodeTest {
         awaitStatus(node, NodeStatus.Running)
         val calls = ops.calls.toList()
         assertTrue(calls.indexOf("shutdown:1") in 0 until calls.indexOf("init:2"))
+        node.dispose()
+    }
+
+    @Test
+    fun withoutAWalletIdentityAntUsesItsOwn() {
+        val ops = FakeOps().apply { releaseSeed.countDown(); releaseInit.countDown() }
+        val node = SwarmNode(config, ops)
+        node.start()
+        awaitStatus(node, NodeStatus.Running)
+        assertEquals(listOf("seed", "init:1", "gateway:1"), ops.calls.toList())
+        assertEquals("0xabc1", node.state.value.accountAddress)
+        assertEquals("ff1", node.state.value.overlay)
+        assertFalse(node.state.value.walletIdentity)
+        node.dispose()
+    }
+
+    @Test
+    fun aWalletIdentityIsHandedToAntAndZeroedAfter() {
+        val ops = FakeOps().apply { releaseSeed.countDown(); releaseInit.countDown() }
+        val node = SwarmNode(config.copy(identity = { """{"signing_key":"aa"}""".toByteArray() }), ops)
+        node.start()
+        awaitStatus(node, NodeStatus.Running)
+        assertEquals(listOf("seed", "initWithIdentity:1", "gateway:1"), ops.calls.toList())
+        assertEquals(listOf("""{"signing_key":"aa"}"""), ops.identities.toList())
+        assertTrue(ops.identityArrays.single().all { it.toInt() == 0 })
+        assertTrue(node.state.value.walletIdentity)
+        assertEquals("0xabc1", node.state.value.accountAddress)
+        node.dispose()
+    }
+
+    @Test
+    fun restartReadsTheIdentityAgain() {
+        val ops = FakeOps().apply { releaseSeed.countDown(); releaseInit.countDown() }
+        val current = java.util.concurrent.atomic.AtomicReference<String?>(null)
+        val node = SwarmNode(config.copy(identity = { current.get()?.toByteArray() }), ops)
+        node.start()
+        awaitStatus(node, NodeStatus.Running)
+        assertFalse(node.state.value.walletIdentity)
+        current.set("wallet")
+        node.restart()
+        val until = System.currentTimeMillis() + 5_000
+        while (!node.state.value.walletIdentity && System.currentTimeMillis() < until) Thread.sleep(10)
+        assertEquals(NodeStatus.Running, node.state.value.status)
+        assertTrue(node.state.value.walletIdentity)
+        val calls = ops.calls.toList()
+        assertTrue(calls.indexOf("shutdown:1") in 0 until calls.indexOf("initWithIdentity:2"))
+        assertEquals("0xabc2", node.state.value.accountAddress)
+        current.set(null)
+        node.restart()
+        val until2 = System.currentTimeMillis() + 5_000
+        while (node.state.value.walletIdentity && System.currentTimeMillis() < until2) Thread.sleep(10)
+        awaitStatus(node, NodeStatus.Running)
+        assertFalse(node.state.value.walletIdentity)
+        assertEquals("init:3", ops.calls.last { it.startsWith("init") })
         node.dispose()
     }
 }

@@ -142,6 +142,13 @@ class Vault internal constructor(
         }
     }
 
+    /**
+     * [VaultRecord.identityTag] of the wallet on the device, or null when
+     * there's none (or it can't be read): which vault the node identities
+     * on disk must have been derived from (#77).
+     */
+    fun identityTag(): String? = store.read()?.identityTag()
+
     /** Whether [create] can make an authentication-bound key; false shows the no-screen-lock warning. */
     fun deviceSecure(): Boolean = store.deviceSecure()
 

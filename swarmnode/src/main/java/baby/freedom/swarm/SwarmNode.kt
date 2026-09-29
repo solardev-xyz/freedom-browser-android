@@ -2,6 +2,7 @@ package baby.freedom.swarm
 
 import android.util.Log
 import java.io.File
+import org.json.JSONObject
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
@@ -40,6 +41,8 @@ class SwarmNode internal constructor(
     internal interface NodeOps {
         fun seed(antDir: File)
         fun init(dataDir: String): Long
+        fun initWithIdentity(dataDir: String, identity: ByteArray): Long
+        fun accountInfo(handle: Long): String?
         fun startGateway(handle: Long, apiAddr: String, lightMode: Boolean, gnosisRpc: String)
         fun agentString(handle: Long): String?
         fun peerCount(handle: Long): Int
@@ -49,6 +52,9 @@ class SwarmNode internal constructor(
         object Native : NodeOps {
             override fun seed(antDir: File) = BootnodeSeeder.seedIfEmpty(antDir)
             override fun init(dataDir: String) = AntNative.init(dataDir)
+            override fun initWithIdentity(dataDir: String, identity: ByteArray) =
+                AntNative.initWithIdentity(dataDir, identity)
+            override fun accountInfo(handle: Long) = AntNative.accountInfo(handle)
             override fun startGateway(handle: Long, apiAddr: String, lightMode: Boolean, gnosisRpc: String) =
                 AntNative.startGateway(handle, apiAddr, lightMode, gnosisRpc)
             override fun agentString(handle: Long) = AntNative.agentString(handle)
@@ -66,6 +72,13 @@ class SwarmNode internal constructor(
          * them disabled — right for ultra-light (read-only) mode.
          */
         val rpcEndpoint: String = "",
+        /**
+         * The identity document to boot ant as (#77) — the account derived
+         * from the wallet — read afresh at every start, or null to run as
+         * the node's own `identity.json`. The node zeroes the bytes once
+         * ant has them.
+         */
+        val identity: () -> ByteArray? = { null },
     )
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -137,7 +150,12 @@ class SwarmNode internal constructor(
             // ant's own port-53 dnsaddr lookup is blocked.
             ops.seed(File(antDir))
             if (!isCurrent(gen)) return
-            val h = ops.init(antDir)
+            val identity = config.identity()
+            val h = try {
+                if (identity != null) ops.initWithIdentity(antDir, identity) else ops.init(antDir)
+            } finally {
+                identity?.fill(0)
+            }
             try {
                 ops.startGateway(
                     handle = h,
@@ -151,6 +169,7 @@ class SwarmNode internal constructor(
                 throw t
             }
             val agent = runCatching { ops.agentString(h) }.getOrNull().orEmpty()
+            val account = runCatching { ops.accountInfo(h)?.let(::JSONObject) }.getOrNull()
             val published = synchronized(lock) {
                 if (generation != gen) return@synchronized false
                 handle = h
@@ -159,6 +178,9 @@ class SwarmNode internal constructor(
                         status = NodeStatus.Running,
                         clientVersion = agent,
                         errorMessage = null,
+                        accountAddress = account?.optString("eth_address").orEmpty(),
+                        overlay = account?.optString("overlay").orEmpty(),
+                        walletIdentity = identity != null,
                     )
                 }
                 startPeerPolling()
@@ -194,7 +216,14 @@ class SwarmNode internal constructor(
             peerPoller?.cancel()
             peerPoller = null
             _state.update {
-                it.copy(status = NodeStatus.Stopped, connectedPeers = 0, clientVersion = "")
+                it.copy(
+                    status = NodeStatus.Stopped,
+                    connectedPeers = 0,
+                    clientVersion = "",
+                    accountAddress = "",
+                    overlay = "",
+                    walletIdentity = false,
+                )
             }
             val h = handle
             handle = 0L
@@ -209,6 +238,16 @@ class SwarmNode internal constructor(
             }.also { pendingShutdown = it }
         }
         shutdown.start()
+    }
+
+    /**
+     * Stop and start again, so the node picks up a changed identity
+     * (#77). The stop supersedes a launch still in flight, and the new
+     * launch waits for the old node's shutdown before it binds the port.
+     */
+    fun restart() {
+        stop()
+        start()
     }
 
     /**

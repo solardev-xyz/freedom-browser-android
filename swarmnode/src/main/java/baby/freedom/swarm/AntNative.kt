@@ -20,6 +20,18 @@ internal object AntNative {
     external fun init(dataDir: String): Long
 
     /**
+     * Like [init], but as the account in [identity] (#77): the UTF-8
+     * identity document `ant_init_with_identity` takes
+     * (`{"signing_key","overlay_nonce"}`). ant neither reads nor writes
+     * `identity.json` then; the shim zeroes its native copy, and the
+     * caller zeroes [identity].
+     */
+    external fun initWithIdentity(dataDir: String, identity: ByteArray): Long
+
+    /** `ant_account_info`: `{"eth_address","overlay","peer_id","agent"}`, null on a stale handle. */
+    external fun accountInfo(handle: Long): String?
+
+    /**
      * Start the in-process bee-shaped HTTP gateway on [apiAddr]
      * (e.g. `127.0.0.1:1633`). [lightMode] false = ultra-light
      * (read-only) mode; [gnosisRpc] backs the on-chain endpoints,

@@ -26,7 +26,7 @@ import org.junit.Test
  * when it locks itself.
  */
 class VaultTest {
-    private class FakeStore(var secure: Boolean = true) : VaultStore {
+    internal class FakeStore(var secure: Boolean = true) : VaultStore {
         var record: VaultRecord? = null
         var fileExists = false
         var key: SecretKey? = null
@@ -63,7 +63,7 @@ class VaultTest {
         }
     }
 
-    private class FakeAuth : VaultAuthenticator {
+    internal class FakeAuth : VaultAuthenticator {
         val asked = mutableListOf<VaultAuthPurpose>()
         var cancel = false
         override suspend fun authenticate(cipher: Cipher, purpose: VaultAuthPurpose): Cipher {
