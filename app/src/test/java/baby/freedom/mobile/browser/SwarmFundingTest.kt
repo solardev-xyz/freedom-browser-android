@@ -208,12 +208,15 @@ class SwarmFundingTest {
     private fun receipt(status: String) = JSONObject().put("blockNumber", "0x10").put("status", status)
 
     /** A record the wallet stopped following before its call ([hash], nonce 1) was mined. */
-    private fun untracked(chain: FakeChain): SwarmFunding {
+    private fun untracked(chain: FakeChain, now: () -> Long = { 0L }): SwarmFunding {
         funding().apply {
             noteSend(status(SendStatus.Stage.Unconfirmed))
             untrack()
         }
-        return SwarmFunding(File(tmp.root, "funding.json"), connect = { connects += it; true }, spends = emptyFlow(), chain = chain)
+        return SwarmFunding(
+            File(tmp.root, "funding.json"), connect = { connects += it; true }, spends = emptyFlow(), chain = chain,
+            confirmAfterMs = 30_000, now = now,
+        )
     }
 
     @Test
@@ -244,7 +247,8 @@ class SwarmFundingTest {
     @Test
     fun `an untracked call that reverted is dropped, one whose nonce went elsewhere is marked, and a failed read changes nothing`() {
         val chain = FakeChain()
-        val f = untracked(chain)
+        var clock = 0L
+        val f = untracked(chain) { clock }
         chain.fail = true
         runBlocking { f.checkChain() }
         assertEquals(false, f.pending.value?.mined)
@@ -252,6 +256,13 @@ class SwarmFundingTest {
 
         chain.fail = false
         chain.minedCount = BigInteger.TWO
+        runBlocking { f.checkChain() }
+        // One read isn't enough (its two halves may come from nodes at different heights), nor an agreeing one too soon.
+        assertNull(f.superseded.value)
+        clock = 29_999
+        runBlocking { f.checkChain() }
+        assertNull(f.superseded.value)
+        clock = 30_000
         runBlocking { f.checkChain() }
         // Can never be mined: kept for the user to dismiss, now safely.
         assertEquals(batch, f.superseded.value)
@@ -262,6 +273,78 @@ class SwarmFundingTest {
         assertNull(f.pending.value)
         assertNull(funding().pending.value)
         assertTrue(connects.isEmpty())
+    }
+
+    @Test
+    fun `a count read ahead of the receipt read doesn't call a just-mined call superseded`() {
+        val chain = FakeChain()
+        var clock = 0L
+        val f = untracked(chain) { clock }
+        // The count's nodes have the block with the call; the receipt's are a block behind.
+        chain.minedCount = BigInteger.TWO
+        runBlocking { f.checkChain() }
+        assertNull(f.superseded.value)
+        // By the next read the lagging nodes caught up: it's mined, never labelled superseded.
+        clock = 30_000
+        chain.receipt = receipt("0x1")
+        runBlocking { f.checkChain() }
+        assertNull(f.superseded.value)
+        assertTrue(f.pending.value!!.mined)
+        assertEquals(listOf(batch), connects)
+    }
+
+    @Test
+    fun `a superseded verdict is withdrawn, and has to be confirmed afresh, when a read disagrees`() {
+        val chain = FakeChain()
+        var clock = 0L
+        val f = untracked(chain) { clock }
+        chain.minedCount = BigInteger.TWO
+        runBlocking { f.checkChain() }
+        clock = 30_000
+        runBlocking { f.checkChain() }
+        assertEquals(batch, f.superseded.value)
+        // A read at a lower height (the count not past the nonce): no longer certain.
+        chain.minedCount = BigInteger.ONE
+        clock = 60_000
+        runBlocking { f.checkChain() }
+        assertNull(f.superseded.value)
+        chain.minedCount = BigInteger.TWO
+        clock = 60_001
+        runBlocking { f.checkChain() }
+        assertNull(f.superseded.value)
+        clock = 90_001
+        runBlocking { f.checkChain() }
+        assertEquals(batch, f.superseded.value)
+    }
+
+    @Test
+    fun `an untracked call is looked up less and less often, and not at all once it can never be mined`() {
+        val chain = FakeChain()
+        val f = SwarmFunding(
+            File(tmp.root, "funding.json"), connect = { connects += it; true }, spends = emptyFlow(), chain = chain,
+            checkEveryMs = 10, checkAtMostEveryMs = 60_000, confirmAfterMs = 10,
+        )
+        f.start(flowOf(status(SendStatus.Stage.Pending), status(SendStatus.Stage.Unconfirmed), null))
+        awaitPending(f) { it?.tracked == false }
+        // Backing off from 10 ms (10, 20, 40, 80, 160, 320…): a handful of reads in 600 ms, not 60.
+        Thread.sleep(600)
+        val backedOff = chain.reads
+        assertTrue("$backedOff reads", backedOff in 2..8)
+
+        // The nonce went elsewhere: confirmed at the next read, then nothing more is read.
+        chain.minedCount = BigInteger.TWO
+        val until = System.currentTimeMillis() + 5_000
+        while (f.superseded.value == null && System.currentTimeMillis() < until) Thread.sleep(10)
+        assertEquals(batch, f.superseded.value)
+        val reads = chain.reads
+        Thread.sleep(300)
+        assertEquals(reads, chain.reads)
+        // A Connect still looks it up once.
+        f.connectNow()
+        val until2 = System.currentTimeMillis() + 5_000
+        while (chain.reads == reads && System.currentTimeMillis() < until2) Thread.sleep(10)
+        assertEquals(reads + 1, chain.reads)
+        assertFalse(f.pending.value!!.mined)
     }
 
     @Test

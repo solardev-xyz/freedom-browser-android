@@ -43,6 +43,9 @@ internal class SwarmFunding(
     private val spends: Flow<StampClient.Spend> = StampClient.spend,
     private val chain: ChainReader? = null,
     private val checkEveryMs: Long = CHECK_EVERY_MS,
+    private val checkAtMostEveryMs: Long = CHECK_AT_MOST_EVERY_MS,
+    private val confirmAfterMs: Long = CONFIRM_AFTER_MS,
+    private val now: () -> Long = { System.nanoTime() / 1_000_000 },
 ) {
     /** Gnosis Chain reads for a call the wallet no longer follows. */
     interface ChainReader {
@@ -84,10 +87,23 @@ internal class SwarmFunding(
     /**
      * The batch id of an untracked record whose call can never be mined:
      * its receipt isn't there while the paying account's nonce went to
-     * another transaction. Only then is Dismiss safe to advise.
+     * another transaction, seen that way by two reads at least
+     * [confirmAfterMs] apart ([supersededSeen]). Only then is Dismiss safe
+     * to advise.
      */
     private val _superseded = MutableStateFlow<String?>(null)
     val superseded: StateFlow<String?> = _superseded.asStateFlow()
+
+    /**
+     * The batch id and time ([now]) of the first read that found its call
+     * superseded, not yet confirmed. The count and the receipt come from
+     * separate router reads that may be answered at different heights: a
+     * count from nodes that already have the block with the call, and a
+     * receipt from nodes one block behind, look exactly like a superseded
+     * call. A node that far behind catches up within seconds, so the
+     * verdict waits for a second read [confirmAfterMs] later that agrees.
+     */
+    private var supersededSeen: Pair<String, Long>? = null
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
     /**
@@ -106,13 +122,23 @@ internal class SwarmFunding(
             }
         }
         if (chain != null) {
-            // While the wallet doesn't follow an unmined call, look it up on chain now and then.
+            // While the wallet doesn't follow an unmined call, look it up on chain now and then:
+            // every [checkEveryMs] at first, backing off to [checkAtMostEveryMs], and no more
+            // once it's known it can never be mined ([superseded]) — only a Connect reads again.
             scope.launch {
                 _pending.collectLatest { p ->
                     if (p != null && !p.mined && !p.tracked && p.hash != null) {
+                        var wait = checkEveryMs
                         while (true) {
                             checkChain()
-                            delay(checkEveryMs)
+                            if (_superseded.value == p.batchId) break
+                            if (synchronized(this@SwarmFunding) { supersededSeen?.first } == p.batchId) {
+                                // Superseded at one read: confirm it as soon as it can be.
+                                delay(confirmAfterMs)
+                            } else {
+                                delay(wait)
+                                wait = minOf(wait * 2, checkAtMostEveryMs)
+                            }
                         }
                     }
                 }
@@ -208,7 +234,7 @@ internal class SwarmFunding(
                 is SendStatus.Stage.Reverted -> update { cur -> cur?.takeUnless { it.batchId == p.batchId && !it.mined } }
                 else -> {}
             }
-            _superseded.value = p.batchId.takeIf { outcome == null && nonceUsed }
+            noteSuperseded(p.batchId, outcome == null && nonceUsed)
             if (connectIt) {
                 Log.i(TAG, "the funding the wallet stopped following was mined; connecting its stamp")
                 connectNow()
@@ -219,6 +245,29 @@ internal class SwarmFunding(
             throw e
         } catch (e: Exception) {
             Log.i(TAG, "couldn't look the funding up on chain (${e.javaClass.simpleName})")
+        }
+    }
+
+    /**
+     * One read's verdict on whether [batchId]'s call is superseded: it's
+     * [superseded] only once a read at least [confirmAfterMs] after the
+     * first such one agrees ([supersededSeen]); any read that doesn't
+     * starts over.
+     */
+    private fun noteSuperseded(batchId: String, seen: Boolean) = synchronized(this) {
+        if (!seen) {
+            supersededSeen = null
+            _superseded.value = null
+            return@synchronized
+        }
+        val t = now()
+        val first = supersededSeen?.takeIf { it.first == batchId }
+        when {
+            first == null -> {
+                supersededSeen = batchId to t
+                _superseded.value = null
+            }
+            t - first.second >= confirmAfterMs -> _superseded.value = batchId
         }
     }
 
@@ -275,6 +324,8 @@ internal class SwarmFunding(
     companion object {
         private const val TAG = "SwarmFunding"
         private const val CHECK_EVERY_MS = 30_000L
+        private const val CHECK_AT_MOST_EVERY_MS = 30 * 60_000L
+        private const val CONFIRM_AFTER_MS = 30_000L
 
         @Volatile
         private var instance: SwarmFunding? = null
