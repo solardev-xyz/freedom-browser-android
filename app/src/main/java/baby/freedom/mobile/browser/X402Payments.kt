@@ -7,6 +7,7 @@ import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import baby.freedom.mobile.chains.Chain
 import baby.freedom.mobile.chains.rpc.ChainDataRouter
+import baby.freedom.mobile.chains.rpc.ChainTrust
 import baby.freedom.mobile.chains.rpc.WalletRpc
 import baby.freedom.mobile.data.ChainStore
 import baby.freedom.mobile.data.X402Store
@@ -39,7 +40,11 @@ class X402Option internal constructor(
     val chain: Chain,
     val symbol: String,
     val decimals: Int,
-    /** The token is one the wallet lists; false: its symbol and decimals were read from the contract. */
+    /**
+     * The token is one the wallet lists; false: its symbol and decimals
+     * were read from the contract, on verified answers on a built-in
+     * chain ([X402Payments.tokenReadTrusted]).
+     */
     val listed: Boolean,
     /** The paying account's balance of the token, or null if it couldn't be read (or there's no account). */
     val balance: BigInteger?,
@@ -89,7 +94,9 @@ data class X402Grant(val cap: BigInteger, val windowMs: Long)
  * locked wallet gets the sheet, which asks for the screen lock. A paid
  * request the site answers with another 402 is not paid again (desktop's
  * loop guard): the history says it was refused, and the user can reload
- * to be asked.
+ * to be asked. A rejected sheet pauses the tab's sheets (the provider's
+ * anti-loop rule) until the user navigates the tab themselves — an
+ * address, Reload or pull-to-refresh — so reloading the page asks again.
  *
  * Subresource 402s (a page's `fetch`) aren't seen here: WebView doesn't
  * let a native handler hold one open and retry it. A site's own x402
@@ -248,10 +255,15 @@ object X402Payments {
     /**
      * Sign [option] from [account] and load the page again with the
      * payment. The history records it before the request goes out, so a
-     * payment is never made that the history doesn't show. An [auto]
-     * payment is counted against the site's allowance once it's signed,
-     * in one write with the check that it's covered ([Paid.NOT_COVERED]
-     * if it no longer is: nothing is sent).
+     * payment is never made that the history doesn't show. The record,
+     * and the allowance change that goes with it — an [auto] payment
+     * counted against the site's allowance ([Paid.NOT_COVERED] if it no
+     * longer covers it: nothing is sent), or the allowance [grant]ed with
+     * a manual one — are one write ([X402Store.commit]), made only once
+     * the payment is signed and its page is still on; if the page is gone
+     * by the time that write is done, it's undone ([X402Store.withdraw]):
+     * nothing was sent, so nothing is spent, granted or listed (#218
+     * R1-M2, R1-M4).
      */
     private suspend fun pay(
         tab: BrowserState,
@@ -277,51 +289,43 @@ object X402Payments {
             Log.w(TAG, "the authorization ran out while it was signed; not sending it")
             return Paid.NOT_SENT
         }
-        if (auto && !store.consume(d.origin, offer.chainId, offer.asset, offer.amount)) return Paid.NOT_COVERED
+        // The page left while it was signed: nothing to pay for.
+        if (!stillOn(tab, doc, webView, d.url)) return Paid.NOT_SENT
         val (header, value) = X402.paymentHeader(d.required, offer, authorization, signature)
-        if (grant != null) {
-            store.grant(
-                origin = d.origin,
-                chainId = offer.chainId,
-                asset = offer.asset,
-                symbol = option.symbol,
-                decimals = option.decimals,
-                cap = grant.cap,
-                windowMs = grant.windowMs,
-                spentNow = offer.amount,
-            )
-        }
-        val id = UUID.randomUUID().toString()
-        val recorded = store.record(
-            X402Store.Payment(
-                id = id,
-                at = System.currentTimeMillis(),
-                origin = d.origin,
-                url = d.url,
-                chainId = offer.chainId,
-                asset = offer.asset,
-                symbol = option.symbol,
-                decimals = option.decimals,
-                amount = offer.amount,
-                payTo = offer.payTo,
-                from = authorization.from,
-                auto = auto,
-                nonce = authorization.nonce,
-                status = X402Store.Status.PENDING,
-            ),
+        val payment = X402Store.Payment(
+            id = UUID.randomUUID().toString(),
+            at = System.currentTimeMillis(),
+            origin = d.origin,
+            url = d.url,
+            chainId = offer.chainId,
+            asset = offer.asset,
+            symbol = option.symbol,
+            decimals = option.decimals,
+            amount = offer.amount,
+            payTo = offer.payTo,
+            from = authorization.from,
+            auto = auto,
+            nonce = authorization.nonce,
+            status = X402Store.Status.PENDING,
         )
-        if (!recorded) {
-            Log.w(TAG, "couldn't record the payment; not sending it")
-            return Paid.NOT_SENT
+        val newAllowance = if (auto) null else grant?.let { X402Store.NewAllowance(option.symbol, option.decimals, it.cap, it.windowMs) }
+        val committed = when (val c = store.commit(payment, newAllowance)) {
+            is X402Store.Commit.Done -> c
+            X402Store.Commit.NotCovered -> return Paid.NOT_COVERED
+            X402Store.Commit.Failed -> {
+                Log.w(TAG, "couldn't record the payment; not sending it")
+                return Paid.NOT_SENT
+            }
         }
         val view = webView.get()
         if (view == null || !stillOn(tab, doc, webView, d.url)) {
-            // Never sent: the page it was for is gone.
-            store.settle(id, X402Store.Status.UNCONFIRMED)
+            // Never sent: the page it was for went while it was written.
+            store.withdraw(payment, committed.allowanceCreated)
             return Paid.NOT_SENT
         }
+        // No suspension from the check above to here: the request goes out on the page it was for.
         vault.noteActivity()
-        retries[tab.id] = Retry(d.url, id)
+        retries[tab.id] = Retry(d.url, payment.id)
         view.loadUrl(d.url, mapOf(header to value))
         return Paid.SENT
     }
@@ -342,8 +346,14 @@ object X402Payments {
                 val chain = chains.firstOrNull { it.id == offer.chainId }
                     ?: return@async null to "Offer ${offer.index + 1}: pays on chain ${offer.chainId}, which isn't in Settings → Chains"
                 val known = knownToken(offer.chainId, offer.asset)
-                val (symbol, decimals) = known ?: (readToken(rpc, offer.chainId, offer.asset)
-                    ?: return@async null to "Offer ${offer.index + 1}: its token on ${chain.name} couldn't be read")
+                val (symbol, decimals) = known ?: when (val read = readToken(rpc, chain, offer.asset)) {
+                    is TokenRead.Ok -> read.symbol to read.decimals
+                    TokenRead.Unverified -> return@async null to
+                        "Offer ${offer.index + 1}: its token on ${chain.name} isn't in the wallet's token list, " +
+                        "and its decimals couldn't be verified, so the amount can't be shown"
+                    TokenRead.Unreadable -> return@async null to
+                        "Offer ${offer.index + 1}: its token on ${chain.name} couldn't be read"
+                }
                 val balance = holder?.let { readBalance(rpc, offer.chainId, offer.asset, it) }
                 X402Option(offer, chain, symbol, decimals, listed = known != null, balance = balance) to null
             }
@@ -363,18 +373,46 @@ object X402Payments {
         baby.freedom.mobile.wallet.Token(100L, "0x2a22f9c3b484c3629090FeED35F17Ff8F88f76F0", "USDC.e", "Bridged USDC", 6),
     )
 
-    private suspend fun readToken(rpc: WalletRpc, chainId: Long, asset: String): Pair<String, Int>? = try {
+    private sealed interface TokenRead {
+        class Ok(val symbol: String, val decimals: Int) : TokenRead
+
+        /** Read, but not on answers the wallet can stand behind ([tokenReadTrusted]). */
+        data object Unverified : TokenRead
+        data object Unreadable : TokenRead
+    }
+
+    /**
+     * Whether an unlisted token's `decimals()`/`symbol()`, read on [chain]
+     * with [trust], may be shown on the sheet as the payment's amount
+     * (#218 R1-F1). The decimals turn the base units the site asks for
+     * into the amount the user approves, so one RPC's word isn't enough:
+     * a site can add a chain with its own RPC (`wallet_addEthereumChain`)
+     * and have it say 18 decimals for a 6-decimal token, showing
+     * 1,000,000 USDC as 0.000001. Only a verified answer (a proof, or a
+     * quorum agreeing) on a built-in chain counts: a custom chain's RPCs
+     * came from whoever added it, a site included, so even a quorum of
+     * them can be one party.
+     */
+    internal fun tokenReadTrusted(chain: Chain, trust: List<ChainTrust>): Boolean =
+        chain.builtIn && trust.isNotEmpty() && trust.all { it.level == ChainTrust.Level.VERIFIED }
+
+    private suspend fun readToken(rpc: WalletRpc, chain: Chain, asset: String): TokenRead = try {
         withTimeoutOrNull(READ_TIMEOUT_MS) {
-            val decimals = Erc20.decodeUint256(rpc.call(chainId, JSONObject().put("to", asset).put("data", DECIMALS)).value)
-                ?.takeIf { it <= BigInteger.valueOf(36) }?.toInt() ?: return@withTimeoutOrNull null
-            val symbol = abiSymbol(rpc.call(chainId, JSONObject().put("to", asset).put("data", SYMBOL)).value)
-                ?: return@withTimeoutOrNull null
-            symbol to decimals
-        }
+            val d = rpc.call(chain.id, JSONObject().put("to", asset).put("data", DECIMALS))
+            val decimals = Erc20.decodeUint256(d.value)
+                ?.takeIf { it <= BigInteger.valueOf(36) }?.toInt() ?: return@withTimeoutOrNull TokenRead.Unreadable
+            val sym = rpc.call(chain.id, JSONObject().put("to", asset).put("data", SYMBOL))
+            val symbol = abiSymbol(sym.value) ?: return@withTimeoutOrNull TokenRead.Unreadable
+            if (!tokenReadTrusted(chain, listOf(d.trust, sym.trust))) {
+                Log.i(TAG, "unlisted token's decimals not verified (${d.trust.level.name.lowercase()}, built-in ${chain.builtIn})")
+                return@withTimeoutOrNull TokenRead.Unverified
+            }
+            TokenRead.Ok(symbol, decimals)
+        } ?: TokenRead.Unreadable
     } catch (e: CancellationException) {
         throw e
     } catch (e: Exception) {
-        null
+        TokenRead.Unreadable
     }
 
     private suspend fun readBalance(rpc: WalletRpc, chainId: Long, asset: String, holder: String): BigInteger? = try {

@@ -60,6 +60,22 @@ class X402Test {
     }
 
     @Test
+    fun `an offer whose time limit can't outlast the runway is listed as unpayable, not dropped after Pay`() {
+        val r = X402.parseRequired(b64(v2(accept(timeout = 10), accept(timeout = 29), accept(timeout = 30))))!!
+        assertEquals(listOf(2), r.offers.map { it.index })
+        assertEquals(
+            listOf(
+                "Offer 1: its time limit (10 s) is too short to pay in; at least 30 s is needed",
+                "Offer 2: its time limit (29 s) is too short to pay in; at least 30 s is needed",
+            ),
+            r.unusable,
+        )
+        // The shortest accepted limit still leaves the runway after signing.
+        val auth = X402.authorize(2, r.offers.single(), payTo, 1_000L, ByteArray(32))
+        assertTrue(X402.runway(auth, 1_000L + 9) >= X402.MIN_RUNWAY_SECONDS)
+    }
+
+    @Test
     fun `offers the wallet can't pay are listed with why, never signed`() {
         val r = X402.parseRequired(
             b64(

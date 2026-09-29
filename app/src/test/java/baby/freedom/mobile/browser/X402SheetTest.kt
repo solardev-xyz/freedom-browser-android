@@ -1,13 +1,18 @@
 package baby.freedom.mobile.browser
 
 import baby.freedom.mobile.chains.BuiltInChains
+import baby.freedom.mobile.chains.Chain
+import baby.freedom.mobile.chains.rpc.ChainSource
+import baby.freedom.mobile.chains.rpc.ChainTrust
 import baby.freedom.mobile.wallet.X402
 import java.math.BigInteger
 import java.util.Base64
 import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /** The x402 sheet's answer (#140) and the token facts it shows. */
@@ -86,5 +91,25 @@ class X402SheetTest {
         assertEquals("USDC" to 6, X402Payments.knownToken(8453, usdc.lowercase()))
         assertEquals("USDC" to 6, X402Payments.knownToken(1, "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"))
         assertNull(X402Payments.knownToken(1, usdc))
+    }
+
+    private fun trust(level: ChainTrust.Level, dissented: List<String> = emptyList()) = ChainTrust(
+        level, if (level == ChainTrust.Level.VERIFIED) ChainSource.QUORUM else ChainSource.DIRECT,
+        listOf("a.example", "b.example"), dissented, listOf("a.example", "b.example"), 3, 2, null,
+    )
+
+    @Test
+    fun `an unlisted token's decimals are shown only on verified answers on a built-in chain (R1-F1)`() {
+        val verified = trust(ChainTrust.Level.VERIFIED)
+        assertTrue(X402Payments.tokenReadTrusted(BuiltInChains.BASE, listOf(verified, verified)))
+        // A quorum that agreed over one dissenter is still verified.
+        assertTrue(X402Payments.tokenReadTrusted(BuiltInChains.BASE, listOf(verified, trust(ChainTrust.Level.VERIFIED, listOf("c.example")))))
+        // One RPC's word — a public one, or the user's own — isn't enough for the amount.
+        assertFalse(X402Payments.tokenReadTrusted(BuiltInChains.BASE, listOf(verified, trust(ChainTrust.Level.UNVERIFIED))))
+        assertFalse(X402Payments.tokenReadTrusted(BuiltInChains.BASE, listOf(trust(ChainTrust.Level.USER_CONFIGURED), verified)))
+        assertFalse(X402Payments.tokenReadTrusted(BuiltInChains.BASE, emptyList()))
+        // A chain a site added (wallet_addEthereumChain) with its own RPCs: even a quorum of them is the site's word.
+        val siteChain = Chain(id = 42161, name = "Arbitrum One", symbol = "ETH", rpcUrls = listOf("https://rpc.site.example", "https://rpc2.site.example"))
+        assertFalse(X402Payments.tokenReadTrusted(siteChain, listOf(verified, verified)))
     }
 }

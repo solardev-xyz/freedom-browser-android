@@ -3548,6 +3548,11 @@ private fun buildRefreshableWebView(
         state.loadAborted = false
         // …and is a new load of its own for the IPFS phase line (#94).
         state.beginLoad(inWebView = true)
+        // It's the user's own reload, like the menu's: a sheet they
+        // rejected on the page (a wallet or x402 payment sheet, a
+        // `window.radicle` prompt) may ask again (#218 R1-M3).
+        EthereumProviders.allowPrompts(state.id)
+        RadicleProviders.allowPrompts(state.id)
         webView.reload()
     }
     // Who owns a downward drag — the refresh spinner or the page.

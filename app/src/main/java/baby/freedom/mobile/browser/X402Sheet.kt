@@ -136,7 +136,7 @@ internal fun X402PaymentBody(
         "Amount",
         "${SendAmounts.exact(o.offer.amount, o.decimals)} ${o.symbol}",
         mono = true,
-        detail = if (o.listed) null else "${o.symbol} isn't in the wallet's token list: its symbol and decimals were read from the contract below.",
+        detail = if (o.listed) null else "${o.symbol} isn't in the wallet's token list: its symbol and decimals were read from the contract below, and verified on ${o.chain.name}.",
     )
     Row0("Network", "${o.chain.name} (chain ${o.chain.id})")
     AddressRow("Pay to", o.offer.payTo)

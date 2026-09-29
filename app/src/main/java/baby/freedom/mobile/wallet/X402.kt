@@ -57,6 +57,14 @@ object X402 {
      */
     internal const val MIN_RUNWAY_SECONDS = 20L
 
+    /**
+     * The shortest `maxTimeoutSeconds` an offer can have and still be
+     * paid: [MIN_RUNWAY_SECONDS] plus time to sign. A shorter one would
+     * always run out before it's sent, so it's listed as unpayable on the
+     * sheet rather than failing after the user taps Pay (#218 R1-M1).
+     */
+    internal const val MIN_TIMEOUT_SECONDS = MIN_RUNWAY_SECONDS + 10
+
     /** v1 network names this browser pays on (desktop's `V1_NETWORKS`). */
     private val V1_NETWORKS = mapOf("base" to 8453L, "ethereum" to 1L)
 
@@ -178,6 +186,9 @@ object X402 {
         if (payTo.equals(asset, ignoreCase = true)) return OfferResult.No("it pays the token contract itself")
         val timeout = (o.opt("maxTimeoutSeconds") as? Number)?.toLong()?.takeIf { it > 0 }
             ?: return OfferResult.No("no valid time limit")
+        if (timeout < MIN_TIMEOUT_SECONDS) {
+            return OfferResult.No("its time limit ($timeout s) is too short to pay in; at least $MIN_TIMEOUT_SECONDS s is needed")
+        }
         val name = (extra?.opt("name") as? String)?.takeIf { it.isNotEmpty() && it.length <= 128 }
         val domainVersion = (extra?.opt("version") as? String)?.takeIf { it.isNotEmpty() && it.length <= 32 }
         if (name == null || domainVersion == null) return OfferResult.No("the token's signing domain isn't named")

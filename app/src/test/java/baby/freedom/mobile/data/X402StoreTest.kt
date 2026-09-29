@@ -177,4 +177,72 @@ class X402StoreTest {
         assertEquals(emptyList<X402Store.Payment>(), X402Store.decodeHistory("not json"))
         assertEquals(emptyList<X402Store.Payment>(), X402Store.decodeHistory("""[{"id":"x"}]"""))
     }
+
+    private fun paid(id: String, amount: Long, auto: Boolean) =
+        payment(id).copy(amount = BigInteger.valueOf(amount), auto = auto)
+
+    @Test
+    fun `an allowance payment is counted in the same write that records it, or not at all`() = runBlocking {
+        val s = store()
+        s.grant(cap = 30)
+        val first = s.commit(paid("a", 20, auto = true), grant = null)
+        assertTrue(first is X402Store.Commit.Done)
+        assertEquals(BigInteger.valueOf(20), s.allowances.first().single().spent)
+        assertEquals(listOf("a"), s.history.first().map { it.id })
+        // Not covered: neither counted nor listed.
+        assertEquals(X402Store.Commit.NotCovered, s.commit(paid("b", 11, auto = true), grant = null))
+        assertEquals(BigInteger.valueOf(20), s.allowances.first().single().spent)
+        assertEquals(listOf("a"), s.history.first().map { it.id })
+        // No allowance at all for another site.
+        assertEquals(X402Store.Commit.NotCovered, s.commit(paid("c", 1, auto = true).copy(origin = "https://other.example"), grant = null))
+    }
+
+    @Test
+    fun `an allowance payment that's never sent is given back and leaves no history (R1-M2)`() = runBlocking {
+        val s = store()
+        s.grant(cap = 30)
+        val p = paid("a", 20, auto = true)
+        val done = s.commit(p, grant = null) as X402Store.Commit.Done
+        assertTrue(s.withdraw(p, done.allowanceCreated))
+        assertEquals(BigInteger.ZERO, s.allowances.first().single().spent)
+        assertEquals(emptyList<X402Store.Payment>(), s.history.first())
+        // Revoked and granted again in between: the new allowance isn't touched.
+        val q = paid("b", 20, auto = true)
+        val again = s.commit(q, grant = null) as X402Store.Commit.Done
+        now += 1
+        s.grant(cap = 50, spent = 40)
+        assertTrue(s.withdraw(q, again.allowanceCreated))
+        assertEquals(BigInteger.valueOf(40), s.allowances.first().single().spent)
+    }
+
+    @Test
+    fun `an allowance granted with a payment is written with its record, and goes if the payment isn't sent (R1-M4)`() = runBlocking {
+        val s = store()
+        val p = paid("a", 10, auto = false)
+        val grant = X402Store.NewAllowance("USDC", 6, BigInteger.valueOf(100), hour)
+        val done = s.commit(p, grant) as X402Store.Commit.Done
+        val a = s.allowances.first().single()
+        assertEquals(BigInteger.valueOf(10), a.spent)
+        assertEquals(BigInteger.valueOf(100), a.cap)
+        assertEquals(listOf("a"), s.history.first().map { it.id })
+        assertTrue(s.withdraw(p, done.allowanceCreated))
+        assertEquals(emptyList<X402Store.Allowance>(), s.allowances.first())
+        assertEquals(emptyList<X402Store.Payment>(), s.history.first())
+        // A manual payment with no grant touches no allowance.
+        s.grant(cap = 50)
+        val plain = s.commit(paid("b", 10, auto = false), grant = null) as X402Store.Commit.Done
+        assertNull(plain.allowanceCreated)
+        assertTrue(s.withdraw(paid("b", 10, auto = false), plain.allowanceCreated))
+        assertEquals(BigInteger.ZERO, s.allowances.first().single().spent)
+        // A grant below the payment is refused, nothing written.
+        assertEquals(X402Store.Commit.Failed, s.commit(paid("c", 60, auto = false), X402Store.NewAllowance("USDC", 6, BigInteger.valueOf(50), hour)))
+        assertEquals(emptyList<X402Store.Payment>(), s.history.first())
+    }
+
+    @Test
+    fun `a commit that can't be written reports it, and nothing is paid`() = runBlocking {
+        val s = X402Store(BrokenStore(IOException("disk"))) { now }
+        assertEquals(X402Store.Commit.Failed, s.commit(paid("a", 10, auto = false), grant = null))
+        assertFalse(s.withdraw(paid("a", 10, auto = false), null))
+    }
 }

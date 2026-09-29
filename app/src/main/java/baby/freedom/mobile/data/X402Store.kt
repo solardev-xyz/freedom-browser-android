@@ -175,6 +175,91 @@ class X402Store internal constructor(
         return written && ok
     }
 
+    /** An allowance the user grants along with the payment they approve: up to [cap] in all, for [windowMs]. */
+    data class NewAllowance(val symbol: String, val decimals: Int, val cap: BigInteger, val windowMs: Long)
+
+    /** What [commit] did. */
+    sealed interface Commit {
+        /**
+         * [Payment] recorded, and the allowance counted or granted.
+         * [allowanceCreated] names the allowance touched (its
+         * [Allowance.created]) for [withdraw]; null if none was.
+         */
+        data class Done(val allowanceCreated: Long?) : Commit
+
+        /** The payment was to come from an allowance that no longer covers it: nothing written. */
+        data object NotCovered : Commit
+
+        /** Couldn't be written (or the grant is invalid): nothing written. */
+        data object Failed : Commit
+    }
+
+    /**
+     * Record [payment] as [Status.PENDING] and, in the same write, count
+     * it against [Payment.origin]'s allowance ([Payment.auto]) or grant
+     * the allowance the user asked for with it ([grant], this payment
+     * counted). All of it is written or none of it (#218 R1-M2, R1-M4):
+     * an allowance is never spent or granted for a payment the history
+     * doesn't show. Undo with [withdraw] if the payment isn't sent after all.
+     */
+    suspend fun commit(payment: Payment, grant: NewAllowance?): Commit {
+        val amount = payment.amount
+        if (amount.signum() <= 0) return Commit.Failed
+        if (grant != null && (payment.auto || grant.cap.signum() <= 0 || amount > grant.cap || grant.windowMs <= 0)) {
+            return Commit.Failed
+        }
+        var result: Commit = Commit.Failed
+        val written = write { prefs ->
+            result = Commit.Failed
+            val now = clock()
+            val key = allowKey(payment.origin, payment.chainId, payment.asset)
+            var created: Long? = null
+            if (payment.auto) {
+                val a = prefs[key]?.let { decodeAllowance(key.name.removePrefix(ALLOW), it) }
+                if (a == null || !live(a, now) || amount > a.remaining) {
+                    result = Commit.NotCovered
+                    return@write
+                }
+                prefs[key] = encodeAllowance(a.copy(spent = a.spent + amount))
+                created = a.created
+            } else if (grant != null) {
+                dropDead(prefs, now)
+                val a = Allowance(
+                    payment.origin, payment.chainId, payment.asset.lowercase(), grant.symbol, grant.decimals,
+                    grant.cap, amount, now, now + grant.windowMs,
+                )
+                prefs[key] = encodeAllowance(a)
+                created = now
+            }
+            val list = prefs[HISTORY]?.let(::decodeHistory).orEmpty()
+            prefs[HISTORY] = encodeHistory((listOf(payment) + list.filter { it.id != payment.id }).take(MAX_HISTORY))
+            result = Commit.Done(created)
+        }
+        return if (written) result else Commit.Failed
+    }
+
+    /**
+     * Undo a [commit] whose payment was never sent: its history entry
+     * goes, an allowance payment is given back to that allowance, and an
+     * allowance granted with it is taken away — only if it's still the
+     * one [commit] touched ([allowanceCreated]), never one the user has
+     * revoked or replaced since. `false` if it couldn't be written.
+     */
+    suspend fun withdraw(payment: Payment, allowanceCreated: Long?): Boolean = write { prefs ->
+        prefs[HISTORY]?.let(::decodeHistory)?.let { list ->
+            prefs[HISTORY] = encodeHistory(list.filter { it.id != payment.id })
+        }
+        if (allowanceCreated == null) return@write
+        val key = allowKey(payment.origin, payment.chainId, payment.asset)
+        val a = prefs[key]?.let { decodeAllowance(key.name.removePrefix(ALLOW), it) } ?: return@write
+        if (a.created != allowanceCreated) return@write
+        if (payment.auto) {
+            prefs[key] = encodeAllowance(a.copy(spent = (a.spent - payment.amount).max(BigInteger.ZERO)))
+        } else {
+            prefs.remove(key)
+        }
+    }
+
     /** Take away [origin]'s allowance for [asset] on [chainId]; `false` if it couldn't be written. */
     suspend fun revoke(origin: String, chainId: Long, asset: String): Boolean =
         write { it.remove(allowKey(origin, chainId, asset)) }
