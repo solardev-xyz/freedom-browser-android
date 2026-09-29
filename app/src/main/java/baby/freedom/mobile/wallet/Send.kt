@@ -6,6 +6,7 @@ import baby.freedom.mobile.chains.rpc.ChainDataRouter
 import baby.freedom.mobile.chains.rpc.ChainRpcException
 import baby.freedom.mobile.chains.rpc.ChainTrust
 import baby.freedom.mobile.chains.rpc.WalletRpc
+import baby.freedom.mobile.ens.hexToBytes
 import baby.freedom.mobile.ens.toHex
 import java.math.BigInteger
 import kotlinx.coroutines.CancellationException
@@ -20,6 +21,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
@@ -96,7 +98,13 @@ object Recipients {
         NodeIdentity.checksum(ByteArray(20) { i -> lowerHex.substring(i * 2, i * 2 + 2).toInt(16).toByte() })
 }
 
-/** What the user asked for: [amount] base units of [token] from [from] to [to] on [chain]. */
+/**
+ * What the user asked for: [amount] base units of [token] from [from] to
+ * [to] on [chain] — or, with [callData], a transaction someone else
+ * composed (desktop Freedom's `eth_sendTransaction` over OpenLV, #113):
+ * [amount] of the native currency, which may be zero, and [callData]
+ * exactly as asked, to [to] (a contract, usually).
+ */
 data class SendRequest(
     val chain: Chain,
     val token: Token,
@@ -104,20 +112,33 @@ data class SendRequest(
     /** EIP-55 checksummed ([Recipients.parse]). */
     val to: String,
     val amount: BigInteger,
+    /** `0x`-prefixed lower-case hex; null for the wallet's own transfers. */
+    val callData: String? = null,
 ) {
     init {
         require(token.chainId == chain.id) { "the token is on another chain" }
-        require(amount.signum() > 0) { "nothing to send" }
+        if (callData == null) {
+            require(amount.signum() > 0) { "nothing to send" }
+        } else {
+            require(token.isNative) { "a composed transaction pays in the native currency" }
+            require(amount.signum() >= 0 && amount.bitLength() <= 256) { "a value out of range" }
+            require(CALL_DATA.matches(callData)) { "call data is 0x-prefixed lower-case hex" }
+        }
     }
 
     /**
      * What goes on chain: native passes straight through; an ERC-20 is a
-     * call to its contract with `transfer(to, amount)` and no value.
+     * call to its contract with `transfer(to, amount)` and no value; a
+     * composed transaction is what it says.
      */
-    fun call(): Triple<String, BigInteger, ByteArray> = if (token.address == null) {
-        Triple(to, amount, ByteArray(0))
-    } else {
-        Triple(token.address, BigInteger.ZERO, Erc20.transferData(to, amount))
+    fun call(): Triple<String, BigInteger, ByteArray> = when {
+        callData != null -> Triple(to, amount, callData.hexToBytes())
+        token.address == null -> Triple(to, amount, ByteArray(0))
+        else -> Triple(token.address, BigInteger.ZERO, Erc20.transferData(to, amount))
+    }
+
+    private companion object {
+        val CALL_DATA = Regex("^0x([0-9a-f]{2})*$")
     }
 }
 
@@ -732,6 +753,44 @@ class WalletSender internal constructor(
         return Submit.STARTED
     }
 
+    /** How far a [submitAndAwaitBroadcast] got. */
+    sealed interface Broadcast {
+        /** A node took it: [hash] is on its way (the wallet page follows it to a receipt). */
+        data class Sent(val hash: String) : Broadcast
+
+        /** It didn't go out — or, with [mayHaveGone], can't be told (the wallet page offers Try again). */
+        data class Failed(val message: String, val mayHaveGone: Boolean) : Broadcast
+
+        /** [Submit.BUSY]: another send is still unresolved; nothing signed. */
+        data object Busy : Broadcast
+
+        /** [Submit.STALE]: nothing signed, price it again. */
+        data object Stale : Broadcast
+    }
+
+    /**
+     * [submit], then wait until the transaction has gone out (or hasn't):
+     * for a transaction someone else asked for and waits on the hash of
+     * (desktop Freedom over OpenLV, #113). The send is the wallet's own
+     * from here on, followed to its receipt and journalled like any other.
+     */
+    suspend fun submitAndAwaitBroadcast(quote: SendQuote, sign: (EthTransaction) -> EthTransaction.Signed): Broadcast {
+        when (submit(quote, sign)) {
+            Submit.BUSY -> return Broadcast.Busy
+            Submit.STALE -> return Broadcast.Stale
+            Submit.STARTED -> Unit
+        }
+        val s = status.first { it?.quote !== quote || (it.stage != SendStatus.Stage.Signing && it.stage != SendStatus.Stage.Broadcasting) }
+        if (s?.quote !== quote) {
+            // Stopped on the phone (Stop tracking, or the wallet removed) while it was going out.
+            return Broadcast.Failed("The send was stopped on the phone while it was going out; it may still go through.", true)
+        }
+        return when (val stage = s.stage) {
+            is SendStatus.Stage.Failed -> Broadcast.Failed(stage.message, stage.mayHaveGone)
+            else -> s.hash?.let { Broadcast.Sent(it) } ?: Broadcast.Failed("No transaction hash came back.", true)
+        }
+    }
+
     /** After a [SendStatus.Stage.Failed] that [SendStatus.Stage.Failed.mayHaveGone]: the same bytes again. */
     fun retry() {
         synchronized(this) {
@@ -965,8 +1024,12 @@ class WalletSender internal constructor(
                 e.insufficientFunds -> "Not enough $symbol to pay for this transaction."
                 e.data != null || e.code == ChainRpcException.EXECUTION_REVERTED || REVERTED.containsMatchIn(e.rpcMessage) -> {
                     val reason = e.data?.let(::revertReason) ?: REVERTED.find(e.rpcMessage)?.let { e.rpcMessage.substring(it.range.last + 1).trim(' ', ':') }
-                    val who = if (request.token.isNative) "The recipient" else "The ${request.token.symbol} contract"
-                    "$who would refuse this transfer" + (reason?.takeIf { it.isNotBlank() }?.let { ": ${clip(it)}" } ?: ".")
+                    val who = when {
+                        request.callData != null -> "The chain would refuse this transaction"
+                        request.token.isNative -> "The recipient would refuse this transfer"
+                        else -> "The ${request.token.symbol} contract would refuse this transfer"
+                    }
+                    who + (reason?.takeIf { it.isNotBlank() }?.let { ": ${clip(it)}" } ?: ".")
                 }
                 else -> "The network couldn’t price this transaction: ${clip(e.rpcMessage)}"
             }

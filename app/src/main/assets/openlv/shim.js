@@ -1,0 +1,146 @@
+/**
+ * JS half of WebViewOpenLvEngine (#113): joins the openlv session in a
+ * pairing code from desktop Freedom (the wallet/client role — desktop
+ * hosts it) and hands the browser's JSON-RPC requests to the app, which
+ * answers each one only after the user approved it on its own sheet.
+ *
+ * iOS's OpenLVShim.js on the openlv 0.2.0 API desktop Freedom uses
+ * (status is an observable; createSession loads the signaling backend
+ * itself), talking to the app over the `freedomOpenLV` WebMessageListener
+ * channel instead of webkit.messageHandlers:
+ *
+ *  - page → app: {type: 'ready'}
+ *                {type: 'status', sid, status: 'connecting' | 'connected' | 'disconnected' | 'failed', message?}
+ *                {type: 'request', sid, id, method, params}
+ *  - app → page: {type: 'start', sid, uri} | {type: 'stop'}
+ *                {type: 'response', sid, id, result} | {type: 'response', sid, id, error: {code, message}}
+ *
+ * `sid` is the app's number for the session a message belongs to, so
+ * nothing from a session it has already replaced is taken for the new one.
+ */
+import { createSession, decodeConnectionURL, webrtc } from './openlv.esm.js';
+
+const channel = window.freedomOpenLV;
+
+// Desktop's own list (its bridge page's): refused here at the transport
+// edge, whatever the app would say, so a pairing code can't turn this
+// page into a generic RPC proxy.
+const ALLOWED_METHODS = new Set([
+  'eth_requestAccounts',
+  'eth_accounts',
+  'eth_chainId',
+  'personal_sign',
+  'eth_signTypedData_v4',
+  'eth_sendTransaction',
+  'wallet_switchEthereumChain',
+  'wallet_addEthereumChain',
+]);
+
+const post = (message) => channel.postMessage(JSON.stringify(message));
+
+let current = null; // {sid, session, pending: Map<id, resolve>}
+let nextId = 1;
+
+function requestHandler(state) {
+  return (payload) => {
+    const { method, params } = payload || {};
+    if (!ALLOWED_METHODS.has(method)) {
+      return Promise.resolve({
+        error: { code: -32601, message: 'Method not supported by this wallet' },
+      });
+    }
+    const id = nextId++;
+    return new Promise((resolve) => {
+      state.pending.set(id, resolve);
+      post({ type: 'request', sid: state.sid, id, method, params: Array.isArray(params) ? params : [] });
+    });
+  };
+}
+
+function stop() {
+  const state = current;
+  current = null;
+  if (!state) return;
+  for (const resolve of state.pending.values()) {
+    resolve({ error: { code: 4900, message: 'The phone closed the session' } });
+  }
+  state.pending.clear();
+  state.unsubscribe?.();
+  if (state.session) Promise.resolve(state.session.close()).catch(() => {});
+}
+
+async function start(sid, uri) {
+  stop();
+  const state = { sid, session: null, pending: new Map(), unsubscribe: null };
+  current = state;
+  const report = (status, message) => {
+    if (current === state) post({ type: 'status', sid, status, message });
+  };
+  try {
+    let params;
+    try {
+      params = decodeConnectionURL(uri);
+    } catch {
+      // The SDK's message quotes the whole code, session key included: not for the screen.
+      throw new Error('That pairing code can’t be read. Scan the code on the computer again.');
+    }
+    if (params.p !== 'mqtt') throw new Error(`Unsupported signaling protocol "${params.p}"`);
+    report('connecting');
+    const session = await createSession(params, [webrtc()], requestHandler(state));
+    if (current !== state) {
+      Promise.resolve(session.close()).catch(() => {});
+      return;
+    }
+    state.session = session;
+    // subscribe() replays the current value, so no state slips past.
+    let linked = false;
+    state.unsubscribe = session.status.subscribe((status) => {
+      if (status === 'connected') {
+        linked = true;
+        report('connected');
+      } else if (status === 'disconnected') {
+        // Desktop closes the session once its job is answered, and the SDK
+        // reports that as an error ("Data channel closed"): after a link
+        // it's the normal end, only before one is it a failure.
+        const error = session.error.get();
+        if (error && !linked) report('failed', String(error));
+        else report('disconnected');
+      } else if (status) {
+        report('connecting');
+      }
+    });
+    await session.connect();
+  } catch (err) {
+    report('failed', String(err?.message || err));
+  }
+}
+
+channel.addEventListener('message', (event) => {
+  let message;
+  try {
+    message = JSON.parse(event.data);
+  } catch {
+    return;
+  }
+  switch (message?.type) {
+    case 'start':
+      start(message.sid, String(message.uri));
+      break;
+    case 'stop':
+      stop();
+      break;
+    case 'response': {
+      const state = current;
+      if (!state || state.sid !== message.sid) return;
+      const resolve = state.pending.get(message.id);
+      if (!resolve) return;
+      state.pending.delete(message.id);
+      resolve(message.error ? { error: message.error } : { result: message.result ?? null });
+      break;
+    }
+    default:
+      break;
+  }
+});
+
+post({ type: 'ready' });

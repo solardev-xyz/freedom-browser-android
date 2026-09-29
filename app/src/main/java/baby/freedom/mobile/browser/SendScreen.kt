@@ -524,7 +524,7 @@ private fun SendReviewSection(
 
 /** A labelled value on its own line (it's never cut), with an optional address and a muted sub-line. */
 @Composable
-private fun ReviewRow(label: String, value: String?, mono: Boolean = false, address: String? = null, detail: String? = null) {
+internal fun ReviewRow(label: String, value: String?, mono: Boolean = false, address: String? = null, detail: String? = null) {
     Column(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
         Text(label, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
         SelectionContainer {
@@ -581,6 +581,8 @@ private fun SendStatusSection(
         Spacer(Modifier.height(8.dp))
         ReviewRow("Amount", "${SendAmounts.exact(request.amount, request.token.decimals)} ${request.token.symbol} on ${request.chain.name}", mono = true)
         ReviewRow("To", null, address = request.to)
+        // One desktop Freedom composed (#113): what it calls is part of what was sent.
+        request.callData?.let { ReviewRow("Data", callDataText(it), mono = true, detail = "Asked for by desktop Freedom") }
         status.hash?.let { hash ->
             Column(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
                 Text("Transaction", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -599,7 +601,8 @@ private fun SendStatusSection(
             stage is SendStatus.Stage.Failed && stage.mayHaveGone -> Button(onClick = onRetry, modifier = Modifier.fillMaxWidth()) {
                 Text("Try again")
             }
-            stage is SendStatus.Stage.Failed -> Button(onClick = onReviewAgain, modifier = Modifier.fillMaxWidth()) {
+            // Desktop Freedom's own transaction was answered as failed there; only it can ask again.
+            stage is SendStatus.Stage.Failed && request.callData == null -> Button(onClick = onReviewAgain, modifier = Modifier.fillMaxWidth()) {
                 Text("Review again")
             }
             stage == SendStatus.Stage.Unconfirmed -> Button(onClick = onCheckAgain, modifier = Modifier.fillMaxWidth()) {

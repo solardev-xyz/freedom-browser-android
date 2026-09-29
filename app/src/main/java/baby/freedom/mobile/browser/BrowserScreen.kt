@@ -2221,6 +2221,10 @@ fun BrowserScreen(
         )
     }
 
+    // Desktop Freedom's signing requests (#113): a dialog over whatever is up,
+    // the scan page it was connected from included.
+    RemoteSigningHost()
+
     // Snackbars over a full-screen panel (Downloads' open() failures
     // and retry outcomes, a download finishing while Settings is up):
     // composed after the panels so they're drawn on top, at the bottom

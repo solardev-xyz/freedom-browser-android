@@ -1,0 +1,169 @@
+package baby.freedom.mobile.wallet
+
+import baby.freedom.mobile.ens.Secp256k1
+import baby.freedom.mobile.ens.hexToBytes
+import baby.freedom.mobile.ens.toHex
+import org.json.JSONArray
+import org.json.JSONObject
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertThrows
+import org.junit.Test
+
+/**
+ * EIP-712 and personal_sign (#113) against ethers v6 — what desktop
+ * Freedom verifies the phone's signatures with. Every expected value
+ * below was computed by ethers (`TypedDataEncoder.hash`,
+ * `Wallet.signTypedData`, `hashMessage`, `Wallet.signMessage`) for the
+ * published Hardhat account 0 key, over the exact payloads
+ * `TypedDataEncoder.getPayload` produces — what desktop sends.
+ */
+class Eip712Test {
+    private val key = "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80".hexToBytes()
+    private val address = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
+
+    /** The EIP's own example, as ethers' getPayload writes it. */
+    private val mail = """{"types":{"Person":[{"name":"name","type":"string"},{"name":"wallet","type":"address"}],"Mail":[{"name":"from","type":"Person"},{"name":"to","type":"Person"},{"name":"contents","type":"string"}],"EIP712Domain":[{"name":"name","type":"string"},{"name":"version","type":"string"},{"name":"chainId","type":"uint256"},{"name":"verifyingContract","type":"address"}]},"domain":{"name":"Ether Mail","version":"1","chainId":"0x1","verifyingContract":"0xcccccccccccccccccccccccccccccccccccccccc"},"primaryType":"Mail","message":{"from":{"name":"Cow","wallet":"0xcd2a3d9f938e13cd947ec05abc7fe734df8dd826"},"to":{"name":"Bob","wallet":"0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},"contents":"Hello, Bob!"}}"""
+
+    /** Arrays of structs, a fixed-size array, strings with non-ASCII, uint256 max, negative and max int64, bytesN, empty bytes, a salt. */
+    private val complex = """{"types":{"Item":[{"name":"id","type":"uint256"},{"name":"delta","type":"int64"},{"name":"tag","type":"bytes4"},{"name":"blob","type":"bytes"}],"Order":[{"name":"owner","type":"address"},{"name":"items","type":"Item[]"},{"name":"flags","type":"bool[2]"},{"name":"notes","type":"string[]"},{"name":"nonce","type":"uint8"}],"EIP712Domain":[{"name":"name","type":"string"},{"name":"version","type":"string"},{"name":"chainId","type":"uint256"},{"name":"verifyingContract","type":"address"},{"name":"salt","type":"bytes32"}]},"domain":{"name":"Freedom test","version":"2","chainId":"0x64","verifyingContract":"0x9a676e781a523b5d0c0e43731313a708cb607508","salt":"0x1111111111111111111111111111111111111111111111111111111111111111"},"primaryType":"Order","message":{"owner":"0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266","items":[{"id":"115792089237316195423570985008687907853269984665640564039457584007913129639935","delta":"-5","tag":"0xdeadbeef","blob":"0x"},{"id":"7","delta":"9223372036854775807","tag":"0x00000001","blob":"0x0102030405"}],"flags":[true,false],"notes":["a","ünïcødé ✓"],"nonce":"255"}}"""
+
+    private fun digest(json: String) = "0x" + Eip712.digest(Eip712.parse(json)).toHex()
+
+    @Test
+    fun `digests and signatures match ethers, desktop's verifier`() {
+        assertEquals("0xbe609aee343fb3c4b28e1df9e632fca64fcfaede20f02e86244efddf30957bd2", digest(mail))
+        assertEquals(
+            "0x6ea8bb309a3401225701f3565e32519f94a0ea91a5910ce9229fe488e773584c0390416a2190d9560219dab757ecca2029e63fa9d1c2aebf676cc25b9f03126a1b",
+            MessageSigning.sign(key.copyOf(), Eip712.digest(Eip712.parse(mail)), address),
+        )
+        assertEquals("0x9219795b39538994abb08c4e68cbfcd6fa5b3f49105b33cd6284ec968c66e609", digest(complex))
+        assertEquals(
+            "0x71efebb21effba274e4353a9f9a9b4e5b7abe3ed860cd781533ba71071f8c4c31e72c900488b681fb3eb9a0ee09094ff326e08487e37f2c149c279b6308b87b11b",
+            MessageSigning.sign(key.copyOf(), Eip712.digest(Eip712.parse(complex)), address),
+        )
+    }
+
+    @Test
+    fun `encodeType puts the primary type first and the rest by name`() {
+        val td = Eip712.parse(complex)
+        assertEquals("Order(address owner,Item[] items,bool[2] flags,string[] notes,uint8 nonce)Item(uint256 id,int64 delta,bytes4 tag,bytes blob)", Eip712.encodeType("Order", td.types))
+        assertEquals("Mail(Person from,Person to,string contents)Person(string name,address wallet)", Eip712.encodeType("Mail", Eip712.parse(mail).types))
+    }
+
+    @Test
+    fun `a payload without EIP712Domain in its types gets the domain's fields in the EIP's order`() {
+        val o = JSONObject(mail)
+        o.getJSONObject("types").remove("EIP712Domain")
+        // Keys in another order, numbers as a JSON number and a decimal string: the same digest.
+        o.put("domain", JSONObject().put("verifyingContract", "0xCcCCccccCCCCcCCCCCCcCcCccCcCCCcCcccccccC").put("chainId", 1).put("version", "1").put("name", "Ether Mail"))
+        assertEquals("0xbe609aee343fb3c4b28e1df9e632fca64fcfaede20f02e86244efddf30957bd2", digest(o.toString()))
+        o.getJSONObject("domain").put("chainId", "1")
+        assertEquals("0xbe609aee343fb3c4b28e1df9e632fca64fcfaede20f02e86244efddf30957bd2", digest(o.toString()))
+        assertEquals(1L, Eip712.chainId(Eip712.parse(o.toString())))
+        // The object itself (not its JSON string) works too.
+        assertEquals("0xbe609aee343fb3c4b28e1df9e632fca64fcfaede20f02e86244efddf30957bd2", "0x" + Eip712.digest(Eip712.parse(o)).toHex())
+    }
+
+    @Test
+    fun `anything not exactly what the types say is refused, never guessed`() {
+        fun refused(edit: (JSONObject) -> Unit) {
+            val o = JSONObject(complex)
+            edit(o)
+            assertThrows(Eip712.InvalidTypedData::class.java) { Eip712.digest(Eip712.parse(o.toString())) }
+        }
+        val item = { o: JSONObject -> o.getJSONObject("message").getJSONArray("items").getJSONObject(0) }
+        refused { it.getJSONObject("message").remove("nonce") } // a missing field
+        refused { it.getJSONObject("message").put("nonce", "256") } // uint8 overflow
+        refused { it.getJSONObject("message").put("nonce", "-1") }
+        refused { item(it).put("delta", "9223372036854775808") } // int64 overflow
+        refused { item(it).put("tag", "0xdeadbe") } // bytes4 of 3 bytes
+        refused { item(it).put("blob", "0x0") } // odd hex
+        refused { it.getJSONObject("message").put("owner", "0x1234") }
+        refused { it.getJSONObject("message").put("flags", JSONArray().put(true)) } // bool[2] of one
+        refused { it.getJSONObject("message").put("flags", JSONArray().put(1).put(0)) } // bools aren't numbers
+        refused { it.getJSONObject("message").put("notes", "a") } // not a list
+        refused { it.getJSONObject("message").put("nonce", 1.5) }
+        refused { it.getJSONObject("message").put("nonce", 1e300) } // a JSON number past what JS holds exactly
+        refused { it.getJSONObject("types").getJSONArray("Order").put(JSONObject().put("name", "x").put("type", "Missing")) }
+        refused { it.getJSONObject("types").getJSONArray("Order").put(JSONObject().put("name", "y").put("type", "uint7")) }
+        refused { it.put("primaryType", "Nope") }
+        assertThrows(Eip712.InvalidTypedData::class.java) { Eip712.parse("not json") }
+        assertThrows(Eip712.InvalidTypedData::class.java) { Eip712.parse("[" .repeat(100_000)) }
+        assertThrows(Eip712.InvalidTypedData::class.java) { Eip712.parse(null) }
+    }
+
+    @Test
+    fun `the sheet's lines show every signed field, nested ones indented, and nothing else`() {
+        val o = JSONObject(complex)
+        o.getJSONObject("message").put("unsigned", "not shown")
+        val (domain, message) = Eip712.lines(Eip712.parse(o.toString()))
+        assertEquals(
+            listOf(
+                Eip712.Line("name", "Freedom test", 0),
+                Eip712.Line("version", "2", 0),
+                Eip712.Line("chainId", "100", 0),
+                Eip712.Line("verifyingContract", "0x9A676e781A523b5d0C0e43731313A708CB607508", 0),
+                Eip712.Line("salt", "0x" + "11".repeat(32), 0),
+            ),
+            domain,
+        )
+        assertEquals(
+            listOf(
+                Eip712.Line("owner", address, 0),
+                Eip712.Line("items", "2 items", 0),
+                Eip712.Line("[0]", "Item", 1),
+                Eip712.Line("id", "115792089237316195423570985008687907853269984665640564039457584007913129639935", 2),
+                Eip712.Line("delta", "-5", 2),
+                Eip712.Line("tag", "0xdeadbeef", 2),
+                Eip712.Line("blob", "0x", 2),
+                Eip712.Line("[1]", "Item", 1),
+                Eip712.Line("id", "7", 2),
+                Eip712.Line("delta", "9223372036854775807", 2),
+                Eip712.Line("tag", "0x00000001", 2),
+                Eip712.Line("blob", "0x0102030405", 2),
+                Eip712.Line("flags", "2 items", 0),
+                Eip712.Line("[0]", "true", 1),
+                Eip712.Line("[1]", "false", 1),
+                Eip712.Line("notes", "2 items", 0),
+                Eip712.Line("[0]", "a", 1),
+                Eip712.Line("[1]", "ünïcødé ✓", 1),
+                Eip712.Line("nonce", "255", 0),
+            ),
+            message,
+        )
+    }
+
+    @Test
+    fun `personal_sign matches ethers for text and for bytes`() {
+        val text = "freedom openlv android harness".toByteArray()
+        assertEquals("0x740df87a68c5f40631aad3bbab1756bb854137557c0c052eed84b741bd1c5b8e", "0x" + MessageSigning.personalDigest(text).toHex())
+        val sig = MessageSigning.sign(key.copyOf(), MessageSigning.personalDigest(text), address)
+        assertEquals(
+            "0x09036ce97346b4f7fe9bb7970503cf8329571b6e638c95f716536c594931ebd34543e67d878ab12cc9e3651608c9e625b741c0dc26134a39725148a836f6f6331b",
+            sig,
+        )
+        assertEquals(address.lowercase(), Secp256k1.recoverPersonalSign(text, sig)?.lowercase())
+        val bin = byteArrayOf(0xff.toByte(), 0x00, 0x10)
+        assertEquals(
+            "0x5fc88852a6252648db7b5c51012d1cc4cba09b334074181848652b6a48e742a978aa3b0a50976aaef7b0f21d31c31e66e37ded7aa646da26323c7f7f31e09ef21c",
+            MessageSigning.sign(key.copyOf(), MessageSigning.personalDigest(bin), address),
+        )
+    }
+
+    @Test
+    fun `a key that isn't the account's signs nothing`() {
+        assertThrows(IllegalStateException::class.java) {
+            MessageSigning.sign(key.copyOf(), MessageSigning.personalDigest(byteArrayOf(1)), "0x70997970C51812dc3A010C7d01b50e0d17dc79C8")
+        }
+    }
+
+    @Test
+    fun `a message reads as text only when it's clean UTF-8`() {
+        assertEquals("Sign in to example.com\nNonce: 1", MessageSigning.readableText("Sign in to example.com\nNonce: 1".toByteArray()))
+        assertNull(MessageSigning.readableText(byteArrayOf(0xff.toByte(), 0x00, 0x10))) // not UTF-8
+        assertNull(MessageSigning.readableText("a\u0000b".toByteArray())) // a NUL
+        assertNull(MessageSigning.readableText("pay‮gnp.exe".toByteArray())) // a bidi override hides what's there
+        assertNull(MessageSigning.readableText("   ".toByteArray()))
+    }
+}
