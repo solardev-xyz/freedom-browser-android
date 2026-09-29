@@ -78,6 +78,16 @@ interface INodeService {
      */
     void reloadIdentity();
 
+    /**
+     * The Swarm node's mode (#114): light (publishing, reading Gnosis
+     * through `gnosisRpc`) or ultra-light (browsing only, no chain;
+     * `gnosisRpc` ignored). The setting lives in the UI process's
+     * DataStore, so the UI relays it on every bind and whenever it or the
+     * Gnosis RPCs change; the service restarts the Swarm node if it runs in
+     * another mode. `gnosisRpc` can carry an API key: never log it.
+     */
+    void setSwarmMode(boolean light, String gnosisRpc);
+
     RadicleInfo getRadicleState();
 
     /**

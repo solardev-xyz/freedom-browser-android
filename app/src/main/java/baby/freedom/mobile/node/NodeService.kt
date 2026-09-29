@@ -20,6 +20,7 @@ import android.system.OsConstants
 import android.system.StructPollfd
 import android.util.Log
 import baby.freedom.mobile.R
+import baby.freedom.mobile.data.ChainStore
 import baby.freedom.mobile.data.NodeSettings
 import baby.freedom.mobile.wallet.KeystoreVaultStore
 import baby.freedom.mobile.wallet.NodeIdentityStore
@@ -39,6 +40,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlin.system.exitProcess
@@ -60,8 +62,20 @@ class NodeService : Service() {
     private lateinit var identityStore: NodeIdentityStore
     private lateinit var vaultStore: KeystoreVaultStore
 
-    /** What the Swarm node's (re)start booted as (#77), for [INodeService.reloadIdentity]. */
+    /** What the Swarm node's (re)start booted as (#77, #114), for [INodeService.reloadIdentity] / [INodeService.setSwarmMode]. */
     private val bootIdentity = SwarmBootIdentity()
+
+    /**
+     * The mode the Swarm node should run in (#114), as the UI last relayed
+     * it through [INodeService.setSwarmMode]; null until it has, when the
+     * first boot reads the persisted setting itself ([swarmMode]).
+     */
+    @Volatile
+    private var relayedMode: SwarmNode.Mode? = null
+
+    /** The mode the launch now booting read, handed to [SwarmNode.Config.mode] right after its identity. */
+    @Volatile
+    private var launchMode: SwarmNode.Mode = SwarmNode.Mode.ULTRA_LIGHT
     private var ipfsNode: IpfsNode? = null
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
@@ -151,20 +165,14 @@ class NodeService : Service() {
         }
 
         override fun reloadIdentity() {
+            scope.launch(Dispatchers.IO) { restartSwarmIfStale("node identity changed") }
+        }
+
+        override fun setSwarmMode(light: Boolean, gnosisRpc: String?) {
+            val mode = if (light) SwarmNode.Mode.light(gnosisRpc.orEmpty()) else SwarmNode.Mode.ULTRA_LIGHT
             scope.launch(Dispatchers.IO) {
-                bootIdentity.restartIfStale(
-                    want = {
-                        identityStore.boot(vaultStore)?.let { boot ->
-                            boot.antIdentity.fill(0)
-                            boot.swarmAddress
-                        }.orEmpty()
-                    },
-                    running = { swarmNode.state.value.status != NodeStatus.Stopped },
-                    restart = {
-                        Log.i(TAG, "node identity changed → restarting swarm")
-                        swarmNode.restart()
-                    },
-                )
+                relayedMode = mode
+                restartSwarmIfStale("swarm mode is now $mode")
             }
         }
 
@@ -213,6 +221,48 @@ class NodeService : Service() {
             }
             return read
         }
+    }
+
+    /**
+     * Restart the Swarm node if it booted as another identity (#77) or in
+     * another mode (#114) than it would boot as now — once, however many
+     * reloads race the change (see [SwarmBootIdentity]).
+     */
+    private fun restartSwarmIfStale(reason: String) {
+        bootIdentity.restartIfStale(
+            want = {
+                val address = identityStore.boot(vaultStore)?.let { boot ->
+                    boot.antIdentity.fill(0)
+                    boot.swarmAddress
+                }.orEmpty()
+                swarmBootKey(address, swarmMode())
+            },
+            running = { swarmNode.state.value.status != NodeStatus.Stopped },
+            restart = {
+                Log.i(TAG, "$reason → restarting swarm")
+                swarmNode.restart()
+            },
+        )
+    }
+
+    /**
+     * The mode the Swarm node should boot in (#114): the UI's latest
+     * [INodeService.setSwarmMode], or — before this process has heard one,
+     * as on its first boot, which starts before the UI binds — the
+     * persisted setting and the chains, read here. That read is this
+     * process's first of those stores, so it can't be a stale cached copy.
+     * Blocking: called from a launch's IO thread.
+     */
+    private fun swarmMode(): SwarmNode.Mode = relayedMode ?: try {
+        runBlocking {
+            swarmModeFor(
+                NodeSettings.get(this@NodeService).swarmLightMode.first(),
+                ChainStore.get(this@NodeService).chains.first(),
+            )
+        }
+    } catch (e: Exception) {
+        Log.w(TAG, "reading the swarm mode failed (${e.javaClass.simpleName}); ultra-light")
+        SwarmNode.Mode.ULTRA_LIGHT
     }
 
     /**
@@ -313,12 +363,17 @@ class NodeService : Service() {
                 dataDir = filesDir.absolutePath,
                 // The wallet's Swarm identity (#77) when there is one,
                 // re-read at every (re)start; ant's own otherwise.
+                // And the mode (#114), read in the same step so the boot
+                // key records the pair this launch really boots as.
                 identity = {
                     bootIdentity.boot {
                         val boot = identityStore.boot(vaultStore)
-                        boot?.swarmAddress.orEmpty() to boot?.antIdentity
+                        val mode = swarmMode()
+                        launchMode = mode
+                        swarmBootKey(boot?.swarmAddress.orEmpty(), mode) to boot?.antIdentity
                     }
                 },
+                mode = { launchMode },
             ),
         )
 

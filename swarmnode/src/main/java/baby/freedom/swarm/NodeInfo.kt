@@ -22,4 +22,9 @@ data class NodeInfo(
      * recovery phrase (#77); false while it runs as its own device identity.
      */
     val walletIdentity: Boolean = false,
+    /**
+     * True while the node runs in light mode (#114): its gateway reports
+     * `beeMode: light` and reads Gnosis. False while ultra-light, or not running.
+     */
+    val lightMode: Boolean = false,
 ) : Parcelable
