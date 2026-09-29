@@ -697,6 +697,7 @@ class WalletSender internal constructor(
                 snapshot(broadcasting, s)
             }
             val saved = journal.save(state)
+            var failedStatus: SendStatus? = null
             val unsaved = synchronized(this@WalletSender) {
                 // Discarded while it was written: nothing goes out (the discard's own write follows this one).
                 if (_status.value?.quote !== quote) return@withContext false
@@ -709,14 +710,20 @@ class WalletSender internal constructor(
                     quote,
                     SendStatus.Stage.Failed("Couldn’t save the transaction before sending it, so nothing was sent.", false),
                 )
-                show(failed)
+                failedStatus = failed
                 snapshot(failed, null)
             }
             // A failed save may still have landed (renamed, just not known
             // to be on flash): write over it, still under [writing], so a
             // restart can't bring back as maybe-sent the bytes the user
-            // was just told were never sent.
+            // is about to be told were never sent. Written *before* the
+            // failure is shown, so there's no window where the page says
+            // "nothing was sent" while the journal still holds the signed
+            // send (a kill in that window would resurrect it).
             journal.save(unsaved)
+            synchronized(this@WalletSender) {
+                if (_status.value?.quote === quote) failedStatus?.let { show(it) }
+            }
             false
         }
     }
