@@ -22,6 +22,7 @@ import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.Schedule
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
@@ -178,8 +179,9 @@ internal fun SendPage(
     val back = {
         val current = status
         when {
-            // A send still on its way, or one that may have gone out (Try again
-            // settles it), stays for the next visit; a settled one is done with.
+            // A send still on its way, or one that may have gone out or got no
+            // receipt (Try again / Keep waiting settles it, Stop tracking gives
+            // it up), stays for the next visit; a settled one is done with.
             current != null -> {
                 if (!current.unresolved) sender.acknowledge()
                 onBack()
@@ -209,6 +211,10 @@ internal fun SendPage(
                         onOpenUrl = onOpenUrl,
                         onRetry = sender::retry,
                         onCheckAgain = sender::checkAgain,
+                        onStopTracking = {
+                            sender.discard()
+                            onBack()
+                        },
                         onReviewAgain = {
                             val request = current.quote.request
                             sender.acknowledge()
@@ -252,7 +258,7 @@ internal fun SendPage(
                                                 quote = null
                                                 notice = null
                                             }
-                                            WalletSender.Submit.BUSY -> error = "Another send is still going out. Wait for it to finish."
+                                            WalletSender.Submit.BUSY -> error = "Another send is still going out, or may have. Settle it (or stop tracking it) first."
                                             WalletSender.Submit.STALE -> stale = true
                                         }
                                     } catch (e: CancellationException) {
@@ -476,7 +482,14 @@ private fun SendReviewSection(
         ReviewRow("Amount", "${SendAmounts.exact(request.amount, token.decimals)} ${token.symbol}", mono = true)
         ReviewRow("Network fee", "up to ${feeText(quote.tx.maxFee, chain)}", mono = true, detail = feeDetail(quote.tx))
         quote.nativeTotal?.let { ReviewRow("Total", "up to ${feeText(it, chain)}", mono = true) }
-        ReviewRow("Nonce", quote.tx.nonce.toString(), detail = trustLabel(quote.nonceTrust))
+        ReviewRow(
+            "Nonce",
+            quote.tx.nonce.toString(),
+            detail = quote.replaces?.let {
+                "${trustLabel(quote.nonceTrust)} · replaces the send you stopped tracking ($it), at a higher fee: " +
+                    "only one of the two can go through"
+            } ?: trustLabel(quote.nonceTrust),
+        )
         Spacer(Modifier.height(4.dp))
         Text(
             "Only the fee the network actually charges is paid; the rest of the “up to” stays in the account.",
@@ -534,9 +547,11 @@ private fun SendStatusSection(
     onOpenUrl: (String) -> Unit,
     onRetry: () -> Unit,
     onCheckAgain: () -> Unit,
+    onStopTracking: () -> Unit,
     onReviewAgain: () -> Unit,
     onDone: () -> Unit,
 ) {
+    var confirmStop by remember { mutableStateOf(false) }
     val (title, text) = sendStatusText(status)
     val request = status.quote.request
     val green = if (MaterialTheme.colorScheme.isLight) Color(0xFF15803D) else Color(0xFF22C55E)
@@ -602,12 +617,41 @@ private fun SendStatusSection(
                     when {
                         stage == SendStatus.Stage.Pending -> "Close (it keeps going)"
                         status.mayHaveGone -> "Close (Try again stays here)"
+                        stage == SendStatus.Stage.Unconfirmed -> "Close (it stays here)"
                         else -> "Done"
                     },
                 )
             }
         }
+        // Giving up on one that may still land is its own, confirmed step.
+        if (status.mayHaveGone || stage == SendStatus.Stage.Unconfirmed) {
+            TextButton(onClick = { confirmStop = true }, modifier = Modifier.fillMaxWidth()) {
+                Text("Stop tracking it…", color = MaterialTheme.colorScheme.error)
+            }
+        }
     }
+    if (confirmStop) {
+        AlertDialog(
+            onDismissRequest = { confirmStop = false },
+            title = { Text("Stop tracking this send?") },
+            text = { Text(stopTrackingText(status)) },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirmStop = false
+                    onStopTracking()
+                }) { Text("Stop tracking", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = { TextButton(onClick = { confirmStop = false }) { Text("Keep it") } },
+        )
+    }
+}
+
+/** What giving up on an unresolved send means, for the confirmation. */
+internal fun stopTrackingText(status: SendStatus): String {
+    val r = status.quote.request
+    return "It may still go through: if it does, ${SendAmounts.exact(r.amount, r.token.decimals)} ${r.token.symbol} is paid. " +
+        "Until it’s mined, the next send from ${r.from.name} on ${r.chain.name} reuses its nonce " +
+        "(${status.quote.tx.nonce}) at a higher fee, so it takes this one’s place: only one of the two can go through."
 }
 
 @Composable

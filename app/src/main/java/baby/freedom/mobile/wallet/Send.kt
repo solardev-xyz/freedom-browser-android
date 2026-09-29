@@ -133,6 +133,12 @@ data class SendQuote(
     val preparedAt: Long,
     /** How the nonce was read (the balances are read the same way). */
     val nonceTrust: ChainTrust,
+    /**
+     * The hash of a send the user stopped tracking while it could still
+     * land, which this one replaces: same nonce, a higher fee, so only
+     * one of the two can ever be mined ([NonceTracker.abandon]).
+     */
+    val replaces: String? = null,
 ) {
     /** For a native send, the amount plus the most the fee can be; null for a token (two currencies). */
     val nativeTotal: BigInteger? get() = if (request.token.isNative) request.amount + tx.maxFee else null
@@ -170,6 +176,24 @@ class GasOracle(private val rpc: WalletRpc) {
             return EthTransaction.Fees.Eip1559(maxFeePerGas = baseFee.shiftLeft(1) + tip, maxPriorityFeePerGas = tip)
         }
 
+        /**
+         * [fees], raised where needed to replace a transaction priced at
+         * [over]: nodes take a replacement only at a fee (and tip) at
+         * least 10% above the one it replaces — this bids 12.5% plus one wei.
+         */
+        internal fun replacing(fees: EthTransaction.Fees, over: EthTransaction.Fees): EthTransaction.Fees {
+            fun bump(v: BigInteger) = v * BigInteger.valueOf(9) / BigInteger.valueOf(8) + BigInteger.ONE
+            return when {
+                fees is EthTransaction.Fees.Eip1559 && over is EthTransaction.Fees.Eip1559 -> EthTransaction.Fees.Eip1559(
+                    maxFeePerGas = fees.maxFeePerGas.max(bump(over.maxFeePerGas)),
+                    maxPriorityFeePerGas = fees.maxPriorityFeePerGas.max(bump(over.maxPriorityFeePerGas)),
+                )
+                fees is EthTransaction.Fees.Legacy && over is EthTransaction.Fees.Legacy ->
+                    EthTransaction.Fees.Legacy(fees.gasPrice.max(bump(over.gasPrice)))
+                else -> fees
+            }
+        }
+
         internal fun legacy(gasPrice: BigInteger): EthTransaction.Fees.Legacy {
             // A zero price would sit in the mempool forever and hold every later nonce behind it.
             if (gasPrice.signum() <= 0) throw SendException("The network gave no usable gas price. Try again.")
@@ -191,6 +215,12 @@ class GasOracle(private val rpc: WalletRpc) {
  * have been evicted). Past that, the chain's count is the answer — a
  * reused nonce can at worst replace a transaction (one of the two
  * mines), while a nonce past a dropped one never mines at all.
+ *
+ * A send the user stops tracking while it may still land is
+ * [abandoned][abandon]: until the chain has mined its nonce, the next
+ * send from that account reuses it (with [GasOracle.replacing]'s higher
+ * fee), so the two can't both go through — rather than go out one past
+ * it, beside it in a mempool.
  */
 class NonceTracker(
     private val rpc: WalletRpc,
@@ -201,8 +231,24 @@ class NonceTracker(
 
     private val sent = HashMap<String, Sent>()
 
+    /** A send stopped being tracked while it could still land: its nonce, fees and hash. */
+    class Abandoned(val nonce: BigInteger, val fees: EthTransaction.Fees, val hash: String)
+
+    private val abandoned = HashMap<String, Abandoned>()
+
     suspend fun next(address: String, chainId: Long): WalletRpc.Reading<BigInteger> {
         val fromChain = rpc.transactionCount(chainId, address)
+        val k = key(address, chainId)
+        val stood = synchronized(sent) { abandoned[k] }
+        if (stood != null) {
+            // Mined (it or another with its nonce): nothing left to replace.
+            if (rpc.transactionCount(chainId, address, "latest").value > stood.nonce) {
+                synchronized(sent) { if (abandoned[k] === stood) abandoned.remove(k) }
+            } else if (fromChain.value > stood.nonce) {
+                // Still waiting in a pool: take its place rather than queue behind it.
+                return fromChain.copy(value = stood.nonce)
+            }
+        }
         val now = clock()
         val local = synchronized(sent) {
             val k = key(address, chainId)
@@ -218,8 +264,27 @@ class NonceTracker(
             val k = key(address, chainId)
             val next = nonce + BigInteger.ONE
             if (sent[k]?.let { it.next >= next } != true) sent[k] = Sent(next, clock())
+            // Its replacement (or a later one) went out: the abandoned one can't land any more.
+            if (abandoned[k]?.let { nonce >= it.nonce } == true) abandoned.remove(k)
         }
     }
+
+    /**
+     * The send with [nonce] ([fees], [hash]) stopped being tracked while
+     * it may still land: the next send reuses its nonce until the chain
+     * has mined it.
+     */
+    fun abandon(address: String, chainId: Long, nonce: BigInteger, fees: EthTransaction.Fees, hash: String) {
+        synchronized(sent) {
+            val k = key(address, chainId)
+            sent.remove(k)
+            abandoned[k] = Abandoned(nonce, fees, hash)
+        }
+    }
+
+    /** The abandoned send a transaction with [nonce] would replace, if any. */
+    fun replacing(address: String, chainId: Long, nonce: BigInteger): Abandoned? =
+        synchronized(sent) { abandoned[key(address, chainId)]?.takeIf { it.nonce == nonce } }
 
     fun forget(address: String, chainId: Long) {
         synchronized(sent) { sent.remove(key(address, chainId)) }
@@ -277,8 +342,13 @@ data class SendStatus(val quote: SendQuote, val stage: Stage, val hash: String? 
      */
     val mayHaveGone: Boolean get() = (stage as? Stage.Failed)?.mayHaveGone == true
 
-    /** Still going, or not yet known not to have gone: the page leaves it for the next visit. */
-    val unresolved: Boolean get() = inFlight || mayHaveGone
+    /**
+     * Still going, or not yet known not to have gone (including a send
+     * no receipt came for): the page leaves it for the next visit, and
+     * only Try again / Keep waiting or an explicit [WalletSender.discard]
+     * ends it.
+     */
+    val unresolved: Boolean get() = inFlight || mayHaveGone || stage == Stage.Unconfirmed
 }
 
 /**
@@ -351,6 +421,8 @@ class WalletSender internal constructor(
             } catch (e: ChainRpcException.Rpc) {
                 throw estimateFailure(e, sending)
             }
+            // Taking the place of a send the user stopped tracking: outbid it, or no node swaps it.
+            val replacing = nonces.replacing(from, chainId, nonce.await().value)
             var tx = EthTransaction(
                 chainId = chainId,
                 nonce = nonce.await().value,
@@ -358,7 +430,7 @@ class WalletSender internal constructor(
                 to = to,
                 value = value,
                 data = data,
-                fees = fees.await(),
+                fees = replacing?.let { GasOracle.replacing(fees.await(), it.fees) } ?: fees.await(),
             )
             val nativeBalance = native.await()
             val symbol = request.chain.symbol
@@ -374,7 +446,7 @@ class WalletSender internal constructor(
                 val what = if (token.isNative) "the amount and the network fee" else "the network fee"
                 throw SendException("Not enough $symbol for $what (up to $fee): $has")
             }
-            SendQuote(sending, tx, nativeBalance, tokenBalance.await(), clock(), nonce.await().trust)
+            SendQuote(sending, tx, nativeBalance, tokenBalance.await(), clock(), nonce.await().trust, replacing?.hash)
         }
     } catch (e: CancellationException) {
         throw e
@@ -392,7 +464,10 @@ class WalletSender internal constructor(
         /** Signing and broadcasting it; [status] follows it. */
         STARTED,
 
-        /** Another send is still being signed or broadcast, or may have gone out and awaits Try again. */
+        /**
+         * Another send is still being signed or broadcast, or may have
+         * gone out and awaits Try again / Keep waiting or [discard].
+         */
         BUSY,
 
         /** Older than [QUOTE_TTL_MS]: nothing signed, price it again. */
@@ -410,8 +485,9 @@ class WalletSender internal constructor(
         synchronized(this) {
             val current = _status.value
             if (current?.stage == SendStatus.Stage.Signing || current?.stage == SendStatus.Stage.Broadcasting) return Submit.BUSY
-            // One that may have gone out is settled by Try again, never by signing another.
-            if (current?.mayHaveGone == true) return Submit.BUSY
+            // One that may have gone out is settled by Try again (or given up on with
+            // discard, which makes the next send replace it), never by signing another beside it.
+            if (current?.unresolved == true) return Submit.BUSY
             if (isStale(quote)) return Submit.STALE
             job?.cancel()
             signed = null
@@ -429,7 +505,11 @@ class WalletSender internal constructor(
                     fail(quote, "Couldn’t sign the transaction. Nothing was sent.", false)
                     return@launch
                 }
-                synchronized(this@WalletSender) { signed = s }
+                synchronized(this@WalletSender) {
+                    // Discarded while the key was at work: nothing goes out.
+                    if (_status.value?.quote !== quote) return@launch
+                    signed = s
+                }
                 broadcast(quote, s)
             }
         }
@@ -461,22 +541,50 @@ class WalletSender internal constructor(
     }
 
     /**
-     * The page is done with the outcome. A send still being signed or
-     * broadcast stays, and so does one that [may have gone out][SendStatus.mayHaveGone]:
-     * its signed bytes are what Try again resends, and without them a
-     * fresh send could pay a second time.
+     * The page is done with the outcome. A send still going stays, and
+     * so does one that [may have gone out][SendStatus.mayHaveGone] or
+     * got no receipt ([SendStatus.unresolved]): its signed bytes are what
+     * Try again resends, and without them a fresh send could pay a
+     * second time. Only [discard] drops those.
      */
     fun acknowledge() {
         synchronized(this) {
             val current = _status.value ?: return
-            val stage = current.stage
-            if (stage == SendStatus.Stage.Signing || stage == SendStatus.Stage.Broadcasting || current.mayHaveGone) return
-            job?.cancel()
-            job = null
-            signed = null
-            _status.value = null
+            if (current.unresolved) return
+            clear()
         }
     }
+
+    /**
+     * Stops tracking the current send whatever its stage: the user gave
+     * up on one that may yet land (Stop tracking), or the wallet it came
+     * from was deleted. If it was signed and may be out there, its nonce
+     * is [abandoned][NonceTracker.abandon]: the next send from that
+     * account on that chain reuses it at a higher fee and so replaces it
+     * — only one of the two can go through, never both.
+     */
+    fun discard() {
+        synchronized(this) {
+            val current = _status.value ?: return
+            val s = signed
+            val certainlyNotSent = (current.stage as? SendStatus.Stage.Failed)?.mayHaveGone == false
+            if (s != null && !current.done && !certainlyNotSent) {
+                val tx = current.quote.tx
+                nonces.abandon(current.quote.request.from.address, tx.chainId, tx.nonce, tx.fees, s.hash)
+                Log.i(TAG, "stopped tracking ${s.hash} chain=${tx.chainId} nonce=${tx.nonce}")
+            }
+            clear()
+        }
+    }
+
+    private fun clear() {
+        job?.cancel()
+        job = null
+        signed = null
+        _status.value = null
+    }
+
+    private fun current(quote: SendQuote): Boolean = synchronized(this) { _status.value?.quote === quote }
 
     /**
      * [resend]: these bytes were broadcast before and may already be out
@@ -486,9 +594,13 @@ class WalletSender internal constructor(
     private suspend fun broadcast(quote: SendQuote, s: EthTransaction.Signed, resend: Boolean = false) {
         val from = quote.request.from.address
         val chainId = quote.tx.chainId
+        // Discarded meanwhile (signing isn't a suspension point, so cancelling alone can't stop this).
+        if (!current(quote)) return
         set(quote, SendStatus.Stage.Broadcasting, s.hash)
         try {
             rpc.sendRawTransaction(chainId, s.raw)
+            // Discarded while it went out: discard filed it as abandoned; don't undo that.
+            if (!current(quote)) return
         } catch (e: CancellationException) {
             throw e
         } catch (e: ChainRpcException) {
@@ -679,10 +791,16 @@ class WalletSender internal constructor(
                 node.insufficientFunds -> "Not sent: not enough $symbol for the amount and the fee any more." to false
                 "nonce too high" in m ->
                     "Not sent: nonce ${quote.tx.nonce} is ahead of what the network expects — an earlier transaction may not have reached it. Review it again." to false
+                nonceUsed(e) && quote.replaces != null ->
+                    "Not sent: nonce ${quote.tx.nonce} was already used — most likely the send you stopped tracking went through " +
+                        "(${quote.replaces}). Check it on the explorer before sending again." to false
                 nonceUsed(e) ->
                     "Not sent: nonce ${quote.tx.nonce} was already used — maybe by another wallet with this account. Review it again." to false
                 "invalid nonce" in m ->
                     "Not sent: the network didn’t accept nonce ${quote.tx.nonce}. Review it again." to false
+                "replacement" in m && "underpriced" in m && quote.replaces != null ->
+                    "Not sent: the send you stopped tracking still holds nonce ${quote.tx.nonce} and the network wouldn’t swap it. " +
+                        "Review it again for a fresh fee." to false
                 "replacement" in m && "underpriced" in m ->
                     "Not sent: another transaction with nonce ${quote.tx.nonce} is still waiting to be mined. Review it again." to false
                 "underpriced" in m || "fee cap" in m || "base fee" in m || "too low" in m ->

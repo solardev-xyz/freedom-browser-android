@@ -4,6 +4,7 @@ import baby.freedom.mobile.browser.explorerTxUrl
 import baby.freedom.mobile.browser.feeDetail
 import baby.freedom.mobile.browser.feeText
 import baby.freedom.mobile.browser.sendStatusText
+import baby.freedom.mobile.browser.stopTrackingText
 import baby.freedom.mobile.chains.BuiltInChains
 import baby.freedom.mobile.chains.Chain
 import baby.freedom.mobile.chains.rpc.ChainDataRouter
@@ -50,6 +51,9 @@ class SendTest {
         var balance = BigInteger.TEN.pow(18)
         var tokenBalance = BigInteger.valueOf(5_000)
         var nonce = 7L
+
+        /** The count of mined transactions (`latest`); null: the same as [nonce] (nothing pending). */
+        var mined: Long? = null
         var baseFee: BigInteger? = BigInteger.valueOf(14)
         var tip = BigInteger.ONE
         var estimate = 21_000L
@@ -67,7 +71,9 @@ class SendTest {
             return when (method) {
                 "eth_getBalance" -> q(balance)
                 "eth_call" -> "\"result\":\"0x" + tokenBalance.toString(16).padStart(64, '0') + "\""
-                "eth_getTransactionCount" -> q(BigInteger.valueOf(nonce))
+                "eth_getTransactionCount" -> q(
+                    BigInteger.valueOf(if (req.getJSONArray("params").optString(1) == "latest") mined ?: nonce else nonce),
+                )
                 "eth_getBlockByNumber" -> "\"result\":" + JSONObject().apply {
                     put("number", "0x10")
                     baseFee?.let { put("baseFeePerGas", "0x" + it.toString(16)) }
@@ -394,19 +400,127 @@ class SendTest {
         s.retry()
         s.awaitStage { it == SendStatus.Stage.Pending }
         assertEquals(1, chain.sent.toSet().size)
+        chain.receipt = """{"status":"0x1","blockNumber":"0x10","gasUsed":"0x5208","effectiveGasPrice":"0x1"}"""
+        s.awaitStage { it is SendStatus.Stage.Confirmed }
         s.acknowledge()
         assertNull(s.status.value)
     }
 
     @Test
-    fun `a send that ends unconfirmed leaves the next nonce to the chain`() = runBlocking<Unit> {
+    fun `a send that ends unconfirmed stays until kept waiting on or given up, and leaves the next nonce to the chain`() = runBlocking<Unit> {
         val chain = FakeChain()
         val s = sender(chain)
         s.submit(s.prepare(request()), signer())
-        s.awaitStage { it == SendStatus.Stage.Unconfirmed }
+        val unconfirmed = s.awaitStage { it == SendStatus.Stage.Unconfirmed }
+        assertTrue(unconfirmed.unresolved)
+        // Done / Back don't drop a send that may yet land, and no second one is signed beside it.
         s.acknowledge()
+        assertEquals(unconfirmed, s.status.value)
+        assertEquals(WalletSender.Submit.BUSY, s.submit(s.prepare(request()), signer()))
+        assertEquals(1, chain.sent.size)
+        s.discard()
+        assertNull(s.status.value)
         // Dropped from every pool meanwhile: nonce 7 again, not 8 past a gap that would never fill.
         assertEquals(BigInteger.valueOf(7), s.prepare(request()).tx.nonce)
+    }
+
+    @Test
+    fun `given up on while still in a pool, the next send takes its nonce at a higher fee, and so replaces it`() = runBlocking<Unit> {
+        val chain = FakeChain()
+        val s = sender(chain)
+        s.submit(s.prepare(request()), signer())
+        val first = s.awaitStage { it == SendStatus.Stage.Unconfirmed }
+        s.discard()
+        // The RPC still holds it: pending 8, mined 7. Not 8 beside it — 7, outbidding it.
+        chain.nonce = 8
+        chain.mined = 7
+        val next = s.prepare(request(amount = 2))
+        assertEquals(BigInteger.valueOf(7), next.tx.nonce)
+        assertEquals(first.hash, next.replaces)
+        val old = first.quote.tx.fees as EthTransaction.Fees.Eip1559
+        val bid = next.tx.fees as EthTransaction.Fees.Eip1559
+        assertTrue(bid.maxFeePerGas * BigInteger.TEN > old.maxFeePerGas * BigInteger.valueOf(11))
+        assertTrue(bid.maxPriorityFeePerGas * BigInteger.TEN > old.maxPriorityFeePerGas * BigInteger.valueOf(11))
+        // Once the replacement is out, the one after goes past it.
+        assertEquals(WalletSender.Submit.STARTED, s.submit(next, signer()))
+        s.awaitStage { it == SendStatus.Stage.Unconfirmed }
+        s.discard()
+        chain.mined = 8
+        val after = s.prepare(request())
+        assertEquals(BigInteger.valueOf(8), after.tx.nonce)
+        assertNull(after.replaces)
+    }
+
+    @Test
+    fun `a send that may have gone out and every node keeps refusing oddly can be given up, and nothing else is blocked after`() = runBlocking<Unit> {
+        val chain = FakeChain()
+        val s = sender(chain)
+        chain.on["eth_sendRawTransaction"] = { req ->
+            synchronized(chain.sent) { chain.sent += req.getJSONArray("params").getString(0) }
+            "\"error\":{\"code\":-32010,\"message\":\"FeeTooLowToCompete\"}"
+        }
+        s.submit(s.prepare(request()), signer())
+        var failed = s.awaitStage { it is SendStatus.Stage.Failed }
+        assertTrue(failed.mayHaveGone)
+        repeat(2) {
+            s.retry()
+            failed = s.awaitStage { it is SendStatus.Stage.Failed }
+            assertTrue(failed.mayHaveGone)
+        }
+        s.acknowledge()
+        assertEquals(failed, s.status.value)
+        // Stop tracking it: gone, and a fresh send is signed — in its place, not beside it.
+        s.discard()
+        assertNull(s.status.value)
+        chain.on.clear()
+        val next = s.prepare(request())
+        assertEquals(BigInteger.valueOf(7), next.tx.nonce)
+        assertEquals(failed.hash, next.replaces)
+        assertEquals(WalletSender.Submit.STARTED, s.submit(next, signer()))
+        s.awaitStage { it == SendStatus.Stage.Pending || it == SendStatus.Stage.Unconfirmed }
+    }
+
+    @Test
+    fun `a send certainly not sent, or never signed, leaves no nonce to replace`() = runBlocking<Unit> {
+        val chain = FakeChain()
+        val s = sender(chain)
+        chain.on["eth_sendRawTransaction"] = { "\"error\":{\"code\":-32000,\"message\":\"nonce too high\"}" }
+        s.submit(s.prepare(request()), signer())
+        s.awaitStage { it is SendStatus.Stage.Failed }
+        s.discard()
+        chain.on.clear()
+        chain.nonce = 8
+        chain.mined = 7
+        assertNull(s.prepare(request()).replaces)
+
+        // Discarded (the wallet deleted) while the key was at work: nothing goes out.
+        val gate = java.util.concurrent.CountDownLatch(1)
+        val signing = java.util.concurrent.CountDownLatch(1)
+        val sentBefore = chain.sent.size
+        s.submit(s.prepare(request())) { tx -> signing.countDown(); gate.await(); tx.sign(key.copyOf(), from.address) }
+        assertTrue(signing.await(5, java.util.concurrent.TimeUnit.SECONDS))
+        s.discard()
+        gate.countDown()
+        Thread.sleep(200)
+        assertNull(s.status.value)
+        assertEquals(sentBefore, chain.sent.size)
+    }
+
+    @Test
+    fun `a replacement bids at least an eighth over what it replaces`() {
+        val old = EthTransaction.Fees.Eip1559(BigInteger.valueOf(800), BigInteger.valueOf(80))
+        assertEquals(
+            EthTransaction.Fees.Eip1559(BigInteger.valueOf(901), BigInteger.valueOf(91)),
+            GasOracle.replacing(EthTransaction.Fees.Eip1559(BigInteger.valueOf(500), BigInteger.valueOf(10)), old),
+        )
+        assertEquals(
+            EthTransaction.Fees.Eip1559(BigInteger.valueOf(2_000), BigInteger.valueOf(200)),
+            GasOracle.replacing(EthTransaction.Fees.Eip1559(BigInteger.valueOf(2_000), BigInteger.valueOf(200)), old),
+        )
+        assertEquals(
+            EthTransaction.Fees.Legacy(BigInteger.valueOf(113)),
+            GasOracle.replacing(EthTransaction.Fees.Legacy(BigInteger.valueOf(50)), EthTransaction.Fees.Legacy(BigInteger.valueOf(100))),
+        )
     }
 
     @Test
@@ -516,6 +630,11 @@ class SendTest {
         assertNotNull(s.status.value)
         gate.countDown()
         s.awaitStage { it == SendStatus.Stage.Pending }
+        // Nor one still waiting for its receipt; a mined one is done with.
+        s.acknowledge()
+        assertNotNull(s.status.value)
+        chain.receipt = """{"status":"0x1","blockNumber":"0x10","gasUsed":"0x5208","effectiveGasPrice":"0x1"}"""
+        s.awaitStage { it is SendStatus.Stage.Confirmed }
         s.acknowledge()
         assertNull(s.status.value)
     }
@@ -540,6 +659,10 @@ class SendTest {
         check(rpc("nonce too high"), "Not sent: nonce 4 is ahead of what the network expects", false)
         check(rpc("nonce too low"), "Not sent: nonce 4 was already used", false)
         check(rpc("OldNonce, Current: 5, tx: 4"), "Not sent: nonce 4 was already used", false)
+        // Replacing a send given up on: a used nonce is most likely that one having gone through.
+        val (m, u) = WalletSender.broadcastFailure(rpc("nonce too low"), quote.copy(replaces = "0xab"))
+        assertTrue(m, m.contains("the send you stopped tracking went through (0xab)"))
+        assertFalse(u)
         // An error this can't read proves nothing: a rate limit, a client's own "already have it" wording.
         check(rpc("something odd‮"), "The RPC answered with an error (something odd), so it may or may not", true)
         check(ChainRpcException.AllSourcesFailed(emptyList(), ChainRpcException.Rpc(-32005, "rate limited", null)), "The RPC answered with an error (rate limited)", true)
@@ -596,6 +719,7 @@ class SendTest {
         assertTrue(sendStatusText(SendStatus(quote, SendStatus.Stage.Reverted(1, null), "0xab")).second.contains("nothing arrived"))
         assertEquals("Not confirmed", sendStatusText(SendStatus(quote, SendStatus.Stage.Failed("x", true))).first)
         assertEquals("Not sent", sendStatusText(SendStatus(quote, SendStatus.Stage.Failed("x", false))).first)
+        assertTrue(stopTrackingText(SendStatus(quote, SendStatus.Stage.Unconfirmed, "0xab")).contains("reuses its nonce (1)"))
     }
 
     @Test

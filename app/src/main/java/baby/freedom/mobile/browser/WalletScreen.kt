@@ -379,8 +379,9 @@ fun WalletScreen(
             publishing = false
             sending = false
         }
-        // A settled send's outcome goes with the wallet it came from.
-        if (state == Vault.State.Empty) sender.acknowledge()
+        // A send goes with the wallet it came from, settled or not (one that may
+        // still land leaves its nonce to be replaced, should that account come back).
+        if (state == Vault.State.Empty) sender.discard()
     }
 
     if (publishing && (state is Vault.State.Locked || state is Vault.State.Unlocked)) {
