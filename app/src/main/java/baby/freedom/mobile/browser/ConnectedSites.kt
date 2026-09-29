@@ -32,6 +32,7 @@ import androidx.compose.ui.unit.dp
 import baby.freedom.mobile.chains.Chain
 import baby.freedom.mobile.data.AutoApproveStore
 import baby.freedom.mobile.data.DappGrantStore
+import baby.freedom.mobile.data.SwarmGrantStore
 import baby.freedom.mobile.wallet.WalletAccount
 import java.util.Date
 import kotlinx.coroutines.flow.map
@@ -213,3 +214,53 @@ internal const val DISCONNECT_FAILED = "Couldn't disconnect: the change couldn't
 
 /** One read of the auto-approve rules; [rules] null when the store couldn't be read. */
 private class RulesRead(val rules: List<AutoApproveRule>?)
+
+/** What a Swarm-connected site's line says: what it may do without asking (#120). */
+internal fun swarmSiteSummary(grant: SwarmGrantStore.Grant): String {
+    val always = listOfNotNull(
+        "publishes".takeIf { "publish" in grant.autoApprove },
+        "manages feeds".takeIf { "feeds" in grant.autoApprove },
+        "signs".takeIf { "signing" in grant.autoApprove },
+    )
+    return if (always.isEmpty()) {
+        "Asks before each upload and signature"
+    } else {
+        always.joinToString(", ").replaceFirstChar { it.uppercase() } + " without asking"
+    }
+}
+
+/**
+ * Sites connected to Swarm through `window.swarm` (#120), each with what
+ * it may do without asking, and Disconnect — which also drops its
+ * "always allow"s and feed access. [disconnectFailed] is the site whose
+ * Disconnect couldn't be saved; its line says so.
+ */
+@Composable
+internal fun SwarmSitesSection(
+    grants: List<SwarmGrantStore.Grant>,
+    onRevoke: (String) -> Unit,
+    disconnectFailed: String? = null,
+) {
+    SectionCard(title = "Connected to Swarm") {
+        grants.forEach { grant ->
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(modifier = Modifier.weight(1f).padding(vertical = 4.dp)) {
+                    Text(permissionOriginDisplay(grant.origin), fontWeight = FontWeight.Medium)
+                    Text(
+                        swarmSiteSummary(grant),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    if (disconnectFailed == grant.origin) {
+                        Text(
+                            DISCONNECT_FAILED,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error,
+                        )
+                    }
+                }
+                TextButton(onClick = { onRevoke(grant.origin) }) { Text("Disconnect") }
+            }
+        }
+    }
+}

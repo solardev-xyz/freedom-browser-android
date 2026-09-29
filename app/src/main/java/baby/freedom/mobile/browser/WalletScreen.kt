@@ -97,6 +97,8 @@ import baby.freedom.mobile.wallet.TokenRegistry
 import baby.freedom.mobile.wallet.TooManyAccountsException
 import baby.freedom.mobile.data.ChainStore
 import baby.freedom.mobile.data.DappGrantStore
+import baby.freedom.mobile.data.SwarmFeedStore
+import baby.freedom.mobile.data.SwarmGrantStore
 import baby.freedom.mobile.wallet.VaultProtection
 import baby.freedom.mobile.wallet.VaultUnreadableException
 import kotlinx.coroutines.CancellationException
@@ -349,6 +351,8 @@ fun WalletScreen(
     var openSite by remember { mutableStateOf<String?>(null) }
     // The connected site whose Disconnect couldn't be saved: its line says so, as the site's page does.
     var disconnectFailed by remember { mutableStateOf<String?>(null) }
+    val swarmGrants by remember(context) { SwarmGrantStore.get(context).all }.collectAsState(initial = emptyList())
+    var swarmDisconnectFailed by remember { mutableStateOf<String?>(null) }
     val allChains by chainStore.chains.collectAsState(initial = null)
     val walletChains = allChains?.filter { it.id in TokenRegistry.WALLET_CHAIN_IDS }
     val activeAddress = accountList?.active?.address
@@ -834,6 +838,19 @@ fun WalletScreen(
                     },
                 )
             }
+            // Sites connected through `window.swarm` (#120), likewise whatever the vault's state.
+            if (swarmGrants.isNotEmpty()) item("swarm-sites") {
+                SwarmSitesSection(
+                    grants = swarmGrants,
+                    disconnectFailed = swarmDisconnectFailed,
+                    onRevoke = { origin ->
+                        swarmDisconnectFailed = null
+                        scope.launch {
+                            if (!SwarmProviders.disconnect(context, origin)) swarmDisconnectFailed = origin
+                        }
+                    },
+                )
+            }
             // Shown whatever the vault's state once there's anything in it, like the connected sites.
             if (state is Vault.State.Locked || state is Vault.State.Unlocked || x402Allowances.isNotEmpty() || x402Payments.isNotEmpty()) {
                 item("x402") {
@@ -893,6 +910,8 @@ fun WalletScreen(
                     vault.remove(
                         alsoWipe = {
                             publishers.wipe()
+                            // The sites' feed access and records (#120): they name identities of this wallet.
+                            SwarmFeedStore.get(context).wipe()
                             history.wipeNow()
                             EthereumProviders.walletRemoved(context)
                             // Its site allowances and payment history (#140).
