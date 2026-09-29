@@ -430,8 +430,8 @@ class WalletSender internal constructor(
 
     /**
      * [resend]: these bytes were broadcast before and may already be out
-     * (Try again), so a node saying the nonce is used may be saying it
-     * about this very transaction.
+     * (Try again), so a node refusing them (the nonce is used, the
+     * balance is too low) may be saying it about this very transaction.
      */
     private suspend fun broadcast(quote: SendQuote, s: EthTransaction.Signed, resend: Boolean = false) {
         val from = quote.request.from.address
@@ -451,21 +451,28 @@ class WalletSender internal constructor(
                 follow(quote, s.hash)
                 return
             }
-            // On a resend, "nonce used" is exactly what a node says once
-            // the earlier try's transaction is mined — and one receipt read
-            // (rate limited, or from a node a block behind) can't rule that
-            // out. Calling it "Not sent" would let Review again pay twice,
-            // so follow its receipt instead: it lands, or ends Unconfirmed
-            // (Keep waiting, the explorer) — never a fresh signature.
-            if (resend && nonceUsed(e)) {
-                Log.i(TAG, "resend chain=$chainId nonce=${quote.tx.nonce}: nonce used, following ${s.hash}")
-                nonces.markSent(from, chainId, quote.tx.nonce)
+            val (message, uncertain) = broadcastFailure(e, quote)
+            // On a resend, a refusal is what a node says once the earlier
+            // try's transaction is mined: "nonce used", or — from a client
+            // that checks the balance or the fee before the nonce
+            // (Nethermind's BalanceTooLowFilter runs before its nonce
+            // filter) — "insufficient funds" for a balance the payment
+            // itself just spent. One receipt read (rate limited, or from a
+            // node a block behind) can't rule that out, and "Not sent"
+            // would let Review again pay twice, so no refusal is read as
+            // "Not sent" here: follow its receipt instead. It lands, or
+            // ends Unconfirmed (Keep waiting, the explorer) — never a
+            // fresh signature.
+            if (resend && !uncertain) {
+                Log.i(TAG, "resend chain=$chainId nonce=${quote.tx.nonce} refused, following ${s.hash}")
+                // A used nonce is used whoever used it; for any other
+                // refusal the chain's own count tells the next send.
+                if (nonceUsed(e)) nonces.markSent(from, chainId, quote.tx.nonce) else nonces.forget(from, chainId)
                 set(quote, SendStatus.Stage.Pending, s.hash)
                 follow(quote, s.hash)
                 return
             }
             nonces.forget(from, chainId)
-            val (message, uncertain) = broadcastFailure(e, quote)
             Log.i(TAG, "broadcast chain=$chainId nonce=${quote.tx.nonce} failed (uncertain=$uncertain)")
             fail(quote, message, uncertain)
             return

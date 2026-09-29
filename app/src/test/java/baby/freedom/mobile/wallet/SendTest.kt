@@ -385,6 +385,49 @@ class SendTest {
     }
 
     @Test
+    fun `on Try again insufficient funds may be this very transaction having spent the balance, so it's followed`() = runBlocking<Unit> {
+        val chain = FakeChain()
+        val s = sender(chain)
+        chain.on["eth_sendRawTransaction"] = { req ->
+            synchronized(chain.sent) { chain.sent += req.getJSONArray("params").getString(0) }
+            throw IOException("timed out")
+        }
+        chain.on["eth_getTransactionReceipt"] = { throw IOException("timed out") }
+        s.submit(s.prepare(request()), signer())
+        s.awaitStage { it is SendStatus.Stage.Failed }
+        // It mined, spending the balance; Nethermind checks the balance
+        // before the nonce, and the first receipt reads are rate limited.
+        chain.on["eth_sendRawTransaction"] = {
+            "\"error\":{\"code\":-32010,\"message\":\"insufficient funds for gas * price + value, balance 1, cost 2\"}"
+        }
+        var reads = 0
+        chain.on["eth_getTransactionReceipt"] = {
+            if (synchronized(chain) { reads++ } < 8) throw IOException("rate limited")
+            "\"result\":{\"status\":\"0x1\",\"blockNumber\":\"0x10\",\"gasUsed\":\"0x5208\",\"effectiveGasPrice\":\"0x1\"}"
+        }
+        s.retry()
+        s.awaitStage { it is SendStatus.Stage.Confirmed }
+        assertEquals(1, chain.sent.toSet().size)
+    }
+
+    @Test
+    fun `on Try again no refusal ends as not sent`() = runBlocking<Unit> {
+        for (refusal in listOf("insufficient funds for gas * price + value", "max fee per gas less than block base fee", "nonce too high")) {
+            val chain = FakeChain()
+            val s = sender(chain)
+            chain.on["eth_sendRawTransaction"] = { throw IOException("timed out") }
+            chain.on["eth_getTransactionReceipt"] = { throw IOException("timed out") }
+            s.submit(s.prepare(request()), signer())
+            s.awaitStage { it is SendStatus.Stage.Failed }
+            chain.on["eth_sendRawTransaction"] = { "\"error\":{\"code\":-32000,\"message\":\"$refusal\"}" }
+            chain.on.remove("eth_getTransactionReceipt")
+            s.retry()
+            val end = s.awaitStage { it == SendStatus.Stage.Unconfirmed || it is SendStatus.Stage.Failed }
+            assertEquals(refusal, SendStatus.Stage.Unconfirmed, end.stage)
+        }
+    }
+
+    @Test
     fun `a locked wallet fails before anything is sent, and one send runs at a time`() = runBlocking<Unit> {
         val chain = FakeChain()
         val s = sender(chain)
