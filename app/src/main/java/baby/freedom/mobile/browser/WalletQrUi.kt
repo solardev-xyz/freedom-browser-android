@@ -293,11 +293,12 @@ internal fun ScanPage(chains: List<Chain>, accounts: List<WalletAccount>, onBack
     var pasted by remember { mutableStateOf("") }
     // The same code seen frame after frame reads once while it stays in view (iOS's lastCode).
     val dedup = remember { ScanDedup() }
-    // A code still in front of the camera must not replace what was just
-    // pasted: not on its next frame, nor after the camera was stopped or
-    // missed it for a while. Clearing the paste field lets it read again.
+    // The codes still in front of the camera must not replace what was just
+    // pasted: not on their next frame, nor after the camera was stopped or
+    // missed them for a while. Clearing the paste field lets them read again
+    // on the next frame.
     fun readPasted() {
-        dedup.holdLast()
+        dedup.holdRecent()
         result = ScannedCode.parse(pasted)
     }
     // Held here, not in the scanner: the scanner sits in a LazyColumn item,
@@ -472,13 +473,17 @@ private fun ImageProxy.luminance(): Pair<ByteArray, Int> {
  * renewing while it stays there; once it has been out of view for
  * [goneAfterMs], pointing the camera at it again reads it again.
  *
- * A paste ([holdLast]) is stronger than that window. The window runs on
+ * A paste ([holdRecent]) is stronger than that window. The window runs on
  * the clock, which also runs while the camera is stopped (app in the
  * background, camera card scrolled away) or can't decode a frame (blur,
  * glare), so a code still in front of the camera would read as new again
- * and replace what was pasted. Instead, the code the camera last
- * reported is held back with no time limit, until the camera reads a
- * different code or [release] is called (the paste field was cleared).
+ * and replace what was pasted. Instead, the codes the camera was reading
+ * when the paste landed are held back with no time limit: its last code,
+ * and every other code it reported within [goneAfterMs] of that one (two
+ * codes in frame, or a neighbouring code the decoder picked up between
+ * frames of the first). A code outside that set replaces the paste;
+ * [release] (the paste field was cleared) lets the held codes read again
+ * on their very next frame, even if they never left view.
  */
 internal class ScanDedup(
     private val clock: () -> Long = SystemClock::elapsedRealtime,
@@ -486,31 +491,41 @@ internal class ScanDedup(
 ) {
     private var last: String? = null
     private var lastSeen = 0L
-    private var held: String? = null
+    /** Every code reported within [goneAfterMs] of the latest report, with when it was last seen. */
+    private val recent = HashMap<String, Long>()
+    private var held: Set<String> = emptySet()
 
     fun isNew(text: String): Boolean {
         val now = clock()
-        if (held != null) {
-            if (text == held) {
-                lastSeen = now
+        if (held.isNotEmpty()) {
+            if (text in held) {
+                note(text, now)
                 return false
             }
-            held = null
+            held = emptySet()
         }
         val seen = text == last && now - lastSeen in 0 until goneAfterMs
-        last = text
-        lastSeen = now
+        note(text, now)
         return !seen
     }
 
-    /** A result was pasted: the camera's last code mustn't replace it, however long it's gone. */
-    fun holdLast() {
-        held = last
+    private fun note(text: String, now: Long) {
+        last = text
+        lastSeen = now
+        recent[text] = now
+        recent.values.removeAll { now - it !in 0 until goneAfterMs }
     }
 
-    /** The paste was cleared: the camera's codes read by the time window alone again. */
+    /** A result was pasted: the codes the camera was reading mustn't replace it, however long they're gone. */
+    fun holdRecent() {
+        val latest = last ?: return
+        held = held + recent.keys + latest
+    }
+
+    /** The paste was cleared: the held codes read again at once, even while still in view. */
     fun release() {
-        held = null
+        if (last in held) last = null
+        held = emptySet()
     }
 }
 

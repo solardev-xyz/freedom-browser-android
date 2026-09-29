@@ -155,7 +155,7 @@ class WalletQrUiTest {
         var now = 1_000L
         val dedup = ScanDedup(clock = { now }, goneAfterMs = 2_000)
         assertTrue(dedup.isNew("A"))
-        dedup.holdLast() // the user pastes something else
+        dedup.holdRecent() // the user pastes something else
         // Camera stopped (Home, scrolled away) or blurred for far longer than the window.
         now += 60_000
         assertFalse(dedup.isNew("A"))
@@ -173,15 +173,70 @@ class WalletQrUiTest {
         var now = 1_000L
         val dedup = ScanDedup(clock = { now }, goneAfterMs = 2_000)
         assertTrue(dedup.isNew("A"))
-        dedup.holdLast()
+        dedup.holdRecent()
         now += 10_000
         assertFalse(dedup.isNew("A"))
+        dedup.release()
+        // A still in front of the camera: its very next frame reads it again,
+        // without first having to leave view for the window.
+        now += 100
+        assertTrue(dedup.isNew("A"))
+        // ...and then reads once while it stays in view, as usual.
+        now += 100
+        assertFalse(dedup.isNew("A"))
+        dedup.holdRecent()
         dedup.release()
         now += 10_000
         assertTrue(dedup.isNew("A"))
         // A paste before the camera read anything holds nothing back.
         val fresh = ScanDedup(clock = { now }, goneAfterMs = 2_000)
-        fresh.holdLast()
+        fresh.holdRecent()
         assertTrue(fresh.isNew("A"))
+    }
+
+    @Test
+    fun `a paste holds back every code the camera was reading, not just the last one`() {
+        var now = 1_000L
+        val dedup = ScanDedup(clock = { now }, goneAfterMs = 2_000)
+        // Two codes in frame: the decoder reads one, then the other.
+        assertTrue(dedup.isNew("A"))
+        now += 200
+        assertTrue(dedup.isNew("B"))
+        dedup.holdRecent()
+        // Neither replaces the paste, in any order, however long the camera was away.
+        now += 200
+        assertFalse(dedup.isNew("A"))
+        now += 200
+        assertFalse(dedup.isNew("B"))
+        now += 60_000
+        assertFalse(dedup.isNew("A"))
+        // A code that wasn't in view does replace it, and ends the hold.
+        now += 100
+        assertTrue(dedup.isNew("C"))
+        now += 100
+        assertTrue(dedup.isNew("A"))
+
+        // A code last read well before the camera's latest one isn't held.
+        val old = ScanDedup(clock = { now }, goneAfterMs = 2_000)
+        assertTrue(old.isNew("X"))
+        now += 5_000
+        assertTrue(old.isNew("Y"))
+        old.holdRecent()
+        now += 100
+        assertFalse(old.isNew("Y"))
+        now += 100
+        assertTrue(old.isNew("X"))
+
+        // Clearing the paste lets both held codes read again at once.
+        val both = ScanDedup(clock = { now }, goneAfterMs = 2_000)
+        assertTrue(both.isNew("A"))
+        now += 100
+        assertTrue(both.isNew("B"))
+        both.holdRecent()
+        both.release()
+        now += 100
+        assertTrue(both.isNew("B"))
+        now += 100
+        assertTrue(both.isNew("A"))
     }
 }
