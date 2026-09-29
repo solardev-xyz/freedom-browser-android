@@ -15,6 +15,9 @@ import android.os.PersistableBundle
 import android.os.SystemClock
 import android.provider.Settings
 import baby.freedom.mobile.wallet.Mnemonic
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import java.security.MessageDigest
 
 /**
@@ -79,6 +82,16 @@ internal object PhraseClipboard {
     private val main = Handler(Looper.getMainLooper())
     private var pendingHash: ByteArray? = null
 
+    private val _copied = MutableStateFlow(false)
+
+    /**
+     * Whether a phrase this process copied is still owed its clear: true
+     * from [copy] until the deadline's [clearIfDue] (or a stale deadline)
+     * takes it off. What the page's Copy button shows as "Copied", so it
+     * goes back to "Copy" the moment the words are gone, not later.
+     */
+    val copied: StateFlow<Boolean> = _copied.asStateFlow()
+
     fun copy(context: Context, words: List<String>, now: Long = SystemClock.elapsedRealtime()) {
         val app = context.applicationContext
         val clipboard = app.getSystemService(ClipboardManager::class.java) ?: return
@@ -86,6 +99,7 @@ internal object PhraseClipboard {
         clip.description.extras = PersistableBundle().apply { putBoolean(EXTRA_IS_SENSITIVE, true) }
         clipboard.setPrimaryClip(clip)
         pendingHash = phraseHash(words)
+        _copied.value = true
         val dueAt = now + TTL_MS
         prefs(app).edit().putLong(KEY_DUE_AT, dueAt).putInt(KEY_BOOT, bootCount(app)).commit()
         main.removeCallbacksAndMessages(null)
@@ -162,6 +176,7 @@ internal object PhraseClipboard {
 
     private fun forget(app: Context) {
         pendingHash = null
+        _copied.value = false
         main.removeCallbacksAndMessages(null)
         prefs(app).edit().remove(KEY_DUE_AT).commit()
         runCatching { app.getSystemService(AlarmManager::class.java).cancel(alarmIntent(app)) }

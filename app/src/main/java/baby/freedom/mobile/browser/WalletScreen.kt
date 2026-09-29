@@ -857,10 +857,11 @@ private fun RecoveryPhrasePage(
     var words by remember { mutableStateOf<List<String>?>(null) }
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
-    var copied by remember { mutableStateOf(false) }
+    // Follows the clipboard itself, so the button says "Copy" again as
+    // soon as the minute is up and the words have been taken off.
+    val copied by PhraseClipboard.copied.collectAsState()
     val hide = {
         words = null
-        copied = false
     }
 
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -940,7 +941,6 @@ private fun RecoveryPhrasePage(
                             OutlinedButton(
                                 onClick = {
                                     PhraseClipboard.copy(context, shown)
-                                    copied = true
                                 },
                                 modifier = Modifier.weight(1f),
                             ) {

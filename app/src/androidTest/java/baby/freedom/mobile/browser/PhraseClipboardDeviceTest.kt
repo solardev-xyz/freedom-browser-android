@@ -44,8 +44,15 @@ class PhraseClipboardDeviceTest {
         val now = SystemClock.elapsedRealtime()
         PhraseClipboard.copy(a, words, now)
         assertTrue(clipboard(a).hasPrimaryClip())
+        assertTrue(PhraseClipboard.copied.value)
+        // Not yet due: still on the clipboard, button still "Copied".
+        PhraseClipboard.clearIfDue(a, now + PhraseClipboard.TTL_MS - 1)
+        assertTrue(clipboard(a).hasPrimaryClip())
+        assertTrue(PhraseClipboard.copied.value)
         PhraseClipboard.clearIfDue(a, now + PhraseClipboard.TTL_MS)
         assertFalse(clipboard(a).hasPrimaryClip())
+        // The page's Copy button follows this back to "Copy" (R3-F1).
+        assertFalse(PhraseClipboard.copied.value)
     }
 
     @Test
