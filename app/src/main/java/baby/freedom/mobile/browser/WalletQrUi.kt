@@ -510,9 +510,23 @@ internal class ScanDedup(
     /** Every code reported within [goneAfterMs] of the latest report, with when it was last seen. */
     private val recent = HashMap<String, Long>()
     private var held: Set<String> = emptySet()
+    /**
+     * The codes [release] let go of: each reads once on its next frame. The
+     * camera's own history ([last], [recent]) is kept, so a later paste
+     * still holds them even if nothing was decoded in between.
+     */
+    private var readOnce: Set<String> = emptySet()
 
     fun isNew(text: String): Boolean {
         val now = clock()
+        if (text in readOnce) {
+            readOnce = readOnce - text
+            note(text, now)
+            shown = text
+            return true
+        }
+        // Another code decoded: the camera has moved on, and the released codes go back to the normal rules.
+        readOnce = emptySet()
         if (held.isNotEmpty()) {
             if (text in held) {
                 note(text, now)
@@ -541,17 +555,19 @@ internal class ScanDedup(
     /** A result was pasted: the codes the camera was reading mustn't replace it, however long they're gone. */
     fun holdRecent() {
         val latest = last ?: return
-        held = held + recent.keys + latest
+        held = held + readOnce + recent.keys + latest
+        readOnce = emptySet()
         shown = null
     }
 
-    /** The paste was cleared: the held codes read again at once, even while still in view. */
+    /**
+     * The paste was cleared: the held codes read again on their very next
+     * frame, even while still in view. What the camera read last is not
+     * forgotten, so pasting again before it decodes anything holds the
+     * same codes back.
+     */
     fun release() {
-        if (last in held) {
-            last = null
-            streak = 0
-        }
-        recent.keys.removeAll(held)
+        readOnce = readOnce + held
         held = emptySet()
     }
 }

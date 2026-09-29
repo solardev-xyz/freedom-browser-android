@@ -199,6 +199,50 @@ class WalletQrUiTest {
     }
 
     @Test
+    fun `pasting again after clearing a paste still holds back the camera's codes`() {
+        var now = 1_000L
+        val dedup = ScanDedup(clock = { now }, goneAfterMs = 2_000)
+        assertTrue(dedup.isNew("A"))
+        now += 200
+        assertTrue(dedup.isNew("B"))
+        dedup.holdRecent() // paste P
+        now += 5_000
+        dedup.release() // clear it
+        now += 5_000
+        dedup.holdRecent() // paste Q, with no camera frame in between
+        // Back in front of the camera much later: neither replaces Q.
+        now += 5_000
+        assertFalse(dedup.isNew("A"))
+        now += 100
+        assertFalse(dedup.isNew("B"))
+        // Clearing Q lets both read again on their next frame, as before,
+        // and then no more while the decoder alternates between them.
+        dedup.release()
+        now += 100
+        assertTrue(dedup.isNew("A"))
+        now += 100
+        assertTrue(dedup.isNew("B"))
+        repeat(5) {
+            now += 100
+            assertFalse(dedup.isNew("A"))
+            now += 100
+            assertFalse(dedup.isNew("B"))
+        }
+        // A released code is let go once only: a code outside the released
+        // set ends it, and the rest go back to the normal rules.
+        val one = ScanDedup(clock = { now }, goneAfterMs = 2_000)
+        assertTrue(one.isNew("A"))
+        now += 100
+        assertTrue(one.isNew("B"))
+        one.holdRecent()
+        one.release()
+        now += 100
+        assertTrue(one.isNew("C"))
+        now += 100
+        assertFalse(one.isNew("A")) // seen moments ago, not shown, one frame
+    }
+
+    @Test
     fun `a paste holds back every code the camera was reading, not just the last one`() {
         var now = 1_000L
         val dedup = ScanDedup(clock = { now }, goneAfterMs = 2_000)
