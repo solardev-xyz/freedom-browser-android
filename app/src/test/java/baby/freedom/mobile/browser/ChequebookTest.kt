@@ -105,6 +105,22 @@ class ChequebookTest {
                 ),
             ),
         )
+        // Nor is one the app stopped waiting for (the node is still on it).
+        assertEquals(
+            "The deposit didn't report back: it may already have been sent (the node is still sending it). " +
+                "The chequebook's balance shows it once it confirms",
+            spendStatusText(
+                StampClient.Spend.Failed(
+                    StampClient.Kind.Deposit, null, StampClient.stillSendingMessage(StampClient.Kind.Deposit),
+                ),
+            ),
+        )
+        assertEquals(
+            "Buying the stamp failed: The node is still sending the transactions. The list shows the stamp once they confirm.",
+            spendStatusText(
+                StampClient.Spend.Failed(StampClient.Kind.Buy, null, StampClient.stillSendingMessage(StampClient.Kind.Buy)),
+            ),
+        )
         // Its outcome keeps the node page's entries reachable with the node off, as a stamp's does.
         assertTrue(stampsEntryShown(light.copy(status = NodeStatus.Stopped), StampClient.Spend.Done(StampClient.Kind.Deposit, null)))
     }

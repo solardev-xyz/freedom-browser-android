@@ -78,6 +78,9 @@ class SwarmNodeTest {
         /** Run inside each spend, in place of ant's transactions. */
         @Volatile var onSpend: (String) -> String = { it }
         override fun storageStatus(handle: Long) = storageStatusJson
+        /** What [settlementStatus] answers: whether ant has set up a chequebook. */
+        @Volatile var settlementJson = """{"enabled":true,"chequebook":"0x${"cb".repeat(20)}"}"""
+        override fun settlementStatus(handle: Long) = settlementJson
         override fun storageQuote(handle: Long, gnosisRpc: String, depth: Int, days: Long): String {
             calls += "quote:$handle:$gnosisRpc:$depth:$days"
             return """{"depth":$depth}"""
@@ -312,11 +315,19 @@ class SwarmNodeTest {
         assertEquals("light", light.toString())
     }
 
-    private fun lightNode(ops: FakeOps, clock: () -> Long = { System.nanoTime() / 1_000_000 }): SwarmNode {
+    private fun lightNode(
+        ops: FakeOps,
+        dataDir: String = config.dataDir,
+        clock: () -> Long = { System.nanoTime() / 1_000_000 },
+    ): SwarmNode {
         ops.releaseSeed.countDown()
         ops.releaseInit.countDown()
         ops.ethAddress = "0x" + TestTx.OWNER.uppercase()
-        val node = SwarmNode(config.copy(mode = { SwarmNode.Mode.light("https://rpc.example/key123") }), ops, clock)
+        val node = SwarmNode(
+            config.copy(dataDir = dataDir, mode = { SwarmNode.Mode.light("https://rpc.example/key123") }),
+            ops,
+            clock,
+        )
         node.start()
         awaitStatus(node, NodeStatus.Running)
         return node
@@ -525,7 +536,7 @@ class SwarmNodeTest {
     fun aDepositThatEndsWithoutAnAnswerBlocksAnotherUntilTheChequebookShowsIt() {
         val ops = FakeOps()
         var now = 1_000_000L
-        val node = lightNode(ops) { now }
+        val node = lightNode(ops, clock = { now })
         ops.chequebookHex = chequebook
         ops.walletPlur = milliBzz.multiply(java.math.BigInteger.TEN).toString()
         ops.chequebookBalancePlur = milliBzz.toString()
@@ -552,6 +563,74 @@ class SwarmNodeTest {
         val third = assertThrows(RuntimeException::class.java) { node.depositChequebook(chequebook, milliBzz) }
         assertTrue(third.message!!.startsWith(SwarmNode.DEPOSIT_MAYBE_SENT))
         assertEquals(3, posts())
+        node.dispose()
+    }
+
+    @Test
+    fun theHoldAfterAnUnansweredDepositOutlivesTheNodeProcess() {
+        val dir = java.nio.file.Files.createTempDirectory("swarmnode-hold").toFile()
+        try {
+            var now = 1_000_000L
+            fun funded(ops: FakeOps) = ops.apply {
+                chequebookHex = chequebook
+                walletPlur = milliBzz.multiply(java.math.BigInteger.TEN).toString()
+                chequebookBalancePlur = milliBzz.toString()
+            }
+            val ops = funded(FakeOps())
+            val node = lightNode(ops, dir.path, clock = { now })
+            ops.onDeposit = { SwarmNode.GatewayAnswer(504, """{"code":504,"message":"timed out"}""") }
+            assertThrows(RuntimeException::class.java) { node.depositChequebook(chequebook, milliBzz) }
+            // Turning the node off kills the :node process: nothing in memory survives.
+            node.dispose()
+
+            // A fresh node on the same data dir still holds the retry, with no POST.
+            val ops2 = funded(FakeOps())
+            val again = lightNode(ops2, dir.path, clock = { now + 60_000 })
+            val held = assertThrows(IllegalStateException::class.java) { again.depositChequebook(chequebook, milliBzz) }
+            assertTrue(held.message!!, held.message!!.startsWith("an earlier deposit may still be on its way"))
+            assertEquals(0, ops2.calls.count { it.startsWith("gateway:POST") })
+            again.dispose()
+
+            // Once the balance shows it, the hold lifts, on disk too.
+            val ops3 = funded(FakeOps()).apply { chequebookBalancePlur = milliBzz.shiftLeft(1).toString() }
+            val third = lightNode(ops3, dir.path, clock = { now + 120_000 })
+            third.depositChequebook(chequebook, milliBzz)
+            assertEquals(1, ops3.calls.count { it.startsWith("gateway:POST") })
+            third.dispose()
+            assertFalse(File(dir, "unconfirmed-deposit.json").exists())
+        } finally {
+            dir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun aBuyThatFailsBeforeAntSetUpAChequebookLeavesTheGatewayAlone() {
+        val ops = FakeOps()
+        val node = lightNode(ops)
+        // Refused before anything went on-chain (no xDAI): ant has no chequebook.
+        ops.settlementJson = """{"enabled":false,"chequebook":null}"""
+        ops.onSpend = { throw RuntimeException("insufficient xDAI") }
+        assertThrows(RuntimeException::class.java) {
+            node.buyStamp(17, java.math.BigInteger.TEN, false, java.math.BigInteger.ONE)
+        }
+        assertEquals(listOf("light:https://rpc.example/key123"), ops.gatewayModes)
+        assertFalse(ops.calls.contains("stopGateway:1"))
+        // Nor does one refused because another payment is running.
+        val otherPayment = java.util.concurrent.CountDownLatch(1)
+        val running = java.util.concurrent.CountDownLatch(1)
+        ops.onSpend = { running.countDown(); otherPayment.await(5, TimeUnit.SECONDS); it }
+        val first = Thread { runCatching { node.buyStamp(17, java.math.BigInteger.TEN, false, java.math.BigInteger.ONE) } }
+        first.start()
+        assertTrue(running.await(5, TimeUnit.SECONDS))
+        val refused = assertThrows(IllegalStateException::class.java) {
+            node.buyStamp(17, java.math.BigInteger.TEN, false, java.math.BigInteger.ONE)
+        }
+        assertEquals("another payment is already running", refused.message)
+        assertEquals(listOf("light:https://rpc.example/key123"), ops.gatewayModes)
+        otherPayment.countDown()
+        first.join(5_000)
+        assertFalse(ops.calls.contains("stopGateway:1"))
+        assertEquals(NodeStatus.Running, node.state.value.status)
         node.dispose()
     }
 

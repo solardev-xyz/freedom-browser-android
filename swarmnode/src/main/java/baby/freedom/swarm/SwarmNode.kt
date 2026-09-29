@@ -38,10 +38,14 @@ import kotlinx.coroutines.withContext
 class SwarmNode internal constructor(
     private val config: Config,
     private val ops: NodeOps,
-    /** A monotonic clock in ms, for how long an unconfirmed deposit blocks another. */
+    /**
+     * A monotonic clock in ms, for how long an unconfirmed deposit blocks
+     * another. The hold is persisted, so outside tests it's one every
+     * process reads alike: time since boot.
+     */
     private val clock: () -> Long = { System.nanoTime() / 1_000_000 },
 ) {
-    constructor(config: Config) : this(config, NodeOps.Native)
+    constructor(config: Config) : this(config, NodeOps.Native, { android.os.SystemClock.elapsedRealtime() })
 
     /** The native calls [SwarmNode] makes; swapped for a fake in tests. */
     internal interface NodeOps {
@@ -55,6 +59,7 @@ class SwarmNode internal constructor(
         fun stopGateway(handle: Long)
         fun shutdown(handle: Long)
         fun storageStatus(handle: Long): String
+        fun settlementStatus(handle: Long): String
         fun storageQuote(handle: Long, gnosisRpc: String, depth: Int, days: Long): String
         fun storageTopupQuote(handle: Long, gnosisRpc: String, days: Long): String
         fun storageValidity(handle: Long, gnosisRpc: String): String
@@ -81,6 +86,7 @@ class SwarmNode internal constructor(
             override fun stopGateway(handle: Long) = AntNative.stopGateway(handle)
             override fun shutdown(handle: Long) = AntNative.shutdown(handle)
             override fun storageStatus(handle: Long) = AntNative.storageStatus(handle)
+            override fun settlementStatus(handle: Long) = AntNative.settlementStatus(handle)
             override fun storageQuote(handle: Long, gnosisRpc: String, depth: Int, days: Long) =
                 AntNative.storageQuote(handle, gnosisRpc, depth, days)
             override fun storageTopupQuote(handle: Long, gnosisRpc: String, days: Long) =
@@ -413,8 +419,13 @@ class SwarmNode internal constructor(
                 // gateway then, or the chequebook (and a deposit into it,
                 // #117) waits for the next node restart. Also when the buy
                 // fails: it can set up the chequebook and then fail on the
-                // batch itself.
-                if (gatewayChequebook() == "") reloadGateway(h, mode = synchronized(lock) { handleMode })
+                // batch itself. Only then, though: a buy that failed before
+                // (no xDAI, another payment running) leaves ant with no
+                // chequebook, and restarting the gateway for it would only
+                // interrupt browsing.
+                if (antHasChequebook(h) && gatewayChequebook() == "") {
+                    reloadGateway(h, mode = synchronized(lock) { handleMode })
+                }
             }
         }
 
@@ -463,6 +474,7 @@ class SwarmNode internal constructor(
             check(wallet >= amountPlur) { "the node holds only ${formatBzz(wallet)} xBZZ" }
             val before = chequebookBalance()
             synchronized(lock) {
+                loadUnconfirmedDeposit()
                 unconfirmedDeposit?.let { u ->
                     // A deposit that ended without an answer may still be on
                     // its way, and `/wallet` doesn't count a pending transfer:
@@ -471,7 +483,7 @@ class SwarmNode internal constructor(
                     val landed = u.chequebook == want && u.balanceBefore != null && before != null &&
                         before >= u.balanceBefore + u.amountPlur
                     if (landed || u.chequebook != want || clock() - u.atMs !in 0 until UNCONFIRMED_DEPOSIT_HOLD_MS) {
-                        unconfirmedDeposit = null
+                        setUnconfirmedDeposit(null)
                     } else {
                         throw IllegalStateException(
                             "an earlier deposit may still be on its way; check the chequebook's balance, " +
@@ -488,7 +500,7 @@ class SwarmNode internal constructor(
                 runCatching { JSONObject(a.body).optString("message") }.getOrNull()?.takeIf { it.isNotBlank() }
             }
             if (depositMaybeSent(answer, message)) {
-                synchronized(lock) { unconfirmedDeposit = UnconfirmedDeposit(want, before, amountPlur, clock()) }
+                synchronized(lock) { setUnconfirmedDeposit(UnconfirmedDeposit(want, before, amountPlur, clock())) }
                 throw RuntimeException(
                     "$DEPOSIT_MAYBE_SENT (${message ?: "the node's gateway didn't answer"}). " +
                         "Check the chequebook's balance before depositing again",
@@ -513,8 +525,60 @@ class SwarmNode internal constructor(
         val atMs: Long,
     )
 
-    /** The last deposit that may or may not have gone out. Guarded by [lock]. */
+    /**
+     * The last deposit that may or may not have gone out. Guarded by
+     * [lock]. Kept in [unconfirmedDepositFile] too: the `:node` process
+     * dies when the node is turned off, and a toggle off and on mustn't
+     * lift the hold.
+     */
     private var unconfirmedDeposit: UnconfirmedDeposit? = null
+    private var unconfirmedDepositLoaded = false
+    private val unconfirmedDepositFile get() = File(config.dataDir, UNCONFIRMED_DEPOSIT_FILE)
+
+    /** Reads the persisted hold once, off the main thread (the first deposit). Under [lock]. */
+    private fun loadUnconfirmedDeposit() {
+        if (unconfirmedDepositLoaded) return
+        unconfirmedDepositLoaded = true
+        unconfirmedDeposit = runCatching {
+            val o = JSONObject(unconfirmedDepositFile.readText())
+            UnconfirmedDeposit(
+                chequebook = normalizeAddress(o.getString("chequebook"))!!,
+                balanceBefore = o.optString("balanceBefore").takeIf { it.isNotEmpty() }?.let(::BigInteger),
+                amountPlur = BigInteger(o.getString("amountPlur")),
+                atMs = o.getLong("atMs"),
+            )
+        }.getOrNull()
+    }
+
+    /** Sets (null: lifts) the hold, on disk too. Under [lock]. */
+    private fun setUnconfirmedDeposit(u: UnconfirmedDeposit?) {
+        unconfirmedDeposit = u
+        unconfirmedDepositLoaded = true
+        runCatching {
+            if (u == null) {
+                unconfirmedDepositFile.delete()
+            } else {
+                val json = JSONObject()
+                    .put("chequebook", u.chequebook)
+                    .put("balanceBefore", u.balanceBefore?.toString() ?: "")
+                    .put("amountPlur", u.amountPlur.toString())
+                    .put("atMs", u.atMs)
+                    .toString()
+                val tmp = File(config.dataDir, "$UNCONFIRMED_DEPOSIT_FILE.tmp")
+                tmp.writeText(json)
+                check(tmp.renameTo(unconfirmedDepositFile))
+            }
+        }.onFailure { Log.w(TAG, "couldn't persist the deposit hold: ${it.javaClass.simpleName}") }
+    }
+
+    /**
+     * Whether ant has a chequebook set up for this account on this device
+     * (its persisted association, which the gateway reads only when it
+     * starts). If ant can't say, assume it may: a needless reload only
+     * interrupts browsing, a missing one strands the chequebook.
+     */
+    private fun antHasChequebook(h: Long): Boolean =
+        runCatching { JSONObject(ops.settlementStatus(h)).getBoolean("enabled") }.getOrDefault(true)
 
     /** What the gateway's chequebook holds, in PLUR; null when it couldn't say. */
     private fun chequebookBalance(): BigInteger? =
@@ -642,6 +706,7 @@ class SwarmNode internal constructor(
         }
 
         /** How a deposit that may have gone out after all ([depositMaybeSent]) starts its error. */
+        private const val UNCONFIRMED_DEPOSIT_FILE = "unconfirmed-deposit.json"
         const val DEPOSIT_MAYBE_SENT = "it may already have been sent"
 
         /** [address] as 40 lowercase hex without `0x`, or null if it isn't an address. */

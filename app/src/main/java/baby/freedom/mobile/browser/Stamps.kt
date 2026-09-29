@@ -3,6 +3,7 @@ package baby.freedom.mobile.browser
 import android.util.Log
 import baby.freedom.mobile.node.INodeService
 import baby.freedom.swarm.SpendPermit
+import baby.freedom.swarm.SwarmNode
 import java.math.BigDecimal
 import java.math.BigInteger
 import java.math.RoundingMode
@@ -308,11 +309,7 @@ internal object StampClient {
                     // Past the deadline the node is most likely still on it.
                     is Answer.Failed -> Spend.Failed(
                         kind, batchId,
-                        when {
-                            a.message != TIMED_OUT -> a.message
-                            kind == Kind.Deposit -> "The node is still sending the deposit. The chequebook's balance shows it once it confirms."
-                            else -> "The node is still sending the transactions. The list shows the stamp once they confirm."
-                        },
+                        if (a.message != TIMED_OUT) a.message else stillSendingMessage(kind),
                     )
                 }
             } catch (t: Throwable) {
@@ -322,6 +319,18 @@ internal object StampClient {
             _spend.compareAndSet(running, outcome)
         }
         return true
+    }
+
+    /**
+     * The outcome of a spend that outlived [SPEND_TIMEOUT_MS]: the node is
+     * most likely still on it. A deposit's leads with
+     * [SwarmNode.DEPOSIT_MAYBE_SENT], so it reads as "didn't report back",
+     * not as a failure (#117).
+     */
+    internal fun stillSendingMessage(kind: Kind): String = when (kind) {
+        Kind.Deposit -> "${SwarmNode.DEPOSIT_MAYBE_SENT} (the node is still sending it). " +
+            "The chequebook's balance shows it once it confirms"
+        else -> "The node is still sending the transactions. The list shows the stamp once they confirm."
     }
 
     private const val NOT_BOUND = "The Swarm node isn't running"
