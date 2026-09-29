@@ -6,6 +6,7 @@ import baby.freedom.mobile.chains.rpc.ChainDataRouter
 import baby.freedom.mobile.chains.rpc.ChainRpcException
 import baby.freedom.mobile.chains.rpc.ChainTrust
 import baby.freedom.mobile.chains.rpc.WalletRpc
+import baby.freedom.mobile.ens.hexToBytes
 import baby.freedom.mobile.ens.toHex
 import java.math.BigInteger
 import kotlinx.coroutines.CancellationException
@@ -20,6 +21,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
@@ -97,21 +99,30 @@ object Recipients {
 }
 
 /**
- * A site's `eth_sendTransaction` (#110): the site that asked ([origin],
- * its provider origin key), the call data it wants sent, and the gas
- * limit it named, if any.
+ * A transaction someone else composed, for the wallet to send: a site's
+ * `eth_sendTransaction` (#110), with the site that asked ([origin], its
+ * provider origin key) — or, with a null [origin], desktop Freedom's over
+ * a scanned OpenLV pairing code (#113), which can't say who made the code.
+ * [data] is the call data exactly as asked, and [gasLimit] the gas limit
+ * it named, if any.
  */
-class DappCall(val origin: String, val data: ByteArray, val gasLimit: BigInteger?) {
+class DappCall(val origin: String?, val data: ByteArray, val gasLimit: BigInteger?) {
     init {
         require(gasLimit == null || gasLimit.signum() > 0) { "gas limit" }
     }
+
+    // By content, so a send read back from the journal equals the one that was written.
+    override fun equals(other: Any?): Boolean =
+        other is DappCall && origin == other.origin && data.contentEquals(other.data) && gasLimit == other.gasLimit
+
+    override fun hashCode(): Int = (origin.hashCode() * 31 + data.contentHashCode()) * 31 + gasLimit.hashCode()
 }
 
 /**
  * What the user asked for: [amount] base units of [token] from [from] to
- * [to] on [chain] — or, with [dapp], what a site asked the wallet to
- * send: [amount] of the native currency (which may be none) and the
- * site's call data to [to].
+ * [to] on [chain] — or, with [dapp], a transaction someone else composed:
+ * [amount] of the native currency (which may be none) and its call data
+ * to [to].
  */
 data class SendRequest(
     val chain: Chain,
@@ -127,15 +138,15 @@ data class SendRequest(
         if (dapp == null) {
             require(amount.signum() > 0) { "nothing to send" }
         } else {
-            require(token.isNative) { "a site's transaction carries the native currency" }
-            require(amount.signum() >= 0) { "negative value" }
+            require(token.isNative) { "a composed transaction carries the native currency" }
+            require(amount.signum() >= 0 && amount.bitLength() <= 256) { "a value out of range" }
         }
     }
 
     /**
      * What goes on chain: native passes straight through; an ERC-20 is a
      * call to its contract with `transfer(to, amount)` and no value; a
-     * site's transaction is its own call data, as it asked.
+     * composed one ([dapp]) is its own call data, as it asked.
      */
     fun call(): Triple<String, BigInteger, ByteArray> = when {
         dapp != null -> Triple(to, amount, dapp.data)
@@ -766,6 +777,44 @@ class WalletSender internal constructor(
             }
         }
         return Submit.STARTED
+    }
+
+    /** How far a [submitAndAwaitBroadcast] got. */
+    sealed interface Broadcast {
+        /** A node took it: [hash] is on its way (the wallet page follows it to a receipt). */
+        data class Sent(val hash: String) : Broadcast
+
+        /** It didn't go out — or, with [mayHaveGone], can't be told (the wallet page offers Try again). */
+        data class Failed(val message: String, val mayHaveGone: Boolean) : Broadcast
+
+        /** [Submit.BUSY]: another send is still unresolved; nothing signed. */
+        data object Busy : Broadcast
+
+        /** [Submit.STALE]: nothing signed, price it again. */
+        data object Stale : Broadcast
+    }
+
+    /**
+     * [submit], then wait until the transaction has gone out (or hasn't):
+     * for a transaction someone else asked for and waits on the hash of
+     * (desktop Freedom over OpenLV, #113). The send is the wallet's own
+     * from here on, followed to its receipt and journalled like any other.
+     */
+    suspend fun submitAndAwaitBroadcast(quote: SendQuote, sign: (EthTransaction) -> EthTransaction.Signed): Broadcast {
+        when (submit(quote, sign)) {
+            Submit.BUSY -> return Broadcast.Busy
+            Submit.STALE -> return Broadcast.Stale
+            Submit.STARTED -> Unit
+        }
+        val s = status.first { it?.quote !== quote || (it.stage != SendStatus.Stage.Signing && it.stage != SendStatus.Stage.Broadcasting) }
+        if (s?.quote !== quote) {
+            // Stopped on the phone (Stop tracking, or the wallet removed) while it was going out.
+            return Broadcast.Failed("The send was stopped on the phone while it was going out; it may still go through.", true)
+        }
+        return when (val stage = s.stage) {
+            is SendStatus.Stage.Failed -> Broadcast.Failed(stage.message, stage.mayHaveGone)
+            else -> s.hash?.let { Broadcast.Sent(it) } ?: Broadcast.Failed("No transaction hash came back.", true)
+        }
     }
 
     /** Whether [submit] would answer [Submit.BUSY] to any quote right now. */

@@ -1,0 +1,22 @@
+<!doctype html>
+<!--
+  Host page for the hidden WebView of WebViewOpenLvEngine (#113). Never
+  shown: it only gives shim.js and the openlv SDK a JS runtime with
+  WebSocket, WebRTC and crypto.subtle. Served by WebViewAssetLoader from
+  https://appassets.androidplatform.net, a secure context, so the SDK can
+  load as the same ES module desktop Freedom vendors.
+
+  Signaling is wss: only; cleartext ws: just to the phone itself (the
+  test harness's broker, through adb reverse), never to a LAN host.
+-->
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'none'; script-src 'self'; connect-src wss: ws://127.0.0.1:* ws://localhost:*">
+  <title>Freedom openlv session</title>
+</head>
+<body>
+  <script type="module" src="./shim.js"></script>
+</body>
+</html>

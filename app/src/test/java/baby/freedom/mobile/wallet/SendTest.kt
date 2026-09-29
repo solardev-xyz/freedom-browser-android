@@ -12,6 +12,7 @@ import baby.freedom.mobile.chains.rpc.ChainRpcException
 import baby.freedom.mobile.chains.rpc.RpcTransport
 import baby.freedom.mobile.chains.rpc.WalletRpc
 import baby.freedom.mobile.ens.hexToBytes
+import baby.freedom.mobile.ens.toHex
 import java.io.IOException
 import java.math.BigInteger
 import kotlinx.coroutines.CoroutineScope
@@ -558,6 +559,70 @@ class SendTest {
             EthTransaction.Fees.Legacy(BigInteger.valueOf(5_000)),
             GasOracle.replacing(EthTransaction.Fees.Legacy(BigInteger.valueOf(5_000)), EthTransaction.Fees.Eip1559(BigInteger.valueOf(800), BigInteger.valueOf(80))),
         )
+    }
+
+    // ---- a transaction desktop Freedom composed (#113) ----
+
+    private fun call(data: String = "0xa9059cbb", value: Long = 0) =
+        SendRequest(gnosis, xdai, from, xbzz.address!!, BigInteger.valueOf(value), DappCall(null, data.hexToBytes(), null))
+
+    @Test
+    fun `a composed call goes out as asked, value zero allowed, and only in the native currency`() = runBlocking<Unit> {
+        val chain = FakeChain()
+        chain.estimate = 50_000
+        val s = sender(chain)
+        val quote = s.prepare(call())
+        assertEquals(xbzz.address, quote.tx.to)
+        assertEquals(BigInteger.ZERO, quote.tx.value)
+        assertEquals("a9059cbb", quote.tx.data.joinToString("") { "%02x".format(it) })
+        assertEquals(BigInteger.valueOf(60_000), quote.tx.gasLimit)
+        // A plain value transfer with no data is a composed request too.
+        assertEquals(0, s.prepare(call(data = "0x", value = 5)).tx.data.size)
+        assertTrue(runCatching { SendRequest(gnosis, xbzz, from, to, BigInteger.ONE, DappCall(null, ByteArray(0), null)) }.isFailure)
+        // The wallet's own sends still need something to send.
+        assertTrue(runCatching { request(amount = 0) }.isFailure)
+    }
+
+    @Test
+    fun `a composed call a contract would refuse says so without calling it a transfer`() {
+        val e = WalletSender.estimateFailure(ChainRpcException.Rpc(3, "execution reverted: nope", null), call())
+        assertEquals("The contract would refuse this transaction: nope", e.message)
+    }
+
+    @Test
+    fun `submitAndAwaitBroadcast answers with the hash once a node took it, or why not`() = runBlocking<Unit> {
+        val chain = FakeChain()
+        val s = sender(chain)
+        val quote = s.prepare(call())
+        val sent = s.submitAndAwaitBroadcast(quote, signer()) as WalletSender.Broadcast.Sent
+        assertEquals(quote.tx.sign(key.copyOf(), from.address).hash, sent.hash)
+        // Still unresolved (no receipt yet): the next is refused, nothing signed.
+        assertEquals(WalletSender.Broadcast.Busy, s.submitAndAwaitBroadcast(s.prepare(call()), signer()))
+        s.discard()
+
+        chain.on["eth_sendRawTransaction"] = { """"error":{"code":-32000,"message":"insufficient funds for gas * price + value"}""" }
+        val refused = s.submitAndAwaitBroadcast(s.prepare(call()), signer()) as WalletSender.Broadcast.Failed
+        assertFalse(refused.mayHaveGone)
+        s.acknowledge()
+
+        val old = WalletSender(chain.rpc(), scope, clock = { System.currentTimeMillis() + WalletSender.QUOTE_TTL_MS }, pollMs = 10, confirmTimeoutMs = 300)
+        old.awaitRestored()
+        assertEquals(WalletSender.Broadcast.Stale, old.submitAndAwaitBroadcast(quote, signer()))
+    }
+
+    @Test
+    fun `a composed call that may have gone out survives the process with its data`() = runBlocking<Unit> {
+        val chain = FakeChain()
+        val s = sender(chain, journal = FileSendJournal(journalFile()))
+        chain.on["eth_sendRawTransaction"] = { throw IOException("timed out") }
+        chain.on["eth_getTransactionReceipt"] = { throw IOException("timed out") }
+        val failed = s.submitAndAwaitBroadcast(s.prepare(call(data = "0xa9059cbb00")), signer()) as WalletSender.Broadcast.Failed
+        assertTrue(failed.mayHaveGone)
+        val again = sender(chain, journal = FileSendJournal(journalFile()))
+        val restored = again.status.value?.quote?.request?.dapp!!
+        assertEquals("a9059cbb00", restored.data.toHex())
+        assertEquals(null, restored.origin)
+        assertEquals(s.status.value, again.status.value)
     }
 
     @Test

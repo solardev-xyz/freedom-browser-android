@@ -576,6 +576,12 @@ class EthereumProviderTest {
         asks.clear()
         ok(call("eth_signTypedData_v4", JSONArray().put(main.address).put(mail)))
         assertTrue((asks.single() as EthAsk.SignTypedData).chainBound)
+        asks.clear()
+        // R1-M2: a bound chain ID past Long's range is compared whole, so 2^64 + 1 (1 in its low 64 bits) isn't chain 1.
+        val wrapped = JSONObject(mail)
+        wrapped.getJSONObject("domain").put("chainId", java.math.BigInteger.ONE.shiftLeft(64).inc().toString())
+        assertEquals(-32602, code(call("eth_signTypedData_v4", JSONArray().put(main.address).put(wrapped))))
+        assertTrue(asks.isEmpty())
     }
 
     @Test
