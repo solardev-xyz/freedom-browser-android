@@ -427,6 +427,7 @@ fun BrowserScreen(
     ipfsProgressSnapshot: () -> String? = { null },
     ipfsCounters: () -> LongArray? = { null },
     onStatusBarTint: (Int?) -> Unit = {},
+    onPanelShown: (Boolean) -> Unit = {},
 ) {
     // Outside composition, so the tabs survive an Activity relaunch
     // (#183, see [TabsSession]).
@@ -1574,6 +1575,9 @@ fun BrowserScreen(
     // under them: a full-screen panel paints the app background there.
     val iconTint = tint.takeIf { !overlayShown }
     LaunchedEffect(iconTint) { onStatusBarTint(iconTint) }
+    // …and the navigation bar drops its contrast scrim over a panel
+    // (#247), so the panel's own background shows there.
+    LaunchedEffect(overlayShown) { onPanelShown(overlayShown) }
 
     // "Tap anywhere outside the floating toolbar to dismiss the
     // keyboard". We intercept presses on the Initial pass so we see
