@@ -27,9 +27,11 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.MainScope
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -346,7 +348,7 @@ object SwarmProviders {
                 val approved = { approved(reply, request.id) }
                 manifestFresh(bridge, doc, origin, request.method, deadline)
                     ?: p.request(origin, request.method, request.params, approved) { ask ->
-                        askOnTab(tab, doc, ask, deadline - SystemClock.elapsedRealtime(), p::current, approved)
+                        askOnTab(tab, doc, ask, deadline - SystemClock.elapsedRealtime(), p::current, approved = approved)
                     }
             } catch (e: CancellationException) {
                 throw e
@@ -396,7 +398,9 @@ object SwarmProviders {
      * once the lock is ours ([SwarmProvider.current]), not the one built
      * before an earlier ask's setup; null (the feed it signs for lost its
      * identity meanwhile) answers [SwarmProvider.Answer.OWNER_GONE]
-     * without a sheet or a block.
+     * without a sheet or a block. [answered] hears the user's own answer
+     * to the sheet, the moment there is one: a refusal that never reaches
+     * it (no sheet, a timeout, a tab that moved on) wasn't the user's.
      */
     internal suspend fun askOnTab(
         tab: BrowserState,
@@ -404,6 +408,7 @@ object SwarmProviders {
         ask: SwarmAsk,
         waitMs: Long = SHEET_WAIT_MS,
         current: suspend (SwarmAsk) -> SwarmAsk? = { it },
+        answered: (SwarmProvider.Answer) -> Unit = {},
         approved: () -> Unit = {},
     ): SwarmProvider.Answer {
         fun live() = (documents[tab.id] ?: 0) == doc && tab.id !in blockedTabs
@@ -436,6 +441,7 @@ object SwarmProviders {
                     pending[tab.id]?.remove(request)
                     if (tab.swarmPrompt === request) tab.swarmPrompt = null
                 }
+                answered(answer)
                 if (!answer.allowed && live()) blockedTabs += tab.id
                 if (answer.allowed && live()) answer else SwarmProvider.Answer.REJECTED
             } ?: return SwarmProvider.Answer.REJECTED
@@ -502,8 +508,18 @@ object SwarmProviders {
             )
             is SwarmManifests.Check.Consent -> {
                 val ask = SwarmAsk.Manifest(origin, check.consent)
-                val answer = askOnTab(bridge.tab, doc, ask, deadline - SystemClock.elapsedRealtime())
-                if (m.decide(check.token, ask.outcomeOf(answer))) null else SwarmProvider.Reply.Err(SwarmProvider.USER_REJECTED, "User rejected the request")
+                var users: SwarmProvider.Answer? = null
+                val answer = askOnTab(bridge.tab, doc, ask, deadline - SystemClock.elapsedRealtime(), answered = { users = it })
+                // A refusal the user never gave (a withdrawn or timed-out
+                // sheet, a tab that moved on) refuses this request only: the
+                // consent may be shared with another tab, which can still
+                // answer it (#226 R1-F2).
+                val outcome = manifestOutcome(ask, answer, users)
+                if (outcome != null && m.decide(check.token, outcome)) {
+                    null
+                } else {
+                    SwarmProvider.Reply.Err(SwarmProvider.USER_REJECTED, "User rejected the request")
+                }
             }
         }
     } catch (e: IllegalStateException) {
@@ -517,6 +533,22 @@ object SwarmProviders {
         // Answered, not thrown: a thrown check would stay in the document's cache and fail every later request.
         Log.w(TAG, "manifest check failed: ${e.javaClass.simpleName}")
         SwarmProvider.Reply.Err(SwarmProvider.INTERNAL, "Internal error")
+    }
+
+    /**
+     * What the manifest sheet's result [answer] decides, given the user's
+     * own answer to it ([users], null if they never gave one): a grant
+     * only when the sheet came back approved, Don't allow only when the
+     * user said so, and nothing — the consent stays open — otherwise.
+     */
+    internal fun manifestOutcome(
+        ask: SwarmAsk.Manifest,
+        answer: SwarmProvider.Answer,
+        users: SwarmProvider.Answer?,
+    ): SwarmManifests.Outcome? = when {
+        answer.allowed -> ask.outcomeOf(answer)
+        users != null && !users.allowed -> SwarmManifests.Outcome.Deny
+        else -> null
     }
 
     /** The tab started (committed) a new document on [url] — null when it's being torn down. */
@@ -679,20 +711,52 @@ internal object GatewayHttp : SwarmProvider.Http {
  * page on screen was served from, [pins], where there is one). Anything
  * not on Swarm is [ManifestDiscovery.Unsupported]; a name that doesn't
  * resolve for now is [ManifestDiscovery.Unresolved].
+ *
+ * The name is resolved once, and the manifest fetched from that very
+ * answer. [timeoutMs] bounds the whole call — the endpoint settings
+ * wait, name resolution and the fetch — from outside ([withinDeadline]),
+ * so a slow resolver can't hold the origin's lock past it (#226 R1-F5).
  */
-internal suspend fun discoverManifest(origin: String, pins: EnsDocumentPins?): ManifestDiscovery = withContext(Dispatchers.IO) {
+internal suspend fun discoverManifest(
+    origin: String,
+    pins: EnsDocumentPins?,
+    timeoutMs: Long = MANIFEST_TIMEOUT_MS.toLong(),
+): ManifestDiscovery {
     val root = VirtualOrigin.parseHostOfUrl(origin)
-    if (root !is ContentRoot.Bzz && root !is ContentRoot.Ens) return@withContext ManifestDiscovery.Unsupported
-    try {
+    if (root !is ContentRoot.Bzz && root !is ContentRoot.Ens) return ManifestDiscovery.Unsupported
+    return withinDeadline(timeoutMs) { remainingMs ->
         Gateways.awaitExternalEndpointsBlocking()
         val served = Gateways.servedRootFor(root, pins)
-            ?: return@withContext ManifestDiscovery.Unresolved("the name didn't resolve")
-        if (served !is ContentRoot.Bzz) return@withContext ManifestDiscovery.Unsupported
-        val url = Gateways.gatewayUrlFor(root, "/" + SwarmManifestFormat.FILE, pins)
-            ?: return@withContext ManifestDiscovery.Unresolved("the name didn't resolve")
-        fetchManifest(url)
-    } catch (e: RuntimeException) {
-        ManifestDiscovery.Unresolved(e.javaClass.simpleName)
+            ?: return@withinDeadline ManifestDiscovery.Unresolved("the name didn't resolve")
+        if (served !is ContentRoot.Bzz) return@withinDeadline ManifestDiscovery.Unsupported
+        val url = Gateways.gatewayUrlFor(served, "/" + SwarmManifestFormat.FILE)
+            ?: return@withinDeadline ManifestDiscovery.Unresolved("no gateway")
+        val left = remainingMs()
+        if (left <= 0) ManifestDiscovery.Unresolved("timed out") else fetchManifest(url, left.toInt())
+    }
+}
+
+/** Blocking work for manifest discovery: runs off the caller's job, so a deadline can leave it behind. */
+private val manifestDiscoveryScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+/**
+ * Runs the blocking [work] (given what's left of [timeoutMs]) and
+ * answers [ManifestDiscovery.Unresolved] once [timeoutMs] has passed,
+ * whether or not [work] has: a blocking call ignores cancellation, so
+ * it runs in its own job, which is left to finish on its own.
+ */
+internal suspend fun withinDeadline(timeoutMs: Long, work: (remainingMs: () -> Long) -> ManifestDiscovery): ManifestDiscovery {
+    val deadline = System.nanoTime() + timeoutMs * 1_000_000
+    val job = manifestDiscoveryScope.async {
+        try {
+            work { (deadline - System.nanoTime()) / 1_000_000 }
+        } catch (e: RuntimeException) {
+            ManifestDiscovery.Unresolved(e.javaClass.simpleName)
+        }
+    }
+    return withTimeoutOrNull(timeoutMs) { job.await() } ?: run {
+        job.cancel()
+        ManifestDiscovery.Unresolved("timed out")
     }
 }
 

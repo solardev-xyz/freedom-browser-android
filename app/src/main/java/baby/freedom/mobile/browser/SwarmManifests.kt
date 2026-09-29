@@ -456,6 +456,13 @@ class SwarmManifests(
         val firstContact: Boolean,
         val changed: List<ManifestCapability>,
         var expiresAt: Long,
+        /**
+         * The record to start from when the origin wasn't tracked yet:
+         * kept here, not saved, until the user decides — an unanswered
+         * first contact (a dismissed app, a process death) leaves the
+         * origin untracked (#226 R1-F3).
+         */
+        val unsaved: Record?,
     )
 
     private class Backoff(val failures: Int, val retryAt: Long)
@@ -512,7 +519,7 @@ class SwarmManifests(
             val record = existing?.let(::copyOf) ?: Record()
             val removed = record.acknowledged.keys.filter { it !in next }
             val additions = next.filter { it !in record.acknowledged }
-            val removals = removeOwners(record, removed)
+            val removals = removeOwners(origin, record, removed)
             for (capability in removed) record.acknowledged.remove(capability)
             record.observed = Observed(found.fingerprint, found.rawHash, manifest.capabilities, clock())
             record.appName = manifest.name
@@ -525,7 +532,11 @@ class SwarmManifests(
             }
             val changed = additions.filter { it !in satisfied }
             if (removals.isNotEmpty() || removed.isNotEmpty() || satisfied.isNotEmpty()) record.revision++
-            transaction(origin, record, removals)
+            // An origin is tracked from its first acknowledged row on: an
+            // untracked one with only rows to ask about stays untracked
+            // until the user answers ([PendingConsent.unsaved]).
+            val tracked = existing != null || satisfied.isNotEmpty()
+            if (tracked) transaction(origin, record, removals)
 
             if (changed.isEmpty()) return@withLock Check.Ready
             val pending = PendingConsent(
@@ -537,6 +548,7 @@ class SwarmManifests(
                 firstContact = firstContact,
                 changed = changed,
                 expiresAt = clock() + TOKEN_TTL_MS,
+                unsaved = if (tracked) null else copyOf(record),
             )
             val token = synchronized(tokens) {
                 // Another tab of the same app checking the same state shares
@@ -546,6 +558,10 @@ class SwarmManifests(
                     tokens[shared]?.expiresAt = pending.expiresAt
                     shared
                 } else {
+                    // Any other consent open for the origin was raised
+                    // against older state: this check supersedes it (an
+                    // untracked origin has no saved revision to show that).
+                    tokens.values.removeAll { it.origin == origin }
                     newToken().also { tokens[it] = pending }
                 }
             }
@@ -554,7 +570,14 @@ class SwarmManifests(
 
     /**
      * The user's answer to the consent [token] stands for: whether the
-     * request that raised it may go on. Throws [IllegalStateException]
+     * request that raised it may go on. Only a user's own answer belongs
+     * here — a sheet that never got one (withdrawn, timed out, the tab
+     * moved on) must leave the consent open, since another tab sharing
+     * it may still be answered. Don't allow on first contact refuses the
+     * request and leaves nothing behind; on an update it declines only
+     * the new rows — they're acknowledged as individual, so the next
+     * document doesn't ask again — and the request goes on under the
+     * authority the site already had (#226 R1-F4). Throws [IllegalStateException]
      * for an unknown, expired or stale consent (nothing is granted), and
      * [IOException] if the decision couldn't be saved.
      */
@@ -571,13 +594,32 @@ class SwarmManifests(
                 throw IllegalStateException("Manifest consent expired")
             }
             val current = records()[origin]
-            if (current?.observed?.fingerprint != pending.fingerprint || current.revision != pending.baseRevision) {
+            val stale = if (pending.unsaved != null) {
+                // Checked while untracked: anything tracked since is newer.
+                current != null
+            } else {
+                current?.observed?.fingerprint != pending.fingerprint || current.revision != pending.baseRevision
+            }
+            if (stale) {
                 synchronized(tokens) { tokens.remove(token) }
                 throw IllegalStateException("Manifest consent is stale")
             }
-            val allowed = outcome != Outcome.Deny
-            if (allowed) {
-                val record = copyOf(current)
+            val base = pending.unsaved ?: current!!
+            val allowed = outcome != Outcome.Deny || !pending.firstContact
+            if (outcome == Outcome.Deny && !pending.firstContact) {
+                // Declining an update's new rows: nothing is granted or
+                // taken back, but the decision is kept so later documents
+                // don't ask again. They stay on the per-action sheets.
+                val record = copyOf(base)
+                for (capability in pending.changed) {
+                    record.acknowledged[capability] = Ack(INDIVIDUAL, DECLINED, pending.manifest.capabilities.getValue(capability), now)
+                }
+                record.receipts += receipt(pending, DECLINED, now)
+                while (record.receipts.size > MAX_RECEIPTS) record.receipts.removeAt(0)
+                record.revision = pending.baseRevision + 1
+                transaction(origin, record, emptyList())
+            } else if (outcome != Outcome.Deny) {
+                val record = copyOf(base)
                 val operations = ArrayList<Pair<ManifestProjection, Boolean>>()
                 if (outcome == Outcome.Individual) {
                     // Individual approvals still connect the app: the base
@@ -594,22 +636,14 @@ class SwarmManifests(
                     if (outcome == Outcome.AllowAll) {
                         operations += addManaged(origin, record, capability)
                     } else {
-                        operations += removeOwners(record, listOf(capability))
+                        operations += removeOwners(origin, record, listOf(capability))
                     }
                 }
-                record.receipts += Receipt(
-                    decidedAt = now,
-                    outcome = if (outcome == Outcome.AllowAll) MANAGED else INDIVIDUAL,
-                    originShown = origin,
-                    nameShown = pending.manifest.name,
-                    descriptionShown = pending.manifest.description,
-                    rows = pending.changed.map { it to pending.manifest.capabilities.getValue(it) },
-                    rawHash = pending.rawHash,
-                )
+                record.receipts += receipt(pending, if (outcome == Outcome.AllowAll) MANAGED else INDIVIDUAL, now)
                 while (record.receipts.size > MAX_RECEIPTS) record.receipts.removeAt(0)
                 record.revision = pending.baseRevision + 1
                 transaction(origin, record, operations)
-            } else if (pending.firstContact) {
+            } else if (pending.unsaved == null) {
                 // Declining on first contact leaves nothing behind.
                 transaction(origin, null, emptyList())
             }
@@ -649,7 +683,7 @@ class SwarmManifests(
         if (rows.isEmpty()) return@withLock true
         record.detached += ManifestProjection.Connection
         record.managed.remove(ManifestProjection.Connection)
-        val operations = removeOwners(record, rows)
+        val operations = removeOwners(origin, record, rows)
         for (capability in rows) {
             val ack = record.acknowledged.getValue(capability)
             record.acknowledged[capability] = Ack(INDIVIDUAL, ack.source, ack.whyShown, clock())
@@ -674,15 +708,32 @@ class SwarmManifests(
 
     private suspend fun prune(origin: String, record: Record) {
         val copy = copyOf(record)
-        transaction(origin, null, removeOwners(copy, ManifestCapability.entries))
+        transaction(origin, null, removeOwners(origin, copy, ManifestCapability.entries))
     }
+
+    private fun receipt(pending: PendingConsent, outcome: String, now: Long) = Receipt(
+        decidedAt = now,
+        outcome = outcome,
+        originShown = pending.origin,
+        nameShown = pending.manifest.name,
+        descriptionShown = pending.manifest.description,
+        rows = pending.changed.map { it to pending.manifest.capabilities.getValue(it) },
+        rawHash = pending.rawHash,
+    )
 
     /**
      * Takes [capabilities] off every grant they own; a grant left with
      * no owner is turned off — last the connection, and never an
-     * identity (removal keeps it, profile §4).
+     * identity (removal keeps it, profile §4). A connection the user
+     * still relies on — an "always allow" or feed access they granted by
+     * hand, which disconnecting would take with it — isn't turned off:
+     * it becomes theirs ([Record.detached]) (#226 R1-F1).
      */
-    private fun removeOwners(record: Record, capabilities: Collection<ManifestCapability>): List<Pair<ManifestProjection, Boolean>> {
+    private suspend fun removeOwners(
+        origin: String,
+        record: Record,
+        capabilities: Collection<ManifestCapability>,
+    ): List<Pair<ManifestProjection, Boolean>> {
         val operations = ArrayList<Pair<ManifestProjection, Boolean>>()
         for (projection in record.managed.keys.toList()) {
             val owners = record.managed.getValue(projection)
@@ -690,6 +741,16 @@ class SwarmManifests(
             if (owners.isEmpty()) {
                 record.managed.remove(projection)
                 if (projection != ManifestProjection.Identity) operations += projection to false
+            }
+        }
+        if (operations.any { it.first == ManifestProjection.Connection }) {
+            val leaving = operations.map { it.first }.toSet()
+            val usersOwn = CONNECTION_RIDERS.any { rider ->
+                rider !in leaving && rider !in record.managed && projections.available(rider) && projections.enabled(origin, rider)
+            }
+            if (usersOwn) {
+                operations.removeAll { it.first == ManifestProjection.Connection }
+                record.detached += ManifestProjection.Connection
             }
         }
         return operations.sortedBy { it.first == ManifestProjection.Connection }
@@ -950,11 +1011,19 @@ class SwarmManifests(
     companion object {
         const val MANAGED = "managed"
         const val INDIVIDUAL = "individual"
+
+        /** An update's new rows the user declined: [Ack.source] and [Receipt.outcome]. */
+        const val DECLINED = "declined"
         const val TOKEN_TTL_MS = 5 * 60_000L
         const val MAX_RECEIPTS = 20
         private const val MAX_COMPLETED = 100
         private const val VERSION = 1
         private const val TAG = "SwarmManifests"
+
+        /** The grants disconnecting a site takes with it: the user's own keep a pruned connection. */
+        private val CONNECTION_RIDERS = listOf(
+            ManifestProjection.AutoPublish, ManifestProjection.AutoFeeds, ManifestProjection.AutoSigning, ManifestProjection.FeedGrant,
+        )
 
         /** Between unresolved attempts for one origin, this session (profile §2.2). */
         val BACKOFF_MS = longArrayOf(2_000, 10_000, 30_000, 60_000)

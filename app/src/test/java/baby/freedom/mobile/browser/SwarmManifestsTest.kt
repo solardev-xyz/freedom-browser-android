@@ -224,6 +224,34 @@ class SwarmManifestsTest {
         t.join(12_000)
     }
 
+    @Test
+    fun `discovery's deadline covers blocking work before the fetch, and passes the rest on`() {
+        val started = System.nanoTime()
+        // A resolver that blocks far past the deadline and ignores cancellation.
+        val result = runBlocking {
+            withinDeadline(300) {
+                try {
+                    Thread.sleep(5_000)
+                } catch (e: InterruptedException) {
+                    // keep blocking semantics simple: ignore
+                }
+                ManifestDiscovery.Absent
+            }
+        }
+        val tookMs = (System.nanoTime() - started) / 1_000_000
+        assertTrue("$result", result is ManifestDiscovery.Unresolved)
+        assertTrue("took $tookMs ms", tookMs < 2_000)
+        var left = -1L
+        runBlocking {
+            withinDeadline(10_000) { remaining ->
+                Thread.sleep(200)
+                left = remaining()
+                ManifestDiscovery.Absent
+            }
+        }
+        assertTrue("left $left", left in 1..9_850)
+    }
+
     // -----------------------------------------------------------------
     // Reconciliation
     // -----------------------------------------------------------------
@@ -374,10 +402,63 @@ class SwarmManifestsTest {
         assertEquals(listOf(Signing), update.consent.rows.map { it.first })
         assertTrue(update.consent.preservedIdentity)
         assertFalse(env.has(site, AutoPublish))
-        assertFalse(env.decide(update, SwarmManifests.Outcome.Deny))
+        // Declining an update's new rows doesn't refuse what the site already has.
+        assertTrue(env.decide(update, SwarmManifests.Outcome.Deny))
         assertFalse(env.has(site, AutoSigning))
         assertTrue(env.has(site, AutoFeeds))
         assertNotNull(runBlocking { env.manifests.record(site) })
+    }
+
+    @Test
+    fun `declining an update's new rows keeps the request going and isn't asked again`() {
+        val env = Env()
+        env.decide(env.check(site, found(Publish)), SwarmManifests.Outcome.AllowAll)
+        val update = env.check(site, found(Publish, Signing), eager = false)
+        assertTrue(update is SwarmManifests.Check.Consent)
+        val sets = env.projections.sets.size
+        assertTrue(env.decide(update, SwarmManifests.Outcome.Deny))
+        assertEquals(sets, env.projections.sets.size)
+        assertTrue(env.has(site, AutoPublish))
+        val record = runBlocking { env.manifests.record(site) }!!
+        assertEquals(SwarmManifests.INDIVIDUAL, record.acknowledged[Signing]!!.decision)
+        assertEquals(SwarmManifests.DECLINED, record.acknowledged[Signing]!!.source)
+        assertEquals(SwarmManifests.DECLINED, record.receipts.last().outcome)
+        assertEquals(listOf(Publish), env.manifests.managedRows()[site])
+        // The next document finds it decided.
+        assertEquals(SwarmManifests.Check.Ready, env.check(site, found(Publish, Signing), eager = false))
+    }
+
+    @Test
+    fun `an unanswered first contact leaves the origin untracked`() {
+        val env = Env()
+        assertTrue(env.check(site, found(Publish)) is SwarmManifests.Check.Consent)
+        assertNull(runBlocking { env.manifests.record(site) })
+        assertNull(env.storage.text?.takeIf { it.contains(site) })
+        // The process dies before the user answers: the site is on the ordinary flow.
+        env.restart()
+        assertEquals(SwarmManifests.Check.Legacy, env.check(site, found(Publish), eager = false))
+        assertEquals(1, env.discoveries)
+        // Answered later (same process), the untracked base still works.
+        val env2 = Env()
+        val c = env2.check(site, found(Publish))
+        assertTrue(env2.decide(c, SwarmManifests.Outcome.AllowAll))
+        assertTrue(env2.has(site, AutoPublish))
+        assertEquals(1, runBlocking { env2.manifests.record(site) }!!.revision)
+    }
+
+    @Test
+    fun `a first-contact consent is stale once another answer tracked the origin`() {
+        val env = Env()
+        val a = env.check(site, found(Publish)) as SwarmManifests.Check.Consent
+        val b = env.check(site, found(Publish, Feeds)) as SwarmManifests.Check.Consent
+        assertTrue(env.decide(b, SwarmManifests.Outcome.Individual))
+        try {
+            env.decide(a, SwarmManifests.Outcome.AllowAll)
+            fail("a stale first-contact consent was accepted")
+        } catch (e: IllegalStateException) {
+            // expected
+        }
+        assertFalse(env.has(site, AutoPublish))
     }
 
     @Test
@@ -395,6 +476,32 @@ class SwarmManifestsTest {
         assertFalse(env.has(site, AutoPublish))
         assertFalse(env.has(site, FeedGrant))
         assertNull(runBlocking { env.manifests.record(site) })
+    }
+
+    @Test
+    fun `pruning keeps a manifest-owned connection that carries the user's own always-allow`() {
+        for (gone in listOf<ManifestDiscovery>(ManifestDiscovery.Absent, found(Signing))) {
+            val env = Env()
+            env.decide(env.check(site, found(Publish)), SwarmManifests.Outcome.AllowAll)
+            // Later the user approves a createFeed sheet with Always allow, by hand.
+            env.projections.on += site to AutoFeeds
+            env.projections.on += site to FeedGrant
+            val result = env.check(site, gone, eager = false)
+            assertFalse("$gone", env.has(site, AutoPublish))
+            assertTrue("$gone", env.has(site, Connection))
+            assertTrue("$gone", env.has(site, AutoFeeds))
+            assertTrue("$gone", env.has(site, FeedGrant))
+            assertFalse("$gone", env.projections.sets.any { it.second == Connection && !it.third })
+            if (result is SwarmManifests.Check.Consent) {
+                // The connection is now the user's: a later removal leaves it too.
+                assertTrue(Connection in runBlocking { env.manifests.record(site) }!!.detached)
+            }
+        }
+        // Without the user's own grants the connection goes, as before.
+        val env = Env()
+        env.decide(env.check(site, found(Publish)), SwarmManifests.Outcome.AllowAll)
+        env.check(site, ManifestDiscovery.Absent, eager = false)
+        assertFalse(env.has(site, Connection))
     }
 
     @Test
