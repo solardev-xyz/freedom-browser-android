@@ -120,4 +120,34 @@ class StampsTest {
         assertEquals("abababab…abababab", shortBatchId(id))
         assertFalse(STAMP_BUY_DAYS.any { it < 2 })
     }
+
+    @Test
+    fun `the confirmation's xDAI bound includes the gas on top of the swap`() {
+        val q = stampQuoteFrom(
+            JSONObject(
+                """{"depth":17,"days":2,"amount_per_chunk":"4325218560","total_cost_plur":"1","total_cost_bzz":"0.05",
+                "capacity_bytes":536870912,"xdai_required":"26000000000000000","xdai_required_display":"0.026",
+                "sufficient_funds":true}""",
+            ),
+        )!!
+        val buy = spendCostText(q, buy = true)
+        assertTrue(buy, buy.contains("swaps 0.026 xDAI and pays up to 0.05 xDAI of gas on top, across up to 5 transactions"))
+        val extend = spendCostText(q, buy = false)
+        assertTrue(extend, extend.contains("swaps 0.026 xDAI and pays up to 0.03 xDAI of gas on top, across up to 3 transactions"))
+        // Never the old claim that the swap figure already bounds the gas.
+        assertFalse(buy.contains("at most 0.026 xDAI including gas"))
+    }
+
+    @Test
+    fun `a spend stays reachable with the node off`() {
+        val light = NodeInfo(status = NodeStatus.Running, lightMode = true, walletIdentity = true)
+        val off = NodeInfo()
+        assertTrue(stampsEntryShown(light, StampClient.Spend.Idle))
+        assertFalse(stampsEntryShown(off, StampClient.Spend.Idle))
+        assertFalse(stampsEntryShown(light.copy(lightMode = false), StampClient.Spend.Idle))
+        // Turned off mid-buy: its progress, then its outcome, can still be opened.
+        assertTrue(stampsEntryShown(off, StampClient.Spend.Running(StampClient.Kind.Buy, null)))
+        assertTrue(stampsEntryShown(off, StampClient.Spend.Failed(StampClient.Kind.Buy, null, "reverted")))
+        assertTrue(stampsEntryShown(off, StampClient.Spend.Done(StampClient.Kind.Extend, id)))
+    }
 }

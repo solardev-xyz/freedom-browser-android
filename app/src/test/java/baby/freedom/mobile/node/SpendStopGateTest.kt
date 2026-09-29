@@ -77,4 +77,19 @@ class SpendStopGateTest {
         assertFalse(gate.awaitIdle(50))
         assertTrue(SpendStopGate().awaitIdle(0))
     }
+
+    @Test
+    fun `a process doomed to exit after a spend stays doomed`() {
+        val latch = ProcessExitLatch()
+        assertFalse(latch.pending)
+        latch.schedule()
+        // Seen from another thread (a later NodeService's main-thread onCreate,
+        // or a binder thread starting a spend), and never cleared: nothing
+        // started in the process could survive the exit.
+        var seen = false
+        thread { seen = latch.pending }.join()
+        assertTrue(seen)
+        latch.schedule()
+        assertTrue(latch.pending)
+    }
 }

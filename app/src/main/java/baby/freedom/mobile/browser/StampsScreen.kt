@@ -157,12 +157,15 @@ internal fun StampsScreen(nodeInfo: NodeInfo, startWithBuy: Boolean = false, onD
             contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
             modifier = Modifier.fillMaxSize(),
         ) {
+            // First, and even with the node off: a spend the node goes on
+            // with after the user turned it off (it stops once the spend
+            // ends) still shows its progress and outcome here.
+            spendStatusText(spend)?.let { text ->
+                item("spend") { SpendBanner(spend, text) }
+            }
             if (blocked != null) {
                 item("blocked") { MutedText(blocked) }
                 return@LazyColumn
-            }
-            spendStatusText(spend)?.let { text ->
-                item("spend") { SpendBanner(spend, text) }
             }
             when {
                 route == "buy" -> item("buy") {
@@ -319,8 +322,7 @@ private fun BuyPage(nodeInfo: NodeInfo, spend: StampClient.Spend, onConfirmed: (
             body = "${formatStampBytes(effectiveStampBytes(q.depth))} for ${daysLabel(q.days)}, for " +
                 withUnit(q.totalCostBzz, "xBZZ") +
                 (q.depositBzz?.let { ", plus ${withUnit(it, "xBZZ")} into the node's new chequebook" } ?: "") +
-                ". The node pays from its xDAI: it swaps what it needs for xBZZ, using at most " +
-                "${withUnit(q.xdaiRequiredDisplay, "xDAI")} including gas. These are real transactions on Gnosis Chain " +
+                ". " + spendCostText(q, buy = true) + " These are real transactions on Gnosis Chain " +
                 "and can't be undone.",
             confirmLabel = "Buy",
             onConfirm = {
@@ -368,8 +370,7 @@ private fun ExtendPage(
         SpendConfirmDialog(
             title = "Extend this postage stamp?",
             body = "${daysLabel(q.days)} more for ${shortBatchId(batch.id)}, for ${withUnit(q.totalCostBzz, "xBZZ")}. " +
-                "The node pays from its xDAI: it swaps what it needs for xBZZ, using at most " +
-                "${withUnit(q.xdaiRequiredDisplay, "xDAI")} including gas. These are real transactions on Gnosis Chain " +
+                spendCostText(q, buy = false) + " These are real transactions on Gnosis Chain " +
                 "and can't be undone.",
             confirmLabel = "Extend",
             onConfirm = {

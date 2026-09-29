@@ -83,6 +83,13 @@ class NodeService : Service() {
     /** Holds a stop back while a postage spend runs inside ant (#116); see [INodeService.stopWhenIdle]. */
     private val stopGate = SpendStopGate()
 
+    /**
+     * Was this instance created in a `:node` process an earlier instance
+     * already doomed to exit after a spend ([ProcessExitLatch])? It then
+     * starts nothing; the exit takes it down and Android restarts it fresh.
+     */
+    private val doomed: Boolean get() = ProcessExitLatch.node.pending
+
     /** `radicleCall`s running at once: the browser's reads and the provider's calls (#124). */
     private val radicleCalls = Semaphore(MAX_RADICLE_CALLS)
 
@@ -140,6 +147,7 @@ class NodeService : Service() {
         }
 
         override fun ensureIpfsStarted() {
+            if (doomed) return
             scope.launch { maybeStartIpfs() }
         }
 
@@ -169,11 +177,13 @@ class NodeService : Service() {
         }
 
         override fun reloadIdentity() {
+            if (doomed) return
             scope.launch(Dispatchers.IO) { restartSwarmIfStale("node identity changed") }
         }
 
         override fun setSwarmMode(light: Boolean, gnosisRpc: String?) {
             val mode = if (light) SwarmNode.Mode.light(gnosisRpc.orEmpty()) else SwarmNode.Mode.ULTRA_LIGHT
+            if (doomed) return
             scope.launch(Dispatchers.IO) {
                 relayedMode = mode
                 restartSwarmIfStale("swarm mode is now $mode")
@@ -183,6 +193,7 @@ class NodeService : Service() {
         override fun getRadicleState(): RadicleInfo = radicleNode.state.value
 
         override fun startRadicle() {
+            if (doomed) return
             scope.launch { radicleNode.start() }
         }
 
@@ -265,7 +276,7 @@ class NodeService : Service() {
      * the process could leave a batch paid for but unregistered.
      */
     private fun <T> spending(block: () -> T): T {
-        check(stopGate.begin()) { "The Swarm node is turning off" }
+        check(!doomed && stopGate.begin()) { "The Swarm node is turning off" }
         try {
             return block()
         } finally {
@@ -500,8 +511,14 @@ class NodeService : Service() {
             }
             .launchIn(scope)
 
-        swarmNode.start()
-        registerNetworkCallback()
+        if (doomed) {
+            // An earlier instance's exit is pending (#116): starting ant
+            // here would collide with its still-live handle, and be killed.
+            Log.w(TAG, "created while :node waits to exit after a postage spend; starting nothing until the restart")
+        } else {
+            swarmNode.start()
+            registerNetworkCallback()
+        }
 
         // Radicle (#73) runs only while the user has it on: the UI calls
         // [INodeService.startRadicle] on every bind while the setting is
@@ -620,11 +637,19 @@ class NodeService : Service() {
         // The spend holds its read lock on ant's handle, so the teardown
         // above never frees ant under it; only the exit waits for it.
         stopGate.requestStop()
+        if (doomed) {
+            // An earlier instance's spend is still running in this process;
+            // its exit thread ends the process once that spend is done.
+            Log.i(TAG, "destroyed while :node waits to exit after a postage spend")
+            return
+        }
         if (stopGate.spendsRunning == 0) {
             Log.i(TAG, "exiting :node process to release state-store lock")
             exitProcess(0)
         }
         Log.w(TAG, "destroyed during a postage spend; exiting once it ends")
+        // A service created in this process from now on starts nothing.
+        ProcessExitLatch.node.schedule()
         Thread({
             stopGate.awaitIdle(DESTROY_SPEND_WAIT_MS)
             // A moment for the spend's answer to reach the app.

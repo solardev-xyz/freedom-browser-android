@@ -2,6 +2,7 @@ package baby.freedom.mobile.browser
 
 import android.util.Log
 import baby.freedom.mobile.node.INodeService
+import baby.freedom.swarm.SpendPermit
 import java.math.BigInteger
 import java.util.Locale
 import kotlinx.coroutines.CoroutineScope
@@ -180,6 +181,20 @@ internal fun stampQuoteFrom(o: JSONObject): StampQuote? = runCatching {
         sufficientFunds = o.getBoolean("sufficient_funds"),
     )
 }.getOrNull()
+
+/**
+ * The confirmation's sentence on what a spend may cost in xDAI (#116):
+ * ant's estimate, and the hard bound [baby.freedom.swarm.SpendGuard]
+ * enforces — the swap at most [StampQuote.xdaiRequired], plus gas of at
+ * most [SpendPermit.MAX_GAS_WEI] for each of the spend's transactions.
+ */
+internal fun spendCostText(q: StampQuote, buy: Boolean): String {
+    val xdai = withUnit(q.xdaiRequiredDisplay, "xDAI")
+    val txs = SpendPermit.slotsFor(buy).size
+    return "The node pays from its xDAI: it swaps what it needs for xBZZ, about $xdai including gas. " +
+        "At most, it swaps $xdai and pays up to ${formatXdai(SpendPermit.maxGasWei(buy))} of gas " +
+        "on top, across up to $txs transactions."
+}
 
 /** ant's amounts come as "0.0283 xBZZ" or a bare number; show them with their unit once. */
 internal fun withUnit(amount: String, unit: String): String =

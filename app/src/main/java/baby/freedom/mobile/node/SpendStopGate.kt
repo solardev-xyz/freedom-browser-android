@@ -73,3 +73,31 @@ internal class SpendStopGate {
     /** Spends running now. */
     val spendsRunning: Int get() = synchronized(monitor) { running }
 }
+
+/**
+ * Process-wide: has a destroyed [NodeService] left the `:node` process
+ * doomed — it exits once a postage spend still running inside ant ends
+ * ([NodeService.onDestroy]'s fallback, #116)?
+ *
+ * Turning the node back on in that window creates a new [NodeService] in
+ * this same process, where the old ant handle (port 1633, its state-store
+ * lock) may still be alive and the pending exit will kill whatever the
+ * new one starts. So the new one starts nothing — no node, no spend — and
+ * the exit takes it down; Android restarts the (sticky, bound) service in
+ * a fresh process, which boots normally.
+ */
+internal class ProcessExitLatch {
+    @Volatile
+    var pending: Boolean = false
+        private set
+
+    /** The process will exit once the running spend ends: nothing may start in it any more. */
+    fun schedule() {
+        pending = true
+    }
+
+    companion object {
+        /** The `:node` process's one latch. */
+        val node = ProcessExitLatch()
+    }
+}

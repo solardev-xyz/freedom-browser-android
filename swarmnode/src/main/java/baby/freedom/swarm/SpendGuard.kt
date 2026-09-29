@@ -215,6 +215,20 @@ class SpendPermit(val plan: SpendPlan) {
         /** 0.01 xDAI of gas per transaction; ant's biggest (the chequebook deploy) is 0.003. */
         val MAX_GAS_WEI: BigInteger = BigInteger.TEN.pow(16)
 
+        /** The transactions a buy ([buy]) or an extend may broadcast, each at most once. */
+        fun slotsFor(buy: Boolean): Set<Slot> = if (buy) {
+            setOf(Slot.Swap, Slot.Approve, Slot.CreateBatch, Slot.DeployChequebook, Slot.SettlementDeposit)
+        } else {
+            setOf(Slot.Swap, Slot.Approve, Slot.TopUp)
+        }
+
+        /**
+         * The most gas a buy or an extend can cost: [MAX_GAS_WEI] for each
+         * of its transactions. It comes on top of the swap's `maxSwapWei`,
+         * so this plus that is the hard bound on the xDAI one spend uses.
+         */
+        fun maxGasWei(buy: Boolean): BigInteger = MAX_GAS_WEI.multiply(BigInteger.valueOf(slotsFor(buy).size.toLong()))
+
         private val METHOD = Regex("\"method\"\\s*:\\s*\"([^\"\\\\]*)\"")
         private val PARAMS = Regex("\"params\"\\s*:\\s*\\[\\s*\"(0x[0-9a-fA-F]*)\"\\s*]")
 

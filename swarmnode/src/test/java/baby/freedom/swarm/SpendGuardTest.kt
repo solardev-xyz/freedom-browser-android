@@ -144,4 +144,29 @@ class SpendGuardTest {
         SpendGuard.during(buy) { assertTrue(SpendGuard.admit(raw)) }
         assertFalse(SpendGuard.admit(raw))
     }
+
+    @Test
+    fun theGasBoundCountsEveryTransactionASpendCanSend() {
+        // Every kind of ant transaction, offered to a fresh permit of each plan:
+        // what gets out is exactly slotsFor, so maxGasWei is the real gas bound.
+        fun everything() = listOf(
+            TestTx.swap(maxSwap),
+            TestTx.approve(amount.shiftLeft(17)),
+            TestTx.approve(amount.shiftLeft(18)),
+            TestTx.createBatch(TestTx.OWNER, amount, 17, false),
+            TestTx.topUp(batch, amount),
+            TestTx.deployChequebook(),
+            TestTx.transfer("cc".repeat(20), BigInteger.TEN.pow(13)),
+        )
+        for ((plan, isBuy) in listOf(buy to true, extend to false)) {
+            val p = SpendPermit(plan)
+            val slots = everything().mapNotNull { raw ->
+                val slot = LegacyTx.decode(raw)?.let(p::slotFor)
+                slot.takeIf { p.admits(raw) }
+            }.toSet()
+            assertEquals(SpendPermit.slotsFor(isBuy), slots)
+        }
+        assertEquals(BigInteger("50000000000000000"), SpendPermit.maxGasWei(buy = true)) // 5 × 0.01 xDAI
+        assertEquals(BigInteger("30000000000000000"), SpendPermit.maxGasWei(buy = false)) // 3 × 0.01 xDAI
+    }
 }

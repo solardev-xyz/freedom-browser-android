@@ -242,6 +242,7 @@ private fun PublishingSection(
     onOpenSetup: () -> Unit,
     onOpenStamps: () -> Unit,
 ) {
+    val spend by StampClient.spend.collectAsState()
     SectionCard(title = "Publishing") {
         Row(
             modifier = Modifier
@@ -267,13 +268,21 @@ private fun PublishingSection(
         Spacer(Modifier.height(4.dp))
         Row {
             TextButton(onClick = onOpenSetup) { Text("Set up publishing") }
-            // Readable only from a light node's gateway.
-            if (nodeInfo.status == NodeStatus.Running && nodeInfo.lightMode) {
+            if (stampsEntryShown(nodeInfo, spend)) {
                 TextButton(onClick = onOpenStamps) { Text("Postage stamps") }
             }
         }
     }
 }
+
+/**
+ * Is the Postage stamps entry offered? The pages read a light node's
+ * gateway, so while one runs; and also while a spend (#116) has something
+ * to show, even with the node off — turning it off mid-spend lets the
+ * spend finish first, and its progress and outcome stay reachable.
+ */
+internal fun stampsEntryShown(nodeInfo: NodeInfo, spend: StampClient.Spend): Boolean =
+    (nodeInfo.status == NodeStatus.Running && nodeInfo.lightMode) || spend !is StampClient.Spend.Idle
 
 /** The line under the light-mode switch: what the mode does, or that the node is on its way into it. */
 internal fun swarmModeSubtitle(nodeInfo: NodeInfo, lightModeWanted: Boolean?): String {
