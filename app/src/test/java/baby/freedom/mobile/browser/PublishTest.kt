@@ -193,6 +193,19 @@ class PublishTest {
     }
 
     @Test
+    fun `a grant released once staging is done isn't released again at the end`() {
+        var releases = 0
+        val release = RunOnce { releases++ }
+        release() // the source has been read
+        release() // the publish's finally
+        assertEquals(1, releases)
+        val raced = java.util.concurrent.atomic.AtomicInteger()
+        val once = RunOnce { raced.incrementAndGet() }
+        (1..8).map { Thread { repeat(1_000) { once() } } }.onEach { it.start() }.forEach { it.join() }
+        assertEquals(1, raced.get())
+    }
+
+    @Test
     fun `a document of unknown size is measured, and refused past the cap`() {
         assertEquals(70_000L, measureCapped(ByteArrayInputStream(ByteArray(70_000)), tooBig = "big"))
         assertEquals(0L, measureCapped(ByteArrayInputStream(ByteArray(0)), tooBig = "big"))

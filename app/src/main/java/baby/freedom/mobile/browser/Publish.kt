@@ -372,6 +372,18 @@ internal object PublishGrants {
     }
 }
 
+/**
+ * [action] run at most once however often this is invoked — so a grant
+ * released early isn't released again, taking another pick's hold.
+ */
+internal class RunOnce(private val action: () -> Unit) {
+    private val done = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    operator fun invoke() {
+        if (done.compareAndSet(false, true)) action()
+    }
+}
+
 /** Of the [persisted] grants, the ones not [held] by a publish in this process. */
 internal fun staleGrants(persisted: List<String>, held: Set<String>): Set<String> =
     persisted.filterNot { it in held }.toSet()
@@ -775,9 +787,12 @@ internal object Publisher {
             record = history.start(plan.kind, plan.name, plan.bytes)
             _state.value = State.Running(record.id, plan.name, plan.kind)
         }
+        // Given back once staging has read the source, not held through the
+        // upload; the finally covers every path that ends before that.
+        val releaseSource = RunOnce { releaseGrant(app, plan.source) }
         scope.launch {
             try {
-                val (reference, bytes) = run(app, plan, batch)
+                val (reference, bytes) = run(app, plan, batch, releaseSource::invoke)
                 history.completed(record.id, reference, batchId, bytes)
             } catch (e: PublishException) {
                 history.failed(record.id, e.message ?: "The upload failed")
@@ -785,7 +800,7 @@ internal object Publisher {
                 Log.w(TAG, "publish failed: ${t.javaClass.simpleName}")
                 history.failed(record.id, "The upload failed")
             } finally {
-                releaseGrant(app, plan.source)
+                releaseSource()
                 // Its record removed from the history meanwhile (Remove or
                 // Clear all): there's no outcome left to show.
                 synchronized(this@Publisher) { _state.value = finishedState(record.id, history.records.value) }
@@ -815,9 +830,11 @@ internal object Publisher {
     /**
      * Stages [plan] in a file (a tar for a folder), so its exact length is
      * known up front and capped, and uploads it. Returns the reference and
-     * the bytes published.
+     * the bytes published. [sourceRead] is called as soon as the source
+     * has been read in full, before the upload, which needs only the
+     * staged copy.
      */
-    private fun run(app: Context, plan: PublishPlan, batch: PostageBatch): Pair<String, Long> {
+    private fun run(app: Context, plan: PublishPlan, batch: PostageBatch, sourceRead: () -> Unit): Pair<String, Long> {
         val batchId = batch.id
         val resolver = app.contentResolver
         val dir = stagingDir(app)
@@ -855,6 +872,7 @@ internal object Publisher {
                     PublishRequest(PublishKind.Folder, batchId, null, null, indexDocumentFor(plan.files.map { it.path }))
                 }
             }
+            sourceRead()
             // What was read may differ from what was listed (a provider
             // that gave no or a wrong size, a file changed since): check
             // the exact bytes against the stamp before anything goes out.
