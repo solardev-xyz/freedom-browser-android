@@ -1,6 +1,7 @@
 package baby.freedom.mobile.browser
 
 import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -28,6 +29,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontFamily
@@ -91,18 +93,30 @@ private fun statusIcon(r: TxRecord): Pair<ImageVector, Color> {
     }
 }
 
+/** One send in a list: amount, status, chain, date and recipient, each wrapped rather than cut. */
 @Composable
 private fun TxRow(r: TxRecord, onOpen: (TxRecord) -> Unit) {
     val (icon, tint) = statusIcon(r)
-    PageRow(
-        title = txTitle(r),
-        subtitle = txSubtitle(r),
-        thirdLine = "To ${shortAddress(r.to)}",
-        style = PageRowStyle.Inset,
-        leadingIcon = null,
-        onClick = { onOpen(r) },
-        trailing = { Icon(icon, contentDescription = txStatusText(r).first, tint = tint, modifier = Modifier.size(20.dp)) },
-    )
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(MaterialTheme.shapes.small)
+            .clickable(onClick = { onOpen(r) })
+            .padding(horizontal = 12.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Text(txTitle(r), fontWeight = FontWeight.Medium)
+            Text(txSubtitle(r), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text(
+                "To ${shortAddress(r.to)}",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+            )
+        }
+        Spacer(Modifier.width(8.dp))
+        Icon(icon, contentDescription = txStatusText(r).first, tint = tint, modifier = Modifier.size(20.dp))
+    }
 }
 
 /** The wallet page's latest sends from the active account, with a way to all of them. */
