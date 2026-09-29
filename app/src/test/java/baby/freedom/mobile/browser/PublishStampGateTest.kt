@@ -41,6 +41,8 @@ class PublishStampGateTest {
         assertFalse(StampClient.mayRestartGateway(StampClient.Spend.Idle, idle))
         assertTrue(StampClient.mayRestartGateway(running(StampClient.Kind.Buy), idle))
         assertTrue(StampClient.mayRestartGateway(StampClient.Spend.Idle, searching))
+        // A connect of a stamp the wallet bought (#115) may set up the chequebook too.
+        assertTrue(StampClient.mayRestartGateway(running(StampClient.Kind.Connect), idle))
         // An extend or a deposit never sets up a chequebook: no reload.
         assertFalse(StampClient.mayRestartGateway(running(StampClient.Kind.Extend), idle))
         assertFalse(StampClient.mayRestartGateway(running(StampClient.Kind.Deposit), idle))
@@ -61,6 +63,8 @@ class PublishStampGateTest {
         assertNull(Publisher.claim("other", PublishKind.File) { record("p2") })
 
         assertFalse(StampClient.buy(quote))
+        // Nor connecting a stamp the wallet bought (#115): it may set up the chequebook.
+        assertFalse(StampClient.connect("ab".repeat(32)))
         assertFalse(StampClient.discover("0x" + "aa".repeat(20)))
         assertEquals(StampClient.Spend.Idle, StampClient.spend.value)
         assertEquals(StampClient.Discovery.Idle, StampClient.discovery.value)
@@ -110,6 +114,10 @@ class PublishStampGateTest {
         val buy = StampClient.spendOutcome(StampClient.Kind.Buy, null, timedOut) { waited++ }
         assertEquals("a timed-out buy waits for :node before it ends", 1, waited)
         assertEquals(StampClient.Spend.Failed(StampClient.Kind.Buy, null, StampClient.BUY_OVERRAN), buy)
+        // So may a connect (#115): it waits too, and says it didn't report back.
+        val connect = StampClient.spendOutcome(StampClient.Kind.Connect, "cd", timedOut) { waited++ }
+        assertEquals(2, waited)
+        assertEquals(StampClient.Spend.Failed(StampClient.Kind.Connect, "cd", StampClient.CONNECT_OVERRAN), connect)
 
         // An extend or a deposit never reloads the gateway: no wait.
         val extend = StampClient.spendOutcome(StampClient.Kind.Extend, "ab", timedOut) { waited++ }
@@ -121,7 +129,7 @@ class PublishStampGateTest {
             StampClient.Spend.Failed(StampClient.Kind.Buy, null, "not enough xDAI"),
             StampClient.spendOutcome(StampClient.Kind.Buy, null, StampClient.Answer.Failed("not enough xDAI")) { waited++ },
         )
-        assertEquals(1, waited)
+        assertEquals(2, waited)
     }
 
     @Test

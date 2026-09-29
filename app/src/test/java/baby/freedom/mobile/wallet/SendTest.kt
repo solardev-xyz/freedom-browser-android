@@ -769,6 +769,28 @@ class SendTest {
     }
 
     @Test
+    fun `the node's funding keeps its label across a restart, and names the node as what it's for`() = runBlocking<Unit> {
+        // #115: the batch it buys is connected once it's mined, even by a later process.
+        val chain = FakeChain()
+        chain.estimate = 250_000
+        val s = sender(chain, journal = FileSendJournal(journalFile()))
+        val node = "0xD5572300E441b77b72bdd318BBFA7b97A1F03096"
+        val nonce = ByteArray(32) { 7 }
+        val data = SwarmFunder.calldata(node, SwarmFunder.XDAI_FOR_NODE_WEI, BigInteger.TEN, BigInteger.TEN, 17, nonce, true)
+        val label = SwarmFundLabel(node, SwarmFunder.batchId(nonce), 17, 2)
+        val value = BigInteger("53000000000000000")
+        val quote = s.prepare(SendRequest(gnosis, xdai, from, SwarmFunder.ADDRESS, value, DappCall(null, data, null, swarm = label)))
+        chain.on["eth_getTransactionReceipt"] = { throw IOException("timed out") }
+        s.submit(quote, signer())
+        s.awaitStage { it == SendStatus.Stage.Pending }
+        val restored = sender(chain, journal = FileSendJournal(journalFile())).status.value!!.quote.request
+        assertEquals(label, restored.dapp!!.swarm)
+        assertEquals(value, restored.amount)
+        assertEquals("your Swarm node (funding and a postage stamp)", baby.freedom.mobile.browser.dappRequester(restored.dapp!!))
+        assertThrows(IllegalArgumentException::class.java) { DappCall("https://app.example", data, null, swarm = label) }
+    }
+
+    @Test
     fun `a site's call with no value still needs the fee, and a revert names the contract`() = runBlocking<Unit> {
         val chain = FakeChain()
         chain.balance = BigInteger.ZERO

@@ -155,6 +155,8 @@ internal data class StampQuote(
     val totalCostBzz: String,
     /** The node's chequebook deposit a first buy also makes, or null for none. */
     val depositBzz: String?,
+    /** The same in PLUR; zero for none. */
+    val depositPlur: BigInteger = BigInteger.ZERO,
     /** xBZZ the node has, and how much more it swaps xDAI for. */
     val accountBzz: String,
     val neededBzz: String,
@@ -176,6 +178,7 @@ internal fun stampQuoteFrom(o: JSONObject): StampQuote? = runCatching {
         amountPerChunk = amount,
         totalCostBzz = o.getString("total_cost_bzz"),
         depositBzz = if (deposit.signum() > 0) o.optString("settlement_deposit_bzz") else null,
+        depositPlur = deposit.max(BigInteger.ZERO),
         accountBzz = o.optString("account_bzz_display"),
         neededBzz = o.optString("needed_bzz_display"),
         xdaiRequired = BigInteger(o.getString("xdai_required")),
@@ -218,8 +221,9 @@ internal fun withUnit(amount: String, unit: String): String =
 
 /**
  * The UI process's way to the node's storage calls, which run in `:node`
- * ([INodeService.stampCall]), and the one spend (a stamp buy or extend, or
- * a chequebook deposit, #117) in flight
+ * ([INodeService.stampCall]), and the one spend (a stamp buy or extend, a
+ * chequebook deposit, #117, or connecting a stamp the wallet bought, #115)
+ * in flight
  * — held here, not by a screen, so it outlives leaving the page, and so
  * there's only ever one. [MainActivity] keeps [service] current.
  */
@@ -385,12 +389,12 @@ internal object StampClient {
 
     /**
      * Whether [spend] or [discovery] may restart the node's gateway: a buy
-     * (the first one sets up the chequebook) or a search (which can adopt
-     * one) ends with `:node` reloading it, which cuts every request open
-     * on it — a publish's `POST /bzz` too.
+     * or a connect (the first one sets up the chequebook, #115) or a search
+     * (which can adopt one) ends with `:node` reloading it, which cuts
+     * every request open on it — a publish's `POST /bzz` too.
      */
     fun mayRestartGateway(spend: Spend, discovery: Discovery): Boolean =
-        (spend is Spend.Running && spend.kind == Kind.Buy) || discovery is Discovery.Running
+        (spend is Spend.Running && spend.kind.mayRestartGateway) || discovery is Discovery.Running
 
     /**
      * Blocks while `:node` runs a buy or a search that may end by
@@ -452,7 +456,12 @@ internal object StampClient {
     fun canRestartGateway(spend: Spend, discovery: Discovery, publishing: Publisher.State): Boolean =
         canSpend(spend, discovery) && publishing !is Publisher.State.Running
 
-    enum class Kind { Buy, Extend, Deposit }
+    enum class Kind {
+        Buy, Extend, Deposit, Connect;
+
+        /** A buy or a connect may end by reloading the gateway: the first one sets up the chequebook (#115). */
+        val mayRestartGateway: Boolean get() = this == Buy || this == Connect
+    }
 
     sealed interface Spend {
         data object Idle : Spend
@@ -492,6 +501,15 @@ internal object StampClient {
         JSONObject().put("chequebook", chequebook).put("amountPlur", amountPlur.toString())
     }
 
+    /**
+     * Connects batch [batchId], which the wallet bought for the node
+     * through SwarmNodeFunder (#115, [SwarmFunding]), so the node stamps
+     * with it; a first one also sets up the node's chequebook, and so may
+     * reload the gateway. False if a spend or a discover is already
+     * running, or a publish is uploading.
+     */
+    fun connect(batchId: String): Boolean = start(Kind.Connect, batchId) { JSONObject().put("batchId", batchId) }
+
     /** Forget a finished spend's outcome once it's been shown. */
     fun acknowledge() {
         _spend.value.let { if (it is Spend.Done || it is Spend.Failed) _spend.compareAndSet(it, Spend.Idle) }
@@ -501,8 +519,8 @@ internal object StampClient {
         val running = Spend.Running(kind, batchId)
         synchronized(this) {
             if (!canSpend(_spend.value, _discovery.value)) return false
-            // A buy may restart the gateway (the chequebook): not under a publish's upload.
-            if (kind == Kind.Buy && !canRestartGateway(_spend.value, _discovery.value, Publisher.state.value)) return false
+            // A buy or connect may restart the gateway (the chequebook): not under a publish's upload.
+            if (kind.mayRestartGateway && !canRestartGateway(_spend.value, _discovery.value, Publisher.state.value)) return false
             _spend.value = running
         }
         scope.launch {
@@ -510,6 +528,7 @@ internal object StampClient {
                 Kind.Buy -> "buy"
                 Kind.Extend -> "extend"
                 Kind.Deposit -> "deposit"
+                Kind.Connect -> "connect"
             }
             val outcome = try {
                 spendOutcome(kind, batchId, call(method, args(), SPEND_TIMEOUT_MS)) {
@@ -526,18 +545,18 @@ internal object StampClient {
 
     /**
      * What a spend of [kind] ended as, by `:node`'s answer [a]. Past the
-     * deadline the node is most likely still on it; and a buy may yet end
-     * by reloading the gateway (the chequebook), so for a buy it first
-     * [awaitBuyEnd]s — the spend stays Running meanwhile, so no publish
+     * deadline the node is most likely still on it; and a buy or connect
+     * may yet end by reloading the gateway (the chequebook), so for those
+     * it first [awaitBuyEnd]s — the spend stays Running meanwhile, so no publish
      * starts under it — until `:node` says it ended (#222 R4-F1).
      */
     internal fun spendOutcome(kind: Kind, batchId: String?, a: Answer, awaitBuyEnd: () -> Unit): Spend = when (a) {
         is Answer.Ok -> Spend.Done(kind, batchId)
         is Answer.Failed -> when {
             a.message != TIMED_OUT -> Spend.Failed(kind, batchId, a.message)
-            kind == Kind.Buy -> {
+            kind.mayRestartGateway -> {
                 awaitBuyEnd()
-                Spend.Failed(kind, batchId, BUY_OVERRAN)
+                Spend.Failed(kind, batchId, if (kind == Kind.Connect) CONNECT_OVERRAN else BUY_OVERRAN)
             }
             else -> Spend.Failed(kind, batchId, stillSendingMessage(kind))
         }
@@ -565,6 +584,11 @@ internal object StampClient {
     internal const val BUY_OVERRAN =
         "it took longer than expected, and ended without telling the app how it went. " +
             "The list shows the stamp if it was bought."
+
+    /** The same for a connect (#115): `:node` doesn't keep its outcome either. */
+    internal const val CONNECT_OVERRAN =
+        "it took longer than expected, and ended without telling the app how it went. " +
+            "If the stamp doesn't show in the list, try Connect again."
     internal const val TIMED_OUT = "The Swarm node didn't answer in time"
     internal const val DISCOVER_OVERRAN =
         "The search took longer than expected, and ended without telling the app what it found. " +

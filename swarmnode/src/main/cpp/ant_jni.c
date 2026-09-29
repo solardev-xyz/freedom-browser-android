@@ -393,6 +393,36 @@ Java_baby_freedom_swarm_AntNative_storageTopupXdai(JNIEnv *env, jobject thiz, jl
 }
 
 /*
+ * ant_storage_connect_batch (#115): registers a batch the node's account
+ * already owns on Gnosis — one the wallet bought for it through
+ * SwarmNodeFunder. Buys nothing itself, but on a first connect ant sets
+ * up the chequebook (deploy + settlement deposit), which broadcasts: so
+ * it puts the gate back first, like the spends, and SwarmNode runs it
+ * inside SpendGuard.during.
+ */
+JNIEXPORT jstring JNICALL
+Java_baby_freedom_swarm_AntNative_storageConnectBatch(JNIEnv *env, jobject thiz, jlong handle,
+                                                      jstring gnosis_rpc, jstring batch_id) {
+    (void)thiz;
+    if (install_guard(handle) != 0) {
+        throw_runtime(env, NULL, "ant_set_chain_transport failed");
+        return NULL;
+    }
+    const char *rpc = (*env)->GetStringUTFChars(env, gnosis_rpc, NULL);
+    if (rpc == NULL) return NULL;
+    const char *batch = (*env)->GetStringUTFChars(env, batch_id, NULL);
+    if (batch == NULL) {
+        (*env)->ReleaseStringUTFChars(env, gnosis_rpc, rpc);
+        return NULL;
+    }
+    char *err = NULL;
+    char *json = ant_storage_connect_batch((const AntHandle *)(uintptr_t)handle, rpc, batch, &err);
+    (*env)->ReleaseStringUTFChars(env, batch_id, batch);
+    (*env)->ReleaseStringUTFChars(env, gnosis_rpc, rpc);
+    return json_or_throw(env, json, err, "ant_storage_connect_batch failed");
+}
+
+/*
  * Finds the batches this account already owns on Gnosis (#118): a log
  * scan, then each still-funded one is registered with the node, so a
  * wallet's stamps come back after a reinstall or on another device. It

@@ -84,6 +84,14 @@ internal object AntNative {
     external fun storageTopupXdai(handle: Long, gnosisRpc: String, amountPerChunk: String): String
 
     /**
+     * `ant_storage_connect_batch` (#115): registers [batchId], which the
+     * node's account must already own on chain, and — first time only —
+     * sets up the chequebook, which broadcasts: only through
+     * [SpendGuard.during] with a [SpendPlan.ConnectBatch].
+     */
+    external fun storageConnectBatch(handle: Long, gnosisRpc: String, batchId: String): String
+
+    /**
      * `ant_storage_discover`: registers every still-funded batch this
      * account owns on Gnosis (#118). Sends nothing: the shim puts the
      * broadcast gate back first, so the chequebook deploy ant may try

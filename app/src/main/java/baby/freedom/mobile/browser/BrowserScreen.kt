@@ -2005,8 +2005,9 @@ fun BrowserScreen(
             // Publish setup's identity step (#114): the wallet page opens
             // over the node page (it's composed after it).
             onOpenWallet = { showWallet = true },
-            // A published page (#118): a new tab in front, never a private
-            // one, with the pages the node page was opened over closed too.
+            // A published page (#118), or the fund-and-buy transaction's
+            // explorer page (#115): a new tab in front, never a private one,
+            // with the pages the node page was opened over closed too.
             onOpenUrl = { url ->
                 showNode = false
                 showSettings = false

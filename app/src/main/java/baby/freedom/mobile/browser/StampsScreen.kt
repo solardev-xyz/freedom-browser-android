@@ -110,17 +110,22 @@ internal fun spendStatusText(spend: StampClient.Spend): String? = when (spend) {
             "waits for each transaction to confirm. This takes a minute or two."
         StampClient.Kind.Deposit -> "Depositing… The node moves the xBZZ into its chequebook and waits for the " +
             "transaction to confirm on Gnosis Chain. This takes up to a minute."
+        StampClient.Kind.Connect -> "Connecting the stamp your wallet bought… The node checks it on Gnosis Chain and, " +
+            "the first time, sets up its chequebook. This takes up to a few minutes."
     }
     is StampClient.Spend.Done -> when (spend.kind) {
         StampClient.Kind.Buy -> "Stamp bought. It becomes usable once the network has seen it, usually within a minute."
         StampClient.Kind.Extend -> "Stamp extended."
         StampClient.Kind.Deposit -> "Deposited into the chequebook."
+        StampClient.Kind.Connect -> "Stamp connected: the node publishes with it."
     }
     is StampClient.Spend.Failed -> when (spend.kind) {
         // Outlived the page's wait (#222 R4-F1): no answer, so not a failure either.
         StampClient.Kind.Buy ->
             if (spend.message == StampClient.BUY_OVERRAN) "The stamp purchase didn't report back: " else "Buying the stamp failed: "
         StampClient.Kind.Extend -> "Extending the stamp failed: "
+        StampClient.Kind.Connect ->
+            if (spend.message == StampClient.CONNECT_OVERRAN) "Connecting the stamp didn't report back: " else "Connecting the stamp your wallet bought failed: "
         // Ended without a clear answer (#117): not a failure, it may be out.
         StampClient.Kind.Deposit ->
             if (spend.message.startsWith(SwarmNode.DEPOSIT_MAYBE_SENT)) "The deposit didn't report back: " else "The deposit failed: "

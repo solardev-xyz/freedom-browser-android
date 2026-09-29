@@ -41,8 +41,9 @@ internal class SpendStopGate(private val nanoTime: () -> Long = System::nanoTime
 
     /**
      * A spend is about to start; false (don't start it) while the node is
-     * being turned off, or while a discover runs. [buy]: it's a stamp buy,
-     * which may reload the gateway as it ends ([gatewayWorkRunning]).
+     * being turned off, or while a discover runs. [buy]: it's a stamp buy
+     * (or a connect of one the wallet bought, #115), which may reload the
+     * gateway as it ends ([gatewayWorkRunning]).
      */
     fun begin(buy: Boolean = false): Boolean = synchronized(monitor) {
         if (stopping || discovering) return false

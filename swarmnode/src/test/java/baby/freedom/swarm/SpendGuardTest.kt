@@ -217,4 +217,36 @@ class SpendGuardTest {
         assertFalse(SpendPermit(buy).admits(TestTx.transfer(chequebook, depositAmount.add(BigInteger.ONE))))
         assertFalse(SpendPermit(extend).admits(TestTx.transfer(chequebook, depositAmount)))
     }
+
+    private val connect = SpendPlan.ConnectBatch(TestTx.OWNER)
+
+    @Test
+    fun aConnectAdmitsOnlyTheChequebookSetupOnce() {
+        // #115: the wallet already bought the batch; connecting it may only set up
+        // the node's chequebook, as a first buy does.
+        val p = SpendPermit(connect)
+        assertTrue(p.admits(TestTx.deployChequebook()))
+        assertTrue(p.admits(TestTx.transfer("cc".repeat(20), depositAmount)))
+        assertFalse(p.admits(TestTx.tx(SpendPermit.CHEQUEBOOK_FACTORY, TestTx.call("15efd8a7", TestTx.addr(TestTx.OWNER), TestTx.word(BigInteger.ONE), ByteArray(32) { 6 }))))
+
+        fun refused(raw: ByteArray) = assertFalse(SpendPermit(connect).admits(raw))
+        refused(TestTx.swap(BigInteger.ONE)) // nothing to swap for
+        refused(TestTx.approve(amount.shiftLeft(17)))
+        refused(TestTx.createBatch(TestTx.OWNER, amount, 17, false)) // no second batch
+        refused(TestTx.topUp(batch, amount))
+        refused(TestTx.deployChequebook(issuer = "22".repeat(20))) // another issuer
+        refused(TestTx.transfer("cc".repeat(20), depositAmount.add(BigInteger.ONE))) // more than the deposit
+        refused(TestTx.tx(SpendPermit.BZZ_TOKEN, TestTx.call("a9059cbb", TestTx.addr("cc".repeat(20)), TestTx.word(depositAmount)), value = BigInteger.ONE))
+
+        // What a fresh connect permit lets out of every kind of ant transaction is exactly CONNECT_SLOTS.
+        val slots = listOf(
+            TestTx.swap(maxSwap), TestTx.approve(amount.shiftLeft(17)), TestTx.createBatch(TestTx.OWNER, amount, 17, false),
+            TestTx.topUp(batch, amount), TestTx.deployChequebook(), TestTx.transfer("cc".repeat(20), depositAmount),
+        ).let { all ->
+            val fresh = SpendPermit(connect)
+            all.mapNotNull { raw -> LegacyTx.decode(raw)?.let(fresh::slotFor)?.takeIf { fresh.admits(raw) } }.toSet()
+        }
+        assertEquals(SpendPermit.CONNECT_SLOTS, slots)
+        assertEquals(BigInteger("20000000000000000"), SpendPermit.CONNECT_MAX_GAS_WEI) // 2 × 0.01 xDAI
+    }
 }

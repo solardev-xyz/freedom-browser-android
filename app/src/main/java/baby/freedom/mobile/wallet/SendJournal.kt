@@ -196,6 +196,12 @@ internal object SendJournalCodec {
                                 JSONObject().put("address", l.address).put("name", l.name).put("activates", l.activates)
                             } ?: JSONObject.NULL,
                         )
+                        .put(
+                            "swarm",
+                            it.swarm?.let { l ->
+                                JSONObject().put("node", l.node).put("batchId", l.batchId).put("depth", l.depth).put("days", l.days)
+                            } ?: JSONObject.NULL,
+                        )
                 } ?: JSONObject.NULL,
             )
             .put(
@@ -244,6 +250,7 @@ internal object SendJournalCodec {
                 d.getString("data").hexToBytes(),
                 d.optStringOrNull("gasLimit")?.let(::BigInteger),
                 d.optJSONObject("safe")?.let { l -> SafeCallLabel(l.getString("address"), l.getString("name"), l.getBoolean("activates")) },
+                d.optJSONObject("swarm")?.let { l -> SwarmFundLabel(l.getString("node"), l.getString("batchId"), l.getInt("depth"), l.getLong("days")) },
             )
         }
         val request = SendRequest(chain, token, from, o.getString("to"), BigInteger(o.getString("amount")), dapp)

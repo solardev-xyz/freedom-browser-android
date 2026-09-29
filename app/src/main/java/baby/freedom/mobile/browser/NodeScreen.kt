@@ -82,7 +82,10 @@ fun NodeScreen(
     onMyotisRecovery: (chainId: Long, repair: Boolean) -> Unit = { _, _ -> },
     /** Open the wallet page, for publish setup's identity step (#114). */
     onOpenWallet: () -> Unit = {},
-    /** Open a published page's bzz:// link in a new tab (#118). */
+    /**
+     * Open a URL in a new tab: a published page's bzz:// link (#118), or
+     * a transaction's explorer page, from the fund-and-buy page (#115).
+     */
     onOpenUrl: (String) -> Unit = {},
 ) {
     val triple = nodeStatusTriple(nodeInfo.status)
@@ -103,7 +106,14 @@ fun NodeScreen(
     var showPublish by rememberSaveable { mutableStateOf(false) }
     // The chequebook page (#117).
     var showChequebook by rememberSaveable { mutableStateOf(false) }
+    // Fund the node and buy a stamp in one wallet transaction (#115).
+    var showFund by rememberSaveable { mutableStateOf(false) }
 
+    if (showFund) {
+        // Back lands on publish setup, which opened it.
+        FundNodeScreen(nodeInfo = nodeInfo, onOpenUrl = onOpenUrl, onDismiss = { showFund = false })
+        return
+    }
     if (showChequebook) {
         // Back lands on whichever page opened it.
         ChequebookScreen(nodeInfo = nodeInfo, onDismiss = { showChequebook = false })
@@ -123,6 +133,7 @@ fun NodeScreen(
             onBuyStamp = { showStamps = "buy" },
             onOpenChequebook = { showChequebook = true },
             onDismiss = { showPublishSetup = false },
+            onFundAndBuy = { showFund = true },
         )
         return
     }

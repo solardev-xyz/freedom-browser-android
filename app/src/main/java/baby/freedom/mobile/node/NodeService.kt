@@ -326,7 +326,7 @@ class NodeService : Service() {
     }
 
     /**
-     * One [INodeService.stampCall] (#116, #117), blocking. The spends are for
+     * One [INodeService.stampCall] (#115, #116, #117), blocking. The spends are for
      * the wallet identity's node only: the device-only key can't be
      * restored anywhere, so nothing bought with it could be kept.
      */
@@ -380,7 +380,7 @@ class NodeService : Service() {
                     status.outcome?.let { o -> runCatching { JSONObject(o) }.getOrNull()?.let { put("outcome", it) } }
                 }.toString()
             }
-            // Whether a buy or a discover runs, either of which may end by
+            // Whether a buy (or connect) or a discover runs, any of which may end by
             // reloading the gateway: a publish waits for it before sending
             // (#222 R4-F1).
             "gatewayWork" -> JSONObject().put("running", stopGate.gatewayWorkRunning).toString()
@@ -394,6 +394,14 @@ class NodeService : Service() {
                 spendable()
                 Log.i(TAG, "extending a postage batch, as the user confirmed")
                 swarmNode.extendStamp(args.getString("batchId"), amount(), maxSwap())
+            }
+            // Counted as a buy: a first connect sets up the chequebook and
+            // ends by reloading the gateway, which a publish waits out.
+            "connect" -> spending(buy = true) {
+                // A batch the wallet bought for the node (#115); ant checks the node owns it.
+                spendable()
+                Log.i(TAG, "connecting a postage batch the wallet bought for the node")
+                swarmNode.connectBatch(args.getString("batchId"))
             }
             "deposit" -> spending {
                 spendable()
