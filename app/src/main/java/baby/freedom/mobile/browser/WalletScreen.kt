@@ -69,6 +69,11 @@ import baby.freedom.mobile.wallet.Vault
 import baby.freedom.mobile.wallet.VaultAuthCancelledException
 import baby.freedom.mobile.wallet.VaultAuthFailedException
 import baby.freedom.mobile.wallet.VaultKeyLostException
+import baby.freedom.mobile.wallet.VaultLockedException
+import baby.freedom.mobile.wallet.WalletAccounts
+import baby.freedom.mobile.wallet.TokenRegistry
+import baby.freedom.mobile.wallet.TooManyAccountsException
+import baby.freedom.mobile.data.ChainStore
 import baby.freedom.mobile.wallet.VaultProtection
 import baby.freedom.mobile.wallet.VaultUnreadableException
 import kotlinx.coroutines.CancellationException
@@ -218,6 +223,8 @@ internal fun walletErrorMessage(e: Throwable, action: String, phraseBackedUp: Bo
     is VaultAuthCancelledException -> null
     is CancellationException -> null
     is VaultAuthFailedException -> "Couldn’t $action: ${e.message}"
+    is VaultLockedException -> "Couldn’t $action: the wallet locked. Unlock it and try again."
+    is TooManyAccountsException -> "Couldn’t $action: ${e.message}."
     is VaultKeyLostException -> "Android has erased this wallet’s key. That happens when the screen lock is removed. " +
         lostWalletAdvice(phraseBackedUp)
     is VaultUnreadableException -> "This wallet can’t be read. " + lostWalletAdvice(phraseBackedUp)
@@ -259,6 +266,32 @@ fun WalletScreen(
     var error by remember { mutableStateOf<String?>(null) }
     var confirmRemove by remember { mutableStateOf(false) }
     ReleaseCoveredFocus()
+
+    // Accounts and balances (#104). Addresses are public, so both show
+    // while the wallet is locked; only adding an account needs it open.
+    val walletAccounts = remember(context) { WalletAccounts.get(context) }
+    val accountList by walletAccounts.accounts.collectAsState()
+    val allBalances by walletAccounts.balances.byAddress.collectAsState()
+    val chainStore = remember(context) { ChainStore.get(context) }
+    val allChains by chainStore.chains.collectAsState(initial = null)
+    val walletChains = allChains?.filter { it.id in TokenRegistry.WALLET_CHAIN_IDS }
+    val activeAddress = accountList?.active?.address
+    var refreshTick by remember { mutableStateOf(0) }
+    var refreshing by remember { mutableStateOf(false) }
+    val refreshGeneration = remember { intArrayOf(0) }
+    // Re-read on opening, on switching account and on Refresh; a newer
+    // read cancels the one before (the effect restarts) and owns the spinner.
+    LaunchedEffect(activeAddress, walletChains, refreshTick) {
+        val address = activeAddress ?: return@LaunchedEffect
+        val chains = walletChains ?: return@LaunchedEffect
+        val mine = ++refreshGeneration[0]
+        refreshing = true
+        try {
+            walletAccounts.balances.refresh(address, chains.flatMap { TokenRegistry.tokens(it) })
+        } finally {
+            if (refreshGeneration[0] == mine) refreshing = false
+        }
+    }
 
     // Re-read on every resume: the user may come back from setting a screen lock.
     val lifecycleState by LocalLifecycleOwner.current.lifecycle.currentStateFlow.collectAsState()
@@ -381,6 +414,35 @@ fun WalletScreen(
                 item("error") { ErrorText(message) }
             }
             val info = (state as? Vault.State.Locked)?.info ?: (state as? Vault.State.Unlocked)?.info
+            if (info != null) {
+                val list = accountList
+                if (list == null) {
+                    item("accounts") { AccountsLockedSection(locked = state is Vault.State.Locked) }
+                } else {
+                    item("accounts") {
+                        AccountsSection(
+                            list = list,
+                            locked = state is Vault.State.Locked,
+                            busy = busy,
+                            onSelect = { index -> scope.launch { walletAccounts.select(index) } },
+                            onAdd = {
+                                run("add an account") {
+                                    if (!vault.unlockedNow()) vault.unlock(auth)
+                                    walletAccounts.add()
+                                }
+                            },
+                        )
+                    }
+                    item("balances") {
+                        BalancesSection(
+                            chains = walletChains.orEmpty(),
+                            balances = allBalances[list.active.address.lowercase()].orEmpty(),
+                            refreshing = refreshing,
+                            onRefresh = { refreshTick++ },
+                        )
+                    }
+                }
+            }
             if (info != null && !info.backedUp) item("backup") { BackupReminder(info.protection) }
             if (info?.protection == VaultProtection.DEVICE_ONLY) item("no-lock") {
                 SectionCard(title = "No screen lock") {
