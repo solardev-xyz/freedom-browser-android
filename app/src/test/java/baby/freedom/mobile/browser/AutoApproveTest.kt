@@ -93,6 +93,11 @@ class AutoApproveTest {
         "0x8069218f" to "Morpho Blue setAuthorizationWithSig",
         "0x0b52d558" to "Aave delegationWithSig",
         "0xbb24d994" to "Compound III allowBySig",
+        // #253 R2-M1: V4's no-unlock entry point and EIP-7702/smart-account batch entry points.
+        "0x4afe393c" to "Uniswap V4 modifyLiquiditiesWithoutUnlock(bytes,bytes[])",
+        "0xabc5345e" to "Ambire executeBySender((address,uint256,bytes)[])",
+        "0x6769de82" to "Ambire executeBySelf((address,uint256,bytes)[])",
+        "0x6171d1c9" to "Ambire execute((address,uint256,bytes)[],bytes)",
     )
 
     @Test

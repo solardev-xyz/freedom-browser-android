@@ -143,8 +143,14 @@ internal val REFUSED_SELECTOR_SIGNATURES: List<String> = listOf(
     "execTransaction(address,uint256,bytes,uint8,uint256,uint256,uint256,address,address,bytes)",
     "execTransactionFromModule(address,uint256,bytes,uint8)",
     "execute(address,uint256,bytes,uint8)",
+    // EIP-7702 / smart-account batches (Ambire): runs every call it's handed. Under 7702 the
+    // account is the user's own address, so even the "by self" form is a plain transaction.
+    "executeBySender((address,uint256,bytes)[])",
+    "executeBySelf((address,uint256,bytes)[])",
+    "execute((address,uint256,bytes)[],bytes)",
     // Uniswap V4 PositionManager: runs whatever actions its data encodes.
     "modifyLiquidities(bytes,uint256)",
+    "modifyLiquiditiesWithoutUnlock(bytes,bytes[])",
 )
 
 /** [REFUSED_SELECTOR_SIGNATURES] as selectors: lower-case `0x` + 8 hex. */
