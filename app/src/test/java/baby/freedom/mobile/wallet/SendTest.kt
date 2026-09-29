@@ -209,6 +209,25 @@ class SendTest {
     }
 
     @Test
+    fun `a send abandoned between its broadcast and its markSent stays abandoned (#229)`() = runBlocking<Unit> {
+        val chain = FakeChain()
+        val tracker = NonceTracker(chain.rpc())
+        val fees = EthTransaction.Fees.Legacy(BigInteger.TEN)
+        val hash = "0x" + "ab".repeat(32)
+        // Stop tracking lands after the node took it, before the sender marks it sent.
+        tracker.abandon(from.address, 100, BigInteger.valueOf(7), fees, hash)
+        tracker.markSent(from.address, 100, BigInteger.valueOf(7), hash.uppercase().replace("0X", "0x"))
+        assertEquals(hash, tracker.replacing(from.address, 100, BigInteger.valueOf(7))?.hash)
+        // Still waiting in a pool: the next send takes its place rather than going out beside it.
+        chain.nonce = 8
+        chain.mined = 7
+        assertEquals(BigInteger.valueOf(7), tracker.next(from.address, 100).value)
+        // Its replacement going out (another hash) is what drops it.
+        tracker.markSent(from.address, 100, BigInteger.valueOf(7), "0x" + "cd".repeat(32))
+        assertNull(tracker.replacing(from.address, 100, BigInteger.valueOf(7)))
+    }
+
+    @Test
     fun `a local nonce is honoured only while the chain may not have seen the send yet`() = runBlocking<Unit> {
         val chain = FakeChain()
         var now = 1_000_000L
