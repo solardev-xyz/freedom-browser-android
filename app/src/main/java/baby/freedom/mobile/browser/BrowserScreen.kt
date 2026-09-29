@@ -2209,6 +2209,14 @@ fun BrowserScreen(
             // The site the user came from, for Publisher identities (#119);
             // never a private tab's, which leaves nothing behind.
             currentSite = tabs.active.takeUnless { it.private }?.providerOrigin,
+            // A transaction's explorer page (#105): a new tab in front, never a
+            // private one — with the pages the wallet was opened over closed too.
+            onOpenUrl = { url ->
+                showWallet = false
+                showSettings = false
+                showNode = false
+                tabs.requestOpenInNewTab?.invoke(url, false, false)
+            },
             onDismiss = { showWallet = false },
         )
     }

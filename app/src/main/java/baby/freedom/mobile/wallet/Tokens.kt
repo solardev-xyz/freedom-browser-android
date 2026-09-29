@@ -50,15 +50,25 @@ object TokenRegistry {
     fun native(chain: Chain) = Token(chain.id, null, chain.symbol, chain.currencyName, chain.decimals)
 }
 
-/** The two ERC-20 bits a balance needs: the `balanceOf` call and its answer. */
+/** The ERC-20 bits the wallet needs: `balanceOf` and its answer, and `transfer`. */
 internal object Erc20 {
     private const val BALANCE_OF = "0x70a08231"
+    private const val TRANSFER = "a9059cbb"
     private val ADDRESS = Regex("^0x[0-9a-fA-F]{40}$")
 
     /** `balanceOf(holder)` call data. */
     fun balanceOfData(holder: String): String {
         require(ADDRESS.matches(holder)) { "not an address" }
         return BALANCE_OF + "0".repeat(24) + holder.substring(2).lowercase()
+    }
+
+    /** `transfer(to, amount)` call data (#105). */
+    fun transferData(to: String, amount: BigInteger): ByteArray {
+        require(ADDRESS.matches(to)) { "not an address" }
+        require(amount.signum() >= 0 && amount.bitLength() <= 256) { "not a uint256" }
+        val word = amount.toString(16).padStart(64, '0')
+        val hex = TRANSFER + "0".repeat(24) + to.substring(2).lowercase() + word
+        return ByteArray(hex.length / 2) { i -> hex.substring(i * 2, i * 2 + 2).toInt(16).toByte() }
     }
 
     /**

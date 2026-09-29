@@ -87,6 +87,7 @@ import baby.freedom.mobile.wallet.VaultAuthFailedException
 import baby.freedom.mobile.wallet.VaultKeyLostException
 import baby.freedom.mobile.wallet.VaultLockedException
 import baby.freedom.mobile.wallet.WalletAccounts
+import baby.freedom.mobile.wallet.WalletSender
 import baby.freedom.mobile.wallet.TokenRegistry
 import baby.freedom.mobile.wallet.TooManyAccountsException
 import baby.freedom.mobile.data.ChainStore
@@ -276,6 +277,7 @@ private fun lostWalletAdvice(phraseBackedUp: Boolean) = if (phraseBackedUp) {
 fun WalletScreen(
     request: Vault.SetupRequest?,
     currentSite: String?,
+    onOpenUrl: (String) -> Unit,
     onDismiss: () -> Unit,
 ) {
     val context = LocalContext.current
@@ -285,6 +287,9 @@ fun WalletScreen(
     val scope = rememberCoroutineScope()
     var importing by remember { mutableStateOf(false) }
     var publishing by remember { mutableStateOf(false) }
+    var sending by remember { mutableStateOf(false) }
+    val sender = remember(context) { WalletSender.get(context) }
+    val sendStatus by sender.status.collectAsState()
     // The receive and scan pages (#106).
     var receiving by remember { mutableStateOf(false) }
     var scanning by remember { mutableStateOf(false) }
@@ -325,6 +330,11 @@ fun WalletScreen(
         } finally {
             if (refreshGeneration[0] == mine) refreshing = false
         }
+    }
+
+    // A send that went through (or failed on chain) changed the balances: read them again.
+    LaunchedEffect(sendStatus?.done) {
+        if (sendStatus?.done == true) refreshTick++
     }
 
     // Re-read on every resume: the user may come back from setting a screen lock.
@@ -371,13 +381,31 @@ fun WalletScreen(
     LaunchedEffect(state, request) {
         if (request != null || (state !is Vault.State.Locked && state !is Vault.State.Unlocked)) {
             publishing = false
+            sending = false
             receiving = false
             scanning = false
         }
+        // A send goes with the wallet it came from, settled or not (one that may
+        // still land leaves its nonce to be replaced, should that account come back).
+        if (state == Vault.State.Empty) sender.discard()
     }
 
     if (publishing && (state is Vault.State.Locked || state is Vault.State.Unlocked)) {
         PublisherIdentitiesPage(currentSite = cameFrom, onBack = { publishing = false })
+        return
+    }
+    val sendFrom = accountList?.active
+    if (sending && sendFrom != null && (state is Vault.State.Locked || state is Vault.State.Unlocked)) {
+        SendPage(
+            account = sendFrom,
+            chains = walletChains.orEmpty(),
+            balances = allBalances[sendFrom.address.lowercase()].orEmpty(),
+            vault = vault,
+            auth = auth,
+            phraseBackedUp = phraseBackedUp,
+            onOpenUrl = onOpenUrl,
+            onBack = { sending = false },
+        )
         return
     }
     val receivingAccount = accountList?.active
@@ -521,6 +549,16 @@ fun WalletScreen(
                             onReceive = {
                                 error = null
                                 receiving = true
+                            },
+                        )
+                    }
+                    item("send") {
+                        SendEntrySection(
+                            status = sendStatus,
+                            enabled = !busy && walletChains != null,
+                            onOpen = {
+                                error = null
+                                sending = true
                             },
                         )
                     }

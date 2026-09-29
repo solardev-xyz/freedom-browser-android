@@ -166,7 +166,8 @@ internal object Secp256k1Keys {
         return byteArrayOf(if (y.testBit(0)) 3 else 2) + HdKeys.to32(x)
     }
 
-    private fun publicPoint(privateKey: ByteArray): Pair<BigInteger, BigInteger> {
+    /** `privateKey·G` in affine coordinates, by the fixed-length ladder (also the nonce point of a signature, [EthSigning]). */
+    internal fun publicPoint(privateKey: ByteArray): Pair<BigInteger, BigInteger> {
         require(isValidPrivate(privateKey)) { "not a secp256k1 private key" }
         val k = BigInteger(1, privateKey)
         // Montgomery ladder: r0 = k'·G, r1 = r0 + G, same work per bit.
