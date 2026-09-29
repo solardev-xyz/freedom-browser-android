@@ -211,6 +211,23 @@ class SwarmProvidersAskTest {
         assertFalse(timedOut.allowed)
         assertNull(heard)
         assertNull(SwarmProviders.manifestOutcome(manifest, timedOut, heard))
+        // A sheet taken down because the tab reloaded/navigated, or closed:
+        // a refusal for the request, not the user's Don't allow (#226 R2-F1).
+        for (takeDown in listOf<(BrowserState) -> Unit>(
+            { SwarmProviders.onDocumentStarted(it, site) },
+            { SwarmProviders.onTabClosed(it.id) },
+        )) {
+            val t = tab()
+            val withdrawn = runBlocking {
+                val r = async { SwarmProviders.askOnTab(t, 0, manifest, answered = { heard = it }) }
+                while (t.swarmPrompt == null && !r.isCompleted) yield()
+                takeDown(t)
+                r.await()
+            }
+            assertFalse(withdrawn.allowed)
+            assertNull(heard)
+            assertNull(SwarmProviders.manifestOutcome(manifest, withdrawn, heard))
+        }
         // The user's own Don't allow is a decision.
         val refused = runBlocking {
             val r = async { SwarmProviders.askOnTab(tab, 0, manifest, answered = { heard = it }) }

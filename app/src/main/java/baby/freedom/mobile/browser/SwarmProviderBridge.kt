@@ -46,10 +46,23 @@ import org.json.JSONObject
  * one and its page is on screen.
  */
 class SwarmPromptRequest internal constructor(val ask: SwarmAsk) {
-    internal val answer = CompletableDeferred<SwarmProvider.Answer>()
+    /** How the sheet ended: [answer], and whether it was the user's own ([byUser]). */
+    internal class Ending(val answer: SwarmProvider.Answer, val byUser: Boolean)
+
+    internal val ending = CompletableDeferred<Ending>()
 
     fun respond(answer: SwarmProvider.Answer) {
-        this.answer.complete(answer)
+        ending.complete(Ending(answer, byUser = true))
+    }
+
+    /**
+     * Taken down without the user answering (the tab started a new
+     * document or closed): a refusal for the request, but not the
+     * user's answer — so not a Don't allow on a shared manifest consent
+     * (#226 R2-F1).
+     */
+    internal fun withdraw() {
+        ending.complete(Ending(SwarmProvider.Answer.REJECTED, byUser = false))
     }
 }
 
@@ -400,7 +413,8 @@ object SwarmProviders {
      * identity meanwhile) answers [SwarmProvider.Answer.OWNER_GONE]
      * without a sheet or a block. [answered] hears the user's own answer
      * to the sheet, the moment there is one: a refusal that never reaches
-     * it (no sheet, a timeout, a tab that moved on) wasn't the user's.
+     * it (no sheet, a timeout, a sheet withdrawn because the tab reloaded,
+     * navigated or closed) wasn't the user's.
      */
     internal suspend fun askOnTab(
         tab: BrowserState,
@@ -435,13 +449,14 @@ object SwarmProviders {
                 val request = SwarmPromptRequest(shown)
                 pending.getOrPut(tab.id) { mutableSetOf() }.add(request)
                 tab.swarmPrompt = request
-                val answer = try {
-                    request.answer.await()
+                val ending = try {
+                    request.ending.await()
                 } finally {
                     pending[tab.id]?.remove(request)
                     if (tab.swarmPrompt === request) tab.swarmPrompt = null
                 }
-                answered(answer)
+                val answer = ending.answer
+                if (ending.byUser) answered(answer)
                 if (!answer.allowed && live()) blockedTabs += tab.id
                 if (answer.allowed && live()) answer else SwarmProvider.Answer.REJECTED
             } ?: return SwarmProvider.Answer.REJECTED
@@ -576,7 +591,7 @@ object SwarmProviders {
     }
 
     private fun withdraw(tabId: Long) {
-        pending[tabId]?.toList()?.forEach { it.respond(SwarmProvider.Answer.REJECTED) }
+        pending[tabId]?.toList()?.forEach { it.withdraw() }
     }
 
     private const val TAG = "SwarmProvider"
