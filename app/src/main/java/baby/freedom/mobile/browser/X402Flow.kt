@@ -21,6 +21,8 @@ import baby.freedom.mobile.data.X402Store
  * navigation of the tab — the user's Reload or address, the page's own
  * link or script, Stop — is not its answer: the paid request is over,
  * unconfirmed, and what comes next is judged on its own (#218 R2-M3).
+ * A form POST is one too, though only the interceptor sees it
+ * ([mainFrameRequested], #218 R3-M1).
  *
  * Main thread only.
  */
@@ -81,6 +83,18 @@ internal class X402Flow<D : Any>(
     fun superseded(tab: Long) {
         detections.remove(tab)
         retries.remove(tab)?.let { settle(it.recordId, X402Store.Status.UNCONFIRMED, null) }
+    }
+
+    /**
+     * A main-frame request with [method] went out on [tab]. The paid
+     * request is a GET, and so are its redirect hops: a POST is a form
+     * the page submitted — which WebView never shows
+     * `shouldOverrideUrlLoading` — replacing the paid request (and any
+     * 402 waiting for its commit), so its answer isn't the paid
+     * request's (#218 R3-M1).
+     */
+    fun mainFrameRequested(tab: Long, method: String?) {
+        if (!method.equals("GET", ignoreCase = true)) superseded(tab)
     }
 
     /** `onPageFinished` for [url] on [tab]: a 402 noted for it that hasn't committed never will. */

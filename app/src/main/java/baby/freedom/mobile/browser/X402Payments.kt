@@ -160,6 +160,14 @@ object X402Payments {
      */
     fun onNavigationSuperseded(tab: BrowserState) = flow.superseded(tab.id)
 
+    /**
+     * `shouldInterceptRequest` for a main-frame request on [tab] with
+     * [method], posted to the main thread: a form POST (never seen by
+     * `shouldOverrideUrlLoading`) supersedes a paid request as the
+     * page's other navigations do (#218 R3-M1).
+     */
+    fun onMainFrameRequested(tab: BrowserState, method: String?) = flow.mainFrameRequested(tab.id, method)
+
     /** `onPageFinished` for [url] on [tab]. */
     fun onLoadFinished(tab: BrowserState, url: String?) = flow.loadFinished(tab.id, url)
 

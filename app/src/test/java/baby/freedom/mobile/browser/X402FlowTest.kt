@@ -106,4 +106,33 @@ class X402FlowTest {
         assertTrue(settled.isEmpty())
         assertTrue(flow.httpError(tab, a, "GET", 500))
     }
+
+    @Test
+    fun `R3-M1 a form POST during a paid request ends it unconfirmed, and its commit isn't Paid`() {
+        flow.paid(tab, a, "r1")
+        flow.mainFrameRequested(tab, "POST")
+        assertNull(flow.committed(tab, a))
+        assertEquals(listOf(Triple("r1", Status.UNCONFIRMED, null)), settled)
+    }
+
+    @Test
+    fun `R3-M1 a POST's redirect to a 402 is a fresh 402, not the paid request refused`() {
+        flow.paid(tab, a, "r1")
+        flow.mainFrameRequested(tab, "POST")
+        flow.redirected(tab, b)
+        assertFalse(flow.httpError(tab, b, "GET", 402))
+        flow.detected(tab, b, "terms")
+        assertEquals("terms", flow.committed(tab, b))
+        assertEquals(listOf(Triple("r1", Status.UNCONFIRMED, null)), settled)
+    }
+
+    @Test
+    fun `R3-M1 the paid request's own GET and its hops don't end it`() {
+        flow.paid(tab, a, "r1")
+        flow.mainFrameRequested(tab, "GET")
+        flow.redirected(tab, b)
+        flow.mainFrameRequested(tab, "GET")
+        assertNull(flow.committed(tab, b))
+        assertEquals(listOf(Triple("r1", Status.PAID, null)), settled)
+    }
 }

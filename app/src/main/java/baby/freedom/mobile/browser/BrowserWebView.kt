@@ -3184,6 +3184,15 @@ private fun buildRefreshableWebView(
                         if (request.hasGesture() && request.method.equals("POST", ignoreCase = true)) {
                             (view as? PageWebView)?.let { v -> v.post { v.putBackHold.dropped() } }
                         }
+                        // x402 (#140): a form POST — gesture or not —
+                        // replaces a paid request in flight; its answer
+                        // is not the paid request's (#218 R3-M1). Posted
+                        // now, so it lands before the POST's own
+                        // redirect or commit callbacks.
+                        if (!request.method.equals("GET", ignoreCase = true)) {
+                            val method = request.method
+                            view?.post { X402Payments.onMainFrameRequested(state, method) }
+                        }
                         heldBack = (view as? PageWebView)?.pageHopRequested(it, request.requestHeaders) == true
                     }
                 }
