@@ -44,7 +44,7 @@ permissions:
   contents: write
 
 env:
-  FFI_REF: v0.12.3
+  FFI_REF: v0.12.4
   COLIBRI_REF: v3.0.0
 
 jobs:
