@@ -2,6 +2,7 @@ package baby.freedom.mobile.wallet
 
 import baby.freedom.mobile.ens.Keccak256
 import baby.freedom.mobile.ens.toHex
+import java.math.BigDecimal
 import java.math.BigInteger
 import org.json.JSONArray
 import org.json.JSONException
@@ -9,45 +10,56 @@ import org.json.JSONObject
 import org.json.JSONTokener
 
 /**
- * EIP-712 typed data (`eth_signTypedData_v4`, #113): what the sheet shows
- * and the digest that's signed, for exactly the payload desktop Freedom
- * sends — ethers' `TypedDataEncoder.getPayload`: `{types, primaryType,
- * domain, message}` with integers as decimal (or `0x`) strings.
+ * EIP-712 typed structured data, as `eth_signTypedData_v4` takes it —
+ * MetaMask's `eth-sig-util` v4 rules where the spec leaves room (a
+ * missing nested struct hashes as zero; `bytes` that aren't hex are
+ * UTF-8; a missing `EIP712Domain` type is built from the domain's own
+ * fields, as ethers and viem send it).
  *
- * Strict, like ethers: a field the type names but the value lacks, a
- * number out of its type's range, bytes of the wrong length or a type no
- * one defined is an error, never a guess — a signature over a digest the
- * user wasn't shown would be worse than none. Fields the value has but
- * the type doesn't name are ignored, as every encoder does (they aren't
- * signed, and the sheet doesn't show them either).
+ * Everything here comes from a web page or a scanned code's peer: every
+ * shape is checked and a bad one is an [Invalid], never a crash, and
+ * nesting is bounded.
+ *
+ * [parseStrict] is ethers' rules instead, for desktop Freedom's requests
+ * over OpenLV (#113), which are exactly what ethers' `TypedDataEncoder.getPayload`
+ * writes: a field the type names but the value lacks, a value of the wrong
+ * JSON kind, bytes of the wrong length or a type no one defined is an
+ * error, never a guess — the phone's sheet ([lines]) shows each signed
+ * value, and a digest over one it didn't show would be worse than none.
+ * Fields the value has but the type doesn't name are ignored either way,
+ * as every encoder does (they aren't signed, and nothing shows them).
  */
 object Eip712 {
-    class InvalidTypedData(message: String) : IllegalArgumentException(message)
+    class Invalid(message: String) : Exception(message)
 
-    class Field(val name: String, val type: String)
+    data class Field(val name: String, val type: String)
 
     class TypedData(
         val types: Map<String, List<Field>>,
         val primaryType: String,
         val domain: JSONObject,
         val message: JSONObject,
-    )
+        /** Parsed by [parseStrict]: [digest] holds every value to exactly its type. */
+        internal val strict: Boolean = false,
+    ) {
+        /**
+         * The domain's `chainId`, only if the signature is bound to it
+         * ([chainBound]) and it's a number: a `chainId` key the domain type
+         * doesn't declare as a `uint` isn't signed as one, so it names no
+         * chain the signature is for (#216 R6-F1).
+         */
+        val chainId: Long?
+            get() = if (!chainBound(this)) null else domain.opt("chainId")?.takeIf { it != JSONObject.NULL }?.let {
+                runCatching { integer(it, "chainId") }.getOrNull()?.takeIf { v -> v.bitLength() < 63 }?.toLong()
+            }
+    }
 
-    /** One line of what's signed, for the sheet: a field's [label] (or `[i]` for an array item), [depth] levels in. */
+    /** One line of what's signed, for the phone's sheet (#113): a field's [label] (or `[i]` for an array item), [depth] levels in. */
     data class Line(val label: String, val value: String, val depth: Int)
 
     private const val DOMAIN = "EIP712Domain"
 
-    /** The domain fields in the order EIP-712 lists them, for a payload whose types leave `EIP712Domain` out. */
-    private val DOMAIN_FIELDS = listOf(
-        "name" to "string",
-        "version" to "string",
-        "chainId" to "uint256",
-        "verifyingContract" to "address",
-        "salt" to "bytes32",
-    )
-
-    /** A typed-data payload bigger than this isn't one any sheet could show. */
+    /** A typed-data payload bigger than this isn't one any sheet could show ([parseStrict]). */
     const val MAX_JSON = 256 * 1024
 
     /**
@@ -66,139 +78,282 @@ object Eip712 {
      */
     const val MAX_SHOWN = 64 * 1024
 
-    private val IDENTIFIER = Regex("^[A-Za-z_$][A-Za-z0-9_$]*$")
-    private val ARRAY = Regex("^(.+)\\[(\\d*)]$")
-    private val UINT = Regex("^uint(\\d{1,3})$")
-    private val INT = Regex("^int(\\d{1,3})$")
+    private val UINT = Regex("^uint(\\d{1,3})?$")
+    private val INT = Regex("^int(\\d{1,3})?$")
     private val BYTES_N = Regex("^bytes(\\d{1,2})$")
     private val HEX = Regex("^0x([0-9a-fA-F]{2})*$")
     private val ADDRESS = Regex("^0x[0-9a-fA-F]{40}$")
 
-    /** [raw] — a JSON string, or the object itself — as typed data. */
-    fun parse(raw: Any?): TypedData = try {
+    /** The domain fields in the order EIP-712 lists them, with their types. */
+    private val DOMAIN_FIELDS = listOf(
+        Field("name", "string"),
+        Field("version", "string"),
+        Field("chainId", "uint256"),
+        Field("verifyingContract", "address"),
+        Field("salt", "bytes32"),
+    )
+
+    private const val MAX_DEPTH = 32
+
+    /** Fields, array elements and type-walk steps one digest may take (#110 R1-F1). */
+    internal const val MAX_WORK = 1_000_000L
+    private val IDENT = Regex("^[A-Za-z_$][A-Za-z0-9_$]*$")
+
+    /** The longest field type accepted: real ones are a name and a few `[n]`s. */
+    internal const val MAX_TYPE_CHARS = 256
+
+    /** An array type split into its element type and its length (empty for a dynamic array). */
+    private class ArrayType(val inner: String, val length: String)
+
+    /** [type] as `inner[length]`, or null if it isn't an array type. */
+    private fun arrayType(type: String): ArrayType? {
+        val open = arraySuffixStart(type, type.length)
+        if (open < 0) return null
+        return ArrayType(type.substring(0, open), type.substring(open + 1, type.length - 1))
+    }
+
+    /** Where `[digits]` ending at [end] in [t] starts, or -1: one backward scan, no regex backtracking. */
+    private fun arraySuffixStart(t: String, end: Int): Int {
+        if (end < 2 || t[end - 1] != ']') return -1
+        var i = end - 2
+        while (i >= 0 && t[i] in '0'..'9') i--
+        return if (i >= 0 && t[i] == '[') i else -1
+    }
+
+    /** [raw] — the JSON text, or the object itself — as typed data. */
+    fun parse(raw: Any?): TypedData = parse(raw, strict = false)
+
+    /**
+     * [parse] by ethers' rules (see the class KDoc): at most [MAX_JSON] of
+     * JSON; field names are identifiers, none twice in a type; every
+     * field's type is one EIP-712 defines or the payload does; a message
+     * is required. [digest] then holds every value to exactly its type.
+     */
+    fun parseStrict(raw: Any?): TypedData = parse(raw, strict = true)
+
+    private fun parse(raw: Any?, strict: Boolean): TypedData {
+        if (strict && raw is String && raw.length > MAX_JSON) throw Invalid("The typed data is too large")
         val o = when (raw) {
             is JSONObject -> raw
-            is String -> {
-                if (raw.length > MAX_JSON) throw InvalidTypedData("The typed data is too large")
-                JSONTokener(raw).nextValue() as? JSONObject ?: throw InvalidTypedData("The typed data isn’t a JSON object")
-            }
-            else -> throw InvalidTypedData("The typed data is missing")
+            is String -> try {
+                JSONTokener(raw).nextValue() as? JSONObject
+            } catch (e: Exception) {
+                null
+            } catch (e: StackOverflowError) {
+                null
+            } ?: throw Invalid("typed data isn't a JSON object")
+            else -> throw Invalid("typed data isn't a JSON object")
+        }
+        val typesJson = o.opt("types") as? JSONObject ?: throw Invalid("types is missing")
+        val primaryType = o.opt("primaryType") as? String ?: throw Invalid("primaryType is missing")
+        val domain = o.opt("domain") as? JSONObject ?: throw Invalid("domain is missing")
+        val message = when (val m = o.opt("message")) {
+            is JSONObject -> m
+            null, JSONObject.NULL -> if (strict && primaryType != DOMAIN) throw Invalid("The typed data has no message") else JSONObject()
+            else -> throw Invalid("message isn't an object")
         }
         val types = LinkedHashMap<String, List<Field>>()
-        val t = o.optJSONObject("types") ?: throw InvalidTypedData("The typed data has no types")
-        for (name in t.keys()) {
-            if (!IDENTIFIER.matches(name)) throw InvalidTypedData("Not a type name: $name")
-            val arr = t.optJSONArray(name) ?: throw InvalidTypedData("Type $name isn’t a list of fields")
-            val fields = (0 until arr.length()).map { i ->
-                val f = arr.optJSONObject(i) ?: throw InvalidTypedData("Type $name has a field that isn’t an object")
-                val fieldName = f.optString("name")
-                val fieldType = f.optString("type")
-                if (!IDENTIFIER.matches(fieldName) || fieldType.isEmpty()) throw InvalidTypedData("Type $name has a malformed field")
-                Field(fieldName, fieldType)
+        for (name in typesJson.keys()) {
+            if (!IDENT.matches(name)) throw Invalid("bad type name")
+            val arr = typesJson.opt(name) as? JSONArray ?: throw Invalid("type $name isn't a list of fields")
+            types[name] = (0 until arr.length()).map { i ->
+                val f = arr.opt(i) as? JSONObject ?: throw Invalid("type $name has a field that isn't an object")
+                val fname = f.opt("name") as? String ?: throw Invalid("type $name has a field with no name")
+                val ftype = f.opt("type") as? String ?: throw Invalid("field $name.$fname has no type")
+                // Checked before anything walks it: a page-sized type string is never scanned more than once (#215 R3-F1).
+                if (ftype.length > MAX_TYPE_CHARS) throw Invalid("field $name.$fname has a type that's too long")
+                // A label on the sheet: never one that could carry a hidden character.
+                if (strict && !IDENT.matches(fname)) throw Invalid("Type $name has a malformed field")
+                Field(fname, ftype)
             }
-            if (fields.map { it.name }.toSet().size != fields.size) throw InvalidTypedData("Type $name names a field twice")
-            types[name] = fields
+            if (strict && types.getValue(name).map { it.name }.toSet().size != types.getValue(name).size) {
+                throw Invalid("Type $name names a field twice")
+            }
         }
-        val domain = o.optJSONObject("domain") ?: JSONObject()
-        if (DOMAIN !in types) {
-            types[DOMAIN] = DOMAIN_FIELDS.filter { (n, _) -> domain.has(n) }.map { (n, ty) -> Field(n, ty) }
+        if (!types.containsKey("EIP712Domain")) {
+            types[DOMAIN] = DOMAIN_FIELDS.filter { domain.has(it.name) && !domain.isNull(it.name) }
         }
-        val primaryType = o.optString("primaryType")
-        if (primaryType !in types) throw InvalidTypedData("The primary type isn’t defined")
-        val message = o.optJSONObject("message") ?: if (primaryType == DOMAIN) JSONObject() else throw InvalidTypedData("The typed data has no message")
-        for (fields in types.values) for (f in fields) checkType(f.type, types)
-        TypedData(types, primaryType, domain, message)
-    } catch (e: JSONException) {
-        throw InvalidTypedData("The typed data isn’t valid JSON")
-    } catch (e: StackOverflowError) {
-        throw InvalidTypedData("The typed data is nested too deeply")
-    }
-
-    /** `keccak256(0x1901 ‖ domainSeparator ‖ hashStruct(message))`: what's signed. */
-    fun digest(td: TypedData): ByteArray = guarded {
-        val typeHashes = HashMap<String, ByteArray>()
-        val domainSeparator = hashStruct(DOMAIN, td.domain, td.types, typeHashes)
-        val body = if (td.primaryType == DOMAIN) ByteArray(0) else hashStruct(td.primaryType, td.message, td.types, typeHashes)
-        Keccak256.digest(byteArrayOf(0x19, 0x01) + domainSeparator + body)
-    }
-
-    /** The domain's chain ID, if it names one. */
-    fun chainId(td: TypedData): Long? = guarded {
-        if (!td.domain.has("chainId")) null else integer(td.domain.get("chainId"), "chainId").takeIf { it.bitLength() < 63 }?.toLong()
-    }
-
-    /** `encodeType`: the primary type, then every type it uses, sorted by name. */
-    fun encodeType(primary: String, types: Map<String, List<Field>>): String {
-        val deps = LinkedHashSet<String>()
-        collect(primary, types, deps)
-        deps.remove(primary)
-        return (listOf(primary) + deps.sorted()).joinToString("") { name ->
-            name + "(" + types.getValue(name).joinToString(",") { "${it.type} ${it.name}" } + ")"
-        }
+        if (!types.containsKey(primaryType)) throw Invalid("types has no entry for $primaryType")
+        if (strict) for (fields in types.values) for (f in fields) checkType(f.type, types)
+        return TypedData(types, primaryType, domain, message, strict)
     }
 
     /**
-     * [typeHashes] memoizes each type's `keccak256(encodeType)` across one
-     * digest: `encodeType` walks every type a struct reaches, so computing
-     * it afresh per instance makes many instances of a type with a long
-     * dependency chain quadratic — seconds of work from a 200 KB payload.
+     * The 32 bytes `eth_signTypedData_v4` signs: keccak256(0x1901 ‖ domainSeparator ‖ hashStruct(message)).
+     *
+     * Each type's hash is worked out once per digest, and the whole digest
+     * has a budget of [MAX_WORK] fields, array elements and type-walk steps:
+     * a page can't make it take minutes with a payload that names hundreds
+     * of types and repeats one struct thousands of times — past the budget
+     * it's [Invalid] ("too large"). Still, call it off the main thread.
      */
-    fun hashStruct(
-        type: String,
-        data: JSONObject,
-        types: Map<String, List<Field>>,
-        typeHashes: MutableMap<String, ByteArray> = HashMap(),
-    ): ByteArray {
-        val typeHash = typeHashes.getOrPut(type) { Keccak256.digest(encodeType(type, types).toByteArray(Charsets.UTF_8)) }
-        val out = java.io.ByteArrayOutputStream()
-        out.write(typeHash)
-        for (f in types.getValue(type)) {
-            if (!data.has(f.name) || data.isNull(f.name)) throw InvalidTypedData("$type.${f.name} is missing")
-            out.write(encodeValue(f.type, data.get(f.name), types, "$type.${f.name}", typeHashes))
-        }
-        return Keccak256.digest(out.toByteArray())
+    fun digest(data: TypedData): ByteArray {
+        val encoder = Encoder(data.types, data.strict)
+        val domainSeparator = encoder.hashStruct("EIP712Domain", data.domain, 0)
+        val body = if (data.primaryType == "EIP712Domain") ByteArray(0) else encoder.hashStruct(data.primaryType, data.message, 0)
+        return Keccak256.digest(byteArrayOf(0x19, 0x01) + domainSeparator + body)
+    }
+
+    fun hashStruct(types: Map<String, List<Field>>, type: String, value: JSONObject, depth: Int): ByteArray =
+        Encoder(types).hashStruct(type, value, depth)
+
+    fun encodeType(types: Map<String, List<Field>>, primary: String): String = Encoder(types).encodeType(primary)
+
+    /**
+     * The domain's [field] as text, only if the `EIP712Domain` type declares
+     * it: a domain key the type doesn't list isn't hashed into the domain
+     * separator, so a site could otherwise show a trusted app's name or
+     * contract the signature doesn't bind (#215 R2-M1).
+     */
+    fun signedDomainString(data: TypedData, field: String): String? {
+        if (data.types["EIP712Domain"]?.none { it.name == field } != false) return null
+        return data.domain.opt(field) as? String
     }
 
     /**
-     * What's signed, for the sheet: the domain's fields, then the message's,
-     * nested structs and arrays indented. More than [MAX_LINES] in either,
-     * or more than [MAX_SHOWN] characters in all, is [InvalidTypedData]:
-     * too much to review is too much to sign.
+     * Whether the domain separator covers a `chainId`: the `EIP712Domain`
+     * type declares it, as a `uint`. Without it the domain's `chainId` key
+     * isn't hashed, so it says nothing about which chain the signature is
+     * for (#215 R3-M1); declared as another type (a `string`) it's hashed as
+     * that, not as a chain ID (#216 R6-F1).
+     */
+    fun chainBound(data: TypedData): Boolean =
+        data.types[DOMAIN]?.any { it.name == "chainId" && UINT.matches(it.type) } == true
+
+    /**
+     * The message as the signature covers it, for showing: only the
+     * fields its types declare, nested structs (and arrays of them) the
+     * same way. A key the types don't name isn't hashed, so a site could
+     * otherwise show the user a reassuring note that means nothing. Call
+     * after [digest] succeeded (which checked the shape and depth).
+     */
+    fun signedMessage(data: TypedData): JSONObject {
+        if (data.primaryType == "EIP712Domain") return JSONObject()
+        return declaredOnly(data.types, data.primaryType, data.message, 0) as? JSONObject ?: JSONObject()
+    }
+
+    private fun declaredOnly(types: Map<String, List<Field>>, type: String, value: Any?, depth: Int): Any? {
+        if (depth > MAX_DEPTH) throw Invalid("typed data nests too deeply")
+        arrayType(type)?.let { a ->
+            val arr = value as? JSONArray ?: return value
+            return JSONArray().apply {
+                for (i in 0 until arr.length()) put(declaredOnly(types, a.inner, arr.opt(i), depth + 1) ?: JSONObject.NULL)
+            }
+        }
+        val fields = types[type] ?: return value
+        val obj = value as? JSONObject ?: return value
+        return JSONObject().apply {
+            for (f in fields) if (obj.has(f.name)) put(f.name, declaredOnly(types, f.type, obj.opt(f.name), depth + 1) ?: JSONObject.NULL)
+        }
+    }
+
+    /** One digest's hashing: its type hashes, worked out once each, and its [MAX_WORK] budget. */
+    private class Encoder(val types: Map<String, List<Field>>, val strict: Boolean = false) {
+        private val typeHashes = HashMap<String, ByteArray>()
+        private var work = 0L
+
+        private fun spend(n: Int = 1) {
+            work += n
+            if (work > MAX_WORK) throw Invalid("typed data is too large")
+        }
+
+        fun hashStruct(type: String, value: JSONObject, depth: Int): ByteArray {
+            if (depth > MAX_DEPTH) throw Invalid("typed data nests too deeply")
+            val fields = types[type] ?: throw Invalid("unknown type $type")
+            val out = java.io.ByteArrayOutputStream()
+            out.write(typeHash(type))
+            for (f in fields) {
+                spend()
+                val v = value.opt(f.name)
+                if (strict && (v == null || v == JSONObject.NULL)) throw Invalid("$type.${f.name} is missing")
+                out.write(encodeField(f.type, if (v == JSONObject.NULL) null else v, f.name, depth))
+            }
+            return Keccak256.digest(out.toByteArray())
+        }
+
+        fun encodeType(primary: String): String {
+            val deps = LinkedHashSet<String>()
+            fun walk(t: String, depth: Int) {
+                if (depth > MAX_DEPTH) throw Invalid("typed data nests too deeply")
+                spend()
+                val base = baseType(t)
+                if (base in deps || !types.containsKey(base)) return
+                deps += base
+                types.getValue(base).forEach { walk(it.type, depth + 1) }
+            }
+            walk(primary, 0)
+            deps.remove(primary)
+            return (listOf(primary) + deps.sorted()).joinToString("") { t ->
+                // Charged by length too: field names are the page's, and each type's encoding repeats its dependencies'.
+                spend(types.getValue(t).size + types.getValue(t).sumOf { it.name.length + it.type.length } / 64)
+                t + "(" + types.getValue(t).joinToString(",") { "${it.type} ${it.name}" } + ")"
+            }
+        }
+
+        private fun typeHash(type: String): ByteArray =
+            typeHashes.getOrPut(type) { Keccak256.digest(encodeType(type).toByteArray(Charsets.UTF_8)) }
+
+        private fun encodeField(type: String, value: Any?, name: String, depth: Int): ByteArray {
+            if (depth > MAX_DEPTH) throw Invalid("typed data nests too deeply")
+            arrayType(type)?.let { a ->
+                val inner = a.inner
+                val arr = value as? JSONArray ?: throw Invalid("$name should be an array")
+                val fixed = a.length
+                if (fixed.isNotEmpty() && fixed.toIntOrNull() != arr.length()) throw Invalid("$name should have $fixed elements")
+                val out = java.io.ByteArrayOutputStream()
+                for (i in 0 until arr.length()) {
+                    spend()
+                    val e = arr.opt(i)
+                    if (strict && (e == null || e == JSONObject.NULL)) throw Invalid("$name[$i] is missing")
+                    out.write(encodeField(inner, if (e == JSONObject.NULL) null else e, "$name[$i]", depth + 1))
+                }
+                return Keccak256.digest(out.toByteArray())
+            }
+            if (types.containsKey(type)) {
+                if (value == null) return ByteArray(32)
+                val obj = value as? JSONObject ?: throw Invalid("$name should be a $type object")
+                return hashStruct(type, obj, depth + 1)
+            }
+            if (strict) checkAtom(type, value, name)
+            return encodeAtom(type, value, name)
+        }
+    }
+
+    /**
+     * What's signed, for the phone's sheet (#113): the domain's fields, then
+     * the message's, nested structs and arrays indented — only fields the
+     * types declare, so nothing unsigned is shown. More than [MAX_LINES] in
+     * either, or more than [MAX_SHOWN] characters in all, is [Invalid]: too
+     * much to review is too much to sign. For [parseStrict]'s typed data,
+     * after [digest] (which held every value to its type).
      */
     fun lines(td: TypedData): Pair<List<Line>, List<Line>> = guarded {
         val domain = ArrayList<Line>()
-        describe(DOMAIN, td.domain, td.types, "", 0, domain)
+        describe(DOMAIN, td.domain, td.types, 0, domain)
         val message = ArrayList<Line>()
-        if (td.primaryType != DOMAIN) describe(td.primaryType, td.message, td.types, "", 0, message)
+        if (td.primaryType != DOMAIN) describe(td.primaryType, td.message, td.types, 0, message)
         val shown = (domain + message).sumOf { it.label.length.toLong() + it.value.length }
-        if (shown > MAX_SHOWN) throw InvalidTypedData("The typed data is too long to show on the phone")
+        if (shown > MAX_SHOWN) throw Invalid("The typed data is too long to show on the phone")
         domain to message
     }
 
-    private fun describe(type: String, data: JSONObject, types: Map<String, List<Field>>, prefix: String, depth: Int, out: MutableList<Line>) {
-        for (f in types.getValue(type)) {
-            val path = if (prefix.isEmpty()) f.name else "$prefix.${f.name}"
-            describeValue(f.type, data.opt(f.name), types, path, f.name, depth, out)
-        }
+    private fun describe(type: String, data: JSONObject, types: Map<String, List<Field>>, depth: Int, out: MutableList<Line>) {
+        for (f in types.getValue(type)) describeValue(f.type, data.opt(f.name), types, f.name, depth, out)
     }
 
-    private fun describeValue(type: String, value: Any?, types: Map<String, List<Field>>, path: String, label: String, depth: Int, out: MutableList<Line>) {
-        if (out.size >= MAX_LINES) throw InvalidTypedData("The typed data has too many fields to show on the phone")
-        val array = ARRAY.find(type)
+    private fun describeValue(type: String, value: Any?, types: Map<String, List<Field>>, label: String, depth: Int, out: MutableList<Line>) {
+        if (out.size >= MAX_LINES) throw Invalid("The typed data has too many fields to show on the phone")
+        if (depth > MAX_DEPTH) throw Invalid("typed data nests too deeply")
+        val array = arrayType(type)
         when {
             array != null -> {
                 val items = value as JSONArray
                 out += Line(label, "${items.length()} item" + if (items.length() == 1) "" else "s", depth)
-                for (i in 0 until items.length()) {
-                    describeValue(array.groupValues[1], items.get(i), types, "$path[$i]", "[$i]", depth + 1, out)
-                }
+                for (i in 0 until items.length()) describeValue(array.inner, items.get(i), types, "[$i]", depth + 1, out)
             }
             type in types -> {
                 out += Line(label, type, depth)
-                val o = value as JSONObject
-                for (f in types.getValue(type)) {
-                    describeValue(f.type, o.opt(f.name), types, "$path.${f.name}", f.name, depth + 1, out)
-                }
+                describe(type, value as JSONObject, types, depth + 1, out)
             }
             else -> out += Line(label, scalarText(type, value), depth)
         }
@@ -206,10 +361,10 @@ object Eip712 {
 
     private fun scalarText(type: String, value: Any?): String = when {
         type == "string" -> visible(value as String)
-        type == "bool" -> value.toString()
-        type == "address" -> NodeIdentity.checksum(hex(value, type))
-        type == "bytes" || BYTES_N.matches(type) -> "0x" + hex(value, type).toHex()
-        else -> integer(value, type).toString()
+        type == "bool" -> (value as Boolean).toString()
+        type == "address" -> NodeIdentity.checksum(strictHex(value, type))
+        type == "bytes" || BYTES_N.matches(type) -> "0x" + strictHex(value, type).toHex()
+        else -> integer(value!!, type).toString()
     }
 
     /**
@@ -217,7 +372,7 @@ object Eip712 {
      * — line breaks and other controls, bidi overrides and other format
      * characters, line/paragraph separators, a combining mark stacked past
      * [MessageSigning.MAX_STACKED_MARKS] on one letter — written as a visible `\n` or
-     * `\u202E` escape, the way [MessageSigning.readableText] refuses them
+     * `‮` escape, the way [MessageSigning.readableText] refuses them
      * for `personal_sign`. Everything else is shown as is.
      */
     internal fun visible(s: String): String {
@@ -239,134 +394,163 @@ object Eip712 {
         return b.toString()
     }
 
-    private fun collect(type: String, types: Map<String, List<Field>>, into: MutableSet<String>) {
-        val base = baseType(type)
-        if (base !in types || !into.add(base)) return
-        for (f in types.getValue(base)) collect(f.type, types, into)
-    }
-
-    private fun baseType(type: String): String {
-        var t = type
-        while (true) t = ARRAY.find(t)?.groupValues?.get(1) ?: return t
-    }
-
+    /** [parseStrict]: [type] (arrays of it included) is one EIP-712 defines or [types] does. */
     private fun checkType(type: String, types: Map<String, List<Field>>) {
         val base = baseType(type)
         val ok = base in types || base == "string" || base == "bytes" || base == "bool" || base == "address" ||
-            UINT.find(base)?.let { bits(it.groupValues[1]) } != null ||
-            INT.find(base)?.let { bits(it.groupValues[1]) } != null ||
+            UINT.find(base)?.groupValues?.get(1)?.let(::bits) != null ||
+            INT.find(base)?.groupValues?.get(1)?.let(::bits) != null ||
             BYTES_N.find(base)?.groupValues?.get(1)?.toIntOrNull()?.let { it in 1..32 } == true
-        if (!ok) throw InvalidTypedData("Unknown type: $type")
+        if (!ok) throw Invalid("Unknown type: $type")
     }
 
     private fun bits(digits: String): Int? = digits.toIntOrNull()?.takeIf { it in 8..256 && it % 8 == 0 }
 
-    private fun encodeValue(
-        type: String,
-        value: Any?,
-        types: Map<String, List<Field>>,
-        where: String,
-        typeHashes: MutableMap<String, ByteArray>,
-    ): ByteArray {
-        val array = ARRAY.find(type)
-        if (array != null) {
-            val items = value as? JSONArray ?: throw InvalidTypedData("$where isn’t a list")
-            val fixed = array.groupValues[2]
-            if (fixed.isNotEmpty() && fixed.toIntOrNull() != items.length()) throw InvalidTypedData("$where must have $fixed items")
-            val out = java.io.ByteArrayOutputStream()
-            for (i in 0 until items.length()) {
-                if (items.isNull(i)) throw InvalidTypedData("$where[$i] is missing")
-                out.write(encodeValue(array.groupValues[1], items.get(i), types, "$where[$i]", typeHashes))
-            }
-            return Keccak256.digest(out.toByteArray())
+    /** [parseStrict]: an atom [value] is exactly the JSON kind [type] is written as — never coerced. */
+    private fun checkAtom(type: String, value: Any?, name: String) {
+        val ok = when {
+            value == null -> false
+            type == "string" -> value is String
+            type == "bool" -> value is Boolean
+            type == "address" -> value is String && ADDRESS.matches(value)
+            type == "bytes" -> value is String && HEX.matches(value)
+            BYTES_N.matches(type) -> value is String && HEX.matches(value) &&
+                (value.length - 2) / 2 == BYTES_N.find(type)!!.groupValues[1].toInt()
+            else -> value is Number || value is String
         }
-        if (type in types) {
-            val o = value as? JSONObject ?: throw InvalidTypedData("$where isn’t an object")
-            return hashStruct(type, o, types, typeHashes)
+        if (!ok) throw Invalid("$name isn’t a valid $type")
+    }
+
+    private fun strictHex(value: Any?, where: String): ByteArray {
+        val s = value as? String
+        if (s == null || !HEX.matches(s)) throw Invalid("$where isn’t 0x hex bytes")
+        return hex(s)!!
+    }
+
+    /** Anything a malformed value throws on the way (a wrong JSON type, a recursion too deep) is [Invalid]. */
+    private inline fun <T> guarded(block: () -> T): T = try {
+        block()
+    } catch (e: Invalid) {
+        throw e
+    } catch (e: ClassCastException) {
+        throw Invalid("The typed data doesn’t match its types")
+    } catch (e: NullPointerException) {
+        throw Invalid("The typed data doesn’t match its types")
+    } catch (e: JSONException) {
+        throw Invalid("The typed data doesn’t match its types")
+    } catch (e: StackOverflowError) {
+        throw Invalid("The typed data is nested too deeply")
+    }
+
+    /** [t] with every `[n]` suffix taken off, in one pass over it (#215 R3-F1). */
+    private fun baseType(t: String): String {
+        var end = t.length
+        while (true) {
+            val open = arraySuffixStart(t, end)
+            if (open < 0) return t.substring(0, end)
+            end = open
         }
+    }
+
+    private fun encodeAtom(type: String, value: Any?, name: String): ByteArray {
+        if (value == null) throw Invalid("missing value for $name")
         return when {
-            type == "string" -> Keccak256.digest((value as? String ?: throw InvalidTypedData("$where isn’t a string")).toByteArray(Charsets.UTF_8))
-            type == "bytes" -> Keccak256.digest(hex(value, where))
-            type == "bool" -> word(if (value as? Boolean ?: throw InvalidTypedData("$where isn’t true or false")) BigInteger.ONE else BigInteger.ZERO)
+            type == "string" -> Keccak256.digest((value as? String ?: value.toString()).toByteArray(Charsets.UTF_8))
+            type == "bytes" -> Keccak256.digest(dynamicBytes(value, name))
+            type == "bool" -> word(if (bool(value, name)) BigInteger.ONE else BigInteger.ZERO)
             type == "address" -> {
-                val s = value as? String
-                if (s == null || !ADDRESS.matches(s)) throw InvalidTypedData("$where isn’t an address")
-                ByteArray(12) + hex(s, where)
+                val s = value as? String ?: throw Invalid("$name should be an address")
+                val b = hex(s) ?: throw Invalid("$name should be an address")
+                if (b.size != 20) throw Invalid("$name should be an address")
+                ByteArray(12) + b
             }
-            BYTES_N.matches(type) -> {
-                val n = BYTES_N.find(type)!!.groupValues[1].toInt()
-                val b = hex(value, where)
-                if (b.size != n) throw InvalidTypedData("$where must be $n bytes")
-                b + ByteArray(32 - n)
+            type.startsWith("bytes") -> {
+                val n = type.removePrefix("bytes").toIntOrNull()?.takeIf { it in 1..32 } ?: throw Invalid("unknown type $type")
+                val b = when (value) {
+                    is String -> hex(value) ?: throw Invalid("$name should be hex")
+                    else -> BigIntegerBytes.of(integer(value, name))
+                }
+                if (b.size > n) throw Invalid("$name is longer than $n bytes")
+                b + ByteArray(32 - b.size)
             }
-            UINT.matches(type) -> {
-                val bits = UINT.find(type)!!.groupValues[1].toInt()
-                val v = integer(value, where)
-                if (v.signum() < 0 || v.bitLength() > bits) throw InvalidTypedData("$where is out of range for $type")
-                word(v)
-            }
-            INT.matches(type) -> {
-                val bits = INT.find(type)!!.groupValues[1].toInt()
-                val v = integer(value, where)
-                if (v.bitLength() > bits - 1) throw InvalidTypedData("$where is out of range for $type")
+            type.startsWith("uint") || type.startsWith("int") -> {
+                val signed = type.startsWith("int")
+                val bits = type.removePrefix(if (signed) "int" else "uint").ifEmpty { "256" }.toIntOrNull()
+                    ?.takeIf { it in 8..256 && it % 8 == 0 } ?: throw Invalid("unknown type $type")
+                val v = integer(value, name)
+                val ok = if (signed) {
+                    v >= BigInteger.ONE.shiftLeft(bits - 1).negate() && v < BigInteger.ONE.shiftLeft(bits - 1)
+                } else {
+                    v.signum() >= 0 && v.bitLength() <= bits
+                }
+                if (!ok) throw Invalid("$name is out of range for $type")
                 word(if (v.signum() < 0) v.add(BigInteger.ONE.shiftLeft(256)) else v)
             }
-            else -> throw InvalidTypedData("Unknown type: $type")
+            else -> throw Invalid("unknown type $type")
         }
-    }
-
-    /** A JSON integer, or one written as a decimal or `0x` string, exactly. */
-    private fun integer(value: Any?, where: String): BigInteger = when (value) {
-        is Int, is Long -> BigInteger.valueOf((value as Number).toLong())
-        is BigInteger -> value
-        // org.json reads a number past Long as a Double: only a whole one JS itself could hold exactly is taken.
-        is Double -> if (value % 1.0 == 0.0 && kotlin.math.abs(value) <= 9.007199254740991E15) {
-            BigInteger.valueOf(value.toLong())
-        } else {
-            throw InvalidTypedData("$where isn’t a whole number (large numbers must be strings)")
-        }
-        is String -> {
-            val t = value.trim()
-            val neg = t.startsWith("-")
-            val digits = t.removePrefix("-")
-            val v = when {
-                digits.startsWith("0x") || digits.startsWith("0X") -> digits.substring(2).takeIf { it.isNotEmpty() && it.length <= 64 && it.all(::isHexChar) }?.let { BigInteger(it, 16) }
-                digits.isNotEmpty() && digits.length <= 80 && digits.all { it in '0'..'9' } -> BigInteger(digits)
-                else -> null
-            } ?: throw InvalidTypedData("$where isn’t a number")
-            if (neg) v.negate() else v
-        }
-        else -> throw InvalidTypedData("$where isn’t a number")
-    }
-
-    private fun isHexChar(c: Char) = c in '0'..'9' || c in 'a'..'f' || c in 'A'..'F'
-
-    private fun hex(value: Any?, where: String): ByteArray {
-        val s = value as? String
-        if (s == null || !HEX.matches(s)) throw InvalidTypedData("$where isn’t 0x hex bytes")
-        return ByteArray((s.length - 2) / 2) { i -> s.substring(2 + 2 * i, 4 + 2 * i).toInt(16).toByte() }
     }
 
     private fun word(v: BigInteger): ByteArray {
-        val raw = v.toByteArray()
-        val out = ByteArray(32)
-        val n = minOf(raw.size, 32)
-        System.arraycopy(raw, raw.size - n, out, 32 - n, n)
-        return out
+        val raw = v.toByteArray().let { if (it.size > 32) it.copyOfRange(it.size - 32, it.size) else it }
+        return ByteArray(32 - raw.size) + raw
     }
 
-    /** Anything a malformed value throws on the way (a wrong JSON type, a recursion too deep) is invalid typed data. */
-    private inline fun <T> guarded(block: () -> T): T = try {
-        block()
-    } catch (e: InvalidTypedData) {
-        throw e
-    } catch (e: ClassCastException) {
-        throw InvalidTypedData("The typed data doesn’t match its types")
-    } catch (e: NullPointerException) {
-        throw InvalidTypedData("The typed data doesn’t match its types")
-    } catch (e: JSONException) {
-        throw InvalidTypedData("The typed data doesn’t match its types")
-    } catch (e: StackOverflowError) {
-        throw InvalidTypedData("The typed data is nested too deeply")
+    private fun bool(v: Any, name: String): Boolean = when (v) {
+        is Boolean -> v
+        is Number -> integer(v, name).signum() != 0
+        "true" -> true
+        "false" -> false
+        else -> throw Invalid("$name should be true or false")
+    }
+
+    private fun dynamicBytes(v: Any, name: String): ByteArray = when (v) {
+        is String -> if (v.startsWith("0x") || v.startsWith("0X")) hex(v) ?: throw Invalid("$name isn't hex") else v.toByteArray(Charsets.UTF_8)
+        is Number -> BigIntegerBytes.of(integer(v, name))
+        else -> throw Invalid("$name should be bytes")
+    }
+
+    /** A JSON number, a decimal string or a `0x` hex string as an integer. */
+    internal fun integer(v: Any, name: String): BigInteger {
+        val n = when (v) {
+            is Int, is Long, is Short, is Byte -> BigInteger.valueOf((v as Number).toLong())
+            is BigInteger -> v
+            is BigDecimal -> runCatching { v.toBigIntegerExact() }.getOrNull()
+            is Double, is Float -> (v as Number).toDouble().takeIf { it == Math.floor(it) && Math.abs(it) <= MAX_SAFE }
+                ?.let { BigDecimal(it).toBigInteger() }
+            is String -> {
+                val t = v.trim()
+                when {
+                    t.startsWith("-0x") || t.startsWith("-0X") -> t.substring(3).takeIf(::isHexDigits)?.let { BigInteger(it, 16).negate() }
+                    t.startsWith("0x") || t.startsWith("0X") -> t.substring(2).takeIf(::isHexDigits)?.let { BigInteger(it, 16) }
+                    t.matches(DECIMAL) -> BigInteger(t)
+                    else -> null
+                }
+            }
+            else -> null
+        } ?: throw Invalid("$name should be an integer")
+        if (n.bitLength() > 256) throw Invalid("$name is out of range")
+        return n
+    }
+
+    private const val MAX_SAFE = 9007199254740991.0
+    private val DECIMAL = Regex("^-?\\d{1,80}$")
+
+    private fun isHexDigits(s: String) = s.isNotEmpty() && s.length <= 64 && s.all { it in '0'..'9' || it in 'a'..'f' || it in 'A'..'F' }
+
+    /** `0x`-hex (even length, possibly empty) as bytes, or null. */
+    internal fun hex(s: String): ByteArray? {
+        val t = s.trim()
+        if (!t.startsWith("0x") && !t.startsWith("0X")) return null
+        val h = t.substring(2)
+        if (h.length % 2 != 0 || h.any { !(it in '0'..'9' || it in 'a'..'f' || it in 'A'..'F') }) return null
+        return ByteArray(h.length / 2) { i -> h.substring(i * 2, i * 2 + 2).toInt(16).toByte() }
+    }
+
+    private object BigIntegerBytes {
+        fun of(v: BigInteger): ByteArray {
+            if (v.signum() < 0) throw Invalid("negative bytes")
+            val raw = v.toByteArray()
+            return if (raw.size > 1 && raw[0].toInt() == 0) raw.copyOfRange(1, raw.size) else raw
+        }
     }
 }

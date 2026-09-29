@@ -3,24 +3,49 @@ package baby.freedom.mobile.wallet
 import baby.freedom.mobile.ens.Keccak256
 import baby.freedom.mobile.ens.Secp256k1
 import baby.freedom.mobile.ens.toHex
+import java.math.BigDecimal
+import java.math.BigInteger
+import org.json.JSONArray
+import org.json.JSONObject
+import org.json.JSONTokener
 
 /**
- * Signing something other than a transaction (#113): an EIP-191
- * `personal_sign` message or an EIP-712 digest ([Eip712.digest]). The
- * signature is desktop's and every wallet's wire form — `0x` ‖ r ‖ s ‖ v
- * with v 27 or 28 — and is checked to recover to the account before it
- * leaves, as a transaction's is ([EthTransaction.sign]).
+ * Signing what a site (#110) or desktop Freedom over OpenLV (#113) asks
+ * the wallet to sign: EIP-191 `personal_sign` and EIP-712
+ * `eth_signTypedData_v4` ([Eip712.digest]), with the account's key
+ * derived for the one signature and zeroed after — as the send flow does
+ * ([WalletSender.vaultSigner]). Every signature is checked to recover to
+ * the account before it leaves.
  */
-internal object MessageSigning {
-    /** `keccak256("\x19Ethereum Signed Message:\n" ‖ len ‖ message)`. */
-    fun personalDigest(message: ByteArray): ByteArray =
-        Keccak256.digest("\u0019Ethereum Signed Message:\n${message.size}".toByteArray(Charsets.UTF_8) + message)
+object MessageSigning {
+    /** EIP-191 version `0x45`: keccak256 of `"\x19Ethereum Signed Message:\n" + len + message`. */
+    fun personalDigest(message: ByteArray): ByteArray {
+        val prefix = "\u0019Ethereum Signed Message:\n${message.size}".toByteArray(Charsets.UTF_8)
+        return Keccak256.digest(prefix + message)
+    }
 
-    /** [digest] signed with [privateKey], which must be [address]'s (the caller zeroes it). */
-    fun sign(privateKey: ByteArray, digest: ByteArray, address: String): String {
-        val signature = "0x" + EthSigning.sign(privateKey, digest).rsv().toHex()
-        check(Secp256k1.recover(digest, signature).equals(address, ignoreCase = true)) { "the key isn’t this account’s" }
-        return signature
+    /**
+     * Signs the 32-byte [digest] with [account]'s key: `0x` + 65 bytes
+     * `r ‖ s ‖ v`, v 27 or 28 — what ethers and MetaMask return. The
+     * signer is recovered from the signature and must be [account], or
+     * nothing is returned. Throws [VaultLockedException] if the wallet
+     * isn't open.
+     */
+    fun sign(vault: Vault, account: WalletAccount, digest: ByteArray): String {
+        val key = vault.withSeed { seed -> HdKeys.secp256k1(seed, account.path) }
+        return try {
+            sign(key, account.address, digest)
+        } finally {
+            key.fill(0)
+        }
+    }
+
+    /** [sign] with the key itself (which the caller zeroes), checked against [address]. */
+    internal fun sign(privateKey: ByteArray, address: String, digest: ByteArray): String {
+        val sig = "0x" + EthSigning.sign(privateKey, digest).rsv().toHex()
+        val recovered = Secp256k1.recover(digest, sig)
+        check(recovered != null && recovered.equals(address, ignoreCase = true)) { "the signature doesn't match the account" }
+        return sig
     }
 
     /**

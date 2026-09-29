@@ -12,6 +12,7 @@ import baby.freedom.mobile.chains.rpc.ChainRpcException
 import baby.freedom.mobile.chains.rpc.RpcTransport
 import baby.freedom.mobile.chains.rpc.WalletRpc
 import baby.freedom.mobile.ens.hexToBytes
+import baby.freedom.mobile.ens.toHex
 import java.io.IOException
 import java.math.BigInteger
 import kotlinx.coroutines.CoroutineScope
@@ -182,6 +183,12 @@ class SendTest {
         assertEquals(BigInteger.valueOf(21_000), WalletSender.gasLimit(BigInteger.valueOf(21_000), hasData = false))
         assertEquals(BigInteger.valueOf(62_400), WalletSender.gasLimit(BigInteger.valueOf(52_000), hasData = true))
         assertEquals(BigInteger.valueOf(28_800), WalletSender.gasLimit(BigInteger.valueOf(24_000), hasData = false))
+        // A site's own gas: taken if it covers the estimate, capped at three times it, ignored below it.
+        val estimate = BigInteger.valueOf(50_000)
+        assertEquals(BigInteger.valueOf(90_000), WalletSender.gasLimit(estimate, hasData = true, site = BigInteger.valueOf(90_000)))
+        assertEquals(BigInteger.valueOf(150_000), WalletSender.gasLimit(estimate, hasData = true, site = BigInteger("ffffffffffff", 16)))
+        assertEquals(BigInteger.valueOf(60_000), WalletSender.gasLimit(estimate, hasData = true, site = BigInteger.valueOf(40_000)))
+        assertEquals(BigInteger.valueOf(60_000), WalletSender.gasLimit(estimate, hasData = true, site = null))
     }
 
     @Test
@@ -557,10 +564,10 @@ class SendTest {
     // ---- a transaction desktop Freedom composed (#113) ----
 
     private fun call(data: String = "0xa9059cbb", value: Long = 0) =
-        SendRequest(gnosis, xdai, from, xbzz.address!!, BigInteger.valueOf(value), callData = data)
+        SendRequest(gnosis, xdai, from, xbzz.address!!, BigInteger.valueOf(value), DappCall(null, data.hexToBytes(), null))
 
     @Test
-    fun `a composed call goes out as asked, value zero allowed, and only with well-formed data`() = runBlocking<Unit> {
+    fun `a composed call goes out as asked, value zero allowed, and only in the native currency`() = runBlocking<Unit> {
         val chain = FakeChain()
         chain.estimate = 50_000
         val s = sender(chain)
@@ -571,10 +578,7 @@ class SendTest {
         assertEquals(BigInteger.valueOf(60_000), quote.tx.gasLimit)
         // A plain value transfer with no data is a composed request too.
         assertEquals(0, s.prepare(call(data = "0x", value = 5)).tx.data.size)
-        for (bad in listOf("a9059cbb", "0xA9059CBB", "0xabc")) {
-            assertTrue(runCatching { call(data = bad) }.isFailure)
-        }
-        assertTrue(runCatching { SendRequest(gnosis, xbzz, from, to, BigInteger.ONE, callData = "0x") }.isFailure)
+        assertTrue(runCatching { SendRequest(gnosis, xbzz, from, to, BigInteger.ONE, DappCall(null, ByteArray(0), null)) }.isFailure)
         // The wallet's own sends still need something to send.
         assertTrue(runCatching { request(amount = 0) }.isFailure)
     }
@@ -582,7 +586,7 @@ class SendTest {
     @Test
     fun `a composed call a contract would refuse says so without calling it a transfer`() {
         val e = WalletSender.estimateFailure(ChainRpcException.Rpc(3, "execution reverted: nope", null), call())
-        assertEquals("The chain would refuse this transaction: nope", e.message)
+        assertEquals("The contract would refuse this transaction: nope", e.message)
     }
 
     @Test
@@ -615,7 +619,9 @@ class SendTest {
         val failed = s.submitAndAwaitBroadcast(s.prepare(call(data = "0xa9059cbb00")), signer()) as WalletSender.Broadcast.Failed
         assertTrue(failed.mayHaveGone)
         val again = sender(chain, journal = FileSendJournal(journalFile()))
-        assertEquals("0xa9059cbb00", again.status.value?.quote?.request?.callData)
+        val restored = again.status.value?.quote?.request?.dapp!!
+        assertEquals("a9059cbb00", restored.data.toHex())
+        assertEquals(null, restored.origin)
         assertEquals(s.status.value, again.status.value)
     }
 
@@ -648,6 +654,47 @@ class SendTest {
         assertFalse(journalFile().exists())
         again.acknowledge()
         assertNull(sender(chain, journal = FileSendJournal(journalFile())).status.value)
+    }
+
+    @Test
+    fun `a site's call goes out with its own data and no value, gas as it named, and survives a restart as the site's`() = runBlocking<Unit> {
+        val chain = FakeChain()
+        chain.estimate = 40_000
+        val s = sender(chain, journal = FileSendJournal(journalFile()))
+        val data = byteArrayOf(0xa9.toByte(), 0x05, 0x9c.toByte(), 0xbb.toByte())
+        val call = SendRequest(gnosis, xdai, from, to, BigInteger.ZERO, DappCall("https://app.example", data, BigInteger.valueOf(90_000)))
+        val quote = s.prepare(call)
+        assertEquals(BigInteger.ZERO, quote.tx.value)
+        assertTrue(quote.tx.data.contentEquals(data))
+        assertEquals(BigInteger.valueOf(90_000), quote.tx.gasLimit)
+        // A named gas limit below the estimate would only fail on chain: the estimate's headroom wins.
+        val low = s.prepare(call.copy(dapp = DappCall("https://app.example", data, BigInteger.valueOf(21_000))))
+        assertEquals(BigInteger.valueOf(48_000), low.tx.gasLimit)
+        chain.on["eth_getTransactionReceipt"] = { throw IOException("timed out") }
+        s.submit(quote, signer())
+        val pending = s.awaitStage { it == SendStatus.Stage.Pending }
+        assertEquals(1, chain.sent.size)
+
+        val again = sender(chain, journal = FileSendJournal(journalFile()))
+        val restored = again.status.value!!.quote.request
+        assertEquals("https://app.example", restored.dapp?.origin)
+        assertTrue(restored.dapp!!.data.contentEquals(data))
+        assertEquals(BigInteger.valueOf(90_000), restored.dapp!!.gasLimit)
+        assertEquals(pending.hash, again.status.value!!.hash)
+    }
+
+    @Test
+    fun `a site's call with no value still needs the fee, and a revert names the contract`() = runBlocking<Unit> {
+        val chain = FakeChain()
+        chain.balance = BigInteger.ZERO
+        val s = sender(chain)
+        val call = SendRequest(gnosis, xdai, from, to, BigInteger.ZERO, DappCall("https://app.example", byteArrayOf(1, 2, 3, 4), null))
+        val poor = runCatching { s.prepare(call) }.exceptionOrNull()
+        assertTrue(poor?.message, poor?.message?.startsWith("Not enough xDAI for the network fee") == true)
+        chain.balance = BigInteger.TEN.pow(18)
+        chain.on["eth_estimateGas"] = { """"error":{"code":3,"message":"execution reverted: nope","data":"0x"}""" }
+        val reverted = runCatching { s.prepare(call) }.exceptionOrNull()
+        assertTrue(reverted?.message, reverted?.message?.startsWith("The contract would refuse this transaction") == true)
     }
 
     @Test

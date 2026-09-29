@@ -179,7 +179,13 @@ internal object SendJournalCodec {
             .put("from", JSONObject().put("index", r.from.index).put("name", r.from.name).put("address", r.from.address))
             .put("to", r.to)
             .put("amount", r.amount.toString())
-            .put("callData", r.callData ?: JSONObject.NULL)
+            .put(
+                "dapp",
+                r.dapp?.let {
+                    JSONObject().put("origin", it.origin ?: JSONObject.NULL).put("data", it.data.toHex())
+                        .put("gasLimit", it.gasLimit?.toString() ?: JSONObject.NULL)
+                } ?: JSONObject.NULL,
+            )
             .put(
                 "tx",
                 JSONObject().put("nonce", q.tx.nonce.toString()).put("gasLimit", q.tx.gasLimit.toString())
@@ -219,7 +225,10 @@ internal object SendJournalCodec {
         val token = Token(chain.id, t.optStringOrNull("address"), t.getString("symbol"), t.getString("name"), t.getInt("decimals"))
         val f = o.getJSONObject("from")
         val from = WalletAccount(f.getInt("index"), f.getString("name"), f.getString("address"))
-        val request = SendRequest(chain, token, from, o.getString("to"), BigInteger(o.getString("amount")), o.optStringOrNull("callData"))
+        val dapp = o.optJSONObject("dapp")?.let { d ->
+            DappCall(d.optStringOrNull("origin"), d.getString("data").hexToBytes(), d.optStringOrNull("gasLimit")?.let(::BigInteger))
+        }
+        val request = SendRequest(chain, token, from, o.getString("to"), BigInteger(o.getString("amount")), dapp)
         val x = o.getJSONObject("tx")
         val tx = EthTransaction(
             chainId = chain.id,

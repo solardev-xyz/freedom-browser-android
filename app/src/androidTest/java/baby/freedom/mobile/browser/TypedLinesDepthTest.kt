@@ -42,7 +42,7 @@ class TypedLinesDepthTest {
         for (i in 29 downTo 1) inner = JSONObject().put("n", inner)
         val payload = JSONObject().put("types", types).put("domain", JSONObject().put("name", "x")).put("primaryType", "Order")
             .put("message", JSONObject().put("note", "hello").put("n", inner))
-        val (_, message) = Eip712.lines(Eip712.parse(payload.toString()))
+        val (_, message) = Eip712.lines(Eip712.parseStrict(payload.toString()))
         rule.setContent {
             FreedomTheme {
                 Box(Modifier.width(358.dp).testTag("sheet").verticalScroll(rememberScrollState())) {

@@ -30,27 +30,27 @@ class Eip712Test {
     /** Arrays of structs, a fixed-size array, strings with non-ASCII, uint256 max, negative and max int64, bytesN, empty bytes, a salt. */
     private val complex = """{"types":{"Item":[{"name":"id","type":"uint256"},{"name":"delta","type":"int64"},{"name":"tag","type":"bytes4"},{"name":"blob","type":"bytes"}],"Order":[{"name":"owner","type":"address"},{"name":"items","type":"Item[]"},{"name":"flags","type":"bool[2]"},{"name":"notes","type":"string[]"},{"name":"nonce","type":"uint8"}],"EIP712Domain":[{"name":"name","type":"string"},{"name":"version","type":"string"},{"name":"chainId","type":"uint256"},{"name":"verifyingContract","type":"address"},{"name":"salt","type":"bytes32"}]},"domain":{"name":"Freedom test","version":"2","chainId":"0x64","verifyingContract":"0x9a676e781a523b5d0c0e43731313a708cb607508","salt":"0x1111111111111111111111111111111111111111111111111111111111111111"},"primaryType":"Order","message":{"owner":"0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266","items":[{"id":"115792089237316195423570985008687907853269984665640564039457584007913129639935","delta":"-5","tag":"0xdeadbeef","blob":"0x"},{"id":"7","delta":"9223372036854775807","tag":"0x00000001","blob":"0x0102030405"}],"flags":[true,false],"notes":["a","ünïcødé ✓"],"nonce":"255"}}"""
 
-    private fun digest(json: String) = "0x" + Eip712.digest(Eip712.parse(json)).toHex()
+    private fun digest(json: String) = "0x" + Eip712.digest(Eip712.parseStrict(json)).toHex()
 
     @Test
     fun `digests and signatures match ethers, desktop's verifier`() {
         assertEquals("0xbe609aee343fb3c4b28e1df9e632fca64fcfaede20f02e86244efddf30957bd2", digest(mail))
         assertEquals(
             "0x6ea8bb309a3401225701f3565e32519f94a0ea91a5910ce9229fe488e773584c0390416a2190d9560219dab757ecca2029e63fa9d1c2aebf676cc25b9f03126a1b",
-            MessageSigning.sign(key.copyOf(), Eip712.digest(Eip712.parse(mail)), address),
+            MessageSigning.sign(key.copyOf(), address, Eip712.digest(Eip712.parseStrict(mail))),
         )
         assertEquals("0x9219795b39538994abb08c4e68cbfcd6fa5b3f49105b33cd6284ec968c66e609", digest(complex))
         assertEquals(
             "0x71efebb21effba274e4353a9f9a9b4e5b7abe3ed860cd781533ba71071f8c4c31e72c900488b681fb3eb9a0ee09094ff326e08487e37f2c149c279b6308b87b11b",
-            MessageSigning.sign(key.copyOf(), Eip712.digest(Eip712.parse(complex)), address),
+            MessageSigning.sign(key.copyOf(), address, Eip712.digest(Eip712.parseStrict(complex))),
         )
     }
 
     @Test
     fun `encodeType puts the primary type first and the rest by name`() {
-        val td = Eip712.parse(complex)
-        assertEquals("Order(address owner,Item[] items,bool[2] flags,string[] notes,uint8 nonce)Item(uint256 id,int64 delta,bytes4 tag,bytes blob)", Eip712.encodeType("Order", td.types))
-        assertEquals("Mail(Person from,Person to,string contents)Person(string name,address wallet)", Eip712.encodeType("Mail", Eip712.parse(mail).types))
+        val td = Eip712.parseStrict(complex)
+        assertEquals("Order(address owner,Item[] items,bool[2] flags,string[] notes,uint8 nonce)Item(uint256 id,int64 delta,bytes4 tag,bytes blob)", Eip712.encodeType(td.types, "Order"))
+        assertEquals("Mail(Person from,Person to,string contents)Person(string name,address wallet)", Eip712.encodeType(Eip712.parseStrict(mail).types, "Mail"))
     }
 
     @Test
@@ -62,9 +62,36 @@ class Eip712Test {
         assertEquals("0xbe609aee343fb3c4b28e1df9e632fca64fcfaede20f02e86244efddf30957bd2", digest(o.toString()))
         o.getJSONObject("domain").put("chainId", "1")
         assertEquals("0xbe609aee343fb3c4b28e1df9e632fca64fcfaede20f02e86244efddf30957bd2", digest(o.toString()))
-        assertEquals(1L, Eip712.chainId(Eip712.parse(o.toString())))
+        assertEquals(1L, Eip712.parseStrict(o.toString()).chainId)
         // The object itself (not its JSON string) works too.
-        assertEquals("0xbe609aee343fb3c4b28e1df9e632fca64fcfaede20f02e86244efddf30957bd2", "0x" + Eip712.digest(Eip712.parse(o)).toHex())
+        assertEquals("0xbe609aee343fb3c4b28e1df9e632fca64fcfaede20f02e86244efddf30957bd2", "0x" + Eip712.digest(Eip712.parseStrict(o)).toHex())
+    }
+
+    @Test
+    fun `a chainId the domain type doesn't declare as a uint names no network`() {
+        // R6-F1: the same digest whatever the undeclared chainId says, so the sheet must not name one.
+        fun payload(chainId: Any, domainType: JSONArray) = JSONObject()
+            .put("types", JSONObject().put("EIP712Domain", domainType).put("Permit", JSONArray().put(JSONObject().put("name", "v").put("type", "uint256"))))
+            .put("primaryType", "Permit")
+            .put("domain", JSONObject().put("name", "Tok").put("chainId", chainId))
+            .put("message", JSONObject().put("v", "1"))
+            .toString()
+        val nameOnly = JSONArray().put(JSONObject().put("name", "name").put("type", "string"))
+        val gnosis = Eip712.parseStrict(payload(100, nameOnly))
+        val ethereum = Eip712.parseStrict(payload(1, nameOnly))
+        assertTrue(Eip712.digest(gnosis).contentEquals(Eip712.digest(ethereum)))
+        assertNull(gnosis.chainId)
+        assertFalse(Eip712.chainBound(gnosis))
+        assertEquals(listOf(Eip712.Line("name", "Tok", 0)), Eip712.lines(gnosis).first)
+        // Declared, but as a string: signed as the text "1", not as a chain ID.
+        val asString = JSONArray(nameOnly.toString()).put(JSONObject().put("name", "chainId").put("type", "string"))
+        val s = Eip712.parseStrict(payload("1", asString))
+        assertNull(s.chainId)
+        assertFalse(Eip712.chainBound(s))
+        // Declared as a uint: bound, and named.
+        val asUint = JSONArray(nameOnly.toString()).put(JSONObject().put("name", "chainId").put("type", "uint256"))
+        assertEquals(100L, Eip712.parseStrict(payload(100, asUint)).chainId)
+        assertTrue(Eip712.chainBound(Eip712.parse(payload(100, asUint))))
     }
 
     @Test
@@ -72,7 +99,7 @@ class Eip712Test {
         fun refused(edit: (JSONObject) -> Unit) {
             val o = JSONObject(complex)
             edit(o)
-            assertThrows(Eip712.InvalidTypedData::class.java) { Eip712.digest(Eip712.parse(o.toString())) }
+            assertThrows(Eip712.Invalid::class.java) { Eip712.digest(Eip712.parseStrict(o.toString())) }
         }
         val item = { o: JSONObject -> o.getJSONObject("message").getJSONArray("items").getJSONObject(0) }
         refused { it.getJSONObject("message").remove("nonce") } // a missing field
@@ -90,16 +117,16 @@ class Eip712Test {
         refused { it.getJSONObject("types").getJSONArray("Order").put(JSONObject().put("name", "x").put("type", "Missing")) }
         refused { it.getJSONObject("types").getJSONArray("Order").put(JSONObject().put("name", "y").put("type", "uint7")) }
         refused { it.put("primaryType", "Nope") }
-        assertThrows(Eip712.InvalidTypedData::class.java) { Eip712.parse("not json") }
-        assertThrows(Eip712.InvalidTypedData::class.java) { Eip712.parse("[" .repeat(100_000)) }
-        assertThrows(Eip712.InvalidTypedData::class.java) { Eip712.parse(null) }
+        assertThrows(Eip712.Invalid::class.java) { Eip712.parseStrict("not json") }
+        assertThrows(Eip712.Invalid::class.java) { Eip712.parseStrict("[" .repeat(100_000)) }
+        assertThrows(Eip712.Invalid::class.java) { Eip712.parseStrict(null) }
     }
 
     @Test
     fun `the sheet's lines show every signed field, nested ones indented, and nothing else`() {
         val o = JSONObject(complex)
         o.getJSONObject("message").put("unsigned", "not shown")
-        val (domain, message) = Eip712.lines(Eip712.parse(o.toString()))
+        val (domain, message) = Eip712.lines(Eip712.parseStrict(o.toString()))
         assertEquals(
             listOf(
                 Eip712.Line("name", "Freedom test", 0),
@@ -140,7 +167,7 @@ class Eip712Test {
     fun `personal_sign matches ethers for text and for bytes`() {
         val text = "freedom openlv android harness".toByteArray()
         assertEquals("0x740df87a68c5f40631aad3bbab1756bb854137557c0c052eed84b741bd1c5b8e", "0x" + MessageSigning.personalDigest(text).toHex())
-        val sig = MessageSigning.sign(key.copyOf(), MessageSigning.personalDigest(text), address)
+        val sig = MessageSigning.sign(key.copyOf(), address, MessageSigning.personalDigest(text))
         assertEquals(
             "0x09036ce97346b4f7fe9bb7970503cf8329571b6e638c95f716536c594931ebd34543e67d878ab12cc9e3651608c9e625b741c0dc26134a39725148a836f6f6331b",
             sig,
@@ -149,14 +176,14 @@ class Eip712Test {
         val bin = byteArrayOf(0xff.toByte(), 0x00, 0x10)
         assertEquals(
             "0x5fc88852a6252648db7b5c51012d1cc4cba09b334074181848652b6a48e742a978aa3b0a50976aaef7b0f21d31c31e66e37ded7aa646da26323c7f7f31e09ef21c",
-            MessageSigning.sign(key.copyOf(), MessageSigning.personalDigest(bin), address),
+            MessageSigning.sign(key.copyOf(), address, MessageSigning.personalDigest(bin)),
         )
     }
 
     @Test
     fun `a key that isn't the account's signs nothing`() {
         assertThrows(IllegalStateException::class.java) {
-            MessageSigning.sign(key.copyOf(), MessageSigning.personalDigest(byteArrayOf(1)), "0x70997970C51812dc3A010C7d01b50e0d17dc79C8")
+            MessageSigning.sign(key.copyOf(), "0x70997970C51812dc3A010C7d01b50e0d17dc79C8", MessageSigning.personalDigest(byteArrayOf(1)))
         }
     }
 
@@ -194,12 +221,13 @@ class Eip712Test {
     fun `a payload built to fan out digests quickly and is refused for the sheet`() {
         val json = fanOut()
         assertTrue(json.length <= Eip712.MAX_JSON)
-        val td = Eip712.parse(json)
+        val td = Eip712.parseStrict(json)
         val started = System.nanoTime()
-        Eip712.digest(td)
+        // Hashed, or refused (its type chain is past the encoder's depth bound) — either way quickly, never a crash.
+        runCatching { Eip712.digest(td) }.exceptionOrNull()?.let { assertTrue(it.toString(), it is Eip712.Invalid) }
         val ms = (System.nanoTime() - started) / 1_000_000
         assertTrue("digest took $ms ms", ms < 2_000)
-        assertThrows(Eip712.InvalidTypedData::class.java) { Eip712.lines(td) }
+        assertThrows(Eip712.Invalid::class.java) { Eip712.lines(td) }
     }
 
     @Test
@@ -213,7 +241,7 @@ class Eip712Test {
     fun `a string field can't hide or reorder what's around it on the sheet`() {
         val payload = JSONObject(mail)
         payload.getJSONObject("message").put("contents", "pay‮gnp.exe\n\n\nend​ ")
-        val (_, message) = Eip712.lines(Eip712.parse(payload.toString()))
+        val (_, message) = Eip712.lines(Eip712.parseStrict(payload.toString()))
         assertEquals("pay\\u202Egnp.exe\\n\\n\\nend\\u200B\\u2028", message.single { it.label == "contents" }.value)
         // Plain text, non-ASCII included, is shown as is.
         assertEquals("ünïcødé ✓", Eip712.visible("ünïcødé ✓"))
@@ -237,10 +265,10 @@ class Eip712Test {
     fun `one huge string field is refused rather than laid out on the sheet`() {
         val payload = JSONObject(mail)
         payload.getJSONObject("message").put("contents", "x".repeat(Eip712.MAX_SHOWN + 1))
-        val td = Eip712.parse(payload.toString())
-        assertThrows(Eip712.InvalidTypedData::class.java) { Eip712.lines(td) }
+        val td = Eip712.parseStrict(payload.toString())
+        assertThrows(Eip712.Invalid::class.java) { Eip712.lines(td) }
         payload.getJSONObject("message").put("contents", "x".repeat(1000))
-        Eip712.lines(Eip712.parse(payload.toString()))
+        Eip712.lines(Eip712.parseStrict(payload.toString()))
     }
 
     @Test
@@ -308,7 +336,7 @@ class Eip712Test {
         for (i in 29 downTo 1) inner = JSONObject().put("n", inner)
         val payload = JSONObject().put("types", types).put("domain", JSONObject().put("name", "x")).put("primaryType", "Order")
             .put("message", JSONObject().put("note", "hello").put("n", inner))
-        val (_, message) = Eip712.lines(Eip712.parse(payload.toString()))
+        val (_, message) = Eip712.lines(Eip712.parseStrict(payload.toString()))
         val spender = message.single { it.label == "spender" }
         assertEquals(30, spender.depth)
         assertEquals("0x" + "b".repeat(40), spender.value.lowercase())

@@ -287,13 +287,13 @@ class OpenLvSession internal constructor(
         // Off the main thread: the payload is the peer's, up to Eip712.MAX_JSON of it.
         val (typed, digest, lines) = try {
             withContext(Dispatchers.Default) {
-                val td = Eip712.parse(params.opt(1))
+                val td = Eip712.parseStrict(params.opt(1))
                 Triple(td, Eip712.digest(td), Eip712.lines(td))
             }
-        } catch (e: Eip712.InvalidTypedData) {
+        } catch (e: Eip712.Invalid) {
             return invalid(e.message ?: "The typed data can’t be read.")
         }
-        val domainChain = Eip712.chainId(typed)
+        val domainChain = typed.chainId
         val chain = domainChain?.let { id -> chains().firstOrNull { it.id == id } }
         val request = Request.TypedData(account, typed.primaryType, lines.first, lines.second, domainChain, chain)
         return when (ask(sid, request)) {
@@ -329,7 +329,7 @@ class OpenLvSession internal constructor(
             from = account,
             to = NodeIdentity.checksum(to.hexToBytes()),
             amount = value,
-            callData = data,
+            dapp = DappCall(origin = null, data = data.hexToBytes(), gasLimit = null),
         )
         var notice: String? = null
         while (true) {
@@ -372,7 +372,7 @@ class OpenLvSession internal constructor(
     }
 
     private suspend fun sign(account: WalletAccount, digest: ByteArray): OpenLvResponse = try {
-        val signature = withContext(Dispatchers.Default) { keys.withKey(account) { key -> MessageSigning.sign(key, digest, account.address) } }
+        val signature = withContext(Dispatchers.Default) { keys.withKey(account) { key -> MessageSigning.sign(key, account.address, digest) } }
         OpenLvResponse.Result(signature)
     } catch (e: VaultLockedException) {
         OpenLvResponse.Error(UNAUTHORIZED, "The wallet on the phone locked before it signed. Try again.")

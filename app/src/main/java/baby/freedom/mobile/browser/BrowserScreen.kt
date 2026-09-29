@@ -963,6 +963,8 @@ fun BrowserScreen(
         if (source == SubmitSource.User) downloads.allowOffers(target.id)
         // Likewise a refused `window.radicle` prompt's block (#124).
         if (source == SubmitSource.User) RadicleProviders.allowPrompts(target.id)
+        // And a rejected `window.ethereum` sheet's (#110).
+        if (source == SubmitSource.User) EthereumProviders.allowPrompts(target.id)
         // Nor is it a load a restore put back over its page (#185 R4-F1).
         if (source == SubmitSource.User) target.userNavigated()
         // And the load it schedules is theirs: its redirects may end in
@@ -2134,6 +2136,7 @@ fun BrowserScreen(
     val androidDialogUp by sitePermissions.androidDialogUp.collectAsState()
     var offerHasTurn by remember(activeTabId) { mutableStateOf(false) }
     var radicleHasTurn by remember(activeTabId) { mutableStateOf(false) }
+    var ethereumHasTurn by remember(activeTabId) { mutableStateOf(false) }
     val promptTurn = modalPromptTurn(
         permissionWaiting = pageUncovered && state.permissionPrompt != null,
         offerWaiting = tabOffers.isNotEmpty(),
@@ -2143,10 +2146,14 @@ fun BrowserScreen(
         // permission prompt on the page being what's on screen.
         radicleWaiting = pageUncovered && state.radiclePrompt != null,
         radicleHasTurn = radicleHasTurn,
+        // The `window.ethereum` approval sheets (#110), gated the same way.
+        ethereumWaiting = pageUncovered && state.ethereumPrompt != null,
+        ethereumHasTurn = ethereumHasTurn,
     )
     SideEffect {
         offerHasTurn = promptTurn == PromptTurn.DownloadOffer
         radicleHasTurn = promptTurn == PromptTurn.Radicle
+        ethereumHasTurn = promptTurn == PromptTurn.Ethereum
     }
     tabOffers.firstOrNull()?.takeIf { promptTurn == PromptTurn.DownloadOffer }?.let { offer ->
         DownloadOfferDialog(
@@ -2248,12 +2255,16 @@ fun BrowserScreen(
     // History, Bookmarks, Downloads) covers the page, so the user
     // always sees the page that is asking, and it waits its turn with
     // the tab's download offer ([modalPromptTurn]).
-    val pageOnScreen = pageUncovered && promptTurn != PromptTurn.DownloadOffer && promptTurn != PromptTurn.Radicle
+    val pageOnScreen = pageUncovered && promptTurn != PromptTurn.DownloadOffer && promptTurn != PromptTurn.Radicle &&
+        promptTurn != PromptTurn.Ethereum
     state.permissionPrompt?.takeIf { promptTurn == PromptTurn.SitePermission }?.let { prompt ->
         androidx.compose.runtime.key(prompt) { SitePermissionPrompt(prompt) }
     }
     state.radiclePrompt?.takeIf { promptTurn == PromptTurn.Radicle }?.let { prompt ->
         androidx.compose.runtime.key(prompt) { RadiclePromptDialog(prompt) }
+    }
+    state.ethereumPrompt?.takeIf { promptTurn == PromptTurn.Ethereum }?.let { prompt ->
+        androidx.compose.runtime.key(prompt) { EthereumApprovalSheet(prompt) }
     }
     // The same gate for Android's own runtime-permission dialog, which
     // the broker raises only over the tab named here — plus the app

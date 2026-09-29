@@ -362,6 +362,13 @@ class BrowserState(val id: Long, val private: Boolean = false) {
     var radiclePrompt: RadiclePromptRequest? by mutableStateOf<RadiclePromptRequest?>(null)
         internal set
 
+    /**
+     * The `window.ethereum` approval sheet this tab is waiting on (#110),
+     * or null. Owned by [EthereumProviders]; shown like [permissionPrompt].
+     */
+    var ethereumPrompt: EthereumPromptRequest? by mutableStateOf<EthereumPromptRequest?>(null)
+        internal set
+
     var canGoBack by mutableStateOf(false)
         internal set
     var canGoForward by mutableStateOf(false)

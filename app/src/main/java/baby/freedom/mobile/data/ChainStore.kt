@@ -48,9 +48,10 @@ import org.json.JSONObject
  * half-written one is skipped rather than handed to a caller.
  *
  * Never throws for storage trouble, like [SitePermissionStore]: a file
- * that can't be read lists only the built-ins (and re-reads with
- * back-off), a failed write reports [AddResult.FAILED] / [RemoveResult.FAILED], and a
- * corrupt file is replaced with an empty one.
+ * that can't be read lists only the built-ins in [chains] and `null` in
+ * [chainsOrUnreadable] (and re-reads with back-off), a failed write
+ * reports [AddResult.FAILED] / [RemoveResult.FAILED], and a corrupt file
+ * is replaced with an empty one.
  */
 class ChainStore internal constructor(
     private val store: DataStore<Preferences>,
@@ -74,26 +75,38 @@ class ChainStore internal constructor(
      */
     enum class RpcAddResult { ADDED, INVALID, DUPLICATE, PUBLIC, NAME_RESOLUTION_PUBLIC, FULL, NO_CHAIN, FAILED }
 
-    /** Every chain: the built-ins, then custom chains in the order they were added. */
-    val chains: Flow<List<Chain>> = flow {
+    /**
+     * Every chain: the built-ins, then custom chains in the order they were
+     * added — or `null` while the file can't be read (and is re-read with
+     * back-off). A reader that acts on a chain being *gone* must use this
+     * rather than [chains]: a read error isn't the user removing every
+     * custom chain (#215 R4-F1).
+     */
+    val chainsOrUnreadable: Flow<List<Chain>?> = flow {
         var failures = 0
         emitAll(
             store.data
+                .map<Preferences, Preferences?> { it }
                 .onEach { failures = 0 }
                 .retryWhen { e, _ ->
                     if (e !is IOException) return@retryWhen false
                     Log.w(TAG, "reading chains failed; listing built-ins only", e)
-                    emit(emptyPreferences())
+                    emit(null)
                     backOff(readRetryMs shl failures.coerceAtMost(5))
                     failures++
                     true
                 },
         )
     }.map { prefs ->
-        (BuiltInChains.ALL + customChains(prefs)).map { chain ->
-            userRpcs(prefs, chain).takeIf { it.isNotEmpty() }?.let { chain.copy(userRpcUrls = it) } ?: chain
+        prefs?.let {
+            (BuiltInChains.ALL + customChains(it)).map { chain ->
+                userRpcs(it, chain).takeIf { rpcs -> rpcs.isNotEmpty() }?.let { rpcs -> chain.copy(userRpcUrls = rpcs) } ?: chain
+            }
         }
     }
+
+    /** [chainsOrUnreadable], listing only the built-ins while the file can't be read. */
+    val chains: Flow<List<Chain>> = chainsOrUnreadable.map { it ?: BuiltInChains.ALL }
 
     /**
      * Add [raw] to chain [id]'s own RPCs ([Chain.userRpcUrls]), after

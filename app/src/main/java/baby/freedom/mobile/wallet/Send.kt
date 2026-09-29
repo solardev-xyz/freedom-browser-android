@@ -99,11 +99,30 @@ object Recipients {
 }
 
 /**
+ * A transaction someone else composed, for the wallet to send: a site's
+ * `eth_sendTransaction` (#110), with the site that asked ([origin], its
+ * provider origin key) — or, with a null [origin], desktop Freedom's over
+ * a scanned OpenLV pairing code (#113), which can't say who made the code.
+ * [data] is the call data exactly as asked, and [gasLimit] the gas limit
+ * it named, if any.
+ */
+class DappCall(val origin: String?, val data: ByteArray, val gasLimit: BigInteger?) {
+    init {
+        require(gasLimit == null || gasLimit.signum() > 0) { "gas limit" }
+    }
+
+    // By content, so a send read back from the journal equals the one that was written.
+    override fun equals(other: Any?): Boolean =
+        other is DappCall && origin == other.origin && data.contentEquals(other.data) && gasLimit == other.gasLimit
+
+    override fun hashCode(): Int = (origin.hashCode() * 31 + data.contentHashCode()) * 31 + gasLimit.hashCode()
+}
+
+/**
  * What the user asked for: [amount] base units of [token] from [from] to
- * [to] on [chain] — or, with [callData], a transaction someone else
- * composed (desktop Freedom's `eth_sendTransaction` over OpenLV, #113):
- * [amount] of the native currency, which may be zero, and [callData]
- * exactly as asked, to [to] (a contract, usually).
+ * [to] on [chain] — or, with [dapp], a transaction someone else composed:
+ * [amount] of the native currency (which may be none) and its call data
+ * to [to].
  */
 data class SendRequest(
     val chain: Chain,
@@ -112,33 +131,27 @@ data class SendRequest(
     /** EIP-55 checksummed ([Recipients.parse]). */
     val to: String,
     val amount: BigInteger,
-    /** `0x`-prefixed lower-case hex; null for the wallet's own transfers. */
-    val callData: String? = null,
+    val dapp: DappCall? = null,
 ) {
     init {
         require(token.chainId == chain.id) { "the token is on another chain" }
-        if (callData == null) {
+        if (dapp == null) {
             require(amount.signum() > 0) { "nothing to send" }
         } else {
-            require(token.isNative) { "a composed transaction pays in the native currency" }
+            require(token.isNative) { "a composed transaction carries the native currency" }
             require(amount.signum() >= 0 && amount.bitLength() <= 256) { "a value out of range" }
-            require(CALL_DATA.matches(callData)) { "call data is 0x-prefixed lower-case hex" }
         }
     }
 
     /**
      * What goes on chain: native passes straight through; an ERC-20 is a
      * call to its contract with `transfer(to, amount)` and no value; a
-     * composed transaction is what it says.
+     * composed one ([dapp]) is its own call data, as it asked.
      */
     fun call(): Triple<String, BigInteger, ByteArray> = when {
-        callData != null -> Triple(to, amount, callData.hexToBytes())
+        dapp != null -> Triple(to, amount, dapp.data)
         token.address == null -> Triple(to, amount, ByteArray(0))
         else -> Triple(token.address, BigInteger.ZERO, Erc20.transferData(to, amount))
-    }
-
-    private companion object {
-        val CALL_DATA = Regex("^0x([0-9a-f]{2})*$")
     }
 }
 
@@ -437,6 +450,7 @@ class WalletSender internal constructor(
     private val pollMs: Long = POLL_MS,
     private val confirmTimeoutMs: Long = CONFIRM_TIMEOUT_MS,
     private val journal: SendJournal = SendJournal.None,
+    private val history: TxHistory? = null,
 ) {
     private val nonces = NonceTracker(rpc, clock, onAbandonedChange = { persistLater() })
     private val gas = GasOracle(rpc)
@@ -445,6 +459,16 @@ class WalletSender internal constructor(
 
     /** The current (or last) confirmed send; null once acknowledged. */
     val status: StateFlow<SendStatus?> = _status.asStateFlow()
+
+    /**
+     * Shows [value] and reports it to the [history] (#109), which records
+     * a send once it went out or may have. Under this object's lock; the
+     * history never blocks on storage there.
+     */
+    private fun show(value: SendStatus?) {
+        _status.value = value
+        value?.let { history?.note(it) }
+    }
 
     /** The signed bytes of the current send, kept so Try again resends exactly them. */
     private var signed: EthTransaction.Signed? = null
@@ -496,13 +520,20 @@ class WalletSender internal constructor(
                 state.send?.let { send ->
                     signed = send.signed
                     val status = send.status
-                    when (status.stage) {
-                        SendStatus.Stage.Broadcasting -> _status.value = status.copy(stage = SendStatus.Stage.Failed(INTERRUPTED, true))
-                        SendStatus.Stage.Pending -> {
-                            _status.value = status
-                            job = scope.launch { follow(status.quote, send.signed.hash) }
-                        }
-                        else -> _status.value = status
+                    val shown = if (status.stage == SendStatus.Stage.Broadcasting) {
+                        status.copy(stage = SendStatus.Stage.Failed(INTERRUPTED, true))
+                    } else {
+                        status
+                    }
+                    if (discardOnRestore) {
+                        // The wallet it came from was removed before this was read back, and
+                        // its history wiped with it: the discard below gives the send up
+                        // (abandoning its nonce) without recording it in the emptied history
+                        // or following it.
+                        _status.value = shown
+                    } else {
+                        show(shown)
+                        if (status.stage == SendStatus.Stage.Pending) job = scope.launch { follow(status.quote, send.signed.hash) }
                     }
                     Log.i(TAG, "restored ${send.signed.hash} chain=${send.signed.tx.chainId} nonce=${send.signed.tx.nonce}")
                 }
@@ -550,7 +581,7 @@ class WalletSender internal constructor(
      * up on that a restart brings back to be given up on again.
      */
     private fun publish(status: SendStatus?) {
-        synchronized(this) { _status.value = status }
+        synchronized(this) { show(status) }
         persistLater()
     }
 
@@ -571,7 +602,7 @@ class WalletSender internal constructor(
             journal.save(state)
             synchronized(this@WalletSender) {
                 if (_status.value !== was) return@withContext false
-                _status.value = now
+                show(now)
                 true
             }
         }
@@ -598,14 +629,14 @@ class WalletSender internal constructor(
                 if (_status.value?.quote !== quote) return@withContext false
                 if (saved) {
                     signed = s
-                    _status.value = broadcasting
+                    show(broadcasting)
                     return@withContext true
                 }
                 val failed = SendStatus(
                     quote,
                     SendStatus.Stage.Failed("Couldn’t save the transaction before sending it, so nothing was sent.", false),
                 )
-                _status.value = failed
+                show(failed)
                 snapshot(failed, null)
             }
             // A failed save may still have landed (renamed, just not known
@@ -642,7 +673,8 @@ class WalletSender internal constructor(
             val nonce = async { nonces.next(from, chainId) }
             val fees = async { gas.fees(chainId) }
             val held = tokenBalance.await() ?: native.await()
-            if (held.signum() == 0) throw SendException("This account has no ${token.symbol}")
+            // A site's call may carry no value: the fee check below says what's missing then.
+            if (held.signum() == 0 && request.dapp == null) throw SendException("This account has no ${token.symbol}")
             if (!all && request.amount > held) {
                 throw SendException(
                     "Not enough ${token.symbol}: this account has ${SendAmounts.exact(held, token.decimals)} ${token.symbol}",
@@ -663,7 +695,7 @@ class WalletSender internal constructor(
             var tx = EthTransaction(
                 chainId = chainId,
                 nonce = nonce.await().value,
-                gasLimit = gasLimit(estimate, data.isNotEmpty()),
+                gasLimit = gasLimit(estimate, data.isNotEmpty(), site = request.dapp?.gasLimit),
                 to = to,
                 value = value,
                 data = data,
@@ -680,7 +712,7 @@ class WalletSender internal constructor(
                 tx = tx.copy(value = rest)
             }
             if (tx.maxFee + tx.value > nativeBalance) {
-                val what = if (token.isNative) "the amount and the network fee" else "the network fee"
+                val what = if (token.isNative && tx.value.signum() > 0) "the amount and the network fee" else "the network fee"
                 throw SendException("Not enough $symbol for $what (up to $fee): $has")
             }
             SendQuote(sending, tx, nativeBalance, tokenBalance.await(), clock(), nonce.await().trust, replacing?.hash)
@@ -720,17 +752,11 @@ class WalletSender internal constructor(
      */
     fun submit(quote: SendQuote, sign: (EthTransaction) -> EthTransaction.Signed): Submit {
         synchronized(this) {
-            // The last process's send isn't read back yet: it may be one this would sign beside.
-            if (!restoredYet) return Submit.BUSY
-            val current = _status.value
-            if (current?.stage == SendStatus.Stage.Signing || current?.stage == SendStatus.Stage.Broadcasting) return Submit.BUSY
-            // One that may have gone out is settled by Try again (or given up on with
-            // discard, which makes the next send replace it), never by signing another beside it.
-            if (current?.unresolved == true) return Submit.BUSY
+            if (busyLocked()) return Submit.BUSY
             if (isStale(quote)) return Submit.STALE
             job?.cancel()
             signed = null
-            _status.value = SendStatus(quote, SendStatus.Stage.Signing)
+            show(SendStatus(quote, SendStatus.Stage.Signing))
             job = scope.launch {
                 val s = try {
                     sign(quote.tx)
@@ -789,6 +815,19 @@ class WalletSender internal constructor(
             is SendStatus.Stage.Failed -> Broadcast.Failed(stage.message, stage.mayHaveGone)
             else -> s.hash?.let { Broadcast.Sent(it) } ?: Broadcast.Failed("No transaction hash came back.", true)
         }
+    }
+
+    /** Whether [submit] would answer [Submit.BUSY] to any quote right now. */
+    fun busy(): Boolean = synchronized(this) { busyLocked() }
+
+    private fun busyLocked(): Boolean {
+        // The last process's send isn't read back yet: it may be one this would sign beside.
+        if (!restoredYet) return true
+        val current = _status.value
+        if (current?.stage == SendStatus.Stage.Signing || current?.stage == SendStatus.Stage.Broadcasting) return true
+        // One that may have gone out is settled by Try again (or given up on with
+        // discard, which makes the next send replace it), never by signing another beside it.
+        return current?.unresolved == true
     }
 
     /** After a [SendStatus.Stage.Failed] that [SendStatus.Stage.Failed.mayHaveGone]: the same bytes again. */
@@ -993,6 +1032,21 @@ class WalletSender internal constructor(
         internal fun gasLimit(estimate: BigInteger, hasData: Boolean): BigInteger =
             if (!hasData && estimate == TRANSFER_GAS) estimate else estimate * BigInteger.valueOf(120) / BigInteger.valueOf(100)
 
+        /**
+         * The gas limit for a send with [site]'s `gas` (a dApp's
+         * `eth_sendTransaction`, #110), if it named one: taken as long as it
+         * covers the estimate, but never more than [SITE_GAS_CEILING] times
+         * it — a site's `0xffffffffffff` would otherwise price the "up to"
+         * fee past any balance, or past the block gas limit so no node
+         * takes it (#215 R6-M2). Below the estimate it's ignored, as the
+         * send would run out of gas.
+         */
+        internal fun gasLimit(estimate: BigInteger, hasData: Boolean, site: BigInteger?): BigInteger =
+            site?.takeIf { it >= estimate }?.min(estimate * SITE_GAS_CEILING) ?: gasLimit(estimate, hasData)
+
+        /** How many times the estimate a site's own `gas` may be ([gasLimit]). */
+        private val SITE_GAS_CEILING = BigInteger.valueOf(3)
+
         /** A receipt's outcome, or null if it's not a receipt this can read. */
         internal fun outcomeOf(receipt: JSONObject): SendStatus.Stage? {
             val block = receipt.optString("blockNumber").hexOrNull()?.toLong() ?: return null
@@ -1025,7 +1079,7 @@ class WalletSender internal constructor(
                 e.data != null || e.code == ChainRpcException.EXECUTION_REVERTED || REVERTED.containsMatchIn(e.rpcMessage) -> {
                     val reason = e.data?.let(::revertReason) ?: REVERTED.find(e.rpcMessage)?.let { e.rpcMessage.substring(it.range.last + 1).trim(' ', ':') }
                     val who = when {
-                        request.callData != null -> "The chain would refuse this transaction"
+                        request.dapp != null -> "The contract would refuse this transaction"
                         request.token.isNative -> "The recipient would refuse this transfer"
                         else -> "The ${request.token.symbol} contract would refuse this transfer"
                     }
@@ -1126,6 +1180,7 @@ class WalletSender internal constructor(
                 rpc = WalletRpc(ChainDataRouter.get(context.applicationContext)),
                 scope = CoroutineScope(SupervisorJob() + Dispatchers.Default),
                 journal = FileSendJournal(journalFile(context)),
+                history = TxHistory.get(context),
             ).also { instance = it }
         }
 

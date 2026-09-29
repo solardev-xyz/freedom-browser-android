@@ -230,7 +230,7 @@ class OpenLvSessionTest {
         assertEquals(listOf(Eip712.Line("to", "desktop", 0)), req.message)
         sheet.decide(OpenLvSession.Decision.Approve())
         val sig = result(engine.next()) as String
-        val digest = Eip712.digest(Eip712.parse(payload.toString()))
+        val digest = Eip712.digest(Eip712.parseStrict(payload.toString()))
         assertEquals(account0.address.lowercase(), Secp256k1.recover(digest, sig)?.lowercase())
 
         s.onRequest(1, 2, "eth_signTypedData_v4", JSONArray().put(account0.address).put("{\"types\":{}}"))

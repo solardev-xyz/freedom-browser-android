@@ -349,7 +349,11 @@ private fun PersonalSignBody(request: OpenLvSession.Request.PersonalSign) {
 @Composable
 private fun TypedDataBody(request: OpenLvSession.Request.TypedData) {
     AccountRow(request.account)
-    request.chainId?.let { id ->
+    // Only a chainId the domain type declares (as a uint) is signed; otherwise the signature isn't tied to any chain (R6-F1).
+    val id = request.chainId
+    if (id == null) {
+        ReviewRow("Network", "Any — the signature names no chain", detail = "It could be used on any network where this contract accepts it")
+    } else {
         ReviewRow("Network", request.chain?.name ?: "Chain $id", detail = if (request.chain == null) "A chain this phone doesn’t have set up" else null)
     }
     ReviewRow("Type", request.primaryType)
@@ -415,7 +419,7 @@ private fun SendTransactionBody(request: OpenLvSession.Request.SendTransaction) 
         Text("This is the sending account itself.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
     ReviewRow("Value", "${SendAmounts.exact(r.amount, chain.decimals)} ${chain.symbol}", mono = true)
-    val data = r.callData ?: "0x"
+    val data = "0x" + (r.dapp?.data?.toHex() ?: "")
     HexRow(
         "Data",
         data,
