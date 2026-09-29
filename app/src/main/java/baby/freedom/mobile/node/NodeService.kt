@@ -356,16 +356,30 @@ class NodeService : Service() {
             // alongside a spend, so no permit is open and it sends nothing.
             "discover" -> {
                 check(stopGate.beginDiscover()) { "A stamp purchase or search is still running. Try again once it's done." }
+                // Kept under the app's id for it, for a search that runs
+                // on after the app stopped waiting ("discovering" below).
+                val id = args.optString("id").ifEmpty { null }
+                var outcome: String? = null
                 try {
-                    swarmNode.discoverStamps()
+                    swarmNode.discoverStamps().also { outcome = it }
+                } catch (e: Exception) {
+                    outcome = JSONObject().put("error", e.message ?: "the Swarm node couldn't do that").toString()
+                    throw e
                 } finally {
-                    stopGate.endDiscover()
+                    stopGate.endDiscover(id, outcome)
                 }
             }
-            // Whether a discover still runs: the app asks once it has
-            // stopped waiting for one, so it holds a publish back until
-            // the search (and any gateway reload it ends with) is over.
-            "discovering" -> JSONObject().put("running", stopGate.discoverRunning).toString()
+            // Whether a discover still runs, and once it's over, how the
+            // app's search [id] ended: the app asks once it has stopped
+            // waiting for one, so it holds a publish back until the search
+            // (and any gateway reload it ends with) is over, and then says
+            // what it found or why it failed.
+            "discovering" -> {
+                val status = stopGate.discoverStatus(args.optString("id").ifEmpty { null })
+                JSONObject().put("running", status.running).apply {
+                    status.outcome?.let { o -> runCatching { JSONObject(o) }.getOrNull()?.let { put("outcome", it) } }
+                }.toString()
+            }
             "buy" -> spending {
                 spendable()
                 val depth = args.getInt("depth").also { require(it in MIN_STAMP_DEPTH..MAX_STAMP_DEPTH) { "bad depth" } }

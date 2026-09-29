@@ -58,11 +58,34 @@ internal class SpendStopGate(private val nanoTime: () -> Long = System::nanoTime
     /** Whether a discover is running now (for saying why a spend didn't start). */
     val discoverRunning: Boolean get() = synchronized(monitor) { discovering }
 
-    /** The discover [beginDiscover] let start has ended, however. */
-    fun endDiscover() = synchronized(monitor) {
+    /**
+     * The discover [beginDiscover] let start has ended, however. [outcome]
+     * is its answer (ant's JSON, or `{"error":…}`), kept for the app under
+     * [id], the id it started the search with, or null if it gave none or
+     * the search ended without one.
+     */
+    fun endDiscover(id: String? = null, outcome: String? = null) = synchronized(monitor) {
         check(discovering) { "endDiscover() without beginDiscover()" }
         discovering = false
+        lastDiscover = id?.let { it to outcome }
     }
+
+    /**
+     * Whether a discover runs now, and — once none does — the outcome of
+     * the one the app started as [id], if it was the last to end (#118).
+     * Read together, so "not running" always comes with the outcome the
+     * search ended with.
+     */
+    fun discoverStatus(id: String?): DiscoverStatus = synchronized(monitor) {
+        DiscoverStatus(
+            running = discovering,
+            outcome = if (discovering || id == null) null else lastDiscover?.takeIf { it.first == id }?.second,
+        )
+    }
+
+    data class DiscoverStatus(val running: Boolean, val outcome: String?)
+
+    private var lastDiscover: Pair<String, String?>? = null
 
     /** A spend [begin] let start has ended, however. True if the service should now stop itself. */
     fun end(): Boolean = synchronized(monitor) {

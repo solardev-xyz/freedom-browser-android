@@ -127,20 +127,46 @@ class StampsTest {
         // Busy, not gone: keep holding a publish back.
         assertTrue(StampClient.discoverStillRunning(timedOut))
         assertFalse(StampClient.discoverStillRunning(ok(false)))
-        // Unbound: the node, and its search, went away.
+        // Unbound: the Activity may be being recreated while `:node` scans on — keep holding.
+        val unbound = StampClient.Answer.Failed("The Swarm node isn't running", unbound = true)
+        assertTrue(StampClient.discoverStillRunning(unbound))
+        // The call to `:node` failed: the process, and its search, went away.
         assertFalse(StampClient.discoverStillRunning(StampClient.Answer.Failed("The Swarm node isn't running")))
 
-        val answers = ArrayDeque(listOf(ok(true), timedOut, ok(true), ok(false), ok(true)))
+        val answers = ArrayDeque(listOf(ok(true), timedOut, unbound, ok(true), ok(false), ok(true)))
         var asks = 0
         var pauses = 0
-        StampClient.awaitDiscoverEnd(ask = { asks++; answers.removeFirst() }) { pauses++ }
-        assertEquals(4, asks)
-        assertEquals(4, pauses)
+        val end = StampClient.awaitDiscoverEnd(ask = { asks++; answers.removeFirst() }) { pauses++ }
+        assertEquals(5, asks)
+        assertEquals(5, pauses)
+        assertEquals(ok(false).json.toString(), (end as StampClient.Answer.Ok).json.toString())
 
         val overran = StampClient.Discovery.Finished(
             ACCOUNT_A, Result.failure(IllegalStateException(StampClient.DISCOVER_OVERRAN)),
         )
         assertEquals(StampClient.DISCOVER_OVERRAN, discoverStatusText(overran))
+    }
+
+    @Test
+    fun `a search that outran the page's wait shows how it actually ended`() {
+        fun ended(outcome: JSONObject?) =
+            StampClient.Answer.Ok(JSONObject().put("running", false).apply { outcome?.let { put("outcome", it) } })
+        // It found stamps.
+        val found = StampClient.overranOutcome(ended(JSONObject().put("registered", org.json.JSONArray().put(id))))
+        assertEquals(listOf(id), found.getOrThrow())
+        assertEquals(discoverOutcomeText(1), discoverStatusText(StampClient.Discovery.Finished(ACCOUNT_A, found)))
+        // It failed in `:node`: the error, not "the list shows what it found".
+        val failed = StampClient.overranOutcome(ended(JSONObject().put("error", "RPC error: rate limited")))
+        assertEquals(
+            "Couldn't look: RPC error: rate limited",
+            discoverStatusText(StampClient.Discovery.Finished(ACCOUNT_A, failed)),
+        )
+        // `:node` kept no outcome for it (it went away mid-search), or the call failed.
+        assertEquals(StampClient.DISCOVER_OVERRAN, StampClient.overranOutcome(ended(null)).exceptionOrNull()?.message)
+        assertEquals(
+            StampClient.DISCOVER_OVERRAN,
+            StampClient.overranOutcome(StampClient.Answer.Failed("The Swarm node isn't running")).exceptionOrNull()?.message,
+        )
     }
 
     @Test

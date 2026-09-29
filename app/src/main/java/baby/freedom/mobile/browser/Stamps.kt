@@ -8,6 +8,7 @@ import java.math.BigDecimal
 import java.math.BigInteger
 import java.math.RoundingMode
 import java.util.Locale
+import java.util.UUID
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -228,12 +229,17 @@ internal object StampClient {
 
     sealed interface Answer {
         data class Ok(val json: JSONObject) : Answer
-        data class Failed(val message: String) : Answer
+        /**
+         * [unbound]: this process holds no binder to `:node` right now —
+         * not proof `:node` is gone: the Activity that binds it may just
+         * be being recreated while `:node` runs on.
+         */
+        data class Failed(val message: String, val unbound: Boolean = false) : Answer
     }
 
     /** Runs [method] on the node and waits up to [timeoutMs]. Blocking; never throws. */
     fun call(method: String, args: JSONObject = JSONObject(), timeoutMs: Long = READ_TIMEOUT_MS): Answer {
-        val binder = service ?: return Answer.Failed(NOT_BOUND)
+        val binder = service ?: return Answer.Failed(NOT_BOUND, unbound = true)
         val pipe = try {
             binder.stampCall(method, args.toString())
         } catch (e: Exception) {
@@ -254,44 +260,73 @@ internal object StampClient {
      * node (#118): bought on another device, or before a reinstall. No
      * transaction. Blocking; the ids it found, or why it couldn't look.
      */
-    private fun discoverNow(): Result<List<String>> = when (val a = call("discover", timeoutMs = DISCOVER_TIMEOUT_MS)) {
-        is Answer.Ok -> Result.success(
-            a.json.optJSONArray("registered")?.let { ids -> (0 until ids.length()).mapNotNull { normalizeBatchId(ids.optString(it)) } }
-                .orEmpty(),
-        )
-        is Answer.Failed -> {
-            if (a.message == TIMED_OUT) {
-                // The page stopped waiting, but `:node` is most likely
-                // still scanning — and may yet adopt a chequebook and
-                // restart the gateway. The search stays Running (so no
-                // publish starts under it) until `:node` says it ended.
-                awaitDiscoverEnd(ask = { call("discovering", timeoutMs = DISCOVERING_TIMEOUT_MS) }) {
-                    Thread.sleep(DISCOVER_POLL_MS)
+    private fun discoverNow(): Result<List<String>> {
+        // Names this search to `:node`, so an outcome it reports later is this one's.
+        val id = UUID.randomUUID().toString()
+        return when (val a = call("discover", JSONObject().put("id", id), timeoutMs = DISCOVER_TIMEOUT_MS)) {
+            is Answer.Ok -> Result.success(registeredIds(a.json))
+            is Answer.Failed -> {
+                if (a.message == TIMED_OUT) {
+                    // The page stopped waiting, but `:node` is most likely
+                    // still scanning — and may yet adopt a chequebook and
+                    // restart the gateway. The search stays Running (so no
+                    // publish starts under it) until `:node` says it ended,
+                    // and then shows how it ended.
+                    val end = awaitDiscoverEnd(
+                        ask = { call("discovering", JSONObject().put("id", id), timeoutMs = DISCOVERING_TIMEOUT_MS) },
+                    ) { Thread.sleep(DISCOVER_POLL_MS) }
+                    overranOutcome(end)
+                } else {
+                    Result.failure(IllegalStateException(a.message))
                 }
-                Result.failure(IllegalStateException(DISCOVER_OVERRAN))
-            } else {
-                Result.failure(IllegalStateException(a.message))
             }
         }
     }
 
+    private fun registeredIds(json: JSONObject): List<String> =
+        json.optJSONArray("registered")?.let { ids -> (0 until ids.length()).mapNotNull { normalizeBatchId(ids.optString(it)) } }
+            .orEmpty()
+
     /**
      * Waits, [pause] between asks, until [ask] (`:node`'s "discovering")
-     * says no search runs any more ([discoverStillRunning]).
+     * says no search runs any more ([discoverStillRunning]). Its last
+     * answer: the one that said so.
      */
-    internal fun awaitDiscoverEnd(ask: () -> Answer, pause: () -> Unit) {
-        do pause() while (discoverStillRunning(ask()))
+    internal fun awaitDiscoverEnd(ask: () -> Answer, pause: () -> Unit): Answer {
+        var a: Answer
+        do {
+            pause()
+            a = ask()
+        } while (discoverStillRunning(a))
+        return a
     }
 
     /**
      * Is `:node`'s search still running, by its answer to "discovering"?
-     * Yes when it says so, and when it didn't answer in time (busy, not
-     * gone); no once it says not, or once it's unbound — the `:node`
-     * process or the node went away, and the search with it.
+     * Yes when it says so; when it didn't answer in time (busy, not gone);
+     * and while this process isn't bound to it ([Answer.Failed.unbound]):
+     * the Activity that binds it may be being recreated while `:node`
+     * scans on, and it answers again once it's rebound. No once it says
+     * not, or once the call to it fails — the `:node` process went away,
+     * and the search with it (a `:node` started again says not running).
      */
     internal fun discoverStillRunning(a: Answer): Boolean = when (a) {
         is Answer.Ok -> a.json.optBoolean("running", false)
-        is Answer.Failed -> a.message == TIMED_OUT
+        is Answer.Failed -> a.message == TIMED_OUT || a.unbound
+    }
+
+    /**
+     * How a search that outlived the page's wait ended, from `:node`'s
+     * last "discovering" answer ([awaitDiscoverEnd]): what it found, or
+     * why it failed, if `:node` kept its outcome; [DISCOVER_OVERRAN] if
+     * not (`:node` went away mid-search).
+     */
+    internal fun overranOutcome(end: Answer): Result<List<String>> {
+        val outcome = (end as? Answer.Ok)?.json?.optJSONObject("outcome")
+            ?: return Result.failure(IllegalStateException(DISCOVER_OVERRAN))
+        return outcome.optString("error").takeIf { it.isNotEmpty() }
+            ?.let { Result.failure(IllegalStateException(it)) }
+            ?: Result.success(registeredIds(outcome))
     }
 
     /**
@@ -458,7 +493,8 @@ internal object StampClient {
     private const val NOT_BOUND = "The Swarm node isn't running"
     internal const val TIMED_OUT = "The Swarm node didn't answer in time"
     internal const val DISCOVER_OVERRAN =
-        "The search took longer than expected. The list shows any stamps it found."
+        "The search took longer than expected, and ended without telling the app what it found. " +
+            "The list shows any stamps it registered."
 
     /** How often a search that outlived [DISCOVER_TIMEOUT_MS] is asked after, and how long each ask waits. */
     private const val DISCOVER_POLL_MS = 5_000L

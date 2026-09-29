@@ -29,6 +29,29 @@ class SpendStopGateTest {
     }
 
     @Test
+    fun `a discover's outcome is kept for the search that asked, and only once it ended`() {
+        assertEquals(SpendStopGate.DiscoverStatus(running = false, outcome = null), gate.discoverStatus("a"))
+        assertTrue(gate.beginDiscover())
+        assertEquals(SpendStopGate.DiscoverStatus(running = true, outcome = null), gate.discoverStatus("a"))
+        gate.endDiscover("a", """{"error":"rpc down"}""")
+        assertEquals(SpendStopGate.DiscoverStatus(running = false, outcome = """{"error":"rpc down"}"""), gate.discoverStatus("a"))
+        // Another search's outcome is not this one's.
+        assertEquals(null, gate.discoverStatus("b").outcome)
+        assertEquals(null, gate.discoverStatus(null).outcome)
+        // A later search replaces it, and hides it while running.
+        assertTrue(gate.beginDiscover())
+        assertEquals(null, gate.discoverStatus("a").outcome)
+        gate.endDiscover("b", """{"registered":[]}""")
+        assertEquals(null, gate.discoverStatus("a").outcome)
+        assertEquals("""{"registered":[]}""", gate.discoverStatus("b").outcome)
+        // One that ended without an outcome (or an id) leaves none.
+        assertTrue(gate.beginDiscover())
+        gate.endDiscover("c", null)
+        assertEquals(null, gate.discoverStatus("c").outcome)
+        assertEquals(null, gate.discoverStatus("b").outcome)
+    }
+
+    @Test
     fun `a discover doesn't count as a spend for a stop`() {
         assertTrue(gate.beginDiscover())
         assertFalse(gate.requestStop())
