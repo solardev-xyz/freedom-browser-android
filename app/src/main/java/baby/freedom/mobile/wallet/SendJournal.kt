@@ -182,7 +182,7 @@ internal object SendJournalCodec {
             .put(
                 "dapp",
                 r.dapp?.let {
-                    JSONObject().put("origin", it.origin).put("data", it.data.toHex())
+                    JSONObject().put("origin", it.origin ?: JSONObject.NULL).put("data", it.data.toHex())
                         .put("gasLimit", it.gasLimit?.toString() ?: JSONObject.NULL)
                 } ?: JSONObject.NULL,
             )
@@ -226,7 +226,7 @@ internal object SendJournalCodec {
         val f = o.getJSONObject("from")
         val from = WalletAccount(f.getInt("index"), f.getString("name"), f.getString("address"))
         val dapp = o.optJSONObject("dapp")?.let { d ->
-            DappCall(d.getString("origin"), d.getString("data").hexToBytes(), d.optStringOrNull("gasLimit")?.let(::BigInteger))
+            DappCall(d.optStringOrNull("origin"), d.getString("data").hexToBytes(), d.optStringOrNull("gasLimit")?.let(::BigInteger))
         }
         val request = SendRequest(chain, token, from, o.getString("to"), BigInteger(o.getString("amount")), dapp)
         val x = o.getJSONObject("tx")
