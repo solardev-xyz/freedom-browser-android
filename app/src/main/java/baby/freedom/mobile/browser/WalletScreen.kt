@@ -24,6 +24,7 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AccountBalanceWallet
+import androidx.compose.material.icons.filled.Badge
 import androidx.compose.material.icons.filled.DeleteForever
 import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.Lock
@@ -65,6 +66,7 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import baby.freedom.mobile.ui.isLight
 import baby.freedom.mobile.wallet.BiometricVaultAuthenticator
 import baby.freedom.mobile.wallet.Mnemonic
+import baby.freedom.mobile.wallet.PublisherIdentityStore
 import baby.freedom.mobile.wallet.Vault
 import baby.freedom.mobile.wallet.VaultAuthCancelledException
 import baby.freedom.mobile.wallet.VaultAuthFailedException
@@ -72,7 +74,10 @@ import baby.freedom.mobile.wallet.VaultKeyLostException
 import baby.freedom.mobile.wallet.VaultProtection
 import baby.freedom.mobile.wallet.VaultUnreadableException
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 internal const val WALLET_ROW_KEY = "wallet"
 internal const val WALLET_TITLE = "Wallet"
@@ -247,6 +252,7 @@ private fun lostWalletAdvice(phraseBackedUp: Boolean) = if (phraseBackedUp) {
 @Composable
 fun WalletScreen(
     request: Vault.SetupRequest?,
+    currentSite: String?,
     onDismiss: () -> Unit,
 ) {
     val context = LocalContext.current
@@ -255,6 +261,9 @@ fun WalletScreen(
     val state by vault.state.collectAsState()
     val scope = rememberCoroutineScope()
     var importing by remember { mutableStateOf(false) }
+    var publishing by remember { mutableStateOf(false) }
+    val publishers = remember(context) { PublisherIdentityStore.get(context) }
+    var publisherSites by remember { mutableStateOf(0) }
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     var confirmRemove by remember { mutableStateOf(false) }
@@ -294,6 +303,20 @@ fun WalletScreen(
                 busy = false
             }
         }
+    }
+
+    // Re-counted whenever the wallet changes and on coming back from the page.
+    LaunchedEffect(state, publishing) {
+        if (!publishing) publisherSites = withContext(Dispatchers.IO) { publishers.sites().size }
+    }
+    // The sub-page closes with the wallet, and for a feature's request, whose banner is on this page.
+    LaunchedEffect(state, request) {
+        if (request != null || (state !is Vault.State.Locked && state !is Vault.State.Unlocked)) publishing = false
+    }
+
+    if (publishing && (state is Vault.State.Locked || state is Vault.State.Unlocked)) {
+        PublisherIdentitiesPage(currentSite = currentSite, onBack = { publishing = false })
+        return
     }
 
     if (importing) {
@@ -399,6 +422,21 @@ fun WalletScreen(
                     ScreenLockSettingsButton()
                 }
             }
+            if (state is Vault.State.Locked || state is Vault.State.Unlocked) item("publishing") {
+                SectionCard(title = "Publishing") {
+                    PageRow(
+                        title = PUBLISHER_IDENTITIES_TITLE,
+                        subtitle = publisherIdentitiesSummary(publisherSites),
+                        style = PageRowStyle.Inset,
+                        leadingIcon = Icons.Filled.Badge,
+                        enabled = !busy,
+                        onClick = {
+                            error = null
+                            publishing = true
+                        },
+                    )
+                }
+            }
             if (state != Vault.State.Empty) item("remove") {
                 SectionCard(title = "Remove") {
                     PageRow(
@@ -418,7 +456,11 @@ fun WalletScreen(
         RemoveWalletDialog(
             onConfirm = {
                 confirmRemove = false
-                run("remove the wallet") { vault.remove() }
+                run("remove the wallet") {
+                    vault.remove()
+                    // Its publisher identities go with it (maintainer decision 9).
+                    withContext(NonCancellable + Dispatchers.IO) { publishers.wipe() }
+                }
             },
             onDismiss = { confirmRemove = false },
         )

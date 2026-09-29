@@ -651,6 +651,15 @@ class BrowserState(val id: Long, val private: Boolean = false) {
         internal set
 
     /**
+     * The document on screen's provider origin key ([providerOriginKey]):
+     * what the Wallet's publisher identities page offers to set up
+     * (#119). Null for home and for anything that isn't a secure origin.
+     * Set by the tab's WebView at navigation commit, with [zoomSite].
+     */
+    var providerOrigin: String? by mutableStateOf<String?>(null)
+        internal set
+
+    /**
      * Whether the page area stops above the bottom chrome for the
      * document on screen (#66). Set by the tab's WebView from its page's
      * bottom-nav detector (see [BottomChromeSlot]); back to overlay on

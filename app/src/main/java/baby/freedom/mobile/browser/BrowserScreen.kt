@@ -2203,6 +2203,9 @@ fun BrowserScreen(
     if (showWallet || walletRequest != null) {
         WalletScreen(
             request = walletRequest,
+            // The site the user came from, for Publisher identities (#119);
+            // never a private tab's, which leaves nothing behind.
+            currentSite = tabs.active.takeUnless { it.private }?.providerOrigin,
             onDismiss = { showWallet = false },
         )
     }
