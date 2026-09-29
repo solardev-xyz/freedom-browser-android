@@ -263,6 +263,38 @@ class LedgerProtocolTest {
         }
     }
 
+    /** A batch of 256 ids: one more than the device takes in an array, so it can only be signed by its hashes. */
+    private fun longBatch(): Eip712.TypedData = Eip712.parse(
+        JSONObject()
+            .put("types", JSONObject()
+                .put("EIP712Domain", JSONArray().put(JSONObject().put("name", "name").put("type", "string")))
+                .put("Batch", JSONArray().put(JSONObject().put("name", "ids").put("type", "uint8[]"))))
+            .put("primaryType", "Batch")
+            .put("domain", JSONObject().put("name", "Shop"))
+            .put("message", JSONObject().put("ids", JSONArray(List(256) { 7 })))
+            .toString(),
+    )
+
+    @Test
+    fun `typed data a Ledger can only sign by its hashes is known before signing, with the hashes it will show (#239)`() = runBlocking {
+        // What the device streams field by field needs no warning.
+        assertNull(LedgerApdus.blindHashes(Eip712.parse(vectors.getJSONObject("eip712").getJSONObject("typed").toString())))
+        val data = longBatch()
+        val hashes = LedgerApdus.blindHashes(data) ?: error("an array over 255 isn't streamable, so the Ledger shows only hashes")
+        assertArrayEquals(Eip712.hashStruct(data.types, "EIP712Domain", data.domain, 0), hashes.domain)
+        assertArrayEquals(Eip712.hashStruct(data.types, "Batch", data.message, 0), hashes.message)
+        // …and they're the very hashes the device is then given: the phone's warning and the Ledger's screen agree.
+        val link = Scripted(listOf(LedgerApdus.signEip712Hashed(path, hashes.domain, hashes.message).toHex() to "01".repeat(65) + "9000"))
+        LedgerEthApp(link).signTypedData(path, data)
+        assertEquals(1, link.n)
+        // A missing nested struct is the same case.
+        val missing = Eip712.parse(
+            """{"types":{"EIP712Domain":[{"name":"name","type":"string"}],"A":[{"name":"b","type":"B"}],"B":[{"name":"x","type":"uint8"}]},
+               "primaryType":"A","domain":{"name":"n"},"message":{}}""",
+        )
+        assertTrue(LedgerApdus.blindHashes(missing) != null)
+    }
+
     @Test
     fun `incorrect data asks for Blind signing only where Blind signing is what lets it through`() = runBlocking {
         suspend fun kind(block: suspend () -> Unit): LedgerException.Kind = try {

@@ -1,6 +1,7 @@
 package baby.freedom.mobile.wallet.ledger
 
 import baby.freedom.mobile.ens.Keccak256
+import baby.freedom.mobile.ens.toHex
 import baby.freedom.mobile.wallet.Eip712
 import baby.freedom.mobile.wallet.NodeIdentity
 import java.io.ByteArrayOutputStream
@@ -130,7 +131,11 @@ internal object LedgerApdus {
      * Throws [Unencodable] for data the device can't be given as it
      * would hash it (a missing nested struct, an array over 255).
      */
-    fun signEip712Full(path: String, data: Eip712.TypedData): List<ByteArray> {
+    fun signEip712Full(path: String, data: Eip712.TypedData): List<ByteArray> =
+        eip712Stream(data) + apdu(INS_SIGN_EIP712, 0x00, 0x01, path(path))
+
+    /** [signEip712Full] up to, not including, its signing APDU. */
+    private fun eip712Stream(data: Eip712.TypedData): List<ByteArray> {
         if (data.primaryType == "EIP712Domain") throw Unencodable("a domain-only message")
         val out = ArrayList<ByteArray>()
         for ((name, fields) in data.types) {
@@ -140,11 +145,38 @@ internal object LedgerApdus {
         val impl = Eip712Values(data.types, out)
         impl.root("EIP712Domain", data.domain)
         impl.root(data.primaryType, data.message)
-        out += apdu(INS_SIGN_EIP712, 0x00, 0x01, path(path))
         return out
     }
 
     class Unencodable(message: String) : Exception(message)
+
+    /** [data]'s [LedgerTypedDataHashes]; null for a domain-only message, which has no struct to hash and is refused. */
+    fun eip712Hashes(data: Eip712.TypedData): LedgerTypedDataHashes? {
+        if (data.primaryType == "EIP712Domain") return null
+        return LedgerTypedDataHashes(
+            Eip712.hashStruct(data.types, "EIP712Domain", data.domain, 0),
+            Eip712.hashStruct(data.types, data.primaryType, data.message, 0),
+        )
+    }
+
+    /**
+     * The hashes a Ledger will show *instead of* [data]'s fields, because
+     * [signEip712Full] can't stream it (an array over 255, a name over 255
+     * bytes, a missing nested struct): the sheet must say so before the
+     * user approves, since the Ledger's screen then no longer backs up what
+     * the phone showed (#239). Null when the device shows it field by field
+     * (or it can't be signed on a Ledger at all). [LedgerEthApp.signTypedData]
+     * takes the hashed path on exactly this condition.
+     */
+    fun blindHashes(data: Eip712.TypedData): LedgerTypedDataHashes? = if (streamable(data)) null else eip712Hashes(data)
+
+    /** Whether [signEip712Full] can give the device [data] field by field. */
+    private fun streamable(data: Eip712.TypedData): Boolean = try {
+        eip712Stream(data)
+        true
+    } catch (e: Unencodable) {
+        false
+    }
 
     private fun utf8(s: String): ByteArray {
         val b = s.toByteArray(Charsets.UTF_8)
@@ -393,6 +425,21 @@ internal object LedgerApdus {
     }
 }
 
+/**
+ * What a Ledger shows for typed data it signs by its hashes rather than
+ * field by field: the domain separator and the message's struct hash, the
+ * two values [LedgerApdus.signEip712Hashed] sends (#239).
+ */
+class LedgerTypedDataHashes(val domain: ByteArray, val message: ByteArray) {
+    val domainHex: String get() = "0x" + domain.toHex()
+    val messageHex: String get() = "0x" + message.toHex()
+
+    override fun equals(other: Any?) =
+        other is LedgerTypedDataHashes && domain.contentEquals(other.domain) && message.contentEquals(other.message)
+
+    override fun hashCode() = 31 * domain.contentHashCode() + message.contentHashCode()
+}
+
 /** The Ethereum app on a connected Ledger (#142): [LedgerApdus] over a [LedgerLink]. */
 internal class LedgerEthApp(private val link: LedgerLink) {
     /** The address at [path], read without showing it on the device. */
@@ -408,7 +455,9 @@ internal class LedgerEthApp(private val link: LedgerLink) {
     /**
      * Typed data shown field by field; on an Ethereum app too old for that
      * (INS 0x1A unknown: `0x6D00`), or data it can't be streamed as, the
-     * two hashes instead — as desktop falls back.
+     * two hashes instead — as desktop falls back. The second case is known
+     * before signing ([LedgerApdus.blindHashes]), and the sheet says the
+     * Ledger will show only these hashes, and which (#239).
      */
     suspend fun signTypedData(path: String, data: Eip712.TypedData): LedgerSignature {
         val full = try {
@@ -423,10 +472,9 @@ internal class LedgerEthApp(private val link: LedgerLink) {
                 if ((e.cause as? LedgerException.StatusWord)?.sw != 0x6d00) throw e
             }
         }
-        val domain = Eip712.hashStruct(data.types, "EIP712Domain", data.domain, 0)
-        if (data.primaryType == "EIP712Domain") throw LedgerException(LedgerException.Kind.UNSUPPORTED)
-        val struct = Eip712.hashStruct(data.types, data.primaryType, data.message, 0)
-        return LedgerApdus.parseSignature(sendAll(listOf(LedgerApdus.signEip712Hashed(path, domain, struct))))
+        // The same hashes the sheet showed when the data can't be streamed (LedgerApdus.blindHashes, #239).
+        val hashes = LedgerApdus.eip712Hashes(data) ?: throw LedgerException(LedgerException.Kind.UNSUPPORTED)
+        return LedgerApdus.parseSignature(sendAll(listOf(LedgerApdus.signEip712Hashed(path, hashes.domain, hashes.message))))
     }
 
     /** Sends [apdus] in order, each only after the one before answered `0x9000`; the last one's data. */

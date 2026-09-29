@@ -17,7 +17,9 @@ import baby.freedom.mobile.wallet.SendRequest
 import baby.freedom.mobile.wallet.TokenRegistry
 import baby.freedom.mobile.wallet.VaultLockedException
 import baby.freedom.mobile.wallet.WalletAccount
+import baby.freedom.mobile.wallet.ledger.LedgerApdus
 import baby.freedom.mobile.wallet.ledger.LedgerException
+import baby.freedom.mobile.wallet.ledger.LedgerTypedDataHashes
 import java.math.BigInteger
 import kotlin.coroutines.CoroutineContext
 import kotlinx.coroutines.CancellationException
@@ -56,6 +58,11 @@ sealed interface EthAsk {
         val verifyingContract: String?,
         val primaryType: String,
         val messageJson: String,
+        /**
+         * Set when [account] is a Ledger's and the Ledger can't show this
+         * field by field, so it will show only these two hashes (#239).
+         */
+        val ledgerHashes: LedgerTypedDataHashes? = null,
     ) : EthAsk
 
     /**
@@ -640,12 +647,14 @@ class EthereumProvider(
         if (params.length() != 2) throw BadParams("Expected [address, typedData]")
         requireSameAccount(params.opt(0) as? String, account)
         // Off the main thread: the payload is the page's, and so is how long it takes to hash.
-        val (data, digest, shown) = withContext(compute) {
+        val (data, digest, shown, ledgerHashes) = withContext(compute) {
             try {
                 val data = Eip712.parse(params.opt(1))
                 val digest = Eip712.digest(data)
                 val json = Eip712.signedMessage(data).let { m -> runCatching { m.toString(2) }.getOrElse { m.toString() } }
-                Triple(data, digest, sheetJson(json))
+                // What the page can make a Ledger show only as hashes, the sheet says so (#239).
+                val hashes = if (account.isLedger) LedgerApdus.blindHashes(data) else null
+                Parsed(data, digest, sheetJson(json), hashes)
             } catch (e: Eip712.Invalid) {
                 throw BadParams("Invalid typed data: ${e.message}")
             }
@@ -670,10 +679,13 @@ class EthereumProvider(
             primaryType = data.primaryType,
             // Only what the signature covers: a key the types don't declare isn't signed.
             messageJson = shown,
+            ledgerHashes = ledgerHashes,
         )
         ask(ask0).let { if (it !is EthAnswer.Approved) return refused(it) }
         return signed { wallet.signTypedData(account, data, digest) }
     }
+
+    private data class Parsed(val data: Eip712.TypedData, val digest: ByteArray, val shown: String, val ledgerHashes: LedgerTypedDataHashes?)
 
     private suspend fun signed(sign: suspend () -> String): Reply = try {
         Reply.Ok(sign())

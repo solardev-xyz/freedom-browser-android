@@ -50,4 +50,25 @@ class EthereumSheetLargeTextTest {
         request = EthereumPromptRequest(ask(true), setUpWallet = {})
         rule.onNodeWithText("Gnosis Chain (chain 100)").assertExists()
     }
+
+    /** #239: typed data a Ledger can only sign by its hashes says so, with the hashes, before the user approves. */
+    @Test
+    fun typedDataALedgerCanOnlySignByItsHashesSaysSoWithTheHashes() {
+        val ledger = WalletAccount(-1, "Ledger", "0x" + "cd".repeat(20), baby.freedom.mobile.wallet.ledger.LedgerKey("44'/60'/0'/0/0", "AA:BB:CC:DD:EE:FF", "Nano X"))
+        val hashes = baby.freedom.mobile.wallet.ledger.LedgerTypedDataHashes(ByteArray(32) { 0x11 }, ByteArray(32) { 0x22 })
+        fun ask(h: baby.freedom.mobile.wallet.ledger.LedgerTypedDataHashes?) = EthAsk.SignTypedData(
+            "https://example.com", ledger, baby.freedom.mobile.chains.BuiltInChains.GNOSIS, true, "Shop", null, "Batch", "{\n  \"ids\": [\n    7,\n    7,\n    7\n  ]\n}",
+            ledgerHashes = h,
+        )
+        var request by androidx.compose.runtime.mutableStateOf(EthereumPromptRequest(ask(hashes), setUpWallet = {}))
+        rule.setContent { FreedomTheme { EthereumApprovalSheet(request) } }
+        rule.onNodeWithText("Your Ledger can’t show this data field by field", substring = true).assertExists()
+        rule.onNodeWithText("0x" + "11".repeat(32)).assertExists()
+        rule.onNodeWithText("0x" + "22".repeat(32)).assertExists()
+        rule.onNodeWithText("where it shows only the two hashes above", substring = true).assertExists()
+        // Data the Ledger shows field by field: no warning, the usual note.
+        request = EthereumPromptRequest(ask(null), setUpWallet = {})
+        rule.onNodeWithText("Your Ledger can’t show this data field by field", substring = true).assertDoesNotExist()
+        rule.onNodeWithText("You’ll check and confirm this on your Ledger (Nano X) next.").assertExists()
+    }
 }
