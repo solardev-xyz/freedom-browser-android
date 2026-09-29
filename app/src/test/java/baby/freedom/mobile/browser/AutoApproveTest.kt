@@ -84,6 +84,15 @@ class AutoApproveTest {
         "0xa3b22fc4" to "Maker hope(address)",
         "0x51945447" to "Kernel execute(address,uint256,bytes,uint8)",
         "0xdd46508f" to "Uniswap V4 modifyLiquidities(bytes,uint256)",
+        // #253 R1-M2: relayer/operator approvals, pre-signed orders and signed authorizations.
+        "0xfa6e671d" to "Balancer V2 setRelayerApproval(address,address,bool)",
+        "0x9f5c462a" to "Euler EVC setAccountOperator(address,address,bool)",
+        "0xc14c11bf" to "Euler EVC setOperator(bytes19,address,uint256)",
+        "0xc16ae7a4" to "Euler EVC batch((address,address,uint256,bytes)[])",
+        "0xec6cb13f" to "CoW setPreSignature(bytes,bool)",
+        "0x8069218f" to "Morpho Blue setAuthorizationWithSig",
+        "0x0b52d558" to "Aave delegationWithSig",
+        "0xbb24d994" to "Compound III allowBySig",
     )
 
     @Test
@@ -116,6 +125,20 @@ class AutoApproveTest {
                 "withdraw for you, this rule lets the site do that with no sheet, to anyone. " +
                 "Only turn it on for a function you know.",
             autoApproveWarning(swap),
+        )
+    }
+
+    @Test
+    fun `a stored rule for a function the wallet can't name is warned about on its site's page, a transfer's isn't`() {
+        assertNull(autoApproveRuleWarning(AutoApproveRule.eligible(site, usdc, BigInteger.ZERO, call("0xa9059cbb"), 100)!!))
+        assertNull(autoApproveRuleWarning(AutoApproveRule.eligible(site, usdc, BigInteger.ZERO, call("0x23b872dd", 3), 100)!!))
+        val swap = AutoApproveRule.eligible(site, usdc, BigInteger.ZERO, call("0x38ed1739", 5), 100)!!
+        assertEquals(
+            "The wallet can't tell what this function does. If it can move tokens you've approved this contract " +
+                "to use, run calls it's handed (as a swap router can), or let someone else spend, borrow or " +
+                "withdraw for you, this rule lets the site do that with no sheet, to anyone. " +
+                "Remove it unless you know the function.",
+            autoApproveRuleWarning(swap),
         )
     }
 

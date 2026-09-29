@@ -1,6 +1,12 @@
 package baby.freedom.mobile.browser
 
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.layout.Column
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performScrollTo
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -22,7 +28,8 @@ import org.junit.runner.RunWith
 /**
  * #234: the send sheet's "Always approve" switch warns, in red, for a
  * function the wallet can't name, says nothing extra for a transfer, and
- * isn't there at all for an approval.
+ * isn't there at all for an approval; a site's page warns under a stored
+ * rule for such a function (#253 R1-M1).
  */
 @RunWith(AndroidJUnit4::class)
 class AutoApproveWarningSheetTest {
@@ -76,5 +83,22 @@ class AutoApproveWarningSheetTest {
         rule.setContent { FreedomTheme { EthereumApprovalSheet(EthereumPromptRequest(ask("0x110496e5"), setUpWallet = {})) } }
         rule.onNodeWithTag("ethereum-approval").assertExists()
         rule.onNodeWithTag("ethereum-always-approve").assertDoesNotExist()
+    }
+
+    @Test
+    fun aSitesPageWarnsUnderAStoredRuleForAnUnknownFunctionOnly() {
+        // #253 R1-M1: a rule granted before the sheet warned still works, so its site's page says so.
+        val swap = AutoApproveRule(site, token.lowercase(), "0x38ed1739", 100, grantedAt = 0)
+        val transfer = AutoApproveRule(site, token.lowercase(), "0xa9059cbb", 100, grantedAt = 0)
+        rule.setContent {
+            FreedomTheme {
+                Column(Modifier.verticalScroll(rememberScrollState())) {
+                    AutoApproveRulesSection(listOf(transfer, swap), BuiltInChains.ALL, onRemove = {})
+                }
+            }
+        }
+        rule.onAllNodesWithTag("auto-approve-rule").assertCountEquals(2)
+        rule.onAllNodesWithTag("auto-approve-rule-warning").assertCountEquals(1)
+        rule.onNodeWithTag("auto-approve-rule-warning").performScrollTo().assertExists()
     }
 }

@@ -105,11 +105,19 @@ internal val REFUSED_SELECTOR_SIGNATURES: List<String> = listOf(
     // NFT permits: Uniswap V3 positions (ERC-721 permit), ERC-4494.
     "permit(address,uint256,uint256,uint8,bytes32,bytes32)",
     "permit(address,uint256,uint256,bytes)",
-    // Authorizations and delegations over a position: Compound III, Aave, Morpho Blue, Maker.
+    // Authorizations and delegations over a position, and their signed forms: Compound III, Aave,
+    // Morpho Blue, Maker, Balancer V2's Vault relayers, Euler's EVC operators, CoW's pre-signed orders.
     "allow(address,bool)",
+    "allowBySig(address,address,bool,uint256,uint256,uint8,bytes32,bytes32)",
     "approveDelegation(address,uint256)",
+    "delegationWithSig(address,address,uint256,uint256,uint8,bytes32,bytes32)",
     "setAuthorization(address,bool)",
+    "setAuthorizationWithSig((address,address,bool,uint256,uint256),(uint8,bytes32,bytes32))",
     "hope(address)",
+    "setRelayerApproval(address,address,bool)",
+    "setAccountOperator(address,address,bool)",
+    "setOperator(bytes19,address,uint256)",
+    "setPreSignature(bytes,bool)",
     // Multicalls and batches: Uniswap V3 periphery, Multicall/Multicall3, BoringBatchable.
     "multicall(bytes[])",
     "multicall(uint256,bytes[])",
@@ -121,6 +129,9 @@ internal val REFUSED_SELECTOR_SIGNATURES: List<String> = listOf(
     "aggregate3((address,bool,bytes)[])",
     "aggregate3Value((address,bool,uint256,bytes)[])",
     "batch(bytes[],bool)",
+    // Euler's EVC: runs calls (each on behalf of one of the user's accounts) its data carries.
+    "batch((address,address,uint256,bytes)[])",
+    "call(address,address,uint256,bytes)",
     // Generic execute entry points: Uniswap's Universal Router, ERC-4337 accounts, ERC-7579/7821, Safe, Kernel.
     "execute(bytes,bytes[])",
     "execute(bytes,bytes[],uint256)",
@@ -162,6 +173,22 @@ internal fun autoApproveWarning(rule: AutoApproveRule): String? =
             "to use, run calls it's handed (as a swap router can), or let someone else spend, borrow or " +
             "withdraw for you, this rule lets the site do that with no sheet, to anyone. " +
             "Only turn it on for a function you know."
+    }
+
+/**
+ * Under a rule on its site's page, in red, for a function the wallet can't
+ * name (#253 R1-M1): a rule granted before the sheet warned (or before this
+ * list grew) still works, so the risk [autoApproveWarning] names at the
+ * switch is said again wherever the rule can be seen and removed.
+ */
+internal fun autoApproveRuleWarning(rule: AutoApproveRule): String? =
+    if (selectorLabel(rule.selector) != null) {
+        null
+    } else {
+        "The wallet can't tell what this function does. If it can move tokens you've approved this contract " +
+            "to use, run calls it's handed (as a swap router can), or let someone else spend, borrow or " +
+            "withdraw for you, this rule lets the site do that with no sheet, to anyone. " +
+            "Remove it unless you know the function."
     }
 
 /** The sheet's switch: "Always approve token transfers on this contract". */
@@ -246,6 +273,14 @@ internal fun AutoApproveRulesSection(
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
+                    autoApproveRuleWarning(rule)?.let {
+                        Text(
+                            it,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error,
+                            modifier = Modifier.padding(top = 2.dp).testTag("auto-approve-rule-warning"),
+                        )
+                    }
                     if (failed?.sameScope(rule) == true) {
                         Text(
                             AUTO_APPROVE_REMOVE_FAILED,
