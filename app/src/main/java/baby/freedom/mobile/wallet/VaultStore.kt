@@ -8,7 +8,10 @@ import android.security.keystore.KeyPermanentlyInvalidatedException
 import android.security.keystore.KeyProperties
 import android.security.keystore.StrongBoxUnavailableException
 import android.security.keystore.UserNotAuthenticatedException
+import android.util.Log
 import java.io.File
+import java.io.FileOutputStream
+import java.io.IOException
 import java.security.InvalidKeyException
 import java.security.KeyStore
 import java.security.UnrecoverableKeyException
@@ -138,15 +141,7 @@ class KeystoreVaultStore(context: Context) : VaultStore {
     override fun read(): VaultRecord? =
         if (!file.exists()) null else runCatching { VaultRecord.decode(file.readText()) }.getOrNull()
 
-    override fun write(record: VaultRecord) {
-        file.parentFile?.mkdirs()
-        val tmp = File(file.parentFile, "${file.name}.tmp")
-        tmp.writeText(record.encode())
-        if (!tmp.renameTo(file)) {
-            tmp.delete()
-            error("couldn't write the wallet file")
-        }
-    }
+    override fun write(record: VaultRecord) = writeDurably(file, record.encode())
 
     override fun newSealingCipher(protection: VaultProtection): SealingCipher {
         deleteKey()
@@ -239,4 +234,32 @@ class KeystoreVaultStore(context: Context) : VaultStore {
         private const val TRANSFORMATION = "AES/GCM/NoPadding"
         private const val GCM_TAG_BITS = 128
     }
+}
+
+/**
+ * Writes [text] to [file] so a power loss can't leave it empty or torn:
+ * whole to a temporary file that's fsynced, renamed over [file], then the
+ * directory fsynced ([dirSync]) so the rename is on flash too. The vault
+ * file is the only copy of a phrase the user may never have written down,
+ * and a zero-length one after a crash reads as unreadable — the wallet
+ * gone (#229). Throws if the bytes couldn't be written or renamed; a
+ * directory that won't sync is only logged, since the file is in place.
+ */
+internal fun writeDurably(file: File, text: String, dirSync: (File?) -> Boolean = FileSendJournal::syncDirectory) {
+    file.parentFile?.mkdirs()
+    val tmp = File(file.parentFile, "${file.name}.tmp")
+    try {
+        FileOutputStream(tmp).use { out ->
+            out.write(text.toByteArray(Charsets.UTF_8))
+            out.fd.sync()
+        }
+    } catch (e: IOException) {
+        tmp.delete()
+        throw e
+    }
+    if (!tmp.renameTo(file)) {
+        tmp.delete()
+        error("couldn't write ${file.name}")
+    }
+    if (!dirSync(file.parentFile)) Log.w("WalletVault", "couldn't sync the directory of ${file.name}")
 }

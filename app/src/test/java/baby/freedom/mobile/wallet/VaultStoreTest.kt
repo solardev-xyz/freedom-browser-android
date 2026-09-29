@@ -35,6 +35,25 @@ class VaultStoreTest {
     }
 
     @Test
+    fun `the vault file is written whole through a synced temp file, then its directory synced (#229)`() {
+        val dir = java.nio.file.Files.createTempDirectory("vault").toFile()
+        try {
+            val file = java.io.File(dir, "wallet/vault.json")
+            val synced = mutableListOf<java.io.File?>()
+            writeDurably(file, "first") { synced += it; true }
+            writeDurably(file, "second") { synced += it; true }
+            org.junit.Assert.assertEquals("second", file.readText())
+            assertFalse(java.io.File(file.parentFile, "vault.json.tmp").exists())
+            org.junit.Assert.assertEquals(listOf(file.parentFile, file.parentFile), synced)
+            // A directory that won't sync leaves the file in place rather than failing the write.
+            writeDurably(file, "third") { false }
+            org.junit.Assert.assertEquals("third", file.readText())
+        } finally {
+            dir.deleteRecursively()
+        }
+    }
+
+    @Test
     fun `a working key opens the cipher`() {
         assertSame(cipher, open())
     }
