@@ -191,7 +191,8 @@ internal fun X402PaymentBody(
         }
         Note(
             "For ${state.window.label}, this site's pages are paid for in ${o.symbol} on ${o.chain.name} without asking, " +
-                "up to that total — only while the wallet is unlocked, never in a private tab. " +
+                "from ${account.name} only, up to that total — only while the wallet is unlocked, never in a private tab. " +
+                "With another account active, you're asked again. " +
                 "Revoke it any time on the wallet page.",
         )
     }
