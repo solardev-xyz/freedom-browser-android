@@ -9,6 +9,12 @@ plugins {
 android {
     namespace = "baby.freedom.mobile"
     compileSdk = 37
+    // The same NDK as :swarmnode. AGP strips every packaged .so
+    // (libfreedom_jni.so, JNA's libjnidispatch.so, …) with this module's
+    // NDK, and AGP 9's default (r28) isn't what the README installs, so
+    // without the pin a local release build silently ships them
+    // unstripped ("Unable to strip the following libraries") (#230).
+    ndkVersion = "27.0.12077973"
 
     defaultConfig {
         applicationId = "baby.freedom.mobile"
@@ -78,9 +84,10 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 
-    // Per-ABI split so we can ship a slim arm64-v8a-only APK (~80 MB)
-    // instead of the universal 310 MB build. Release builds and the
-    // local `:installDebug` flow still work via `universalApk = true`.
+    // Per-ABI split so we can ship a slim arm64-v8a-only APK (~30 MB)
+    // instead of the universal one (~50 MB, both ABIs' native libs).
+    // Release builds and the local `:installDebug` flow still work via
+    // `universalApk = true`.
     splits {
         abi {
             isEnable = true
@@ -107,6 +114,30 @@ android {
             "META-INF/FastDoubleParser-NOTICE",
             "META-INF/DISCLAIMER",
             "META-INF/{AL2.0,LGPL2.1}",
+        )
+        // Store native libraries deflated (#230). The app is sideloaded
+        // from GitHub Releases, which serve the APK as-is and have no
+        // delta updates, so every install and update downloads the whole
+        // file: compressed, the arm64-v8a APK drops by ~22 MB (~43%),
+        // almost all of it libfreedom_mobile_ffi.so. The cost is on disk:
+        // the installer extracts the .so files next to the APK instead
+        // of mapping them straight out of it, ~19 MB more installed.
+        // Dex stays stored (uncompressed): deflating it saves only ~3 MB
+        // for ~6 MB more on disk and an extraction on first start.
+        jniLibs.useLegacyPackaging = true
+        // Only arm64-v8a and x86_64 carry libfreedom_mobile_ffi.so (see
+        // :swarmnode's abiFilters), so the other ABIs that AARs bring
+        // along (JNA's armeabi/armeabi-v7a/x86/mips/mips64
+        // libjnidispatch.so, AndroidX's and CameraX's 32-bit helpers) can
+        // never run the app. They only bloated the universal APK and let
+        // it install on a 32-bit-only phone that then crashed on first
+        // native call; without them that phone refuses the install (#230).
+        jniLibs.excludes += setOf(
+            "lib/armeabi/**",
+            "lib/armeabi-v7a/**",
+            "lib/x86/**",
+            "lib/mips/**",
+            "lib/mips64/**",
         )
     }
 }

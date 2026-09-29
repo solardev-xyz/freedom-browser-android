@@ -57,6 +57,7 @@ import baby.freedom.mobile.ui.isLight
 import baby.freedom.mobile.ens.toHex
 import baby.freedom.mobile.wallet.DappCall
 import baby.freedom.mobile.wallet.EthTransaction
+import baby.freedom.mobile.wallet.GasOracle
 import baby.freedom.mobile.wallet.Recipients
 import baby.freedom.mobile.wallet.SendAmounts
 import baby.freedom.mobile.wallet.SendException
@@ -97,6 +98,30 @@ internal fun feeDetail(tx: EthTransaction): String {
     return when (val f = tx.fees) {
         is EthTransaction.Fees.Eip1559 -> "Gas limit $limit · up to ${gweiText(f.maxFeePerGas)} per gas, tip ${gweiText(f.maxPriorityFeePerGas)}"
         is EthTransaction.Fees.Legacy -> "Gas limit $limit · ${gweiText(f.gasPrice)} per gas"
+    }
+}
+
+/**
+ * What of the review's "up to" fee is actually paid (#233): gas the
+ * transaction doesn't use and, with a base fee, headroom the base fee
+ * doesn't rise into stay in the account. The tip is paid on each unit
+ * of gas used, but only as far as the cap leaves room above the base
+ * fee (R1-M2); a legacy gas price is paid in full. A fee above what an
+ * auto-approve rule sends without asking ([GasOracle.quiet]) — a legacy
+ * price no cap could clamp, say — is called out as unusually high.
+ */
+internal fun feeFootnote(tx: EthTransaction): String {
+    val paid = when (tx.fees) {
+        is EthTransaction.Fees.Eip1559 ->
+            "The “up to” leaves room for unused gas and for the base fee to rise; what isn't used stays in the " +
+                "account. The tip is paid on the gas used, less only if the base fee rises into that room."
+        is EthTransaction.Fees.Legacy ->
+            "The “up to” leaves room for unused gas, which stays in the account; the gas used is paid at the price above in full."
+    }
+    return if (GasOracle.quiet(tx.fees, tx.chainId)) {
+        paid
+    } else {
+        "This network fee is unusually high per gas; check it before you confirm. $paid"
     }
 }
 
@@ -495,7 +520,7 @@ private fun SendReviewSection(
         )
         Spacer(Modifier.height(4.dp))
         Text(
-            "Only the fee the network actually charges is paid; the rest of the “up to” stays in the account.",
+            feeFootnote(quote.tx),
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )

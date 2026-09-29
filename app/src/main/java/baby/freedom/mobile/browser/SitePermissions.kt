@@ -426,15 +426,19 @@ enum class PromptTurn { None, SitePermission, DownloadOffer, Radicle, Ethereum, 
  *   the turn once it has it ([swarmHasTurn]); waiting, it comes after the
  *   `window.ethereum` sheet and before the offer.
  *
- * [permissionWaiting], [radicleWaiting], [ethereumWaiting] and [swarmWaiting] are already gated on the page
- * being on screen (no full-screen panel over it, the Downloads list
- * included); the offer keeps its own rules (see `BrowserScreen`).
+ * - None of them shows while a full-screen panel covers the page
+ *   ([pageUncovered] false: Settings, the Wallet, the tab switcher, the
+ *   Downloads list, …). Each is the page's doing and names it, so it
+ *   waits until the page is what's on screen, then takes its turn as
+ *   above. The download offer included: it used to be the one prompt
+ *   that showed over a panel (#228).
  */
 fun modalPromptTurn(
     permissionWaiting: Boolean,
     offerWaiting: Boolean,
     offerHasTurn: Boolean,
     androidDialogUp: Boolean,
+    pageUncovered: Boolean = true,
     radicleWaiting: Boolean = false,
     radicleHasTurn: Boolean = false,
     ethereumWaiting: Boolean = false,
@@ -442,6 +446,7 @@ fun modalPromptTurn(
     swarmWaiting: Boolean = false,
     swarmHasTurn: Boolean = false,
 ): PromptTurn = when {
+    !pageUncovered -> PromptTurn.None
     androidDialogUp -> PromptTurn.None
     offerWaiting && offerHasTurn -> PromptTurn.DownloadOffer
     radicleWaiting && radicleHasTurn -> PromptTurn.Radicle

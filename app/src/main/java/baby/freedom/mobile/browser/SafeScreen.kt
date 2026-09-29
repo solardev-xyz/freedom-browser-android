@@ -779,7 +779,7 @@ private fun SafeCallReview(
         ReviewRow("Nonce", quote.tx.nonce.toString(), detail = nonceDetail(quote))
         Spacer(Modifier.height(4.dp))
         Text(
-            "Only the fee the network actually charges is paid; the rest of the “up to” stays in the account.",
+            feeFootnote(quote.tx),
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )

@@ -92,7 +92,7 @@ class TxHistoryTest {
                 chains = { listOf(chain) },
                 transport = RpcTransport { _, body, _ ->
                     if (down) throw IOException("down")
-                    """{"jsonrpc":"2.0","id":1,${answer(JSONObject(body))}}"""
+                    withReceiptHash(JSONObject(body), """{"jsonrpc":"2.0","id":1,${answer(JSONObject(body))}}""")
                 },
             ),
         )
@@ -280,7 +280,7 @@ class TxHistoryTest {
                     val req = JSONObject(body)
                     // The first receipt read is from before it landed; the one after the nonce read sees it.
                     if (req.getString("method") == "eth_getTransactionReceipt" && ++reads > 1) chain.receipts[hash] = ok()
-                    """{"jsonrpc":"2.0","id":1,${chain.answer(req)}}"""
+                    withReceiptHash(req, """{"jsonrpc":"2.0","id":1,${chain.answer(req)}}""")
                 },
             ),
         )

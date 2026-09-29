@@ -135,6 +135,11 @@ class MainActivity : ComponentActivity() {
     // as ARGB, or null when it shows the app background there (#92).
     private var statusBarTint by mutableStateOf<Int?>(null)
 
+    // Whether an opaque full-screen panel (Settings, Wallet, the tab
+    // switcher…) is over the page, so the navigation bar needs no
+    // contrast scrim (#247).
+    private var panelShown by mutableStateOf(false)
+
     @Volatile
     private var binder: INodeService? = null
     private var bound = false
@@ -536,6 +541,7 @@ class MainActivity : ComponentActivity() {
                         ipfsProgressSnapshot = ::ipfsProgressSnapshot,
                         ipfsCounters = ::ipfsCounters,
                         onStatusBarTint = { statusBarTint = it },
+                        onPanelShown = { panelShown = it },
                     )
                 }
             }
@@ -564,6 +570,16 @@ class MainActivity : ComponentActivity() {
      * follow that colour instead of the scheme ([statusBarIconsDark]).
      * One effect decides both, so a live theme switch can't race a tint
      * change into the wrong icons.
+     *
+     * With 3-button navigation Android also lays a translucent contrast
+     * scrim over the (transparent) navigation bar, because it can't know
+     * what the app draws there. Over a web page that's right — the page
+     * can be any colour — but over a full-screen panel it's the app's
+     * own scheme background, which the icons above already match, and
+     * the scrim just paints a grey band that isn't the panel's colour
+     * (#247; a dark panel got a grey bar, rgb(42,42,43) over
+     * rgb(20,18,24), on the API 36 AVD). So the scrim is dropped while a
+     * panel is up ([panelShown]) and comes back when the page does.
      */
     @Composable
     private fun SystemBarsForScheme() {
@@ -576,6 +592,9 @@ class MainActivity : ComponentActivity() {
                 isAppearanceLightStatusBars = darkStatusIcons
                 isAppearanceLightNavigationBars = lightScheme
             }
+        }
+        LaunchedEffect(panelShown) {
+            window.isNavigationBarContrastEnforced = !panelShown
         }
     }
 

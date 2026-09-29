@@ -427,6 +427,7 @@ fun BrowserScreen(
     ipfsProgressSnapshot: () -> String? = { null },
     ipfsCounters: () -> LongArray? = { null },
     onStatusBarTint: (Int?) -> Unit = {},
+    onPanelShown: (Boolean) -> Unit = {},
 ) {
     // Outside composition, so the tabs survive an Activity relaunch
     // (#183, see [TabsSession]).
@@ -1574,6 +1575,9 @@ fun BrowserScreen(
     // under them: a full-screen panel paints the app background there.
     val iconTint = tint.takeIf { !overlayShown }
     LaunchedEffect(iconTint) { onStatusBarTint(iconTint) }
+    // …and the navigation bar drops its contrast scrim over a panel
+    // (#247), so the panel's own background shows there.
+    LaunchedEffect(overlayShown) { onPanelShown(overlayShown) }
 
     // "Tap anywhere outside the floating toolbar to dismiss the
     // keyboard". We intercept presses on the Initial pass so we see
@@ -2140,7 +2144,7 @@ fun BrowserScreen(
     val tabOffers = downloadOffers.filter { it.tabId == activeTabId }
     // It takes turns with the site-permission prompt (#81) on the same
     // tab — they never stack; see [modalPromptTurn] for the order.
-    // A permission prompt waits while a full-screen panel covers the
+    // Every one of them waits while a full-screen panel covers the
     // page (the Downloads list included, via [overlayShown]).
     val pageUncovered = !overlayShown
     val androidDialogUp by sitePermissions.androidDialogUp.collectAsState()
@@ -2149,20 +2153,21 @@ fun BrowserScreen(
     var ethereumHasTurn by remember(activeTabId) { mutableStateOf(false) }
     var swarmHasTurn by remember(activeTabId) { mutableStateOf(false) }
     val promptTurn = modalPromptTurn(
-        permissionWaiting = pageUncovered && state.permissionPrompt != null,
+        permissionWaiting = state.permissionPrompt != null,
         offerWaiting = tabOffers.isNotEmpty(),
         offerHasTurn = offerHasTurn,
         androidDialogUp = androidDialogUp,
-        // The `window.radicle` consent prompt (#124), gated like the
-        // permission prompt on the page being what's on screen.
-        radicleWaiting = pageUncovered && state.radiclePrompt != null,
+        // The `window.radicle` consent prompt (#124).
+        radicleWaiting = state.radiclePrompt != null,
         radicleHasTurn = radicleHasTurn,
-        // The `window.ethereum` approval sheets (#110), gated the same way.
-        ethereumWaiting = pageUncovered && state.ethereumPrompt != null,
+        // The `window.ethereum` approval sheets (#110).
+        ethereumWaiting = state.ethereumPrompt != null,
         ethereumHasTurn = ethereumHasTurn,
-        // The `window.swarm` approval sheets (#120), gated the same way.
-        swarmWaiting = pageUncovered && state.swarmPrompt != null,
+        // The `window.swarm` approval sheets (#120).
+        swarmWaiting = state.swarmPrompt != null,
         swarmHasTurn = swarmHasTurn,
+        // All of them, the download offer included, only over the page.
+        pageUncovered = pageUncovered,
     )
     SideEffect {
         offerHasTurn = promptTurn == PromptTurn.DownloadOffer

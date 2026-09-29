@@ -47,6 +47,27 @@ class WalletRpcTest {
     }
 
     @Test
+    fun aReceiptForAnotherTransactionOrNoneNamedIsRefused() = runBlocking {
+        val hash = "0x" + "ab".repeat(32)
+        var receipt = "{\"status\":\"0x1\",\"blockNumber\":\"0x10\",\"transactionHash\":\"${hash.uppercase().replace("0X", "0x")}\"}"
+        val w = wallet { "\"result\":$receipt" }
+        assertEquals(16, Integer.decode(w.receipt(10, hash).value!!.getString("blockNumber")))
+        for (other in listOf(
+            // Another transaction's receipt, and one that names none (#229).
+            "{\"status\":\"0x1\",\"blockNumber\":\"0x10\",\"transactionHash\":\"0x${"cd".repeat(32)}\"}",
+            "{\"status\":\"0x1\",\"blockNumber\":\"0x10\"}",
+        )) {
+            receipt = other
+            try {
+                w.receipt(10, hash)
+                fail(other)
+            } catch (e: ChainRpcException) {
+                // Refused, whichever way the router words an answer no source gave in a usable shape.
+            }
+        }
+    }
+
+    @Test
     fun aRevertComesBackWithItsData() = runBlocking {
         val w = wallet { """"error":{"code":3,"message":"execution reverted","data":"0x08c379a0"}""" }
         try {

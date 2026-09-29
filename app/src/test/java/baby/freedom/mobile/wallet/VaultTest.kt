@@ -90,6 +90,17 @@ class VaultTest {
     fun tearDown() = job.cancel()
 
     @Test
+    fun `opening the wallet or showing the phrase needs an explicit confirm after a face, sealing doesn't (#229)`() {
+        assertTrue(VaultAuthPurpose.UNLOCK.confirmationRequired)
+        assertTrue(VaultAuthPurpose.REVEAL.confirmationRequired)
+        // Restoring leaves an unlocked wallet; backing up opens the phrase (#244).
+        assertTrue(VaultAuthPurpose.RESTORE.confirmationRequired)
+        assertTrue(VaultAuthPurpose.BACKUP.confirmationRequired)
+        assertFalse(VaultAuthPurpose.CREATE.confirmationRequired)
+        assertFalse(VaultAuthPurpose.IMPORT.confirmationRequired)
+    }
+
+    @Test
     fun `no vault on a fresh install`() {
         assertEquals(Vault.State.Empty, vault().state.value)
     }
