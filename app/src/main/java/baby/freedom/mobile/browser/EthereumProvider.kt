@@ -296,19 +296,23 @@ class EthereumProvider(
      *
      * Runs to the end even if the caller is cancelled (a page closed while
      * the write is in flight): the store commits the revoke regardless, and
-     * a revoke that commits must also tell the site's pages.
+     * a revoke that commits must also tell the site's pages. Holds
+     * [siteLinks], so a rule turned on from a sheet that was open meanwhile
+     * can't be written after the site's rules were dropped.
      */
     suspend fun disconnect(origin: String): Boolean = withContext(NonCancellable) {
-        val grant = try {
-            grants.grantFor(origin)
-        } catch (e: GrantsUnreadable) {
-            return@withContext false
-        } ?: return@withContext autoApprove.revokeOrigin(origin)
-        if (!autoApprove.revokeOrigin(origin)) return@withContext false
-        if (!grants.revoke(origin)) return@withContext false
-        synchronized(sessionChains) { sessionChains[origin] = grant.chainId }
-        events.emit(origin, "accountsChanged", JSONArray())
-        true
+        siteLinks.withLock {
+            val grant = try {
+                grants.grantFor(origin)
+            } catch (e: GrantsUnreadable) {
+                return@withLock false
+            } ?: return@withLock autoApprove.revokeOrigin(origin)
+            if (!autoApprove.revokeOrigin(origin)) return@withLock false
+            if (!grants.revoke(origin)) return@withLock false
+            synchronized(sessionChains) { sessionChains[origin] = grant.chainId }
+            events.emit(origin, "accountsChanged", JSONArray())
+            true
+        }
     }
 
     /**
@@ -316,21 +320,52 @@ class EthereumProvider(
      * auto-approve rule dropped, so importing the
      * same phrase later doesn't quietly reconnect them, and their open
      * pages see no accounts. Each keeps its chain for the session, as
-     * [disconnect]. False if the store couldn't be written. Not cancellable,
-     * as [disconnect].
+     * [disconnect]. False if either store couldn't be written — but each is
+     * still cleared as far as it can be: a rule store that can't be written
+     * doesn't keep every site connected past the wallet's removal (and a
+     * rule left behind is dropped when its site next connects, [connect]).
+     * Not cancellable, as [disconnect].
      */
     suspend fun disconnectAll(): Boolean = withContext(NonCancellable) {
-        // Unreadable: clear them all the same; only which pages to tell is unknown.
-        val all = try {
-            grants.all()
-        } catch (e: GrantsUnreadable) {
-            emptyMap()
+        siteLinks.withLock {
+            // Unreadable: clear them all the same; only which pages to tell is unknown.
+            val all = try {
+                grants.all()
+            } catch (e: GrantsUnreadable) {
+                emptyMap()
+            }
+            val rulesCleared = autoApprove.clear()
+            if (!grants.clear()) return@withLock false
+            synchronized(sessionChains) { all.forEach { (origin, g) -> sessionChains[origin] = g.chainId } }
+            all.keys.forEach { events.emit(it, "accountsChanged", JSONArray()) }
+            rulesCleared
         }
-        if (!autoApprove.clear()) return@withContext false
-        if (!grants.clear()) return@withContext false
-        synchronized(sessionChains) { all.forEach { (origin, g) -> sessionChains[origin] = g.chainId } }
-        all.keys.forEach { events.emit(it, "accountsChanged", JSONArray()) }
-        true
+    }
+
+    /**
+     * Held while a site's connection or its auto-approve rules change
+     * ([connect], [disconnect], [disconnectAll], [grantRule]), so a rule is
+     * only ever written for a site that is connected, with the account it
+     * was turned on for, at the moment it's written.
+     */
+    private val siteLinks = Mutex()
+
+    /**
+     * Turn [rule] on for [origin]'s send from [account] — if the site is
+     * still connected with that account now that the sheet is closed. The
+     * page may have disconnected itself (`wallet_revokePermissions`), or the
+     * user it, while the sheet was up; a rule written then would outlive
+     * the disconnect and cover the site's next connection (R1-F1).
+     */
+    private suspend fun grantRule(origin: String, account: WalletAccount, rule: AutoApproveRule) {
+        siteLinks.withLock {
+            val now = try {
+                connectedAccount(origin)
+            } catch (e: GrantsUnreadable) {
+                null
+            }
+            if (now != null && now.address.equals(account.address, ignoreCase = true)) autoApprove.grant(rule)
+        }
     }
 
     // ---- Chains ----
@@ -487,7 +522,13 @@ class EthereumProvider(
         val picked = answer.account ?: return rejected()
         // Only an account this wallet has, whatever the sheet handed back.
         val account = wallet.accounts()?.firstOrNull { it.address.equals(picked.address, ignoreCase = true) } ?: return rejected()
-        if (!grants.grant(origin, account.address, chain.id)) return Reply.Err(INTERNAL, "Couldn't save the connection")
+        // A new connection starts with no rules: any the site's last one left (a grant for an
+        // account this wallet no longer lists, or a rule store the wallet's removal couldn't
+        // clear) were turned on for another account's sends, not this one's (R1-M1).
+        val saved = withContext(NonCancellable) {
+            siteLinks.withLock { autoApprove.revokeOrigin(origin) && grants.grant(origin, account.address, chain.id) }
+        }
+        if (!saved) return Reply.Err(INTERNAL, "Couldn't save the connection")
         synchronized(sessionChains) { sessionChains.remove(origin) }
         wallet.noteActivity()
         events.emit(origin, "accountsChanged", JSONArray().put(account.address))
@@ -622,7 +663,7 @@ class EthereumProvider(
                 val answer = ask(EthAsk.SendTransaction(origin, quote, repriced, rule, ruled))
                 if (answer !is EthAnswer.Approved) return refused(answer)
                 // Turned on with the sheet's approval. A rule that couldn't be saved doesn't stop this send.
-                if (answer.alwaysApprove && rule != null && !ruled) autoApprove.grant(rule)
+                if (answer.alwaysApprove && rule != null && !ruled) grantRule(origin, account, rule)
             }
             when (val s = sends.submit(quote)) {
                 is Submitted.Sent -> return Reply.Ok(s.hash)

@@ -82,6 +82,7 @@ internal fun autoApproveSwitchLabel(rule: AutoApproveRule): String =
 /** Under the switch: exactly what the rule covers, in full. */
 internal fun autoApproveScope(rule: AutoApproveRule, chain: String): String =
     "Function ${rule.selector} on ${checksumOf(rule.contract)}, on $chain, from this site only. " +
+        "Every such call is covered, whatever its recipient, spender or amount. " +
         "Calls that also send funds still ask."
 
 /** A rule's line on its site's page: "Token transfers" or "Function 0x12345678". */
@@ -100,7 +101,8 @@ private fun checksumOf(address: String): String = EthereumProvider.checksummed(a
 
 internal const val AUTO_APPROVE_EXPLAINER =
     "Transactions from this site that match a rule go out without asking while the wallet is unlocked. " +
-        "Each rule covers one function on one contract on one network, and only calls that send no funds. " +
+        "Each rule covers one function on one contract on one network — with any recipient, spender or amount — " +
+        "and only calls that send no funds. " +
         "Disconnecting the site removes its rules."
 internal const val AUTO_APPROVE_REMOVE_FAILED = "Couldn't remove the rule: the change couldn't be saved. Try again."
 
@@ -116,6 +118,8 @@ internal fun AutoApproveRulesSection(
     onRemove: (AutoApproveRule) -> Unit,
     failed: AutoApproveRule? = null,
     unreadable: Boolean = false,
+    /** The rules haven't been read yet: say nothing about them rather than "None". */
+    loading: Boolean = false,
 ) {
     SectionCard(title = "Auto-approve rules") {
         Text(
@@ -123,7 +127,9 @@ internal fun AutoApproveRulesSection(
             style = MaterialTheme.typography.bodyMedium,
             modifier = Modifier.padding(bottom = 8.dp),
         )
-        if (unreadable) {
+        if (loading) {
+            // Nothing yet: a "None" here would be wrong for a moment on a site with rules.
+        } else if (unreadable) {
             Text(
                 "Couldn't read the rules right now. None of them apply until they can be read.",
                 style = MaterialTheme.typography.bodySmall,

@@ -223,10 +223,12 @@ object EthereumProviders {
      * The wallet was removed: every connected site is disconnected
      * ([EthereumProvider.disconnectAll]) and every auto-approve rule
      * dropped, so neither can come back to life if the same phrase is
-     * imported again.
+     * imported again. Each store is cleared even if the other can't be.
      */
-    suspend fun walletRemoved(context: Context): Boolean =
-        provider?.disconnectAll() ?: (AutoApproveStore.get(context).clear() && DappGrantStore.get(context).clear())
+    suspend fun walletRemoved(context: Context): Boolean = provider?.disconnectAll() ?: run {
+        val rulesCleared = AutoApproveStore.get(context).clear()
+        DappGrantStore.get(context).clear() && rulesCleared
+    }
 
     /**
      * Track [webView] (a tab's, before its first load) and register the

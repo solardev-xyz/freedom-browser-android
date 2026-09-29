@@ -34,6 +34,7 @@ import baby.freedom.mobile.data.AutoApproveStore
 import baby.freedom.mobile.data.DappGrantStore
 import baby.freedom.mobile.wallet.WalletAccount
 import java.util.Date
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 
 /*
@@ -131,7 +132,10 @@ internal fun ConnectedSitePage(
     val account = grantAccount(grant, accounts)
     val context = LocalContext.current
     val ruleStore = remember(context) { AutoApproveStore.get(context) }
-    val allRules by ruleStore.allOrUnreadable.collectAsState(initial = emptyList())
+    // Wrapped, so "not read yet" (null) is told apart from "unreadable" (a null list).
+    val read by remember(ruleStore) { ruleStore.allOrUnreadable.map { RulesRead(it) } }
+        .collectAsState(initial = null)
+    val allRules = read?.rules
     val rules = allRules.orEmpty().filter { it.origin == grant.origin }
     var removeFailed by remember { mutableStateOf<AutoApproveRule?>(null) }
     FullScreenScaffold(title = "Connected site", onDismiss = onBack) {
@@ -161,7 +165,8 @@ internal fun ConnectedSitePage(
                         scope.launch { removeFailed = if (ruleStore.revoke(rule)) null else rule }
                     },
                     failed = removeFailed,
-                    unreadable = allRules == null,
+                    unreadable = read != null && allRules == null,
+                    loading = read == null,
                 )
             }
             item("disconnect") {
@@ -205,3 +210,6 @@ internal const val DISCONNECT_EXPLAINER =
     "The site's open pages lose the account at once, and its auto-approve rules are removed. It can ask to connect " +
         "again; nothing is shared until you approve."
 internal const val DISCONNECT_FAILED = "Couldn't disconnect: the change couldn't be saved. Try again."
+
+/** One read of the auto-approve rules; [rules] null when the store couldn't be read. */
+private class RulesRead(val rules: List<AutoApproveRule>?)

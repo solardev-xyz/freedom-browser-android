@@ -46,7 +46,8 @@ class AutoApproveTest {
         val rule = AutoApproveRule.eligible(site, usdc.lowercase(), BigInteger.ZERO, call("0x095ea7b3"), 1)!!
         assertEquals("Token approvals", autoApproveRuleTitle(rule))
         assertEquals(
-            "Function 0x095ea7b3 on $usdc, on Ethereum, from this site only. Calls that also send funds still ask.",
+            "Function 0x095ea7b3 on $usdc, on Ethereum, from this site only. " +
+                "Every such call is covered, whatever its recipient, spender or amount. Calls that also send funds still ask.",
             autoApproveScope(rule, "Ethereum"),
         )
     }

@@ -1033,6 +1033,75 @@ class EthereumProviderTest {
     }
 
     @Test
+    fun `a rule turned on in a sheet the site disconnected under is not written, so reconnecting asks`() {
+        connect()
+        sends.outcomes += sent(1)
+        runBlocking {
+            provider.request(site, "eth_sendTransaction", tx("to" to token, "data" to transferData)) { ask ->
+                asks += ask
+                // The page's own wallet_revokePermissions, while the sheet is up.
+                assertTrue(provider.disconnect(site))
+                EthAnswer.Approved(alwaysApprove = true)
+            }
+        }
+        assertTrue(rules.rules.isEmpty())
+        connect()
+        answer = { EthAnswer.Rejected }
+        assertEquals(4001, code(call("eth_sendTransaction", tx("to" to token, "data" to transferData))))
+        assertEquals(1, asks.size)
+    }
+
+    @Test
+    fun `a rule turned on in a sheet the site reconnected under with another account is not written`() {
+        connect()
+        sends.outcomes += sent(1)
+        runBlocking {
+            provider.request(site, "eth_sendTransaction", tx("to" to token, "data" to transferData)) { ask ->
+                asks += ask
+                assertTrue(provider.disconnect(site))
+                assertEquals(
+                    second.address,
+                    (provider.request(site, "eth_requestAccounts", JSONArray()) { EthAnswer.Approved(second) } as EthereumProvider.Reply.Ok)
+                        .value.let { (it as JSONArray).getString(0) },
+                )
+                EthAnswer.Approved(alwaysApprove = true)
+            }
+        }
+        assertTrue(rules.rules.isEmpty())
+    }
+
+    @Test
+    fun `connecting drops rules an earlier connection left, so they never cover another account`() {
+        grantTransferRule()
+        // Account 1 was the site's; the wallet's list no longer has it, so the site shows as unconnected.
+        wallet.list = listOf(second)
+        answer = { EthAnswer.Approved(second) }
+        assertEquals(second.address, (ok(call("eth_requestAccounts")) as JSONArray).getString(0))
+        assertTrue(rules.rules.isEmpty())
+        answer = { EthAnswer.Rejected }
+        assertEquals(4001, code(call("eth_sendTransaction", tx("to" to token, "data" to transferData))))
+    }
+
+    @Test
+    fun `a connect whose old rules can't be dropped is not saved`() {
+        grantTransferRule()
+        wallet.list = listOf(second)
+        rules.failWrites = true
+        answer = { EthAnswer.Approved(second) }
+        assertEquals(-32603, code(call("eth_requestAccounts")))
+        assertEquals(main.address, grants.grants[site]?.account)
+    }
+
+    @Test
+    fun `removing the wallet disconnects every site even if the rules can't be cleared`() {
+        grantTransferRule()
+        rules.failWrites = true
+        assertFalse(runBlocking { provider.disconnectAll() })
+        assertTrue(grants.grants.isEmpty())
+        assertEquals(listOf(Triple(site, "accountsChanged", "[]")), events)
+    }
+
+    @Test
     fun `the approval copy names each action`() {
         assertEquals("Connect", ethApprovalCopy(EthAsk.Connect(site, BuiltInChains.GNOSIS)).approve)
         assertEquals("Switch", ethApprovalCopy(EthAsk.SwitchChain(site, BuiltInChains.GNOSIS, BuiltInChains.BASE)).approve)
