@@ -149,4 +149,39 @@ class WalletQrUiTest {
         now -= 10_000
         assertTrue(dedup.isNew("A"))
     }
+
+    @Test
+    fun `a paste is not replaced by the code the camera last read, however long it was gone`() {
+        var now = 1_000L
+        val dedup = ScanDedup(clock = { now }, goneAfterMs = 2_000)
+        assertTrue(dedup.isNew("A"))
+        dedup.holdLast() // the user pastes something else
+        // Camera stopped (Home, scrolled away) or blurred for far longer than the window.
+        now += 60_000
+        assertFalse(dedup.isNew("A"))
+        now += 5_000
+        assertFalse(dedup.isNew("A"))
+        // A different code does replace the paste, and afterwards A reads again as usual.
+        now += 100
+        assertTrue(dedup.isNew("B"))
+        now += 100
+        assertTrue(dedup.isNew("A"))
+    }
+
+    @Test
+    fun `clearing the paste lets the held code read again`() {
+        var now = 1_000L
+        val dedup = ScanDedup(clock = { now }, goneAfterMs = 2_000)
+        assertTrue(dedup.isNew("A"))
+        dedup.holdLast()
+        now += 10_000
+        assertFalse(dedup.isNew("A"))
+        dedup.release()
+        now += 10_000
+        assertTrue(dedup.isNew("A"))
+        // A paste before the camera read anything holds nothing back.
+        val fresh = ScanDedup(clock = { now }, goneAfterMs = 2_000)
+        fresh.holdLast()
+        assertTrue(fresh.isNew("A"))
+    }
 }

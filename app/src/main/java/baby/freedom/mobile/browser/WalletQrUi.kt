@@ -293,6 +293,13 @@ internal fun ScanPage(chains: List<Chain>, accounts: List<WalletAccount>, onBack
     var pasted by remember { mutableStateOf("") }
     // The same code seen frame after frame reads once while it stays in view (iOS's lastCode).
     val dedup = remember { ScanDedup() }
+    // A code still in front of the camera must not replace what was just
+    // pasted: not on its next frame, nor after the camera was stopped or
+    // missed it for a while. Clearing the paste field lets it read again.
+    fun readPasted() {
+        dedup.holdLast()
+        result = ScannedCode.parse(pasted)
+    }
     // Held here, not in the scanner: the scanner sits in a LazyColumn item,
     // whose plain remember is lost when it scrolls off screen.
     val cameraPermission = rememberCameraPermissionState()
@@ -331,12 +338,15 @@ internal fun ScanPage(chains: List<Chain>, accounts: List<WalletAccount>, onBack
                         NoSuggestionsTextInput {
                             OutlinedTextField(
                                 value = pasted,
-                                onValueChange = { pasted = it },
+                                onValueChange = {
+                                    pasted = it
+                                    if (it.isBlank()) dedup.release()
+                                },
                                 placeholder = { Text("0x…, ethereum:… or openlv://…") },
                                 singleLine = true,
                                 keyboardOptions = urlKeyboardOptions(ImeAction.Done),
                                 keyboardActions = KeyboardActions(
-                                    onDone = { if (pasted.isNotBlank()) result = ScannedCode.parse(pasted) },
+                                    onDone = { if (pasted.isNotBlank()) readPasted() },
                                 ),
                                 modifier = Modifier.fillMaxWidth(),
                             )
@@ -344,9 +354,7 @@ internal fun ScanPage(chains: List<Chain>, accounts: List<WalletAccount>, onBack
                     }
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
                         TextButton(
-                            // The dedup stays: a code still in front of the camera must
-                            // not replace what was just pasted on its next frame.
-                            onClick = { result = ScannedCode.parse(pasted) },
+                            onClick = { readPasted() },
                             enabled = pasted.isNotBlank(),
                         ) { Text("Read") }
                     }
@@ -463,6 +471,14 @@ private fun ImageProxy.luminance(): Pair<ByteArray, Int> {
  * A code in view is decoded several times a second, so the window keeps
  * renewing while it stays there; once it has been out of view for
  * [goneAfterMs], pointing the camera at it again reads it again.
+ *
+ * A paste ([holdLast]) is stronger than that window. The window runs on
+ * the clock, which also runs while the camera is stopped (app in the
+ * background, camera card scrolled away) or can't decode a frame (blur,
+ * glare), so a code still in front of the camera would read as new again
+ * and replace what was pasted. Instead, the code the camera last
+ * reported is held back with no time limit, until the camera reads a
+ * different code or [release] is called (the paste field was cleared).
  */
 internal class ScanDedup(
     private val clock: () -> Long = SystemClock::elapsedRealtime,
@@ -470,13 +486,31 @@ internal class ScanDedup(
 ) {
     private var last: String? = null
     private var lastSeen = 0L
+    private var held: String? = null
 
     fun isNew(text: String): Boolean {
         val now = clock()
+        if (held != null) {
+            if (text == held) {
+                lastSeen = now
+                return false
+            }
+            held = null
+        }
         val seen = text == last && now - lastSeen in 0 until goneAfterMs
         last = text
         lastSeen = now
         return !seen
+    }
+
+    /** A result was pasted: the camera's last code mustn't replace it, however long it's gone. */
+    fun holdLast() {
+        held = last
+    }
+
+    /** The paste was cleared: the camera's codes read by the time window alone again. */
+    fun release() {
+        held = null
     }
 }
 
