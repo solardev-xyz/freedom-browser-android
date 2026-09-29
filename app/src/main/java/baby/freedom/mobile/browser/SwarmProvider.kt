@@ -121,10 +121,20 @@ class SwarmProvider(
         /** [origin]'s identities, giving it an app-scoped one first if it has none. Throws [IOException], or [IllegalStateException] with no wallet. */
         fun ensureSite(origin: String): SitePublisher
 
-        /** [identity]'s 32-byte key, which the caller zeroes. Throws [VaultLockedException]. */
+        /**
+         * [identity]'s 32-byte key, which the caller zeroes. Throws
+         * [VaultLockedException]. Not wallet activity by itself (#236):
+         * a site's always-allowed identity read must not keep the wallet open.
+         */
         fun signingKey(identity: PublisherIdentity): ByteArray
 
-        /** A signature was made: keeps the wallet from idling into its lock (desktop's `resetVaultAutoLockTimer`). */
+        /**
+         * The user approved a sheet, or a write they allowed went out to
+         * the node: keeps the wallet from idling into its lock (desktop's
+         * `resetVaultAutoLockTimer`). Never for a read answered with no
+         * sheet and no write (#236). A write needn't spend new postage:
+         * rewriting the same SOC can reuse its stamp slot.
+         */
         fun noteActivity()
     }
 
@@ -482,9 +492,21 @@ class SwarmProvider(
             if (needsWallet && !publishers.walletExists()) return rejected()
             if (!feeds.granted(origin)) saving("the site's feed access") { feeds.grant(origin) }
             if (answer.always) grants.setAutoApprove(origin, kind)
+            // The user's own yes counts as wallet activity (#236).
+            publishers.noteActivity()
         }
         calls.committed()
-        return signed.work()
+        val reply = signed.work()
+        // So does a write that went out, sheet or no sheet: a Swarm write the
+        // user allowed, like a publish (#236's scope). It need not spend new
+        // postage — rewriting the same SOC identifier can reuse the chunk's
+        // stamp slot — so a page with Signing on "always allow" can still hold
+        // the lock off by rewriting one SOC; that rule is the user's to revoke.
+        // A read "always allow" answers with no sheet and no write (the signing
+        // identity, an existing feed) doesn't count, or a page could keep the
+        // wallet open just by polling it.
+        if (signed.writes && reply is Reply.Ok) publishers.noteActivity()
+        return reply
     }
 
     /**
@@ -608,7 +630,6 @@ class SwarmProvider(
             return feedOwnerGone(feed)
         }
         return try {
-            publishers.noteActivity()
             block(Resolved(identity, key))
         } finally {
             key.fill(0)
