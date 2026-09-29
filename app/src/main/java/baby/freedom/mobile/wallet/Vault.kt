@@ -231,8 +231,13 @@ class Vault internal constructor(
     /**
      * Remove wallet: deletes the sealed phrase and its key. There is no
      * undo; only the recovery phrase brings the wallet back.
+     *
+     * [alsoWipe] deletes what was derived from the wallet (its publisher
+     * identities, #119). It runs in the same non-cancellable block as the
+     * vault's own wipe, so it can't be skipped by the caller's scope
+     * being cancelled while [remove] waits for the lock or wipes.
      */
-    suspend fun remove() = ops.withLock {
+    suspend fun remove(alsoWipe: () -> Unit = {}) = ops.withLock {
         lock()
         // Empty is set inside the non-cancellable block: once the file and
         // key are gone the state must say so, even if the caller's scope
@@ -240,6 +245,7 @@ class Vault internal constructor(
         withContext(NonCancellable + io) {
             store.wipe()
             _state.value = State.Empty
+            alsoWipe()
         }
     }
 

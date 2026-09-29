@@ -285,13 +285,16 @@ class VaultTest {
             release.await()
         }
         // The Wallet page's scope, torn down while Keystore deletes the key.
-        val page = CoroutineScope(Dispatchers.Default).launch { v.remove() }
+        val derivedWiped = java.util.concurrent.atomic.AtomicBoolean(false)
+        val page = CoroutineScope(Dispatchers.Default).launch { v.remove(alsoWipe = { derivedWiped.set(true) }) }
         assertTrue(entered.await(5, java.util.concurrent.TimeUnit.SECONDS))
         page.cancel()
         release.countDown()
         page.join()
         assertNull(store.record)
         assertEquals(Vault.State.Empty, v.state.value)
+        // What was derived from it (publisher identities) goes too, cancelled or not.
+        assertTrue(derivedWiped.get())
     }
 
     @Test
