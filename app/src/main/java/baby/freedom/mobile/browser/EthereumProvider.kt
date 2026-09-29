@@ -283,7 +283,7 @@ class EthereumProvider(
         (list ?: BuiltInChains.ALL).firstOrNull { it.id == id }?.let { return it }
         if (id == DEFAULT_CHAIN_ID) return BuiltInChains.GNOSIS
         if (list == null || pinned != null) throw ChainUnavailable(id)
-        return moveOffRemoved(origin, id, list)
+        return moveOffRemoved(origin, id)
     }
 
     /** The chain [origin] was last put on (connected, or switched for this session); null if none. */
@@ -293,17 +293,25 @@ class EthereumProvider(
     /** Serializes moving sites off removed chains, so each is moved and told once. */
     private val chainMoves = Mutex()
 
-    /** Move [origin] off [removed] (not in [list]) to Gnosis, and tell its pages. */
-    private suspend fun moveOffRemoved(origin: String, removed: Long, list: List<Chain>): Chain {
-        val fallback = list.firstOrNull { it.id == DEFAULT_CHAIN_ID } ?: BuiltInChains.GNOSIS
+    /**
+     * Move [origin] off [removed] to Gnosis, and tell its pages. The chain
+     * list is read again under the lock, not taken from the caller: one read
+     * before a `wallet_addEthereumChain` finished would otherwise undo the
+     * chain it just added and switched the site to (#215 R5-M2).
+     */
+    private suspend fun moveOffRemoved(origin: String, removed: Long): Chain {
         val moved = chainMoves.withLock {
             // Another request, or the sweep, may have moved it meanwhile.
-            if ((storedChain(origin) ?: DEFAULT_CHAIN_ID) != removed) return@withLock false
+            if ((storedChain(origin) ?: DEFAULT_CHAIN_ID) != removed) return@withLock null
+            val list = runCatching { chains() }.getOrNull() ?: throw ChainUnavailable(removed)
+            // Added (back) since the caller looked: nothing to move.
+            if (list.any { it.id == removed }) return@withLock null
+            val fallback = list.firstOrNull { it.id == DEFAULT_CHAIN_ID } ?: BuiltInChains.GNOSIS
             if (!setChainFor(origin, fallback.id)) throw ChainUnavailable(removed)
             events.emit(origin, "chainChanged", fallback.hexId)
-            true
+            fallback
         }
-        return if (moved) fallback else chainFor(origin)
+        return moved ?: chainFor(origin)
     }
 
     /**
@@ -318,7 +326,7 @@ class EthereumProvider(
         for (origin in origins) {
             if (pinnedChain(origin) != null) continue
             val id = storedChain(origin) ?: continue
-            if (id !in ids) runCatching { moveOffRemoved(origin, id, list) }
+            if (id !in ids) runCatching { moveOffRemoved(origin, id) }
         }
     }
 
@@ -338,8 +346,10 @@ class EthereumProvider(
         val current = chainFor(origin)
         if (current.id == id) return Reply.Ok(JSONObject.NULL)
         pinnedChain(origin)?.let { return pinnedRefusal(current) }
-        val target = runCatching { chains() }.getOrNull()?.firstOrNull { it.id == id }
-            ?: return Reply.Err(UNRECOGNIZED_CHAIN, "Unrecognized chain ID ${hex(id)}. Try adding the chain using wallet_addEthereumChain first.")
+        val list = runCatching { chains() }.getOrNull()
+        val target = (list ?: BuiltInChains.ALL).firstOrNull { it.id == id }
+            // Unreadable list: the chain may well be set up, so 4902 ("add it first") would be a lie.
+            ?: return if (list == null) chainListUnreadable() else Reply.Err(UNRECOGNIZED_CHAIN, "Unrecognized chain ID ${hex(id)}. Try adding the chain using wallet_addEthereumChain first.")
         return switchTo(origin, current, target, ask)
     }
 
@@ -357,7 +367,12 @@ class EthereumProvider(
         if (current.id == id) return Reply.Ok(JSONObject.NULL)
         pinnedChain(origin)?.let { return pinnedRefusal(current) }
         // A chain the wallet has keeps its own settings: this only switches to it.
-        runCatching { chains() }.getOrNull()?.firstOrNull { it.id == id }?.let { return switchTo(origin, current, it, ask) }
+        val list = runCatching { chains() }.getOrNull()
+        (list ?: BuiltInChains.ALL).firstOrNull { it.id == id }?.let { return switchTo(origin, current, it, ask) }
+        // Unreadable list: whether the wallet already has this chain is unknown, and if it
+        // does, approving an Add sheet showing the site's name and RPCs would keep the stored
+        // ones instead (#215 R5-M1). Refuse rather than show a sheet that may not be true.
+        if (list == null) return chainListUnreadable()
         val chain = chainFromParams(id, p, allowLoopback = RpcUrls.isLoopbackUrl(origin))
         ask(EthAsk.AddChain(origin, chain)).let { if (it !is EthAnswer.Approved) return refused(it) }
         if (!grants.addChain(chain)) return Reply.Err(INTERNAL, "Couldn't add the chain")
@@ -365,6 +380,8 @@ class EthereumProvider(
         events.emit(origin, "chainChanged", chain.hexId)
         return Reply.Ok(JSONObject.NULL)
     }
+
+    private fun chainListUnreadable() = Reply.Err(INTERNAL, "Couldn't read the wallet's chain list; try again")
 
     private fun pinnedRefusal(current: Chain) =
         Reply.Err(UNSUPPORTED, "This onchain app is pinned to ${current.name} (chain ${current.id}); it can't switch chains.")

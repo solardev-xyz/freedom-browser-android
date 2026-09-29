@@ -92,6 +92,8 @@ class EthereumProviderTest {
     private val sepolia = Chain(id = 11155111, name = "Sepolia", symbol = "ETH", rpcUrls = listOf("https://rpc.sepolia.org"), isTestnet = true)
     /** What Settings → Chains has; null when it can't be read. */
     private var chainList: List<Chain>? = BuiltInChains.ALL + sepolia
+    /** Runs once, right after the provider's next read of [chainList] took its snapshot. */
+    private var afterChainsRead: (() -> Unit)? = null
     private val grants = FakeGrants()
     private val wallet = FakeWallet()
     private val sends = FakeSends()
@@ -104,7 +106,11 @@ class EthereumProviderTest {
     private val provider = EthereumProvider(
         grants = grants,
         wallet = wallet,
-        chains = { chainList ?: throw java.io.IOException("unreadable") },
+        chains = {
+            val list = chainList
+            afterChainsRead?.let { afterChainsRead = null; it() }
+            list ?: throw java.io.IOException("unreadable")
+        },
         reads = { chainId, method, params, origin ->
             readsSeen += "$chainId $method $params $origin"
             readAnswer(method)
@@ -463,6 +469,46 @@ class EthereumProviderTest {
         // A built-in chain is still known.
         grants.grants[site] = grants.grants[site]!!.copy(chainId = 1)
         assertEquals("0x1", ok(call("eth_chainId")))
+    }
+
+    @Test
+    fun `while the chain list can't be read, built-in chains still switch and nothing unknowable is offered to add`() {
+        answer = { EthAnswer.Approved() }
+        connect()
+        chainList = null
+        // A built-in chain: switched to as normal, not 4902.
+        ok(call("wallet_switchEthereumChain", JSONArray().put(JSONObject().put("chainId", "0x1"))))
+        assertEquals(1L, grants.grants[site]?.chainId)
+        assertEquals(EthAsk.SwitchChain(site, BuiltInChains.GNOSIS, BuiltInChains.ETHEREUM), asks.single())
+        asks.clear()
+        // Adding a built-in chain under the site's own name and RPCs only switches, as with a readable list.
+        val evil = JSONObject().put("chainId", "0x64").put("chainName", "Evil Gnosis")
+            .put("nativeCurrency", JSONObject().put("name", "x").put("symbol", "X").put("decimals", 18))
+            .put("rpcUrls", JSONArray().put("https://rpc.evil.example"))
+        ok(call("wallet_addEthereumChain", JSONArray().put(evil)))
+        assertEquals(EthAsk.SwitchChain(site, BuiltInChains.ETHEREUM, BuiltInChains.GNOSIS), asks.single())
+        asks.clear()
+        // A chain that may or may not be stored: neither a 4902 nor an Add sheet whose values might not be used.
+        assertEquals(-32603, code(call("wallet_switchEthereumChain", JSONArray().put(JSONObject().put("chainId", "0xaa36a7")))))
+        val custom = JSONObject(evil.toString()).put("chainId", "0xaa36a7").put("chainName", "Evil Sepolia")
+        assertEquals(-32603, code(call("wallet_addEthereumChain", JSONArray().put(custom))))
+        assertTrue(asks.isEmpty())
+        assertTrue(grants.added.isEmpty())
+        assertEquals(100L, grants.grants[site]?.chainId)
+    }
+
+    @Test
+    fun `a request that read the chain list before a chain was added doesn't move the site back off it`() {
+        val custom = Chain(id = 1337, name = "Local", symbol = "ETH", rpcUrls = listOf("https://rpc.local.example"), isTestnet = true)
+        connect()
+        // The read's snapshot lacks 1337; the same site's add then finishes (stored, switched) before it looks at the site.
+        afterChainsRead = {
+            chainList = chainList!! + custom
+            grants.grants[site] = grants.grants[site]!!.copy(chainId = 1337)
+        }
+        assertEquals("0x539", ok(call("eth_chainId")))
+        assertEquals(1337L, grants.grants[site]?.chainId)
+        assertTrue(events.isEmpty())
     }
 
     @Test
