@@ -23,6 +23,8 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.json.JSONObject
 import org.junit.After
+import org.junit.Rule
+import org.junit.rules.TemporaryFolder
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -42,6 +44,9 @@ class SendTest {
     private val xbzz = TokenRegistry.builtins.first { it.symbol == "xBZZ" }
     private val gwei = BigInteger.valueOf(1_000_000_000L)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+
+    @get:Rule
+    val tmp = TemporaryFolder()
 
     @After
     fun tearDown() = scope.cancel()
@@ -102,8 +107,14 @@ class SendTest {
         )
     }
 
-    private fun sender(chain: FakeChain, clock: () -> Long = System::currentTimeMillis) =
-        WalletSender(chain.rpc(), scope, clock, pollMs = 10, confirmTimeoutMs = 300)
+    private fun sender(
+        chain: FakeChain,
+        journal: SendJournal = SendJournal.None,
+        clock: () -> Long = System::currentTimeMillis,
+    ) = WalletSender(chain.rpc(), scope, clock, pollMs = 10, confirmTimeoutMs = 300, journal = journal)
+
+    /** A journal file that outlives one [WalletSender], as the app's outlives its process. */
+    private fun journalFile() = java.io.File(tmp.root, "wallet/send.json")
 
     private fun signer(): (EthTransaction) -> EthTransaction.Signed = { tx -> tx.sign(key.copyOf(), from.address) }
 
@@ -521,6 +532,145 @@ class SendTest {
             EthTransaction.Fees.Legacy(BigInteger.valueOf(113)),
             GasOracle.replacing(EthTransaction.Fees.Legacy(BigInteger.valueOf(50)), EthTransaction.Fees.Legacy(BigInteger.valueOf(100))),
         )
+    }
+
+    @Test
+    fun `a replacement outbids across fee types too`() {
+        // A legacy send replaced by an EIP-1559 one: the old gas price is both cap and tip to beat.
+        assertEquals(
+            EthTransaction.Fees.Eip1559(BigInteger.valueOf(113), BigInteger.valueOf(113)),
+            GasOracle.replacing(EthTransaction.Fees.Eip1559(BigInteger.valueOf(30), BigInteger.valueOf(2)), EthTransaction.Fees.Legacy(BigInteger.valueOf(100))),
+        )
+        // An EIP-1559 send replaced by a legacy one: outbid its cap (and so its tip).
+        assertEquals(
+            EthTransaction.Fees.Legacy(BigInteger.valueOf(901)),
+            GasOracle.replacing(EthTransaction.Fees.Legacy(BigInteger.valueOf(50)), EthTransaction.Fees.Eip1559(BigInteger.valueOf(800), BigInteger.valueOf(80))),
+        )
+        assertEquals(
+            EthTransaction.Fees.Legacy(BigInteger.valueOf(5_000)),
+            GasOracle.replacing(EthTransaction.Fees.Legacy(BigInteger.valueOf(5_000)), EthTransaction.Fees.Eip1559(BigInteger.valueOf(800), BigInteger.valueOf(80))),
+        )
+    }
+
+    @Test
+    fun `a send that may have gone out survives the process, and Try again after it resends the very same bytes`() = runBlocking<Unit> {
+        val chain = FakeChain()
+        val s = sender(chain, journal = FileSendJournal(journalFile()))
+        chain.on["eth_sendRawTransaction"] = { req ->
+            synchronized(chain.sent) { chain.sent += req.getJSONArray("params").getString(0) }
+            chain.nonce = 8
+            throw IOException("timed out")
+        }
+        chain.on["eth_getTransactionReceipt"] = { throw IOException("timed out") }
+        s.submit(s.prepare(request(token = xbzz, amount = 42)), signer())
+        val failed = s.awaitStage { it is SendStatus.Stage.Failed }
+        assertTrue(failed.mayHaveGone)
+
+        // The process dies; the next one finds it as it was, and signs nothing beside it.
+        val again = sender(chain, journal = FileSendJournal(journalFile()))
+        assertEquals(failed, again.status.value)
+        chain.on.remove("eth_getTransactionReceipt")
+        assertEquals(WalletSender.Submit.BUSY, again.submit(again.prepare(request()), signer()))
+        chain.on.clear()
+        again.retry()
+        again.awaitStage { it == SendStatus.Stage.Pending }
+        assertEquals(1, chain.sent.toSet().size)
+        chain.receipt = """{"status":"0x1","blockNumber":"0x10","gasUsed":"0x5208","effectiveGasPrice":"0x1"}"""
+        again.awaitStage { it is SendStatus.Stage.Confirmed }
+        // Settled: nothing left on disk.
+        assertFalse(journalFile().exists())
+        again.acknowledge()
+        assertNull(sender(chain, journal = FileSendJournal(journalFile())).status.value)
+    }
+
+    @Test
+    fun `a send the process died sending comes back as may-have-gone, and one waiting for its receipt goes on waiting`() = runBlocking<Unit> {
+        val chain = FakeChain()
+        // The first process's journal: it writes nothing once the process is "killed".
+        var dead = false
+        val file = FileSendJournal(journalFile())
+        val first = object : SendJournal {
+            override fun save(state: SendJournal.State) = dead || file.save(state)
+            override fun load() = file.load()
+        }
+        val s = sender(chain, journal = first)
+        val broadcasting = java.util.concurrent.CountDownLatch(1)
+        val hold = java.util.concurrent.CountDownLatch(1)
+        chain.on["eth_sendRawTransaction"] = { req ->
+            synchronized(chain.sent) { chain.sent += req.getJSONArray("params").getString(0) }
+            broadcasting.countDown()
+            hold.await()
+            throw IOException("killed")
+        }
+        s.submit(s.prepare(request()), signer())
+        assertTrue(broadcasting.await(5, java.util.concurrent.TimeUnit.SECONDS))
+        // Killed right here, mid-broadcast: the signed bytes were saved before they went out.
+        dead = true
+        val again = sender(chain, journal = FileSendJournal(journalFile()))
+        val restored = again.status.value!!
+        assertEquals(SendStatus.Stage.Failed(WalletSender.INTERRUPTED, true), restored.stage)
+        assertEquals(s.status.value!!.hash, restored.hash)
+        hold.countDown()
+        chain.on.clear()
+        again.retry()
+        again.awaitStage { it == SendStatus.Stage.Pending }
+        assertEquals(1, chain.sent.toSet().size)
+
+        // Killed again while waiting for the receipt: the next process follows it to the end.
+        val third = sender(chain, journal = FileSendJournal(journalFile()))
+        assertEquals(SendStatus.Stage.Pending, third.status.value!!.stage)
+        chain.receipt = """{"status":"0x1","blockNumber":"0x10","gasUsed":"0x5208","effectiveGasPrice":"0x1"}"""
+        third.awaitStage { it is SendStatus.Stage.Confirmed }
+        assertEquals(1, chain.sent.toSet().size)
+    }
+
+    @Test
+    fun `a send given up on is still replaced after a restart, and deleting the wallet leaves no payment on disk`() = runBlocking<Unit> {
+        val chain = FakeChain()
+        val s = sender(chain, journal = FileSendJournal(journalFile()))
+        s.submit(s.prepare(request()), signer())
+        val unconfirmed = s.awaitStage { it == SendStatus.Stage.Unconfirmed }
+        assertEquals(unconfirmed, sender(chain, journal = FileSendJournal(journalFile())).status.value)
+        // Stop tracking (or the wallet deleted): the payment goes, only its nonce, fee and hash stay.
+        s.discard()
+        val onDisk = journalFile().readText()
+        assertFalse(onDisk.contains(to.substring(2), ignoreCase = true))
+        assertFalse(onDisk.contains("\"send\""))
+
+        chain.nonce = 8
+        chain.mined = 7
+        val again = sender(chain, journal = FileSendJournal(journalFile()))
+        assertNull(again.status.value)
+        val next = again.prepare(request(amount = 2))
+        assertEquals(BigInteger.valueOf(7), next.tx.nonce)
+        assertEquals(unconfirmed.hash, next.replaces)
+        // Once the chain has mined that nonce there's nothing to replace, and the record goes.
+        chain.mined = 8
+        assertNull(again.prepare(request()).replaces)
+        assertFalse(journalFile().exists())
+    }
+
+    @Test
+    fun `a send whose bytes can't be saved first is not broadcast`() = runBlocking<Unit> {
+        val chain = FakeChain()
+        val broken = object : SendJournal {
+            override fun save(state: SendJournal.State) = state.send == null
+            override fun load(): SendJournal.State? = null
+        }
+        val s = sender(chain, journal = broken)
+        s.submit(s.prepare(request()), signer())
+        val failed = s.awaitStage { it is SendStatus.Stage.Failed }
+        assertFalse(failed.mayHaveGone)
+        assertTrue(chain.sent.isEmpty())
+    }
+
+    @Test
+    fun `an unreadable or tampered journal reads as no send`() {
+        journalFile().parentFile!!.mkdirs()
+        journalFile().writeText("{not json")
+        assertNull(FileSendJournal(journalFile()).load())
+        journalFile().writeText("[".repeat(100_000))
+        assertNull(FileSendJournal(journalFile()).load())
     }
 
     @Test

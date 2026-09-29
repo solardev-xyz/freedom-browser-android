@@ -180,17 +180,23 @@ class GasOracle(private val rpc: WalletRpc) {
          * [fees], raised where needed to replace a transaction priced at
          * [over]: nodes take a replacement only at a fee (and tip) at
          * least 10% above the one it replaces — this bids 12.5% plus one wei.
+         * Across fee types too (one RPC may report a base fee and another
+         * not): a legacy gas price counts as both fee cap and tip, as geth
+         * compares them, so the replacement is never left unbumped.
          */
         internal fun replacing(fees: EthTransaction.Fees, over: EthTransaction.Fees): EthTransaction.Fees {
             fun bump(v: BigInteger) = v * BigInteger.valueOf(9) / BigInteger.valueOf(8) + BigInteger.ONE
-            return when {
-                fees is EthTransaction.Fees.Eip1559 && over is EthTransaction.Fees.Eip1559 -> EthTransaction.Fees.Eip1559(
-                    maxFeePerGas = fees.maxFeePerGas.max(bump(over.maxFeePerGas)),
-                    maxPriorityFeePerGas = fees.maxPriorityFeePerGas.max(bump(over.maxPriorityFeePerGas)),
+            val (overCap, overTip) = when (over) {
+                is EthTransaction.Fees.Eip1559 -> over.maxFeePerGas to over.maxPriorityFeePerGas
+                is EthTransaction.Fees.Legacy -> over.gasPrice to over.gasPrice
+            }
+            return when (fees) {
+                is EthTransaction.Fees.Eip1559 -> EthTransaction.Fees.Eip1559(
+                    maxFeePerGas = fees.maxFeePerGas.max(bump(overCap)),
+                    maxPriorityFeePerGas = fees.maxPriorityFeePerGas.max(bump(overTip)),
                 )
-                fees is EthTransaction.Fees.Legacy && over is EthTransaction.Fees.Legacy ->
-                    EthTransaction.Fees.Legacy(fees.gasPrice.max(bump(over.gasPrice)))
-                else -> fees
+                // The tip never exceeds the cap, so outbidding the cap outbids both.
+                is EthTransaction.Fees.Legacy -> EthTransaction.Fees.Legacy(fees.gasPrice.max(bump(overCap)))
             }
         }
 
@@ -220,12 +226,15 @@ class GasOracle(private val rpc: WalletRpc) {
  * [abandoned][abandon]: until the chain has mined its nonce, the next
  * send from that account reuses it (with [GasOracle.replacing]'s higher
  * fee), so the two can't both go through — rather than go out one past
- * it, beside it in a mempool.
+ * it, beside it in a mempool. Those records outlive the process
+ * ([SendJournal]): [onAbandonedChange] is told whenever they change, never
+ * while this tracker's own lock is held.
  */
 class NonceTracker(
     private val rpc: WalletRpc,
     private val clock: () -> Long = System::currentTimeMillis,
     private val ttlMs: Long = LOCAL_TTL_MS,
+    private val onAbandonedChange: () -> Unit = {},
 ) {
     private class Sent(val next: BigInteger, val at: Long)
 
@@ -243,7 +252,7 @@ class NonceTracker(
         if (stood != null) {
             // Mined (it or another with its nonce): nothing left to replace.
             if (rpc.transactionCount(chainId, address, "latest").value > stood.nonce) {
-                synchronized(sent) { if (abandoned[k] === stood) abandoned.remove(k) }
+                if (synchronized(sent) { abandoned[k] === stood && abandoned.remove(k) != null }) onAbandonedChange()
             } else if (fromChain.value > stood.nonce) {
                 // Still waiting in a pool: take its place rather than queue behind it.
                 return fromChain.copy(value = stood.nonce)
@@ -260,13 +269,14 @@ class NonceTracker(
     }
 
     fun markSent(address: String, chainId: Long, nonce: BigInteger) {
-        synchronized(sent) {
+        val dropped = synchronized(sent) {
             val k = key(address, chainId)
             val next = nonce + BigInteger.ONE
             if (sent[k]?.let { it.next >= next } != true) sent[k] = Sent(next, clock())
             // Its replacement (or a later one) went out: the abandoned one can't land any more.
-            if (abandoned[k]?.let { nonce >= it.nonce } == true) abandoned.remove(k)
+            abandoned[k]?.let { nonce >= it.nonce } == true && abandoned.remove(k) != null
         }
+        if (dropped) onAbandonedChange()
     }
 
     /**
@@ -280,6 +290,15 @@ class NonceTracker(
             sent.remove(k)
             abandoned[k] = Abandoned(nonce, fees, hash)
         }
+        onAbandonedChange()
+    }
+
+    /** Every abandoned send, keyed `chainId:address` (for [SendJournal]). */
+    fun abandonedSnapshot(): Map<String, Abandoned> = synchronized(sent) { HashMap(abandoned) }
+
+    /** Takes back what [abandonedSnapshot] gave before the process was restarted. */
+    fun restoreAbandoned(records: Map<String, Abandoned>) {
+        synchronized(sent) { abandoned.putAll(records) }
     }
 
     /** The abandoned send a transaction with [nonce] would replace, if any. */
@@ -369,8 +388,9 @@ class WalletSender internal constructor(
     private val clock: () -> Long = System::currentTimeMillis,
     private val pollMs: Long = POLL_MS,
     private val confirmTimeoutMs: Long = CONFIRM_TIMEOUT_MS,
+    private val journal: SendJournal = SendJournal.None,
 ) {
-    private val nonces = NonceTracker(rpc, clock)
+    private val nonces = NonceTracker(rpc, clock, onAbandonedChange = { persist() })
     private val gas = GasOracle(rpc)
 
     private val _status = MutableStateFlow<SendStatus?>(null)
@@ -381,6 +401,61 @@ class WalletSender internal constructor(
     /** The signed bytes of the current send, kept so Try again resends exactly them. */
     private var signed: EthTransaction.Signed? = null
     private var job: Job? = null
+
+    init {
+        restore()
+    }
+
+    /**
+     * Picks up where the last process left off ([SendJournal]): the
+     * abandoned nonces, and an unresolved send as it stood — one that
+     * was waiting for its receipt goes on waiting, one the process died
+     * sending is "may have gone out" (Try again resends the same bytes).
+     */
+    private fun restore() {
+        val state = journal.load() ?: return
+        nonces.restoreAbandoned(state.abandoned)
+        val send = state.send ?: return
+        synchronized(this) {
+            signed = send.signed
+            val status = send.status
+            when (status.stage) {
+                SendStatus.Stage.Broadcasting -> _status.value = status.copy(stage = SendStatus.Stage.Failed(INTERRUPTED, true))
+                SendStatus.Stage.Pending -> {
+                    _status.value = status
+                    job = scope.launch { follow(status.quote, send.signed.hash) }
+                }
+                else -> _status.value = status
+            }
+            Log.i(TAG, "restored ${send.signed.hash} chain=${send.signed.tx.chainId} nonce=${send.signed.tx.nonce}")
+        }
+    }
+
+    /**
+     * Writes what must survive the process ([SendJournal]): the current
+     * send if it's [unresolved][SendStatus.unresolved] and signed, and the
+     * abandoned nonces. Called with every change, under this object's lock
+     * so writes land in order, and before [publish] shows the change, so
+     * nothing is on screen that a restart wouldn't bring back; false if
+     * the journal couldn't be written.
+     */
+    private fun persist(current: SendStatus? = _status.value): Boolean = synchronized(this) {
+        val s = signed
+        val send = if (current != null && s != null && current.unresolved && current.stage != SendStatus.Stage.Signing) {
+            SendJournal.Send(current, s)
+        } else {
+            null
+        }
+        journal.save(SendJournal.State(send, nonces.abandonedSnapshot()))
+    }
+
+    /** [status] becomes the current one: journalled first, then shown. */
+    private fun publish(status: SendStatus?) {
+        synchronized(this) {
+            persist(status)
+            _status.value = status
+        }
+    }
 
     /**
      * Prices [request] for the review. With [all], for the account's
@@ -509,6 +584,20 @@ class WalletSender internal constructor(
                     // Discarded while the key was at work: nothing goes out.
                     if (_status.value?.quote !== quote) return@launch
                     signed = s
+                    // On disk before it goes out: a process killed mid-broadcast
+                    // must come back to these bytes, never to an empty form that
+                    // would sign a second payment next to them.
+                    val broadcasting = SendStatus(quote, SendStatus.Stage.Broadcasting, s.hash)
+                    if (persist(broadcasting)) {
+                        _status.value = broadcasting
+                    } else {
+                        signed = null
+                        _status.value = SendStatus(
+                            quote,
+                            SendStatus.Stage.Failed("Couldn’t save the transaction before sending it, so nothing was sent.", false),
+                        )
+                        return@launch
+                    }
                 }
                 broadcast(quote, s)
             }
@@ -523,7 +612,7 @@ class WalletSender internal constructor(
             val s = signed ?: return
             if ((status.stage as? SendStatus.Stage.Failed)?.mayHaveGone != true) return
             job?.cancel()
-            _status.value = status.copy(stage = SendStatus.Stage.Broadcasting, hash = s.hash)
+            publish(status.copy(stage = SendStatus.Stage.Broadcasting, hash = s.hash))
             job = scope.launch { broadcast(status.quote, s, resend = true) }
         }
     }
@@ -535,7 +624,7 @@ class WalletSender internal constructor(
             val hash = status.hash ?: return
             if (status.stage != SendStatus.Stage.Unconfirmed) return
             job?.cancel()
-            _status.value = status.copy(stage = SendStatus.Stage.Pending)
+            publish(status.copy(stage = SendStatus.Stage.Pending))
             job = scope.launch { follow(status.quote, hash) }
         }
     }
@@ -581,7 +670,7 @@ class WalletSender internal constructor(
         job?.cancel()
         job = null
         signed = null
-        _status.value = null
+        publish(null)
     }
 
     private fun current(quote: SendQuote): Boolean = synchronized(this) { _status.value?.quote === quote }
@@ -683,19 +772,23 @@ class WalletSender internal constructor(
         synchronized(this) {
             // A newer send (or an acknowledge) took over: this one's news is stale.
             if (_status.value?.quote !== quote) return
-            _status.value = SendStatus(quote, stage, hash)
+            publish(SendStatus(quote, stage, hash))
         }
     }
 
     private fun fail(quote: SendQuote, message: String, mayHaveGone: Boolean) {
         synchronized(this) {
             if (_status.value?.quote !== quote) return
-            _status.value = _status.value?.copy(stage = SendStatus.Stage.Failed(message, mayHaveGone))
+            publish(_status.value?.copy(stage = SendStatus.Stage.Failed(message, mayHaveGone)))
         }
     }
 
     companion object {
         private const val TAG = "WalletSend"
+
+        /** A send the last process died broadcasting, as the next one finds it. */
+        internal const val INTERRUPTED = "The app closed while this was going out, so it may or may not have gone out. " +
+            "Try again sends the very same transaction, so it can’t be paid twice."
 
         /** A quote older than this is priced again before it's signed. */
         const val QUOTE_TTL_MS = 60_000L
@@ -845,6 +938,7 @@ class WalletSender internal constructor(
             instance ?: WalletSender(
                 rpc = WalletRpc(ChainDataRouter.get(context.applicationContext)),
                 scope = CoroutineScope(SupervisorJob() + Dispatchers.Default),
+                journal = FileSendJournal(java.io.File(context.applicationContext.noBackupFilesDir, "wallet/send.json")),
             ).also { instance = it }
         }
 
