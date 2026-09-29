@@ -56,6 +56,27 @@ class PhraseClipboardDeviceTest {
     }
 
     @Test
+    fun aNewProcessStillOwedTheClearShowsCopied() = withFocus { a ->
+        val now = SystemClock.elapsedRealtime()
+        PhraseClipboard.copy(a, words, now)
+        // As a new process (swiped from Recents, reopened within the
+        // minute): no hash, no in-memory "copied", only the saved deadline.
+        PhraseClipboard::class.java.getDeclaredField("pendingHash").apply { isAccessible = true }
+            .set(PhraseClipboard, null)
+        @Suppress("UNCHECKED_CAST")
+        (PhraseClipboard::class.java.getDeclaredField("_copied").apply { isAccessible = true }
+            .get(PhraseClipboard) as kotlinx.coroutines.flow.MutableStateFlow<Boolean>).value = false
+        assertFalse(PhraseClipboard.copied.value)
+        // Focus regained before the deadline: the button reads "Copied" again (R4-F1).
+        PhraseClipboard.clearIfDue(a, now + PhraseClipboard.TTL_MS - 1)
+        assertTrue(PhraseClipboard.copied.value)
+        assertTrue(clipboard(a).hasPrimaryClip())
+        PhraseClipboard.clearIfDue(a, now + PhraseClipboard.TTL_MS)
+        assertFalse(clipboard(a).hasPrimaryClip())
+        assertFalse(PhraseClipboard.copied.value)
+    }
+
+    @Test
     fun anotherClipCopiedSinceIsLeftAlone() = withFocus { a ->
         val now = SystemClock.elapsedRealtime()
         PhraseClipboard.copy(a, words, now)

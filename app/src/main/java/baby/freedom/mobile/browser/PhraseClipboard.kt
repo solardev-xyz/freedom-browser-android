@@ -85,10 +85,13 @@ internal object PhraseClipboard {
     private val _copied = MutableStateFlow(false)
 
     /**
-     * Whether a phrase this process copied is still owed its clear: true
-     * from [copy] until the deadline's [clearIfDue] (or a stale deadline)
-     * takes it off. What the page's Copy button shows as "Copied", so it
-     * goes back to "Copy" the moment the words are gone, not later.
+     * Whether a copied phrase is still owed its clear: true from [copy]
+     * until the deadline's [clearIfDue] (or a stale deadline) takes it
+     * off. A process started while a clear is still pending (the saved
+     * deadline) learns it from its first [clearIfDue], which
+     * `MainActivity.onWindowFocusChanged` runs as soon as Freedom has
+     * focus. What the page's Copy button shows as "Copied", so it goes
+     * back to "Copy" the moment the words are gone, not later.
      */
     val copied: StateFlow<Boolean> = _copied.asStateFlow()
 
@@ -129,7 +132,16 @@ internal object PhraseClipboard {
         if (dueAt == 0L) return
         when (deadline(dueAt, prefs.getInt(KEY_BOOT, -1), bootCount(app), now)) {
             Deadline.STALE -> return forget(app)
-            Deadline.PENDING -> return
+            Deadline.PENDING -> {
+                // Still owed, possibly to a new process (swiped from
+                // Recents and reopened within the minute): the button reads
+                // "Copied" again, and this process's own Handler brings it
+                // back to "Copy" on time rather than the inexact alarm.
+                _copied.value = true
+                main.removeCallbacksAndMessages(null)
+                main.postDelayed({ clearIfDue(app) }, dueAt - now)
+                return
+            }
             Deadline.DUE -> Unit
         }
         runCatching {
