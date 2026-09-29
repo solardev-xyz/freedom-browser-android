@@ -544,6 +544,52 @@ class SwarmProviderTest {
     }
 
     @Test
+    fun `a feed whose own identity is gone is refused, never signed with another key`() {
+        connect()
+        grants.auto += site to SwarmProvider.AutoApprove.Feeds
+        feeds.grant(site)
+        ok(call("swarm_createFeed", JSONObject().put("name", "log")))
+        val uploads = node.uploads().size
+        val update = JSONObject().put("feedId", "log").put("reference", "cd".repeat(32))
+        val entry = JSONObject().put("name", "log").put("data", "x")
+
+        // The identities file was set aside (unparseable): the feed record survived, its identity didn't.
+        publishers.sites.clear()
+        for (params in listOf("swarm_updateFeed" to update, "swarm_writeFeedEntry" to entry)) {
+            assertEquals(params.first, "feed_owner_unavailable", err(call(params.first, params.second)).reason)
+        }
+        assertTrue("no new identity made for the site", publishers.sites.isEmpty())
+
+        // The site has identities again, but not the feed's.
+        publishers.ensureSite(other)
+        publishers.ensureSite(site)
+        assertEquals("feed_owner_unavailable", err(call("swarm_updateFeed", update)).reason)
+
+        // The feed's identity is listed, but its key no longer derives the feed's owner (a different wallet).
+        publishers.sites.clear()
+        publishers.ensureSite(site)
+        feeds.put(site, feeds.feed(site, "log")!!.copy(owner = PublisherKeys.address(ByteArray(32) { 0x7f })))
+        assertEquals("feed_owner_unavailable", err(call("swarm_writeFeedEntry", entry)).reason)
+        assertTrue("its key was zeroed", publishers.keysHandedOut.last().all { it == 0.toByte() })
+
+        assertEquals("nothing was uploaded", uploads, node.uploads().size)
+        assertTrue(asked.isEmpty())
+        assertEquals(site to null, site to feeds.feed(site, "log")!!.lastReference)
+    }
+
+    @Test
+    fun `no sheet for a feed whose own identity is gone`() {
+        connect()
+        feeds.grant(site)
+        grants.auto += site to SwarmProvider.AutoApprove.Feeds
+        ok(call("swarm_createFeed", JSONObject().put("name", "log")))
+        grants.auto.clear()
+        publishers.sites.clear()
+        assertEquals("feed_owner_unavailable", err(call("swarm_updateFeed", JSONObject().put("feedId", "log").put("reference", "cd".repeat(32)))).reason)
+        assertTrue(asked.isEmpty())
+    }
+
+    @Test
     fun `feed names are desktop's`() {
         connect()
         for (bad in listOf("", "a/b", "x".repeat(65), "new\nline")) {

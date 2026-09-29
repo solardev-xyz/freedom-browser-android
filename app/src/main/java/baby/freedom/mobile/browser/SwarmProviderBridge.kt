@@ -26,7 +26,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.MainScope
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONObject
@@ -276,7 +275,9 @@ object SwarmProviders {
      * approves. A [SwarmAsk.Sign] that [needs a wallet][SwarmAsk.Sign.needsWallet]
      * then opens wallet setup, right from the user's tap on the sheet —
      * and a setup the user backs out of blocks the tab like a refused
-     * sheet, so a page can't reopen the wallet page in a loop.
+     * sheet, so a page can't reopen the wallet page in a loop. The tab's
+     * other asks wait until setup is over, and after a backed-out one are
+     * refused without a sheet.
      */
     internal suspend fun askOnTab(
         tab: BrowserState,
@@ -288,9 +289,19 @@ object SwarmProviders {
         fun live() = (documents[tab.id] ?: 0) == doc && tab.id !in blockedTabs
         if (!live() || waitMs <= 0) return SwarmProvider.Answer.REJECTED
         val lock = promptLocks.getOrPut(tab.id) { Mutex() }
-        return withTimeoutOrNull(waitMs) {
-            lock.withLock {
-                if (!live()) return@withLock SwarmProvider.Answer.REJECTED
+        // The tab's prompt lock is held through wallet setup too, not just
+        // the sheet: another request's sheet waits until setup is over, so
+        // one the user backs out of (blocking the tab) refuses the rest
+        // without a sheet popping up behind the wallet page.
+        var held = false
+        try {
+            val answer = withTimeoutOrNull(waitMs) {
+                // No suspension between lock() returning and the flag:
+                // a timeout either lands before the lock is ours (and
+                // lock() gives it back) or after we've noted it.
+                lock.lock()
+                held = true
+                if (!live()) return@withTimeoutOrNull SwarmProvider.Answer.REJECTED
                 val request = SwarmPromptRequest(ask)
                 pending.getOrPut(tab.id) { mutableSetOf() }.add(request)
                 tab.swarmPrompt = request
@@ -302,8 +313,7 @@ object SwarmProviders {
                 }
                 if (!answer.allowed && live()) blockedTabs += tab.id
                 if (answer.allowed && live()) answer else SwarmProvider.Answer.REJECTED
-            }
-        }?.let { answer ->
+            } ?: return SwarmProvider.Answer.REJECTED
             if (!answer.allowed) return answer
             approved()
             if (ask !is SwarmAsk.Sign || !ask.needsWallet) return answer
@@ -312,8 +322,10 @@ object SwarmProviders {
             // page has stopped its timer.
             val set = setUpWallet(swarmWalletReason(ask.origin))
             if (!set && live()) blockedTabs += tab.id
-            if (set && live()) answer else SwarmProvider.Answer.REJECTED
-        } ?: SwarmProvider.Answer.REJECTED
+            return if (set && live()) answer else SwarmProvider.Answer.REJECTED
+        } finally {
+            if (held) lock.unlock()
+        }
     }
 
     /** The tab started (committed) a new document on [url] — null when it's being torn down. */

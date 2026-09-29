@@ -1,5 +1,6 @@
 package baby.freedom.mobile.browser
 
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.async
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.yield
@@ -12,8 +13,9 @@ import org.junit.Test
 
 /**
  * [SwarmProviders.askOnTab] (#120): wallet setup only follows an approved
- * sheet, a setup the user backs out of blocks the tab like a refusal, and
- * a sheet left unanswered is withdrawn before the page's own timer.
+ * sheet, a setup the user backs out of blocks the tab like a refusal (and
+ * the tab's other asks wait it out), and a sheet left unanswered is
+ * withdrawn before the page's own timer.
  */
 class SwarmProvidersAskTest {
     private val site = "https://app.example"
@@ -75,6 +77,58 @@ class SwarmProvidersAskTest {
         setUpAnswer = true
         assertTrue(ask(tab, sign(needsWallet = true), SwarmProvider.Answer(true)).allowed)
         assertEquals(2, setUps.size)
+    }
+
+    @Test
+    fun `other asks wait out wallet setup, and a backed-out setup refuses them without a sheet`() = runBlocking {
+        val tab = tab()
+        val setUp = CompletableDeferred<Boolean>()
+        SwarmProviders.setUpWallet = { reason ->
+            setUps += reason
+            setUp.await()
+        }
+        val first = async { SwarmProviders.askOnTab(tab, 0, sign(needsWallet = true)) { approvals++ } }
+        while (tab.swarmPrompt == null) yield()
+        val firstSheet = tab.swarmPrompt!!
+        val second = async { SwarmProviders.askOnTab(tab, 0, sign(needsWallet = true)) { approvals++ } }
+        repeat(10) { yield() }
+        assertTrue("only one sheet at a time", tab.swarmPrompt === firstSheet)
+        firstSheet.respond(SwarmProvider.Answer(true))
+        while (setUps.isEmpty()) yield()
+        // The wallet page is open: the second sheet stays parked behind it.
+        repeat(50) { yield() }
+        assertNull(tab.swarmPrompt)
+        assertFalse(second.isCompleted)
+        setUp.complete(false)
+        assertFalse(first.await().allowed)
+        assertFalse(second.await().allowed)
+        assertNull("the blocked tab puts up no second sheet", tab.swarmPrompt)
+        assertEquals(1, setUps.size)
+        assertEquals(1, approvals)
+    }
+
+    @Test
+    fun `after a completed wallet setup the waiting ask gets its own sheet`() = runBlocking {
+        val tab = tab()
+        val setUp = CompletableDeferred<Boolean>()
+        SwarmProviders.setUpWallet = { reason ->
+            setUps += reason
+            setUp.await()
+        }
+        val first = async { SwarmProviders.askOnTab(tab, 0, sign(needsWallet = true)) { approvals++ } }
+        while (tab.swarmPrompt == null) yield()
+        val firstSheet = tab.swarmPrompt!!
+        val second = async { SwarmProviders.askOnTab(tab, 0, sign(needsWallet = false)) { approvals++ } }
+        firstSheet.respond(SwarmProvider.Answer(true))
+        while (setUps.isEmpty()) yield()
+        repeat(50) { yield() }
+        assertNull(tab.swarmPrompt)
+        setUp.complete(true)
+        assertTrue(first.await().allowed)
+        while (tab.swarmPrompt == null) yield()
+        tab.swarmPrompt!!.respond(SwarmProvider.Answer(true))
+        assertTrue(second.await().allowed)
+        assertEquals(2, approvals)
     }
 
     @Test

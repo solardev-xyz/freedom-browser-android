@@ -434,7 +434,10 @@ class SwarmProvider(
         val autoApproved = granted && grants.autoApprove(origin, kind)
         if (!granted || !autoApproved || !publishers.unlocked()) {
             // The identity that will actually sign: a feed's own, not the site's active one.
-            val identity = publishers.site(origin)?.let { signerOf(it, signed.feed) }
+            val site = publishers.site(origin)
+            val identity = site?.let { signerOf(it, signed.feed) }
+            // A feed whose own identity is gone can't be signed for: no sheet for it.
+            if (signed.feed != null && identity == null) return feedOwnerGone(signed.feed)
             val answer = calls.ask(SwarmAsk.Sign(origin, method, kind, !granted, signed.feedName, signed.detail, identity, needsWallet))
             if (!answer.allowed) return rejected()
             if (needsWallet && !publishers.walletExists()) return rejected()
@@ -449,9 +452,18 @@ class SwarmProvider(
      * Which of [site]'s identities signs for [feed]: the one it was
      * created with, or the site's active one for a new feed or a SOC. The
      * sheet's "Signs as" and the signature itself both come from here.
+     * Null when [feed]'s own identity isn't [site]'s any more: never the
+     * active one in its place, whose key doesn't own the feed.
      */
-    private fun signerOf(site: SitePublisher, feed: FeedRecord?): PublisherIdentity =
-        feed?.let { f -> site.identities.firstOrNull { it.id == f.identityId } } ?: site.active
+    private fun signerOf(site: SitePublisher, feed: FeedRecord?): PublisherIdentity? =
+        if (feed == null) site.active else site.identities.firstOrNull { it.id == feed.identityId }
+
+    /** [feed]'s owner isn't on this device (any more): nothing can sign for it. */
+    private fun feedOwnerGone(feed: FeedRecord) = Reply.Err(
+        INTERNAL,
+        "The identity that owns feed ${feed.name} is no longer on this device",
+        reason("feed_owner_unavailable"),
+    )
 
     /**
      * Runs a write to this device's stores: its [IOException] (or
@@ -515,13 +527,24 @@ class SwarmProvider(
 
     /**
      * Runs [block] with the signing key of [feed]'s identity (the site's
-     * active one for a new feed or a SOC), zeroing it after.
+     * active one for a new feed or a SOC), zeroing it after. A feed whose
+     * identity is gone, or whose key no longer derives its owner, is
+     * refused ([feedOwnerGone]) rather than signed with another key.
      */
     private suspend fun withKey(origin: String, feed: FeedRecord?, block: suspend (Resolved) -> Reply): Reply {
         if (!feeds.granted(origin)) return notAuthorized("feed_not_granted")
-        val site = saving("the site's publisher identity") { publishers.ensureSite(origin) }
-        val identity = signerOf(site, feed)
+        // An existing feed never gets the site a new identity: its own has to be there.
+        val site = if (feed == null) {
+            saving("the site's publisher identity") { publishers.ensureSite(origin) }
+        } else {
+            withContext(io) { publishers.site(origin) } ?: return feedOwnerGone(feed)
+        }
+        val identity = signerOf(site, feed) ?: return feedOwnerGone(feed!!)
         val key = withContext(io) { publishers.signingKey(identity) }
+        if (feed != null && !PublisherKeys.address(key).equals(feed.owner, ignoreCase = true)) {
+            key.fill(0)
+            return feedOwnerGone(feed)
+        }
         return try {
             publishers.noteActivity()
             block(Resolved(identity, key))
