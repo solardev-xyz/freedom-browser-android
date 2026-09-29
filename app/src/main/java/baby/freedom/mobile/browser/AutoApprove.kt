@@ -167,6 +167,17 @@ internal fun selectorLabel(selector: String): String? = when (selector.lowercase
 }
 
 /**
+ * The risk of an auto-approve rule for a function the wallet can't name,
+ * shared by the sheet's switch ([autoApproveWarning]) and the site's page
+ * ([autoApproveRuleWarning]) so the two surfaces can't describe it
+ * differently (#253 R3-M1); each adds only its own closing advice.
+ */
+private const val UNKNOWN_FUNCTION_RISK =
+    "The wallet can't tell what this function does. If it can move tokens you've approved this contract " +
+        "to use, run calls it's handed (as a swap router can), or let someone else spend, borrow or " +
+        "withdraw for you, this rule lets the site do that with no sheet, to anyone."
+
+/**
  * Under the switch, in red, for a function the wallet can't name (#234):
  * the refused list can't know every router, so what an unknown function
  * could do with any arguments is said before the user turns it on.
@@ -175,10 +186,7 @@ internal fun autoApproveWarning(rule: AutoApproveRule): String? =
     if (selectorLabel(rule.selector) != null) {
         null
     } else {
-        "The wallet can't tell what this function does. If it can move tokens you've approved this contract " +
-            "to use, run calls it's handed (as a swap router can), or let someone else spend, borrow or " +
-            "withdraw for you, this rule lets the site do that with no sheet, to anyone. " +
-            "Only turn it on for a function you know."
+        "$UNKNOWN_FUNCTION_RISK Only turn it on for a function you know."
     }
 
 /**
@@ -191,10 +199,7 @@ internal fun autoApproveRuleWarning(rule: AutoApproveRule): String? =
     if (selectorLabel(rule.selector) != null) {
         null
     } else {
-        "The wallet can't tell what this function does. If it can move tokens you've approved this contract " +
-            "to use, run calls it's handed (as a swap router can), or let someone else spend, borrow or " +
-            "withdraw for you, this rule lets the site do that with no sheet, to anyone. " +
-            "Remove it unless you know the function."
+        "$UNKNOWN_FUNCTION_RISK Remove it unless you know the function."
     }
 
 /** The sheet's switch: "Always approve token transfers on this contract". */
