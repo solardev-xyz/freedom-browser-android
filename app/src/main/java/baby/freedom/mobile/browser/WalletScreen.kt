@@ -823,7 +823,8 @@ private fun RemoveWalletDialog(onConfirm: () -> Unit, onDismiss: () -> Unit) {
  * [PhraseClipboard.TTL_MS] can't drift apart.
  */
 internal val COPY_NOTE = "Copying puts the words on the clipboard, where other apps can read them. " +
-    "They’re taken off again after ${PhraseClipboard.TTL_MS / 1000 / 60} minute."
+    "They’re taken off again after ${PhraseClipboard.TTL_MS / 1000 / 60} minute, or up to a minute " +
+    "later if Freedom is in the background by then."
 
 /**
  * Show recovery phrase (#78): the words behind a fresh authentication,

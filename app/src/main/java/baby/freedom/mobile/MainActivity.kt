@@ -551,8 +551,8 @@ class MainActivity : ComponentActivity() {
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
-        // A copied recovery phrase (#78) whose minute ran out while the
-        // app was away: the clipboard is only readable with focus.
+        // A copied recovery phrase (#78) whose clear is owed and hadn't
+        // run yet (e.g. a late inexact alarm): catch up now.
         if (hasFocus) PhraseClipboard.clearIfDue(this)
     }
 

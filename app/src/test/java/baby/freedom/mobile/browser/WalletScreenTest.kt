@@ -139,8 +139,17 @@ class WalletScreenTest {
         assertFalse(PhraseClipboard.clipIsPhrase("https://example.com", hash))
         assertFalse(PhraseClipboard.clipIsPhrase("", hash))
         assertFalse(PhraseClipboard.clipIsPhrase(null, hash))
+        // At the deadline: a readable clipboard is cleared only if it still
+        // holds the phrase; an unreadable one (no focus) or a process that
+        // lost the hash clears outright, so the words never outlive the minute.
+        assertTrue(PhraseClipboard.shouldClear(listOf(twelve), hash))
+        assertTrue(PhraseClipboard.shouldClear(listOf("https://example.com", twelve), hash))
+        assertFalse(PhraseClipboard.shouldClear(listOf("https://example.com"), hash))
+        assertFalse(PhraseClipboard.shouldClear(emptyList(), hash))
+        assertTrue(PhraseClipboard.shouldClear(null, hash))
+        assertTrue(PhraseClipboard.shouldClear(listOf("https://example.com"), null))
         // The note on the page matches the timer.
         assertEquals(60_000L, PhraseClipboard.TTL_MS)
-        assertTrue(COPY_NOTE.endsWith("after 1 minute."))
+        assertTrue(COPY_NOTE.contains("after 1 minute, or up to a minute later"))
     }
 }
