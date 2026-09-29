@@ -40,13 +40,26 @@ class SwarmNode internal constructor(
     private val ops: NodeOps,
     /**
      * A monotonic clock in ms, for how long an unconfirmed deposit blocks
-     * another. The hold is persisted, so outside tests it's one every
-     * process reads alike: time since boot, which a reboot restarts at 0
-     * (see [holdElapsedMs]).
+     * another. The hold is persisted, so the app's node (the public
+     * constructor) uses one every process reads alike and that keeps
+     * counting through deep sleep: `SystemClock.elapsedRealtime()`, time
+     * since boot, which a reboot restarts at 0 (see [holdElapsedMs]). The
+     * `System.nanoTime()` default, which stops in deep sleep, is for JVM
+     * tests only, where `SystemClock` isn't available.
      */
     private val clock: () -> Long = { System.nanoTime() / 1_000_000 },
+    /**
+     * This boot's id (null: unknown), kept with a hold so a later boot
+     * isn't mistaken for the one the hold's [clock] reading came from.
+     */
+    private val bootId: () -> String? = { null },
 ) {
-    constructor(config: Config) : this(config, NodeOps.Native, { android.os.SystemClock.elapsedRealtime() })
+    constructor(config: Config) : this(
+        config,
+        NodeOps.Native,
+        { android.os.SystemClock.elapsedRealtime() },
+        { kernelBootId() },
+    )
 
     /** The native calls [SwarmNode] makes; swapped for a fake in tests. */
     internal interface NodeOps {
@@ -483,7 +496,7 @@ class SwarmNode internal constructor(
                     // the chequebook shows it (or long enough that it won't).
                     val landed = u.chequebook == want && u.balanceBefore != null && before != null &&
                         before >= u.balanceBefore + u.amountPlur
-                    if (landed || u.chequebook != want || holdElapsedMs(clock(), u.atMs) >= UNCONFIRMED_DEPOSIT_HOLD_MS) {
+                    if (landed || u.chequebook != want || holdElapsedMs(clock(), u.atMs, sameBoot(u.bootId)) >= UNCONFIRMED_DEPOSIT_HOLD_MS) {
                         setUnconfirmedDeposit(null)
                     } else {
                         throw IllegalStateException(
@@ -501,7 +514,7 @@ class SwarmNode internal constructor(
                 runCatching { JSONObject(a.body).optString("message") }.getOrNull()?.takeIf { it.isNotBlank() }
             }
             if (depositMaybeSent(answer, message)) {
-                synchronized(lock) { setUnconfirmedDeposit(UnconfirmedDeposit(want, before, amountPlur, clock())) }
+                synchronized(lock) { setUnconfirmedDeposit(UnconfirmedDeposit(want, before, amountPlur, clock(), bootId())) }
                 throw RuntimeException(
                     "$DEPOSIT_MAYBE_SENT (${message ?: "the node's gateway didn't answer"}). " +
                         "Check the chequebook's balance before depositing again",
@@ -517,14 +530,22 @@ class SwarmNode internal constructor(
     /**
      * A deposit whose outcome the node couldn't tell (#117): into
      * [chequebook], which held [balanceBefore] PLUR (null: unknown), of
-     * [amountPlur], at [atMs] on [clock].
+     * [amountPlur], at [atMs] on [clock], during the boot [bootId]
+     * (null: unknown).
      */
     private data class UnconfirmedDeposit(
         val chequebook: String,
         val balanceBefore: BigInteger?,
         val amountPlur: BigInteger,
         val atMs: Long,
+        val bootId: String?,
     )
+
+    /** Whether a hold taken during boot [holdBoot] is from this boot (null: can't tell). */
+    private fun sameBoot(holdBoot: String?): Boolean? {
+        val current = bootId() ?: return null
+        return holdBoot?.let { it == current }
+    }
 
     /**
      * The last deposit that may or may not have gone out. Guarded by
@@ -547,6 +568,7 @@ class SwarmNode internal constructor(
                 balanceBefore = o.optString("balanceBefore").takeIf { it.isNotEmpty() }?.let(::BigInteger),
                 amountPlur = BigInteger(o.getString("amountPlur")),
                 atMs = o.getLong("atMs"),
+                bootId = o.optString("bootId").takeIf { it.isNotEmpty() },
             )
         }.getOrNull()
     }
@@ -564,6 +586,7 @@ class SwarmNode internal constructor(
                     .put("balanceBefore", u.balanceBefore?.toString() ?: "")
                     .put("amountPlur", u.amountPlur.toString())
                     .put("atMs", u.atMs)
+                    .put("bootId", u.bootId ?: "")
                     .toString()
                 val tmp = File(config.dataDir, "$UNCONFIRMED_DEPOSIT_FILE.tmp")
                 tmp.writeText(json)
@@ -693,11 +716,25 @@ class SwarmNode internal constructor(
         /**
          * A lower bound on the time since a hold taken at [atMs], with the
          * [clock] now reading [now]. The clock is time since boot and the
-         * hold is persisted, so a reboot restarts it below [atMs]; the
-         * deposit then came before this boot, so at least [now] has passed.
-         * Never more than the real time: the hold is never cut short.
+         * hold is persisted, so a reboot restarts it at 0: a hold from an
+         * earlier boot ([sameBoot] false) came before this one, so at least
+         * [now] has passed. Without boot ids to compare (null), a reading
+         * below [atMs] still proves a reboot; one above it is taken as the
+         * same boot, which can only run the hold longer (#117). Never more
+         * than the real time: the hold is never cut short.
          */
-        internal fun holdElapsedMs(now: Long, atMs: Long): Long = if (now >= atMs) now - atMs else now
+        internal fun holdElapsedMs(now: Long, atMs: Long, sameBoot: Boolean? = null): Long = when {
+            sameBoot == false || now < atMs -> now
+            else -> now - atMs
+        }
+
+        /**
+         * The kernel's id for this boot (a fresh UUID each boot, readable
+         * by apps), or null if it can't be read.
+         */
+        internal fun kernelBootId(): String? = runCatching {
+            File("/proc/sys/kernel/random/boot_id").readText().trim().takeIf { it.isNotEmpty() }
+        }.getOrNull()
 
         /**
          * Whether a deposit that got [answer] (null: none, e.g. a read

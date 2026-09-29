@@ -319,6 +319,7 @@ class SwarmNodeTest {
         ops: FakeOps,
         dataDir: String = config.dataDir,
         clock: () -> Long = { System.nanoTime() / 1_000_000 },
+        bootId: () -> String? = { null },
     ): SwarmNode {
         ops.releaseSeed.countDown()
         ops.releaseInit.countDown()
@@ -327,6 +328,7 @@ class SwarmNodeTest {
             config.copy(dataDir = dataDir, mode = { SwarmNode.Mode.light("https://rpc.example/key123") }),
             ops,
             clock,
+            bootId,
         )
         node.start()
         awaitStatus(node, NodeStatus.Running)
@@ -640,10 +642,69 @@ class SwarmNodeTest {
     }
 
     @Test
+    fun aHoldFromAnEarlierBootDoesNotComeBackOnceUptimePassesIt() {
+        val dir = java.nio.file.Files.createTempDirectory("swarmnode-hold-boot-id").toFile()
+        try {
+            fun funded(ops: FakeOps) = ops.apply {
+                chequebookHex = chequebook
+                walletPlur = milliBzz.multiply(java.math.BigInteger.TEN).toString()
+                chequebookBalancePlur = milliBzz.toString()
+            }
+            // Unanswered at 2 h of uptime, boot "a".
+            val ops = funded(FakeOps())
+            val node = lightNode(ops, dir.path, clock = { 2 * 3_600_000L }, bootId = { "a" })
+            ops.onDeposit = { null }
+            assertThrows(RuntimeException::class.java) { node.depositChequebook(chequebook, milliBzz) }
+            node.dispose()
+
+            // Rebooted (boot "b"), and never checked until 2 h 05 min into
+            // it: the uptime is past the hold's reading, but it's another
+            // boot, so the full 2 h 05 min counts and the hold is gone.
+            val ops2 = funded(FakeOps())
+            val again = lightNode(ops2, dir.path, clock = { 2 * 3_600_000L + 5 * 60_000L }, bootId = { "b" })
+            again.depositChequebook(chequebook, milliBzz)
+            assertEquals(1, ops2.calls.count { it.startsWith("gateway:POST") })
+            again.dispose()
+        } finally {
+            dir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun aHoldFromThisBootStillCountsFromItsReading() {
+        val dir = java.nio.file.Files.createTempDirectory("swarmnode-hold-same-boot").toFile()
+        try {
+            fun funded(ops: FakeOps) = ops.apply {
+                chequebookHex = chequebook
+                walletPlur = milliBzz.multiply(java.math.BigInteger.TEN).toString()
+                chequebookBalancePlur = milliBzz.toString()
+            }
+            val ops = funded(FakeOps())
+            val node = lightNode(ops, dir.path, clock = { 2 * 3_600_000L }, bootId = { "a" })
+            ops.onDeposit = { null }
+            assertThrows(RuntimeException::class.java) { node.depositChequebook(chequebook, milliBzz) }
+            node.dispose()
+
+            // Same boot, node toggled off and on, 5 min later: still held.
+            val ops2 = funded(FakeOps())
+            val again = lightNode(ops2, dir.path, clock = { 2 * 3_600_000L + 5 * 60_000L }, bootId = { "a" })
+            assertThrows(IllegalStateException::class.java) { again.depositChequebook(chequebook, milliBzz) }
+            assertEquals(0, ops2.calls.count { it.startsWith("gateway:POST") })
+            again.dispose()
+        } finally {
+            dir.deleteRecursively()
+        }
+    }
+
+    @Test
     fun holdElapsedIsNeverMoreThanTheRealTime() {
         assertEquals(60_000L, SwarmNode.holdElapsedMs(1_060_000L, 1_000_000L))
+        assertEquals(60_000L, SwarmNode.holdElapsedMs(1_060_000L, 1_000_000L, sameBoot = true))
         // Rebooted: only the time since this boot is sure.
         assertEquals(30_000L, SwarmNode.holdElapsedMs(30_000L, 7_200_000L))
+        assertEquals(30_000L, SwarmNode.holdElapsedMs(30_000L, 7_200_000L, sameBoot = false))
+        // Another boot whose uptime has passed the hold's reading.
+        assertEquals(7_500_000L, SwarmNode.holdElapsedMs(7_500_000L, 7_200_000L, sameBoot = false))
     }
 
     @Test
