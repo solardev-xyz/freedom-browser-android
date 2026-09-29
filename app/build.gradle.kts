@@ -161,6 +161,12 @@ dependencies {
     implementation("androidx.camera:camera-lifecycle:$cameraXVersion")
     implementation("androidx.camera:camera-view:$cameraXVersion")
 
+    // Opt-in, end-to-end encrypted recovery-phrase backup (#231). Asked
+    // only from the wallet page (is backup possible, is there one to
+    // restore) and, while backup is on, on returning to the app; without
+    // Play services every call fails and the page says backup isn't available.
+    implementation("com.google.android.gms:play-services-auth-blockstore:16.4.0")
+
     // window.swarm messaging (#121): the WebSocket to the node's
     // `/gsoc/subscribe` and `/pss/subscribe` (loopback only; answers the
     // node's pings). Its mockwebserver stands in for the node in tests.

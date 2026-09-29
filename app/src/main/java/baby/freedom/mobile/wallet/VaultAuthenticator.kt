@@ -15,6 +15,8 @@ enum class VaultAuthPurpose(val title: String, val subtitle: String) {
     IMPORT("Import your wallet", "Confirm it’s you to encrypt your recovery phrase"),
     UNLOCK("Unlock your wallet", "Confirm it’s you to open your wallet"),
     REVEAL("Show recovery phrase", "Confirm it’s you to see your recovery phrase"),
+    BACKUP("Back up with Google", "Confirm it’s you to back up your recovery phrase"),
+    RESTORE("Restore your wallet", "Confirm it’s you to restore your wallet from Google backup"),
 }
 
 /** The user backed out of the prompt (or the system dismissed it); not an error to show. */

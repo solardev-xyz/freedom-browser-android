@@ -80,7 +80,13 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import baby.freedom.mobile.ui.isLight
 import baby.freedom.mobile.wallet.BiometricVaultAuthenticator
 import baby.freedom.mobile.wallet.DuplicateAccountException
+import baby.freedom.mobile.wallet.BackupMissingException
+import baby.freedom.mobile.wallet.BackupNotEncryptedException
+import baby.freedom.mobile.wallet.BackupUnavailableException
+import baby.freedom.mobile.wallet.BackupUnreadableException
 import baby.freedom.mobile.wallet.Mnemonic
+import baby.freedom.mobile.wallet.PhraseBackup
+import baby.freedom.mobile.wallet.RestoreNeedsScreenLockException
 import baby.freedom.mobile.wallet.OpenLvSession
 import baby.freedom.mobile.wallet.PublisherIdentityStore
 import baby.freedom.mobile.wallet.SafeAccounts
@@ -137,7 +143,8 @@ internal fun walletAttentionLine(state: Vault.State): String? {
         else -> return null
     }
     return when {
-        !info.backedUp -> BACKUP_REMINDER
+        // Google backup (#231) holds the phrase: the wallet isn't this phone's only copy.
+        !info.backedUp && !info.cloudBackup -> BACKUP_REMINDER
         info.protection == VaultProtection.DEVICE_ONLY -> NO_SCREEN_LOCK_LINE
         else -> null
     }
@@ -147,9 +154,18 @@ internal fun walletAttentionLine(state: Vault.State): String? {
 internal fun walletSettingsRows(state: Vault.State) = listOf(
     settingsRow(
         WALLET_ROW_KEY, WALLET_TITLE, walletSummary(state), walletAttentionLine(state),
-        "Recovery phrase", "Identity", "Back up",
+        "Recovery phrase", "Identity", "Back up", GOOGLE_BACKUP_TITLE, "Restore",
     ),
 )
+
+/** The status card's Backup line: where the phrase is kept, by what Google backup actually did ([PhraseBackup.reconcile]). */
+internal fun walletBackupDetail(cloudBackup: Boolean, status: PhraseBackup.Status?): String = when {
+    !cloudBackup -> "This phone only"
+    status == PhraseBackup.Status.CLOUD -> "This phone and Google (end-to-end encrypted)"
+    status == PhraseBackup.Status.PAUSED -> "This phone (Google backup paused)"
+    status == PhraseBackup.Status.NONE -> "This phone (Google backup missing)"
+    else -> "This phone, and Google once it answers"
+}
 
 /** What the import field says under the phrase as it's typed. */
 internal sealed class ImportHint(val text: String) {
@@ -252,7 +268,12 @@ private val bip39Words: Set<String> by lazy { baby.freedom.mobile.wallet.Bip39En
  * has never been shown (#78), so a dead wallet isn't met with "import
  * your recovery phrase" they never had.
  */
-internal fun walletErrorMessage(e: Throwable, action: String, phraseBackedUp: Boolean): String? = when (e) {
+internal fun walletErrorMessage(
+    e: Throwable,
+    action: String,
+    phraseBackedUp: Boolean,
+    googleBackup: Boolean = false,
+): String? = when (e) {
     is VaultAuthCancelledException -> null
     is CancellationException -> null
     is VaultAuthFailedException -> "Couldn’t $action: ${e.message}"
@@ -261,12 +282,23 @@ internal fun walletErrorMessage(e: Throwable, action: String, phraseBackedUp: Bo
     is DuplicateAccountException -> "Couldn’t $action: the next account of this wallet is already on the list, added from a " +
         "Ledger that holds the same recovery phrase. Remove that Ledger account to add it here."
     is VaultKeyLostException -> "Android has erased this wallet’s key. That happens when the screen lock is removed. " +
-        lostWalletAdvice(phraseBackedUp)
-    is VaultUnreadableException -> "This wallet can’t be read. " + lostWalletAdvice(phraseBackedUp)
+        lostWalletAdvice(phraseBackedUp, googleBackup)
+    is VaultUnreadableException -> "This wallet can’t be read. " + lostWalletAdvice(phraseBackedUp, googleBackup)
+    // Google backup (#231). None of these messages can carry the phrase.
+    is BackupUnavailableException -> "Couldn’t $action: ${e.message}."
+    is BackupNotEncryptedException -> "Couldn’t $action: Google can’t end-to-end encrypt the backup on this " +
+        "phone. That needs a screen lock and a Google account."
+    is BackupUnreadableException -> "Couldn’t $action: the Google backup isn’t one this version can read."
+    is BackupMissingException -> "Couldn’t $action: there’s no Google backup on this phone any more."
+    is RestoreNeedsScreenLockException -> "Couldn’t $action: set a screen lock first, so the restored " +
+        "wallet asks who you are before it opens."
     else -> "Couldn’t $action (${e.javaClass.simpleName})"
 }
 
-private fun lostWalletAdvice(phraseBackedUp: Boolean) = if (phraseBackedUp) {
+private fun lostWalletAdvice(phraseBackedUp: Boolean, googleBackup: Boolean) = if (googleBackup) {
+    "Its $GOOGLE_BACKUP_TITLE still has the recovery phrase: remove the wallet but keep that backup, " +
+        "then restore it (with a screen lock set)."
+} else if (phraseBackedUp) {
     "Remove the wallet and import your recovery phrase to get it back."
 } else {
     "Its recovery phrase was never shown, so it can’t be restored: remove it and set up a new wallet."
@@ -331,6 +363,15 @@ fun WalletScreen(
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     var confirmRemove by remember { mutableStateOf(false) }
+    // Google backup (#231): whether it's possible here, whether Block Store holds an
+    // entry, where this wallet's backup stands, and the delete confirmations.
+    val phraseBackup = remember(context) { PhraseBackup.get(context) }
+    var backupAvailability by remember { mutableStateOf<PhraseBackup.Availability?>(null) }
+    var backupEntry by remember { mutableStateOf<Boolean?>(null) }
+    var backupStatus by remember { mutableStateOf<PhraseBackup.Status?>(null) }
+    var backupCheck by remember { mutableStateOf(0) }
+    var confirmBackupOff by remember { mutableStateOf(false) }
+    var confirmBackupDelete by remember { mutableStateOf(false) }
     ReleaseCoveredFocus()
 
     // Accounts and balances (#104). Addresses are public, so both show
@@ -405,6 +446,17 @@ fun WalletScreen(
     val lifecycleState by LocalLifecycleOwner.current.lifecycle.currentStateFlow.collectAsState()
     val deviceSecure = remember(lifecycleState) { vault.deviceSecure() }
 
+    // Asked again on every resume too: a screen lock or Google account set (or removed)
+    // meanwhile changes whether backup can be end-to-end encrypted. With backup on, the
+    // entry is reconciled with that (PhraseBackup.reconcile) and reports where it stands.
+    val resumed = lifecycleState.isAtLeast(Lifecycle.State.RESUMED)
+    LaunchedEffect(resumed, state, backupCheck) {
+        if (!resumed) return@LaunchedEffect
+        backupAvailability = phraseBackup.availability()
+        backupStatus = if (vault.cloudBackupOn()) phraseBackup.reconcileQuietly() else null
+        backupEntry = phraseBackup.exists()
+    }
+
     // Whether the user can have the phrase: false for a created wallet
     // whose phrase was never shown (#78), which the copy must not send
     // them to re-import.
@@ -413,6 +465,8 @@ fun WalletScreen(
         is Vault.State.Unlocked -> s.info.backedUp
         else -> true
     }
+    val googleBackupOn = (state as? Vault.State.Locked)?.info?.cloudBackup
+        ?: (state as? Vault.State.Unlocked)?.info?.cloudBackup ?: false
 
     // A feature asked for the wallet: hand it back as soon as it's open.
     LaunchedEffect(request, state) {
@@ -429,7 +483,7 @@ fun WalletScreen(
             try {
                 block()
             } catch (e: Throwable) {
-                error = walletErrorMessage(e, action, phraseBackedUp)
+                error = walletErrorMessage(e, action, phraseBackedUp, googleBackupOn)
                 if (e is CancellationException) throw e
             } finally {
                 busy = false
@@ -637,6 +691,26 @@ fun WalletScreen(
                     }
                 }
             }
+            if (state == Vault.State.Empty && backupEntry == true) item("restore") {
+                RestoreFromBackupSection(
+                    busy = busy,
+                    deviceSecure = deviceSecure,
+                    onRestore = {
+                        run("restore the wallet") {
+                            vault.restore(auth, phraseBackup)
+                            backupCheck++
+                        }
+                    },
+                    onDelete = { confirmBackupDelete = true },
+                    noScreenLock = {
+                        NoScreenLockWarning(
+                            text = "Restoring asks for your fingerprint, face or screen lock, and this " +
+                                "phone has none. Set a PIN, pattern or password first.",
+                        )
+                        ScreenLockSettingsButton()
+                    },
+                )
+            }
             item("state") {
                 when (val s = state) {
                     Vault.State.Empty -> SetupSection(
@@ -655,12 +729,14 @@ fun WalletScreen(
                     is Vault.State.Locked -> StatusSection(
                         locked = true,
                         info = s.info,
+                        backupStatus = backupStatus,
                         busy = busy,
                         onAction = { run("unlock the wallet") { vault.unlock(auth) } },
                     )
                     is Vault.State.Unlocked -> StatusSection(
                         locked = false,
                         info = s.info,
+                        backupStatus = backupStatus,
                         busy = busy,
                         onAction = { vault.lock() },
                     )
@@ -680,6 +756,21 @@ fun WalletScreen(
                 item("error") { ErrorText(message) }
             }
             val info = stored
+            val turnOnBackup = {
+                run("turn on Google backup") {
+                    vault.enableCloudBackup(auth, phraseBackup)
+                    backupCheck++
+                }
+            }
+            if (info != null && showGoogleBackupOffer(info.cloudBackupOffered, info.cloudBackup, backupAvailability)) {
+                item("backup-offer") {
+                    GoogleBackupOffer(
+                        busy = busy,
+                        onTurnOn = turnOnBackup,
+                        onNotNow = { run("save your answer") { vault.markCloudBackupOffered() } },
+                    )
+                }
+            }
             if (info != null) {
                 val list = accountList
                 if (list == null) {
@@ -796,7 +887,7 @@ fun WalletScreen(
                 error = null
                 showingPhrase = true
             }
-            if (info != null && !info.backedUp) item("backup") {
+            if (info != null && !info.backedUp && !info.cloudBackup) item("backup") {
                 BackupReminder(info.protection, busy = busy, onShow = openPhrase)
             }
             if (info != null) item("phrase") {
@@ -814,6 +905,17 @@ fun WalletScreen(
                         onClick = openPhrase,
                     )
                 }
+            }
+            if (info != null) item("google-backup") {
+                GoogleBackupSection(
+                    on = info.cloudBackup,
+                    availability = backupAvailability,
+                    status = backupStatus,
+                    otherBackupThere = backupEntry == true,
+                    busy = busy,
+                    onToggle = { on -> if (on) turnOnBackup() else confirmBackupOff = true },
+                    screenLockButton = { ScreenLockSettingsButton() },
+                )
             }
             if (info?.protection == VaultProtection.DEVICE_ONLY) item("no-lock") {
                 SectionCard(title = "No screen lock") {
@@ -911,11 +1013,39 @@ fun WalletScreen(
         }
     }
 
+    if (confirmBackupOff || confirmBackupDelete) {
+        val turningOff = confirmBackupOff
+        DeleteGoogleBackupDialog(
+            turningOff = turningOff,
+            onConfirm = {
+                confirmBackupOff = false
+                confirmBackupDelete = false
+                if (turningOff) {
+                    run("turn off Google backup") {
+                        vault.disableCloudBackup(phraseBackup)
+                        backupCheck++
+                    }
+                } else {
+                    run("delete the Google backup") {
+                        phraseBackup.delete()
+                        backupCheck++
+                    }
+                }
+            },
+            onDismiss = {
+                confirmBackupOff = false
+                confirmBackupDelete = false
+            },
+        )
+    }
+
     if (confirmRemove) {
         RemoveWalletDialog(
-            onConfirm = {
+            cloudBackup = stored?.cloudBackup == true,
+            onConfirm = { withBackup ->
                 confirmRemove = false
                 run("remove the wallet") {
+                    var backupLeft: String? = null
                     // Its publisher identities (maintainer decision 9), its history and the
                     // sites connected to it (#110) — or importing the same phrase later would
                     // quietly reconnect them — go with it, inside remove()'s own
@@ -924,6 +1054,17 @@ fun WalletScreen(
                     // ahead of.
                     vault.remove(
                         alsoWipe = {
+                            // Its Google backup (#231). A failure doesn't stop the removal
+                            // (a phone that lost Play services could never remove its
+                            // wallet otherwise): the entry then shows below as a backup
+                            // to restore or delete, and the page says so.
+                            if (withBackup) {
+                                try {
+                                    phraseBackup.delete()
+                                } catch (e: BackupUnavailableException) {
+                                    backupLeft = e.message
+                                }
+                            }
                             publishers.wipe()
                             // The sites' feed access and records (#120): they name identities of this wallet.
                             SwarmFeedStore.get(context).wipe()
@@ -933,6 +1074,11 @@ fun WalletScreen(
                             x402.clear()
                         },
                     )
+                    backupLeft?.let {
+                        error = "The wallet is removed, but its Google backup couldn’t be deleted ($it). " +
+                            "Delete it below once Google Play services answers."
+                    }
+                    backupCheck++
                 }
             },
             onDismiss = { confirmRemove = false },
@@ -955,7 +1101,7 @@ private fun SetupSection(
         )
         Spacer(Modifier.height(8.dp))
         Text(
-            "It stays on this phone only — nothing is backed up to the cloud. Once it’s made, " +
+            "It stays on this phone only unless you turn on $GOOGLE_BACKUP_TITLE. Once it’s made, " +
                 "write down its recovery phrase ($SHOW_PHRASE): without it, the wallet can’t be " +
                 "restored if the phone is lost, broken or reset.",
             style = MaterialTheme.typography.bodySmall,
@@ -985,6 +1131,7 @@ private fun SetupSection(
 private fun StatusSection(
     locked: Boolean,
     info: Vault.Info,
+    backupStatus: PhraseBackup.Status?,
     busy: Boolean,
     onAction: () -> Unit,
 ) {
@@ -1016,7 +1163,11 @@ private fun StatusSection(
             singleLine = false,
         )
         DetailRow("Key kept in", if (info.strongBox) "StrongBox secure chip" else "Android Keystore", singleLine = false)
-        DetailRow("Backup", "This phone only", singleLine = false)
+        DetailRow(
+            "Backup",
+            walletBackupDetail(info.cloudBackup, backupStatus),
+            singleLine = false,
+        )
         Spacer(Modifier.height(8.dp))
         if (locked) {
             Button(onClick = onAction, enabled = !busy, modifier = Modifier.fillMaxWidth()) {
@@ -1242,8 +1393,11 @@ private fun ImportPhrasePage(
  * ticks that they have the phrase or accept losing the wallet.
  */
 @Composable
-private fun RemoveWalletDialog(onConfirm: () -> Unit, onDismiss: () -> Unit) {
+private fun RemoveWalletDialog(cloudBackup: Boolean, onConfirm: (deleteBackup: Boolean) -> Unit, onDismiss: () -> Unit) {
     var acknowledged by remember { mutableStateOf(false) }
+    // Remove wallet deletes its Google backup too (#231), unless the user keeps it: the way
+    // back for a wallet whose key Android erased is to remove it and restore that backup.
+    var deleteBackup by remember { mutableStateOf(true) }
     AlertDialog(
         onDismissRequest = onDismiss,
         icon = { Icon(Icons.Filled.AccountBalanceWallet, contentDescription = null) },
@@ -1251,9 +1405,18 @@ private fun RemoveWalletDialog(onConfirm: () -> Unit, onDismiss: () -> Unit) {
         text = {
             Column {
                 Text(
-                    "This deletes the wallet and its recovery phrase from this phone. There is no " +
-                        "undo and no copy anywhere else: without the recovery phrase written down, " +
-                        "this wallet and everything in it are gone for good.",
+                    if (cloudBackup && deleteBackup) {
+                        "This deletes the wallet and its recovery phrase from this phone, and its " +
+                            "Google backup too. There is no undo: without the recovery phrase written " +
+                            "down, this wallet and everything in it are gone for good."
+                    } else if (cloudBackup) {
+                        "This deletes the wallet and its recovery phrase from this phone. Its Google " +
+                            "backup stays, and this page offers to restore it."
+                    } else {
+                        "This deletes the wallet and its recovery phrase from this phone. There is no " +
+                            "undo and no copy anywhere else: without the recovery phrase written down, " +
+                            "this wallet and everything in it are gone for good."
+                    },
                 )
                 Spacer(Modifier.height(12.dp))
                 Row(
@@ -1270,11 +1433,27 @@ private fun RemoveWalletDialog(onConfirm: () -> Unit, onDismiss: () -> Unit) {
                     Spacer(Modifier.width(8.dp))
                     Text("I have my recovery phrase, or I accept losing this wallet")
                 }
+                if (cloudBackup) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .toggleable(
+                                value = deleteBackup,
+                                role = Role.Checkbox,
+                                onValueChange = { deleteBackup = it },
+                            ),
+                    ) {
+                        Checkbox(checked = deleteBackup, onCheckedChange = null)
+                        Spacer(Modifier.width(8.dp))
+                        Text("Also delete its Google backup")
+                    }
+                }
             }
         },
         confirmButton = {
             TextButton(
-                onClick = onConfirm,
+                onClick = { onConfirm(cloudBackup && deleteBackup) },
                 enabled = acknowledged,
                 colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error),
             ) { Text("Remove wallet") }

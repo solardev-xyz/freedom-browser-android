@@ -109,6 +109,10 @@ class Vault internal constructor(
         val strongBox: Boolean,
         /** False until the user has seen the phrase (#78): the backup reminder shows till then. */
         val backedUp: Boolean,
+        /** Google backup (#231) is on: the phrase is this wallet's entry in Block Store. */
+        val cloudBackup: Boolean = false,
+        /** The one-time Google backup offer after create or import has been answered. */
+        val cloudBackupOffered: Boolean = false,
     )
 
     sealed interface State {
@@ -149,6 +153,13 @@ class Vault internal constructor(
      */
     fun identityTag(): String? = store.read()?.identityTag()
 
+    /** Whether Google backup (#231) is on for the wallet on the device. */
+    fun cloudBackupOn(): Boolean = when (val s = _state.value) {
+        is State.Locked -> s.info.cloudBackup
+        is State.Unlocked -> s.info.cloudBackup
+        else -> false
+    }
+
     /** Whether [create] can make an authentication-bound key; false shows the no-screen-lock warning. */
     fun deviceSecure(): Boolean = store.deviceSecure()
 
@@ -157,13 +168,23 @@ class Vault internal constructor(
      * A phrase created here has not been backed up yet; an [imported]
      * one evidently has, so it gets no backup reminder.
      */
-    suspend fun create(mnemonic: Mnemonic, auth: VaultAuthenticator, imported: Boolean) = ops.withLock {
+    suspend fun create(
+        mnemonic: Mnemonic,
+        auth: VaultAuthenticator,
+        imported: Boolean,
+        restored: Boolean = false,
+    ) = ops.withLock {
         check(_state.value == State.Empty) { "a wallet already exists" }
         val protection = if (store.deviceSecure()) VaultProtection.SCREEN_LOCK else VaultProtection.DEVICE_ONLY
         try {
             val sealing = withContext(io) { store.newSealingCipher(protection) }
             val cipher = if (protection == VaultProtection.SCREEN_LOCK) {
-                auth.authenticate(sealing.cipher, if (imported) VaultAuthPurpose.IMPORT else VaultAuthPurpose.CREATE)
+                val purpose = when {
+                    restored -> VaultAuthPurpose.RESTORE
+                    imported -> VaultAuthPurpose.IMPORT
+                    else -> VaultAuthPurpose.CREATE
+                }
+                auth.authenticate(sealing.cipher, purpose)
             } else {
                 sealing.cipher
             }
@@ -174,7 +195,13 @@ class Vault internal constructor(
             } finally {
                 plain.fill(0)
             }
-            val record = VaultRecord(protection, sealing.strongBox, iv, sealed, backedUp = imported)
+            // A restored wallet's phrase is still the Block Store entry it came from: backup on.
+            val record = VaultRecord(
+                protection, sealing.strongBox, iv, sealed,
+                backedUp = imported || restored,
+                cloudBackup = restored,
+                cloudBackupOffered = restored,
+            )
             val derived = withContext(compute) { mnemonic.seed() }
             withContext(io) { store.write(record) }
             open(derived, record)
@@ -207,7 +234,57 @@ class Vault internal constructor(
     suspend fun markBackedUp() = ops.withLock {
         val record = storedRecord()
         if (record.backedUp) return@withLock
-        val updated = record.withBackedUp(true)
+        rewrite(record.withBackedUp(true))
+    }
+
+    /**
+     * Google backup on (#231): opens the phrase with a fresh
+     * authentication and hands it to [backup], which stores it only if
+     * Block Store will end-to-end encrypt it. If recording that fails, the
+     * entry is taken out again, so "on" is never claimed for a wallet whose
+     * phrase isn't there, nor left there unclaimed.
+     */
+    suspend fun enableCloudBackup(auth: VaultAuthenticator, backup: PhraseBackup) = ops.withLock {
+        val record = storedRecord()
+        val mnemonic = openMnemonic(record, auth, VaultAuthPurpose.BACKUP)
+        backup.store(mnemonic)
+        try {
+            rewrite(record.copy(cloudBackup = true, cloudBackupOffered = true))
+        } catch (t: Throwable) {
+            withContext(NonCancellable) { runCatching { backup.delete() } }
+            throw t
+        }
+    }
+
+    /** Google backup off: the Block Store entry is deleted first, and the wallet says off only once it's gone. */
+    suspend fun disableCloudBackup(backup: PhraseBackup) = ops.withLock {
+        val record = storedRecord()
+        backup.delete()
+        rewrite(record.copy(cloudBackup = false, cloudBackupOffered = true))
+    }
+
+    /** The user said Not now to the one-time Google backup offer. */
+    suspend fun markCloudBackupOffered() = ops.withLock {
+        val record = storedRecord()
+        if (record.cloudBackupOffered) return@withLock
+        rewrite(record.copy(cloudBackupOffered = true))
+    }
+
+    /**
+     * "Restore wallet" on a phone with no wallet and a Block Store entry
+     * (#231): the backed-up phrase becomes the device's wallet, sealed
+     * like an import — which asks for the fingerprint, face or screen
+     * lock. A phone without a screen lock can't restore this way (nothing
+     * would ask), so it's refused there before the phrase is even read.
+     */
+    suspend fun restore(auth: VaultAuthenticator, backup: PhraseBackup) {
+        if (!store.deviceSecure()) throw RestoreNeedsScreenLockException()
+        val mnemonic = backup.read() ?: throw BackupMissingException()
+        create(mnemonic, auth, imported = true, restored = true)
+    }
+
+    /** Writes [updated] (same sealed phrase, new flags) and publishes it. Call under [ops]. */
+    private suspend fun rewrite(updated: VaultRecord) {
         withContext(io) { store.write(updated) }
         // Under the seed lock, and keyed on the seed rather than the state
         // read before it: an auto-lock landing meanwhile must not be undone.
@@ -449,4 +526,4 @@ class Vault internal constructor(
     }
 }
 
-private fun VaultRecord.info() = Vault.Info(protection, strongBox, backedUp)
+private fun VaultRecord.info() = Vault.Info(protection, strongBox, backedUp, cloudBackup, cloudBackupOffered)
