@@ -302,4 +302,20 @@ class OpenLvSessionTest {
         assertEquals(OpenLvSession.INVALID_PARAMS, error(engine.next()))
         assertNull(s.approval.value)
     }
+
+    @Test
+    fun `call data over the cap is refused before it's priced or shown`() {
+        val (s, engine) = session()
+        s.startOnScope()
+        s.onRequest(1, 0, "wallet_switchEthereumChain", JSONArray().put(JSONObject().put("chainId", "0x64")))
+        engine.next()
+        val tx = JSONObject().put("from", account0.address).put("to", account1.address).put("chainId", "0x64")
+        s.onRequest(1, 1, "eth_sendTransaction", JSONArray().put(JSONObject(tx.toString()).put("data", "0x" + "ab".repeat(OpenLvSession.MAX_CALL_DATA + 1))))
+        assertEquals(OpenLvSession.INVALID_PARAMS, error(engine.next()))
+        assertNull(s.approval.value)
+        // At the cap it's a request like any other.
+        s.onRequest(1, 2, "eth_sendTransaction", JSONArray().put(JSONObject(tx.toString()).put("data", "0x" + "ab".repeat(OpenLvSession.MAX_CALL_DATA))))
+        val quote = (s.awaitSheet().request as OpenLvSession.Request.SendTransaction).quote
+        assertEquals(OpenLvSession.MAX_CALL_DATA, quote.tx.data.size)
+    }
 }

@@ -57,15 +57,22 @@ function requestHandler(state) {
   };
 }
 
-function signalingAllowed(url) {
+// Why a pairing code's signaling server can't be used, or null if it can:
+// wss:, or cleartext ws: only to the phone itself (as the page's CSP).
+function signalingRefusal(url) {
   let u;
   try {
     u = new URL(url);
   } catch {
-    return false;
+    return 'That pairing code’s server address can’t be read. Scan the code on the computer again.';
   }
-  if (u.protocol === 'wss:') return true;
-  return u.protocol === 'ws:' && (u.hostname === '127.0.0.1' || u.hostname === 'localhost');
+  if (u.protocol === 'wss:') return null;
+  if (u.protocol === 'ws:') {
+    if (u.hostname === '127.0.0.1' || u.hostname === 'localhost') return null;
+    return 'That pairing code points at an unencrypted server. Scan the code on the computer again.';
+  }
+  // Scheme only: the rest of the URL can carry credentials.
+  return `That pairing code’s server uses ${u.protocol}, but the phone connects over secure WebSockets (wss:) only. Scan the code on the computer again.`;
 }
 
 function stop() {
@@ -96,10 +103,8 @@ async function start(sid, uri) {
       throw new Error('That pairing code can’t be read. Scan the code on the computer again.');
     }
     if (params.p !== 'mqtt') throw new Error(`Unsupported signaling protocol "${params.p}"`);
-    // As the page's CSP: wss:, or cleartext only to the phone itself.
-    if (params.s != null && !signalingAllowed(String(params.s))) {
-      throw new Error('That pairing code points at an unencrypted server. Scan the code on the computer again.');
-    }
+    const refusal = params.s != null ? signalingRefusal(String(params.s)) : null;
+    if (refusal) throw new Error(refusal);
     report('connecting');
     const session = await createSession(params, [webrtc()], requestHandler(state));
     if (current !== state) {

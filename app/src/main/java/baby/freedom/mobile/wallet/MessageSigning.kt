@@ -38,15 +38,23 @@ internal object MessageSigning {
         } catch (e: java.nio.charset.CharacterCodingException) {
             return null
         }
-        val invisible = text.any { c -> hides(c) && c != '\n' && c != '\t' && c != '\r' }
+        val invisible = text.codePoints().anyMatch { c -> hides(c) && c != '\n'.code && c != '\t'.code && c != '\r'.code }
         return text.takeIf { !invisible && it.isNotBlank() }
     }
 
     /**
-     * Whether [c] can hide or rearrange the text around it on a sheet: a
-     * control character (line breaks included), a format character (bidi
-     * overrides, zero-width joiners) or a line/paragraph separator.
+     * Whether code point [c] can hide or rearrange the text around it on a
+     * sheet: a control character (line breaks included), a format character
+     * (bidi overrides, zero-width joiners, and the supplementary-plane ones
+     * too — tag characters U+E0001/U+E0020–E007F, U+1BCA0–3, U+1D173–A), a
+     * line/paragraph separator, or a lone surrogate. Judged per code point,
+     * never per UTF-16 `Char`: half of a surrogate pair is typed SURROGATE,
+     * which would let every supplementary format character through.
      */
-    fun hides(c: Char): Boolean =
-        c.isISOControl() || Character.getType(c) == Character.FORMAT.toInt() || c == '\u2028' || c == '\u2029'
+    fun hides(c: Int): Boolean =
+        Character.isISOControl(c) || Character.getType(c) == Character.FORMAT.toInt() ||
+            Character.getType(c) == Character.SURROGATE.toInt() || c == 0x2028 || c == 0x2029
+
+    /** Whether any code point of [s] [hides]. */
+    fun anyHides(s: String): Boolean = s.codePoints().anyMatch(::hides)
 }

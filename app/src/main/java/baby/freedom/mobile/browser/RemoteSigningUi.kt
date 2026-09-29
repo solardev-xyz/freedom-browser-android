@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.selection.selectableGroup
@@ -24,6 +25,7 @@ import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -62,8 +64,73 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
-/** A composed transaction's call data as the review shows it: all of it, or that there's none. */
-internal fun callDataText(hex: String): String = if (hex == "0x" || hex.isEmpty()) "None" else hex
+/**
+ * [hex] (`0x`-prefixed) as the review lays it out: one 32-byte word a line —
+ * ABI's own grain — after the 4-byte function selector when [selector].
+ * Every byte is in a line; nothing is cut.
+ */
+internal fun hexLines(hex: String, selector: Boolean): List<String> {
+    val body = hex.removePrefix("0x")
+    if (body.isEmpty()) return emptyList()
+    val out = ArrayList<String>(body.length / HEX_WORD + 2)
+    val first = minOf(body.length, if (selector) 8 else HEX_WORD)
+    out += "0x" + body.substring(0, first)
+    var i = first
+    while (i < body.length) {
+        out += body.substring(i, minOf(body.length, i + HEX_WORD))
+        i += HEX_WORD
+    }
+    return out
+}
+
+private const val HEX_WORD = 64
+
+/** Up to this many lines are laid out inline; more go in a bounded, lazily laid out box. */
+internal const val HEX_INLINE_LINES = 16
+
+/**
+ * A review row for bytes shown in hex (call data, a binary message). A
+ * short value is laid out inline; a long one (up to 64 KB of it:
+ * [OpenLvSession.MAX_CALL_DATA], [OpenLvSession.MAX_MESSAGE]) goes in a
+ * box of its own that scrolls and only lays out the lines on screen — one
+ * Text holding all of it took seconds of main-thread layout.
+ */
+@Composable
+internal fun HexRow(label: String, hex: String, selector: Boolean, detail: String? = null) {
+    val lines = remember(hex, selector) { hexLines(hex, selector) }
+    Column(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+        Text(label, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        // A 32-byte word as two 16-byte halves: fits a phone's width instead of wrapping at a random column.
+        val line: @Composable (String) -> Unit = {
+            Text(
+                it.chunked(HEX_WORD / 2).joinToString("\n"),
+                fontFamily = FontFamily.Monospace,
+                style = MaterialTheme.typography.bodyMedium,
+                modifier = Modifier.padding(vertical = 3.dp),
+            )
+        }
+        when {
+            lines.isEmpty() -> Text("None")
+            lines.size <= HEX_INLINE_LINES -> SelectionContainer { Column { lines.forEach { line(it) } } }
+            else -> Surface(
+                shape = RoundedCornerShape(8.dp),
+                color = MaterialTheme.colorScheme.surfaceContainerHighest,
+                modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+            ) {
+                SelectionContainer {
+                    LazyColumn(Modifier.fillMaxWidth().heightIn(max = 240.dp).padding(horizontal = 8.dp, vertical = 4.dp)) {
+                        items(lines.size) { line(lines[it]) }
+                    }
+                }
+            }
+        }
+        val more = if (lines.size > HEX_INLINE_LINES) "${lines.size} lines: scroll the box to read them all" else null
+        listOfNotNull(detail, more).joinToString(" · ").takeIf { it.isNotEmpty() }?.let {
+            Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+    }
+    HorizontalDivider()
+}
 
 /** What the connection with desktop Freedom is doing, in a line. */
 internal fun remoteStatusText(status: OpenLvSession.Status): String = when (status) {
@@ -269,7 +336,7 @@ private fun PersonalSignBody(request: OpenLvSession.Request.PersonalSign) {
     if (text != null) {
         ReviewRow("Message", text)
     } else {
-        ReviewRow("Message", "0x" + request.message.toHex(), mono = true, detail = "${request.message.size} bytes that aren’t text")
+        HexRow("Message", "0x" + request.message.toHex(), selector = false, detail = "${request.message.size} bytes that aren’t text")
     }
     Spacer(Modifier.height(4.dp))
     Text(
@@ -333,10 +400,10 @@ private fun SendTransactionBody(request: OpenLvSession.Request.SendTransaction) 
     }
     ReviewRow("Value", "${SendAmounts.exact(r.amount, chain.decimals)} ${chain.symbol}", mono = true)
     val data = r.callData ?: "0x"
-    ReviewRow(
+    HexRow(
         "Data",
-        callDataText(data),
-        mono = true,
+        data,
+        selector = true,
         detail = if (data.length > 2) "${(data.length - 2) / 2} bytes: the contract call it asks to make" else "A plain transfer",
     )
     ReviewRow("Network fee", "up to ${feeText(quote.tx.maxFee, chain)}", mono = true, detail = feeDetail(quote.tx))

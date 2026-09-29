@@ -315,7 +315,12 @@ class OpenLvSession internal constructor(
         val value = if (tx.has("value")) quantity(tx.opt("value"))?.takeIf { it.signum() >= 0 && it.bitLength() <= 256 } ?: return invalid("Not a value.") else BigInteger.ZERO
         val data = when (val d = tx.opt("data") ?: tx.opt("input")) {
             null, JSONObject.NULL -> "0x"
-            is String -> d.lowercase().takeIf { HEX.matches(it) } ?: return invalid("The data isn’t hex.")
+            // Bounded before anything reads it: the sheet shows all of it, and more isn't a call anyone reviews.
+            is String -> if (d.length > 2 + 2 * MAX_CALL_DATA) {
+                return invalid("The call data is over ${MAX_CALL_DATA / 1024} KB: more than the phone will show you to approve.")
+            } else {
+                d.lowercase().takeIf { HEX.matches(it) } ?: return invalid("The data isn’t hex.")
+            }
             else -> return invalid("The data isn’t hex.")
         }
         val request = SendRequest(
@@ -412,6 +417,13 @@ class OpenLvSession internal constructor(
 
         /** A `personal_sign` message longer than this isn't one a sheet can show. */
         const val MAX_MESSAGE = 64 * 1024
+
+        /**
+         * `eth_sendTransaction` call data longer than this, in bytes, is
+         * refused. Real contract calls are a few hundred bytes to a few KB;
+         * a node won't relay a transaction over 128 KB anyway.
+         */
+        const val MAX_CALL_DATA = 64 * 1024
 
         private val HEX = Regex("^0x([0-9a-fA-F]{2})*$")
         private val QUANTITY = Regex("^0x[0-9a-fA-F]{1,64}$")

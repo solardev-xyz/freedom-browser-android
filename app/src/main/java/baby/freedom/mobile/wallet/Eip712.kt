@@ -57,6 +57,15 @@ object Eip712 {
      */
     const val MAX_LINES = 1000
 
+    /**
+     * More characters than this across every line isn't something a
+     * person reads either — and the sheet lays each line out whole on the
+     * main thread, so one huge string field (the payload can be up to
+     * [MAX_JSON]) would freeze it. The same bound as a `personal_sign`
+     * message ([OpenLvSession.MAX_MESSAGE]).
+     */
+    const val MAX_SHOWN = 64 * 1024
+
     private val IDENTIFIER = Regex("^[A-Za-z_$][A-Za-z0-9_$]*$")
     private val ARRAY = Regex("^(.+)\\[(\\d*)]$")
     private val UINT = Regex("^uint(\\d{1,3})$")
@@ -152,14 +161,17 @@ object Eip712 {
 
     /**
      * What's signed, for the sheet: the domain's fields, then the message's,
-     * nested structs and arrays indented. More than [MAX_LINES] in either is
-     * [InvalidTypedData]: too much to review is too much to sign.
+     * nested structs and arrays indented. More than [MAX_LINES] in either,
+     * or more than [MAX_SHOWN] characters in all, is [InvalidTypedData]:
+     * too much to review is too much to sign.
      */
     fun lines(td: TypedData): Pair<List<Line>, List<Line>> = guarded {
         val domain = ArrayList<Line>()
         describe(DOMAIN, td.domain, td.types, "", 0, domain)
         val message = ArrayList<Line>()
         if (td.primaryType != DOMAIN) describe(td.primaryType, td.message, td.types, "", 0, message)
+        val shown = (domain + message).sumOf { it.label.length.toLong() + it.value.length }
+        if (shown > MAX_SHOWN) throw InvalidTypedData("The typed data is too long to show on the phone")
         domain to message
     }
 
@@ -208,15 +220,17 @@ object Eip712 {
      * for `personal_sign`. Everything else is shown as is.
      */
     internal fun visible(s: String): String {
-        if (s.none(MessageSigning::hides)) return s
+        if (!MessageSigning.anyHides(s)) return s
         val b = StringBuilder(s.length + 16)
-        for (c in s) {
+        // Per code point: a supplementary format character (a tag character) is two Chars.
+        s.codePoints().forEach { c ->
             when {
-                !MessageSigning.hides(c) -> b.append(c)
-                c == '\n' -> b.append("\\n")
-                c == '\r' -> b.append("\\r")
-                c == '\t' -> b.append("\\t")
-                else -> b.append("\\u").append(c.code.toString(16).uppercase(java.util.Locale.ROOT).padStart(4, '0'))
+                !MessageSigning.hides(c) -> b.appendCodePoint(c)
+                c == '\n'.code -> b.append("\\n")
+                c == '\r'.code -> b.append("\\r")
+                c == '\t'.code -> b.append("\\t")
+                c > 0xFFFF -> b.append("\\u{").append(c.toString(16).uppercase(java.util.Locale.ROOT)).append('}')
+                else -> b.append("\\u").append(c.toString(16).uppercase(java.util.Locale.ROOT).padStart(4, '0'))
             }
         }
         return b.toString()

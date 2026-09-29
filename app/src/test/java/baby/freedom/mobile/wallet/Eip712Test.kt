@@ -217,4 +217,28 @@ class Eip712Test {
         // Plain text, non-ASCII included, is shown as is.
         assertEquals("ünïcødé ✓", Eip712.visible("ünïcødé ✓"))
     }
+
+    @Test
+    fun `supplementary-plane format characters are caught per code point`() {
+        // Tag characters (U+E0001, U+E0041), a shorthand format control (U+1BCA0),
+        // a musical-notation format control (U+1D173): each two UTF-16 Chars.
+        val tags = "ok" + String(Character.toChars(0xE0001)) + String(Character.toChars(0xE0041)) + "!"
+        assertEquals("ok\\u{E0001}\\u{E0041}!", Eip712.visible(tags))
+        assertEquals("a\\u{1BCA0}b\\u{1D173}", Eip712.visible("a" + String(Character.toChars(0x1BCA0)) + "b" + String(Character.toChars(0x1D173))))
+        assertNull(MessageSigning.readableText(tags.toByteArray()))
+        // A lone surrogate (JSON "\ud800") is escaped too; a real emoji is not.
+        assertEquals("x\\uD800y", Eip712.visible("x\uD800y"))
+        assertEquals("gm 👋", Eip712.visible("gm 👋"))
+        assertEquals("gm 👋", MessageSigning.readableText("gm 👋".toByteArray()))
+    }
+
+    @Test
+    fun `one huge string field is refused rather than laid out on the sheet`() {
+        val payload = JSONObject(mail)
+        payload.getJSONObject("message").put("contents", "x".repeat(Eip712.MAX_SHOWN + 1))
+        val td = Eip712.parse(payload.toString())
+        assertThrows(Eip712.InvalidTypedData::class.java) { Eip712.lines(td) }
+        payload.getJSONObject("message").put("contents", "x".repeat(1000))
+        Eip712.lines(Eip712.parse(payload.toString()))
+    }
 }
