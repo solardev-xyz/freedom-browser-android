@@ -59,6 +59,13 @@ class SwarmNode internal constructor(
         fun storageBuyXdai(handle: Long, gnosisRpc: String, depth: Int, amountPerChunk: String, immutable: Boolean): String
         fun storageTopupXdai(handle: Long, gnosisRpc: String, amountPerChunk: String): String
 
+        /**
+         * One request to the node's own gateway ([GATEWAY_URL] + [path]),
+         * from this process: its status code and body, or null when it
+         * couldn't be reached. Never logs the path's query.
+         */
+        fun gateway(method: String, path: String, timeoutMs: Int): GatewayAnswer?
+
         object Native : NodeOps {
             override fun seed(antDir: File) = BootnodeSeeder.seedIfEmpty(antDir)
             override fun init(dataDir: String) = AntNative.init(dataDir)
@@ -81,8 +88,33 @@ class SwarmNode internal constructor(
                 AntNative.storageBuyXdai(handle, gnosisRpc, depth, amountPerChunk, immutable)
             override fun storageTopupXdai(handle: Long, gnosisRpc: String, amountPerChunk: String) =
                 AntNative.storageTopupXdai(handle, gnosisRpc, amountPerChunk)
+            override fun gateway(method: String, path: String, timeoutMs: Int): GatewayAnswer? = try {
+                val conn = java.net.URL(GATEWAY_URL + path).openConnection() as java.net.HttpURLConnection
+                try {
+                    conn.requestMethod = method
+                    conn.connectTimeout = GATEWAY_CONNECT_TIMEOUT_MS
+                    conn.readTimeout = timeoutMs
+                    conn.useCaches = false
+                    if (method == "POST") {
+                        conn.doOutput = true
+                        conn.setFixedLengthStreamingMode(0)
+                        conn.outputStream.close()
+                    }
+                    val code = conn.responseCode
+                    val body = (if (code >= 400) conn.errorStream else conn.inputStream)
+                        ?.use { it.readBytes().toString(Charsets.UTF_8) }.orEmpty()
+                    GatewayAnswer(code, body)
+                } finally {
+                    conn.disconnect()
+                }
+            } catch (e: java.io.IOException) {
+                null
+            }
         }
     }
+
+    /** A gateway response: [code] and [body]. */
+    internal data class GatewayAnswer(val code: Int, val body: String)
 
     data class Config(
         val dataDir: String,
@@ -370,7 +402,14 @@ class SwarmNode internal constructor(
     fun buyStamp(depth: Int, amountPerChunk: BigInteger, immutable: Boolean, maxSwapWei: BigInteger): String =
         withLightNode { h, rpc ->
             val plan = SpendPlan.BuyStamp(owner(), depth, amountPerChunk, immutable, maxSwapWei)
-            SpendGuard.during(plan) { ops.storageBuyXdai(h, rpc, depth, amountPerChunk.toString(), immutable) }
+            val bought = SpendGuard.during(plan) { ops.storageBuyXdai(h, rpc, depth, amountPerChunk.toString(), immutable) }
+            // The first buy sets up the chequebook (deploys one, or adopts the
+            // one this account already owns), but the gateway only loads it
+            // when it starts — ant's contract is to restart the gateway then,
+            // or the chequebook (and a deposit into it, #117) waits for the
+            // next node restart.
+            if (gatewayChequebook() == "") reloadGateway(h, mode = synchronized(lock) { handleMode })
+            bought
         }
 
     /**
@@ -392,6 +431,78 @@ class SwarmNode internal constructor(
             val plan = SpendPlan.ExtendStamp(owner(), want, depth, amountPerChunk, maxSwapWei)
             SpendGuard.during(plan) { ops.storageTopupXdai(h, rpc, amountPerChunk.toString()) }
         }
+
+    /**
+     * Deposits [amountPlur] of the node's own xBZZ into its chequebook
+     * [chequebook] (#117), as the user confirmed it — through ant's
+     * `POST /chequebook/deposit`, the one transfer the permit admits.
+     * Refuses unless the gateway's chequebook is [chequebook] and the
+     * account holds the xBZZ (there's no swap). SPENDS. Returns ant's
+     * `{"transactionHash": …}`.
+     */
+    fun depositChequebook(chequebook: String, amountPlur: BigInteger): String {
+        require(amountPlur.signum() > 0) { "bad amount" }
+        val want = normalizeAddress(chequebook) ?: throw IllegalArgumentException("not a chequebook address")
+        return withLightNode { _, _ ->
+            when (gatewayChequebook()) {
+                null -> throw IllegalStateException("the node couldn't say which chequebook it has")
+                "" -> throw IllegalStateException("the node has no chequebook yet")
+                want -> Unit
+                else -> throw IllegalStateException("the node's chequebook isn't the one you confirmed")
+            }
+            val wallet = ops.gateway("GET", "/wallet", GATEWAY_READ_TIMEOUT_MS)
+                ?.takeIf { it.code == 200 }
+                ?.let { runCatching { BigInteger(JSONObject(it.body).getString("bzzBalance")) }.getOrNull() }
+                ?: throw IllegalStateException("the node couldn't read its xBZZ balance")
+            check(wallet >= amountPlur) { "the node holds only ${formatBzz(wallet)} xBZZ" }
+            val plan = SpendPlan.DepositChequebook(owner(), want, amountPlur)
+            val answer = SpendGuard.during(plan) {
+                ops.gateway("POST", "/chequebook/deposit?amount=$amountPlur", DEPOSIT_TIMEOUT_MS)
+            } ?: throw RuntimeException("the node's gateway didn't answer")
+            if (answer.code !in 200..299) {
+                val message = runCatching { JSONObject(answer.body).optString("message") }.getOrNull()
+                throw RuntimeException(message?.takeIf { it.isNotBlank() } ?: "the deposit failed (HTTP ${answer.code})")
+            }
+            answer.body
+        }
+    }
+
+    /**
+     * The chequebook the gateway loaded, as 40 lowercase hex; `""` for
+     * none; null when it couldn't say (not answering, still reading the
+     * chain).
+     */
+    private fun gatewayChequebook(): String? {
+        val answer = ops.gateway("GET", "/chequebook/address", GATEWAY_READ_TIMEOUT_MS)?.takeIf { it.code == 200 }
+            ?: return null
+        val address = runCatching { JSONObject(answer.body).getString("chequebookAddress") }.getOrNull() ?: return null
+        val hex = normalizeAddress(address) ?: return null
+        return if (hex.all { it == '0' }) "" else hex
+    }
+
+    /**
+     * Stops and starts the gateway of [h] in [mode], so it loads what ant
+     * persisted meanwhile (a chequebook). Only while [h] is still the
+     * node's handle; a failure leaves the node in Error rather than
+     * Running with no gateway.
+     */
+    private fun reloadGateway(h: Long, mode: Mode) {
+        synchronized(lock) { if (handle != h) return }
+        try {
+            ops.stopGateway(h)
+            ops.startGateway(handle = h, apiAddr = GATEWAY_ADDR, lightMode = mode.light, gnosisRpc = mode.gnosisRpc)
+            Log.i(TAG, "reloaded the gateway so it reports the node's chequebook")
+        } catch (t: Throwable) {
+            Log.w(TAG, "reloading the gateway failed: ${t.javaClass.simpleName}")
+            synchronized(lock) {
+                if (handle == h) {
+                    _state.update {
+                        it.copy(status = NodeStatus.Error, errorMessage = "The gateway didn't come back after a postage purchase")
+                    }
+                }
+            }
+        }
+    }
 
     /** The node's account, as [SpendPlan.owner]. */
     private fun owner(): String = _state.value.accountAddress.removePrefix("0x").lowercase()
@@ -442,6 +553,20 @@ class SwarmNode internal constructor(
         const val GATEWAY_URL: String = "http://$GATEWAY_ADDR"
 
         private const val TAG = "SwarmNode"
+
+        private const val GATEWAY_CONNECT_TIMEOUT_MS = 5_000
+        private const val GATEWAY_READ_TIMEOUT_MS = 15_000
+
+        /** ant waits up to 3 min for a deposit's receipt; a little longer here. */
+        private const val DEPOSIT_TIMEOUT_MS = 4 * 60_000
+
+        /** [address] as 40 lowercase hex without `0x`, or null if it isn't an address. */
+        fun normalizeAddress(address: String): String? = address.trim().removePrefix("0x").removePrefix("0X").lowercase()
+            .takeIf { s -> s.length == 40 && s.all { it in '0'..'9' || it in 'a'..'f' } }
+
+        /** PLUR as xBZZ (16 decimals), trailing zeros dropped. */
+        internal fun formatBzz(plur: BigInteger): String =
+            java.math.BigDecimal(plur).movePointLeft(16).stripTrailingZeros().toPlainString()
 
         /** [id] as 64 lowercase hex without `0x`, or null if it isn't a batch id. */
         fun normalizeBatchId(id: String): String? = id.trim().removePrefix("0x").removePrefix("0X").lowercase()

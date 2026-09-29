@@ -4,9 +4,9 @@ import android.util.Log
 import java.math.BigInteger
 
 /**
- * What one spend the user confirmed in the app may broadcast (#116):
- * the exact transactions ant's own xDAI-funded postage flow sends for it,
- * and no others. [owner] is the node's own account (40 lowercase hex, no
+ * What one spend the user confirmed in the app may broadcast (#116,
+ * #117): the exact transactions ant's own flow sends for it, and no
+ * others. [owner] is the node's own account (40 lowercase hex, no
  * `0x`), which signs every one of them.
  */
 sealed interface SpendPlan {
@@ -39,10 +39,22 @@ sealed interface SpendPlan {
         val amountPerChunk: BigInteger,
         val maxSwapWei: BigInteger,
     ) : SpendPlan
+
+    /**
+     * Depositing into the node's chequebook (#117, ant's `POST
+     * /chequebook/deposit`): one xBZZ `transfer` of exactly [amountPlur]
+     * to [chequebook] (40 lowercase hex), the chequebook the confirmation
+     * named. No swap: the xBZZ must already be in the node's account.
+     */
+    data class DepositChequebook(
+        override val owner: String,
+        val chequebook: String,
+        val amountPlur: BigInteger,
+    ) : SpendPlan
 }
 
 /**
- * The Swarm node's broadcast gate (#114, #116).
+ * The Swarm node's broadcast gate (#114, #116, #117).
  *
  * `ant_jni.c` installs a chain transport on every node, and every
  * `eth_send*` ant makes — from its HTTP gateway, which any app on the
@@ -63,10 +75,13 @@ sealed interface SpendPlan {
  * address, because the chequebook it funds is created in the same flow
  * and its address can't be known before ant sends the deposit. That is
  * safe only because no ant gateway route transfers xBZZ to an address the
- * caller chooses, so during a buy the only `transfer` ant can sign is its
- * own deposit. If ant ever gains such a route (a withdraw, a cash-out),
- * pin this slot to the deployed chequebook first — until then a request
- * racing a buy could send up to 0.001 xBZZ to an address of its choice.
+ * caller chooses: the one gateway route that transfers xBZZ at all, `POST
+ * /chequebook/deposit` (#117), pays only the chequebook the gateway
+ * loaded at start, the node's own. So during a buy the only `transfer`s
+ * ant can sign go to the node's chequebooks. If ant ever gains a route
+ * that pays a caller-chosen address (a withdraw, a cash-out), pin this
+ * slot to the deployed chequebook first — until then a request racing a
+ * buy could send up to 0.001 xBZZ to an address of its choice.
  */
 object SpendGuard {
     @Volatile
@@ -119,7 +134,7 @@ object SpendGuard {
  * again: that's ant retrying the same broadcast, not a second spend.
  */
 class SpendPermit(val plan: SpendPlan) {
-    enum class Slot { Swap, Approve, CreateBatch, TopUp, DeployChequebook, SettlementDeposit }
+    enum class Slot { Swap, Approve, CreateBatch, TopUp, DeployChequebook, SettlementDeposit, Deposit }
 
     private val used = HashSet<Slot>()
     private val admitted = HashSet<String>()
@@ -152,11 +167,19 @@ class SpendPermit(val plan: SpendPlan) {
             ?.let { hex(it.copyOfRange(12, 32)) }
         val owner = plan.owner
 
+        if (plan is SpendPlan.DepositChequebook) {
+            // One transfer of exactly the confirmed xBZZ to exactly the confirmed chequebook.
+            return Slot.Deposit.takeIf {
+                tx.value.signum() == 0 && to == BZZ_TOKEN && selector == SEL_TRANSFER && words == 64 &&
+                    address(0) == plan.chequebook && uint(1) == plan.amountPlur
+            }
+        }
         if (tx.value.signum() != 0) {
             // Only the swap carries xDAI, and never more than the confirmation showed.
             val maxSwap = when (plan) {
                 is SpendPlan.BuyStamp -> plan.maxSwapWei
                 is SpendPlan.ExtendStamp -> plan.maxSwapWei
+                is SpendPlan.DepositChequebook -> return null
             }
             return Slot.Swap.takeIf {
                 to == SWAP_HELPER && selector == SEL_SWAP && words == 64 &&
@@ -166,6 +189,7 @@ class SpendPermit(val plan: SpendPlan) {
         val (depth, amount) = when (plan) {
             is SpendPlan.BuyStamp -> plan.depth to plan.amountPerChunk
             is SpendPlan.ExtendStamp -> plan.depth to plan.amountPerChunk
+            is SpendPlan.DepositChequebook -> return null
         }
         return when {
             to == BZZ_TOKEN && selector == SEL_APPROVE && words == 64 ->
@@ -222,12 +246,18 @@ class SpendPermit(val plan: SpendPlan) {
             setOf(Slot.Swap, Slot.Approve, Slot.TopUp)
         }
 
+        /** What a chequebook deposit (#117) may broadcast: its one transfer. */
+        val DEPOSIT_SLOTS: Set<Slot> = setOf(Slot.Deposit)
+
         /**
          * The most gas a buy or an extend can cost: [MAX_GAS_WEI] for each
          * of its transactions. It comes on top of the swap's `maxSwapWei`,
          * so this plus that is the hard bound on the xDAI one spend uses.
          */
         fun maxGasWei(buy: Boolean): BigInteger = MAX_GAS_WEI.multiply(BigInteger.valueOf(slotsFor(buy).size.toLong()))
+
+        /** The most gas a chequebook deposit can cost: [MAX_GAS_WEI] for its one transaction. */
+        val DEPOSIT_MAX_GAS_WEI: BigInteger = MAX_GAS_WEI.multiply(BigInteger.valueOf(DEPOSIT_SLOTS.size.toLong()))
 
         private val METHOD = Regex("\"method\"\\s*:\\s*\"([^\"\\\\]*)\"")
         private val PARAMS = Regex("\"params\"\\s*:\\s*\\[\\s*\"(0x[0-9a-fA-F]*)\"\\s*]")

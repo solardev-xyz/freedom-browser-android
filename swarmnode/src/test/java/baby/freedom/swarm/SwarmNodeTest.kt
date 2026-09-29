@@ -89,6 +89,25 @@ class SwarmNodeTest {
             calls += "topup:$handle:$amountPerChunk"
             return onSpend("topup")
         }
+
+        /** The gateway's chequebook, 40 hex (all zeros for none), and the account's xBZZ in PLUR. */
+        @Volatile var chequebookHex = "0".repeat(40)
+        @Volatile var walletPlur = "0"
+        /** What a `POST /chequebook/deposit` does, in place of ant's transaction. */
+        @Volatile var onDeposit: (String) -> SwarmNode.GatewayAnswer =
+            { SwarmNode.GatewayAnswer(201, "{\"transactionHash\":\"0x${"ee".repeat(32)}\"}") }
+        override fun gateway(method: String, path: String, timeoutMs: Int): SwarmNode.GatewayAnswer? {
+            calls += "gateway:$method $path"
+            return when {
+                method == "GET" && path == "/chequebook/address" ->
+                    SwarmNode.GatewayAnswer(200, "{\"chequebookAddress\":\"0x$chequebookHex\"}")
+                method == "GET" && path == "/wallet" ->
+                    SwarmNode.GatewayAnswer(200, "{\"bzzBalance\":\"$walletPlur\",\"nativeTokenBalance\":\"1\"}")
+                method == "POST" && path.startsWith("/chequebook/deposit?amount=") ->
+                    onDeposit(path.substringAfter("amount="))
+                else -> SwarmNode.GatewayAnswer(404, "")
+            }
+        }
     }
 
     private val config = SwarmNode.Config(dataDir = "/nonexistent")
@@ -393,6 +412,105 @@ class SwarmNodeTest {
         }
         assertFalse(e.message!!.contains("key123"))
         assertTrue(e.message!!.contains("the Gnosis RPC"))
+        node.dispose()
+    }
+
+    private val chequebook = "37".repeat(20)
+    private val milliBzz = java.math.BigInteger.TEN.pow(13)
+
+    @Test
+    fun aDepositRunsInsideAPermitForExactlyTheConfirmedChequebookAndAmount() {
+        val ops = FakeOps()
+        val node = lightNode(ops)
+        ops.chequebookHex = chequebook
+        ops.walletPlur = "34393882720917"
+        val confirmed = TestTx.request(TestTx.transfer(chequebook, milliBzz))
+        val elsewhere = TestTx.request(TestTx.transfer("cc".repeat(20), milliBzz))
+        val seen = mutableListOf<Boolean>()
+        ops.onDeposit = { amount ->
+            seen += SpendGuard.admit(elsewhere)
+            seen += SpendGuard.admit(confirmed)
+            assertEquals(milliBzz.toString(), amount)
+            SwarmNode.GatewayAnswer(201, """{"transactionHash":"0xabc"}""")
+        }
+        assertFalse(SpendGuard.admit(confirmed))
+        assertEquals("""{"transactionHash":"0xabc"}""", node.depositChequebook("0x" + chequebook.uppercase(), milliBzz))
+        assertEquals(listOf(false, true), seen)
+        // Closed again once the deposit returns.
+        assertFalse(SpendGuard.admit(confirmed))
+        node.dispose()
+    }
+
+    @Test
+    fun aDepositRefusesAnotherChequebookNoneOrMoreXbzzThanTheNodeHolds() {
+        val ops = FakeOps()
+        val node = lightNode(ops)
+        ops.walletPlur = milliBzz.toString()
+        fun refused(cb: String, amount: java.math.BigInteger): String {
+            val e = assertThrows(IllegalStateException::class.java) { node.depositChequebook(cb, amount) }
+            assertFalse(ops.calls.any { it.startsWith("gateway:POST") })
+            return e.message!!
+        }
+        // No chequebook yet (the gateway's zero address).
+        assertEquals("the node has no chequebook yet", refused(chequebook, milliBzz))
+        // The gateway's chequebook isn't the one the user confirmed.
+        ops.chequebookHex = "cc".repeat(20)
+        assertEquals("the node's chequebook isn't the one you confirmed", refused(chequebook, milliBzz))
+        // More than the account holds: no swap for a deposit.
+        ops.chequebookHex = chequebook
+        assertEquals("the node holds only 0.001 xBZZ", refused(chequebook, milliBzz.add(java.math.BigInteger.ONE)))
+        assertThrows(IllegalArgumentException::class.java) { node.depositChequebook(chequebook, java.math.BigInteger.ZERO) }
+        assertThrows(IllegalArgumentException::class.java) { node.depositChequebook("0x1234", milliBzz) }
+        node.dispose()
+    }
+
+    @Test
+    fun aFailedDepositSaysWhyWithoutTheRpc() {
+        val ops = FakeOps()
+        val node = lightNode(ops)
+        ops.chequebookHex = chequebook
+        ops.walletPlur = milliBzz.toString()
+        ops.onDeposit = {
+            SwarmNode.GatewayAnswer(502, """{"code":502,"message":"chain tx: deposit transfer: https://rpc.example/key123 refused"}""")
+        }
+        val e = assertThrows(RuntimeException::class.java) { node.depositChequebook(chequebook, milliBzz) }
+        assertTrue(e.message!!.startsWith("chain tx: deposit transfer:"))
+        assertFalse(e.message!!.contains("key123"))
+        node.dispose()
+    }
+
+    @Test
+    fun aDepositNeedsARunningLightNode() {
+        val ops = FakeOps().apply { releaseSeed.countDown(); releaseInit.countDown() }
+        val node = SwarmNode(config, ops)
+        assertThrows(IllegalStateException::class.java) { node.depositChequebook(chequebook, milliBzz) }
+        node.start()
+        awaitStatus(node, NodeStatus.Running)
+        assertThrows(IllegalStateException::class.java) { node.depositChequebook(chequebook, milliBzz) }
+        assertFalse(ops.calls.any { it.startsWith("gateway:GET") || it.startsWith("gateway:POST") })
+        node.dispose()
+    }
+
+    @Test
+    fun aBuyThatLeavesTheGatewayWithoutAChequebookReloadsItAndOneWithAChequebookDoesnt() {
+        val ops = FakeOps()
+        val node = lightNode(ops)
+        // The gateway loaded no chequebook at start, and still reports none
+        // after the buy set one up (it reads it only when it starts): reload
+        // it, in the same mode, on the same node.
+        node.buyStamp(17, java.math.BigInteger.TEN, false, java.math.BigInteger.ONE)
+        val afterBuy = ops.calls.dropWhile { !it.startsWith("buy:") }
+        assertEquals(
+            listOf("stopGateway:1", "gateway:1"),
+            afterBuy.filter { it.startsWith("stopGateway:") || it.startsWith("gateway:") && !it.startsWith("gateway:GET") },
+        )
+        assertEquals(listOf("light:https://rpc.example/key123", "light:https://rpc.example/key123"), ops.gatewayModes)
+        assertEquals(NodeStatus.Running, node.state.value.status)
+
+        // Already reporting one: no reload.
+        ops.chequebookHex = chequebook
+        node.buyStamp(17, java.math.BigInteger.TEN, false, java.math.BigInteger.ONE)
+        assertEquals(2, ops.gatewayModes.size)
         node.dispose()
     }
 }

@@ -216,7 +216,8 @@ internal fun withUnit(amount: String, unit: String): String =
 
 /**
  * The UI process's way to the node's storage calls, which run in `:node`
- * ([INodeService.stampCall]), and the one spend (buy or extend) in flight
+ * ([INodeService.stampCall]), and the one spend (a stamp buy or extend, or
+ * a chequebook deposit, #117) in flight
  * — held here, not by a screen, so it outlives leaving the page, and so
  * there's only ever one. [MainActivity] keeps [service] current.
  */
@@ -247,7 +248,7 @@ internal object StampClient {
         return o.optString("error").takeIf { it.isNotEmpty() }?.let { Answer.Failed(it) } ?: Answer.Ok(o)
     }
 
-    enum class Kind { Buy, Extend }
+    enum class Kind { Buy, Extend, Deposit }
 
     sealed interface Spend {
         data object Idle : Spend
@@ -276,6 +277,14 @@ internal object StampClient {
             .put("maxSwapWei", quote.xdaiRequired.toString())
     }
 
+    /**
+     * Deposits [amountPlur] into the chequebook [chequebook] (#117), as the
+     * user just confirmed. False if a spend is already running.
+     */
+    fun deposit(chequebook: String, amountPlur: BigInteger): Boolean = start(Kind.Deposit, null) {
+        JSONObject().put("chequebook", chequebook).put("amountPlur", amountPlur.toString())
+    }
+
     /** Forget a finished spend's outcome once it's been shown. */
     fun acknowledge() {
         _spend.value.let { if (it is Spend.Done || it is Spend.Failed) _spend.compareAndSet(it, Spend.Idle) }
@@ -288,14 +297,22 @@ internal object StampClient {
             _spend.value = running
         }
         scope.launch {
-            val method = if (kind == Kind.Buy) "buy" else "extend"
+            val method = when (kind) {
+                Kind.Buy -> "buy"
+                Kind.Extend -> "extend"
+                Kind.Deposit -> "deposit"
+            }
             val outcome = try {
                 when (val a = call(method, args(), SPEND_TIMEOUT_MS)) {
                     is Answer.Ok -> Spend.Done(kind, batchId)
                     // Past the deadline the node is most likely still on it.
                     is Answer.Failed -> Spend.Failed(
                         kind, batchId,
-                        if (a.message == TIMED_OUT) "The node is still sending the transactions. The list shows the stamp once they confirm." else a.message,
+                        when {
+                            a.message != TIMED_OUT -> a.message
+                            kind == Kind.Deposit -> "The node is still sending the deposit. The chequebook's balance shows it once it confirms."
+                            else -> "The node is still sending the transactions. The list shows the stamp once they confirm."
+                        },
                     )
                 }
             } catch (t: Throwable) {

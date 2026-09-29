@@ -67,8 +67,9 @@ import org.json.JSONObject
  * starts reading Gnosis) and deploys no chequebook by itself, so the order
  * differs: identity, light mode, xDAI, chequebook, postage stamp. The
  * stamp step opens the stamp pages (#116, [StampsScreen]); buying the
- * first stamp also deploys the chequebook. Funding in one transaction
- * (#115) and the chequebook deposit (#117) come in their own issues.
+ * first stamp also deploys the chequebook, whose step then shows what it
+ * holds and opens the deposit page (#117, [ChequebookScreen]). Funding in
+ * one transaction (#115) comes in its own issue.
  */
 
 /** A checklist step's state, as on iOS: ○ pending, ▶ active (yours to do), ⏳ waiting, ✓ done. */
@@ -93,6 +94,8 @@ internal data class PublishReadiness(
     val xdaiUnavailable: Boolean = false,
     /** The deployed chequebook's address, `""` for none. */
     val chequebook: String? = null,
+    /** What the chequebook holds, in PLUR (#117). */
+    val chequebookBalancePlur: BigInteger? = null,
     /** How many of the node's postage batches are usable. */
     val usableStamps: Int? = null,
 )
@@ -200,7 +203,7 @@ internal fun publishSteps(r: PublishReadiness): List<PublishStep> {
             PublishStepKey.Chequebook,
             "Chequebook",
             if (chequebookDeployed) {
-                "Deployed at ${r.chequebook}."
+                "Deployed at ${r.chequebook}." + (r.chequebookBalancePlur?.let { " Holds ${formatBzz(it)}." } ?: "")
             } else {
                 "The chequebook pays other nodes for storing your data. The node deploys it with " +
                     "its first postage stamp."
@@ -277,6 +280,7 @@ internal fun PublishSetupScreen(
     onSwitchToLightMode: () -> Unit,
     onOpenWallet: () -> Unit,
     onBuyStamp: () -> Unit,
+    onOpenChequebook: () -> Unit,
     onDismiss: () -> Unit,
 ) {
     BackHandler(onBack = onDismiss)
@@ -306,14 +310,8 @@ internal fun PublishSetupScreen(
         }
     }
     val xdai = balance.wei
-    // What only a light node's gateway knows, every 5 s while it runs.
-    val chequebook by produceState<String?>(null, light) {
-        value = null
-        while (light) {
-            gatewayGet("/chequebook/address")?.let(::chequebookFrom)?.let { value = it }
-            delay(GATEWAY_POLL_MS)
-        }
-    }
+    // What only a light node's gateway knows, while it runs.
+    val chequebook = rememberChequebookState(light)
     val usableStamps by produceState<Int?>(null, light) {
         value = null
         while (light) {
@@ -323,7 +321,9 @@ internal fun PublishSetupScreen(
     }
 
     val steps = publishSteps(
-        PublishReadiness(nodeInfo, lightModeWanted, xdai, balance.failed, chequebook, usableStamps),
+        PublishReadiness(
+            nodeInfo, lightModeWanted, xdai, balance.failed, chequebook.address, chequebook.balancePlur, usableStamps,
+        ),
     )
     val blocked = publishBlockedReason(nodeInfo)
 
@@ -366,6 +366,9 @@ internal fun PublishSetupScreen(
                                         Text("Copy address")
                                     }
                                 }
+                            }
+                            PublishStepKey.Chequebook -> if (step.status == StepStatus.Done) {
+                                OutlinedButton(onClick = onOpenChequebook) { Text("Deposit") }
                             }
                             PublishStepKey.Stamp -> if (step.status == StepStatus.Active) {
                                 Button(onClick = onBuyStamp) { Text("Buy a postage stamp") }
