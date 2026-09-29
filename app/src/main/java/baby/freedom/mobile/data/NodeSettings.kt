@@ -113,6 +113,23 @@ class NodeSettings private constructor(
     }
 
     /**
+     * Whether the embedded Swarm node runs in light mode (#114) rather than
+     * ultra-light. Ultra-light by default, as on desktop and iOS: browsing
+     * needs no chain. Light connects the node to Gnosis Chain so it can
+     * publish. Stored as iOS's `BeeNodeMode` raw values ("light",
+     * "ultra-light"). `MainActivity` relays it, with the Gnosis RPC it
+     * needs ([baby.freedom.mobile.node.SwarmMode]), to the `:node` process
+     * through [baby.freedom.mobile.node.INodeService.setSwarmMode].
+     */
+    val swarmLightMode: Flow<Boolean> = store.data.map { prefs ->
+        prefs[Keys.SWARM_NODE_MODE] == SWARM_MODE_LIGHT
+    }
+
+    suspend fun setSwarmLightMode(light: Boolean) {
+        store.edit { it[Keys.SWARM_NODE_MODE] = if (light) SWARM_MODE_LIGHT else SWARM_MODE_ULTRA_LIGHT }
+    }
+
+    /**
      * Whether the embedded Radicle node should run (#73). Off by default,
      * as on iOS: it's a publish-capable node that creates an identity key
      * and dials Radicle seeds, so it starts only once the user asks. The UI
@@ -585,6 +602,7 @@ class NodeSettings private constructor(
 
     private object Keys {
         val RUN_NODE_ENABLED = booleanPreferencesKey("run_node_enabled")
+        val SWARM_NODE_MODE = stringPreferencesKey("swarm_node_mode")
         val MYOTIS_ENABLED = booleanPreferencesKey("myotis_enabled")
         val TOR_ENABLED = booleanPreferencesKey("tor_enabled")
         val TOR_START_ON_LAUNCH = booleanPreferencesKey("tor_start_on_launch")
@@ -609,6 +627,9 @@ class NodeSettings private constructor(
 
     companion object {
         const val DEFAULT_IPFS_ROUTING_MODE = "auto"
+
+        private const val SWARM_MODE_LIGHT = "light"
+        private const val SWARM_MODE_ULTRA_LIGHT = "ultra-light"
 
         /**
          * Valid freedom-ipfs routing strategies, in the order we want

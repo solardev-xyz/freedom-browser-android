@@ -73,6 +73,19 @@ block). CORS preflights to the node origin are answered by the app;
 response-side CORS headers are the node's job (status tracked in
 `docs/virtual-origins-hardening.md`).
 
+The node's **on-chain** writes are not part of it: a page's non-GET
+request to `/stamps…`, `/chequebook…`, `/stake…`, `/wallet…` or
+`/transactions…` on the gateway port (any host, since any name can
+resolve to loopback) is answered `403` by the app and never reaches the
+node (#114, `NodeChainWrites`) — in light mode those endpoints would sign
+and send transactions from the user's funded node account with no
+prompt. The interceptor can't see every such request (a navigation's
+redirect is followed inside Chromium, and other apps reach the port
+directly), so the node itself also refuses to broadcast any transaction
+(`ant_jni.c`'s chain transport): an on-chain write that gets past the
+interceptor fails at the node instead. Buying stamps and funding the
+chequebook go through the app.
+
 ## Explicitly unsupported
 
 - **Literal `fetch("bzz://…")` from page JS** — Chromium rejects

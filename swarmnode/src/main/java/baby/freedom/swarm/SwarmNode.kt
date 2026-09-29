@@ -67,19 +67,41 @@ class SwarmNode internal constructor(
     data class Config(
         val dataDir: String,
         /**
-         * Gnosis JSON-RPC endpoint backing the gateway's on-chain
-         * `/wallet` / `/stamps` / `/chequebook` surfaces. `""` keeps
-         * them disabled — right for ultra-light (read-only) mode.
-         */
-        val rpcEndpoint: String = "",
-        /**
          * The identity document to boot ant as (#77) — the account derived
          * from the wallet — read afresh at every start, or null to run as
          * the node's own `identity.json`. The node zeroes the bytes once
          * ant has them.
          */
         val identity: () -> ByteArray? = { null },
+        /**
+         * The mode to boot in (#114), read afresh at every start — right
+         * after [identity], in the same launch, so a host can hand over
+         * the pair it read together.
+         */
+        val mode: () -> Mode = { Mode.ULTRA_LIGHT },
     )
+
+    /**
+     * How the node takes part in Swarm (#114). Ultra-light browses with no
+     * chain at all. Light hands ant a Gnosis JSON-RPC endpoint, [gnosisRpc]:
+     * the gateway then reports `beeMode: light` and serves real `/wallet`,
+     * `/stamps`, `/chequebook` and `/chainstate` — the publishing side.
+     * The endpoint can carry an API key in its path or query: never log it.
+     */
+    class Mode private constructor(val light: Boolean, val gnosisRpc: String) {
+        override fun equals(other: Any?) =
+            other is Mode && other.light == light && other.gnosisRpc == gnosisRpc
+        override fun hashCode() = 31 * light.hashCode() + gnosisRpc.hashCode()
+        override fun toString() = if (light) "light" else "ultra-light"
+
+        companion object {
+            val ULTRA_LIGHT = Mode(false, "")
+
+            /** Light mode against [gnosisRpc]; ultra-light when it's blank, since light needs a chain. */
+            fun light(gnosisRpc: String): Mode =
+                gnosisRpc.trim().takeIf { it.isNotEmpty() }?.let { Mode(true, it) } ?: ULTRA_LIGHT
+        }
+    }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
@@ -151,6 +173,12 @@ class SwarmNode internal constructor(
             ops.seed(File(antDir))
             if (!isCurrent(gen)) return
             val identity = config.identity()
+            val mode = try {
+                config.mode()
+            } catch (t: Throwable) {
+                identity?.fill(0)
+                throw t
+            }
             val h = try {
                 if (identity != null) ops.initWithIdentity(antDir, identity) else ops.init(antDir)
             } finally {
@@ -160,9 +188,10 @@ class SwarmNode internal constructor(
                 ops.startGateway(
                     handle = h,
                     apiAddr = GATEWAY_ADDR,
-                    // Ultra-light: read path only, no publishing.
-                    lightMode = false,
-                    gnosisRpc = config.rpcEndpoint,
+                    // Ultra-light: read path only, no chain. Light: the
+                    // chain surfaces publishing needs (#114).
+                    lightMode = mode.light,
+                    gnosisRpc = mode.gnosisRpc,
                 )
             } catch (t: Throwable) {
                 runCatching { ops.shutdown(h) }
@@ -181,6 +210,7 @@ class SwarmNode internal constructor(
                         accountAddress = account?.optString("eth_address").orEmpty(),
                         overlay = account?.optString("overlay").orEmpty(),
                         walletIdentity = identity != null,
+                        lightMode = mode.light,
                     )
                 }
                 startPeerPolling()
@@ -223,6 +253,7 @@ class SwarmNode internal constructor(
                     accountAddress = "",
                     overlay = "",
                     walletIdentity = false,
+                    lightMode = false,
                 )
             }
             val h = handle
@@ -242,7 +273,7 @@ class SwarmNode internal constructor(
 
     /**
      * Stop and start again, so the node picks up a changed identity
-     * (#77). The stop supersedes a launch still in flight, and the new
+     * (#77) or mode (#114). The stop supersedes a launch still in flight, and the new
      * launch waits for the old node's shutdown before it binds the port.
      */
     fun restart() {

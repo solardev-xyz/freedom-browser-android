@@ -49,8 +49,11 @@ class SwarmNodeTest {
         }
         override fun accountInfo(handle: Long) =
             """{"eth_address":"0xabc$handle","overlay":"ff$handle","peer_id":"16Uiu2","agent":"ant-test"}"""
+        /** Each [startGateway]'s mode, as `light:<rpc>` or `ultra-light`. */
+        val gatewayModes: MutableList<String> = Collections.synchronizedList(mutableListOf())
         override fun startGateway(handle: Long, apiAddr: String, lightMode: Boolean, gnosisRpc: String) {
             calls += "gateway:$handle"
+            gatewayModes += if (lightMode) "light:$gnosisRpc" else "ultra-light:$gnosisRpc"
         }
         override fun agentString(handle: Long) = "ant-test"
         override fun peerCount(handle: Long) = 0
@@ -199,5 +202,64 @@ class SwarmNodeTest {
         assertFalse(node.state.value.walletIdentity)
         assertEquals("init:3", ops.calls.last { it.startsWith("init") })
         node.dispose()
+    }
+
+    @Test
+    fun bootsUltraLightWithNoChainByDefault() {
+        val ops = FakeOps().apply { releaseSeed.countDown(); releaseInit.countDown() }
+        val node = SwarmNode(config, ops)
+        node.start()
+        awaitStatus(node, NodeStatus.Running)
+        assertEquals(listOf("ultra-light:"), ops.gatewayModes.toList())
+        assertFalse(node.state.value.lightMode)
+        node.dispose()
+    }
+
+    @Test
+    fun lightModeHandsTheGatewayItsRpcAndARestartReadsTheModeAgain() {
+        val ops = FakeOps().apply { releaseSeed.countDown(); releaseInit.countDown() }
+        val mode = java.util.concurrent.atomic.AtomicReference(SwarmNode.Mode.light("https://rpc.example"))
+        val node = SwarmNode(config.copy(mode = { mode.get() }), ops)
+        node.start()
+        awaitStatus(node, NodeStatus.Running)
+        assertEquals(listOf("light:https://rpc.example"), ops.gatewayModes.toList())
+        assertTrue(node.state.value.lightMode)
+
+        mode.set(SwarmNode.Mode.ULTRA_LIGHT)
+        node.restart()
+        val until = System.currentTimeMillis() + 5_000
+        while (ops.gatewayModes.size < 2 && System.currentTimeMillis() < until) Thread.sleep(10)
+        awaitStatus(node, NodeStatus.Running)
+        assertEquals(listOf("light:https://rpc.example", "ultra-light:"), ops.gatewayModes.toList())
+        assertFalse(node.state.value.lightMode)
+        node.stop()
+        assertFalse(node.state.value.lightMode)
+        node.dispose()
+    }
+
+    @Test
+    fun aModeThatThrowsFailsTheStartAndStillZeroesTheIdentity() {
+        val ops = FakeOps().apply { releaseSeed.countDown(); releaseInit.countDown() }
+        val identity = """{"signing_key":"aa"}""".toByteArray()
+        val node = SwarmNode(
+            config.copy(identity = { identity }, mode = { throw IllegalStateException("no settings") }),
+            ops,
+        )
+        node.start()
+        awaitStatus(node, NodeStatus.Error)
+        assertTrue(identity.all { it.toInt() == 0 })
+        assertEquals(listOf("seed"), ops.calls.toList())
+        node.dispose()
+    }
+
+    @Test
+    fun lightModeNeedsAnRpc() {
+        assertEquals(SwarmNode.Mode.ULTRA_LIGHT, SwarmNode.Mode.light("  "))
+        assertFalse(SwarmNode.Mode.light("").light)
+        val light = SwarmNode.Mode.light(" https://rpc.example ")
+        assertTrue(light.light)
+        assertEquals("https://rpc.example", light.gnosisRpc)
+        // Its string form never carries the endpoint, which may hold a key.
+        assertEquals("light", light.toString())
     }
 }

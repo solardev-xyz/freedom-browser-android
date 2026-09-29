@@ -41,6 +41,7 @@ import baby.freedom.mobile.browser.TorRouting
 import baby.freedom.mobile.browser.UnverifiedOrigins
 import baby.freedom.mobile.browser.VirtualOrigin
 import baby.freedom.mobile.browser.statusBarIconsDark
+import baby.freedom.mobile.data.ChainStore
 import baby.freedom.mobile.data.NodeSettings
 import baby.freedom.mobile.data.RadicleGrantStore
 import baby.freedom.mobile.ens.EnsNormalize
@@ -51,6 +52,7 @@ import baby.freedom.mobile.node.INodeService
 import baby.freedom.mobile.node.MyotisLink
 import baby.freedom.mobile.node.MyotisService
 import baby.freedom.mobile.node.NodeService
+import baby.freedom.mobile.node.swarmModeFor
 import baby.freedom.mobile.node.ITorCallback
 import baby.freedom.mobile.node.ITorService
 import baby.freedom.mobile.node.TorService
@@ -63,6 +65,7 @@ import baby.freedom.swarm.MyotisInfo
 import baby.freedom.swarm.MyotisStatus
 import baby.freedom.swarm.NodeInfo
 import baby.freedom.swarm.RadicleInfo
+import baby.freedom.swarm.SwarmNode
 import baby.freedom.swarm.TorInfo
 import baby.freedom.swarm.TorStatus
 import kotlinx.coroutines.Dispatchers
@@ -125,6 +128,18 @@ class MainActivity : ComponentActivity() {
     @Volatile
     private var binder: INodeService? = null
     private var bound = false
+
+    /**
+     * The Swarm node's mode (#114) from the light-mode setting and the
+     * Gnosis RPCs, relayed to `:node` on every bind and every change; null
+     * until first read. Main thread only.
+     */
+    private var swarmMode: SwarmNode.Mode? = null
+
+    private fun relaySwarmMode(b: INodeService?, mode: SwarmNode.Mode?) {
+        mode ?: return
+        runCatching { b?.setSwarmMode(mode.light, mode.gnosisRpc) }
+    }
 
     private val callback = object : INodeCallback.Stub() {
         override fun onStateChanged(info: NodeInfo?) {
@@ -246,6 +261,9 @@ class MainActivity : ComponentActivity() {
                 }
             }
             runCatching { b.radicleState?.let { radicleInfoFlow.value = it } }
+            // The mode (#114) first, so the identity check below already
+            // compares against it rather than restarting the node twice.
+            relaySwarmMode(b, swarmMode)
             // A wallet change made while unbound (#77).
             runCatching { b.reloadIdentity() }
             // The Radicle on/off setting lives here, in the UI process's
@@ -313,6 +331,17 @@ class MainActivity : ComponentActivity() {
         // open unnecessarily.
         lifecycleScope.launch {
             if (settings.runNodeEnabled.first()) startAndBindService()
+        }
+
+        // The Swarm node's mode (#114) follows its setting and the Gnosis
+        // RPCs live: `:node` restarts the node when it changes.
+        lifecycleScope.launch {
+            combine(settings.swarmLightMode, ChainStore.get(this@MainActivity).chains, ::swarmModeFor)
+                .distinctUntilChanged()
+                .collect { mode ->
+                    swarmMode = mode
+                    relaySwarmMode(binder, mode)
+                }
         }
 
         // The Myotis light client (#72, off by default) follows its

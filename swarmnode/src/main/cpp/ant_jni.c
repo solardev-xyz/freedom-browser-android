@@ -13,7 +13,9 @@
 
 #include <jni.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "ant.h"
 #include "freedom_mobile.h"
@@ -101,6 +103,56 @@ Java_baby_freedom_swarm_AntNative_accountInfo(JNIEnv *env, jobject thiz, jlong h
     return out;
 }
 
+/*
+ * The chain transport every Freedom node runs with (#114): ant may read
+ * the chain, but never broadcast. In light mode the gateway signs and
+ * sends a transaction for POST /stamps, PATCH /stamps/topup|dilute,
+ * POST /chequebook/deposit and friends with no prompt and no auth, and
+ * the gateway sits on 127.0.0.1:1633 where every app on the device (and
+ * any page in any browser, via a no-cors POST) can reach it. Refusing
+ * the broadcast itself is the one place that covers all of those
+ * callers at once, however the request got to the gateway.
+ *
+ * A read returns NULL: ant falls back to the configured gnosis_rpc URL,
+ * exactly as with no transport. A broadcast (`eth_send*`) gets a
+ * JSON-RPC error that isn't -32000, which ant passes through to its
+ * caller as a genuine answer instead of retrying it on gnosis_rpc (see
+ * ant_set_chain_transport). ant builds the request body itself, so a
+ * plain substring match on the method can't be dodged by a page.
+ *
+ * Spending from the app's own screens (#115-#117) will need to lift
+ * this for the one transaction the user confirmed; until then nothing
+ * in the app spends, and nothing else may.
+ */
+static const char *const BROADCAST_METHOD = "\"eth_send";
+
+static char *refuse_broadcasts(const char *request_json, void *host_ctx) {
+    (void)host_ctx;
+    if (request_json == NULL || strstr(request_json, BROADCAST_METHOD) == NULL) return NULL;
+    /* Echo the request's id when it's a plain number or string; null otherwise. */
+    char id[64] = "null";
+    const char *p = strstr(request_json, "\"id\"");
+    if (p != NULL) {
+        p += 4;
+        while (*p == ' ' || *p == ':') p++;
+        size_t n = strcspn(p, ",} \t\r\n");
+        if (n > 0 && n < sizeof(id) && memchr(p, '\\', n) == NULL) {
+            memcpy(id, p, n);
+            id[n] = '\0';
+        }
+    }
+    static const char *const fmt =
+        "{\"jsonrpc\":\"2.0\",\"id\":%s,\"error\":{\"code\":-32003,"
+        "\"message\":\"Freedom doesn't let the Swarm node send transactions\"}}";
+    size_t len = strlen(fmt) + strlen(id) + 1;
+    char *out = malloc(len);
+    if (out != NULL) snprintf(out, len, fmt, id);
+    /* Out of memory: NULL would fall back to gnosis_rpc and broadcast.
+     * There's nothing to answer with, so stop here rather than spend. */
+    if (out == NULL) abort();
+    return out;
+}
+
 JNIEXPORT void JNICALL
 Java_baby_freedom_swarm_AntNative_startGateway(JNIEnv *env, jobject thiz, jlong handle,
                                                jstring api_addr, jboolean light_mode,
@@ -111,6 +163,15 @@ Java_baby_freedom_swarm_AntNative_startGateway(JNIEnv *env, jobject thiz, jlong 
     const char *rpc = (*env)->GetStringUTFChars(env, gnosis_rpc, NULL);
     if (rpc == NULL) {
         (*env)->ReleaseStringUTFChars(env, api_addr, addr);
+        return;
+    }
+    /* Before the gateway starts: it captures its chain wiring there. A
+     * build without chain support has no chain to broadcast on. */
+    int tr = ant_set_chain_transport((AntHandle *)(uintptr_t)handle, refuse_broadcasts, NULL);
+    if (tr != ANT_CHAIN_TRANSPORT_OK && tr != ANT_CHAIN_TRANSPORT_UNSUPPORTED) {
+        (*env)->ReleaseStringUTFChars(env, api_addr, addr);
+        (*env)->ReleaseStringUTFChars(env, gnosis_rpc, rpc);
+        throw_runtime(env, NULL, "ant_set_chain_transport failed");
         return;
     }
     char *err = NULL;

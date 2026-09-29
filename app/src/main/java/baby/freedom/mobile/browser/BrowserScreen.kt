@@ -1998,6 +1998,9 @@ fun BrowserScreen(
             onToggleMyotis = onToggleMyotis,
             tor = tor,
             onMyotisRecovery = onMyotisRecovery,
+            // Publish setup's identity step (#114): the wallet page opens
+            // over the node page (it's composed after it).
+            onOpenWallet = { showWallet = true },
             onDismiss = { showNode = false },
         )
     }

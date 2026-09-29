@@ -20,11 +20,16 @@ import androidx.compose.material.icons.filled.PowerSettingsNew
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.ui.platform.LocalContext
@@ -47,11 +52,13 @@ import baby.freedom.swarm.TorInfo
 import baby.freedom.swarm.TorStatus
 import android.os.SystemClock
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import java.util.Locale
 
 /**
  * Full-screen node-details page: the Swarm node's live status, peer
- * count, gateway URL and run-node on/off toggle, the Tor client (#143)
+ * count, gateway URL and run-node on/off toggle, its mode and the way into
+ * publish setup (#114, [PublishSetupScreen]), the Tor client (#143)
  * with its start/stop switch, status and version, then the Myotis
  * Ethereum / Gnosis light client (#72) with its own switch and per-chain
  * sync state. Shares the same [FullScreenScaffold] chrome as Settings /
@@ -69,12 +76,33 @@ fun NodeScreen(
     tor: TorControls = TorControls(),
     /** A chain's Retry (`repair = false`) or Repair sync data (`true`) on a blocked or waiting recovery. */
     onMyotisRecovery: (chainId: Long, repair: Boolean) -> Unit = { _, _ -> },
+    /** Open the wallet page, for publish setup's identity step (#114). */
+    onOpenWallet: () -> Unit = {},
 ) {
-    BackHandler(onBack = onDismiss)
     val triple = nodeStatusTriple(nodeInfo.status)
     val context = LocalContext.current
-    val externalSwarm by remember(context) { NodeSettings.get(context).externalSwarmEndpoint }
+    val settings = remember(context) { NodeSettings.get(context) }
+    val externalSwarm by remember(settings) { settings.externalSwarmEndpoint }
         .collectAsState(initial = "")
+    // The mode setting (#114); MainActivity relays it to the node, which
+    // restarts into it. Null until read, so the switch doesn't flicker.
+    val lightModeWanted by remember(settings) { settings.swarmLightMode }
+        .collectAsState(initial = null)
+    val scope = rememberCoroutineScope()
+    val setLightMode: (Boolean) -> Unit = { light -> scope.launch { settings.setSwarmLightMode(light) } }
+    var showPublishSetup by rememberSaveable { mutableStateOf(false) }
+
+    if (showPublishSetup) {
+        PublishSetupScreen(
+            nodeInfo = nodeInfo,
+            lightModeWanted = lightModeWanted == true,
+            onSwitchToLightMode = { setLightMode(true) },
+            onOpenWallet = onOpenWallet,
+            onDismiss = { showPublishSetup = false },
+        )
+        return
+    }
+    BackHandler(onBack = onDismiss)
 
     FullScreenScaffold(
         title = "Nodes",
@@ -95,6 +123,14 @@ fun NodeScreen(
             }
             item("details") {
                 DetailsSection(nodeInfo = nodeInfo)
+            }
+            item("publishing") {
+                PublishingSection(
+                    nodeInfo = nodeInfo,
+                    lightModeWanted = lightModeWanted,
+                    onSetLightMode = setLightMode,
+                    onOpenSetup = { showPublishSetup = true },
+                )
             }
             item("gateway") {
                 GatewaySection(externalSwarm = externalSwarm)
@@ -155,7 +191,11 @@ private fun StatusSection(
 @Composable
 private fun DetailsSection(nodeInfo: NodeInfo) {
     SectionCard(title = "Details") {
-        DetailRow("Mode", "ultra-light")
+        // What the node runs as, from the node itself: the setting can be
+        // ahead of it while it restarts.
+        if (nodeInfo.status == NodeStatus.Running) {
+            DetailRow("Mode", swarmModeLabel(nodeInfo.lightMode))
+        }
         DetailRow("Peers", nodeInfo.connectedPeers.toString())
         if (nodeInfo.clientVersion.isNotBlank()) {
             DetailRow("Client", nodeInfo.clientVersion, mono = true)
@@ -172,6 +212,68 @@ private fun DetailsSection(nodeInfo: NodeInfo) {
         val err = nodeInfo.errorMessage
         if (!err.isNullOrBlank()) {
             DetailRow("Error", err, singleLine = false)
+        }
+    }
+}
+
+/** The Swarm node's mode as desktop and iOS name it. */
+internal fun swarmModeLabel(light: Boolean): String = if (light) "Light" else "Ultra-light"
+
+/**
+ * The Swarm node's mode (#114) and the way into publish setup. The switch
+ * is the setting; the line under it says what the node runs as, which lags
+ * the switch while the node restarts.
+ */
+@Composable
+private fun PublishingSection(
+    nodeInfo: NodeInfo,
+    lightModeWanted: Boolean?,
+    onSetLightMode: (Boolean) -> Unit,
+    onOpenSetup: () -> Unit,
+) {
+    SectionCard(title = "Publishing") {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text("Light mode", fontWeight = FontWeight.Medium)
+                Text(
+                    swarmModeSubtitle(nodeInfo, lightModeWanted),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Spacer(Modifier.width(12.dp))
+            Switch(
+                checked = lightModeWanted == true,
+                onCheckedChange = onSetLightMode,
+                enabled = lightModeWanted != null,
+            )
+        }
+        Spacer(Modifier.height(4.dp))
+        TextButton(onClick = onOpenSetup) { Text("Set up publishing") }
+    }
+}
+
+/** The line under the light-mode switch: what the mode does, or that the node is on its way into it. */
+internal fun swarmModeSubtitle(nodeInfo: NodeInfo, lightModeWanted: Boolean?): String {
+    val running = nodeInfo.status == NodeStatus.Running
+    return when {
+        lightModeWanted == null -> ""
+        running && nodeInfo.lightMode == lightModeWanted -> if (lightModeWanted) {
+            "Connected to Gnosis Chain, so the node can publish"
+        } else {
+            "Browsing only. Light mode connects the node to Gnosis Chain so it can publish"
+        }
+        running || nodeInfo.status == NodeStatus.Starting ->
+            "Restarting the node in ${swarmModeLabel(lightModeWanted).lowercase()} mode…"
+        else -> if (lightModeWanted) {
+            "Runs in light mode when the node is on"
+        } else {
+            "Runs in ultra-light mode (browsing only) when the node is on"
         }
     }
 }
