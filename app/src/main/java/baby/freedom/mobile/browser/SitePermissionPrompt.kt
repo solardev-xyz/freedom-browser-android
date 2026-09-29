@@ -235,7 +235,7 @@ private fun androidRefusals(context: Context) =
  * rationale flag is up), so a later silent refusal can be read as "denied
  * for good" rather than "dialog backed out of".
  */
-private fun noteAndroidRefusal(activity: Activity, permission: String) {
+internal fun noteAndroidRefusal(activity: Activity, permission: String) {
     if (!ActivityCompat.shouldShowRequestPermissionRationale(activity, permission)) return
     val prefs = androidRefusals(activity)
     val seen = prefs.getStringSet(ANDROID_REFUSALS_KEY, emptySet()).orEmpty()
@@ -243,7 +243,7 @@ private fun noteAndroidRefusal(activity: Activity, permission: String) {
     prefs.edit().putStringSet(ANDROID_REFUSALS_KEY, seen + permission).apply()
 }
 
-private fun androidPermissionBlocked(activity: Activity, permission: String): Boolean =
+internal fun androidPermissionBlocked(activity: Activity, permission: String): Boolean =
     androidPermissionBlockedInSettings(
         rationale = ActivityCompat.shouldShowRequestPermissionRationale(activity, permission),
         deniedBefore = permission in
