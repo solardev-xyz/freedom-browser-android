@@ -31,4 +31,12 @@ class AddressTextTest {
     fun `far too wide isn't shrunk past the floor`() {
         assertNull(fittedAddressSize(14.sp, 250, ::width))
     }
+
+    @Test
+    fun `a too-long amount may break only after a separator, never between digits`() {
+        val z = "\u200B"
+        assertEquals("1,${z}234,${z}567.${z}891", amountBreaks("1,234,567.891"))
+        assertEquals("42", amountBreaks("42"))
+        assertEquals("<0.${z}000001", amountBreaks("<0.000001"))
+    }
 }

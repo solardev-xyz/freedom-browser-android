@@ -21,6 +21,7 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.RadioButton
+import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -29,6 +30,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
@@ -287,35 +289,98 @@ internal fun BalancesSection(
     }
 }
 
+/**
+ * One token's balance. The amount is never soft-wrapped mid-number (a
+ * wrapped `60,562.1027` / `99` reads as a smaller amount): it sits next to
+ * the symbol when it fits that column on one line, else gets the row's
+ * whole width on its own line, shrunk a little if that makes it fit
+ * ([fittedAddressSize]). Only a number too long even for that breaks,
+ * and then only after a `,` or the `.`, which stays at the end of the
+ * line so the line visibly continues ([amountBreaks]).
+ */
 @Composable
 private fun BalanceRow(symbol: String, name: String, text: BalanceText) {
     val amber = if (MaterialTheme.colorScheme.isLight) Color(0xFFB45309) else Color(0xFFF59E0B)
-    Row(
-        verticalAlignment = Alignment.Top,
-        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
-    ) {
-        Column(Modifier.weight(1f)) {
-            Text(symbol, fontWeight = FontWeight.Medium)
-            Text(
-                name,
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
+    val amount = text.amount ?: "—"
+    val mono = LocalTextStyle.current.copy(fontFamily = FontFamily.Monospace)
+    val measurer = rememberTextMeasurer()
+    val density = LocalDensity.current
+    val label = @Composable {
+        Text(symbol, fontWeight = FontWeight.Medium)
+        Text(
+            name,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+    val detail = @Composable {
+        Text(
+            text.detail,
+            style = MaterialTheme.typography.bodySmall,
+            color = if (text.warn) amber else MaterialTheme.colorScheme.onSurfaceVariant,
+            textAlign = TextAlign.End,
+            modifier = Modifier.fillMaxWidth(),
+        )
+    }
+    BoxWithConstraints(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+        val maxWidth = constraints.maxWidth
+        val gap = with(density) { 12.dp.roundToPx() }
+        // The amount column's share of the row next to the symbol (weights 1 : 1.4).
+        val column = if (maxWidth == Constraints.Infinity) maxWidth else ((maxWidth - gap) * 1.4f / 2.4f).toInt()
+        val widthAt = { size: TextUnit ->
+            measurer.measure(amount, mono.copy(fontSize = size), softWrap = false, maxLines = 1).size.width
         }
-        Spacer(Modifier.width(12.dp))
-        Column(horizontalAlignment = Alignment.End, modifier = Modifier.weight(1.4f)) {
-            Text(
-                text.amount ?: "—",
-                fontFamily = FontFamily.Monospace,
-                textAlign = TextAlign.End,
-            )
-            Text(
-                text.detail,
-                style = MaterialTheme.typography.bodySmall,
-                color = if (text.warn) amber else MaterialTheme.colorScheme.onSurfaceVariant,
-                textAlign = TextAlign.End,
-            )
+        // Keyed on the measurer too: it's replaced when the density or font scale changes.
+        val sideBySide = remember(amount, mono, column, measurer) {
+            column == Constraints.Infinity || widthAt(mono.fontSize) <= column
         }
+        if (sideBySide) {
+            Row(verticalAlignment = Alignment.Top, modifier = Modifier.fillMaxWidth()) {
+                Column(Modifier.weight(1f)) { label() }
+                Spacer(Modifier.width(12.dp))
+                Column(horizontalAlignment = Alignment.End, modifier = Modifier.weight(1.4f)) {
+                    Text(amount, style = mono, softWrap = false, maxLines = 1)
+                    detail()
+                }
+            }
+        } else {
+            val fitted = remember(amount, mono, maxWidth, measurer) {
+                fittedAddressSize(mono.fontSize, maxWidth, widthAt)
+            }
+            Column(Modifier.fillMaxWidth()) {
+                label()
+                if (fitted != null) {
+                    Text(
+                        amount,
+                        style = mono.copy(fontSize = fitted),
+                        softWrap = false,
+                        maxLines = 1,
+                        textAlign = TextAlign.End,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                } else {
+                    Text(
+                        amountBreaks(amount),
+                        style = mono,
+                        textAlign = TextAlign.End,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+                detail()
+            }
+        }
+    }
+}
+
+/**
+ * [amount] with a zero-width space after every `,` and the `.`, so a
+ * number too long for one line wraps only there — the separator ending
+ * the line shows it goes on — never between two digits.
+ */
+internal fun amountBreaks(amount: String): String = buildString {
+    for (c in amount) {
+        append(c)
+        if (c == ',' || c == '.') append('\u200B')
     }
 }
 
