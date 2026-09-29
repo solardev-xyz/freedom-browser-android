@@ -3178,8 +3178,12 @@ private fun buildRefreshableWebView(
                     } else {
                         X402Payments.onNavigationSuperseded(state)
                         // Started by the page on screen: only that site's
-                        // own allowance may pay for it (#218 R4-M3).
-                        X402Payments.onNavigationStarted(state, byUser = false, pageUrl = committedPageUrl, url = target)
+                        // own allowance may pay for it (#218 R4-M3), and
+                        // only on the user's tap, not the page's own
+                        // script chaining 402s (#237).
+                        X402Payments.onNavigationStarted(
+                            state, byUser = false, pageUrl = committedPageUrl, url = target, gesture = request.hasGesture(),
+                        )
                     }
                 }
                 return false

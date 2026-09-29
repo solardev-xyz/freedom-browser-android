@@ -47,6 +47,18 @@ import java.util.concurrent.ConcurrentHashMap
  * the interceptor, so a chain `pay.example` → 307 → `evil.example` → 303
  * → `pay.example` would look as if it never left (#218 R6-M1).
  *
+ * The site's own page pays silently only for a navigation the user
+ * made it start — a link they tapped, a script run from their tap
+ * (`hasGesture`) — never one it starts on its own: a paid page setting
+ * `location.href` to the next 402, and that one's to the next, would
+ * otherwise spend the whole allowance in seconds, one silent payment a
+ * hop (#237). And once a paid request of a site's is answered Refused,
+ * that site's allowance pays nothing silently — in any tab — until the
+ * user navigates to it themselves ([navigationStarted] `byUser`: their
+ * address on that site, or their Reload or Back/Forward on its page),
+ * as the server may keep a refused payment's authorization and collect
+ * it anyway (#237).
+ *
  * Main thread only, but for [epoch].
  */
 internal class X402Flow<D : Any>(
@@ -71,7 +83,7 @@ internal class X402Flow<D : Any>(
      * URL it has been at — its start's, if known, and each server
      * redirect's (#218 R5-M1).
      */
-    private class Initiator(val byUser: Boolean, val fromOrigin: String?, val post: Boolean) {
+    private class Initiator(val byUser: Boolean, val fromOrigin: String?, val post: Boolean, val gesture: Boolean) {
         val hopOrigins = mutableListOf<String?>()
     }
 
@@ -80,24 +92,34 @@ internal class X402Flow<D : Any>(
         val value: D,
         private val byUser: Boolean,
         private val fromOrigin: String?,
+        private val gesture: Boolean,
         private val hopOrigins: List<String?>,
+        private val held: Set<String>,
     ) {
         /**
          * An allowance of [origin]'s may pay this without asking: the user
-         * named the load, or [origin]'s own page started it — not another
-         * site's link, script or popup, nor a navigation nobody was seen
-         * starting (#218 R4-M3) — and it never left [origin] on the way:
-         * a redirect through another origin is that origin's say, not the
-         * starter's (#218 R5-M1).
+         * named the load, or [origin]'s own page started it on the user's
+         * tap (#237) — not another site's link, script or popup, nor a
+         * navigation nobody was seen starting (#218 R4-M3), nor one the
+         * page started on its own (#237) — and it never left [origin] on
+         * the way: a redirect through another origin is that origin's say,
+         * not the starter's (#218 R5-M1). Never while [origin] is held
+         * after a Refused payment (#237).
          */
         fun allowanceMayPay(origin: String): Boolean =
-            (byUser || fromOrigin == origin) && hopOrigins.all { it == origin }
+            origin !in held && (byUser || (fromOrigin == origin && gesture)) && hopOrigins.all { it == origin }
     }
 
     private val detections = HashMap<Long, Detection<D>>()
     private val retries = HashMap<Long, Retry>()
     private val initiators = HashMap<Long, Initiator>()
     private val epochs = ConcurrentHashMap<Long, Long>()
+
+    /** Origins a paid request of which was answered Refused: no allowance of theirs pays silently (#237). */
+    private val held = HashSet<String>()
+
+    /** The origin of the page each tab last committed: what the user's Reload or Back/Forward navigates away from. */
+    private val pages = HashMap<Long, String>()
 
     /**
      * [tab]'s payment epoch, from any thread: the interceptor reads it
@@ -124,6 +146,9 @@ internal class X402Flow<D : Any>(
         retries.remove(tab)
         detections.remove(tab)
         settle(retry.recordId, X402Store.Status.REFUSED, status)
+        // The server may keep the refused authorization and collect it anyway: its site's
+        // allowance pays nothing more silently until the user navigates to it (#237).
+        originOf(retry.url)?.let(held::add)
         return true
     }
 
@@ -169,12 +194,24 @@ internal class X402Flow<D : Any>(
      * A navigation of [tab]'s to [url] (null: a Reload or Back/Forward,
      * of an entry already in the tab's history) began, [byUser] (their
      * address, Reload, Back/Forward) or from the page of [fromOrigin] on
-     * screen (its link, script or form); [post]: it's a form POST (or
-     * other non-GET), whose 307/308 redirects no callback shows. Called
-     * after [superseded].
+     * screen (its link, script or form) — with the user's [gesture]
+     * (`hasGesture`: their tap, or script run from it) or on its own;
+     * [post]: it's a form POST (or other non-GET), whose 307/308
+     * redirects no callback shows. Called after [superseded]. The user's
+     * own navigation to a site held after a Refused payment — their
+     * address on it, or their Reload or Back/Forward on its page — lets
+     * its allowance pay again (#237).
      */
-    fun navigationStarted(tab: Long, byUser: Boolean, fromOrigin: String?, url: String?, post: Boolean = false) {
-        initiators[tab] = Initiator(byUser, fromOrigin, post).also { if (url != null) it.hopOrigins.add(originOf(url)) }
+    fun navigationStarted(
+        tab: Long,
+        byUser: Boolean,
+        fromOrigin: String?,
+        url: String?,
+        post: Boolean = false,
+        gesture: Boolean = false,
+    ) {
+        if (byUser) (if (url != null) originOf(url) else pages[tab])?.let(held::remove)
+        initiators[tab] = Initiator(byUser, fromOrigin, post, gesture).also { if (url != null) it.hopOrigins.add(originOf(url)) }
     }
 
     /**
@@ -221,6 +258,8 @@ internal class X402Flow<D : Any>(
      */
     fun committed(tab: Long, url: String?): Committed<D>? {
         val initiator = initiators.remove(tab)
+        val page = url?.let(originOf)
+        if (page != null) pages[tab] = page else pages.remove(tab)
         retries.remove(tab)?.let { retry ->
             val answered = url != null && url in retry.hops && retry.seen
             settle(retry.recordId, if (answered) X402Store.Status.PAID else X402Store.Status.UNCONFIRMED, null)
@@ -231,12 +270,15 @@ internal class X402Flow<D : Any>(
             detection.value,
             initiator?.byUser == true,
             initiator?.fromOrigin,
+            initiator?.gesture == true,
             initiator?.hopOrigins.orEmpty(),
+            held.toSet(),
         )
     }
 
     fun closed(tab: Long) {
         superseded(tab)
         epochs.remove(tab)
+        pages.remove(tab)
     }
 }

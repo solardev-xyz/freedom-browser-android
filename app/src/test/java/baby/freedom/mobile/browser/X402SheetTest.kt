@@ -112,6 +112,31 @@ class X402SheetTest {
     }
 
     @Test
+    fun `#237 the allowance note says whom it pays, how much at a time, and for which navigations`() {
+        val o = ask(balance = 1_000_000, "10000").options.single()
+        val note = allowanceNote(X402Window.DAY, o, "Account 1")
+        assertTrue(note, note.contains("each at most 0.01 USDC, to the Pay to address above only"))
+        assertTrue(note, note.contains("from Account 1 only"))
+        assertTrue(note, note.contains("not ones it moves to on its own"))
+        assertTrue(note, note.contains("after the site refuses a payment, not until you open or reload it yourself"))
+    }
+
+    @Test
+    fun `#237 the wallet page's allowance line shows its payee and per-payment amount`() {
+        val a = baby.freedom.mobile.data.X402Store.Allowance(
+            "https://api.example", 8453, usdc.lowercase(), account1.address, "USDC", 6,
+            BigInteger.valueOf(100_000), BigInteger.valueOf(20_000), 0, 1,
+            payTo = "0x209693bc6afc0c5328ba36faf03c514ef312287c", each = BigInteger.valueOf(10_000),
+        )
+        val format = java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.ROOT).apply { timeZone = java.util.TimeZone.getTimeZone("UTC") }
+        assertEquals(
+            "0.02 of 0.1 USDC used · at most 0.01 each · to ${shortAddress("0x209693bc6afc0c5328ba36faf03c514ef312287c")} · " +
+                "Base · from ${shortAddress(account1.address)} · until 1970-01-01",
+            x402AllowanceLine(a, "Base", format),
+        )
+    }
+
+    @Test
     fun `an allowance starts at ten payments, must cover this one, and goes with the answer`() {
         val s = X402SheetState(ask(balance = 1_000_000, "10000"))
         s.auto = true

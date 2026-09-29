@@ -60,6 +60,19 @@ internal fun ledgerHurry(offer: X402.Offer): String? {
     else "The site allows only $s s to confirm once the Ledger shows the payment; after that it isn't sent."
 }
 
+/**
+ * What an allowance granted on the sheet lets the site do: pay whom, how
+ * much at a time and in all, for which navigations, and when it stops —
+ * the payee and the per-payment amount are this payment's (#237).
+ */
+internal fun allowanceNote(window: X402Window, o: X402Option, account: String): String =
+    "For ${window.label}, this site's pages are paid for in ${o.symbol} on ${o.chain.name} without asking — " +
+        "each at most ${SendAmounts.exact(o.offer.amount, o.decimals)} ${o.symbol}, to the Pay to address above only — " +
+        "from $account only, up to that total. Only pages you open yourself or reach by tapping on the site, " +
+        "not ones it moves to on its own; and after the site refuses a payment, not until you open or reload it yourself. " +
+        "Only while the wallet is unlocked, never in a private tab. With another account active, you're asked again. " +
+        "Revoke it any time on the wallet page."
+
 /** What the user has picked on an x402 sheet: an offer, and whether (and how much) to allow paying without asking. */
 internal class X402SheetState(val ask: X402Ask) {
     var selected by mutableIntStateOf(ask.options.indexOfFirst { it.fundable }.coerceAtLeast(0))
@@ -216,12 +229,7 @@ internal fun X402PaymentBody(
                 )
             }
         }
-        Note(
-            "For ${state.window.label}, this site's pages are paid for in ${o.symbol} on ${o.chain.name} without asking, " +
-                "from ${accountLabel(account)} only, up to that total — only while the wallet is unlocked, never in a private tab. " +
-                "With another account active, you're asked again. " +
-                "Revoke it any time on the wallet page.",
-        )
+        Note(allowanceNote(state.window, o, accountLabel(account)))
     }
     Spacer(Modifier.height(8.dp))
     Note(
