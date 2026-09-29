@@ -200,6 +200,8 @@ object EthereumProviders {
             // Aged while a Ledger was unlocked or reviewed on: nothing sent; priced again, the site's sheet asks again.
             is SendStatus.Stage.Failed -> if (stage.stale) {
                 EthereumProvider.Submitted.Stale
+            } else if (stage.rejected) {
+                EthereumProvider.Submitted.Rejected
             } else {
                 EthereumProvider.Submitted.Failed(stage.message, status.hash.takeIf { stage.mayHaveGone })
             }
@@ -215,6 +217,17 @@ object EthereumProviders {
      */
     suspend fun disconnect(context: Context, origin: String): Boolean =
         provider?.disconnect(origin) ?: DappGrantStore.get(context).revoke(origin)
+
+    /**
+     * The Ledger account [address] is being removed: the sites connected
+     * with it are disconnected ([EthereumProvider.accountRemoved]). False
+     * if that couldn't be read or written.
+     */
+    suspend fun accountRemoved(context: Context, address: String): Boolean =
+        provider?.accountRemoved(address) ?: DappGrantStore.get(context).let { store ->
+            val grants = store.allOrUnreadable.first() ?: return false
+            grants.filter { it.account.equals(address, ignoreCase = true) }.map { store.revoke(it.origin) }.all { it }
+        }
 
     /**
      * The wallet was removed: every connected site is disconnected

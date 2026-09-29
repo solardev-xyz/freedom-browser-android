@@ -389,10 +389,17 @@ data class SendStatus(val quote: SendQuote, val stage: Stage, val hash: String? 
          * the very same signed bytes, so it can't be sent twice.
          * Otherwise it certainly wasn't sent, and the send is reviewed again.
          * [stale]: it wasn't sent because its quote got older than
-         * [WalletSender.QUOTE_TTL_MS] while it was being signed (a Ledger
+         * [WalletSender.SIGNED_TTL_MS] while it was being signed (a Ledger
          * waited on): priced again, it can be confirmed again.
+         * [rejected]: the user refused it on their Ledger, or cancelled
+         * waiting for it — a site that asked for it hears a rejection (4001).
          */
-        data class Failed(val message: String, val mayHaveGone: Boolean, val stale: Boolean = false) : Stage
+        data class Failed(
+            val message: String,
+            val mayHaveGone: Boolean,
+            val stale: Boolean = false,
+            val rejected: Boolean = false,
+        ) : Stage
 
         data object Pending : Stage
         data class Confirmed(val block: Long, val feePaid: BigInteger?) : Stage
@@ -722,6 +729,16 @@ class WalletSender internal constructor(
     /** Whether [quote] is too old to sign as is (its fees may no longer get it mined). */
     fun isStale(quote: SendQuote): Boolean = clock() - quote.preparedAt !in 0 until QUOTE_TTL_MS
 
+    /**
+     * Whether [quote], signed just now, is too old to broadcast: priced
+     * over [SIGNED_TTL_MS] ago. Longer than [QUOTE_TTL_MS], which was
+     * already checked as the signing began (and, on a Ledger, again once
+     * it was connected and unlocked, just before it showed the
+     * transaction), so the time the user spends reviewing it on the
+     * device doesn't throw away what they just approved.
+     */
+    private fun tooOldToSend(quote: SendQuote): Boolean = clock() - quote.preparedAt !in 0 until SIGNED_TTL_MS
+
     /** What [submit] did with a quote. */
     enum class Submit {
         /** Signing and broadcasting it; [status] follows it. */
@@ -744,8 +761,8 @@ class WalletSender internal constructor(
      * quote has gone [stale][isStale] (checked here, at the moment of
      * signing, however long an unlock prompt kept the user before it —
      * and again once it's signed, since a Ledger's connect, unlock and
-     * on-device review all happen inside [sign]: a quote that aged past
-     * [QUOTE_TTL_MS] meanwhile is thrown away unsent and ends
+     * on-device review all happen inside [sign]: a quote priced over
+     * [SIGNED_TTL_MS] ago by then is thrown away unsent and ends
      * [SendStatus.Stage.Failed.stale], to be priced again).
      */
     fun submit(quote: SendQuote, sign: suspend (EthTransaction) -> EthTransaction.Signed): Submit {
@@ -769,7 +786,8 @@ class WalletSender internal constructor(
                 } catch (e: LedgerException) {
                     // The Ledger's own words: rejected, locked, disconnected, timed out… (#142)
                     val nothing = if (e.message.orEmpty().contains("Nothing was")) "" else " Nothing was sent."
-                    fail(quote, e.message + nothing, false)
+                    val rejected = e.kind == LedgerException.Kind.REJECTED || e.kind == LedgerException.Kind.CANCELLED
+                    fail(quote, e.message + nothing, false, rejected)
                     return@launch
                 } catch (e: Exception) {
                     Log.w(TAG, "signing failed: ${e.javaClass.simpleName}")
@@ -778,7 +796,7 @@ class WalletSender internal constructor(
                 }
                 // Signing may have taken minutes (a Ledger unlocked, opened, reviewed on):
                 // bytes whose fee cap was priced too long ago are dropped, never sent.
-                if (isStale(quote)) {
+                if (tooOldToSend(quote)) {
                     failStale(quote)
                     return@launch
                 }
@@ -976,8 +994,8 @@ class WalletSender internal constructor(
     private suspend fun set(quote: SendQuote, stage: SendStatus.Stage, hash: String?): Boolean =
         journalThenShow(quote) { SendStatus(quote, stage, hash) }
 
-    private suspend fun fail(quote: SendQuote, message: String, mayHaveGone: Boolean) =
-        journalThenShow(quote) { it.copy(stage = SendStatus.Stage.Failed(message, mayHaveGone)) }
+    private suspend fun fail(quote: SendQuote, message: String, mayHaveGone: Boolean, rejected: Boolean = false) =
+        journalThenShow(quote) { it.copy(stage = SendStatus.Stage.Failed(message, mayHaveGone, rejected = rejected)) }
 
     private suspend fun failStale(quote: SendQuote) = journalThenShow(quote) {
         it.copy(stage = SendStatus.Stage.Failed(STALE_WHILE_SIGNING, mayHaveGone = false, stale = true))
@@ -1009,12 +1027,19 @@ class WalletSender internal constructor(
         internal const val INTERRUPTED = "The app closed while this was going out, so it may or may not have gone out. " +
             "Try again sends the very same transaction, so it can’t be paid twice."
 
-        /** Why a send was dropped unsent: its quote aged past [QUOTE_TTL_MS] while it was signed. */
-        internal const val STALE_WHILE_SIGNING = "The network fee was worked out over a minute ago, before this was signed, " +
+        /** Why a send was dropped unsent: its quote aged past [SIGNED_TTL_MS] while it was signed. */
+        internal const val STALE_WHILE_SIGNING = "The network fee was worked out over three minutes ago, before this was signed, " +
             "so it may no longer get the transaction in. Nothing was sent; review the new fee and confirm again."
 
-        /** A quote older than this is priced again before it's signed (and dropped if it got older while signing). */
+        /** A quote older than this is priced again before it's signed (or shown on a Ledger). */
         const val QUOTE_TTL_MS = 60_000L
+
+        /**
+         * Signed bytes whose quote is older than this are dropped, not
+         * broadcast: [QUOTE_TTL_MS] to confirm, plus time to review it
+         * on a Ledger (#220 R2-M1).
+         */
+        const val SIGNED_TTL_MS = 3 * 60_000L
 
         /** Between receipt reads: about a Gnosis block, under an Ethereum one. */
         const val POLL_MS = 4_000L

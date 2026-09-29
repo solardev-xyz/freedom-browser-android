@@ -182,6 +182,9 @@ class EthereumProvider(
         data class Sent(val hash: String) : Submitted
         data object Stale : Submitted
         data object Busy : Submitted
+
+        /** Refused on the Ledger, or the user cancelled waiting for it: nothing sent. */
+        data object Rejected : Submitted
         data class Failed(val message: String, val hash: String?) : Submitted
     }
 
@@ -290,6 +293,30 @@ class EthereumProvider(
         synchronized(sessionChains) { all.forEach { (origin, g) -> sessionChains[origin] = g.chainId } }
         all.keys.forEach { events.emit(it, "accountsChanged", JSONArray()) }
         return true
+    }
+
+    /**
+     * The Ledger account [address] was taken off the wallet: every site
+     * connected with it is disconnected, as [disconnect], so adding the
+     * account again later doesn't quietly reconnect them, and their open
+     * pages see no accounts. False if the grants couldn't be read or written.
+     */
+    suspend fun accountRemoved(address: String): Boolean {
+        val all = try {
+            grants.all()
+        } catch (e: GrantsUnreadable) {
+            return false
+        }
+        var ok = true
+        all.filterValues { it.account.equals(address, ignoreCase = true) }.forEach { (origin, grant) ->
+            if (!grants.revoke(origin)) {
+                ok = false
+                return@forEach
+            }
+            synchronized(sessionChains) { sessionChains[origin] = grant.chainId }
+            events.emit(origin, "accountsChanged", JSONArray())
+        }
+        return ok
     }
 
     // ---- Chains ----
@@ -585,6 +612,8 @@ class EthereumProvider(
             when (val s = sends.submit(quote)) {
                 is Submitted.Sent -> return Reply.Ok(s.hash)
                 Submitted.Busy -> return busy()
+                // As personal_sign and typed data answer the same refusal (EIP-1193 4001).
+                Submitted.Rejected -> return Reply.Err(USER_REJECTED, "User rejected the transaction on the Ledger.")
                 is Submitted.Failed -> return Reply.Err(INTERNAL, s.message, s.hash?.let { JSONObject().put("hash", it) })
                 // Priced too long ago to trust its fee: price it again and let the user look.
                 Submitted.Stale -> {

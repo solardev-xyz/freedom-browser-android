@@ -621,7 +621,16 @@ fun WalletScreen(
                                 connectingLedger = true
                             },
                             onRemoveLedger = { account ->
-                                run("remove the Ledger account") { walletAccounts.removeLedger(account.index) }
+                                run("remove the Ledger account") {
+                                    // Its sites first (#220 R2-M2): told they lost it now, and not
+                                    // quietly reconnected if the same Ledger account is added again.
+                                    if (!EthereumProviders.accountRemoved(context, account.address)) {
+                                        error = "Couldn’t remove the Ledger account: the sites connected to it " +
+                                            "couldn’t be disconnected. Try again."
+                                        return@run
+                                    }
+                                    walletAccounts.removeLedger(account.index)
+                                }
                             },
                         )
                     }

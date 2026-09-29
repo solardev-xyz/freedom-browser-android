@@ -761,6 +761,31 @@ class EthereumProviderTest {
     }
 
     @Test
+    fun `a transaction refused on the Ledger is a user rejection for the page, not priced again`() {
+        connect()
+        answer = { EthAnswer.Approved() }
+        sends.outcomes += EthereumProvider.Submitted.Rejected
+        assertEquals(4001, code(call("eth_sendTransaction", tx("to" to second.address))))
+        assertEquals(1, sends.prepared.size)
+        assertEquals(1, asks.size)
+    }
+
+    @Test
+    fun `removing a Ledger account disconnects the sites connected with it, and only those`() {
+        val other = "https://other.example"
+        connect(second)
+        answer = { EthAnswer.Approved(main) }
+        ok(call("eth_requestAccounts", origin = other))
+        events.clear()
+        assertTrue(runBlocking { provider.accountRemoved(second.address.lowercase()) })
+        assertNull(grants.grants[site])
+        assertEquals(main.address, grants.grants[other]?.account)
+        assertEquals(listOf(Triple(site, "accountsChanged", "[]")), events)
+        // The same account added back: the site asks again before it sees it.
+        assertEquals("[]", ok(call("eth_accounts")).toString())
+    }
+
+    @Test
     fun `reads go to the site's chain as the page's own reads, errors as the node gave them`() {
         assertEquals("0x1", ok(call("eth_blockNumber")))
         assertEquals("100 eth_blockNumber [] $site", readsSeen.single())

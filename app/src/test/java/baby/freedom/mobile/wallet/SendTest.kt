@@ -12,6 +12,7 @@ import baby.freedom.mobile.chains.rpc.ChainRpcException
 import baby.freedom.mobile.chains.rpc.RpcTransport
 import baby.freedom.mobile.chains.rpc.WalletRpc
 import baby.freedom.mobile.ens.hexToBytes
+import baby.freedom.mobile.wallet.ledger.LedgerException
 import java.io.IOException
 import java.math.BigInteger
 import kotlinx.coroutines.CoroutineScope
@@ -1074,6 +1075,40 @@ class SendTest {
         assertEquals(WalletSender.Submit.STARTED, s.submit(s.prepare(request()), signer()))
         s.awaitStage { it == SendStatus.Stage.Pending }
         assertEquals(1, chain.sent.size)
+    }
+
+    @Test
+    fun `a transaction approved on the Ledger within the review allowance is sent, not dropped`() = runBlocking<Unit> {
+        val chain = FakeChain()
+        var now = 1_000L
+        val s = sender(chain) { now }
+        val quote = s.prepare(request())
+        // Confirmed after 35 s (the pre-sign check passes); approved on the device 30 s later.
+        now += 35_000
+        assertEquals(
+            WalletSender.Submit.STARTED,
+            s.submit(quote) { tx ->
+                now += 30_000
+                tx.sign(key.copyOf(), from.address)
+            },
+        )
+        s.awaitStage { it == SendStatus.Stage.Pending }
+        assertEquals(1, chain.sent.size)
+    }
+
+    @Test
+    fun `a transaction refused or cancelled on the Ledger fails as a rejection`() = runBlocking<Unit> {
+        for (kind in LedgerException.Kind.entries) {
+            val chain = FakeChain()
+            val s = sender(chain) { 1_000L }
+            assertEquals(WalletSender.Submit.STARTED, s.submit(s.prepare(request())) { throw LedgerException(kind) })
+            val failed = s.awaitStage { it is SendStatus.Stage.Failed }.stage as SendStatus.Stage.Failed
+            val rejection = kind == LedgerException.Kind.REJECTED || kind == LedgerException.Kind.CANCELLED
+            assertEquals(kind.name, rejection, failed.rejected)
+            assertFalse(failed.mayHaveGone)
+            assertFalse(failed.stale)
+            assertTrue(chain.sent.isEmpty())
+        }
     }
 
     @Test
