@@ -2,6 +2,7 @@ package baby.freedom.mobile.wallet
 
 import android.content.Context
 import android.util.Log
+import androidx.annotation.VisibleForTesting
 import baby.freedom.mobile.chains.rpc.ChainDataRouter
 import baby.freedom.mobile.chains.rpc.WalletRpc
 import baby.freedom.mobile.ens.Keccak256
@@ -270,12 +271,25 @@ class WalletAccounts internal constructor(
         private var instance: WalletAccounts? = null
 
         fun get(context: Context): WalletAccounts = instance ?: synchronized(this) {
-            instance ?: WalletAccounts(
-                vault = Vault.get(context),
-                store = WalletAccountStore.get(context),
+            instance ?: create(context).also { instance = it }
+        }
+
+        /**
+         * Builds an instance from the *application* context only: this lives
+         * for the whole process, and the balance fetcher's lambda would
+         * otherwise pin whatever was passed in (the first `MainActivity`,
+         * with its whole view tree and WebViews) for as long as the node's
+         * foreground service keeps the process alive.
+         */
+        @VisibleForTesting
+        internal fun create(context: Context): WalletAccounts {
+            val app = context.applicationContext
+            return WalletAccounts(
+                vault = Vault.get(app),
+                store = WalletAccountStore.get(app),
                 scope = CoroutineScope(SupervisorJob() + Dispatchers.Default),
-                balances = WalletBalances { BalanceFetcher(WalletRpc(ChainDataRouter.get(context))) },
-            ).also { instance = it }
+                balances = WalletBalances { BalanceFetcher(WalletRpc(ChainDataRouter.get(app))) },
+            )
         }
     }
 }
