@@ -163,7 +163,12 @@ internal class X402Flow<D : Any>(
         retries[tab] = Retry(url, recordId)
     }
 
-    /** A main-frame server redirect on [tab] to [target]. */
+    /**
+     * A main-frame server redirect on [tab] to [target] — the WebView's,
+     * or one the browser cancelled to switch the user agent and loaded
+     * [target] in place of (#180): the same navigation either way, so not
+     * the user's address on [target]'s site (#237 R2-F1).
+     */
     fun redirected(tab: Long, target: String) {
         // A response that redirects isn't the 402 noted before it, which will never commit now.
         detections.remove(tab)
@@ -213,6 +218,15 @@ internal class X402Flow<D : Any>(
         if (byUser && url != null) originOf(url)?.let(held::remove)
         initiators[tab] = Initiator(byUser, fromOrigin, post, gesture).also { if (url != null) it.hopOrigins.add(originOf(url)) }
     }
+
+    /**
+     * [origin] is held after a Refused payment, now: its allowance pays
+     * nothing silently. [Committed.allowanceMayPay] is the hold as the
+     * 402 committed; a payment it let through is checked again here just
+     * before it goes out, as a paid request of the site's in another tab
+     * may have been Refused while this one was worked out (#237 R2-M1).
+     */
+    fun holds(origin: String): Boolean = origin in held
 
     /**
      * The user's own Reload or Back/Forward on [tab] — the bar's buttons,

@@ -463,4 +463,47 @@ class X402FlowTest {
         flow.detected(tab, b, "terms")
         assertTrue(flow.committed(tab, b)!!.allowanceMayPay(origin))
     }
+
+    @Test
+    fun `#237 R2-F1 another site's redirect into a held site, reloaded to switch the user agent, neither lifts the hold nor pays`() {
+        refusedOnScreen()
+        // The user types evil.example, which 302s to pay.example; the redirect crosses the
+        // desktop/mobile line, so the browser cancels it and loads the target in its place —
+        // reported as the same navigation's redirect hop, not the user's address on pay.example.
+        flow.superseded(tab)
+        flow.navigationStarted(tab, byUser = true, fromOrigin = null, url = "https://evil.example/x")
+        flow.redirected(tab, "$origin/next-402")
+        flow.detected(tab, "$origin/next-402", "terms")
+        assertFalse(flow.committed(tab, "$origin/next-402")!!.allowanceMayPay(origin))
+        assertTrue(flow.holds(origin))
+        assertFalse(tappedLinkPays())
+    }
+
+    @Test
+    fun `#237 R2-F1 the user's address corrected to a same-site hop still pays`() {
+        flow.navigationStarted(tab, byUser = true, fromOrigin = null, url = b)
+        flow.redirected(tab, a)
+        flow.detected(tab, a, "terms")
+        assertTrue(flow.committed(tab, a)!!.allowanceMayPay(origin))
+    }
+
+    @Test
+    fun `#237 R2-M1 a hold taken after a 402 committed is seen before its payment goes out`() {
+        // Tab 2's tapped link on the site commits a 402 its allowance may pay...
+        flow.navigationStarted(2L, byUser = false, fromOrigin = origin, url = b, gesture = true)
+        flow.detected(2L, b, "terms")
+        val committed = flow.committed(2L, b)!!
+        assertTrue(committed.allowanceMayPay(origin))
+        assertFalse(flow.holds(origin))
+        // ...while tab 1's paid request on the same site is answered Refused.
+        send(a, "r1")
+        assertTrue(flow.httpError(tab, a, "GET", 402))
+        // The commit's snapshot doesn't know; the live check that gates the payment does.
+        assertTrue(committed.allowanceMayPay(origin))
+        assertTrue(flow.holds(origin))
+        assertFalse(flow.holds("https://other.example"))
+        flow.superseded(tab)
+        flow.navigationStarted(tab, byUser = true, fromOrigin = null, url = a)
+        assertFalse(flow.holds(origin))
+    }
 }
