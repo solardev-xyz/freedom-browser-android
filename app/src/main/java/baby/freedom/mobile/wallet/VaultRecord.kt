@@ -33,7 +33,9 @@ enum class VaultProtection(val wire: String) {
  * The vault as stored on disk: the recovery phrase sealed with AES-GCM
  * under the Keystore key, plus what isn't secret — how the key is
  * guarded, whether it sits in StrongBox, and whether the user has seen
- * the phrase since it was made (the backup reminder). There is no
+ * the phrase since it was made (the backup reminder), and whether the
+ * phrase is in the opt-in Google Block Store backup ([PhraseBackup],
+ * #231) and that backup has been offered. There is no
  * plaintext copy of the phrase anywhere; [ciphertext] can only be opened
  * by the Keystore key, which can't leave the phone's secure hardware.
  */
@@ -43,8 +45,18 @@ class VaultRecord(
     val iv: ByteArray,
     val ciphertext: ByteArray,
     val backedUp: Boolean,
+    /** This wallet's phrase is the entry in Block Store ([PhraseBackup]): Google backup is on. */
+    val cloudBackup: Boolean = false,
+    /** The one-time "Back up with Google?" offer after create or import has been answered (#231). */
+    val cloudBackupOffered: Boolean = false,
 ) {
-    fun withBackedUp(backedUp: Boolean) = VaultRecord(protection, strongBox, iv, ciphertext, backedUp)
+    fun withBackedUp(backedUp: Boolean) = copy(backedUp = backedUp)
+
+    fun copy(
+        backedUp: Boolean = this.backedUp,
+        cloudBackup: Boolean = this.cloudBackup,
+        cloudBackupOffered: Boolean = this.cloudBackupOffered,
+    ) = VaultRecord(protection, strongBox, iv, ciphertext, backedUp, cloudBackup, cloudBackupOffered)
 
     fun encode(): String = JSONObject()
         .put("version", VERSION)
@@ -53,6 +65,8 @@ class VaultRecord(
         .put("iv", Base64.getEncoder().encodeToString(iv))
         .put("ciphertext", Base64.getEncoder().encodeToString(ciphertext))
         .put("backedUp", backedUp)
+        .put("cloudBackup", cloudBackup)
+        .put("cloudBackupOffered", cloudBackupOffered)
         .toString()
 
     companion object {
@@ -70,6 +84,9 @@ class VaultRecord(
                     iv = Base64.getDecoder().decode(o.getString("iv")),
                     ciphertext = Base64.getDecoder().decode(o.getString("ciphertext")),
                     backedUp = o.optBoolean("backedUp", false),
+                    // Absent in files written before #231: backup off, never offered.
+                    cloudBackup = o.optBoolean("cloudBackup", false),
+                    cloudBackupOffered = o.optBoolean("cloudBackupOffered", false),
                 ).takeIf { it.iv.isNotEmpty() && it.ciphertext.isNotEmpty() }
             }
         } catch (_: Exception) {

@@ -67,6 +67,8 @@ import baby.freedom.mobile.ui.isLight
 import baby.freedom.mobile.wallet.NodeIdentitySync
 import baby.freedom.mobile.wallet.WalletAccounts
 import baby.freedom.mobile.wallet.WalletSender
+import baby.freedom.mobile.wallet.PhraseBackup
+import baby.freedom.mobile.wallet.PhraseBackupJob
 import baby.freedom.mobile.wallet.Vault
 import baby.freedom.swarm.IpfsInfo
 import baby.freedom.swarm.MyotisInfo
@@ -646,6 +648,14 @@ class MainActivity : ComponentActivity() {
         // The wallet's auto-lock (#76): back within the 1-minute grace,
         // it stays open; later than that, it locks now.
         Vault.get(this).onAppForeground()
+        // Google backup (#231): if encryption went away while we were out
+        // (the screen lock was removed), take the cloud copy down; back on
+        // once it's there again. Whatever the wallet says: an entry kept
+        // after Remove wallet, or one a new phone received, needs it too.
+        lifecycleScope.launch {
+            val status = PhraseBackup.get(this@MainActivity).reconcileQuietly()
+            PhraseBackupJob.sync(this@MainActivity, status)
+        }
         runCatching { binder?.onAppForeground() }
         runCatching { myotisBinder?.onAppForeground() }
     }
