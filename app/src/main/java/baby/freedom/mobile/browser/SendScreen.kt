@@ -54,6 +54,8 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import baby.freedom.mobile.chains.Chain
 import baby.freedom.mobile.ui.isLight
+import baby.freedom.mobile.ens.toHex
+import baby.freedom.mobile.wallet.DappCall
 import baby.freedom.mobile.wallet.EthTransaction
 import baby.freedom.mobile.wallet.Recipients
 import baby.freedom.mobile.wallet.SendAmounts
@@ -525,7 +527,7 @@ private fun SendReviewSection(
 
 /** A labelled value on its own line (it's never cut), with an optional address and a muted sub-line. */
 @Composable
-private fun ReviewRow(label: String, value: String?, mono: Boolean = false, address: String? = null, detail: String? = null) {
+internal fun ReviewRow(label: String, value: String?, mono: Boolean = false, address: String? = null, detail: String? = null) {
     Column(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
         Text(label, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
         SelectionContainer {
@@ -581,9 +583,11 @@ private fun SendStatusSection(
         }
         Spacer(Modifier.height(8.dp))
         // A site's transaction (#110): who asked for it, whatever it carries.
-        request.dapp?.let { ReviewRow("Requested by", permissionOriginDisplay(it.origin)) }
+        request.dapp?.let { ReviewRow("Requested by", dappRequester(it)) }
         ReviewRow("Amount", "${SendAmounts.exact(request.amount, request.token.decimals)} ${request.token.symbol} on ${request.chain.name}", mono = true)
         ReviewRow(if (request.dapp != null) "Contract" else "To", null, address = request.to)
+        // One desktop Freedom composed (#113): what it calls is part of what was sent.
+        request.dapp?.takeIf { it.origin == null }?.let { HexRow("Data", "0x" + it.data.toHex(), selector = true, detail = "Asked for over a scanned pairing code") }
         status.hash?.let { hash ->
             Column(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
                 Text("Transaction", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -602,7 +606,7 @@ private fun SendStatusSection(
             stage is SendStatus.Stage.Failed && stage.mayHaveGone -> Button(onClick = onRetry, modifier = Modifier.fillMaxWidth()) {
                 Text("Try again")
             }
-            // A site's transaction is the site's to ask for again, not this page's.
+            // A transaction a site or desktop Freedom composed is theirs to ask for again, not this page's.
             stage is SendStatus.Stage.Failed && request.dapp == null -> Button(onClick = onReviewAgain, modifier = Modifier.fillMaxWidth()) {
                 Text("Review again")
             }
@@ -677,7 +681,7 @@ internal fun SendEntrySection(status: SendStatus?, enabled: Boolean, onOpen: () 
             subtitle = status?.let {
                 val r = it.quote.request
                 val what = "${SendAmounts.exact(r.amount, r.token.decimals)} ${r.token.symbol} on ${r.chain.name}"
-                r.dapp?.let { d -> "$what, for ${permissionOriginDisplay(d.origin)}" } ?: what
+                r.dapp?.let { d -> "$what, for ${dappRequester(d)}" } ?: what
             } ?: "Native currency or tokens, from this account",
             style = PageRowStyle.Inset,
             leadingIcon = Icons.AutoMirrored.Filled.Send,
@@ -686,3 +690,6 @@ internal fun SendEntrySection(status: SendStatus?, enabled: Boolean, onOpen: () 
         )
     }
 }
+
+/** Who asked for a composed transaction: the site, or — for desktop Freedom's (#113) — the code that was scanned. */
+internal fun dappRequester(d: DappCall): String = d.origin?.let(::permissionOriginDisplay) ?: "a scanned pairing code"

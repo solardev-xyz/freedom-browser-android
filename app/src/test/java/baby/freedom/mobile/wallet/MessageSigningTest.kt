@@ -41,7 +41,7 @@ class MessageSigningTest {
                 "07299936d304c153f6443dfa05f40ff007d72911b6f72307f996231605b915621c",
             MessageSigning.sign(cow, cowAddress, digest),
         )
-        assertEquals(1L, data.chainId)
+        assertEquals(1L.toBigInteger(), data.chainId)
     }
 
     @Test

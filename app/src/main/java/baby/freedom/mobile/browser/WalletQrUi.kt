@@ -77,6 +77,7 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import baby.freedom.mobile.chains.Chain
+import baby.freedom.mobile.wallet.OpenLvSession
 import baby.freedom.mobile.wallet.ScannedCode
 import baby.freedom.mobile.wallet.TokenAmounts
 import baby.freedom.mobile.wallet.TokenRegistry
@@ -289,8 +290,14 @@ internal fun exactAmount(raw: BigInteger, decimals: Int): String =
 @Composable
 internal fun ScanPage(chains: List<Chain>, accounts: List<WalletAccount>, onBack: () -> Unit) {
     val context = LocalContext.current
+    val session = remember(context) { OpenLvSession.get(context) }
     var result by remember { mutableStateOf<ScannedCode?>(null) }
     var pasted by remember { mutableStateOf("") }
+    // A pairing code connects as it's read (#113): the sheets ask before anything is signed or shared.
+    fun show(code: ScannedCode) {
+        result = code
+        if (code is ScannedCode.Pairing) session.start(code.uri)
+    }
     // The same code seen frame after frame reads once while it stays in view (iOS's lastCode).
     val dedup = remember { ScanDedup() }
     // The codes still in front of the camera must not replace what was just
@@ -299,7 +306,7 @@ internal fun ScanPage(chains: List<Chain>, accounts: List<WalletAccount>, onBack
     // on the next frame.
     fun readPasted() {
         dedup.holdRecent()
-        result = ScannedCode.parse(pasted)
+        show(ScannedCode.parse(pasted))
     }
     // Held here, not in the scanner: the scanner sits in a LazyColumn item,
     // whose plain remember is lost when it scrolls off screen.
@@ -315,7 +322,7 @@ internal fun ScanPage(chains: List<Chain>, accounts: List<WalletAccount>, onBack
                 SectionCard(title = "Camera") {
                     QrScanner(
                         permission = cameraPermission,
-                        onCode = { text -> if (dedup.isNew(text)) result = ScannedCode.parse(text) },
+                        onCode = { text -> if (dedup.isNew(text)) show(ScannedCode.parse(text)) },
                         modifier = Modifier.fillMaxWidth().aspectRatio(1f).clip(RoundedCornerShape(12.dp)),
                     )
                     Spacer(Modifier.height(8.dp))
@@ -329,7 +336,11 @@ internal fun ScanPage(chains: List<Chain>, accounts: List<WalletAccount>, onBack
             }
             result?.let { code ->
                 item("result") {
-                    ScannedCodeSection(code, scannedLines(code, chains, accounts), onCopy = { copyToClipboard(context, it) })
+                    if (code is ScannedCode.Pairing) {
+                        PairingSection(code.uri)
+                    } else {
+                        ScannedCodeSection(code, scannedLines(code, chains, accounts), onCopy = { copyToClipboard(context, it) })
+                    }
                 }
             }
             item("paste") {
@@ -421,11 +432,7 @@ private fun ScannedCodeSection(code: ScannedCode, lines: List<ScannedLine>, onCo
                     }
                 }
             }
-            is ScannedCode.Pairing -> Text(
-                "This code connects desktop Freedom to this phone, so the phone can sign for it. " +
-                    "Signing for desktop Freedom isn’t available on Android yet.",
-                style = MaterialTheme.typography.bodyMedium,
-            )
+            is ScannedCode.Pairing -> Unit
             is ScannedCode.Unrecognized -> Text(code.reason, style = MaterialTheme.typography.bodyMedium)
         }
     }
