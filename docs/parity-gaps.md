@@ -39,6 +39,7 @@ The parity plan ([#128](https://github.com/solardev-xyz/freedom-browser-android/
 | [#274](https://github.com/solardev-xyz/freedom-browser-android/issues/274) | Myotis: start and stop Ethereum and Gnosis separately | yes | no | S |
 | [#275](https://github.com/solardev-xyz/freedom-browser-android/issues/275) | Tor through an external SOCKS proxy (Orbot) | yes | no | S |
 | [#276](https://github.com/solardev-xyz/freedom-browser-android/issues/276) | Node logs: view and share | log file | yes | S |
+| [#283](https://github.com/solardev-xyz/freedom-browser-android/issues/283) | Keep web pages from reading the Swarm node's local API (today a sandboxed iframe, origin `null`, reads `/wallet`, `/stamps`, `/addresses` and `/chequebook/balance`; only writes are refused) | yes | not checked | S |
 
 ### Wallet
 
@@ -58,7 +59,6 @@ The parity plan ([#128](https://github.com/solardev-xyz/freedom-browser-android/
 
 ## Checked and not filed
 
-- **Pages reading the Swarm node's local API.** Desktop now blocks web content from the Ant API ([freedom-browser#428](https://github.com/solardev-xyz/freedom-browser/issues/428)). On Android, writes are already refused (`NodeChainWrites.kt`, plus `SpendGuard` at the native transport). A fixture page's `fetch('http://127.0.0.1:1633/addresses')` failed with a CORS error on v0.6.10, because ant sends no `Access-Control-Allow-Origin`, so a page can't read the answers either.
 - **Home page contents.** Android's home already shows Bookmarks and Recent (`HomeScreen.kt`), as iOS's does. Only the Explore entry is missing, and that is folded into [#278](https://github.com/solardev-xyz/freedom-browser-android/issues/278).
 - **Empty states.** History, Bookmarks and Downloads have them (`EmptyState` in `HistoryBookmarksScreens.kt`, `DownloadsScreen.kt`).
 - **Font scale.** At 200%, the main menu and the home page lay out without clipping; the one truncation found (the address placeholder) is in [#279](https://github.com/solardev-xyz/freedom-browser-android/issues/279).
