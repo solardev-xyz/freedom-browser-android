@@ -210,6 +210,23 @@ class VaultTest {
     }
 
     @Test
+    fun `a Swarm signing key is derived without holding the idle lock off (#236)`() = runBlocking {
+        val v = vault()
+        v.create(phrase, auth, imported = false)
+        val identity = PublisherIdentity(PublisherIdentity.Mode.APP_SCOPED, 0, "App-scoped identity 1", 1)
+        // A page polling an always-allowed swarm_getSigningIdentity every 10 s.
+        repeat(89) {
+            now += 10_000L
+            PublisherKeys.signingKey(v, identity).fill(0)
+        }
+        v.lockIfExpired()
+        assertTrue(v.state.value is Vault.State.Unlocked)
+        now += 10_000L
+        v.lockIfExpired()
+        assertTrue(v.state.value is Vault.State.Locked)
+    }
+
+    @Test
     fun `seed is refused once idle time is up even before the timer fires`() = runBlocking {
         val v = vault()
         v.create(phrase, auth, imported = false)

@@ -710,6 +710,43 @@ class SwarmProviderTest {
     }
 
     @Test
+    fun `an always-allowed signing identity read doesn't hold the idle lock off, approvals and writes do (#236)`() {
+        connect()
+        answer = SwarmProvider.Answer(true, always = true)
+        val owner = okJson(call("swarm_getSigningIdentity")).getString("owner")
+        assertEquals("the user's yes on the sheet counts", 1, publishers.activity)
+
+        // "Always allow" now answers it with no sheet, no write and nothing spent:
+        // polling it must not keep the wallet open.
+        asked.clear()
+        repeat(100) { assertEquals(owner, okJson(call("swarm_getSigningIdentity")).getString("owner")) }
+        assertTrue(asked.isEmpty())
+        assertTrue(node.uploads().isEmpty())
+        assertEquals(1, publishers.activity)
+
+        // A refused sheet doesn't count either.
+        answer = SwarmProvider.Answer.REJECTED
+        assertEquals(4001, err(call("swarm_createFeed", JSONObject().put("name", "posts"))).code)
+        assertEquals(1, publishers.activity)
+
+        // A write "always allow" lets through spends postage, like a publish: it counts.
+        ok(call("swarm_writeSingleOwnerChunk", JSONObject().put("identifier", "01".repeat(32)).put("data", "payload")))
+        assertEquals(1, asked.size)
+        assertEquals(2, publishers.activity)
+
+        // An approved feed sheet that creates the feed: the yes, then the write.
+        answer = SwarmProvider.Answer(true, always = true)
+        ok(call("swarm_createFeed", JSONObject().put("name", "posts")))
+        assertEquals(4, publishers.activity)
+        // Creating it again under always-allow only returns it: nothing written, not activity.
+        asked.clear()
+        repeat(20) { ok(call("swarm_createFeed", JSONObject().put("name", "posts"))) }
+        assertTrue(asked.isEmpty())
+        assertEquals(4, publishers.activity)
+        assertTrue(publishers.keysHandedOut.all { k -> k.all { it == 0.toByte() } })
+    }
+
+    @Test
     fun `a locked wallet always gets the sheet, even with always-allow`() {
         connect()
         feeds.grant(site)

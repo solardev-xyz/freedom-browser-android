@@ -252,17 +252,23 @@ class Vault internal constructor(
     }
 
     /**
-     * Runs [block] with the 64-byte BIP-39 seed (a copy, zeroed after) and
-     * counts it as wallet activity. Throws [VaultLockedException] if the
-     * vault isn't unlocked — or has just run out its auto-lock time. Keep
-     * whatever [block] derives scoped to the one operation.
+     * Runs [block] with the 64-byte BIP-39 seed (a copy, zeroed after) and,
+     * unless [activity] is false, counts it as wallet activity. Throws
+     * [VaultLockedException] if the vault isn't unlocked — or has just run
+     * out its auto-lock time. Keep whatever [block] derives scoped to the
+     * one operation. [activity] false is for a key a site's request uses
+     * with no sheet and nothing spent (a Swarm signing identity read under
+     * "always allow"), which mustn't hold the idle lock off (#236); the
+     * caller counts it itself when the user approved or a write went out.
      */
-    fun <T> withSeed(block: (ByteArray) -> T): T {
+    fun <T> withSeed(activity: Boolean = true, block: (ByteArray) -> T): T {
         val copy = synchronized(lock) {
             lockIfExpiredLocked()
             val s = seed ?: throw VaultLockedException()
-            policy.activity(clock())
-            reschedule()
+            if (activity) {
+                policy.activity(clock())
+                reschedule()
+            }
             s.copyOf()
         }
         return try {
