@@ -78,6 +78,11 @@ class DappGrantStore internal constructor(private val store: DataStore<Preferenc
     /** Disconnect [origin]; `false` if the store couldn't be written. */
     suspend fun revoke(origin: String): Boolean = write { it.remove(keyOf(origin)) }
 
+    /** Disconnect every site (the wallet was removed); `false` if the store couldn't be written. */
+    suspend fun clear(): Boolean = write { prefs ->
+        prefs.asMap().keys.filter { it.name.startsWith(PREFIX) }.forEach { prefs.remove(it) }
+    }
+
     private suspend fun write(change: (MutablePreferences) -> Unit): Boolean = try {
         store.edit(change)
         true

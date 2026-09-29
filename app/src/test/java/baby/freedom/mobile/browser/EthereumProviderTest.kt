@@ -43,6 +43,8 @@ class EthereumProviderTest {
             return true
         }
         override suspend fun revoke(origin: String) = grants.remove(origin).let { true }
+        override suspend fun all(): Map<String, EthereumProvider.Grant> = HashMap(grants)
+        override suspend fun clear() = grants.clear().let { true }
         override suspend fun addChain(chain: Chain): Boolean {
             added += chain
             return true
@@ -66,6 +68,8 @@ class EthereumProviderTest {
         val prepared = mutableListOf<SendRequest>()
         val outcomes = ArrayDeque<EthereumProvider.Submitted>()
         var prepareError: String? = null
+        var busy = false
+        override fun busy() = busy
         override suspend fun prepare(request: SendRequest): SendQuote {
             prepareError?.let { throw SendException(it) }
             prepared += request
@@ -192,6 +196,24 @@ class EthereumProviderTest {
     }
 
     @Test
+    fun `personal_sign text with a bidi override or an invisible character shows hex`() {
+        connect()
+        answer = { EthAnswer.Approved() }
+        for (text in listOf("pay \u202Eevil\u202C", "a\u2066b\u2069", "zero\u200Bwidth", "tag\uDB40\uDC01", "\uFEFFbom")) {
+            asks.clear()
+            ok(call("personal_sign", JSONArray().put(text).put(main.address)))
+            val shown = asks.single() as EthAsk.SignMessage
+            assertNull(text, shown.text)
+            assertEquals("0x" + text.toByteArray().joinToString("") { "%02x".format(it) }, shown.hex)
+            // The same bytes sent as hex are shown the same way.
+            asks.clear()
+            ok(call("personal_sign", JSONArray().put(shown.hex).put(main.address)))
+            assertNull((asks.single() as EthAsk.SignMessage).text)
+        }
+        assertEquals("Sign in\nNonce: 1 ✓ 🐄", EthereumProvider.readableUtf8("Sign in\nNonce: 1 ✓ 🐄".toByteArray()))
+    }
+
+    @Test
     fun `signing as another account than the connected one is refused before any sheet`() {
         connect()
         answer = { EthAnswer.Approved() }
@@ -237,6 +259,73 @@ class EthereumProviderTest {
         assertEquals(BuiltInChains.ETHEREUM, shown.chain)
         assertTrue(shown.messageJson.contains("Hello, Bob!"))
         assertEquals(-32602, code(call("eth_signTypedData_v4", JSONArray().put(main.address).put("{\"types\":{}}"))))
+    }
+
+    @Test
+    fun `the typed-data sheet shows only the fields the signature covers`() {
+        connect()
+        answer = { EthAnswer.Approved() }
+        ok(call("wallet_switchEthereumChain", JSONArray().put(JSONObject().put("chainId", "0x1"))))
+        asks.clear()
+        val data = JSONObject(mail)
+        data.getJSONObject("message").put("note", "Just a harmless login").getJSONObject("to").put("extra", "not signed")
+        val sig = ok(call("eth_signTypedData_v4", JSONArray().put(main.address).put(data)))
+        // Undeclared keys don't change what's signed...
+        assertEquals(ok(call("eth_signTypedData_v4", JSONArray().put(main.address).put(mail))), sig)
+        // ...and aren't shown.
+        val shown = JSONObject((asks.first() as EthAsk.SignTypedData).messageJson)
+        assertEquals(setOf("from", "to", "contents"), shown.keys().asSequence().toSet())
+        assertEquals(setOf("name", "wallet"), shown.getJSONObject("to").keys().asSequence().toSet())
+        assertEquals("Bob", shown.getJSONObject("to").getString("name"))
+    }
+
+    @Test
+    fun `typed data that would take minutes to hash is hashed once per type, or refused quickly`() {
+        connect()
+        answer = { EthAnswer.Approved() }
+        // ~400 types hung off Root, and message.items = N × {} of Root[]: each item
+        // used to re-walk all 400 types for Root's type hash.
+        fun payload(n: Int): JSONObject {
+            val types = JSONObject()
+            types.put("EIP712Domain", JSONArray().put(JSONObject().put("name", "name").put("type", "string")))
+            val root = JSONArray()
+            for (i in 0 until 400) {
+                types.put("T$i", JSONArray().put(JSONObject().put("name", "v").put("type", "uint256")))
+                root.put(JSONObject().put("name", "f$i").put("type", "T$i"))
+            }
+            types.put("Root", root)
+            types.put("Main", JSONArray().put(JSONObject().put("name", "items").put("type", "Root[]")))
+            val items = JSONArray().apply { repeat(n) { put(JSONObject()) } }
+            return JSONObject().put("types", types).put("primaryType", "Main")
+                .put("domain", JSONObject().put("name", "x")).put("message", JSONObject().put("items", items))
+        }
+        var start = System.nanoTime()
+        ok(call("eth_signTypedData_v4", JSONArray().put(main.address).put(payload(2000))))
+        assertTrue("took ${(System.nanoTime() - start) / 1_000_000} ms", System.nanoTime() - start < 3_000_000_000L)
+        asks.clear()
+        start = System.nanoTime()
+        val err = call("eth_signTypedData_v4", JSONArray().put(main.address).put(payload(20_000))) as EthereumProvider.Reply.Err
+        assertTrue("took ${(System.nanoTime() - start) / 1_000_000} ms", System.nanoTime() - start < 3_000_000_000L)
+        assertEquals(-32602, err.code)
+        assertTrue(err.message, err.message.contains("too large"))
+        assertTrue(asks.isEmpty())
+    }
+
+    @Test
+    fun `typed data is hashed on the compute context, not the caller's`() {
+        var dispatched = 0
+        val compute = object : kotlinx.coroutines.CoroutineDispatcher() {
+            override fun dispatch(context: kotlin.coroutines.CoroutineContext, block: Runnable) {
+                dispatched++
+                kotlinx.coroutines.Dispatchers.Default.dispatch(context, block)
+            }
+        }
+        val p = EthereumProvider(grants, wallet, { BuiltInChains.ALL }, { _, _, _, _ -> null }, sends, compute)
+        connect()
+        grants.grants[site] = EthereumProvider.Grant(main.address, 1)
+        val sig = runBlocking { p.request(site, "eth_signTypedData_v4", JSONArray().put(main.address).put(mail)) { EthAnswer.Approved() } }
+        assertTrue(sig is EthereumProvider.Reply.Ok)
+        assertTrue(dispatched > 0)
     }
 
     @Test
@@ -299,6 +388,24 @@ class EthereumProviderTest {
         assertEquals("Test Ether", added.currencyName)
         assertEquals(listOf(added), grants.added)
         assertEquals(Triple(site, "chainChanged", "0x539"), events.last())
+    }
+
+    @Test
+    fun `a remote site can't add a chain whose RPC is on the device, a page on loopback can`() {
+        answer = { EthAnswer.Approved() }
+        val params = JSONObject()
+            .put("chainId", "0x539")
+            .put("chainName", "Local")
+            .put("nativeCurrency", JSONObject().put("name", "Test Ether").put("symbol", "TST").put("decimals", 18))
+            .put("rpcUrls", JSONArray().put("http://localhost:8545").put("http://127.0.0.1:8545"))
+        assertEquals(-32602, code(call("wallet_addEthereumChain", JSONArray().put(params))))
+        params.getJSONArray("rpcUrls").put("https://rpc.local.example")
+        ok(call("wallet_addEthereumChain", JSONArray().put(JSONObject(params.toString()))))
+        assertEquals(listOf("https://rpc.local.example"), (asks.last() as EthAsk.AddChain).chain.rpcUrls)
+        asks.clear()
+        val local = "http://localhost:3000"
+        ok(call("wallet_addEthereumChain", JSONArray().put(JSONObject(params.toString()).put("chainId", "0x53a")), origin = local))
+        assertEquals(listOf("http://localhost:8545", "http://127.0.0.1:8545", "https://rpc.local.example"), (asks.single() as EthAsk.AddChain).chain.rpcUrls)
     }
 
     @Test
@@ -368,6 +475,12 @@ class EthereumProviderTest {
         answer = { EthAnswer.Approved() }
         sends.outcomes += EthereumProvider.Submitted.Busy
         assertEquals(-32603, code(call("eth_sendTransaction", tx("to" to second.address))))
+        // A send already going out: said before any sheet, not after the user confirmed.
+        asks.clear()
+        sends.busy = true
+        assertEquals(-32603, code(call("eth_sendTransaction", tx("to" to second.address))))
+        assertTrue(asks.isEmpty())
+        sends.busy = false
         sends.outcomes += EthereumProvider.Submitted.Failed("Not sent: nope", "0x" + "ef".repeat(32))
         val failed = call("eth_sendTransaction", tx("to" to second.address)) as EthereumProvider.Reply.Err
         assertEquals("Not sent: nope", failed.message)
@@ -414,6 +527,42 @@ class EthereumProviderTest {
         assertNull(grants.grants[site])
         assertEquals(Triple(site, "accountsChanged", "[]"), events.single())
         assertEquals("[]", ok(call("eth_accounts")).toString())
+    }
+
+    @Test
+    fun `a disconnected site stays on its chain, with no chainChanged`() {
+        answer = { EthAnswer.Approved() }
+        ok(call("wallet_addEthereumChain", JSONArray().put(JSONObject().put("chainId", "0x1").put("chainName", "x"))))
+        connect()
+        assertEquals(1L, grants.grants[site]?.chainId)
+        ok(call("wallet_revokePermissions", JSONArray().put(JSONObject().put("eth_accounts", JSONObject()))))
+        assertEquals("0x1", ok(call("eth_chainId")))
+        assertEquals("1 eth_blockNumber [] $site", ok(call("eth_blockNumber")).let { readsSeen.last() })
+        // The wallet page's Disconnect does the same.
+        connect()
+        ok(call("wallet_switchEthereumChain", JSONArray().put(JSONObject().put("chainId", "0x2105"))))
+        events.clear()
+        assertTrue(runBlocking { provider.disconnect(site) })
+        assertNull(grants.grants[site])
+        assertEquals(listOf(Triple(site, "accountsChanged", "[]")), events)
+        assertEquals("0x2105", ok(call("eth_chainId")))
+    }
+
+    @Test
+    fun `removing the wallet disconnects every site, so the same phrase imported again doesn't reconnect them`() {
+        val other = "https://other.example"
+        connect()
+        answer = { EthAnswer.Approved(main) }
+        ok(call("eth_requestAccounts", origin = other))
+        ok(call("wallet_switchEthereumChain", JSONArray().put(JSONObject().put("chainId", "0x1")), origin = other))
+        events.clear()
+        assertTrue(runBlocking { provider.disconnectAll() })
+        assertTrue(grants.grants.isEmpty())
+        assertEquals(setOf(Triple(site, "accountsChanged", "[]"), Triple(other, "accountsChanged", "[]")), events.toSet())
+        // Same accounts back (the phrase imported again): nothing is shared until asked.
+        assertEquals("[]", ok(call("eth_accounts")).toString())
+        assertEquals(4100, code(call("personal_sign", JSONArray().put("hi").put(main.address))))
+        assertEquals("0x1", ok(call("eth_chainId", origin = other)))
     }
 
     @Test

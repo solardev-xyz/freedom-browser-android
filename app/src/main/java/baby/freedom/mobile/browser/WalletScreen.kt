@@ -625,13 +625,15 @@ fun WalletScreen(
                 }
             }
             // Sites connected through `window.ethereum` (#110), and the way to disconnect them.
-            if ((state is Vault.State.Locked || state is Vault.State.Unlocked) && dappGrants.isNotEmpty()) item("dapps") {
+            // Shown whatever the vault's state: a connection left behind (a remove whose
+            // grant wipe failed) must never be out of the user's reach.
+            if (dappGrants.isNotEmpty()) item("dapps") {
                 DappSitesSection(
                     grants = dappGrants,
                     chains = allChains.orEmpty(),
                     accounts = accountList?.accounts.orEmpty(),
                     onRevoke = { origin ->
-                        scope.launch { if (dappGrantStore.revoke(origin)) EthereumProviders.revoked(origin) }
+                        scope.launch { EthereumProviders.disconnect(context, origin) }
                     },
                 )
             }
@@ -670,9 +672,16 @@ fun WalletScreen(
             onConfirm = {
                 confirmRemove = false
                 run("remove the wallet") {
-                    // Its publisher identities go with it (maintainer decision 9),
-                    // inside remove()'s own non-cancellable wipe.
-                    vault.remove(alsoWipe = publishers::wipe)
+                    // Its publisher identities go with it (maintainer decision 9), and so
+                    // do the sites connected to it (#110) — or importing the same phrase
+                    // later would quietly reconnect them — inside remove()'s own
+                    // non-cancellable wipe.
+                    vault.remove(
+                        alsoWipe = {
+                            publishers.wipe()
+                            EthereumProviders.walletRemoved(context)
+                        },
+                    )
                 }
             },
             onDismiss = { confirmRemove = false },

@@ -134,6 +134,9 @@ object EthereumProviders {
                 override suspend fun grant(origin: String, account: String, chainId: Long) = grantStore.grant(origin, account, chainId)
                 override suspend fun setChain(origin: String, chainId: Long) = grantStore.setChain(origin, chainId)
                 override suspend fun revoke(origin: String) = grantStore.revoke(origin)
+                override suspend fun all() =
+                    grantStore.all.first().associate { it.origin to EthereumProvider.Grant(it.account, it.chainId) }
+                override suspend fun clear() = grantStore.clear()
                 override suspend fun addChain(chain: Chain) = when (chainStore.add(chain)) {
                     ChainStore.AddResult.ADDED, ChainStore.AddResult.DUPLICATE, ChainStore.AddResult.BUILT_IN -> true
                     ChainStore.AddResult.FAILED -> false
@@ -157,6 +160,7 @@ object EthereumProviders {
             sends = object : EthereumProvider.Sends {
                 override suspend fun prepare(request: SendRequest) = sender.prepare(request)
                 override suspend fun submit(quote: SendQuote) = submitAndWait(sender, vault, quote)
+                override fun busy() = sender.busy()
             },
         )
         p.events = EthereumProvider.Events { origin, event, data -> scope.launch { emit(origin, event, data) } }
@@ -187,10 +191,21 @@ object EthereumProviders {
         }
     }
 
-    /** The user disconnected [origin] on the wallet page: its open pages see no accounts any more. */
-    fun revoked(origin: String) {
-        scope.launch { emit(origin, "accountsChanged", JSONArray()) }
-    }
+    /**
+     * The user disconnected [origin] on the wallet page: its open pages see
+     * no accounts any more and stay on their chain
+     * ([EthereumProvider.disconnect]). False if it couldn't be written.
+     */
+    suspend fun disconnect(context: Context, origin: String): Boolean =
+        provider?.disconnect(origin) ?: DappGrantStore.get(context).revoke(origin)
+
+    /**
+     * The wallet was removed: every connected site is disconnected
+     * ([EthereumProvider.disconnectAll]), so its grants can't come back to
+     * life if the same phrase is imported again.
+     */
+    suspend fun walletRemoved(context: Context): Boolean =
+        provider?.disconnectAll() ?: DappGrantStore.get(context).clear()
 
     /**
      * Track [webView] (a tab's, before its first load) and register the

@@ -723,13 +723,7 @@ class WalletSender internal constructor(
      */
     fun submit(quote: SendQuote, sign: (EthTransaction) -> EthTransaction.Signed): Submit {
         synchronized(this) {
-            // The last process's send isn't read back yet: it may be one this would sign beside.
-            if (!restoredYet) return Submit.BUSY
-            val current = _status.value
-            if (current?.stage == SendStatus.Stage.Signing || current?.stage == SendStatus.Stage.Broadcasting) return Submit.BUSY
-            // One that may have gone out is settled by Try again (or given up on with
-            // discard, which makes the next send replace it), never by signing another beside it.
-            if (current?.unresolved == true) return Submit.BUSY
+            if (busyLocked()) return Submit.BUSY
             if (isStale(quote)) return Submit.STALE
             job?.cancel()
             signed = null
@@ -754,6 +748,19 @@ class WalletSender internal constructor(
             }
         }
         return Submit.STARTED
+    }
+
+    /** Whether [submit] would answer [Submit.BUSY] to any quote right now. */
+    fun busy(): Boolean = synchronized(this) { busyLocked() }
+
+    private fun busyLocked(): Boolean {
+        // The last process's send isn't read back yet: it may be one this would sign beside.
+        if (!restoredYet) return true
+        val current = _status.value
+        if (current?.stage == SendStatus.Stage.Signing || current?.stage == SendStatus.Stage.Broadcasting) return true
+        // One that may have gone out is settled by Try again (or given up on with
+        // discard, which makes the next send replace it), never by signing another beside it.
+        return current?.unresolved == true
     }
 
     /** After a [SendStatus.Stage.Failed] that [SendStatus.Stage.Failed.mayHaveGone]: the same bytes again. */

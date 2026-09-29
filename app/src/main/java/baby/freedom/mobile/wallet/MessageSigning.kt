@@ -85,6 +85,9 @@ object Eip712 {
     )
 
     private const val MAX_DEPTH = 32
+
+    /** Fields, array elements and type-walk steps one digest may take (#110 R1-F1). */
+    internal const val MAX_WORK = 1_000_000L
     private val IDENT = Regex("^[A-Za-z_$][A-Za-z0-9_$]*$")
     private val ARRAY_SUFFIX = Regex("^(.*)\\[(\\d*)]$")
 
@@ -127,43 +130,121 @@ object Eip712 {
         return TypedData(types, primaryType, domain, message)
     }
 
-    /** The 32 bytes `eth_signTypedData_v4` signs: keccak256(0x1901 ‖ domainSeparator ‖ hashStruct(message)). */
+    /**
+     * The 32 bytes `eth_signTypedData_v4` signs: keccak256(0x1901 ‖ domainSeparator ‖ hashStruct(message)).
+     *
+     * Each type's hash is worked out once per digest, and the whole digest
+     * has a budget of [MAX_WORK] fields, array elements and type-walk steps:
+     * a page can't make it take minutes with a payload that names hundreds
+     * of types and repeats one struct thousands of times — past the budget
+     * it's [Invalid] ("too large"). Still, call it off the main thread.
+     */
     fun digest(data: TypedData): ByteArray {
-        val domainSeparator = hashStruct(data.types, "EIP712Domain", data.domain, 0)
-        val body = if (data.primaryType == "EIP712Domain") ByteArray(0) else hashStruct(data.types, data.primaryType, data.message, 0)
+        val encoder = Encoder(data.types)
+        val domainSeparator = encoder.hashStruct("EIP712Domain", data.domain, 0)
+        val body = if (data.primaryType == "EIP712Domain") ByteArray(0) else encoder.hashStruct(data.primaryType, data.message, 0)
         return Keccak256.digest(byteArrayOf(0x19, 0x01) + domainSeparator + body)
     }
 
-    fun hashStruct(types: Map<String, List<Field>>, type: String, value: JSONObject, depth: Int): ByteArray {
+    fun hashStruct(types: Map<String, List<Field>>, type: String, value: JSONObject, depth: Int): ByteArray =
+        Encoder(types).hashStruct(type, value, depth)
+
+    fun encodeType(types: Map<String, List<Field>>, primary: String): String = Encoder(types).encodeType(primary)
+
+    /**
+     * The message as the signature covers it, for showing: only the
+     * fields its types declare, nested structs (and arrays of them) the
+     * same way. A key the types don't name isn't hashed, so a site could
+     * otherwise show the user a reassuring note that means nothing. Call
+     * after [digest] succeeded (which checked the shape and depth).
+     */
+    fun signedMessage(data: TypedData): JSONObject {
+        if (data.primaryType == "EIP712Domain") return JSONObject()
+        return declaredOnly(data.types, data.primaryType, data.message, 0) as? JSONObject ?: JSONObject()
+    }
+
+    private fun declaredOnly(types: Map<String, List<Field>>, type: String, value: Any?, depth: Int): Any? {
         if (depth > MAX_DEPTH) throw Invalid("typed data nests too deeply")
-        val fields = types[type] ?: throw Invalid("unknown type $type")
-        val out = java.io.ByteArrayOutputStream()
-        out.write(typeHash(types, type))
-        for (f in fields) {
-            val v = value.opt(f.name)
-            out.write(encodeField(types, f.type, if (v == JSONObject.NULL) null else v, f.name, depth))
+        ARRAY_SUFFIX.matchEntire(type)?.let { m ->
+            val arr = value as? JSONArray ?: return value
+            return JSONArray().apply {
+                for (i in 0 until arr.length()) put(declaredOnly(types, m.groupValues[1], arr.opt(i), depth + 1) ?: JSONObject.NULL)
+            }
         }
-        return Keccak256.digest(out.toByteArray())
+        val fields = types[type] ?: return value
+        val obj = value as? JSONObject ?: return value
+        return JSONObject().apply {
+            for (f in fields) if (obj.has(f.name)) put(f.name, declaredOnly(types, f.type, obj.opt(f.name), depth + 1) ?: JSONObject.NULL)
+        }
     }
 
-    fun encodeType(types: Map<String, List<Field>>, primary: String): String {
-        val deps = LinkedHashSet<String>()
-        fun walk(t: String, depth: Int) {
+    /** One digest's hashing: its type hashes, worked out once each, and its [MAX_WORK] budget. */
+    private class Encoder(val types: Map<String, List<Field>>) {
+        private val typeHashes = HashMap<String, ByteArray>()
+        private var work = 0L
+
+        private fun spend(n: Int = 1) {
+            work += n
+            if (work > MAX_WORK) throw Invalid("typed data is too large")
+        }
+
+        fun hashStruct(type: String, value: JSONObject, depth: Int): ByteArray {
             if (depth > MAX_DEPTH) throw Invalid("typed data nests too deeply")
-            val base = baseType(t)
-            if (base in deps || !types.containsKey(base)) return
-            deps += base
-            types.getValue(base).forEach { walk(it.type, depth + 1) }
+            val fields = types[type] ?: throw Invalid("unknown type $type")
+            val out = java.io.ByteArrayOutputStream()
+            out.write(typeHash(type))
+            for (f in fields) {
+                spend()
+                val v = value.opt(f.name)
+                out.write(encodeField(f.type, if (v == JSONObject.NULL) null else v, f.name, depth))
+            }
+            return Keccak256.digest(out.toByteArray())
         }
-        walk(primary, 0)
-        deps.remove(primary)
-        return (listOf(primary) + deps.sorted()).joinToString("") { t ->
-            t + "(" + types.getValue(t).joinToString(",") { "${it.type} ${it.name}" } + ")"
+
+        fun encodeType(primary: String): String {
+            val deps = LinkedHashSet<String>()
+            fun walk(t: String, depth: Int) {
+                if (depth > MAX_DEPTH) throw Invalid("typed data nests too deeply")
+                spend()
+                val base = baseType(t)
+                if (base in deps || !types.containsKey(base)) return
+                deps += base
+                types.getValue(base).forEach { walk(it.type, depth + 1) }
+            }
+            walk(primary, 0)
+            deps.remove(primary)
+            return (listOf(primary) + deps.sorted()).joinToString("") { t ->
+                spend(types.getValue(t).size)
+                t + "(" + types.getValue(t).joinToString(",") { "${it.type} ${it.name}" } + ")"
+            }
+        }
+
+        private fun typeHash(type: String): ByteArray =
+            typeHashes.getOrPut(type) { Keccak256.digest(encodeType(type).toByteArray(Charsets.UTF_8)) }
+
+        private fun encodeField(type: String, value: Any?, name: String, depth: Int): ByteArray {
+            if (depth > MAX_DEPTH) throw Invalid("typed data nests too deeply")
+            ARRAY_SUFFIX.matchEntire(type)?.let { m ->
+                val inner = m.groupValues[1]
+                val arr = value as? JSONArray ?: throw Invalid("$name should be an array")
+                val fixed = m.groupValues[2]
+                if (fixed.isNotEmpty() && fixed.toIntOrNull() != arr.length()) throw Invalid("$name should have $fixed elements")
+                val out = java.io.ByteArrayOutputStream()
+                for (i in 0 until arr.length()) {
+                    spend()
+                    val e = arr.opt(i)
+                    out.write(encodeField(inner, if (e == JSONObject.NULL) null else e, "$name[$i]", depth + 1))
+                }
+                return Keccak256.digest(out.toByteArray())
+            }
+            if (types.containsKey(type)) {
+                if (value == null) return ByteArray(32)
+                val obj = value as? JSONObject ?: throw Invalid("$name should be a $type object")
+                return hashStruct(type, obj, depth + 1)
+            }
+            return encodeAtom(type, value, name)
         }
     }
-
-    private fun typeHash(types: Map<String, List<Field>>, type: String) =
-        Keccak256.digest(encodeType(types, type).toByteArray(Charsets.UTF_8))
 
     private fun baseType(t: String): String {
         var b = t
@@ -173,25 +254,7 @@ object Eip712 {
         }
     }
 
-    private fun encodeField(types: Map<String, List<Field>>, type: String, value: Any?, name: String, depth: Int): ByteArray {
-        if (depth > MAX_DEPTH) throw Invalid("typed data nests too deeply")
-        ARRAY_SUFFIX.matchEntire(type)?.let { m ->
-            val inner = m.groupValues[1]
-            val arr = value as? JSONArray ?: throw Invalid("$name should be an array")
-            val fixed = m.groupValues[2]
-            if (fixed.isNotEmpty() && fixed.toIntOrNull() != arr.length()) throw Invalid("$name should have $fixed elements")
-            val out = java.io.ByteArrayOutputStream()
-            for (i in 0 until arr.length()) {
-                val e = arr.opt(i)
-                out.write(encodeField(types, inner, if (e == JSONObject.NULL) null else e, "$name[$i]", depth + 1))
-            }
-            return Keccak256.digest(out.toByteArray())
-        }
-        if (types.containsKey(type)) {
-            if (value == null) return ByteArray(32)
-            val obj = value as? JSONObject ?: throw Invalid("$name should be a $type object")
-            return hashStruct(types, type, obj, depth + 1)
-        }
+    private fun encodeAtom(type: String, value: Any?, name: String): ByteArray {
         if (value == null) throw Invalid("missing value for $name")
         return when {
             type == "string" -> Keccak256.digest((value as? String ?: value.toString()).toByteArray(Charsets.UTF_8))

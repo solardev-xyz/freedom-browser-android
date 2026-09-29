@@ -17,7 +17,10 @@ import baby.freedom.mobile.wallet.TokenRegistry
 import baby.freedom.mobile.wallet.VaultLockedException
 import baby.freedom.mobile.wallet.WalletAccount
 import java.math.BigInteger
+import kotlin.coroutines.CoroutineContext
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -104,6 +107,8 @@ class EthereumProvider(
     private val chains: suspend () -> List<Chain>,
     private val reads: suspend (chainId: Long, method: String, params: JSONArray, origin: String) -> Any?,
     private val sends: Sends,
+    /** Where typed data is parsed and hashed: never the main thread, which a page's payload could otherwise hold up. */
+    private val compute: CoroutineContext = Dispatchers.Default,
 ) {
     /** Connected sites ([baby.freedom.mobile.data.DappGrantStore]) and the chain list. */
     interface Grants {
@@ -111,6 +116,12 @@ class EthereumProvider(
         suspend fun grant(origin: String, account: String, chainId: Long): Boolean
         suspend fun setChain(origin: String, chainId: Long): Boolean
         suspend fun revoke(origin: String): Boolean
+
+        /** Every connected site, by origin. */
+        suspend fun all(): Map<String, Grant>
+
+        /** Disconnect every site (the wallet was removed); true if it's written. */
+        suspend fun clear(): Boolean
 
         /** Add a custom chain (Settings → Chains); true if it's there now. */
         suspend fun addChain(chain: Chain): Boolean
@@ -137,6 +148,13 @@ class EthereumProvider(
 
         /** Sign and broadcast [quote]; returns once it's out (its hash) or didn't go. */
         suspend fun submit(quote: SendQuote): Submitted
+
+        /**
+         * Whether [submit] would refuse any quote right now as
+         * [Submitted.Busy] (another send is going out or unresolved) — so
+         * the user isn't asked to confirm one that can't go.
+         */
+        fun busy(): Boolean
     }
 
     sealed interface Submitted {
@@ -195,13 +213,7 @@ class EthereumProvider(
                 else -> r
             }
             "wallet_getPermissions" -> Reply.Ok(permissions(origin, connected))
-            "wallet_revokePermissions" -> {
-                if (connected != null || grants.grantFor(origin) != null) {
-                    if (!grants.revoke(origin)) return Reply.Err(INTERNAL, "Couldn't save the change")
-                    events.emit(origin, "accountsChanged", JSONArray())
-                }
-                Reply.Ok(JSONObject.NULL)
-            }
+            "wallet_revokePermissions" -> if (disconnect(origin)) Reply.Ok(JSONObject.NULL) else Reply.Err(INTERNAL, "Couldn't save the change")
             "personal_sign" -> personalSign(origin, connected ?: return notConnected(), params, ask)
             "eth_signTypedData_v4" -> signTypedData(origin, connected ?: return notConnected(), params, ask)
             "eth_sendTransaction" -> sendTransaction(origin, connected ?: return notConnected(), params, ask)
@@ -213,6 +225,35 @@ class EthereumProvider(
             in ChainDataRouter.READ_METHODS -> read(origin, method, params)
             else -> Reply.Err(UNSUPPORTED, "Method not supported: $method")
         }
+    }
+
+    /**
+     * Disconnect [origin] (`wallet_revokePermissions`, or Disconnect on the
+     * wallet page): its pages see no accounts. The site stays on the chain
+     * it was on for the rest of this session — its pages were told that
+     * chain and get no `chainChanged` — as a site that never connected
+     * keeps the one it switched to. False if it couldn't be written.
+     */
+    suspend fun disconnect(origin: String): Boolean {
+        val grant = grants.grantFor(origin) ?: return true
+        if (!grants.revoke(origin)) return false
+        synchronized(sessionChains) { sessionChains[origin] = grant.chainId }
+        events.emit(origin, "accountsChanged", JSONArray())
+        return true
+    }
+
+    /**
+     * The wallet was removed: every site is disconnected, so importing the
+     * same phrase later doesn't quietly reconnect them, and their open
+     * pages see no accounts. Each keeps its chain for the session, as
+     * [disconnect]. False if the store couldn't be written.
+     */
+    suspend fun disconnectAll(): Boolean {
+        val all = grants.all()
+        if (!grants.clear()) return false
+        synchronized(sessionChains) { all.forEach { (origin, g) -> sessionChains[origin] = g.chainId } }
+        all.keys.forEach { events.emit(it, "accountsChanged", JSONArray()) }
+        return true
     }
 
     // ---- Chains ----
@@ -262,7 +303,7 @@ class EthereumProvider(
         pinnedChain(origin)?.let { return pinnedRefusal(current) }
         // A chain the wallet has keeps its own settings: this only switches to it.
         runCatching { chains() }.getOrNull()?.firstOrNull { it.id == id }?.let { return switchTo(origin, current, it, ask) }
-        val chain = chainFromParams(id, p)
+        val chain = chainFromParams(id, p, allowLoopback = RpcUrls.isLoopbackUrl(origin))
         ask(EthAsk.AddChain(origin, chain)).let { if (it !is EthAnswer.Approved) return refused(it) }
         if (!grants.addChain(chain)) return Reply.Err(INTERNAL, "Couldn't add the chain")
         if (!setChainFor(origin, chain.id)) return Reply.Err(INTERNAL, "Couldn't save the change")
@@ -332,7 +373,8 @@ class EthereumProvider(
         }
         requireSameAccount(address, account)
         val bytes = Eip712.hex(message) ?: message.toByteArray(Charsets.UTF_8)
-        val text = if (Eip712.hex(message) == null) message else readableUtf8(bytes)
+        // Plain text too: one with a bidi override or an invisible character is shown as hex.
+        val text = readableUtf8(bytes)
         val answer = ask(EthAsk.SignMessage(origin, account, text, "0x" + bytes.hexString()))
         if (answer !is EthAnswer.Approved) return refused(answer)
         return signed { wallet.sign(account, MessageSigning.personalDigest(bytes)) }
@@ -341,15 +383,16 @@ class EthereumProvider(
     private suspend fun signTypedData(origin: String, account: WalletAccount, params: JSONArray, ask: suspend (EthAsk) -> EthAnswer): Reply {
         if (params.length() != 2) throw BadParams("Expected [address, typedData]")
         requireSameAccount(params.opt(0) as? String, account)
-        val data = try {
-            Eip712.parse(params.opt(1))
-        } catch (e: Eip712.Invalid) {
-            throw BadParams("Invalid typed data: ${e.message}")
-        }
-        val digest = try {
-            Eip712.digest(data)
-        } catch (e: Eip712.Invalid) {
-            throw BadParams("Invalid typed data: ${e.message}")
+        // Off the main thread: the payload is the page's, and so is how long it takes to hash.
+        val (data, digest, shown) = withContext(compute) {
+            try {
+                val data = Eip712.parse(params.opt(1))
+                val digest = Eip712.digest(data)
+                val shown = Eip712.signedMessage(data).let { m -> runCatching { m.toString(2) }.getOrElse { m.toString() } }
+                Triple(data, digest, shown)
+            } catch (e: Eip712.Invalid) {
+                throw BadParams("Invalid typed data: ${e.message}")
+            }
         }
         val chain = chainFor(origin)
         if (data.domain.has("chainId") && !data.domain.isNull("chainId") && data.chainId != chain.id) {
@@ -362,7 +405,8 @@ class EthereumProvider(
             domainName = data.domain.opt("name") as? String,
             verifyingContract = data.domain.opt("verifyingContract") as? String,
             primaryType = data.primaryType,
-            messageJson = runCatching { data.message.toString(2) }.getOrElse { data.message.toString() },
+            // Only what the signature covers: a key the types don't declare isn't signed.
+            messageJson = shown,
         )
         ask(ask0).let { if (it !is EthAnswer.Approved) return refused(it) }
         return signed { wallet.sign(account, digest) }
@@ -406,13 +450,12 @@ class EthereumProvider(
         }
         var repriced = false
         repeat(MAX_REPRICES) {
+            // Before the sheet, not after the user confirmed one that can't go.
+            if (sends.busy()) return busy()
             ask(EthAsk.SendTransaction(origin, quote, repriced)).let { if (it !is EthAnswer.Approved) return refused(it) }
             when (val s = sends.submit(quote)) {
                 is Submitted.Sent -> return Reply.Ok(s.hash)
-                Submitted.Busy -> return Reply.Err(
-                    INTERNAL,
-                    "Another transaction from this wallet is still going out or waiting on the wallet page. Nothing was sent.",
-                )
+                Submitted.Busy -> return busy()
                 is Submitted.Failed -> return Reply.Err(INTERNAL, s.message, s.hash?.let { JSONObject().put("hash", it) })
                 // Priced too long ago to trust its fee: price it again and let the user look.
                 Submitted.Stale -> {
@@ -426,6 +469,11 @@ class EthereumProvider(
         }
         return Reply.Err(INTERNAL, "The network fee kept changing before it could be sent. Nothing was sent.")
     }
+
+    private fun busy() = Reply.Err(
+        INTERNAL,
+        "Another transaction from this wallet is still going out or waiting on the wallet page. Nothing was sent.",
+    )
 
     /** The priced [request], or the [Reply] saying why it can't be sent (a [SendException]'s words). */
     private suspend fun prepare(request: SendRequest): Any = try {
@@ -478,7 +526,13 @@ class EthereumProvider(
         return ChainInput.parseId(s) ?: throw BadParams("chainId isn't a valid chain ID")
     }
 
-    private fun chainFromParams(id: Long, p: JSONObject): Chain {
+    /**
+     * The chain [p] describes. An `http://` loopback RPC (a node on the
+     * device) only when the page asking is itself on loopback
+     * ([allowLoopback]): a remote site mustn't point the app's own
+     * JSON-RPC client at ports on the device.
+     */
+    private fun chainFromParams(id: Long, p: JSONObject, allowLoopback: Boolean): Chain {
         val name = p.opt("chainName") as? String ?: throw BadParams("chainName is missing")
         val currency = p.opt("nativeCurrency") as? JSONObject ?: throw BadParams("nativeCurrency is missing")
         val symbol = currency.opt("symbol") as? String ?: throw BadParams("nativeCurrency.symbol is missing")
@@ -486,6 +540,7 @@ class EthereumProvider(
         val rpcs = (p.opt("rpcUrls") as? JSONArray)?.let { a -> (0 until a.length()).mapNotNull { a.opt(it) as? String } }.orEmpty()
             .take(Chain.MAX_RPC_URLS * 4)
             .mapNotNull(RpcUrls::normalize)
+            .filter { allowLoopback || !RpcUrls.isLoopbackUrl(it) }
             .distinct()
             .take(Chain.MAX_RPC_URLS)
         if (rpcs.isEmpty()) throw BadParams("rpcUrls has no usable https RPC")
@@ -543,7 +598,13 @@ class EthereumProvider(
             return if (mixed && sum != address) null else sum
         }
 
-        /** [bytes] as text if it's UTF-8 with no control characters but tab and newlines; else null. */
+        /**
+         * [bytes] as text if it's UTF-8 with no control characters but tab
+         * and newlines and no format characters (Unicode `Cf`: bidi
+         * overrides and isolates, zero-width spaces and joiners, the BOM),
+         * which would make the sheet show something other than, or in
+         * another order than, what's signed; else null (shown as hex).
+         */
         internal fun readableUtf8(bytes: ByteArray): String? {
             val decoder = Charsets.UTF_8.newDecoder()
                 .onMalformedInput(java.nio.charset.CodingErrorAction.REPORT)
@@ -553,7 +614,14 @@ class EthereumProvider(
             } catch (e: java.nio.charset.CharacterCodingException) {
                 return null
             }
-            return s.takeIf { t -> t.none { it.isISOControl() && it != '\n' && it != '\t' && it != '\r' } }
+            var i = 0
+            while (i < s.length) {
+                val cp = s.codePointAt(i)
+                val control = Character.isISOControl(cp) && cp != '\n'.code && cp != '\t'.code && cp != '\r'.code
+                if (control || Character.getType(cp) == Character.FORMAT.toInt()) return null
+                i += Character.charCount(cp)
+            }
+            return s
         }
 
         private fun ByteArray.hexString(): String = joinToString("") { "%02x".format(it) }
