@@ -16,6 +16,7 @@ import androidx.compose.ui.semantics.getOrNull
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.text.TextLayoutResult
+import androidx.compose.ui.text.TextMeasurer
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -37,7 +38,10 @@ import org.junit.runner.RunWith
  * #208 R1-F1: a balance never soft-wraps between two digits, at any font
  * scale — a wrapped `60,562.1027` / `99` reads as a smaller amount. It
  * fits on one line (beside the symbol, or on its own line); only a number
- * too long even for that breaks, and then only after a separator.
+ * too long even for that breaks, and then only after a separator. Which
+ * amounts are "too long" depends on the screen width, so the test checks
+ * each wrap against the row's actual width rather than a fixed length
+ * (#208 R2-M1).
  */
 @RunWith(AndroidJUnit4::class)
 class BalanceRowWrapTest {
@@ -95,7 +99,24 @@ class BalanceRowWrapTest {
                     val end = text.substring(0, layout.getLineEnd(line)).trimEnd('​')
                     assertTrue("$amount broke mid-number at $s: '$end'", end.last() == ',' || end.last() == '.')
                 }
-                if (amount.length < 20) assertEquals("$amount wrapped at $s", 1, layout.lineCount)
+                // Breaking is the last resort, whatever the screen width: a wrapped amount
+                // must not have fit the row on one line even shrunk as far as the row
+                // shrinks it. fittedAddressSize steps down by 0.01 to MIN_ADDRESS_SCALE, so
+                // it always tries some scale below MIN_ADDRESS_SCALE + 0.01.
+                if (layout.lineCount > 1) {
+                    val input = layout.layoutInput
+                    val measurer = TextMeasurer(input.fontFamilyResolver, input.density, input.layoutDirection)
+                    val shrunk = measurer.measure(
+                        amount,
+                        input.style.copy(fontSize = input.style.fontSize * (MIN_ADDRESS_SCALE + 0.01f)),
+                        softWrap = false,
+                        maxLines = 1,
+                    ).size.width
+                    assertTrue(
+                        "$amount wrapped at $s though it fits one line: $shrunk <= ${layout.size.width}",
+                        shrunk > layout.size.width,
+                    )
+                }
             }
         }
     }
