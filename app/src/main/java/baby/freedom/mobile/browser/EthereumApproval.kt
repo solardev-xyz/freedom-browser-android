@@ -337,6 +337,18 @@ private fun SendBody(ask: EthAsk.SendTransaction) {
         Note("It took more than a minute, so the network fee was priced again. Check it before you confirm.", warn = true)
         Spacer(Modifier.height(4.dp))
     }
+    quote.replaces?.let {
+        // A site's transaction can take the nonce of a send the user stopped tracking that's
+        // still waiting in a pool — say so here as the Send page does, or confirming silently
+        // drops that earlier send (#215 R6-F1).
+        Note(
+            "This transaction takes the place of the send you stopped tracking ($it): only one of the two can " +
+                "go through, and this one pays the higher fee. If that send still matters, reject this and " +
+                "settle it on the wallet page first.",
+            warn = true,
+        )
+        Spacer(Modifier.height(4.dp))
+    }
     Row0("Network", chain.name)
     AccountRow(request.from, "From")
     AddressRow(if (data.isEmpty()) "To" else "Contract", request.to)
@@ -349,7 +361,7 @@ private fun SendBody(ask: EthAsk.SendTransaction) {
     }
     Row0("Network fee", "up to ${feeText(quote.tx.maxFee, chain)}", mono = true, detail = feeDetail(quote.tx))
     quote.nativeTotal?.takeIf { request.amount.signum() > 0 }?.let { Row0("Total", "up to ${feeText(it, chain)}", mono = true) }
-    Row0("Nonce", quote.tx.nonce.toString(), detail = trustLabel(quote.nonceTrust))
+    Row0("Nonce", quote.tx.nonce.toString(), detail = nonceDetail(quote))
     Spacer(Modifier.height(8.dp))
     Note(
         "Only the fee the network actually charges is paid. A transaction can't be undone once it's sent: " +

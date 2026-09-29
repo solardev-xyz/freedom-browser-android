@@ -486,10 +486,7 @@ private fun SendReviewSection(
         ReviewRow(
             "Nonce",
             quote.tx.nonce.toString(),
-            detail = quote.replaces?.let {
-                "${trustLabel(quote.nonceTrust)} · replaces the send you stopped tracking ($it), at a higher fee: " +
-                    "only one of the two can go through"
-            } ?: trustLabel(quote.nonceTrust),
+            detail = nonceDetail(quote),
         )
         Spacer(Modifier.height(4.dp))
         Text(

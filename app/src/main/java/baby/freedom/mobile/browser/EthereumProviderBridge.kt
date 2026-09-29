@@ -131,12 +131,12 @@ object EthereumProviders {
         val p = EthereumProvider(
             grants = object : EthereumProvider.Grants {
                 override suspend fun grantFor(origin: String) =
-                    grantStore.grantFor(origin)?.let { EthereumProvider.Grant(it.account, it.chainId) }
+                    all()[origin]
                 override suspend fun grant(origin: String, account: String, chainId: Long) = grantStore.grant(origin, account, chainId)
                 override suspend fun setChain(origin: String, chainId: Long) = grantStore.setChain(origin, chainId)
                 override suspend fun revoke(origin: String) = grantStore.revoke(origin)
-                override suspend fun all() =
-                    grantStore.all.first().associate { it.origin to EthereumProvider.Grant(it.account, it.chainId) }
+                override suspend fun all() = (grantStore.allOrUnreadable.first() ?: throw EthereumProvider.GrantsUnreadable())
+                    .associate { it.origin to EthereumProvider.Grant(it.account, it.chainId) }
                 override suspend fun clear() = grantStore.clear()
                 override suspend fun addChain(chain: Chain) = when (chainStore.add(chain)) {
                     ChainStore.AddResult.ADDED, ChainStore.AddResult.DUPLICATE, ChainStore.AddResult.BUILT_IN -> true

@@ -182,6 +182,12 @@ class SendTest {
         assertEquals(BigInteger.valueOf(21_000), WalletSender.gasLimit(BigInteger.valueOf(21_000), hasData = false))
         assertEquals(BigInteger.valueOf(62_400), WalletSender.gasLimit(BigInteger.valueOf(52_000), hasData = true))
         assertEquals(BigInteger.valueOf(28_800), WalletSender.gasLimit(BigInteger.valueOf(24_000), hasData = false))
+        // A site's own gas: taken if it covers the estimate, capped at three times it, ignored below it.
+        val estimate = BigInteger.valueOf(50_000)
+        assertEquals(BigInteger.valueOf(90_000), WalletSender.gasLimit(estimate, hasData = true, site = BigInteger.valueOf(90_000)))
+        assertEquals(BigInteger.valueOf(150_000), WalletSender.gasLimit(estimate, hasData = true, site = BigInteger("ffffffffffff", 16)))
+        assertEquals(BigInteger.valueOf(60_000), WalletSender.gasLimit(estimate, hasData = true, site = BigInteger.valueOf(40_000)))
+        assertEquals(BigInteger.valueOf(60_000), WalletSender.gasLimit(estimate, hasData = true, site = null))
     }
 
     @Test

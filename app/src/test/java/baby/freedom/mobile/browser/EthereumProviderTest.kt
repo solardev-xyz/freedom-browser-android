@@ -32,7 +32,12 @@ class EthereumProviderTest {
     private class FakeGrants : EthereumProvider.Grants {
         val grants = HashMap<String, EthereumProvider.Grant>()
         val added = mutableListOf<Chain>()
-        override suspend fun grantFor(origin: String) = grants[origin]
+        /** The store can't be read right now. */
+        var unreadable = false
+        override suspend fun grantFor(origin: String): EthereumProvider.Grant? {
+            if (unreadable) throw EthereumProvider.GrantsUnreadable()
+            return grants[origin]
+        }
         override suspend fun grant(origin: String, account: String, chainId: Long): Boolean {
             grants[origin] = EthereumProvider.Grant(account, chainId)
             return true
@@ -43,7 +48,10 @@ class EthereumProviderTest {
             return true
         }
         override suspend fun revoke(origin: String) = grants.remove(origin).let { true }
-        override suspend fun all(): Map<String, EthereumProvider.Grant> = HashMap(grants)
+        override suspend fun all(): Map<String, EthereumProvider.Grant> {
+            if (unreadable) throw EthereumProvider.GrantsUnreadable()
+            return HashMap(grants)
+        }
         override suspend fun clear() = grants.clear().let { true }
         override suspend fun addChain(chain: Chain): Boolean {
             added += chain
@@ -498,6 +506,42 @@ class EthereumProviderTest {
     }
 
     @Test
+    fun `a site on a custom chain can still switch to a built-in one while the chain list can't be read`() {
+        answer = { EthAnswer.Approved() }
+        connect()
+        ok(call("wallet_switchEthereumChain", JSONArray().put(JSONObject().put("chainId", "0xaa36a7"))))
+        asks.clear()
+        events.clear()
+        chainList = null
+        ok(call("wallet_switchEthereumChain", JSONArray().put(JSONObject().put("chainId", "0x1"))))
+        val ask = asks.single() as EthAsk.SwitchChain
+        assertEquals(11155111L, ask.from.id)
+        assertEquals(BuiltInChains.ETHEREUM, ask.to)
+        assertEquals(1L, grants.grants[site]?.chainId)
+        assertEquals(listOf(Triple(site, "chainChanged", "0x1")), events)
+    }
+
+    @Test
+    fun `while connected sites can't be read, a connected site is refused rather than shown as unconnected on Gnosis`() {
+        answer = { EthAnswer.Approved() }
+        connect()
+        ok(call("wallet_switchEthereumChain", JSONArray().put(JSONObject().put("chainId", "0xaa36a7"))))
+        events.clear()
+        grants.unreadable = true
+        assertEquals(-32603, code(call("eth_accounts")))
+        assertEquals(-32603, code(call("eth_chainId")))
+        assertEquals(-32603, code(call("eth_blockNumber")))
+        // The sweep moves nobody, and a disconnect isn't claimed done.
+        runBlocking { provider.chainsChanged(BuiltInChains.ALL) }
+        assertFalse(runBlocking { provider.disconnect(site) })
+        assertTrue(events.isEmpty())
+        assertTrue(readsSeen.isEmpty())
+        grants.unreadable = false
+        assertEquals(JSONArray().put(main.address).toString(), ok(call("eth_accounts")).toString())
+        assertEquals(11155111L, grants.grants[site]?.chainId)
+    }
+
+    @Test
     fun `a request that read the chain list before a chain was added doesn't move the site back off it`() {
         val custom = Chain(id = 1337, name = "Local", symbol = "ETH", rpcUrls = listOf("https://rpc.local.example"), isTestnet = true)
         connect()
@@ -756,6 +800,23 @@ class EthereumProviderTest {
         assertEquals("[]", ok(call("eth_accounts")).toString())
         assertEquals(4100, code(call("personal_sign", JSONArray().put("hi").put(main.address))))
         assertEquals("0x1", ok(call("eth_chainId", origin = other)))
+    }
+
+    @Test
+    fun `both review screens say when a send replaces one the user stopped tracking`() {
+        connect()
+        answer = { EthAnswer.Rejected }
+        call("eth_sendTransaction", tx("to" to second.address))
+        // The sheet's quote, as the Send page would get it from the same prepare.
+        val quote = (asks.single() as EthAsk.SendTransaction).quote
+        val trust = trustLabel(quote.nonceTrust)
+        assertEquals(trust, nonceDetail(quote))
+        val replacing = quote.copy(replaces = "0x" + "aa".repeat(32))
+        assertEquals(
+            "$trust · replaces the send you stopped tracking (0x${"aa".repeat(32)}), at a higher fee: " +
+                "only one of the two can go through",
+            nonceDetail(replacing),
+        )
     }
 
     @Test

@@ -114,7 +114,11 @@ class EthereumProvider(
     /** Where typed data is parsed and hashed: never the main thread, which a page's payload could otherwise hold up. */
     private val compute: CoroutineContext = Dispatchers.Default,
 ) {
-    /** Connected sites ([baby.freedom.mobile.data.DappGrantStore]) and the chain list. */
+    /**
+     * Connected sites ([baby.freedom.mobile.data.DappGrantStore]) and the
+     * chain list. [grantFor] and [all] throw [GrantsUnreadable] while the
+     * store can't be read — not "no site is connected" (#215 R6-M1).
+     */
     interface Grants {
         suspend fun grantFor(origin: String): Grant?
         suspend fun grant(origin: String, account: String, chainId: Long): Boolean
@@ -132,6 +136,9 @@ class EthereumProvider(
     }
 
     data class Grant(val account: String, val chainId: Long)
+
+    /** [Grants] can't be read right now; which sites are connected, and on which chain, is unknown. */
+    class GrantsUnreadable : Exception("connected sites unreadable")
 
     /** The wallet: its accounts (public), activity, and signing a digest. */
     interface Wallet {
@@ -203,6 +210,10 @@ class EthereumProvider(
         Reply.Err(INVALID_PARAMS, e.message ?: "Invalid params")
     } catch (e: ChainUnavailable) {
         Reply.Err(CHAIN_DISCONNECTED, "Chain ${e.id} isn't set up in this wallet (Settings → Chains)")
+    } catch (e: GrantsUnreadable) {
+        // Not "unconnected, on Gnosis": answering that would flip a connected site's accounts
+        // and chain with no event, and back once the store reads again (#215 R6-M1).
+        Reply.Err(INTERNAL, "Couldn't read the wallet's connected sites; try again")
     }
 
     private suspend fun dispatch(origin: String, method: String, params: JSONArray, ask: suspend (EthAsk) -> EthAnswer): Reply {
@@ -241,7 +252,11 @@ class EthereumProvider(
      * keeps the one it switched to. False if it couldn't be written.
      */
     suspend fun disconnect(origin: String): Boolean {
-        val grant = grants.grantFor(origin) ?: return true
+        val grant = try {
+            grants.grantFor(origin)
+        } catch (e: GrantsUnreadable) {
+            return false
+        } ?: return true
         if (!grants.revoke(origin)) return false
         synchronized(sessionChains) { sessionChains[origin] = grant.chainId }
         events.emit(origin, "accountsChanged", JSONArray())
@@ -255,7 +270,12 @@ class EthereumProvider(
      * [disconnect]. False if the store couldn't be written.
      */
     suspend fun disconnectAll(): Boolean {
-        val all = grants.all()
+        // Unreadable: clear them all the same; only which pages to tell is unknown.
+        val all = try {
+            grants.all()
+        } catch (e: GrantsUnreadable) {
+            emptyMap()
+        }
         if (!grants.clear()) return false
         synchronized(sessionChains) { all.forEach { (origin, g) -> sessionChains[origin] = g.chainId } }
         all.keys.forEach { events.emit(it, "accountsChanged", JSONArray()) }
@@ -325,7 +345,8 @@ class EthereumProvider(
             synchronized(sessionChains) { sessionChains.filterValues { it !in ids }.keys.toList() }
         for (origin in origins) {
             if (pinnedChain(origin) != null) continue
-            val id = storedChain(origin) ?: continue
+            // A grant store that can't be read moves nobody (#215 R6-M1).
+            val id = runCatching { storedChain(origin) }.getOrNull() ?: continue
             if (id !in ids) runCatching { moveOffRemoved(origin, id) }
         }
     }
@@ -341,9 +362,22 @@ class EthereumProvider(
         return true
     }
 
+    /**
+     * The chain [origin] is switching away from: [chainFor], except that a
+     * site on a custom chain can still leave it for a built-in one while
+     * the chain list can't be read (#215 R6-M3) — its current chain is then
+     * named by ID alone, as nothing more about it can be looked up.
+     */
+    private suspend fun switchingFrom(origin: String): Chain = try {
+        chainFor(origin)
+    } catch (e: ChainUnavailable) {
+        if (pinnedChain(origin) != null || runCatching { chains() }.getOrNull() != null) throw e
+        Chain(id = e.id, name = "Custom network", symbol = "", rpcUrls = emptyList())
+    }
+
     private suspend fun switchChain(origin: String, params: JSONArray, ask: suspend (EthAsk) -> EthAnswer): Reply {
         val id = chainIdParam(params)
-        val current = chainFor(origin)
+        val current = switchingFrom(origin)
         if (current.id == id) return Reply.Ok(JSONObject.NULL)
         pinnedChain(origin)?.let { return pinnedRefusal(current) }
         val list = runCatching { chains() }.getOrNull()
@@ -363,7 +397,7 @@ class EthereumProvider(
     private suspend fun addChain(origin: String, params: JSONArray, ask: suspend (EthAsk) -> EthAnswer): Reply {
         val p = params.opt(0) as? JSONObject ?: throw BadParams("Expected [{chainId, chainName, nativeCurrency, rpcUrls}]")
         val id = chainIdOf(p.opt("chainId"))
-        val current = chainFor(origin)
+        val current = switchingFrom(origin)
         if (current.id == id) return Reply.Ok(JSONObject.NULL)
         pinnedChain(origin)?.let { return pinnedRefusal(current) }
         // A chain the wallet has keeps its own settings: this only switches to it.

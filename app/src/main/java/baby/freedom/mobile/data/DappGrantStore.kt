@@ -31,34 +31,34 @@ import org.json.JSONObject
  * never a key. A private tab never reads or writes here.
  *
  * Never throws for storage trouble: an unreadable file reads as "no
- * grants" (the site asks again), a failed write reports `false`, and a
- * corrupt file is replaced with an empty one.
+ * grants" in [all] and `null` in [allOrUnreadable], a failed write
+ * reports `false`, and a corrupt file is replaced with an empty one.
  */
 class DappGrantStore internal constructor(private val store: DataStore<Preferences>) {
     data class Grant(val origin: String, val account: String, val chainId: Long)
 
-    /** Every grant, by origin. */
-    val all: Flow<List<Grant>> = store.data
+    /**
+     * Every grant, by origin; null while the file can't be read. The
+     * provider reads this one: a read error isn't every site being
+     * disconnected (#215 R6-M1), as [ChainStore.chainsOrUnreadable].
+     */
+    val allOrUnreadable: Flow<List<Grant>?> = store.data
+        .map<Preferences, Preferences?> { it }
         .catch { e ->
             if (e !is IOException) throw e
-            Log.w(TAG, "reading dApp grants failed; treating as none", e)
-            emit(emptyPreferences())
+            Log.w(TAG, "reading dApp grants failed", e)
+            emit(null)
         }
         .map { prefs ->
-            prefs.asMap().mapNotNull { (k, v) ->
+            prefs?.asMap()?.mapNotNull { (k, v) ->
                 val name = k.name
                 if (!name.startsWith(PREFIX)) return@mapNotNull null
                 decode(name.removePrefix(PREFIX), v as? String ?: return@mapNotNull null)
-            }.sortedBy { it.origin }
+            }?.sortedBy { it.origin }
         }
 
-    /** [origin]'s grant, or null if it has none (or the store can't be read). */
-    suspend fun grantFor(origin: String): Grant? = try {
-        all.first().firstOrNull { it.origin == origin }
-    } catch (e: Exception) {
-        Log.w(TAG, "reading dApp grant failed", e)
-        null
-    }
+    /** Every grant, by origin; none while the file can't be read (the wallet page's list). */
+    val all: Flow<List<Grant>> = allOrUnreadable.map { it.orEmpty() }
 
     /** Connect [origin] with [account] on [chainId]; `false` if it couldn't be written. */
     suspend fun grant(origin: String, account: String, chainId: Long): Boolean =

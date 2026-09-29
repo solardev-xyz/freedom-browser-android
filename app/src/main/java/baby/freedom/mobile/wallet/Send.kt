@@ -684,7 +684,7 @@ class WalletSender internal constructor(
             var tx = EthTransaction(
                 chainId = chainId,
                 nonce = nonce.await().value,
-                gasLimit = request.dapp?.gasLimit?.takeIf { it >= estimate } ?: gasLimit(estimate, data.isNotEmpty()),
+                gasLimit = gasLimit(estimate, data.isNotEmpty(), site = request.dapp?.gasLimit),
                 to = to,
                 value = value,
                 data = data,
@@ -982,6 +982,21 @@ class WalletSender internal constructor(
          */
         internal fun gasLimit(estimate: BigInteger, hasData: Boolean): BigInteger =
             if (!hasData && estimate == TRANSFER_GAS) estimate else estimate * BigInteger.valueOf(120) / BigInteger.valueOf(100)
+
+        /**
+         * The gas limit for a send with [site]'s `gas` (a dApp's
+         * `eth_sendTransaction`, #110), if it named one: taken as long as it
+         * covers the estimate, but never more than [SITE_GAS_CEILING] times
+         * it — a site's `0xffffffffffff` would otherwise price the "up to"
+         * fee past any balance, or past the block gas limit so no node
+         * takes it (#215 R6-M2). Below the estimate it's ignored, as the
+         * send would run out of gas.
+         */
+        internal fun gasLimit(estimate: BigInteger, hasData: Boolean, site: BigInteger?): BigInteger =
+            site?.takeIf { it >= estimate }?.min(estimate * SITE_GAS_CEILING) ?: gasLimit(estimate, hasData)
+
+        /** How many times the estimate a site's own `gas` may be ([gasLimit]). */
+        private val SITE_GAS_CEILING = BigInteger.valueOf(3)
 
         /** A receipt's outcome, or null if it's not a receipt this can read. */
         internal fun outcomeOf(receipt: JSONObject): SendStatus.Stage? {
