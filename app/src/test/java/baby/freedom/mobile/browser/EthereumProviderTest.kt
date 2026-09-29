@@ -13,6 +13,10 @@ import baby.freedom.mobile.wallet.SendQuote
 import baby.freedom.mobile.wallet.SendRequest
 import baby.freedom.mobile.wallet.WalletAccount
 import java.math.BigInteger
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import org.json.JSONArray
 import org.json.JSONObject
@@ -47,7 +51,14 @@ class EthereumProviderTest {
             grants[origin] = g.copy(chainId = chainId)
             return true
         }
-        override suspend fun revoke(origin: String) = grants.remove(origin).let { true }
+        /** When set, a revoke waits here before it commits: a write still in flight. */
+        var revokeGate: CompletableDeferred<Unit>? = null
+        val revokeStarted = CompletableDeferred<Unit>()
+        override suspend fun revoke(origin: String): Boolean {
+            revokeStarted.complete(Unit)
+            revokeGate?.await()
+            return grants.remove(origin).let { true }
+        }
         override suspend fun all(): Map<String, EthereumProvider.Grant> {
             if (unreadable) throw EthereumProvider.GrantsUnreadable()
             return HashMap(grants)
@@ -789,6 +800,26 @@ class EthereumProviderTest {
         assertNull(grants.grants[site])
         assertEquals(listOf(Triple(site, "accountsChanged", "[]")), events)
         assertEquals("0x2105", ok(call("eth_chainId")))
+    }
+
+    @Test
+    fun `a disconnect whose caller goes away mid-write still tells the site's pages`() {
+        connect()
+        events.clear()
+        val gate = CompletableDeferred<Unit>()
+        grants.revokeGate = gate
+        runBlocking {
+            // The connected site's page: Disconnect tapped, then Back while the write is in flight.
+            val page = launch(start = CoroutineStart.UNDISPATCHED) { provider.disconnect(site) }
+            grants.revokeStarted.await()
+            val left = launch { page.cancelAndJoin() }
+            gate.complete(Unit)
+            left.join()
+            assertTrue(page.isCancelled)
+        }
+        assertNull(grants.grants[site])
+        assertEquals(listOf(Triple(site, "accountsChanged", "[]")), events)
+        assertEquals("[]", ok(call("eth_accounts")).toString())
     }
 
     @Test

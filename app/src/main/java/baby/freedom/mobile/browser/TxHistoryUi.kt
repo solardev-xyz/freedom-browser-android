@@ -75,7 +75,7 @@ internal fun txStatusText(r: TxRecord): Pair<String, String> {
 internal fun txSubtitle(r: TxRecord, format: DateFormat = txDateFormat()): String =
     "${txStatusText(r).first} · ${r.chainName} · ${format.format(Date(r.sentAt))}"
 
-private fun txDateFormat(): DateFormat = DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT)
+internal fun txDateFormat(): DateFormat = DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT)
 
 /** [records] sent from [address], newest first. */
 internal fun txRecordsFrom(records: List<TxRecord>, address: String?): List<TxRecord> =
@@ -218,7 +218,7 @@ internal fun TxDetailPage(r: TxRecord, onOpenUrl: (String) -> Unit, onBack: () -
 
 /** A labelled value on its own line, never cut. */
 @Composable
-private fun TxField(label: String, value: String?, mono: Boolean = false, address: String? = null) {
+internal fun TxField(label: String, value: String?, mono: Boolean = false, address: String? = null) {
     Column(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
         Text(label, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
         SelectionContainer {

@@ -196,9 +196,14 @@ object EthereumProviders {
     }
 
     /**
-     * The user disconnected [origin] on the wallet page: its open pages see
-     * no accounts any more and stay on their chain
-     * ([EthereumProvider.disconnect]). False if it couldn't be written.
+     * The user disconnected [origin]: the one path for every disconnect
+     * control — Settings' ×, the Connected site page and the wallet page.
+     * Its open pages see no accounts any more and stay on their chain
+     * ([EthereumProvider.disconnect]). Once the provider exists this runs to
+     * completion even if the caller is cancelled (the sheet closing, the
+     * screen leaving composition), so a revoked grant always comes with its
+     * `accountsChanged`; before then there are no pages to tell and only
+     * the store is written. False if it couldn't be written.
      */
     suspend fun disconnect(context: Context, origin: String): Boolean =
         provider?.disconnect(origin) ?: DappGrantStore.get(context).revoke(origin)
