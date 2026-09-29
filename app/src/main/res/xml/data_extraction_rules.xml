@@ -8,6 +8,12 @@
   key that never leaves this device, so a copy would be unreadable
   anyway. (Builds before that store kept them in plain text in
   `freedom_node_settings`; MainActivity moves them out on start.)
+  So are the stores that let a site act on the wallet or the node without
+  asking: connected sites (DappGrantStore), auto-approve rules
+  (AutoApproveStore), x402 allowances (X402Store) and Swarm grants
+  (SwarmGrantStore). The wallet itself never travels, so on a new phone
+  these would come back silently once the same phrase is imported there,
+  never granted on that device (#229).
   The wallet vault (KeystoreVaultStore) needs no rule: it lives in
   `noBackupFilesDir` (`no_backup/wallet/vault.json`), which no backup
   domain includes, under its own Keystore key (`freedom.wallet.vault`,
@@ -16,8 +22,16 @@
 <data-extraction-rules>
     <cloud-backup>
         <exclude domain="file" path="datastore/freedom_rpc_secrets.preferences_pb" />
+        <exclude domain="file" path="datastore/freedom_dapp_grants.preferences_pb" />
+        <exclude domain="file" path="datastore/freedom_dapp_auto_approve.preferences_pb" />
+        <exclude domain="file" path="datastore/freedom_x402.preferences_pb" />
+        <exclude domain="file" path="datastore/freedom_swarm_grants.preferences_pb" />
     </cloud-backup>
     <device-transfer>
         <exclude domain="file" path="datastore/freedom_rpc_secrets.preferences_pb" />
+        <exclude domain="file" path="datastore/freedom_dapp_grants.preferences_pb" />
+        <exclude domain="file" path="datastore/freedom_dapp_auto_approve.preferences_pb" />
+        <exclude domain="file" path="datastore/freedom_x402.preferences_pb" />
+        <exclude domain="file" path="datastore/freedom_swarm_grants.preferences_pb" />
     </device-transfer>
 </data-extraction-rules>
