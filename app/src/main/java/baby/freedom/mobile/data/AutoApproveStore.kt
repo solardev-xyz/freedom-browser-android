@@ -69,10 +69,14 @@ class AutoApproveStore internal constructor(
     /** Drop [rule]; `false` if the store couldn't be written. */
     suspend fun revoke(rule: AutoApproveRule): Boolean = write { it.remove(keyOf(rule)) }
 
-    /** Drop every rule of [origin] (the site was disconnected); `false` if the store couldn't be written. */
+    /**
+     * Drop every rule of [origin] (the site was disconnected); `false` if the store couldn't be written.
+     * Matched on the key's origin part, not on [decodeKey], so a rule no longer valid (one granted
+     * for a function refused since, #234) goes with its site too rather than lingering unseen.
+     */
     suspend fun revokeOrigin(origin: String): Boolean = write { prefs ->
         prefs.asMap().keys
-            .filter { it.name.startsWith(PREFIX) && decodeKey(it.name.removePrefix(PREFIX))?.origin == origin }
+            .filter { it.name.startsWith(PREFIX) && it.name.removePrefix(PREFIX).split('|').let { p -> p.size == 4 && p[0] == origin } }
             .forEach { prefs.remove(it) }
     }
 

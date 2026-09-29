@@ -459,6 +459,15 @@ private fun AutoApproveSwitch(rule: AutoApproveRule, chain: String, checked: Boo
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+            autoApproveWarning(rule)?.let {
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    it,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.testTag("ethereum-always-approve-warning"),
+                )
+            }
         }
     }
 }
