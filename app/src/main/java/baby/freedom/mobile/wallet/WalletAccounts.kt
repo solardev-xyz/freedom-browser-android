@@ -6,6 +6,7 @@ import baby.freedom.mobile.chains.rpc.ChainDataRouter
 import baby.freedom.mobile.chains.rpc.WalletRpc
 import baby.freedom.mobile.ens.Keccak256
 import java.io.File
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -161,6 +162,15 @@ class WalletAccounts internal constructor(
     /** The wallet's accounts, or null when there's no wallet — or it has never been opened since #104. */
     val accounts: StateFlow<WalletAccountList?> = _accounts.asStateFlow()
 
+    private val _syncFailed = MutableStateFlow(false)
+
+    /**
+     * Whether the last attempt to bring [accounts] in line with the vault
+     * failed (the list couldn't be read, derived or saved). The wallet
+     * page offers [retry] then, instead of waiting on a list that isn't coming.
+     */
+    val syncFailed: StateFlow<Boolean> = _syncFailed.asStateFlow()
+
     private val mutex = Mutex()
     private var started = false
 
@@ -190,11 +200,17 @@ class WalletAccounts internal constructor(
                     Vault.State.Unreadable -> _accounts.value = null
                 }
             }
+            _syncFailed.value = false
         } catch (t: Throwable) {
+            if (t is CancellationException) throw t
             // Never a key or the seed: only what went wrong.
             Log.w(TAG, "account sync failed: ${t.javaClass.simpleName}")
+            _syncFailed.value = true
         }
     }
+
+    /** Tries again to bring [accounts] in line with the vault as it is now (after [syncFailed]). Never throws. */
+    suspend fun retry() = reconcile(vault.state.value)
 
     private suspend fun verify() {
         val tag = withContext(io) { vault.identityTag() } ?: return
@@ -234,7 +250,10 @@ class WalletAccounts internal constructor(
         added.last()
     }
 
-    /** Makes account [index] the one the wallet shows. */
+    /**
+     * Makes account [index] the one the wallet shows. Throws if the
+     * choice can't be saved (the caller reports it; [accounts] is unchanged).
+     */
     suspend fun select(index: Int) = mutex.withLock {
         val current = _accounts.value ?: return@withLock
         if (current.activeIndex == index || current.accounts.none { it.index == index }) return@withLock

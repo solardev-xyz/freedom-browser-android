@@ -271,6 +271,7 @@ fun WalletScreen(
     // while the wallet is locked; only adding an account needs it open.
     val walletAccounts = remember(context) { WalletAccounts.get(context) }
     val accountList by walletAccounts.accounts.collectAsState()
+    val accountSyncFailed by walletAccounts.syncFailed.collectAsState()
     val allBalances by walletAccounts.balances.byAddress.collectAsState()
     val chainStore = remember(context) { ChainStore.get(context) }
     val allChains by chainStore.chains.collectAsState(initial = null)
@@ -417,14 +418,23 @@ fun WalletScreen(
             if (info != null) {
                 val list = accountList
                 if (list == null) {
-                    item("accounts") { AccountsLockedSection(locked = state is Vault.State.Locked) }
+                    item("accounts") {
+                        AccountsLockedSection(
+                            locked = state is Vault.State.Locked,
+                            failed = accountSyncFailed,
+                            busy = busy,
+                            onRetry = { run("find your accounts") { walletAccounts.retry() } },
+                        )
+                    }
                 } else {
                     item("accounts") {
                         AccountsSection(
                             list = list,
                             locked = state is Vault.State.Locked,
                             busy = busy,
-                            onSelect = { index -> scope.launch { walletAccounts.select(index) } },
+                            // Through run(): saving the choice can fail
+                            // (a full disk), and that's an error line, not a crash.
+                            onSelect = { index -> run("switch account") { walletAccounts.select(index) } },
                             onAdd = {
                                 run("add an account") {
                                     if (!vault.unlockedNow()) vault.unlock(auth)

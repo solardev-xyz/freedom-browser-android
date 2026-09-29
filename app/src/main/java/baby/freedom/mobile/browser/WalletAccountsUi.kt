@@ -5,6 +5,7 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.widget.Toast
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -23,14 +24,19 @@ import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.Constraints
+import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import baby.freedom.mobile.chains.Chain
 import baby.freedom.mobile.chains.rpc.ChainTrust
@@ -98,10 +104,10 @@ internal fun AccountsSection(
     SectionCard(title = "Account") {
         Text(active.name, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Medium)
         SelectionContainer {
-            Text(
+            AddressText(
                 active.address,
                 style = MaterialTheme.typography.bodyMedium,
-                fontFamily = FontFamily.Monospace,
+                color = MaterialTheme.colorScheme.onSurface,
                 modifier = Modifier.padding(top = 2.dp),
             )
         }
@@ -139,10 +145,9 @@ internal fun AccountsSection(
                     Spacer(Modifier.width(8.dp))
                     Column(Modifier.weight(1f)) {
                         Text(account.name, fontWeight = if (selected) FontWeight.Medium else FontWeight.Normal)
-                        Text(
+                        AddressText(
                             account.address,
                             style = MaterialTheme.typography.bodySmall,
-                            fontFamily = FontFamily.Monospace,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
@@ -164,14 +169,81 @@ internal fun AccountsSection(
     }
 }
 
-/** An opened wallet that has no account list yet (made before #104): the first unlock derives it. */
+/**
+ * An address in monospace that never leaves a character or two alone on
+ * a second line: on one line if it fits (shrunk to no less than
+ * [MIN_ADDRESS_SCALE] of [style]'s size if that's what it takes),
+ * otherwise as two even halves, one under the other.
+ */
 @Composable
-internal fun AccountsLockedSection(locked: Boolean) {
+internal fun AddressText(address: String, style: TextStyle, color: Color, modifier: Modifier = Modifier) {
+    val mono = style.copy(fontFamily = FontFamily.Monospace, color = color)
+    val measurer = rememberTextMeasurer()
+    BoxWithConstraints(modifier) {
+        val maxWidth = constraints.maxWidth
+        // Keyed on the measurer too: it's replaced when the density or font
+        // scale changes, and a size fitted at the old scale would clip.
+        val fitted = remember(address, mono, maxWidth, measurer) {
+            fittedAddressSize(mono.fontSize, maxWidth) { size ->
+                measurer.measure(address, mono.copy(fontSize = size), softWrap = false, maxLines = 1).size.width
+            }
+        }
+        if (fitted != null) {
+            Text(address, style = mono.copy(fontSize = fitted), softWrap = false, maxLines = 1)
+        } else {
+            val half = (address.length + 1) / 2
+            Column {
+                Text(address.substring(0, half), style = mono)
+                Text(address.substring(half), style = mono)
+            }
+        }
+    }
+}
+
+/**
+ * The largest size from [full] down to [MIN_ADDRESS_SCALE] of it at which
+ * the text, [widthAt] px wide, fits in [maxWidth] px; null if even the
+ * smallest doesn't.
+ */
+internal fun fittedAddressSize(full: TextUnit, maxWidth: Int, widthAt: (TextUnit) -> Int): TextUnit? {
+    if (maxWidth == Constraints.Infinity) return full
+    val fullWidth = widthAt(full)
+    if (fullWidth <= maxWidth) return full
+    // A monospace line's width scales with the size: start from that
+    // estimate, then step down until it really fits.
+    var scale = maxWidth.toFloat() / fullWidth
+    while (scale >= MIN_ADDRESS_SCALE) {
+        val size = full * scale
+        if (widthAt(size) <= maxWidth) return size
+        scale -= 0.01f
+    }
+    return null
+}
+
+internal const val MIN_ADDRESS_SCALE = 0.85f
+
+/**
+ * An opened wallet that has no account list yet (made before #104): the
+ * first unlock derives it. If that failed ([failed]: the list couldn't be
+ * derived or saved), says so and offers to try again rather than
+ * "Finding…" forever.
+ */
+@Composable
+internal fun AccountsLockedSection(locked: Boolean, failed: Boolean, busy: Boolean, onRetry: () -> Unit) {
     SectionCard(title = "Account") {
         Text(
-            if (locked) "Unlock the wallet to see its accounts and their balances." else "Finding your accounts…",
+            when {
+                locked -> "Unlock the wallet to see its accounts and their balances."
+                failed -> "Couldn’t set up this wallet’s accounts. The phone may be out of storage."
+                else -> "Finding your accounts…"
+            },
             style = MaterialTheme.typography.bodyMedium,
         )
+        if (!locked && failed) {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                TextButton(onClick = onRetry, enabled = !busy) { Text(if (busy) "Working…" else "Try again") }
+            }
+        }
     }
 }
 

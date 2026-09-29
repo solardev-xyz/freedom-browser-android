@@ -168,6 +168,40 @@ class WalletAccountsTest {
     }
 
     @Test
+    fun `a list that can't be saved reports it and a retry recovers`() = runBlocking {
+        val a = accounts()
+        vault.create(abandon12, auth, imported = true)
+        // Where the list's folder should be, a file: every save fails (as on a full disk).
+        file.parentFile!!.writeText("in the way")
+        a.reconcile(vault.state.value)
+        assertNull(a.accounts.value)
+        assertTrue(a.syncFailed.value)
+        a.retry() // still failing: still reported, never thrown
+        assertTrue(a.syncFailed.value)
+        file.parentFile!!.delete()
+        a.retry()
+        assertEquals(abandonAddresses[0], a.accounts.value!!.active.address)
+        assertEquals(false, a.syncFailed.value)
+    }
+
+    @Test
+    fun `a switch that can't be saved throws for the page to report, and changes nothing`() = runBlocking {
+        val a = accounts()
+        vault.create(abandon12, auth, imported = true)
+        a.reconcile(vault.state.value)
+        a.add()
+        val before = a.accounts.value
+        file.parentFile!!.deleteRecursively()
+        file.parentFile!!.writeText("in the way")
+        try {
+            a.select(0)
+            fail("expected the failed save to throw")
+        } catch (_: Exception) {
+        }
+        assertEquals(before, a.accounts.value)
+    }
+
+    @Test
     fun `a corrupt or malformed list reads as none`() {
         val tag = "t"
         file.parentFile!!.mkdirs()
