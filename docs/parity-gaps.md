@@ -39,7 +39,7 @@ The parity plan ([#128](https://github.com/solardev-xyz/freedom-browser-android/
 | [#274](https://github.com/solardev-xyz/freedom-browser-android/issues/274) | Myotis: start and stop Ethereum and Gnosis separately | yes | no | S |
 | [#275](https://github.com/solardev-xyz/freedom-browser-android/issues/275) | Tor through an external SOCKS proxy (Orbot) | yes | no | S |
 | [#276](https://github.com/solardev-xyz/freedom-browser-android/issues/276) | Node logs: view and share | log file | yes | S |
-| [#283](https://github.com/solardev-xyz/freedom-browser-android/issues/283) | Keep web pages from reading the Swarm node's local API (today a sandboxed iframe, origin `null`, reads `/wallet`, `/stamps`, `/addresses` and `/chequebook/balance`; only writes are refused) | yes | not checked | S |
+| [#283](https://github.com/solardev-xyz/freedom-browser-android/issues/283) | Keep web pages from reading the Swarm node's local API (today a sandboxed iframe, origin `null`, reads `/wallet`, `/stamps`, `/addresses` and `/chequebook/balance`; only writes are refused. Seen from a private-address page only; a public https origin, where Private Network Access may block it, is not checked yet) | yes | not checked | S |
 
 ### Wallet
 
