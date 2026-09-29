@@ -795,7 +795,11 @@ class WalletSender internal constructor(
      * a failure that certainly didn't go out, and written over whatever
      * part of the failed save did land, so a restart agrees).
      */
-    private suspend fun journalBeforeBroadcast(quote: SendQuote, s: EthTransaction.Signed): Boolean = withContext(Dispatchers.IO) {
+    private suspend fun journalBeforeBroadcast(
+        quote: SendQuote,
+        s: EthTransaction.Signed,
+        start: Started,
+    ): Boolean = withContext(Dispatchers.IO) {
         val broadcasting = SendStatus(quote, SendStatus.Stage.Broadcasting, s.hash)
         synchronized(writing) {
             val state = synchronized(this@WalletSender) {
@@ -828,6 +832,8 @@ class WalletSender internal constructor(
             // "nothing was sent" while the journal still holds the signed
             // send (a kill in that window would resurrect it).
             journal.save(unsaved)
+            // Nothing went out, so no nonce was taken: settled before it's shown.
+            settle(start)
             synchronized(this@WalletSender) {
                 if (_status.value?.quote === quote) failedStatus?.let { show(it) }
             }
@@ -1023,37 +1029,49 @@ class WalletSender internal constructor(
     }
 
     private suspend fun signAndBroadcast(quote: SendQuote, sign: suspend (EthTransaction) -> EthTransaction.Signed, start: Started) {
+        // Every ending below that takes no nonce settles [start] before its
+        // outcome is shown, as [broadcast] does: a page that sees the failure
+        // and prices again at once must read this send as over, not as one
+        // still taking its nonce (which would make that fresh quote STALE).
         val s = try {
             sign(quote.tx)
         } catch (e: CancellationException) {
             throw e
-        } catch (e: QuoteStaleException) {
-            failStale(quote, droppedSigned = false)
-            return
-        } catch (e: VaultLockedException) {
-            fail(quote, "The wallet locked before the transaction was signed. Nothing was sent; confirm again to unlock it.", false)
-            return
-        } catch (e: LedgerException) {
-            // The Ledger's own words: rejected, locked, disconnected, timed out… (#142)
-            val nothing = if (e.message.orEmpty().contains("Nothing was")) "" else " Nothing was sent."
-            val rejected = e.kind == LedgerException.Kind.REJECTED || e.kind == LedgerException.Kind.CANCELLED
-            fail(quote, e.message + nothing, false, rejected)
-            return
         } catch (e: Exception) {
-            Log.w(TAG, "signing failed: ${e.javaClass.simpleName}")
-            fail(quote, "Couldn’t sign the transaction. Nothing was sent.", false)
+            settle(start)
+            signingFailed(quote, e)
             return
         }
         // Signing may have taken minutes (a Ledger unlocked, opened, reviewed on):
         // bytes whose fee cap was priced too long ago are dropped, never sent.
         if (tooOldToSend(quote)) {
+            settle(start)
             failStale(quote, droppedSigned = true)
             return
         }
         // On disk before it goes out: a process killed mid-broadcast
         // must come back to these bytes, never to an empty form that
         // would sign a second payment next to them.
-        if (journalBeforeBroadcast(quote, s)) broadcast(quote, s, start = start)
+        if (journalBeforeBroadcast(quote, s, start)) broadcast(quote, s, start = start)
+    }
+
+    /** Signing [quote] threw [e]: nothing was sent, and the page is told why. */
+    private suspend fun signingFailed(quote: SendQuote, e: Exception) {
+        when (e) {
+            is QuoteStaleException -> failStale(quote, droppedSigned = false)
+            is VaultLockedException ->
+                fail(quote, "The wallet locked before the transaction was signed. Nothing was sent; confirm again to unlock it.", false)
+            is LedgerException -> {
+                // The Ledger's own words: rejected, locked, disconnected, timed out… (#142)
+                val nothing = if (e.message.orEmpty().contains("Nothing was")) "" else " Nothing was sent."
+                val rejected = e.kind == LedgerException.Kind.REJECTED || e.kind == LedgerException.Kind.CANCELLED
+                fail(quote, e.message + nothing, false, rejected)
+            }
+            else -> {
+                Log.w(TAG, "signing failed: ${e.javaClass.simpleName}")
+                fail(quote, "Couldn’t sign the transaction. Nothing was sent.", false)
+            }
+        }
     }
 
     /** How far a [submitAndAwaitBroadcast] got. */

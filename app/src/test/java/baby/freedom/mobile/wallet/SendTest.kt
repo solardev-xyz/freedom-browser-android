@@ -20,6 +20,7 @@ import baby.freedom.mobile.ens.toHex
 import baby.freedom.mobile.wallet.ledger.LedgerException
 import java.io.IOException
 import java.math.BigInteger
+import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -1446,6 +1447,39 @@ class SendTest {
         // Nothing holds the next send back: priced again, it goes.
         now += 1
         assertEquals(WalletSender.Submit.STARTED, s.submit(s.prepare(request()), signer()))
+        s.awaitStage { it == SendStatus.Stage.Pending }
+        assertEquals(1, chain.sent.size)
+    }
+
+    @Test
+    fun `a send that ends without going out is over by the time its failure shows`() = runBlocking<Unit> {
+        // The page may price the next send the moment it sees the failure. A quote priced
+        // then must not read the failed send as one still taking its nonce (STALE forever
+        // after): the send is settled before its failure is shown, never just after.
+        val chain = FakeChain()
+        val now = AtomicLong(1_000L)
+        val s = sender(chain) { now.get() }
+        /** Submits [quote] with [sign], which fails it; the quote priced the moment that failure shows. */
+        suspend fun pricedAsItFails(quote: SendQuote, sign: suspend (EthTransaction) -> EthTransaction.Signed): SendQuote {
+            val atFailure = kotlinx.coroutines.CompletableDeferred<SendQuote>()
+            // Unconfined: runs inside the sender's show(), as the failure appears, before anything after it.
+            val watcher = launch(Dispatchers.Unconfined) {
+                s.changes.first { it?.stage is SendStatus.Stage.Failed }
+                atFailure.complete(runBlocking { s.prepare(request()) })
+            }
+            assertEquals(WalletSender.Submit.STARTED, s.submit(quote, sign))
+            return withTimeout(5_000) { atFailure.await() }.also { watcher.cancel() }
+        }
+        // Refused on the Ledger; the quote priced as that shows is taken, and approved
+        // on the Ledger too late to send; the one priced as that shows goes out.
+        val second = pricedAsItFails(s.prepare(request())) { throw LedgerException(LedgerException.Kind.REJECTED) }
+        s.acknowledge()
+        val third = pricedAsItFails(second) { tx ->
+            now.addAndGet(WalletSender.SIGNED_TTL_MS)
+            tx.sign(key.copyOf(), from.address)
+        }
+        s.acknowledge()
+        assertEquals(WalletSender.Submit.STARTED, s.submit(third, signer()))
         s.awaitStage { it == SendStatus.Stage.Pending }
         assertEquals(1, chain.sent.size)
     }
