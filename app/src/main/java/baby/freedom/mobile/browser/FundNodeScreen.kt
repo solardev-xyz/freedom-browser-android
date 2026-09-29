@@ -39,6 +39,7 @@ import baby.freedom.mobile.chains.BuiltInChains
 import baby.freedom.mobile.chains.Chain
 import baby.freedom.mobile.chains.rpc.ChainDataRouter
 import baby.freedom.mobile.chains.rpc.ChainRpcException
+import baby.freedom.mobile.chains.rpc.ChainTrust
 import baby.freedom.mobile.chains.rpc.WalletRpc
 import baby.freedom.mobile.data.ChainStore
 import baby.freedom.mobile.wallet.BiometricVaultAuthenticator
@@ -90,6 +91,24 @@ internal fun fundNodeSummary(plan: SwarmFunder.Plan, days: Long): String =
         "swaps ${formatXdaiCeiling(plan.xdaiForSwap)} for about ${formatBzz(plan.expectedBzz)} " +
         "(at least ${formatBzz(plan.minBzz)}), buys the stamp for ${formatBzz(plan.stampCostPlur)}, and sends the node " +
         "${formatXdai(plan.xdaiForNode)} and the xBZZ the stamp doesn't use."
+
+/**
+ * Whether the pool's `slot0()` read, with [trust], may size the swap
+ * (#225 R4-F2). The price sets how much xDAI is swapped, while the
+ * slippage floor stays at what the stamp needs: a lone RPC claiming xBZZ
+ * is 10x dearer would have the call swap 10x the xDAI and accept ~90%
+ * slippage, the surplus open to a sandwich. So only a proof or a quorum
+ * agreeing, or the user's own RPC with no one answering otherwise, counts
+ * — as for an onchain app's bytes ([OnchainApp]'s `trusted`).
+ */
+internal fun poolPriceTrusted(trust: ChainTrust): Boolean = when (trust.level) {
+    ChainTrust.Level.VERIFIED -> true
+    ChainTrust.Level.USER_CONFIGURED -> trust.dissented.isEmpty()
+    ChainTrust.Level.UNVERIFIED -> false
+}
+
+internal const val POOL_PRICE_UNVERIFIED =
+    "The pool's price isn't verified (not enough RPCs agreed on it). Try again, or add an RPC of your own in Settings."
 
 /** The pool's price, as xDAI per xBZZ to 6 significant digits. */
 internal fun formatSpotPrice(sqrtPriceX96: BigInteger): String =
@@ -150,8 +169,12 @@ internal fun FundNodeScreen(nodeInfo: NodeInfo, onOpenUrl: (String) -> Unit, onD
                 is StampClient.Answer.Ok -> stampQuoteFrom(a.json) ?: throw SendException("The node's price couldn't be read")
                 is StampClient.Answer.Failed -> throw SendException(a.message)
             }
-            val slot0 = rpc.call(SwarmFunder.CHAIN_ID, JSONObject().put("to", SwarmFunder.POOL).put("data", SwarmFunder.SLOT0_DATA)).value
-            val sqrt = SwarmFunder.sqrtPriceFrom(slot0) ?: throw SendException("The pool's price couldn't be read")
+            val slot0 = rpc.call(SwarmFunder.CHAIN_ID, JSONObject().put("to", SwarmFunder.POOL).put("data", SwarmFunder.SLOT0_DATA))
+            if (!poolPriceTrusted(slot0.trust)) {
+                Log.i(TAG, "pool price not verified (${slot0.trust.level.name.lowercase()}, ${slot0.trust.dissented.size} dissented)")
+                throw SendException(POOL_PRICE_UNVERIFIED)
+            }
+            val sqrt = SwarmFunder.sqrtPriceFrom(slot0.value) ?: throw SendException("The pool's price couldn't be read")
             Priced.Ready(q, sqrt)
         } catch (e: CancellationException) {
             throw e

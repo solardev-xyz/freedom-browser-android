@@ -1,6 +1,8 @@
 package baby.freedom.mobile.browser
 
 import baby.freedom.mobile.chains.BuiltInChains
+import baby.freedom.mobile.chains.rpc.ChainSource
+import baby.freedom.mobile.chains.rpc.ChainTrust
 import baby.freedom.mobile.wallet.ChainTrustsForTest
 import baby.freedom.mobile.wallet.DappCall
 import baby.freedom.mobile.wallet.EthTransaction
@@ -138,6 +140,11 @@ class SwarmFundingTest {
         val until = System.currentTimeMillis() + 5_000
         while (!want(f.pending.value) && System.currentTimeMillis() < until) Thread.sleep(10)
         assertTrue("pending was ${f.pending.value}", want(f.pending.value))
+    }
+
+    private fun awaitConnects(n: Int) {
+        val until = System.currentTimeMillis() + 5_000
+        while (synchronized(connects) { connects.size } < n && System.currentTimeMillis() < until) Thread.sleep(10)
     }
 
     @Test
@@ -348,6 +355,42 @@ class SwarmFundingTest {
     }
 
     @Test
+    fun `lookups stopped by a superseded verdict start again when a Connect's read withdraws it`() {
+        val chain = FakeChain()
+        val f = SwarmFunding(
+            File(tmp.root, "funding.json"), connect = { connects += it; false }, spends = emptyFlow(), chain = chain,
+            checkEveryMs = 10, checkAtMostEveryMs = 40, confirmAfterMs = 10,
+        )
+        chain.minedCount = BigInteger.TWO
+        f.start(flowOf(status(SendStatus.Stage.Pending), status(SendStatus.Stage.Unconfirmed), null))
+        awaitPending(f) { it?.tracked == false }
+        val until = System.currentTimeMillis() + 5_000
+        while (f.superseded.value == null && System.currentTimeMillis() < until) Thread.sleep(10)
+        assertEquals(batch, f.superseded.value)
+        val stopped = chain.reads
+        Thread.sleep(200)
+        assertEquals(stopped, chain.reads)
+
+        // A Connect (which fails: nothing changes in the record) reads at a height where the nonce isn't used yet.
+        chain.minedCount = BigInteger.ONE
+        f.connectNow()
+        val until2 = System.currentTimeMillis() + 5_000
+        while (f.superseded.value != null && System.currentTimeMillis() < until2) Thread.sleep(10)
+        assertNull(f.superseded.value)
+        // No longer certain it can never land: the app keeps checking, as the card says, and connects it once mined.
+        val withdrawn = chain.reads
+        val until3 = System.currentTimeMillis() + 5_000
+        while (chain.reads < withdrawn + 2 && System.currentTimeMillis() < until3) Thread.sleep(10)
+        assertTrue("${chain.reads - withdrawn} reads", chain.reads >= withdrawn + 2)
+        chain.receipt = receipt("0x1")
+        chain.minedCount = BigInteger.TWO
+        awaitPending(f) { it?.mined == true }
+        awaitConnects(2)
+        assertTrue(connects.size >= 2)
+        assertEquals(batch, connects.last())
+    }
+
+    @Test
     fun `once the wallet stops following the call, it's looked up on chain until it's mined`() {
         val chain = FakeChain()
         val f = SwarmFunding(File(tmp.root, "funding.json"), connect = { connects += it; true }, spends = emptyFlow(), chain = chain, checkEveryMs = 20)
@@ -358,10 +401,22 @@ class SwarmFundingTest {
         assertTrue(chain.reads >= 2)
         chain.receipt = receipt("0x1")
         awaitPending(f) { it?.mined == true }
+        // The connect follows the record's update, on the loop's own thread.
+        awaitConnects(1)
         assertEquals(listOf(batch), connects)
         val reads = chain.reads
         Thread.sleep(200)
         assertEquals(reads, chain.reads)
+    }
+
+    @Test
+    fun `the pool's price sizes the swap only when a quorum, a proof, or the user's own undisputed RPC gave it`() {
+        val u = ChainTrustsForTest.unverified
+        assertFalse(poolPriceTrusted(u))
+        assertTrue(poolPriceTrusted(u.copy(level = ChainTrust.Level.VERIFIED, source = ChainSource.QUORUM, k = 3, m = 2)))
+        assertTrue(poolPriceTrusted(u.copy(level = ChainTrust.Level.VERIFIED, dissented = listOf("b.example"), k = 3, m = 2)))
+        assertTrue(poolPriceTrusted(u.copy(level = ChainTrust.Level.USER_CONFIGURED)))
+        assertFalse(poolPriceTrusted(u.copy(level = ChainTrust.Level.USER_CONFIGURED, dissented = listOf("b.example"))))
     }
 
     @Test

@@ -18,6 +18,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import org.json.JSONObject
@@ -123,15 +124,21 @@ internal class SwarmFunding(
         }
         if (chain != null) {
             // While the wallet doesn't follow an unmined call, look it up on chain now and then:
-            // every [checkEveryMs] at first, backing off to [checkAtMostEveryMs], and no more
-            // once it's known it can never be mined ([superseded]) — only a Connect reads again.
+            // every [checkEveryMs] at first, backing off to [checkAtMostEveryMs], and not while
+            // it's known it can never be mined ([superseded]) — only a Connect reads then. A read
+            // that withdraws that verdict (a Connect's, answered at another height) starts the
+            // lookups over, so the card's "keeps checking" stays true (#225 R4-F1).
             scope.launch {
                 _pending.collectLatest { p ->
                     if (p != null && !p.mined && !p.tracked && p.hash != null) {
                         var wait = checkEveryMs
                         while (true) {
                             checkChain()
-                            if (_superseded.value == p.batchId) break
+                            if (_superseded.value == p.batchId) {
+                                // The read that withdrew it has just been made: the next one after [checkEveryMs].
+                                _superseded.first { it != p.batchId }
+                                wait = checkEveryMs
+                            }
                             if (synchronized(this@SwarmFunding) { supersededSeen?.first } == p.batchId) {
                                 // Superseded at one read: confirm it as soon as it can be.
                                 delay(confirmAfterMs)
