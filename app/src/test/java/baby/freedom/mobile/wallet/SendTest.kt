@@ -106,7 +106,7 @@ class SendTest {
                 chains = { listOf<Chain>(gnosis) },
                 transport = RpcTransport { _, body, _ ->
                     if (down) throw IOException("down")
-                    """{"jsonrpc":"2.0","id":1,${answer(JSONObject(body))}}"""
+                    withReceiptHash(JSONObject(body), """{"jsonrpc":"2.0","id":1,${answer(JSONObject(body))}}""")
                 },
             ),
         )
@@ -1430,4 +1430,13 @@ internal object ChainTrustsForTest {
         baby.freedom.mobile.chains.rpc.ChainSource.DIRECT,
         listOf("a.example"), emptyList(), listOf("a.example"), 1, 1, null,
     )
+}
+
+/** A receipt answer names its own transaction, as a node's does (#229): the fakes' receipts leave it out. */
+internal fun withReceiptHash(req: JSONObject, reply: String): String {
+    if (req.getString("method") != "eth_getTransactionReceipt") return reply
+    val o = JSONObject(reply)
+    val r = o.opt("result") as? JSONObject ?: return reply
+    if (!r.has("transactionHash")) r.put("transactionHash", req.getJSONArray("params").getString(0))
+    return o.toString()
 }

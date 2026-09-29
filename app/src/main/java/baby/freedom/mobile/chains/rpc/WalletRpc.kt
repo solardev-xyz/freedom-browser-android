@@ -69,12 +69,19 @@ class WalletRpc(private val router: ChainDataRouter) {
             (it as? String)?.takeIf { s -> HEX.matches(s) } ?: throw invalid("eth_getCode", it)
         }
 
-    /** The receipt, or `null` while the transaction is pending (or unknown). */
+    /**
+     * The receipt, or `null` while the transaction is pending (or unknown).
+     * One that doesn't name [txHash] as its `transactionHash` — another
+     * transaction's, or a made-up one — is [ChainRpcException.InvalidResponse]:
+     * a node can't have a send shown as landed by answering with any receipt
+     * at all (#229).
+     */
     suspend fun receipt(chainId: Long, txHash: String): Reading<JSONObject?> =
         read(chainId, "eth_getTransactionReceipt", JSONArray().put(txHash)) {
             when (it) {
                 null -> null
-                is JSONObject -> it
+                is JSONObject -> it.takeIf { r -> (r.opt("transactionHash") as? String).equals(txHash, ignoreCase = true) }
+                    ?: throw invalid("eth_getTransactionReceipt", it)
                 else -> throw invalid("eth_getTransactionReceipt", it)
             }
         }
