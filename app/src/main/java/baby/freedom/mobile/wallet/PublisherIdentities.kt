@@ -286,8 +286,9 @@ class PublisherIdentityStore internal constructor(
      * [RECOVERY_STRIDE] above the last restart — indexes are handed out
      * one per new identity, so no device gets through a stride. The
      * unparseable floor is kept as `*.corrupt*` (wipe leaves those too),
-     * and their count says how many strides are already used. The new
-     * floor is written here, before anything is allocated from it, so a
+     * and their count says how many strides are already used (a copy is
+     * deleted again if the new floor can't be written). The new floor is
+     * written here, before anything is allocated from it, so a
      * failed save can't leave no floor (which reads as 0) behind.
      * Throws [IOException] if that can't be done, or every stride is
      * used up.
@@ -306,9 +307,17 @@ class PublisherIdentityStore internal constructor(
         }
         Log.w(TAG, "publisher key index floor can't be parsed and there's nothing to rebuild it from; restarting at stride $n")
         // Copied, not moved: the floor is only ever replaced in one step.
-        floor.copyTo(target)
+        // The copy only counts as a restart once the new floor is written:
+        // a failed write takes it back, or every failing Set up / Create
+        // would use up another stride with nothing allocated from it.
         val next = n * RECOVERY_STRIDE
-        writeFloor(next)
+        try {
+            floor.copyTo(target)
+            writeFloor(next)
+        } catch (e: IOException) {
+            target.delete()
+            throw e
+        }
         return next
     }
 

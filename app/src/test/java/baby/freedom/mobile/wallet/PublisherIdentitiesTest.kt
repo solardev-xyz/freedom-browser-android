@@ -188,6 +188,24 @@ class PublisherIdentitiesTest {
     }
 
     @Test
+    fun `a restart whose floor can't be written doesn't use up a stride`() {
+        val dir = file.parentFile!!.apply { mkdirs() }
+        val floor = File(dir, "publisher-key-index-floor")
+        floor.writeText("garbage")
+        // The floor can't be replaced: a directory is in the way of its temp copy.
+        val blocker = File(dir, "${floor.name}.tmp").apply { mkdirs() }
+        repeat(3) { assertThrows(IOException::class.java) { store.ensureSite(siteA) } }
+        assertEquals("garbage", floor.readText())
+        assertTrue(dir.listFiles()!!.none { it.name.startsWith("${floor.name}.corrupt") })
+        // Once it can be written, the restart is the first one, not the fourth.
+        blocker.delete()
+        val stride = PublisherIdentityStore.RECOVERY_STRIDE
+        assertEquals("app-scoped:$stride", store.ensureSite(siteA).activeId)
+        assertEquals("garbage", File(dir, "${floor.name}.corrupt").readText())
+        assertFalse(File(dir, "${floor.name}.corrupt-1").exists())
+    }
+
+    @Test
     fun `a floor lost too many times refuses to allocate`() {
         val dir = file.parentFile!!.apply { mkdirs() }
         val floor = File(dir, "publisher-key-index-floor")
