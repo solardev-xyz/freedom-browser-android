@@ -89,7 +89,27 @@ object Eip712 {
     /** Fields, array elements and type-walk steps one digest may take (#110 R1-F1). */
     internal const val MAX_WORK = 1_000_000L
     private val IDENT = Regex("^[A-Za-z_$][A-Za-z0-9_$]*$")
-    private val ARRAY_SUFFIX = Regex("^(.*)\\[(\\d*)]$")
+
+    /** The longest field type accepted: real ones are a name and a few `[n]`s. */
+    internal const val MAX_TYPE_CHARS = 256
+
+    /** An array type split into its element type and its length (empty for a dynamic array). */
+    private class ArrayType(val inner: String, val length: String)
+
+    /** [type] as `inner[length]`, or null if it isn't an array type. */
+    private fun arrayType(type: String): ArrayType? {
+        val open = arraySuffixStart(type, type.length)
+        if (open < 0) return null
+        return ArrayType(type.substring(0, open), type.substring(open + 1, type.length - 1))
+    }
+
+    /** Where `[digits]` ending at [end] in [t] starts, or -1: one backward scan, no regex backtracking. */
+    private fun arraySuffixStart(t: String, end: Int): Int {
+        if (end < 2 || t[end - 1] != ']') return -1
+        var i = end - 2
+        while (i >= 0 && t[i] in '0'..'9') i--
+        return if (i >= 0 && t[i] == '[') i else -1
+    }
 
     /** [raw] — the JSON text, or the object itself — as typed data. */
     fun parse(raw: Any?): TypedData {
@@ -120,6 +140,8 @@ object Eip712 {
                 val f = arr.opt(i) as? JSONObject ?: throw Invalid("type $name has a field that isn't an object")
                 val fname = f.opt("name") as? String ?: throw Invalid("type $name has a field with no name")
                 val ftype = f.opt("type") as? String ?: throw Invalid("field $name.$fname has no type")
+                // Checked before anything walks it: a page-sized type string is never scanned more than once (#215 R3-F1).
+                if (ftype.length > MAX_TYPE_CHARS) throw Invalid("field $name.$fname has a type that's too long")
                 Field(fname, ftype)
             }
         }
@@ -163,6 +185,13 @@ object Eip712 {
     }
 
     /**
+     * Whether the domain separator covers a `chainId`: the `EIP712Domain`
+     * type declares it. Without it the domain's `chainId` key isn't hashed,
+     * so it says nothing about which chain the signature is for (#215 R3-M1).
+     */
+    fun chainBound(data: TypedData): Boolean = data.types["EIP712Domain"]?.any { it.name == "chainId" } == true
+
+    /**
      * The message as the signature covers it, for showing: only the
      * fields its types declare, nested structs (and arrays of them) the
      * same way. A key the types don't name isn't hashed, so a site could
@@ -176,10 +205,10 @@ object Eip712 {
 
     private fun declaredOnly(types: Map<String, List<Field>>, type: String, value: Any?, depth: Int): Any? {
         if (depth > MAX_DEPTH) throw Invalid("typed data nests too deeply")
-        ARRAY_SUFFIX.matchEntire(type)?.let { m ->
+        arrayType(type)?.let { a ->
             val arr = value as? JSONArray ?: return value
             return JSONArray().apply {
-                for (i in 0 until arr.length()) put(declaredOnly(types, m.groupValues[1], arr.opt(i), depth + 1) ?: JSONObject.NULL)
+                for (i in 0 until arr.length()) put(declaredOnly(types, a.inner, arr.opt(i), depth + 1) ?: JSONObject.NULL)
             }
         }
         val fields = types[type] ?: return value
@@ -225,7 +254,8 @@ object Eip712 {
             walk(primary, 0)
             deps.remove(primary)
             return (listOf(primary) + deps.sorted()).joinToString("") { t ->
-                spend(types.getValue(t).size)
+                // Charged by length too: field names are the page's, and each type's encoding repeats its dependencies'.
+                spend(types.getValue(t).size + types.getValue(t).sumOf { it.name.length + it.type.length } / 64)
                 t + "(" + types.getValue(t).joinToString(",") { "${it.type} ${it.name}" } + ")"
             }
         }
@@ -235,10 +265,10 @@ object Eip712 {
 
         private fun encodeField(type: String, value: Any?, name: String, depth: Int): ByteArray {
             if (depth > MAX_DEPTH) throw Invalid("typed data nests too deeply")
-            ARRAY_SUFFIX.matchEntire(type)?.let { m ->
-                val inner = m.groupValues[1]
+            arrayType(type)?.let { a ->
+                val inner = a.inner
                 val arr = value as? JSONArray ?: throw Invalid("$name should be an array")
-                val fixed = m.groupValues[2]
+                val fixed = a.length
                 if (fixed.isNotEmpty() && fixed.toIntOrNull() != arr.length()) throw Invalid("$name should have $fixed elements")
                 val out = java.io.ByteArrayOutputStream()
                 for (i in 0 until arr.length()) {
@@ -257,11 +287,13 @@ object Eip712 {
         }
     }
 
+    /** [t] with every `[n]` suffix taken off, in one pass over it (#215 R3-F1). */
     private fun baseType(t: String): String {
-        var b = t
+        var end = t.length
         while (true) {
-            val m = ARRAY_SUFFIX.matchEntire(b) ?: return b
-            b = m.groupValues[1]
+            val open = arraySuffixStart(t, end)
+            if (open < 0) return t.substring(0, end)
+            end = open
         }
     }
 

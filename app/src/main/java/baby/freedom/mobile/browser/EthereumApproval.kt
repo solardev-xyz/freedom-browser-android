@@ -313,7 +313,7 @@ private fun SignMessageBody(ask: EthAsk.SignMessage) {
 
 @Composable
 private fun SignTypedDataBody(ask: EthAsk.SignTypedData) {
-    Row0("Network", "${ask.chain.name} (chain ${ask.chain.id})")
+    Row0("Network", if (ask.chainBound) "${ask.chain.name} (chain ${ask.chain.id})" else "Any — the signature names no chain")
     AccountRow(ask.account)
     ask.domainName?.let { Row0("Application", it) }
     ask.verifyingContract?.let { AddressRow("Contract", it) }

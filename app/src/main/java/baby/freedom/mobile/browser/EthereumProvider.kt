@@ -20,6 +20,8 @@ import java.math.BigInteger
 import kotlin.coroutines.CoroutineContext
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
@@ -45,6 +47,8 @@ sealed interface EthAsk {
         override val origin: String,
         val account: WalletAccount,
         val chain: Chain,
+        /** The signature names [chain]; false when it isn't tied to any chain (no `chainId` in its domain). */
+        val chainBound: Boolean,
         val domainName: String?,
         val verifyingContract: String?,
         val primaryType: String,
@@ -197,6 +201,8 @@ class EthereumProvider(
         throw e
     } catch (e: BadParams) {
         Reply.Err(INVALID_PARAMS, e.message ?: "Invalid params")
+    } catch (e: ChainUnavailable) {
+        Reply.Err(CHAIN_DISCONNECTED, "Chain ${e.id} isn't set up in this wallet (Settings → Chains)")
     }
 
     private suspend fun dispatch(origin: String, method: String, params: JSONArray, ask: suspend (EthAsk) -> EthAnswer): Reply {
@@ -258,17 +264,66 @@ class EthereumProvider(
 
     // ---- Chains ----
 
-    /** The chain [origin] is on: an onchain app's own; the connected site's; the one it switched to; else Gnosis. */
+    /**
+     * The chain [origin] is on: an onchain app's own; the connected site's;
+     * the one it switched to; else Gnosis.
+     *
+     * A site whose chain was removed in Settings → Chains is moved to Gnosis
+     * — written down, and its pages told with `chainChanged` — rather than
+     * quietly answered and routed for Gnosis while they still think they're
+     * on the old chain (#215 R3-F2). An onchain app pinned to a removed
+     * chain can't move: its requests are refused with 4901 instead. So is
+     * any site whose chain can't be looked up because the list couldn't be
+     * read.
+     */
     internal suspend fun chainFor(origin: String): Chain {
-        val list = runCatching { chains() }.getOrNull().orEmpty()
-        val id = pinnedChain(origin)
-            ?: grants.grantFor(origin)?.chainId
-            ?: synchronized(sessionChains) { sessionChains[origin] }
-            ?: DEFAULT_CHAIN_ID
-        return list.firstOrNull { it.id == id }
-            ?: list.firstOrNull { it.id == DEFAULT_CHAIN_ID }
-            ?: BuiltInChains.GNOSIS
+        val list = runCatching { chains() }.getOrNull()
+        val pinned = pinnedChain(origin)
+        val id = pinned ?: storedChain(origin) ?: DEFAULT_CHAIN_ID
+        (list ?: BuiltInChains.ALL).firstOrNull { it.id == id }?.let { return it }
+        if (id == DEFAULT_CHAIN_ID) return BuiltInChains.GNOSIS
+        if (list == null || pinned != null) throw ChainUnavailable(id)
+        return moveOffRemoved(origin, id, list)
     }
+
+    /** The chain [origin] was last put on (connected, or switched for this session); null if none. */
+    private suspend fun storedChain(origin: String): Long? =
+        grants.grantFor(origin)?.chainId ?: synchronized(sessionChains) { sessionChains[origin] }
+
+    /** Serializes moving sites off removed chains, so each is moved and told once. */
+    private val chainMoves = Mutex()
+
+    /** Move [origin] off [removed] (not in [list]) to Gnosis, and tell its pages. */
+    private suspend fun moveOffRemoved(origin: String, removed: Long, list: List<Chain>): Chain {
+        val fallback = list.firstOrNull { it.id == DEFAULT_CHAIN_ID } ?: BuiltInChains.GNOSIS
+        val moved = chainMoves.withLock {
+            // Another request, or the sweep, may have moved it meanwhile.
+            if ((storedChain(origin) ?: DEFAULT_CHAIN_ID) != removed) return@withLock false
+            if (!setChainFor(origin, fallback.id)) throw ChainUnavailable(removed)
+            events.emit(origin, "chainChanged", fallback.hexId)
+            true
+        }
+        return if (moved) fallback else chainFor(origin)
+    }
+
+    /**
+     * The chain list is now [list] (Settings → Chains changed it): every
+     * site on a chain that's gone is moved to Gnosis and its pages told,
+     * as [chainFor] would on the site's next request.
+     */
+    suspend fun chainsChanged(list: List<Chain>) {
+        val ids = list.mapTo(HashSet()) { it.id }
+        val origins = runCatching { grants.all() }.getOrNull().orEmpty().filterValues { it.chainId !in ids }.keys +
+            synchronized(sessionChains) { sessionChains.filterValues { it !in ids }.keys.toList() }
+        for (origin in origins) {
+            if (pinnedChain(origin) != null) continue
+            val id = storedChain(origin) ?: continue
+            if (id !in ids) runCatching { moveOffRemoved(origin, id, list) }
+        }
+    }
+
+    /** [chainFor] can't name a chain the site's pages can be answered for. */
+    private class ChainUnavailable(val id: Long) : Exception()
 
     private fun pinnedChain(origin: String): Long? = OnchainAppRef.parseVirtual(origin)?.first?.chainId
 
@@ -395,13 +450,16 @@ class EthereumProvider(
             }
         }
         val chain = chainFor(origin)
-        if (data.domain.has("chainId") && !data.domain.isNull("chainId") && data.chainId != chain.id) {
+        // Only a chainId the domain separator covers says which chain this is for; an undeclared one isn't signed.
+        val chainBound = Eip712.chainBound(data)
+        if (chainBound && data.chainId != chain.id) {
             throw BadParams("The typed data is for chain ${data.domain.opt("chainId")}, but this site is on ${chain.name} (chain ${chain.id})")
         }
         val ask0 = EthAsk.SignTypedData(
             origin = origin,
             account = account,
             chain = chain,
+            chainBound = chainBound,
             // Only what the domain separator covers: an undeclared key isn't signed.
             domainName = Eip712.signedDomainString(data, "name"),
             verifyingContract = Eip712.signedDomainString(data, "verifyingContract"),

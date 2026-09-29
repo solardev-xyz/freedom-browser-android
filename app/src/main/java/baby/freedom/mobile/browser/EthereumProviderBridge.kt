@@ -165,6 +165,8 @@ object EthereumProviders {
         )
         p.events = EthereumProvider.Events { origin, event, data -> scope.launch { emit(origin, event, data) } }
         provider = p
+        // A chain removed in Settings → Chains moves the sites on it off it, and tells their pages (#215 R3-F2).
+        scope.launch { chainStore.chains.collect { p.chainsChanged(it) } }
     }
 
     /**

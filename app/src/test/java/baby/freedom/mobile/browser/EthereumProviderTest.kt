@@ -90,6 +90,8 @@ class EthereumProviderTest {
     }
 
     private val sepolia = Chain(id = 11155111, name = "Sepolia", symbol = "ETH", rpcUrls = listOf("https://rpc.sepolia.org"), isTestnet = true)
+    /** What Settings → Chains has; null when it can't be read. */
+    private var chainList: List<Chain>? = BuiltInChains.ALL + sepolia
     private val grants = FakeGrants()
     private val wallet = FakeWallet()
     private val sends = FakeSends()
@@ -102,7 +104,7 @@ class EthereumProviderTest {
     private val provider = EthereumProvider(
         grants = grants,
         wallet = wallet,
-        chains = { BuiltInChains.ALL + sepolia },
+        chains = { chainList ?: throw java.io.IOException("unreadable") },
         reads = { chainId, method, params, origin ->
             readsSeen += "$chainId $method $params $origin"
             readAnswer(method)
@@ -398,6 +400,109 @@ class EthereumProviderTest {
         assertEquals("0x64", ok(call("eth_chainId")))
         assertEquals(-32602, code(call("wallet_switchEthereumChain", JSONArray().put(JSONObject().put("chainId", 1)))))
         assertEquals(-32602, code(call("wallet_switchEthereumChain")))
+    }
+
+    @Test
+    fun `a site whose chain was removed is moved to Gnosis, written down and told, once`() {
+        answer = { EthAnswer.Approved() }
+        connect()
+        ok(call("wallet_switchEthereumChain", JSONArray().put(JSONObject().put("chainId", "0xaa36a7"))))
+        val session = "https://session.example"
+        ok(call("wallet_switchEthereumChain", JSONArray().put(JSONObject().put("chainId", "0xaa36a7")), origin = session))
+        events.clear()
+        // Removed in Settings → Chains: the sweep moves both and tells their pages.
+        chainList = BuiltInChains.ALL
+        runBlocking { provider.chainsChanged(chainList!!) }
+        assertEquals(setOf(Triple(site, "chainChanged", "0x64"), Triple(session, "chainChanged", "0x64")), events.toSet())
+        assertEquals(2, events.size)
+        assertEquals(100L, grants.grants[site]?.chainId)
+        assertEquals("0x64", ok(call("eth_chainId")))
+        assertEquals("0x64", ok(call("eth_chainId", origin = session)))
+        // Added back later: the sites stay where they were moved, silently switching nobody.
+        chainList = BuiltInChains.ALL + sepolia
+        runBlocking { provider.chainsChanged(chainList!!) }
+        assertEquals("0x64", ok(call("eth_chainId")))
+        assertEquals(2, events.size)
+    }
+
+    @Test
+    fun `a removed chain the sweep hasn't seen yet moves the site on its next request, with chainChanged first`() {
+        answer = { EthAnswer.Approved() }
+        connect()
+        ok(call("wallet_switchEthereumChain", JSONArray().put(JSONObject().put("chainId", "0xaa36a7"))))
+        events.clear()
+        chainList = BuiltInChains.ALL
+        assertEquals("0x64", ok(call("eth_chainId")))
+        assertEquals(listOf(Triple(site, "chainChanged", "0x64")), events)
+        assertEquals(100L, grants.grants[site]?.chainId)
+        ok(call("eth_blockNumber"))
+        assertEquals("100 eth_blockNumber [] $site", readsSeen.last())
+        assertEquals(1, events.size)
+    }
+
+    @Test
+    fun `an onchain app pinned to a removed chain is refused, never answered for Gnosis`() {
+        chainList = listOf(BuiltInChains.ETHEREUM, BuiltInChains.GNOSIS)
+        val app = "https://0x1234567890123456789012345678901234567890-8453.web3.freedom.baby"
+        assertEquals(4901, code(call("eth_chainId", origin = app)))
+        assertEquals(4901, code(call("eth_blockNumber", origin = app)))
+        assertTrue(readsSeen.isEmpty())
+        assertTrue(events.isEmpty())
+    }
+
+    @Test
+    fun `a site on a custom chain while the chain list can't be read is refused, not routed to Gnosis`() {
+        answer = { EthAnswer.Approved() }
+        connect()
+        ok(call("wallet_switchEthereumChain", JSONArray().put(JSONObject().put("chainId", "0xaa36a7"))))
+        events.clear()
+        chainList = null
+        assertEquals(4901, code(call("eth_chainId")))
+        assertEquals(11155111L, grants.grants[site]?.chainId)
+        assertTrue(events.isEmpty())
+        // A built-in chain is still known.
+        grants.grants[site] = grants.grants[site]!!.copy(chainId = 1)
+        assertEquals("0x1", ok(call("eth_chainId")))
+    }
+
+    @Test
+    fun `typed data whose domain type doesn't declare chainId isn't checked against the site's chain, and the sheet says so`() {
+        connect()
+        answer = { EthAnswer.Approved() }
+        val data = JSONObject(mail)
+        // chainId 1 in the domain, but not in EIP712Domain: not signed, so neither checked nor shown.
+        data.getJSONObject("types").put(
+            "EIP712Domain",
+            JSONArray().put(JSONObject().put("name", "name").put("type", "string"))
+                .put(JSONObject().put("name", "verifyingContract").put("type", "address")),
+        )
+        ok(call("eth_signTypedData_v4", JSONArray().put(main.address).put(data)))
+        assertFalse((asks.single() as EthAsk.SignTypedData).chainBound)
+        asks.clear()
+        // Declared: checked (the site is on Gnosis, the data says 1) and refused before any sheet.
+        assertEquals(-32602, code(call("eth_signTypedData_v4", JSONArray().put(main.address).put(mail))))
+        assertTrue(asks.isEmpty())
+        ok(call("wallet_switchEthereumChain", JSONArray().put(JSONObject().put("chainId", "0x1"))))
+        asks.clear()
+        ok(call("eth_signTypedData_v4", JSONArray().put(main.address).put(mail)))
+        assertTrue((asks.single() as EthAsk.SignTypedData).chainBound)
+    }
+
+    @Test
+    fun `a page-sized array type string is refused at once, not stripped one suffix at a time`() {
+        connect()
+        answer = { EthAnswer.Approved() }
+        fun payload(type: String) = JSONObject()
+            .put("types", JSONObject().put("Mail", JSONArray().put(JSONObject().put("name", "a").put("type", type))))
+            .put("primaryType", "Mail").put("domain", JSONObject().put("name", "x"))
+            .put("message", JSONObject().put("a", JSONArray()))
+        val start = System.nanoTime()
+        val err = call("eth_signTypedData_v4", JSONArray().put(main.address).put(payload("uint256" + "[]".repeat(450_000)).toString()))
+        assertTrue("took ${(System.nanoTime() - start) / 1_000_000} ms", System.nanoTime() - start < 2_000_000_000L)
+        assertEquals(-32602, code(err))
+        assertTrue(asks.isEmpty())
+        // Up to the cap, suffixes are still fine.
+        ok(call("eth_signTypedData_v4", JSONArray().put(main.address).put(payload("uint256" + "[]".repeat(100)))))
     }
 
     @Test

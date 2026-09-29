@@ -106,4 +106,14 @@ class MessageSigningTest {
         val deep = "{\"n\":".repeat(60) + "null" + "}".repeat(60)
         bad("""{"types":{"M":[{"name":"n","type":"M"}]},"primaryType":"M","domain":{},"message":$deep}""")
     }
+
+    @Test
+    fun `a struct under several array suffixes is still a dependency, and a malformed suffix isn't an array`() {
+        val types = mapOf(
+            "Main" to listOf(Eip712.Field("grid", "Person[2][][3]"), Eip712.Field("odd", "Thing[x]")),
+            "Person" to listOf(Eip712.Field("name", "string")),
+            "Thing" to listOf(Eip712.Field("v", "uint8")),
+        )
+        assertEquals("Main(Person[2][][3] grid,Thing[x] odd)Person(string name)", Eip712.encodeType(types, "Main"))
+    }
 }
