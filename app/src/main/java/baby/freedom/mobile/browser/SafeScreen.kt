@@ -84,7 +84,6 @@ import baby.freedom.mobile.wallet.SendQuote
 import baby.freedom.mobile.wallet.SendRequest
 import baby.freedom.mobile.wallet.SendStatus
 import baby.freedom.mobile.wallet.Token
-import baby.freedom.mobile.wallet.TokenAmounts
 import baby.freedom.mobile.wallet.TokenRegistry
 import baby.freedom.mobile.wallet.Vault
 import baby.freedom.mobile.wallet.VaultAuthenticator
@@ -592,7 +591,8 @@ internal fun SafePage(
                         holdings == null && checkError != null -> FieldText(checkError!!, error = true)
                         holdings == null -> Text("Reading…", style = MaterialTheme.typography.bodyMedium)
                         else -> holdings!!.forEach { (token, raw) ->
-                            ReviewRow(token.symbol, "${TokenAmounts.format(raw, token.decimals, maxFraction = 8)} ${token.symbol}", mono = true)
+                            // Every digit: a Safe funded with a few wei must not read as "<0.00000001".
+                            ReviewRow(token.symbol, "${exactAmount(raw, token.decimals)} ${token.symbol}", mono = true)
                         }
                     }
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
@@ -1155,6 +1155,7 @@ private fun SafeRequestPage(
                                     when {
                                         signed -> "Signed"
                                         mine != null -> "Signs on this phone"
+                                        p.ready -> "Not needed: enough owners have signed"
                                         else -> "Waiting: share the request below"
                                     },
                                     style = MaterialTheme.typography.bodySmall,
