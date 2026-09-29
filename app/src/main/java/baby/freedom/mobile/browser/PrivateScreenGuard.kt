@@ -46,7 +46,7 @@ internal fun privateContentOnScreen(
  *
  * `FLAG_SECURE` covers this window only; the other windows a private
  * page can open are made secure themselves: JavaScript dialogs
- * ([showPrivateJsDialog]) and Chromium's own `<select>` lists and
+ * ([showJsDialog]) and Chromium's own `<select>` lists and
  * pickers ([PrivateWindowContext]).
  */
 @Composable
