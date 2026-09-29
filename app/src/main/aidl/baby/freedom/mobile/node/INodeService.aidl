@@ -70,6 +70,14 @@ interface INodeService {
      */
     void recoverNetwork();
 
+    /**
+     * The node identities on disk may have changed (#77: a wallet was
+     * created, imported or removed — see NodeIdentitySync): restart the
+     * Swarm node if what it runs as isn't what it would boot as now.
+     * Also called on every bind, to catch a change made while unbound.
+     */
+    void reloadIdentity();
+
     RadicleInfo getRadicleState();
 
     /**

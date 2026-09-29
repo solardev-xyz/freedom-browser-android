@@ -55,6 +55,7 @@ import baby.freedom.mobile.node.ITorService
 import baby.freedom.mobile.node.TorService
 import baby.freedom.mobile.ui.FreedomTheme
 import baby.freedom.mobile.ui.isLight
+import baby.freedom.mobile.wallet.NodeIdentitySync
 import baby.freedom.mobile.wallet.Vault
 import baby.freedom.swarm.IpfsInfo
 import baby.freedom.swarm.MyotisInfo
@@ -244,6 +245,8 @@ class MainActivity : ComponentActivity() {
                 }
             }
             runCatching { b.radicleState?.let { radicleInfoFlow.value = it } }
+            // A wallet change made while unbound (#77).
+            runCatching { b.reloadIdentity() }
             // The Radicle on/off setting lives here, in the UI process's
             // DataStore; a freshly (re)started `:node` hears it on bind.
             // Under [radicleRelay], so a toggle landing at the same time
@@ -286,6 +289,14 @@ class MainActivity : ComponentActivity() {
             } catch (e: Exception) {
                 android.util.Log.w("MainActivity", "reading name-resolution settings failed (${e.javaClass.simpleName})")
             }
+        }
+
+        // The nodes follow the wallet's identity (#77): a wallet created,
+        // imported or removed changes what the Swarm node boots as, and a
+        // bound `:node` restarts it. (Unbound, it reads it at its next start.)
+        NodeIdentitySync.get(this).apply {
+            onChanged = { runCatching { binder?.reloadIdentity() } }
+            start()
         }
 
         // Honor the persisted preference on cold start. If the user had

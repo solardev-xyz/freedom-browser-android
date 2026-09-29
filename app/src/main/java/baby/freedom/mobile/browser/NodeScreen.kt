@@ -160,6 +160,15 @@ private fun DetailsSection(nodeInfo: NodeInfo) {
         if (nodeInfo.clientVersion.isNotBlank()) {
             DetailRow("Client", nodeInfo.clientVersion, mono = true)
         }
+        // Which account the node runs as (#77): the wallet's, derived from
+        // the recovery phrase — the same as on desktop and iOS — or its own.
+        if (nodeInfo.accountAddress.isNotBlank()) {
+            DetailRow("Identity", if (nodeInfo.walletIdentity) "From your wallet" else "This device's own")
+            DetailRow("Address", nodeInfo.accountAddress, mono = true, singleLine = false)
+        }
+        if (nodeInfo.overlay.isNotBlank()) {
+            DetailRow("Overlay", nodeInfo.overlay, mono = true, singleLine = false)
+        }
         val err = nodeInfo.errorMessage
         if (!err.isNullOrBlank()) {
             DetailRow("Error", err, singleLine = false)

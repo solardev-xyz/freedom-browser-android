@@ -17,4 +17,15 @@ class KeystoreAliasTest {
     fun `wallet vault and RPC API keys use distinct Keystore aliases`() {
         assertNotEquals(KeystoreKey.ALIAS, KeystoreVaultStore.KEY_ALIAS)
     }
+
+    /**
+     * The node identity key (#77) is made without user authentication and
+     * deleted on Remove wallet: sharing either other alias would hand the
+     * vault's phrase to an unauthenticated key, or wipe the API keys.
+     */
+    @Test
+    fun `node identity key has its own alias`() {
+        assertNotEquals(KeystoreNodeKeys.ALIAS, KeystoreVaultStore.KEY_ALIAS)
+        assertNotEquals(KeystoreNodeKeys.ALIAS, KeystoreKey.ALIAS)
+    }
 }

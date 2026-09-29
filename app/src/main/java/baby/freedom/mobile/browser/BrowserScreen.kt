@@ -81,6 +81,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import baby.freedom.mobile.data.BrowsingRepository
 import baby.freedom.mobile.ui.PrivateTheme
 import baby.freedom.mobile.data.NodeSettings
+import baby.freedom.mobile.wallet.NodeIdentitySync
 import baby.freedom.mobile.wallet.Vault
 import baby.freedom.mobile.ens.EnsInput
 import baby.freedom.mobile.ens.EnsResult
@@ -449,6 +450,7 @@ fun BrowserScreen(
     // probe job that outlives the recomposition would capture stale
     // NodeStatus and falsely treat a now-running node as stopped.
     val currentNodeInfo by rememberUpdatedState(nodeInfo)
+    val currentRunNodeEnabled by rememberUpdatedState(runNodeEnabled)
     val currentIpfsInfo by rememberUpdatedState(ipfsInfo)
     val keyboard = LocalSoftwareKeyboardController.current
     val focusManager = LocalFocusManager.current
@@ -550,6 +552,19 @@ fun BrowserScreen(
                     }
                 }
             }
+        }
+    }
+
+    // The node identity switched with the wallet (#77, decision 10: the
+    // user sees a notice and the node restarts). Names no page, so it
+    // needs no private-tab handling.
+    LaunchedEffect(Unit) {
+        NodeIdentitySync.get(context).notices.collect { change ->
+            val restarting = currentRunNodeEnabled && currentNodeInfo.status != NodeStatus.Stopped
+            snackbarHostState.showSnackbar(
+                nodeIdentityNotice(change, restarting),
+                duration = SnackbarDuration.Long,
+            )
         }
     }
 

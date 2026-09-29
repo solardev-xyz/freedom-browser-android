@@ -21,6 +21,8 @@ import android.system.StructPollfd
 import android.util.Log
 import baby.freedom.mobile.R
 import baby.freedom.mobile.data.NodeSettings
+import baby.freedom.mobile.wallet.KeystoreVaultStore
+import baby.freedom.mobile.wallet.NodeIdentityStore
 import baby.freedom.swarm.IpfsInfo
 import baby.freedom.swarm.IpfsNode
 import baby.freedom.swarm.NodeInfo
@@ -55,6 +57,18 @@ import org.json.JSONObject
 class NodeService : Service() {
 
     private lateinit var swarmNode: SwarmNode
+    private lateinit var identityStore: NodeIdentityStore
+    private lateinit var vaultStore: KeystoreVaultStore
+
+    /**
+     * What the Swarm node's latest (re)start read as its identity (#77):
+     * the wallet's Swarm address, `""` for ant's own, null before the
+     * first read. Written and compared under [bootLock], so
+     * [INodeService.reloadIdentity] restarts only a node that really
+     * booted as something else than the store now says.
+     */
+    private var bootedAs: String? = null
+    private val bootLock = Any()
     private var ipfsNode: IpfsNode? = null
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
@@ -141,6 +155,24 @@ class NodeService : Service() {
 
         override fun recoverNetwork() {
             scope.launch { recoverNetworkNow("ui request") }
+        }
+
+        override fun reloadIdentity() {
+            scope.launch(Dispatchers.IO) {
+                val stale = synchronized(bootLock) {
+                    val want = identityStore.boot(vaultStore)?.let { boot ->
+                        boot.antIdentity.fill(0)
+                        boot.swarmAddress
+                    }.orEmpty()
+                    // Not booted yet: the coming read already sees the change.
+                    val booted = bootedAs ?: return@synchronized false
+                    !booted.equals(want, ignoreCase = true) && swarmNode.state.value.status != NodeStatus.Stopped
+                }
+                if (stale) {
+                    Log.i(TAG, "node identity changed → restarting swarm")
+                    swarmNode.restart()
+                }
+            }
         }
 
         override fun getRadicleState(): RadicleInfo = radicleNode.state.value
@@ -281,8 +313,21 @@ class NodeService : Service() {
         super.onCreate()
         createChannel()
 
+        identityStore = NodeIdentityStore.get(this)
+        vaultStore = KeystoreVaultStore(this)
         swarmNode = SwarmNode(
-            SwarmNode.Config(dataDir = filesDir.absolutePath),
+            SwarmNode.Config(
+                dataDir = filesDir.absolutePath,
+                // The wallet's Swarm identity (#77) when there is one,
+                // re-read at every (re)start; ant's own otherwise.
+                identity = {
+                    synchronized(bootLock) {
+                        val boot = identityStore.boot(vaultStore)
+                        bootedAs = boot?.swarmAddress.orEmpty()
+                        boot?.antIdentity
+                    }
+                },
+            ),
         )
 
         startForeground(

@@ -13,9 +13,16 @@
 
 #include <jni.h>
 #include <stdint.h>
+#include <stdlib.h>
 
 #include "ant.h"
 #include "freedom_mobile.h"
+
+/* Zero secret bytes in a way the compiler can't drop as a dead store. */
+static void wipe(void *p, size_t n) {
+    volatile unsigned char *v = (volatile unsigned char *)p;
+    while (n--) *v++ = 0;
+}
 
 static void throw_runtime(JNIEnv *env, char *owned_err, const char *fallback) {
     jclass cls = (*env)->FindClass(env, "java/lang/RuntimeException");
@@ -42,6 +49,56 @@ Java_baby_freedom_swarm_AntNative_init(JNIEnv *env, jobject thiz, jstring data_d
         return 0;
     }
     return (jlong)(uintptr_t)handle;
+}
+
+/*
+ * Like init, but ant runs as the account in `identity` (#77): the UTF-8
+ * identity document for ant_init_with_identity, handed over as a byte[]
+ * so neither side ever holds the key in an immutable String. It is
+ * copied straight into a native buffer (GetByteArrayRegion — no pinned
+ * or JVM-side copy), NUL-terminated, and zeroed before it is freed.
+ */
+JNIEXPORT jlong JNICALL
+Java_baby_freedom_swarm_AntNative_initWithIdentity(JNIEnv *env, jobject thiz, jstring data_dir,
+                                                   jbyteArray identity) {
+    (void)thiz;
+    jsize len = (*env)->GetArrayLength(env, identity);
+    char *doc = malloc((size_t)len + 1);
+    if (doc == NULL) {
+        throw_runtime(env, NULL, "out of memory");
+        return 0;
+    }
+    (*env)->GetByteArrayRegion(env, identity, 0, len, (jbyte *)doc);
+    doc[len] = '\0';
+    const char *dir = (*env)->GetStringUTFChars(env, data_dir, NULL);
+    AntHandle *handle = NULL;
+    char *err = NULL;
+    if (dir != NULL) {
+        freedom_mobile_init_logging();
+        handle = ant_init_with_identity(dir, NULL, doc, &err);
+    }
+    wipe(doc, (size_t)len + 1);
+    free(doc);
+    if (dir == NULL) return 0; /* OOM — exception already pending */
+    (*env)->ReleaseStringUTFChars(env, data_dir, dir);
+    if (handle == NULL) {
+        throw_runtime(env, err, "ant_init_with_identity failed");
+        return 0;
+    }
+    return (jlong)(uintptr_t)handle;
+}
+
+/* ant_account_info: {"eth_address","overlay","peer_id","agent"}, or null. */
+JNIEXPORT jstring JNICALL
+Java_baby_freedom_swarm_AntNative_accountInfo(JNIEnv *env, jobject thiz, jlong handle) {
+    (void)thiz;
+    char *err = NULL;
+    char *info = ant_account_info((const AntHandle *)(uintptr_t)handle, &err);
+    ant_free_string(err);
+    if (info == NULL) return NULL;
+    jstring out = (*env)->NewStringUTF(env, info);
+    ant_free_string(info);
+    return out;
 }
 
 JNIEXPORT void JNICALL
