@@ -18,6 +18,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -47,6 +48,13 @@ internal class SwarmFunding(
     private val checkAtMostEveryMs: Long = CHECK_AT_MOST_EVERY_MS,
     private val confirmAfterMs: Long = CONFIRM_AFTER_MS,
     private val now: () -> Long = { System.nanoTime() / 1_000_000 },
+    /**
+     * Whether a connect may start now: no spend, stamp search or publish
+     * upload holds the node ([StampClient.canRestartGateway]). A connect
+     * owed while one did ([connectOwed]) is retried once this turns true.
+     */
+    private val connectFree: Flow<Boolean> =
+        combine(StampClient.spend, StampClient.discovery, Publisher.state, StampClient::canRestartGateway),
 ) {
     /** Gnosis Chain reads for a call the wallet no longer follows. */
     interface ChainReader {
@@ -87,6 +95,18 @@ internal class SwarmFunding(
 
     private val _pending = MutableStateFlow(load())
     val pending: StateFlow<Pending?> = _pending.asStateFlow()
+
+    /**
+     * The batch id of a mined record the app itself is to connect: its
+     * call was just seen mined, and [connect] refused to start then
+     * (another spend, a stamp search, or a publish uploading). Retried as
+     * soon as [connectFree] allows, and cleared once a connect for it
+     * starts or the record goes. A mined record not owed one (a connect
+     * that ran and failed, or one left by an earlier process) waits for
+     * the card's Connect (#225 R1-F1).
+     */
+    private val _connectOwed = MutableStateFlow<String?>(null)
+    val connectOwed: StateFlow<String?> = _connectOwed.asStateFlow()
 
     /**
      * The batch id of an untracked record whose call can never be mined:
@@ -171,6 +191,18 @@ internal class SwarmFunding(
             }
         }
         scope.launch {
+            // A connect refused while the node was held by other work: start it once nothing does.
+            combine(connectFree, _connectOwed) { free, owed -> owed.takeIf { free } }.collect { owed ->
+                if (owed != null) {
+                    if (_pending.value?.takeIf { it.mined }?.batchId != owed) {
+                        _connectOwed.compareAndSet(owed, null)
+                    } else if (connectNow()) {
+                        Log.i(TAG, "connecting the mined stamp now that nothing holds the node up")
+                    }
+                }
+            }
+        }
+        scope.launch {
             spends.collect { s ->
                 // Connected: nothing more to do for it.
                 if (s is StampClient.Spend.Done && s.kind == StampClient.Kind.Connect) {
@@ -209,7 +241,7 @@ internal class SwarmFunding(
         }
         if (mined) {
             Log.i(TAG, "the node's funding was mined; connecting its stamp")
-            connectNow()
+            connectMined()
         }
     }
 
@@ -229,7 +261,20 @@ internal class SwarmFunding(
     fun connectNow(): Boolean {
         val p = _pending.value?.takeIf { it.mined || !it.tracked } ?: return false
         if (!p.mined) scope.launch { checkChain() }
-        return connect(p.batchId)
+        val started = connect(p.batchId)
+        if (started) _connectOwed.compareAndSet(p.batchId, null)
+        return started
+    }
+
+    /**
+     * The record's call was just seen mined: connect its batch now, or —
+     * refused, since other work holds the node — as soon as it's free
+     * ([connectOwed]).
+     */
+    private fun connectMined() {
+        val batchId = _pending.value?.takeIf { it.mined }?.batchId ?: return
+        _connectOwed.value = batchId
+        if (!connectNow()) Log.i(TAG, "the node is busy; connecting the stamp once it's free")
     }
 
     /**
@@ -276,7 +321,7 @@ internal class SwarmFunding(
             noteSuperseded(p.batchId, outcome == null && nonceUsed)
             if (connectIt) {
                 Log.i(TAG, "the funding the wallet stopped following was mined; connecting its stamp")
-                connectNow()
+                connectMined()
             } else if (dropIt) {
                 Log.i(TAG, "the funding the wallet stopped following reverted; nothing was bought")
             } else if (outcome is SendStatus.Stage.Reverted) {
@@ -347,6 +392,7 @@ internal class SwarmFunding(
             // (a test's next instance reading the file raced a late save here, #225 R5-F3).
             save(next)
             _pending.value = next
+            _connectOwed.value?.let { if (it != next?.batchId) _connectOwed.compareAndSet(it, null) }
         }
     }
 

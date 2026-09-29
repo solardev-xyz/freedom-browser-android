@@ -337,6 +337,7 @@ internal fun PublishSetupScreen(
     val funding by produceState(SwarmFunding.loaded(), context) { value = SwarmFunding.load(context) }
     val pendingStamp = funding?.pending?.collectAsState()?.value
     val superseded = funding?.superseded?.collectAsState()?.value
+    val connectOwed = funding?.connectOwed?.collectAsState()?.value
     val spend by StampClient.spend.collectAsState()
 
     FullScreenScaffold(title = "Set up publishing", onDismiss = onDismiss) {
@@ -361,7 +362,7 @@ internal fun PublishSetupScreen(
             if (pendingStamp != null && f != null) {
                 item("pendingStamp") {
                     PendingStampCard(
-                        pendingStamp, nodeInfo, spend, superseded == pendingStamp.batchId,
+                        pendingStamp, nodeInfo, spend, superseded == pendingStamp.batchId, connectOwed == pendingStamp.batchId,
                         onConnect = { f.connectNow() }, onForget = f::forget,
                     )
                 }

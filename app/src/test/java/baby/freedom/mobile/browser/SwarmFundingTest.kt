@@ -504,6 +504,78 @@ class SwarmFundingTest {
         assertEquals(reads, chain.reads)
     }
 
+    /** A funding whose connects are refused while [free] is false, as [StampClient.start] refuses them under other work. */
+    private fun busyFunding(free: kotlinx.coroutines.flow.MutableStateFlow<Boolean>, chain: FakeChain? = null) =
+        SwarmFunding(
+            File(tmp.root, "funding.json"), connect = { if (free.value) { connects += it; true } else false },
+            spends = emptyFlow(), chain = chain, confirmAfterMs = 30_000, now = { 0L }, connectFree = free,
+        )
+
+    @Test
+    fun `a connect refused while the node is busy is started once it's free, and the card says so meanwhile`() {
+        val free = kotlinx.coroutines.flow.MutableStateFlow(false)
+        val f = busyFunding(free)
+        f.start(emptyFlow())
+        f.noteSend(status(SendStatus.Stage.Pending))
+        // Mined during a publish's upload: the connect is refused, and owed.
+        f.noteSend(status(SendStatus.Stage.Confirmed(1, null)))
+        assertTrue(f.pending.value!!.mined)
+        assertTrue(connects.isEmpty())
+        assertEquals(batch, f.connectOwed.value)
+        val light = NodeInfo(status = NodeStatus.Running, accountAddress = node, walletIdentity = true, lightMode = true)
+        val owedText = pendingStampText(f.pending.value!!, light, StampClient.Spend.Idle, superseded = false, owed = true)
+        assertTrue(owedText, owedText.contains("as soon as"))
+
+        // The upload ends: connected, once.
+        free.value = true
+        awaitConnects(1)
+        assertEquals(listOf(batch), connects)
+        assertNull(f.connectOwed.value)
+        free.value = false
+        free.value = true
+        Thread.sleep(100)
+        assertEquals(1, connects.size)
+        // Not owed any more (it ran; had it failed, the card offers Connect): no promise of connecting it.
+        val waiting = pendingStampText(f.pending.value!!, light, StampClient.Spend.Idle, superseded = false, owed = false)
+        assertTrue(waiting, waiting.startsWith("Mined. Connect adds it"))
+    }
+
+    @Test
+    fun `an owed connect is dropped with its record`() {
+        val free = kotlinx.coroutines.flow.MutableStateFlow(false)
+        val f = busyFunding(free)
+        f.start(emptyFlow())
+        f.noteSend(status(SendStatus.Stage.Pending))
+        f.noteSend(status(SendStatus.Stage.Confirmed(1, null)))
+        assertEquals(batch, f.connectOwed.value)
+        f.forget()
+        assertNull(f.connectOwed.value)
+        free.value = true
+        Thread.sleep(100)
+        assertTrue(connects.isEmpty())
+    }
+
+    @Test
+    fun `an untracked call found mined while the node is busy is connected once it's free`() {
+        val chain = FakeChain()
+        funding().apply {
+            noteSend(status(SendStatus.Stage.Unconfirmed))
+            untrack()
+        }
+        val free = kotlinx.coroutines.flow.MutableStateFlow(false)
+        val f = busyFunding(free, chain)
+        f.start(emptyFlow())
+        chain.receipt = receipt("0x1")
+        chain.minedCount = BigInteger.TWO
+        runBlocking { f.checkChain() }
+        assertTrue(f.pending.value!!.mined)
+        assertTrue(connects.isEmpty())
+        assertEquals(batch, f.connectOwed.value)
+        free.value = true
+        awaitConnects(1)
+        assertEquals(listOf(batch), connects)
+    }
+
     @Test
     fun `the pool's price sizes the swap only when a quorum, a proof, or the user's own undisputed RPC gave it`() {
         val u = ChainTrustsForTest.unverified

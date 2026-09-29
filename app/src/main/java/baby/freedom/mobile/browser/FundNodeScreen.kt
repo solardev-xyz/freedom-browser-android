@@ -146,6 +146,7 @@ internal fun FundNodeScreen(nodeInfo: NodeInfo, onOpenUrl: (String) -> Unit, onD
     val sendStatus by sender.status.collectAsState()
     val pending = funding?.pending?.collectAsState()?.value
     val superseded = funding?.superseded?.collectAsState()?.value
+    val connectOwed = funding?.connectOwed?.collectAsState()?.value
     val spend by StampClient.spend.collectAsState()
     val node = fundingAddress(nodeInfo)
 
@@ -254,7 +255,7 @@ internal fun FundNodeScreen(nodeInfo: NodeInfo, onOpenUrl: (String) -> Unit, onD
             val f = funding
             if (pending != null && f != null) {
                 item("pending") {
-                    PendingStampCard(pending, nodeInfo, spend, superseded == pending.batchId, onConnect = { f.connectNow() }, onForget = f::forget)
+                    PendingStampCard(pending, nodeInfo, spend, superseded == pending.batchId, connectOwed == pending.batchId, onConnect = { f.connectNow() }, onForget = f::forget)
                 }
             }
             when {
@@ -461,13 +462,16 @@ private fun FundReview(
 /**
  * The pending stamp card's explanation. [superseded]: the chain shows its
  * call can never be mined ([SwarmFunding.superseded]) — the only case in
- * which an unmined record is certain to have bought nothing.
+ * which an unmined record is certain to have bought nothing. [owed]:
+ * the app is to connect it itself once the node is free
+ * ([SwarmFunding.connectOwed]); otherwise a mined one waits for Connect.
  */
 internal fun pendingStampText(
     p: SwarmFunding.Pending,
     nodeInfo: NodeInfo,
     spend: StampClient.Spend,
     superseded: Boolean,
+    owed: Boolean = false,
 ): String {
     val connecting = spend is StampClient.Spend.Running && spend.kind == StampClient.Kind.Connect && spend.batchId == p.batchId
     val failed = (spend as? StampClient.Spend.Failed)?.takeIf { it.kind == StampClient.Kind.Connect && it.batchId == p.batchId }
@@ -489,7 +493,9 @@ internal fun pendingStampText(
         failed != null && p.mined -> "Connecting it failed: ${failed.message}"
         failed != null -> "Connecting it failed: ${failed.message} $untracked"
         !p.mined -> "Your wallet stopped following its transaction. $untracked"
-        else -> "Mined. The node connects it to publish with it" +
+        owed -> "Mined. The node connects it to publish with it as soon as the stamp work or upload " +
+            "it's busy with ends."
+        else -> "Mined. Connect adds it to the node to publish with it" +
             (stampsBlockedReason(nodeInfo)?.let { " once it can: $it" } ?: ".")
     }
 }
@@ -505,6 +511,7 @@ internal fun PendingStampCard(
     nodeInfo: NodeInfo,
     spend: StampClient.Spend,
     superseded: Boolean,
+    owed: Boolean,
     onConnect: () -> Unit,
     onForget: () -> Unit,
 ) {
@@ -515,7 +522,7 @@ internal fun PendingStampCard(
     SectionCard(title = "Stamp from your wallet") {
         DetailRow("Stamp", "${formatStampBytes(effectiveStampBytes(p.depth))}, ${daysLabel(p.days)}")
         DetailRow("Batch", shortBatchId(p.batchId), mono = true)
-        MutedText(pendingStampText(p, nodeInfo, spend, superseded))
+        MutedText(pendingStampText(p, nodeInfo, spend, superseded, owed))
         if (p.mined || !p.tracked) {
             Spacer(Modifier.height(8.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
