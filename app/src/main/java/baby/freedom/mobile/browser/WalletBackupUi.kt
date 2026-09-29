@@ -49,6 +49,7 @@ internal fun googleBackupStatus(
     on: Boolean,
     availability: PhraseBackup.Availability?,
     status: PhraseBackup.Status?,
+    entryKnown: Boolean = true,
 ): String = if (on) {
     when (status) {
         PhraseBackup.Status.CLOUD -> "On · end-to-end encrypted in your Google account backup"
@@ -67,12 +68,18 @@ internal fun googleBackupStatus(
         PhraseBackup.Availability.UNSUPPORTED -> "Unavailable · needs Google Play services, which this " +
             "phone doesn’t have"
         null -> "Checking…"
-    }
+    }.let { if (availability == PhraseBackup.Availability.READY && !entryKnown) "Checking…" else it }
 }
 
-/** Whether the switch can be flipped: off always (to delete), on only when the backup would be encrypted. */
-internal fun googleBackupSwitchEnabled(on: Boolean, availability: PhraseBackup.Availability?) =
-    on || availability == PhraseBackup.Availability.READY
+/**
+ * Whether the switch can be flipped: off always (to delete), on only when
+ * the backup would be encrypted — and once it's known whether Block Store
+ * already holds an entry ([entryKnown]), so the note that Turn on replaces
+ * another wallet's backup is on screen before the switch can be tapped
+ * (#244 R4-F2).
+ */
+internal fun googleBackupSwitchEnabled(on: Boolean, availability: PhraseBackup.Availability?, entryKnown: Boolean) =
+    on || (availability == PhraseBackup.Availability.READY && entryKnown)
 
 /**
  * Whether Block Store's entry ([PhraseBackup.known]) is the wallet on this
@@ -102,6 +109,13 @@ internal enum class BackupHeld {
 
     /** In the Google account's backup, end-to-end encrypted: a copy off this phone. */
     CLOUD,
+
+    /**
+     * Block Store holds an entry, but whose can't be told: the wallet on
+     * this phone can't be read, so there's no address to compare it with
+     * (#244 R4-F3). It may be this wallet's or another's.
+     */
+    UNATTRIBUTED,
 
     /**
      * Block Store hasn't said whether it holds this wallet's phrase (not
@@ -172,14 +186,14 @@ internal fun GoogleBackupSection(
     on: Boolean,
     availability: PhraseBackup.Availability?,
     status: PhraseBackup.Status?,
-    entryThere: Boolean,
+    entryThere: Boolean?,
     thisWallet: Boolean?,
     busy: Boolean,
     onToggle: (Boolean) -> Unit,
     onDeleteKept: () -> Unit,
     screenLockButton: @Composable () -> Unit,
 ) {
-    val enabled = !busy && googleBackupSwitchEnabled(on, availability)
+    val enabled = !busy && googleBackupSwitchEnabled(on, availability, entryKnown = entryThere != null)
     SectionCard(title = GOOGLE_BACKUP_TITLE) {
         Row(
             verticalAlignment = Alignment.CenterVertically,
@@ -192,7 +206,7 @@ internal fun GoogleBackupSection(
             Column(Modifier.weight(1f)) {
                 Text("Back up recovery phrase", fontWeight = FontWeight.Medium)
                 Text(
-                    googleBackupStatus(on, availability, status),
+                    googleBackupStatus(on, availability, status, entryKnown = entryThere != null),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -206,7 +220,7 @@ internal fun GoogleBackupSection(
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
-        val kept = if (on) null else keptBackupNote(entryThere, thisWallet)
+        val kept = if (on) null else keptBackupNote(entryThere == true, thisWallet)
         if (kept != null) {
             Spacer(Modifier.height(8.dp))
             Text(

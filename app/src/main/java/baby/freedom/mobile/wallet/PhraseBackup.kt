@@ -5,6 +5,8 @@ import com.google.android.gms.auth.blockstore.Blockstore
 import com.google.android.gms.auth.blockstore.DeleteBytesRequest
 import com.google.android.gms.auth.blockstore.RetrieveBytesRequest
 import com.google.android.gms.auth.blockstore.StoreBytesData
+import com.google.android.gms.common.ConnectionResult
+import com.google.android.gms.common.GoogleApiAvailability
 import com.google.android.gms.tasks.Task
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
@@ -165,11 +167,34 @@ class PhraseBackup(
      * [BackupNotEncryptedException] (and stores nothing) unless Block Store
      * says that backup will be end-to-end encrypted.
      */
-    suspend fun store(mnemonic: Mnemonic) = writes.withLock {
+    suspend fun store(mnemonic: Mnemonic) = writes.withLock { storeHeld(mnemonic) }
+
+    private suspend fun storeHeld(mnemonic: Mnemonic) {
         if (!blockStore.endToEndEncryptionAvailable()) throw BackupNotEncryptedException()
         write(mnemonic.phrase(), cloud = true)
         _known.value = Known(Status.CLOUD, addressOf(mnemonic))
     }
+
+    private suspend fun deleteHeld() {
+        blockStore.delete(KEY)
+        _known.value = Known(Status.NONE, null)
+    }
+
+    /** [store] and [delete] for code already holding the entry lock, inside [exclusive]. */
+    inner class Held internal constructor() {
+        suspend fun store(mnemonic: Mnemonic) = storeHeld(mnemonic)
+        suspend fun delete() = deleteHeld()
+    }
+
+    /**
+     * Runs [block] holding the entry lock, for a caller that also takes
+     * another lock around its writes ([Vault]'s): this one is always taken
+     * first. A reconcile stuck on an unresponsive Play services can hold it
+     * for up to a minute, and whoever waits for it then must not be holding
+     * the vault's lock meanwhile, or unlocking queues behind it (#244 R4-F4).
+     * Inside, write through the [Held] receiver: the lock isn't reentrant.
+     */
+    suspend fun <T> exclusive(block: suspend Held.() -> T): T = writes.withLock { Held().block() }
 
     /** The backed-up phrase, or null when Block Store holds none. */
     suspend fun read(): Mnemonic? {
@@ -191,10 +216,7 @@ class PhraseBackup(
     }
 
     /** Deletes the entry, here and (at Block Store's next sync) from the cloud. */
-    suspend fun delete() = writes.withLock {
-        blockStore.delete(KEY)
-        _known.value = Known(Status.NONE, null)
-    }
+    suspend fun delete() = writes.withLock { deleteHeld() }
 
     /**
      * Keeps the entry's cloud copy end-to-end encrypted: rewrites it as
@@ -314,7 +336,8 @@ class PhraseBackup(
  * never data.
  */
 class GmsBlockStore(context: Context) : BlockStorePort {
-    private val client by lazy { Blockstore.getClient(context.applicationContext) }
+    private val app = context.applicationContext
+    private val client by lazy { Blockstore.getClient(app) }
 
     override suspend fun endToEndEncryptionAvailable(): Boolean =
         call { client.isEndToEndEncryptionAvailable() } == true
@@ -339,6 +362,12 @@ class GmsBlockStore(context: Context) : BlockStorePort {
     }
 
     private suspend fun <T> call(start: () -> Task<T>): T? = try {
+        // Asked before every call, never cached: Play services can be installed, enabled
+        // or updated while the app runs. Without it the client isn't even created — a
+        // call made then has Play services' own library post a heads-up "Freedom won't
+        // work unless you enable Google Play services" notification, on every foreground
+        // reconcile (#244 R4-F1), though the app works fine without it.
+        if (!playServicesUsable(app)) throw BackupUnavailableException("Google Play services isn’t available")
         withTimeout(TIMEOUT_MS) { start().await() }
     } catch (e: TimeoutCancellationException) {
         throw BackupUnavailableException("Google Play services didn’t answer")
@@ -365,5 +394,10 @@ class GmsBlockStore(context: Context) : BlockStorePort {
 
     private companion object {
         const val TIMEOUT_MS = 20_000L
+
+        /** Only answers; unlike a failed API call it shows the user nothing. */
+        fun playServicesUsable(context: Context): Boolean = runCatching {
+            GoogleApiAvailability.getInstance().isGooglePlayServicesAvailable(context) == ConnectionResult.SUCCESS
+        }.getOrDefault(false)
     }
 }

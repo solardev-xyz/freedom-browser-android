@@ -250,23 +250,28 @@ class Vault internal constructor(
      * entry is taken out again, so "on" is never claimed for a wallet whose
      * phrase isn't there, nor left there unclaimed.
      */
-    suspend fun enableCloudBackup(auth: VaultAuthenticator, backup: PhraseBackup) = ops.withLock {
-        val record = storedRecord()
-        val mnemonic = openMnemonic(record, auth, VaultAuthPurpose.BACKUP)
-        backup.store(mnemonic)
-        try {
-            rewrite(record.copy(cloudBackup = true, cloudBackupOffered = true))
-        } catch (t: Throwable) {
-            withContext(NonCancellable) { runCatching { backup.delete() } }
-            throw t
+    suspend fun enableCloudBackup(auth: VaultAuthenticator, backup: PhraseBackup) = backup.exclusive {
+        // The entry's lock first, then the vault's: see [PhraseBackup.exclusive].
+        ops.withLock {
+            val record = storedRecord()
+            val mnemonic = openMnemonic(record, auth, VaultAuthPurpose.BACKUP)
+            store(mnemonic)
+            try {
+                rewrite(record.copy(cloudBackup = true, cloudBackupOffered = true))
+            } catch (t: Throwable) {
+                withContext(NonCancellable) { runCatching { delete() } }
+                throw t
+            }
         }
     }
 
     /** Google backup off: the Block Store entry is deleted first, and the wallet says off only once it's gone. */
-    suspend fun disableCloudBackup(backup: PhraseBackup) = ops.withLock {
-        val record = storedRecord()
-        backup.delete()
-        rewrite(record.copy(cloudBackup = false, cloudBackupOffered = true))
+    suspend fun disableCloudBackup(backup: PhraseBackup) = backup.exclusive {
+        ops.withLock {
+            val record = storedRecord()
+            delete()
+            rewrite(record.copy(cloudBackup = false, cloudBackupOffered = true))
+        }
     }
 
     /** The user said Not now to the one-time Google backup offer. */

@@ -89,13 +89,35 @@ class WalletBackupUiTest {
 
     @Test
     fun `the switch turns on only when encrypted, and off always`() {
-        assertTrue(googleBackupSwitchEnabled(false, Availability.READY))
-        assertFalse(googleBackupSwitchEnabled(false, Availability.NOT_ENCRYPTED))
-        assertFalse(googleBackupSwitchEnabled(false, Availability.UNSUPPORTED))
-        assertFalse(googleBackupSwitchEnabled(false, null))
+        assertTrue(googleBackupSwitchEnabled(false, Availability.READY, entryKnown = true))
+        assertFalse(googleBackupSwitchEnabled(false, Availability.NOT_ENCRYPTED, entryKnown = true))
+        assertFalse(googleBackupSwitchEnabled(false, Availability.UNSUPPORTED, entryKnown = true))
+        assertFalse(googleBackupSwitchEnabled(false, null, entryKnown = true))
         for (a in listOf(Availability.READY, Availability.NOT_ENCRYPTED, Availability.UNSUPPORTED, null)) {
-            assertTrue(googleBackupSwitchEnabled(true, a))
+            assertTrue(googleBackupSwitchEnabled(true, a, entryKnown = false))
         }
+    }
+
+    @Test
+    fun `turning on waits until it's known whether another backup would be replaced`() {
+        // #244 R4-F2: ready, but the entry not looked up yet — the "replaces it" note can't show yet.
+        assertFalse(googleBackupSwitchEnabled(false, Availability.READY, entryKnown = false))
+        assertEquals("Checking…", googleBackupStatus(false, Availability.READY, null, entryKnown = false))
+        assertTrue(googleBackupStatus(false, Availability.READY, null, entryKnown = true).startsWith("Off"))
+    }
+
+    @Test
+    fun `an unreadable wallet's kept backup isn't called its own`() {
+        // #244 R4-F3: whose the entry is can't be told.
+        val text = removeWalletKeepsBackupText(BackupHeld.UNATTRIBUTED)
+        assertTrue(text.contains("may be this one or another"))
+        assertFalse(text.contains("Its Google backup"))
+        val msg = walletErrorMessage(
+            VaultUnreadableException(), "unlock the wallet", phraseBackedUp = true, googleBackup = true,
+            backupOwnerKnown = false,
+        )!!
+        assertTrue(msg.contains("may be this one or another"))
+        assertFalse(msg.contains("Its Google backup"))
     }
 
     @Test

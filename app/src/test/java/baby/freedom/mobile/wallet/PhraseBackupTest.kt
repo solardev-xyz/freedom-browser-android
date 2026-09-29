@@ -1,6 +1,7 @@
 package baby.freedom.mobile.wallet
 
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.async
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -473,11 +474,40 @@ class PhraseBackupTest {
         val v = vault()
         v.create(phrase, auth, imported = false)
         v.enableCloudBackup(auth, backup)
-        // As the wallet page calls it: the backup goes inside remove()'s own wipe.
-        v.remove(alsoWipe = { backup.delete() })
+        // As the wallet page calls it: the backup goes inside remove()'s own wipe, the
+        // entry's lock taken first.
+        backup.exclusive { v.remove(alsoWipe = { delete() }) }
         assertEquals(Vault.State.Empty, v.state.value)
         assertNull(blockStore.entry())
         assertEquals(false, backup.exists())
+    }
+
+    @Test
+    fun `turning backup off behind a stuck reconcile doesn't hold up unlocking`() = runBlocking {
+        // #244 R4-F4: a reconcile waiting on an unresponsive Play services holds the entry's
+        // lock; Turn off (and Enable, and Remove with the backup) wait for it without holding
+        // the vault's, so unlock and the rest go ahead meanwhile.
+        val v = vault()
+        v.create(phrase, auth, imported = false)
+        v.enableCloudBackup(auth, backup)
+        v.lock()
+        val gate = CompletableDeferred<Unit>().also { blockStore.retrieveGate = it }
+        val reconciling = launch { backup.reconcile() }
+        blockStore.retrieving.await()
+        blockStore.retrieveGate = null
+        val turningOff = launch { v.disableCloudBackup(backup) }
+        repeat(5) { yield() }
+        assertFalse(turningOff.isCompleted)
+        val unlocking = async { v.unlock(auth) }
+        repeat(5) { yield() }
+        assertTrue("unlock queued behind the stuck reconcile", unlocking.isCompleted)
+        assertTrue(v.state.value is Vault.State.Unlocked)
+        v.markBackedUp()
+        gate.complete(Unit)
+        reconciling.join()
+        turningOff.join()
+        assertNull(blockStore.entry())
+        assertFalse(info(v)!!.cloudBackup)
     }
 
     @Test
