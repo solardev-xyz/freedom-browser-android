@@ -18,6 +18,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -25,9 +26,11 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import baby.freedom.mobile.chains.Chain
+import baby.freedom.mobile.data.AutoApproveStore
 import baby.freedom.mobile.data.DappGrantStore
 import baby.freedom.mobile.wallet.WalletAccount
 import java.util.Date
@@ -109,7 +112,8 @@ internal fun DappSitesSection(
 /**
  * One connected site in full (desktop's per-site permissions screen, iOS's
  * `ConnectedSiteDetailView`): the site, the account it sees, the network
- * it's on, since when, and Disconnect. [onDisconnect] reports whether the
+ * it's on, since when, its auto-approve rules (#112) each with Remove, and
+ * Disconnect. [onDisconnect] reports whether the
  * change was saved; the page closes when it was, and says so when it wasn't.
  */
 @Composable
@@ -125,6 +129,11 @@ internal fun ConnectedSitePage(
     var busy by remember { mutableStateOf(false) }
     var failed by remember { mutableStateOf(false) }
     val account = grantAccount(grant, accounts)
+    val context = LocalContext.current
+    val ruleStore = remember(context) { AutoApproveStore.get(context) }
+    val allRules by ruleStore.allOrUnreadable.collectAsState(initial = emptyList())
+    val rules = allRules.orEmpty().filter { it.origin == grant.origin }
+    var removeFailed by remember { mutableStateOf<AutoApproveRule?>(null) }
     FullScreenScaffold(title = "Connected site", onDismiss = onBack) {
         LazyColumn(
             verticalArrangement = Arrangement.spacedBy(12.dp),
@@ -143,6 +152,17 @@ internal fun ConnectedSitePage(
                     TxField("Network", grantNetwork(grant, chains))
                     grant.connectedAt?.let { TxField("Connected", txDateFormat().format(Date(it))) }
                 }
+            }
+            item("rules") {
+                AutoApproveRulesSection(
+                    rules = rules,
+                    chains = chains,
+                    onRemove = { rule ->
+                        scope.launch { removeFailed = if (ruleStore.revoke(rule)) null else rule }
+                    },
+                    failed = removeFailed,
+                    unreadable = allRules == null,
+                )
             }
             item("disconnect") {
                 Column(Modifier.fillMaxWidth()) {
@@ -180,7 +200,8 @@ internal fun ConnectedSitePage(
 
 internal const val CONNECTED_SITE_EXPLAINER =
     "This site can see the account below and ask you to sign messages or send transactions from it. " +
-        "Each signature and transaction still needs your approval."
+        "Each signature and transaction still needs your approval, unless an auto-approve rule below covers it."
 internal const val DISCONNECT_EXPLAINER =
-    "The site's open pages lose the account at once. It can ask to connect again; nothing is shared until you approve."
+    "The site's open pages lose the account at once, and its auto-approve rules are removed. It can ask to connect " +
+        "again; nothing is shared until you approve."
 internal const val DISCONNECT_FAILED = "Couldn't disconnect: the change couldn't be saved. Try again."

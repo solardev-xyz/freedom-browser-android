@@ -12,6 +12,7 @@ import androidx.webkit.WebViewFeature
 import baby.freedom.mobile.chains.Chain
 import baby.freedom.mobile.chains.rpc.ChainDataRouter
 import baby.freedom.mobile.chains.rpc.RoutingContext
+import baby.freedom.mobile.data.AutoApproveStore
 import baby.freedom.mobile.data.ChainStore
 import baby.freedom.mobile.data.DappGrantStore
 import baby.freedom.mobile.wallet.MessageSigning
@@ -122,6 +123,7 @@ object EthereumProviders {
             ""
         }
         val grantStore = DappGrantStore.get(app)
+        val ruleStore = AutoApproveStore.get(app)
         val chainStore = ChainStore.get(app)
         val router = ChainDataRouter.get(app)
         val vault = Vault.get(app)
@@ -151,6 +153,7 @@ object EthereumProviders {
                     accounts.start()
                     return withTimeoutOrNull(ACCOUNTS_WAIT_MS) { accounts.accounts.first { it != null } }?.accounts
                 }
+                override fun unlocked() = vault.unlockedNow()
                 override fun noteActivity() = vault.noteActivity()
                 override fun sign(account: WalletAccount, digest: ByteArray) = MessageSigning.sign(vault, account, digest)
             },
@@ -162,6 +165,12 @@ object EthereumProviders {
                 override suspend fun prepare(request: SendRequest) = sender.prepare(request)
                 override suspend fun submit(quote: SendQuote) = submitAndWait(sender, vault, quote)
                 override fun busy() = sender.busy()
+            },
+            autoApprove = object : EthereumProvider.AutoApprove {
+                override suspend fun matches(rule: AutoApproveRule) = ruleStore.matches(rule)
+                override suspend fun grant(rule: AutoApproveRule) = ruleStore.grant(rule)
+                override suspend fun revokeOrigin(origin: String) = ruleStore.revokeOrigin(origin)
+                override suspend fun clear() = ruleStore.clear()
             },
         )
         p.events = EthereumProvider.Events { origin, event, data -> scope.launch { emit(origin, event, data) } }
@@ -203,18 +212,21 @@ object EthereumProviders {
      * completion even if the caller is cancelled (the sheet closing, the
      * screen leaving composition), so a revoked grant always comes with its
      * `accountsChanged`; before then there are no pages to tell and only
-     * the store is written. False if it couldn't be written.
+     * the stores are written — the site's auto-approve rules (#112) first,
+     * as [EthereumProvider.disconnect]. False if it couldn't be written.
      */
     suspend fun disconnect(context: Context, origin: String): Boolean =
-        provider?.disconnect(origin) ?: DappGrantStore.get(context).revoke(origin)
+        provider?.disconnect(origin)
+            ?: (AutoApproveStore.get(context).revokeOrigin(origin) && DappGrantStore.get(context).revoke(origin))
 
     /**
      * The wallet was removed: every connected site is disconnected
-     * ([EthereumProvider.disconnectAll]), so its grants can't come back to
-     * life if the same phrase is imported again.
+     * ([EthereumProvider.disconnectAll]) and every auto-approve rule
+     * dropped, so neither can come back to life if the same phrase is
+     * imported again.
      */
     suspend fun walletRemoved(context: Context): Boolean =
-        provider?.disconnectAll() ?: DappGrantStore.get(context).clear()
+        provider?.disconnectAll() ?: (AutoApproveStore.get(context).clear() && DappGrantStore.get(context).clear())
 
     /**
      * Track [webView] (a tab's, before its first load) and register the

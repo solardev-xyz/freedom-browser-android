@@ -56,8 +56,21 @@ sealed interface EthAsk {
         val messageJson: String,
     ) : EthAsk
 
-    /** `eth_sendTransaction`, priced ([quote]); [repriced] when an earlier quote went stale and this is its fresh price. */
-    data class SendTransaction(override val origin: String, val quote: SendQuote, val repriced: Boolean) : EthAsk
+    /**
+     * `eth_sendTransaction`, priced ([quote]); [repriced] when an earlier
+     * quote went stale and this is its fresh price. [autoApprove] is the
+     * rule (#112) the user may turn on with it — null when the call can't
+     * have one ([AutoApproveRule.eligible]); [ruled] when that rule is
+     * already on and the sheet shows only because the wallet is locked or
+     * the send replaces one the user stopped tracking.
+     */
+    data class SendTransaction(
+        override val origin: String,
+        val quote: SendQuote,
+        val repriced: Boolean,
+        val autoApprove: AutoApproveRule? = null,
+        val ruled: Boolean = false,
+    ) : EthAsk
 
     /** `wallet_switchEthereumChain` (or `wallet_addEthereumChain` for a chain the wallet already has). */
     data class SwitchChain(override val origin: String, val from: Chain, val to: Chain) : EthAsk
@@ -76,8 +89,12 @@ sealed interface EthAnswer {
      */
     data object Paused : EthAnswer
 
-    /** [account]: the one the user picked to share, for [EthAsk.Connect]. */
-    data class Approved(val account: WalletAccount? = null) : EthAnswer
+    /**
+     * [account]: the one the user picked to share, for [EthAsk.Connect].
+     * [alwaysApprove]: for [EthAsk.SendTransaction], also turn its
+     * [EthAsk.SendTransaction.autoApprove] rule on.
+     */
+    data class Approved(val account: WalletAccount? = null, val alwaysApprove: Boolean = false) : EthAnswer
 }
 
 /**
@@ -94,7 +111,9 @@ sealed interface EthAnswer {
  *    account the user chose ([Grants]).
  *  - Connected sites only: `personal_sign`, `eth_signTypedData_v4` and
  *    `eth_sendTransaction`, each asked every time, from the account the
- *    site was given and no other.
+ *    site was given and no other — except a transaction an auto-approve
+ *    rule the user turned on covers ([AutoApprove], #112), which goes out
+ *    without a sheet while the wallet is unlocked.
  *
  * Each site is on a chain of its own: Gnosis until it switches (desktop's
  * default), an onchain app's own chain always. A switch moves that site
@@ -112,6 +131,7 @@ class EthereumProvider(
     private val chains: suspend () -> List<Chain>,
     private val reads: suspend (chainId: Long, method: String, params: JSONArray, origin: String) -> Any?,
     private val sends: Sends,
+    private val autoApprove: AutoApprove,
     /** Where typed data is parsed and hashed: never the main thread, which a page's payload could otherwise hold up. */
     private val compute: CoroutineContext = Dispatchers.Default,
 ) {
@@ -141,10 +161,28 @@ class EthereumProvider(
     /** [Grants] can't be read right now; which sites are connected, and on which chain, is unknown. */
     class GrantsUnreadable : Exception("connected sites unreadable")
 
+    /**
+     * Auto-approve rules (#112, [baby.freedom.mobile.data.AutoApproveStore]).
+     * [matches] is false while the store can't be read: the sheet shows.
+     */
+    interface AutoApprove {
+        suspend fun matches(rule: AutoApproveRule): Boolean
+        suspend fun grant(rule: AutoApproveRule): Boolean
+
+        /** Drop every rule of [origin]; true if it's written. */
+        suspend fun revokeOrigin(origin: String): Boolean
+
+        /** Drop every rule (the wallet was removed); true if it's written. */
+        suspend fun clear(): Boolean
+    }
+
     /** The wallet: its accounts (public), activity, and signing a digest. */
     interface Wallet {
         /** The wallet's accounts, or null when there's no wallet (or it has never been opened). */
         suspend fun accounts(): List<WalletAccount>?
+
+        /** Whether the wallet is open right now, so a send can be signed without asking to unlock. */
+        fun unlocked(): Boolean
 
         /** A connected site is using the wallet: the idle lock waits (maintainer decision 7). */
         fun noteActivity()
@@ -247,7 +285,11 @@ class EthereumProvider(
 
     /**
      * Disconnect [origin] (`wallet_revokePermissions`, or Disconnect on the
-     * wallet page): its pages see no accounts. The site stays on the chain
+     * wallet page): its pages see no accounts, and its auto-approve rules
+     * (#112) are dropped, so connecting again later starts with none. The
+     * rules go first: if they can't be written the site stays connected
+     * and the caller can try again, never a disconnected site with rules
+     * left over. The site stays on the chain
      * it was on for the rest of this session — its pages were told that
      * chain and get no `chainChanged` — as a site that never connected
      * keeps the one it switched to. False if it couldn't be written.
@@ -261,7 +303,8 @@ class EthereumProvider(
             grants.grantFor(origin)
         } catch (e: GrantsUnreadable) {
             return@withContext false
-        } ?: return@withContext true
+        } ?: return@withContext autoApprove.revokeOrigin(origin)
+        if (!autoApprove.revokeOrigin(origin)) return@withContext false
         if (!grants.revoke(origin)) return@withContext false
         synchronized(sessionChains) { sessionChains[origin] = grant.chainId }
         events.emit(origin, "accountsChanged", JSONArray())
@@ -269,7 +312,8 @@ class EthereumProvider(
     }
 
     /**
-     * The wallet was removed: every site is disconnected, so importing the
+     * The wallet was removed: every site is disconnected and every
+     * auto-approve rule dropped, so importing the
      * same phrase later doesn't quietly reconnect them, and their open
      * pages see no accounts. Each keeps its chain for the session, as
      * [disconnect]. False if the store couldn't be written. Not cancellable,
@@ -282,6 +326,7 @@ class EthereumProvider(
         } catch (e: GrantsUnreadable) {
             emptyMap()
         }
+        if (!autoApprove.clear()) return@withContext false
         if (!grants.clear()) return@withContext false
         synchronized(sessionChains) { all.forEach { (origin, g) -> sessionChains[origin] = g.chainId } }
         all.keys.forEach { events.emit(it, "accountsChanged", JSONArray()) }
@@ -564,11 +609,21 @@ class EthereumProvider(
             is SendQuote -> q
             else -> return q as Reply
         }
+        // The one rule that could cover this call (#112): this site, this contract, this function, this chain.
+        val rule = AutoApproveRule.eligible(origin, to, value, data, chain.id)
         var repriced = false
         repeat(MAX_REPRICES) {
             // Before the sheet, not after the user confirmed one that can't go.
             if (sends.busy()) return busy()
-            ask(EthAsk.SendTransaction(origin, quote, repriced)).let { if (it !is EthAnswer.Approved) return refused(it) }
+            val ruled = rule != null && autoApprove.matches(rule)
+            // No sheet only with the wallet open (else the sheet's button asks to unlock), and never
+            // for a send that takes the place of one the user stopped tracking: that warning is theirs to read.
+            if (!ruled || !wallet.unlocked() || quote.replaces != null) {
+                val answer = ask(EthAsk.SendTransaction(origin, quote, repriced, rule, ruled))
+                if (answer !is EthAnswer.Approved) return refused(answer)
+                // Turned on with the sheet's approval. A rule that couldn't be saved doesn't stop this send.
+                if (answer.alwaysApprove && rule != null && !ruled) autoApprove.grant(rule)
+            }
             when (val s = sends.submit(quote)) {
                 is Submitted.Sent -> return Reply.Ok(s.hash)
                 Submitted.Busy -> return busy()
