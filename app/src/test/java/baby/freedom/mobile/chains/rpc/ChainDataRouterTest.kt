@@ -545,6 +545,16 @@ class ChainDataRouterTest {
     }
 
     @Test
+    fun broadcastTakesEveryClientsAlreadyKnownWordingAsSent() = runBlocking {
+        for (wording in listOf("already known", "AlreadyKnown", "known transaction: abc", "Transaction already imported")) {
+            val net = Net()
+            net.handlers[a] = { err(-32010, wording) }
+            val r = router(net, listOf(chain(rpcs = listOf(a)))).broadcast(137, rawTx)
+            assertEquals(wording, txHash, r.result)
+        }
+    }
+
+    @Test
     fun broadcastAnswersTheTransactionsOwnHashWhateverTheNodeSays() = runBlocking {
         for (reply in listOf(ok(true), ok("0xdeadbeef"), ok(null))) {
             val net = Net()

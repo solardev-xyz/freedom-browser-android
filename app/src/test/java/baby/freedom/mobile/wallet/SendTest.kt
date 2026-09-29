@@ -342,6 +342,49 @@ class SendTest {
     }
 
     @Test
+    fun `on Try again a used nonce may be this very transaction, so it's followed, never reviewed again`() = runBlocking<Unit> {
+        val chain = FakeChain()
+        val s = sender(chain)
+        val quote = s.prepare(request())
+        chain.on["eth_sendRawTransaction"] = { req ->
+            synchronized(chain.sent) { chain.sent += req.getJSONArray("params").getString(0) }
+            throw IOException("timed out")
+        }
+        chain.on["eth_getTransactionReceipt"] = { throw IOException("timed out") }
+        s.submit(quote, signer())
+        assertTrue((s.awaitStage { it is SendStatus.Stage.Failed }.stage as SendStatus.Stage.Failed).mayHaveGone)
+        // It mined meanwhile; every node now says the nonce is used, and the
+        // receipt reads right after are rate limited.
+        chain.on["eth_sendRawTransaction"] = { "\"error\":{\"code\":-32000,\"message\":\"nonce too low\"}" }
+        var reads = 0
+        chain.on["eth_getTransactionReceipt"] = {
+            if (synchronized(chain) { reads++ } < 8) throw IOException("rate limited")
+            "\"result\":{\"status\":\"0x1\",\"blockNumber\":\"0x10\",\"gasUsed\":\"0x5208\",\"effectiveGasPrice\":\"0x1\"}"
+        }
+        s.retry()
+        s.awaitStage { it is SendStatus.Stage.Confirmed }
+        assertEquals(1, chain.sent.toSet().size)
+        // And the next send doesn't reuse nonce 7.
+        chain.on.clear()
+        assertEquals(BigInteger.valueOf(8), s.prepare(request()).tx.nonce)
+    }
+
+    @Test
+    fun `on Try again a used nonce with no receipt ends waiting, not as not sent`() = runBlocking<Unit> {
+        val chain = FakeChain()
+        val s = sender(chain)
+        chain.on["eth_sendRawTransaction"] = { throw IOException("timed out") }
+        chain.on["eth_getTransactionReceipt"] = { throw IOException("timed out") }
+        s.submit(s.prepare(request()), signer())
+        s.awaitStage { it is SendStatus.Stage.Failed }
+        chain.on["eth_sendRawTransaction"] = { "\"error\":{\"code\":-32000,\"message\":\"nonce too low\"}" }
+        chain.on.remove("eth_getTransactionReceipt")
+        s.retry()
+        val end = s.awaitStage { it == SendStatus.Stage.Unconfirmed || it is SendStatus.Stage.Failed }
+        assertEquals(SendStatus.Stage.Unconfirmed, end.stage)
+    }
+
+    @Test
     fun `a locked wallet fails before anything is sent, and one send runs at a time`() = runBlocking<Unit> {
         val chain = FakeChain()
         val s = sender(chain)
@@ -385,6 +428,7 @@ class SendTest {
         check(rpc("max fee per gas less than block base fee"), "Not sent: its fee is below", false)
         check(rpc("nonce too high"), "Not sent: nonce 4 is ahead of what the network expects", false)
         check(rpc("nonce too low"), "Not sent: nonce 4 was already used", false)
+        check(rpc("OldNonce, Current: 5, tx: 4"), "Not sent: nonce 4 was already used", false)
         // An error this can't read proves nothing: a rate limit, a client's own "already have it" wording.
         check(rpc("something odd‮"), "The RPC answered with an error (something odd), so it may or may not", true)
         check(ChainRpcException.AllSourcesFailed(emptyList(), ChainRpcException.Rpc(-32005, "rate limited", null)), "The RPC answered with an error (rate limited)", true)

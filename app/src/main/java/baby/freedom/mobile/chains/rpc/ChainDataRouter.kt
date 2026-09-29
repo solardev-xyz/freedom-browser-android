@@ -437,7 +437,7 @@ class ChainDataRouter internal constructor(
         /** [providerOf] for every RPC on the device itself. */
         internal const val LOOPBACK_PROVIDER = "loopback"
 
-        private val ALREADY_KNOWN = Regex("already known|known transaction|already imported", RegexOption.IGNORE_CASE)
+        private val ALREADY_KNOWN = Regex("already ?known|known transaction|already imported", RegexOption.IGNORE_CASE)
 
         /**
          * The first [k] of [pool] run by different providers, in order:

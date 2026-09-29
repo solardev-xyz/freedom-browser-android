@@ -400,7 +400,7 @@ class WalletSender internal constructor(
             if ((status.stage as? SendStatus.Stage.Failed)?.mayHaveGone != true) return
             job?.cancel()
             _status.value = status.copy(stage = SendStatus.Stage.Broadcasting, hash = s.hash)
-            job = scope.launch { broadcast(status.quote, s) }
+            job = scope.launch { broadcast(status.quote, s, resend = true) }
         }
     }
 
@@ -428,7 +428,12 @@ class WalletSender internal constructor(
         }
     }
 
-    private suspend fun broadcast(quote: SendQuote, s: EthTransaction.Signed) {
+    /**
+     * [resend]: these bytes were broadcast before and may already be out
+     * (Try again), so a node saying the nonce is used may be saying it
+     * about this very transaction.
+     */
+    private suspend fun broadcast(quote: SendQuote, s: EthTransaction.Signed, resend: Boolean = false) {
         val from = quote.request.from.address
         val chainId = quote.tx.chainId
         set(quote, SendStatus.Stage.Broadcasting, s.hash)
@@ -441,6 +446,19 @@ class WalletSender internal constructor(
             // asked after it then says the nonce is used: if this very
             // transaction is on chain, it went out.
             if (landed(chainId, s.hash)) {
+                nonces.markSent(from, chainId, quote.tx.nonce)
+                set(quote, SendStatus.Stage.Pending, s.hash)
+                follow(quote, s.hash)
+                return
+            }
+            // On a resend, "nonce used" is exactly what a node says once
+            // the earlier try's transaction is mined — and one receipt read
+            // (rate limited, or from a node a block behind) can't rule that
+            // out. Calling it "Not sent" would let Review again pay twice,
+            // so follow its receipt instead: it lands, or ends Unconfirmed
+            // (Keep waiting, the explorer) — never a fresh signature.
+            if (resend && nonceUsed(e)) {
+                Log.i(TAG, "resend chain=$chainId nonce=${quote.tx.nonce}: nonce used, following ${s.hash}")
                 nonces.markSent(from, chainId, quote.tx.nonce)
                 set(quote, SendStatus.Stage.Pending, s.hash)
                 follow(quote, s.hash)
@@ -576,8 +594,17 @@ class WalletSender internal constructor(
          * client's own "already have it" wording) proves nothing either —
          * both are "may have gone", where Try again resends the same bytes.
          */
+        private fun nodeErrorOf(e: ChainRpcException): ChainRpcException.Rpc? =
+            (e as? ChainRpcException.Rpc) ?: (e as? ChainRpcException.AllSourcesFailed)?.nodeError
+
+        /** A node's answer that the transaction's nonce is already taken (by whichever transaction). */
+        internal fun nonceUsed(e: ChainRpcException): Boolean {
+            val m = nodeErrorOf(e)?.rpcMessage?.lowercase() ?: return false
+            return "nonce too low" in m || "already been used" in m || "oldnonce" in m
+        }
+
         internal fun broadcastFailure(e: ChainRpcException, quote: SendQuote): Pair<String, Boolean> {
-            val node = (e as? ChainRpcException.Rpc) ?: (e as? ChainRpcException.AllSourcesFailed)?.nodeError
+            val node = nodeErrorOf(e)
             val unanswered = (e as? ChainRpcException.AllSourcesFailed)?.unanswered == true
             val symbol = quote.request.chain.symbol
             val m = node?.rpcMessage?.lowercase().orEmpty()
@@ -592,7 +619,7 @@ class WalletSender internal constructor(
                 node.insufficientFunds -> "Not sent: not enough $symbol for the amount and the fee any more." to false
                 "nonce too high" in m ->
                     "Not sent: nonce ${quote.tx.nonce} is ahead of what the network expects — an earlier transaction may not have reached it. Review it again." to false
-                "nonce too low" in m || "already been used" in m ->
+                nonceUsed(e) ->
                     "Not sent: nonce ${quote.tx.nonce} was already used — maybe by another wallet with this account. Review it again." to false
                 "invalid nonce" in m ->
                     "Not sent: the network didn’t accept nonce ${quote.tx.nonce}. Review it again." to false
