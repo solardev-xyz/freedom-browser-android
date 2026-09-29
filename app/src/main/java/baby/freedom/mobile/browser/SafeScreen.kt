@@ -1080,6 +1080,11 @@ private fun SafeRequestPage(
         val mine = p.safeTx().nonce
         if (onChain > mine) {
             val exec = p.execHash
+            // An execution given up on (Stop tracking) that landed anyway: this transaction is done, not superseded.
+            if (exec == null && p.abandonedExec?.let { chainReads.succeeded(c.id, it) } == true) {
+                safes.discard(p.id)
+                return false
+            }
             when (exec?.let { chainReads.succeeded(c.id, it) }) {
                 true -> safes.discard(p.id)
                 // Our execution's receipt isn't known yet (a node a block behind the one that gave
@@ -1105,7 +1110,7 @@ private fun SafeRequestPage(
         // before its end reached this record) isn't going out: Discard and Execute open up again.
         val exec = p.execHash ?: return@LaunchedEffect
         sender.awaitRestored()
-        if (sender.status.value?.hash != exec) runCatching { safes.clearExecution(p.id, exec) }
+        if (sender.status.value?.hash != exec) runCatching { safes.clearExecution(p.id, exec, abandoned = true) }
     }
 
     fun prepareExecution() = act("price the execution") {
@@ -1330,10 +1335,7 @@ private fun SafeRequestPage(
             onDismissRequest = { confirmDiscard = false },
             title = { Text("Discard this ${if (p.kind == SafePending.Kind.TX) "transaction" else "message"}?") },
             text = {
-                Text(
-                    "The signatures collected here are thrown away. A signature already given to another device stays valid there " +
-                        (if (p.kind == SafePending.Kind.TX) "until the Safe executes another transaction with this nonce." else "for this exact message."),
-                )
+                Text(safeDiscardText(p))
             },
             confirmButton = {
                 TextButton(onClick = {
@@ -1345,6 +1347,18 @@ private fun SafeRequestPage(
                 }) { Text("Discard", color = MaterialTheme.colorScheme.error) }
             },
             dismissButton = { TextButton(onClick = { confirmDiscard = false }) { Text("Keep it") } },
+        )
+    }
+}
+
+/** What Discard throws away, and what it can't stop. */
+internal fun safeDiscardText(p: SafePending): String = buildString {
+    append("The signatures collected here are thrown away. A signature already given to another device stays valid there ")
+    append(if (p.kind == SafePending.Kind.TX) "until the Safe executes another transaction with this nonce." else "for this exact message.")
+    if (p.kind == SafePending.Kind.TX && p.abandonedExec != null) {
+        append(
+            "\n\nThe execution you stopped tracking (${p.abandonedExec.take(10)}…) can still be mined and make this payment: " +
+                "discarding doesn’t stop it. The next send from the account that paid for it reuses its nonce and replaces it.",
         )
     }
 }

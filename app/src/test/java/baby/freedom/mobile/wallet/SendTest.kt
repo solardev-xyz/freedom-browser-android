@@ -21,6 +21,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.json.JSONObject
@@ -390,6 +391,47 @@ class SendTest {
         s.awaitStage { it == SendStatus.Stage.Pending }
         assertEquals(1, chain.sent.toSet().size)
         assertTrue(chain.sent.size >= 2)
+    }
+
+    @Test
+    fun `changes hands a slow follower every status, where status would skip a Confirmed acknowledged meanwhile`() = runBlocking<Unit> {
+        val chain = FakeChain()
+        val s = sender(chain)
+        // Two followers, each stuck on its first send status (as SafeAccounts is, writing it to disk).
+        val gate = kotlinx.coroutines.CompletableDeferred<Unit>()
+        fun follow(flow: kotlinx.coroutines.flow.Flow<SendStatus?>): Pair<MutableList<SendStatus?>, kotlinx.coroutines.Job> {
+            val seen = java.util.Collections.synchronizedList(mutableListOf<SendStatus?>())
+            val job = scope.launch {
+                flow.collect {
+                    seen += it
+                    if (it != null) gate.await()
+                }
+            }
+            return seen to job
+        }
+        val (viaStatus, statusJob) = follow(s.status)
+        val (viaChanges, changesJob) = follow(s.changes)
+        // Both subscribed before the send starts (the StateFlow one says so with its initial null).
+        withTimeout(5_000) { while (viaStatus.isEmpty()) delay(5) }
+        delay(100)
+        chain.receipt = """{"status":"0x1","blockNumber":"0x10","gasUsed":"0x5208","effectiveGasPrice":"0x1"}"""
+        s.submit(s.prepare(request()), signer())
+        s.awaitStage { it is SendStatus.Stage.Confirmed }
+        // Done, while both followers are still busy with the send's first status.
+        s.acknowledge()
+        gate.complete(Unit)
+        withTimeout(5_000) {
+            while (viaChanges.lastOrNull() != null || viaChanges.size < 2) delay(10)
+            while (viaStatus.lastOrNull() != null || viaStatus.size < 2) delay(10)
+        }
+        statusJob.cancel()
+        changesJob.cancel()
+        // status conflates (its follower resumes on Done's null, how R4-M2 happens); changes has every step, in order.
+        assertEquals(null, viaStatus.last())
+        val stages = viaChanges.map { it?.stage }
+        val pending = stages.indexOf(SendStatus.Stage.Pending)
+        val confirmed = stages.indexOfFirst { it is SendStatus.Stage.Confirmed }
+        assertTrue("$stages", pending >= 0 && confirmed > pending && stages.last() == null)
     }
 
     @Test

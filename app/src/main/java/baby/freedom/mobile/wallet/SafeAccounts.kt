@@ -74,6 +74,12 @@ data class SafePending(
     val execHash: String? = null,
     /** The Safe's nonce moved past this transaction without it: it can never execute. */
     val superseded: Boolean = false,
+    /**
+     * The last `execTransaction` the sender stopped following (Stop
+     * tracking) before it was mined: until its nonce is reused it can
+     * still land and pay out, whatever happens to this entry.
+     */
+    val abandonedExec: String? = null,
 ) {
     enum class Kind { TX, MESSAGE }
 
@@ -157,6 +163,7 @@ class SafeStore internal constructor(private val file: File) {
                 text = p.optString("text").takeIf { p.has("text") && !p.isNull("text") },
                 execHash = p.optString("execHash").takeIf { p.has("execHash") && !p.isNull("execHash") },
                 superseded = p.optBoolean("superseded"),
+                abandonedExec = p.optString("abandonedExec").takeIf { p.has("abandonedExec") && !p.isNull("abandonedExec") },
             )
         }
         SafeState(safes, pending)
@@ -197,7 +204,8 @@ class SafeStore internal constructor(private val file: File) {
                                 )
                                 .put("text", p.text ?: JSONObject.NULL)
                                 .put("execHash", p.execHash ?: JSONObject.NULL)
-                                .put("superseded", p.superseded),
+                                .put("superseded", p.superseded)
+                                .put("abandonedExec", p.abandonedExec ?: JSONObject.NULL),
                         )
                     }
                 },
@@ -261,7 +269,11 @@ class SafeAccounts internal constructor(
     /** The vault identity tag [state] was read under (guarded by [mutex]). */
     private var loadedTag: String? = null
 
-    /** Follows the vault (and, given [sends], the wallet's sends) from now on. Idempotent. */
+    /**
+     * Follows the vault (and, given [sends], the wallet's sends) from now on. Idempotent.
+     * [sends] must deliver every status, none conflated away ([WalletSender.changes]): a
+     * Confirmed skipped between a Pending and Done's null would read as Stop tracking.
+     */
     fun start(sends: Flow<SendStatus?>? = null) {
         synchronized(this) {
             if (started) return
@@ -476,9 +488,17 @@ class SafeAccounts internal constructor(
         s.copy(pending = s.pending.map { if (it.id == id) it.copy(superseded = true, execHash = null) else it }) to Unit
     }
 
-    /** The `execTransaction` [hash] for pending [id] is no longer going out (a later one's hash is kept). */
-    suspend fun clearExecution(id: String, hash: String) = update { s ->
-        s.copy(pending = s.pending.map { if (it.id == id && it.execHash == hash) it.copy(execHash = null) else it }) to Unit
+    /**
+     * The `execTransaction` [hash] for pending [id] is no longer being followed (a later one's
+     * hash is kept). [abandoned]: it wasn't settled, only given up on (Stop tracking), so it
+     * may still be mined — kept as [SafePending.abandonedExec] for Discard to warn about.
+     */
+    suspend fun clearExecution(id: String, hash: String, abandoned: Boolean = false) = update { s ->
+        s.copy(
+            pending = s.pending.map {
+                if (it.id == id && it.execHash == hash) it.copy(execHash = null, abandonedExec = if (abandoned) hash else it.abandonedExec) else it
+            },
+        ) to Unit
     }
 
     /** [hash] is the `execTransaction` now going out for pending [id] (null: none is). */
@@ -528,7 +548,7 @@ class SafeAccounts internal constructor(
         val hash = status.hash ?: return
         val state = _state.value ?: return
         val entry = state.pendingFor(label.address).firstOrNull { it.kind == SafePending.Kind.TX && it.execHash == hash } ?: return
-        clearExecution(entry.id, hash)
+        clearExecution(entry.id, hash, abandoned = true)
     }
 
     companion object {
@@ -544,7 +564,7 @@ class SafeAccounts internal constructor(
         fun get(context: Context): SafeAccounts = instance ?: synchronized(this) {
             instance ?: create(context).also {
                 instance = it
-                it.start(WalletSender.get(context).status)
+                it.start(WalletSender.get(context).changes)
             }
         }
 

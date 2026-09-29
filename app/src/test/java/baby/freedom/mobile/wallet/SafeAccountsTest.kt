@@ -1,6 +1,7 @@
 package baby.freedom.mobile.wallet
 
 import baby.freedom.mobile.browser.erc20Transfer
+import baby.freedom.mobile.browser.safeDiscardText
 import baby.freedom.mobile.browser.safePendingState
 import baby.freedom.mobile.browser.safePendingTitle
 import baby.freedom.mobile.browser.safeRowSubtitle
@@ -306,10 +307,15 @@ class SafeAccountsTest {
             publish(execStatus(safe, exec, false, SendStatus.Stage.Pending, first))
             publish(execStatus(safe, exec, false, stage, first))
             assertEquals(first, s.state.value!!.pending.single().execHash)
-            // Stop tracking: the sender publishes null. Nothing is going out, so Discard opens up again.
+            // Stop tracking: the sender publishes null. Nothing is being followed, so Discard opens up again —
+            // but the abandoned execution can still land, and Discard says so.
             publish(null)
             assertNull(s.state.value!!.pending.single().execHash)
+            assertEquals(first, s.state.value!!.pending.single().abandonedExec)
+            assertTrue(safeDiscardText(s.state.value!!.pending.single()).contains("can still be mined and make this payment"))
         }
+        // It's on disk: a fresh process reads the warning back.
+        assertEquals(first, SafeStore(file).read(vault.identityTag()!!)!!.pending.single().abandonedExec)
         // A different send replacing it (the abandoned nonce reused) frees it just the same.
         publish(execStatus(safe, exec, false, SendStatus.Stage.Pending, first))
         publish(execStatus(safe, byteArrayOf(9), false, SendStatus.Stage.Pending, "0x" + "d2".repeat(32)))
@@ -320,6 +326,31 @@ class SafeAccountsTest {
         assertEquals("0x" + "d3".repeat(32), s.state.value!!.pending.single().execHash)
         s.discard(p.id)
         assertTrue(s.state.value!!.pending.isEmpty())
+    }
+
+    @Test
+    fun `a reverted execution is settled, so Discard carries no still-may-land warning`() = runBlocking<Unit> {
+        vault.create(abandon12, auth, imported = true)
+        val sends = MutableStateFlow<SendStatus?>(null)
+        suspend fun publish(v: SendStatus?) {
+            sends.value = v
+            yield()
+        }
+        val s = safes().also { it.start(sends) }
+        val safe = s.create("", listOf(account1.address, other), 1, local)
+        s.markDeployed(safe.address)
+        val tx = SafeProtocol.SafeTx(other, BigInteger.ONE, ByteArray(0), BigInteger.ZERO)
+        val p = s.proposeTx(safe, tx, SafePending.Payment(other, BigInteger.ONE, "xDAI", 18, null))
+        vault.unlock(auth)
+        val exec = SafeProtocol.execTransactionData(tx, s.signWith(p.id, account1).signatures)
+        val hash = "0x" + "d4".repeat(32)
+        publish(execStatus(safe, exec, false, SendStatus.Stage.Pending, hash))
+        publish(execStatus(safe, exec, false, SendStatus.Stage.Reverted(10, null), hash))
+        publish(null)
+        val entry = s.state.value!!.pending.single()
+        assertNull(entry.execHash)
+        assertNull(entry.abandonedExec)
+        assertFalse(safeDiscardText(entry).contains("still be mined"))
     }
 
     @Test

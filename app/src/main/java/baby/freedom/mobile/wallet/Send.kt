@@ -16,10 +16,14 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
@@ -470,13 +474,30 @@ class WalletSender internal constructor(
     /** The current (or last) confirmed send; null once acknowledged. */
     val status: StateFlow<SendStatus?> = _status.asStateFlow()
 
+    private val _changes = MutableSharedFlow<SendStatus?>(replay = 1, extraBufferCapacity = Channel.UNLIMITED)
+
+    /**
+     * Every value [status] takes, in order, none skipped (the latest is
+     * replayed to a new collector): [status] conflates, so a collector
+     * busy with a Pending could see it followed straight by the null of
+     * Done and never see the Confirmed between. For a follower that must
+     * not miss an outcome ([SafeAccounts]).
+     */
+    val changes: SharedFlow<SendStatus?> = _changes.asSharedFlow()
+
+    /** Sets [status] and hands [value] to [changes]; under this object's lock. */
+    private fun setStatus(value: SendStatus?) {
+        _status.value = value
+        _changes.tryEmit(value)
+    }
+
     /**
      * Shows [value] and reports it to the [history] (#109), which records
      * a send once it went out or may have. Under this object's lock; the
      * history never blocks on storage there.
      */
     private fun show(value: SendStatus?) {
-        _status.value = value
+        setStatus(value)
         value?.let { history?.note(it) }
     }
 
@@ -540,7 +561,7 @@ class WalletSender internal constructor(
                         // its history wiped with it: the discard below gives the send up
                         // (abandoning its nonce) without recording it in the emptied history
                         // or following it.
-                        _status.value = shown
+                        setStatus(shown)
                     } else {
                         show(shown)
                         if (status.stage == SendStatus.Stage.Pending) job = scope.launch { follow(status.quote, send.signed.hash) }
