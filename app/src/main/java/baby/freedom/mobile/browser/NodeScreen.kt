@@ -17,6 +17,7 @@ import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.HourglassTop
 import androidx.compose.material.icons.filled.PowerSettingsNew
+import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -58,8 +59,8 @@ import java.util.Locale
 /**
  * Full-screen node-details page: the Swarm node's live status, peer
  * count, gateway URL and run-node on/off toggle, its mode and the ways into
- * publish setup (#114, [PublishSetupScreen]) and the postage stamps (#116,
- * [StampsScreen]), the Tor client (#143)
+ * publish setup (#114, [PublishSetupScreen]), the postage stamps (#116,
+ * [StampsScreen]) and the Publish page (#118, [PublishScreen]), the Tor client (#143)
  * with its start/stop switch, status and version, then the Myotis
  * Ethereum / Gnosis light client (#72) with its own switch and per-chain
  * sync state. Shares the same [FullScreenScaffold] chrome as Settings /
@@ -79,6 +80,8 @@ fun NodeScreen(
     onMyotisRecovery: (chainId: Long, repair: Boolean) -> Unit = { _, _ -> },
     /** Open the wallet page, for publish setup's identity step (#114). */
     onOpenWallet: () -> Unit = {},
+    /** Open a published page's bzz:// link in a new tab (#118). */
+    onOpenUrl: (String) -> Unit = {},
 ) {
     val triple = nodeStatusTriple(nodeInfo.status)
     val context = LocalContext.current
@@ -94,6 +97,8 @@ fun NodeScreen(
     var showPublishSetup by rememberSaveable { mutableStateOf(false) }
     // The stamp pages (#116): "list", "buy" (from publish setup), or null.
     var showStamps by rememberSaveable { mutableStateOf<String?>(null) }
+    // The Publish page (#118); the stamp and setup pages it links to open over it.
+    var showPublish by rememberSaveable { mutableStateOf(false) }
 
     showStamps?.let { start ->
         // Back from the stamps lands on whichever page opened them.
@@ -108,6 +113,16 @@ fun NodeScreen(
             onOpenWallet = onOpenWallet,
             onBuyStamp = { showStamps = "buy" },
             onDismiss = { showPublishSetup = false },
+        )
+        return
+    }
+    if (showPublish) {
+        PublishScreen(
+            nodeInfo = nodeInfo,
+            onOpenStamps = { showStamps = "list" },
+            onOpenSetup = { showPublishSetup = true },
+            onOpenUrl = onOpenUrl,
+            onDismiss = { showPublish = false },
         )
         return
     }
@@ -140,6 +155,7 @@ fun NodeScreen(
                     onSetLightMode = setLightMode,
                     onOpenSetup = { showPublishSetup = true },
                     onOpenStamps = { showStamps = "list" },
+                    onOpenPublish = { showPublish = true },
                 )
             }
             item("gateway") {
@@ -243,8 +259,10 @@ private fun PublishingSection(
     onSetLightMode: (Boolean) -> Unit,
     onOpenSetup: () -> Unit,
     onOpenStamps: () -> Unit,
+    onOpenPublish: () -> Unit,
 ) {
     val spend by StampClient.spend.collectAsState()
+    val publishing by Publisher.state.collectAsState()
     SectionCard(title = "Publishing") {
         Row(
             modifier = Modifier
@@ -267,6 +285,10 @@ private fun PublishingSection(
                 enabled = lightModeWanted != null,
             )
         }
+        if (publishEntryShown(nodeInfo, publishing)) {
+            Spacer(Modifier.height(8.dp))
+            Button(onClick = onOpenPublish) { Text("Publish") }
+        }
         Spacer(Modifier.height(4.dp))
         Row {
             TextButton(onClick = onOpenSetup) { Text("Set up publishing") }
@@ -285,6 +307,14 @@ private fun PublishingSection(
  */
 internal fun stampsEntryShown(nodeInfo: NodeInfo, spend: StampClient.Spend): Boolean =
     (nodeInfo.status == NodeStatus.Running && nodeInfo.lightMode) || spend !is StampClient.Spend.Idle
+
+/**
+ * Is the Publish entry offered (#118)? Uploads go to a light node, so
+ * while one runs; and while a publish is running or its outcome waits to
+ * be seen, so it stays reachable if the node is turned off meanwhile.
+ */
+internal fun publishEntryShown(nodeInfo: NodeInfo, publishing: Publisher.State): Boolean =
+    (nodeInfo.status == NodeStatus.Running && nodeInfo.lightMode) || publishing !is Publisher.State.Idle
 
 /** The line under the light-mode switch: what the mode does, or that the node is on its way into it. */
 internal fun swarmModeSubtitle(nodeInfo: NodeInfo, lightModeWanted: Boolean?): String {

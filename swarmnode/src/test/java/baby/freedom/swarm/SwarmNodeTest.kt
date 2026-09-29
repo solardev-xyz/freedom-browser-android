@@ -89,6 +89,13 @@ class SwarmNodeTest {
             calls += "topup:$handle:$amountPerChunk"
             return onSpend("topup")
         }
+        /** Run inside a discover, in place of ant's scan (and the chequebook deploy it may try). */
+        @Volatile var onDiscover: () -> Unit = {}
+        override fun storageDiscover(handle: Long, gnosisRpc: String): String {
+            calls += "discover:$handle:$gnosisRpc"
+            onDiscover()
+            return """{"registered":[]}"""
+        }
     }
 
     private val config = SwarmNode.Config(dataDir = "/nonexistent")
@@ -309,6 +316,28 @@ class SwarmNodeTest {
 
         val light = lightNode(FakeOps())
         assertEquals("""{"depth":17}""", light.storageQuote(17, 2))
+        light.dispose()
+    }
+
+    @Test
+    fun findingOwnedStampsNeedsALightNodeAndLetsNothingOut() {
+        val ultraLight = FakeOps().apply { releaseSeed.countDown(); releaseInit.countDown() }
+        val node = SwarmNode(config, ultraLight)
+        node.start()
+        awaitStatus(node, NodeStatus.Running)
+        assertThrows(IllegalStateException::class.java) { node.discoverStamps() }
+        node.dispose()
+
+        val ops = FakeOps()
+        val light = lightNode(ops)
+        // ant may try to deploy a chequebook while it registers a batch it
+        // found: no permit is open, so that broadcast is refused.
+        val deploy = TestTx.request(TestTx.createBatch(TestTx.OWNER, java.math.BigInteger.TEN, 17, false))
+        var admitted: Boolean? = null
+        ops.onDiscover = { admitted = SpendGuard.admit(deploy) }
+        assertEquals("""{"registered":[]}""", light.discoverStamps())
+        assertEquals(false, admitted)
+        assertTrue(ops.calls.any { it.startsWith("discover:1:") })
         light.dispose()
     }
 

@@ -128,7 +128,7 @@ interface INodeService {
 
     /**
      * Postage stamps (#116): `method` is one of NodeService.STAMP_CALLS —
-     * `status`, `quote`, `extendQuote` (no transaction) or `buy`,
+     * `status`, `quote`, `extendQuote`, `discover` (no transaction) or `buy`,
      * `extend` (SPEND, from the stamp screens' confirmation only) — with
      * `argsJson` its arguments. Returns the read end of a pipe the answer
      * (ant's JSON, or `{"error": …}`) is written to, like [radicleCall].

@@ -350,6 +350,8 @@ class NodeService : Service() {
                 }
                 swarmNode.storageTopupQuote(days())
             }
+            // Registers the stamps this account already owns (#118); sends nothing.
+            "discover" -> swarmNode.discoverStamps()
             "buy" -> spending {
                 spendable()
                 val depth = args.getInt("depth").also { require(it in MIN_STAMP_DEPTH..MAX_STAMP_DEPTH) { "bad depth" } }

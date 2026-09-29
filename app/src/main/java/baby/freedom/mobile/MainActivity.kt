@@ -37,6 +37,7 @@ import baby.freedom.mobile.browser.OnchainApps
 import baby.freedom.mobile.browser.PhraseClipboard
 import baby.freedom.mobile.browser.RadApi
 import baby.freedom.mobile.browser.RadicleClient
+import baby.freedom.mobile.browser.Publisher
 import baby.freedom.mobile.browser.StampClient
 import baby.freedom.mobile.browser.RadicleProviders
 import baby.freedom.mobile.browser.RadicleControls
@@ -322,6 +323,9 @@ class MainActivity : ComponentActivity() {
                 android.util.Log.w("MainActivity", "reading name-resolution settings failed (${e.javaClass.simpleName})")
             }
         }
+
+        // A publish staged in the cache (#118) by a run that ended mid-upload.
+        lifecycleScope.launch(Dispatchers.IO) { Publisher.sweepStaging(this@MainActivity) }
 
         // The nodes follow the wallet's identity (#77): a wallet created,
         // imported or removed changes what the Swarm node boots as, and a

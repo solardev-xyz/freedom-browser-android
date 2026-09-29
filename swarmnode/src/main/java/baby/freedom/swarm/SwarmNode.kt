@@ -58,6 +58,7 @@ class SwarmNode internal constructor(
         fun storageValidity(handle: Long, gnosisRpc: String): String
         fun storageBuyXdai(handle: Long, gnosisRpc: String, depth: Int, amountPerChunk: String, immutable: Boolean): String
         fun storageTopupXdai(handle: Long, gnosisRpc: String, amountPerChunk: String): String
+        fun storageDiscover(handle: Long, gnosisRpc: String): String
 
         object Native : NodeOps {
             override fun seed(antDir: File) = BootnodeSeeder.seedIfEmpty(antDir)
@@ -81,6 +82,7 @@ class SwarmNode internal constructor(
                 AntNative.storageBuyXdai(handle, gnosisRpc, depth, amountPerChunk, immutable)
             override fun storageTopupXdai(handle: Long, gnosisRpc: String, amountPerChunk: String) =
                 AntNative.storageTopupXdai(handle, gnosisRpc, amountPerChunk)
+            override fun storageDiscover(handle: Long, gnosisRpc: String) = AntNative.storageDiscover(handle, gnosisRpc)
         }
     }
 
@@ -361,6 +363,15 @@ class SwarmNode internal constructor(
 
     /** What extending the node's connected batch by [days] would cost. */
     fun storageTopupQuote(days: Long): String = withLightNode { h, rpc -> ops.storageTopupQuote(h, rpc, days) }
+
+    /**
+     * Finds the batches this account already owns on Gnosis and registers
+     * the ones still funded (#118), so stamps bought earlier (on another
+     * device, or before a reinstall) can be published with again. Runs
+     * outside any [SpendGuard] permit, so nothing ant might try to send
+     * meanwhile gets out. Returns `{"registered":[ids],"status":{…}}`.
+     */
+    fun discoverStamps(): String = withLightNode { h, rpc -> ops.storageDiscover(h, rpc) }
 
     /**
      * Buys a batch as the user confirmed it: [depth], [amountPerChunk] from

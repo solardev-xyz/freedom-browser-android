@@ -81,6 +81,13 @@ internal fun stampSpendBlockedReason(node: NodeInfo): String? = stampsBlockedRea
     else -> null
 }
 
+/** What a search for the account's own stamps found. */
+internal fun discoverOutcomeText(found: Int): String = when (found) {
+    0 -> "No other stamps: this account owns none that are still paid for."
+    1 -> "Found 1 stamp this account owns; it's in the list below."
+    else -> "Found $found stamps this account owns; they're in the list below."
+}
+
 /** One line under a spend in flight, or its outcome. */
 internal fun spendStatusText(spend: StampClient.Spend): String? = when (spend) {
     StampClient.Spend.Idle -> null
@@ -186,7 +193,12 @@ internal fun StampsScreen(nodeInfo: NodeInfo, startWithBuy: Boolean = false, onD
                         }
                     }
                 }
-                else -> listPage(nodeInfo, batches, spend, onBuy = { route = "buy" }, onOpen = { route = "detail:${it.id}" })
+                else -> listPage(
+                    nodeInfo, batches, spend,
+                    onBuy = { route = "buy" },
+                    onOpen = { route = "detail:${it.id}" },
+                    onFound = { refresh++ },
+                )
             }
         }
     }
@@ -198,6 +210,7 @@ private fun androidx.compose.foundation.lazy.LazyListScope.listPage(
     spend: StampClient.Spend,
     onBuy: () -> Unit,
     onOpen: (PostageBatch) -> Unit,
+    onFound: () -> Unit,
 ) {
     item("intro") {
         SectionCard(title = "Postage stamps") {
@@ -214,12 +227,44 @@ private fun androidx.compose.foundation.lazy.LazyListScope.listPage(
             Button(onClick = onBuy, enabled = cantSpend == null && spend !is StampClient.Spend.Running) {
                 Text("Buy a stamp")
             }
+            FindOwnedStamps(onFound)
         }
     }
     when {
         batches == null -> item("loading") { MutedText("Reading the node's stamps…") }
         batches.isEmpty() -> item("empty") { MutedText("No stamps yet.") }
         else -> items(batches, key = { it.id }) { batch -> BatchCard(batch) { onOpen(batch) } }
+    }
+}
+
+/**
+ * Finding the stamps this account already owns (#118): bought on another
+ * device, or before Freedom was reinstalled. The node registers each one
+ * that's still funded, and the list shows it.
+ */
+@Composable
+private fun FindOwnedStamps(onFound: () -> Unit) {
+    // Null: not asked; "" while looking; else what came of it.
+    var outcome by remember { mutableStateOf<String?>(null) }
+    Spacer(Modifier.height(4.dp))
+    TextButton(
+        enabled = outcome != "",
+        onClick = {
+            outcome = ""
+        },
+    ) { Text("Find stamps you already own") }
+    if (outcome == "") {
+        LaunchedEffect(Unit) {
+            val found = withContext(Dispatchers.IO) { StampClient.discover() }
+            outcome = found.fold(
+                onSuccess = { ids -> discoverOutcomeText(ids.size) },
+                onFailure = { "Couldn't look: ${it.message}" },
+            )
+            onFound()
+        }
+        SubLine("Searching Gnosis Chain for stamps this account bought…")
+    } else {
+        outcome?.let { SubLine(it) }
     }
 }
 

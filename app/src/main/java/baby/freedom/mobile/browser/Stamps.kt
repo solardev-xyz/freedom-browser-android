@@ -247,6 +247,19 @@ internal object StampClient {
         return o.optString("error").takeIf { it.isNotEmpty() }?.let { Answer.Failed(it) } ?: Answer.Ok(o)
     }
 
+    /**
+     * Registers the stamps this account already owns on Gnosis with the
+     * node (#118): bought on another device, or before a reinstall. No
+     * transaction. Blocking; the ids it found, or why it couldn't look.
+     */
+    fun discover(): Result<List<String>> = when (val a = call("discover", timeoutMs = DISCOVER_TIMEOUT_MS)) {
+        is Answer.Ok -> Result.success(
+            a.json.optJSONArray("registered")?.let { ids -> (0 until ids.length()).mapNotNull { normalizeBatchId(ids.optString(it)) } }
+                .orEmpty(),
+        )
+        is Answer.Failed -> Result.failure(IllegalStateException(a.message))
+    }
+
     enum class Kind { Buy, Extend }
 
     sealed interface Spend {
@@ -310,6 +323,9 @@ internal object StampClient {
     private const val NOT_BOUND = "The Swarm node isn't running"
     private const val TIMED_OUT = "The Swarm node didn't answer in time"
     const val READ_TIMEOUT_MS = 60_000L
+
+    /** A discover scans the account's xBZZ transfers since the token's deploy, then reads each batch found. */
+    const val DISCOVER_TIMEOUT_MS = 3 * 60_000L
 
     /**
      * A spend's: up to five transactions, each waited on for up to a
