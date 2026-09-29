@@ -75,6 +75,15 @@ class AutoApproveTest {
         "0x47e1da2a" to "ERC-4337 executeBatch(address[],uint256[],bytes[])",
         "0xe9ae5c53" to "ERC-7579 execute(bytes32,bytes)",
         "0x6a761202" to "Safe execTransaction",
+        // #253 R1-F1: authorizations, delegations, NFT permits and more execute shapes.
+        "0x110496e5" to "Compound III allow(address,bool)",
+        "0xc04a8a10" to "Aave approveDelegation(address,uint256)",
+        "0xeecea000" to "Morpho Blue setAuthorization(address,bool)",
+        "0x7ac2ff7b" to "Uniswap V3 positions permit(address,uint256,uint256,uint8,bytes32,bytes32)",
+        "0x745a41bc" to "ERC-4494 permit(address,uint256,uint256,bytes)",
+        "0xa3b22fc4" to "Maker hope(address)",
+        "0x51945447" to "Kernel execute(address,uint256,bytes,uint8)",
+        "0xdd46508f" to "Uniswap V4 modifyLiquidities(bytes,uint256)",
     )
 
     @Test
@@ -103,8 +112,9 @@ class AutoApproveTest {
         val swap = AutoApproveRule.eligible(site, usdc, BigInteger.ZERO, call("0x38ed1739", 5), 100)!!
         assertEquals(
             "The wallet can't tell what this function does. If it can move tokens you've approved this contract " +
-                "to use, or run calls it's handed (as a swap router can), this rule lets the site do that with " +
-                "no sheet, to anyone. Only turn it on for a function you know.",
+                "to use, run calls it's handed (as a swap router can), or let someone else spend, borrow or " +
+                "withdraw for you, this rule lets the site do that with no sheet, to anyone. " +
+                "Only turn it on for a function you know.",
             autoApproveWarning(swap),
         )
     }

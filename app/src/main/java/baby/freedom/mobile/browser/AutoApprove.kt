@@ -75,13 +75,17 @@ data class AutoApproveRule(
  * Functions no rule may cover (#234, security audit #229): each hands out
  * more than the one call the user looked at, so "any arguments, no sheet"
  * would be a blank cheque. Approvals and permits let a spender the site
- * picks take tokens later, off the wallet's screen; a multicall, batch or
+ * picks take tokens later, off the wallet's screen, and an authorization
+ * or credit delegation lets someone else withdraw or borrow against the
+ * user's position; a multicall, batch or
  * execute entry point runs whatever calls its data carries, so a router
  * that already holds token approvals (its own, or through Permit2) could
  * be told to send them anywhere. Named by signature, so the list can be
  * read against the standards; checked in [AutoApproveRule.of], so a rule
  * granted for one of these before this list existed is skipped when read,
- * and never matched again.
+ * and never matched again. A deny list can't name every such function
+ * (#253 R1-F1), so the copy says "best-known" and an unnamed function's
+ * switch carries [autoApproveWarning].
  */
 internal val REFUSED_SELECTOR_SIGNATURES: List<String> = listOf(
     // Token approvals and permits: ERC-20, ERC-721/1155, ERC-777, ERC-1363, ERC-6909, EIP-2612, DAI, Permit2.
@@ -98,6 +102,14 @@ internal val REFUSED_SELECTOR_SIGNATURES: List<String> = listOf(
     "approve(address,address,uint160,uint48)",
     "permit(address,((address,uint160,uint48,uint48),address,uint256),bytes)",
     "permit(address,((address,uint160,uint48,uint48)[],address,uint256),bytes)",
+    // NFT permits: Uniswap V3 positions (ERC-721 permit), ERC-4494.
+    "permit(address,uint256,uint256,uint8,bytes32,bytes32)",
+    "permit(address,uint256,uint256,bytes)",
+    // Authorizations and delegations over a position: Compound III, Aave, Morpho Blue, Maker.
+    "allow(address,bool)",
+    "approveDelegation(address,uint256)",
+    "setAuthorization(address,bool)",
+    "hope(address)",
     // Multicalls and batches: Uniswap V3 periphery, Multicall/Multicall3, BoringBatchable.
     "multicall(bytes[])",
     "multicall(uint256,bytes[])",
@@ -109,7 +121,7 @@ internal val REFUSED_SELECTOR_SIGNATURES: List<String> = listOf(
     "aggregate3((address,bool,bytes)[])",
     "aggregate3Value((address,bool,uint256,bytes)[])",
     "batch(bytes[],bool)",
-    // Generic execute entry points: Uniswap's Universal Router, ERC-4337 accounts, ERC-7579/7821, Safe.
+    // Generic execute entry points: Uniswap's Universal Router, ERC-4337 accounts, ERC-7579/7821, Safe, Kernel.
     "execute(bytes,bytes[])",
     "execute(bytes,bytes[],uint256)",
     "execute(address,uint256,bytes)",
@@ -119,6 +131,9 @@ internal val REFUSED_SELECTOR_SIGNATURES: List<String> = listOf(
     "execute(bytes32,bytes)",
     "execTransaction(address,uint256,bytes,uint8,uint256,uint256,uint256,address,address,bytes)",
     "execTransactionFromModule(address,uint256,bytes,uint8)",
+    "execute(address,uint256,bytes,uint8)",
+    // Uniswap V4 PositionManager: runs whatever actions its data encodes.
+    "modifyLiquidities(bytes,uint256)",
 )
 
 /** [REFUSED_SELECTOR_SIGNATURES] as selectors: lower-case `0x` + 8 hex. */
@@ -144,8 +159,9 @@ internal fun autoApproveWarning(rule: AutoApproveRule): String? =
         null
     } else {
         "The wallet can't tell what this function does. If it can move tokens you've approved this contract " +
-            "to use, or run calls it's handed (as a swap router can), this rule lets the site do that with " +
-            "no sheet, to anyone. Only turn it on for a function you know."
+            "to use, run calls it's handed (as a swap router can), or let someone else spend, borrow or " +
+            "withdraw for you, this rule lets the site do that with no sheet, to anyone. " +
+            "Only turn it on for a function you know."
     }
 
 /** The sheet's switch: "Always approve token transfers on this contract". */
@@ -176,7 +192,7 @@ internal const val AUTO_APPROVE_EXPLAINER =
     "Transactions from this site that match a rule go out without asking while the wallet is unlocked. " +
         "Each rule covers one function on one contract on one network — with any recipient, spender or amount — " +
         "and only calls that send no funds. " +
-        "Approvals, permits, multicalls and execute functions can't have a rule. " +
+        "The best-known approval, permit, multicall and execute functions can't have a rule. " +
         "Disconnecting the site removes its rules."
 internal const val AUTO_APPROVE_REMOVE_FAILED = "Couldn't remove the rule: the change couldn't be saved. Try again."
 

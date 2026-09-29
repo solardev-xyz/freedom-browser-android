@@ -69,4 +69,12 @@ class AutoApproveWarningSheetTest {
         rule.onNodeWithTag("ethereum-approval").assertExists()
         rule.onNodeWithTag("ethereum-always-approve").assertDoesNotExist()
     }
+
+    @Test
+    fun aLendingAuthorizationsSheetHasNoSwitch() {
+        // Compound III allow(address,bool): lets a manager withdraw the user's collateral (#253 R1-F1).
+        rule.setContent { FreedomTheme { EthereumApprovalSheet(EthereumPromptRequest(ask("0x110496e5"), setUpWallet = {})) } }
+        rule.onNodeWithTag("ethereum-approval").assertExists()
+        rule.onNodeWithTag("ethereum-always-approve").assertDoesNotExist()
+    }
 }
