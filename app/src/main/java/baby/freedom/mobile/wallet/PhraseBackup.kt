@@ -13,6 +13,7 @@ import kotlin.coroutines.resumeWithException
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -22,10 +23,19 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONObject
+import java.io.File
 
 /** Block Store can't be used here: no Google Play services, or it didn't answer. */
-class BackupUnavailableException(message: String) : Exception(message)
+open class BackupUnavailableException(message: String) : Exception(message)
+
+/**
+ * Play services didn't answer in time. Unlike a refusal this says nothing
+ * about the call itself: a `Task` can't be cancelled, so a write may still
+ * land after this was thrown (#244 R1-M2).
+ */
+class BackupNoAnswerException(message: String = "Google Play services didn’t answer") : BackupUnavailableException(message)
 
 /**
  * Block Store can't end-to-end encrypt a cloud backup on this phone (no
@@ -65,6 +75,55 @@ interface BlockStorePort {
 }
 
 /**
+ * Whether the entry was last written *by this install*, and for the cloud
+ * or not: the entry's own `cloud` field is only what whichever phone wrote
+ * it asked for, and Block Store doesn't say what an entry restored onto
+ * this phone (device-to-device or from the cloud) is actually flagged
+ * with (#244 R1-M1). Null when this install hasn't written it, or a write
+ * was left unfinished. Kept out of every Android backup
+ * ([Context.getNoBackupFilesDir]): a copy on a new phone would claim a
+ * write that phone never made.
+ */
+interface WrittenHere {
+    suspend fun get(): Boolean?
+    suspend fun set(cloud: Boolean?)
+
+    class InMemory : WrittenHere {
+        @Volatile private var value: Boolean? = null
+        override suspend fun get() = value
+        override suspend fun set(cloud: Boolean?) {
+            value = cloud
+        }
+    }
+
+    /** One small file; a failed read or write reads as "not written here", which costs one rewrite. */
+    class InFile(private val file: File) : WrittenHere {
+        override suspend fun get(): Boolean? = withContext(Dispatchers.IO) {
+            runCatching { if (file.exists()) file.readText().trim() else null }.getOrNull()?.let {
+                when (it) {
+                    "cloud" -> true
+                    "device" -> false
+                    else -> null
+                }
+            }
+        }
+
+        override suspend fun set(cloud: Boolean?) = withContext(Dispatchers.IO) {
+            runCatching {
+                if (cloud == null) {
+                    file.delete()
+                } else {
+                    val tmp = File(file.path + ".tmp")
+                    tmp.writeText(if (cloud) "cloud" else "device")
+                    if (!tmp.renameTo(file)) file.delete()
+                }
+            }
+            Unit
+        }
+    }
+}
+
+/**
  * Opt-in, end-to-end encrypted backup of the recovery phrase through
  * Google Block Store (#231; decision 4 on #75 made v1 device-only and
  * left this for later).
@@ -80,7 +139,9 @@ interface BlockStorePort {
  * copy; Block Store deletes the one already up there at its next sync)
  * whenever encryption has gone away, e.g. the screen lock was removed,
  * and back to cloud once it returns. The payload records which it was
- * written as, so [reconcile] only rewrites on a change.
+ * written as and [WrittenHere] whether this install wrote it so, so
+ * [reconcile] only rewrites on a change — and always once for an entry
+ * that came from another phone, whose flag on this one nothing reports.
  *
  * [reconcile] follows the *entry*, not the wallet: an entry left behind
  * with the wallet removed (its backup kept), or one a new phone received
@@ -109,6 +170,7 @@ class PhraseBackup(
     private val blockStore: BlockStorePort,
     /** Where the entry's account address is derived (PBKDF2): off the main thread. */
     private val compute: CoroutineDispatcher = Dispatchers.Default,
+    private val writtenHere: WrittenHere = WrittenHere.InMemory(),
 ) {
     /** Serializes every change to the entry; see the class KDoc. */
     private val writes = Mutex()
@@ -176,13 +238,58 @@ class PhraseBackup(
 
     private suspend fun storeHeld(mnemonic: Mnemonic) {
         if (!blockStore.endToEndEncryptionAvailable()) throw BackupNotEncryptedException()
-        write(mnemonic.phrase(), cloud = true)
-        _known.value = Known(Status.CLOUD, addressOf(mnemonic))
+        val address = addressOf(mnemonic)
+        // Whose the entry was before: a write Play services doesn't answer may still land.
+        val before = entryAddress()
+        try {
+            write(mnemonic.phrase(), cloud = true)
+        } catch (e: BackupNoAnswerException) {
+            // The caller is told it failed, so it mustn't turn up later as a cloud backup
+            // nobody asked for (#244 R1-M2). [GmsBlockStore] sends nothing more until that
+            // write has finished, so this reads what it did; if it still hasn't, this fails
+            // too and the entry's state stays unknown.
+            _known.value = null
+            if (before == null || !before.equals(address, ignoreCase = true)) {
+                withContext(NonCancellable) { runCatching { deleteIfOfHeld(address) } }
+            }
+            throw e
+        }
+        _known.value = Known(Status.CLOUD, address)
+    }
+
+    /** Account 0's address of the entry's phrase; null with no entry or an unreadable one. */
+    private suspend fun entryAddress(): String? {
+        val bytes = blockStore.retrieve(KEY) ?: return null
+        return try {
+            addressOf(Mnemonic.parse(decode(bytes).phrase))
+        } catch (_: BackupUnreadableException) {
+            null
+        } catch (_: Mnemonic.ParseException) {
+            null
+        } finally {
+            bytes.fill(0)
+        }
     }
 
     private suspend fun deleteHeld() {
         blockStore.delete(KEY)
+        writtenHere.set(null)
         _known.value = Known(Status.NONE, null)
+    }
+
+    /** What [Held.deleteIfOf] did. */
+    enum class DeleteIfOf {
+        /** The entry was that wallet's, and is deleted. */
+        DELETED,
+
+        /** There was no entry. */
+        NO_ENTRY,
+
+        /** The entry is another wallet's: kept. */
+        OTHER_WALLET,
+
+        /** Whose the entry is couldn't be told (no address given, or it can't be read): kept. */
+        UNKNOWN,
     }
 
     /**
@@ -190,14 +297,13 @@ class PhraseBackup(
      * address is [address], read afresh under the lock: for a delete asked
      * while whose the entry is wasn't known (Remove wallet with Play
      * services slow to answer), which must not take another wallet's kept
-     * backup with it (#244 R5-F2). True if deleted; false with no entry;
-     * null when an entry stays because it isn't that wallet's, can't be
-     * read, or [address] is null.
+     * backup with it (#244 R5-F2).
      */
-    private suspend fun deleteIfOfHeld(address: String?): Boolean? {
+    private suspend fun deleteIfOfHeld(address: String?): DeleteIfOf {
         val bytes = blockStore.retrieve(KEY) ?: run {
+            writtenHere.set(null)
             _known.value = Known(Status.NONE, null)
-            return false
+            return DeleteIfOf.NO_ENTRY
         }
         val entryAddress = try {
             addressOf(Mnemonic.parse(decode(bytes).phrase))
@@ -208,9 +314,10 @@ class PhraseBackup(
         } finally {
             bytes.fill(0)
         }
-        if (address == null || entryAddress == null || !entryAddress.equals(address, ignoreCase = true)) return null
+        if (address == null || entryAddress == null) return DeleteIfOf.UNKNOWN
+        if (!entryAddress.equals(address, ignoreCase = true)) return DeleteIfOf.OTHER_WALLET
         deleteHeld()
-        return true
+        return DeleteIfOf.DELETED
     }
 
     /** [store] and [delete] for code already holding the entry lock, inside [exclusive]. */
@@ -219,7 +326,7 @@ class PhraseBackup(
         suspend fun delete() = deleteHeld()
 
         /** See [deleteIfOfHeld]. */
-        suspend fun deleteIfOf(address: String?): Boolean? = deleteIfOfHeld(address)
+        suspend fun deleteIfOf(address: String?): DeleteIfOf = deleteIfOfHeld(address)
     }
 
     /**
@@ -267,13 +374,16 @@ class PhraseBackup(
         try {
             val bytes = blockStore.retrieve(KEY)
             if (bytes == null) {
+                writtenHere.set(null)
                 _known.value = Known(Status.NONE, null)
                 return@withLock Status.NONE
             }
             try {
                 val entry = decode(bytes)
                 val encrypted = blockStore.endToEndEncryptionAvailable()
-                if (entry.cloud != encrypted) {
+                // The payload's flag is what the phone that wrote it asked for; only a write
+                // this install made says what the entry is flagged with here (#244 R1-M1).
+                if (entry.cloud != encrypted || writtenHere.get() != encrypted) {
                     rewriting = true
                     write(entry.phrase, cloud = encrypted)
                 }
@@ -323,11 +433,14 @@ class PhraseBackup(
     /** Call under [writes]. */
     private suspend fun write(phrase: String, cloud: Boolean) {
         val bytes = encode(Entry(phrase, cloud))
+        // Unknown until the write is answered: one left unfinished is written again next time.
+        writtenHere.set(null)
         try {
             blockStore.store(KEY, bytes, backupToCloud = cloud)
         } finally {
             bytes.fill(0)
         }
+        writtenHere.set(cloud)
     }
 
     /** The entry as stored: the phrase, and whether it was written for the cloud. */
@@ -360,7 +473,10 @@ class PhraseBackup(
         private var instance: PhraseBackup? = null
 
         fun get(context: Context): PhraseBackup = instance ?: synchronized(this) {
-            instance ?: PhraseBackup(GmsBlockStore(context)).also { instance = it }
+            instance ?: PhraseBackup(
+                GmsBlockStore(context),
+                writtenHere = WrittenHere.InFile(File(context.applicationContext.noBackupFilesDir, "phrase-backup-written")),
+            ).also { instance = it }
         }
     }
 }
@@ -397,6 +513,8 @@ class GmsBlockStore(context: Context) : BlockStorePort {
         call { client.deleteBytes(request) }
     }
 
+    private val order = TaskOrder(TIMEOUT_MS)
+
     private suspend fun <T> call(start: () -> Task<T>): T? = try {
         // Asked before every call, never cached: Play services can be installed, enabled
         // or updated while the app runs. Without it the client isn't even created — a
@@ -404,9 +522,10 @@ class GmsBlockStore(context: Context) : BlockStorePort {
         // work unless you enable Google Play services" notification, on every foreground
         // reconcile (#244 R4-F1), though the app works fine without it.
         if (!playServicesUsable(app)) throw BackupUnavailableException("Google Play services isn’t available")
-        withTimeout(TIMEOUT_MS) { start().await() }
+        val task = order.submit(start)
+        withTimeout(TIMEOUT_MS) { task.await() }
     } catch (e: TimeoutCancellationException) {
-        throw BackupUnavailableException("Google Play services didn’t answer")
+        throw BackupNoAnswerException()
     } catch (e: CancellationException) {
         throw e
     } catch (e: BackupUnavailableException) {
@@ -428,12 +547,40 @@ class GmsBlockStore(context: Context) : BlockStorePort {
         }
     }
 
-    private companion object {
+    internal companion object {
         const val TIMEOUT_MS = 20_000L
 
         /** Only answers; unlike a failed API call it shows the user nothing. */
-        fun playServicesUsable(context: Context): Boolean = runCatching {
+        private fun playServicesUsable(context: Context): Boolean = runCatching {
             GoogleApiAvailability.getInstance().isGooglePlayServicesAvailable(context) == ConnectionResult.SUCCESS
         }.getOrDefault(false)
+    }
+}
+
+/**
+ * Keeps Block Store calls in the order they were made. A timed-out or
+ * cancelled wait doesn't cancel the Play services `Task` behind it, so a
+ * store can still land after its caller gave up — and after the entry lock
+ * was released, over a delete made next (#244 R1-M2). So no call is sent
+ * while an earlier one is still running: it waits for that one first, and
+ * throws [BackupNoAnswerException] (sending nothing) if it doesn't finish
+ * within [timeoutMs].
+ */
+internal class TaskOrder(private val timeoutMs: Long) {
+    private val lock = Mutex()
+    private var last: Task<*>? = null
+
+    suspend fun <T> submit(start: () -> Task<T>): Task<T> = lock.withLock {
+        val previous = last
+        if (previous != null && !previous.isComplete &&
+            withTimeoutOrNull(timeoutMs) { previous.settled() } == null
+        ) {
+            throw BackupNoAnswerException("Google Play services is still busy with an earlier request")
+        }
+        start().also { last = it }
+    }
+
+    private suspend fun Task<*>.settled() = suspendCancellableCoroutine { cont ->
+        addOnCompleteListener({ it.run() }) { cont.resume(Unit) }
     }
 }

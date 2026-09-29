@@ -288,11 +288,16 @@ class Vault internal constructor(
      * like an import — which asks for the fingerprint, face or screen
      * lock. A phone without a screen lock can't restore this way (nothing
      * would ask), so it's refused there before the phrase is even read.
+     * The entry is then reconciled, which writes it once from this phone.
      */
     suspend fun restore(auth: VaultAuthenticator, backup: PhraseBackup) {
         if (!store.deviceSecure()) throw RestoreNeedsScreenLockException()
         val mnemonic = backup.read() ?: throw BackupMissingException()
         create(mnemonic, auth, imported = true, restored = true)
+        // An entry that came from another phone carries that phone's cloud flag, not this
+        // one's: have this install write it for itself now rather than at the next
+        // foreground (#244 R1-M1). Quiet: the wallet is restored either way.
+        backup.reconcileQuietly()
     }
 
     /** Writes [updated] (same sealed phrase, new flags) and publishes it. Call under [ops]. */

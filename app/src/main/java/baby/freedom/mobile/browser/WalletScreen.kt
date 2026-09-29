@@ -1191,7 +1191,7 @@ fun WalletScreen(
                 confirmRemove = false
                 run("remove the wallet") {
                     var backupLeft: String? = null
-                    var backupNotThis = false
+                    var backupKept: PhraseBackup.DeleteIfOf? = null
                     // With backup on, only this wallet's phrase is ever stored, and an
                     // unattributed entry is deleted as "that backup, whichever wallet it's
                     // of". Otherwise whose the entry is is checked again under the lock:
@@ -1214,7 +1214,13 @@ fun WalletScreen(
                             // to restore or delete, and the page says so.
                             if (entry != null) {
                                 try {
-                                    if (deleteAny) entry.delete() else if (entry.deleteIfOf(ownAddress) == null) backupNotThis = true
+                                    if (deleteAny) {
+                                        entry.delete()
+                                    } else {
+                                        backupKept = entry.deleteIfOf(ownAddress).takeIf {
+                                            it == PhraseBackup.DeleteIfOf.OTHER_WALLET || it == PhraseBackup.DeleteIfOf.UNKNOWN
+                                        }
+                                    }
                                 } catch (e: BackupUnavailableException) {
                                     backupLeft = e.message
                                 }
@@ -1236,16 +1242,29 @@ fun WalletScreen(
                         error = "The wallet is removed, but its Google backup couldn’t be deleted ($it). " +
                             "Delete it below once Google Play services answers."
                     }
-                    if (backupNotThis) {
-                        error = "The wallet is removed. The Google backup on this phone isn’t one of this " +
-                            "wallet as far as Freedom can tell, so it was kept: restore or delete it below."
-                    }
+                    backupKeptMessage(backupKept)?.let { error = it }
                     backupCheck++
                 }
             },
             onDismiss = { confirmRemove = false },
         )
     }
+}
+
+/**
+ * What Remove wallet says about a Google backup it kept because it wasn't
+ * seen to be this wallet's: another wallet's, or one whose owner couldn't
+ * be told (this wallet's address not read yet, or the entry unreadable),
+ * which may well be this wallet's (#244 R1-M3). Null when none was kept.
+ */
+internal fun backupKeptMessage(kept: PhraseBackup.DeleteIfOf?): String? = when (kept) {
+    PhraseBackup.DeleteIfOf.OTHER_WALLET ->
+        "The wallet is removed. The Google backup on this phone is another wallet’s, so it was kept: " +
+            "restore or delete it below."
+    PhraseBackup.DeleteIfOf.UNKNOWN ->
+        "The wallet is removed. Freedom couldn’t tell whether the Google backup on this phone is this " +
+            "wallet’s, so it was kept: restore or delete it below."
+    else -> null
 }
 
 @Composable

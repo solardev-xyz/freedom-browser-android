@@ -48,8 +48,15 @@ class PhraseBackupTest {
         var storeGate: CompletableDeferred<Unit>? = null
         val storing = CompletableDeferred<Unit>()
 
+        /**
+         * When set, [store] throws [BackupNoAnswerException] as a timed-out Play services
+         * write does: after writing the entry when true (it landed late), before when false.
+         */
+        var storeNoAnswer: Boolean? = null
+
         override suspend fun store(key: String, bytes: ByteArray, backupToCloud: Boolean) {
             reach()
+            if (storeNoAnswer == false) throw BackupNoAnswerException()
             storeGate?.let {
                 storing.complete(Unit)
                 it.await()
@@ -57,6 +64,7 @@ class PhraseBackupTest {
             stores++
             // Copied, as Play services parcels it: the caller zeroes its own array.
             entries[key] = Stored(bytes.copyOf(), backupToCloud)
+            if (storeNoAnswer == true) throw BackupNoAnswerException()
         }
 
         override suspend fun retrieve(key: String): ByteArray? {
@@ -431,20 +439,122 @@ class PhraseBackupTest {
         )
         val mine = phrase.seed().let { seed -> EthAccounts.address(seed, 0).also { seed.fill(0) } }
         backup.store(other)
-        assertEquals(null, backup.exclusive { deleteIfOf(mine) })
+        assertEquals(PhraseBackup.DeleteIfOf.OTHER_WALLET, backup.exclusive { deleteIfOf(mine) })
         assertTrue("another wallet's backup stays", blockStore.entry() != null)
-        assertEquals(null, backup.exclusive { deleteIfOf(null) })
+        // #244 R1-M3: no address to compare isn't "another wallet's".
+        assertEquals(PhraseBackup.DeleteIfOf.UNKNOWN, backup.exclusive { deleteIfOf(null) })
         assertTrue("with no address to compare, nothing is deleted", blockStore.entry() != null)
         // This wallet's own (any case) is deleted, and known follows.
         backup.store(phrase)
-        assertEquals(true, backup.exclusive { deleteIfOf(mine.lowercase()) })
+        assertEquals(PhraseBackup.DeleteIfOf.DELETED, backup.exclusive { deleteIfOf(mine.lowercase()) })
         assertNull(blockStore.entry())
         assertEquals(PhraseBackup.Status.NONE, backup.known.value?.status)
-        assertEquals(false, backup.exclusive { deleteIfOf(mine) })
-        // An unreadable entry isn't known to be this wallet's either.
+        assertEquals(PhraseBackup.DeleteIfOf.NO_ENTRY, backup.exclusive { deleteIfOf(mine) })
+        // An unreadable entry isn't known to be this wallet's either, nor another's.
         blockStore.entries[PhraseBackup.KEY] = FakeBlockStore.Stored("junk".toByteArray(), true)
-        assertEquals(null, backup.exclusive { deleteIfOf(mine) })
+        assertEquals(PhraseBackup.DeleteIfOf.UNKNOWN, backup.exclusive { deleteIfOf(mine) })
         assertTrue(blockStore.entry() != null)
+    }
+
+    @Test
+    fun `Remove wallet says another wallet's only when it is, and not knowing otherwise`() {
+        // #244 R1-M3.
+        val other = baby.freedom.mobile.browser.backupKeptMessage(PhraseBackup.DeleteIfOf.OTHER_WALLET)!!
+        val unknown = baby.freedom.mobile.browser.backupKeptMessage(PhraseBackup.DeleteIfOf.UNKNOWN)!!
+        assertTrue(other.contains("another wallet’s"))
+        assertFalse(unknown.contains("another wallet’s"))
+        assertTrue(unknown.contains("couldn’t tell whether"))
+        assertNull(baby.freedom.mobile.browser.backupKeptMessage(PhraseBackup.DeleteIfOf.DELETED))
+        assertNull(baby.freedom.mobile.browser.backupKeptMessage(PhraseBackup.DeleteIfOf.NO_ENTRY))
+        assertNull(baby.freedom.mobile.browser.backupKeptMessage(null))
+    }
+
+    @Test
+    fun `an entry this install didn't write is rewritten once, for this phone`() = runBlocking {
+        // #244 R1-M1: the payload's cloud flag is what the old phone asked for; what the entry
+        // restored here is flagged with, Block Store doesn't say.
+        blockStore.store(PhraseBackup.KEY, PhraseBackup.encode(PhraseBackup.Entry(phrase.phrase(), cloud = true)), false)
+        val fresh = PhraseBackup(blockStore)
+        assertEquals(PhraseBackup.Status.CLOUD, fresh.reconcile())
+        assertEquals("rewritten from this phone", 2, blockStore.stores)
+        assertTrue(blockStore.entry()!!.cloud)
+        assertEquals(PhraseBackup.Status.CLOUD, fresh.reconcile())
+        assertEquals("only once", 2, blockStore.stores)
+        // Deleted and written again elsewhere (a later restore onto this phone): again once.
+        fresh.delete()
+        blockStore.store(PhraseBackup.KEY, PhraseBackup.encode(PhraseBackup.Entry(phrase.phrase(), cloud = true)), false)
+        fresh.reconcile()
+        assertEquals(4, blockStore.stores)
+        assertTrue(blockStore.entry()!!.cloud)
+    }
+
+    @Test
+    fun `the written-here marker is kept in a file, and a bad one reads as not written`() = runBlocking {
+        val dir = java.nio.file.Files.createTempDirectory("written-here").toFile()
+        try {
+            val file = java.io.File(dir, "m")
+            val marker = WrittenHere.InFile(file)
+            assertNull(marker.get())
+            marker.set(true)
+            assertEquals(true, WrittenHere.InFile(file).get())
+            marker.set(false)
+            assertEquals(false, marker.get())
+            marker.set(null)
+            assertNull(marker.get())
+            file.writeText("junk")
+            assertNull(marker.get())
+        } finally {
+            dir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `restoring an entry from another phone writes it from this one`() = runBlocking {
+        // #244 R1-M1: a new phone's install has never written the entry D2D or cloud restore gave it.
+        blockStore.store(PhraseBackup.KEY, PhraseBackup.encode(PhraseBackup.Entry(phrase.phrase(), cloud = true)), false)
+        val v = vault()
+        v.restore(auth, PhraseBackup(blockStore))
+        assertEquals(2, blockStore.stores)
+        assertTrue(blockStore.entry()!!.cloud)
+    }
+
+    @Test
+    fun `a Turn on Play services doesn't answer can't leave a cloud backup behind`() = runBlocking {
+        // #244 R1-M2: a Task can't be cancelled, so a timed-out store can still land.
+        val v = vault()
+        v.create(phrase, auth, imported = false)
+        blockStore.storeNoAnswer = true // it landed after all
+        try {
+            v.enableCloudBackup(auth, backup)
+            fail("no answer, yet on")
+        } catch (_: BackupNoAnswerException) {
+        }
+        assertNull("the late write was taken back", blockStore.entry())
+        assertFalse(info(v)!!.cloudBackup)
+        assertEquals(PhraseBackup.Known(PhraseBackup.Status.NONE, null), backup.known.value)
+
+        // It never landed: another wallet's kept backup stays.
+        val other = Mnemonic.parse("legal winner thank year wave sausage worth useful legal winner thank yellow")
+        blockStore.storeNoAnswer = null
+        backup.store(other)
+        blockStore.storeNoAnswer = false
+        try {
+            v.enableCloudBackup(auth, backup)
+            fail("no answer, yet on")
+        } catch (_: BackupNoAnswerException) {
+        }
+        assertEquals(other.words, backup.read()!!.words)
+
+        // This wallet's own backup, there before: left as it was, not deleted.
+        blockStore.storeNoAnswer = null
+        backup.store(phrase)
+        blockStore.storeNoAnswer = true
+        try {
+            v.enableCloudBackup(auth, backup)
+            fail("no answer, yet on")
+        } catch (_: BackupNoAnswerException) {
+        }
+        assertEquals(phrase.words, backup.read()!!.words)
     }
 
     @Test
