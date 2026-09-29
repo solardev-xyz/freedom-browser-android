@@ -103,7 +103,12 @@ internal enum class BackupHeld {
     /** In the Google account's backup, end-to-end encrypted: a copy off this phone. */
     CLOUD,
 
-    /** Google backup is on, but Block Store hasn't said where the entry stands. */
+    /**
+     * Block Store hasn't said whether it holds this wallet's phrase (not
+     * reconciled yet, Play services not answering, or whose the entry is
+     * can't be told). With backup on, there should be one; with it off,
+     * one kept from before may be there all the same (#244 R3-F2).
+     */
     UNKNOWN,
 }
 
@@ -117,7 +122,10 @@ internal fun backupHeld(on: Boolean, known: PhraseBackup.Known?, walletAddress: 
     when (backupEntryIsThisWallet(on, known, walletAddress)) {
         true -> if (known?.status == PhraseBackup.Status.CLOUD) BackupHeld.CLOUD else BackupHeld.DEVICE
         false -> BackupHeld.NONE
-        null -> if (on) BackupHeld.UNKNOWN else BackupHeld.NONE
+        // Not "none" with backup off either: an entry of this wallet kept after Remove
+        // wallet may be there, and Remove wallet must neither deny it nor hide its
+        // delete box while Play services is slow to say (#244 R3-F2).
+        null -> BackupHeld.UNKNOWN
     }
 
 /** Account 0 of the wallet's own seed: what a Block Store entry's phrase is compared against. */

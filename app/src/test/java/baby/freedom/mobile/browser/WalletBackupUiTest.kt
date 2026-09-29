@@ -60,7 +60,12 @@ class WalletBackupUiTest {
         assertEquals(BackupHeld.DEVICE, backupHeld(true, Known(Status.PAUSED, A), A))
         assertEquals(BackupHeld.NONE, backupHeld(true, Known(Status.NONE, null), A))
         assertEquals(BackupHeld.UNKNOWN, backupHeld(true, null, A))
-        assertEquals(BackupHeld.NONE, backupHeld(false, null, A))
+        // Backup off and Block Store not heard from: a kept entry of this wallet may be
+        // there, so Remove wallet must not say there's no copy, nor hide its delete box (#244 R3-F2).
+        assertEquals(BackupHeld.UNKNOWN, backupHeld(false, null, A))
+        assertEquals(BackupHeld.UNKNOWN, backupHeld(false, Known(Status.CLOUD, null), A))
+        assertEquals(BackupHeld.UNKNOWN, backupHeld(false, Known(Status.CLOUD, B), null))
+        assertEquals(BackupHeld.NONE, backupHeld(false, Known(Status.NONE, null), A))
         assertEquals(BackupHeld.CLOUD, backupHeld(false, Known(Status.CLOUD, A), A))
         assertEquals(BackupHeld.NONE, backupHeld(false, Known(Status.CLOUD, B), A))
     }

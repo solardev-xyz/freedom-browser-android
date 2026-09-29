@@ -203,6 +203,9 @@ class PhraseBackup(
      * entry back to the app freely); the phrase is only held for the rewrite.
      */
     suspend fun reconcile(): Status = writes.withLock {
+        // Whether this run has started rewriting the entry: from then on, what [known]
+        // said before may be wrong (a cloud entry now device-only).
+        var rewriting = false
         try {
             val bytes = blockStore.retrieve(KEY)
             if (bytes == null) {
@@ -212,7 +215,10 @@ class PhraseBackup(
             try {
                 val entry = decode(bytes)
                 val encrypted = blockStore.endToEndEncryptionAvailable()
-                if (entry.cloud != encrypted) write(entry.phrase, cloud = encrypted)
+                if (entry.cloud != encrypted) {
+                    rewriting = true
+                    write(entry.phrase, cloud = encrypted)
+                }
                 val status = if (encrypted) Status.CLOUD else Status.PAUSED
                 val address = try {
                     addressOf(Mnemonic.parse(entry.phrase))
@@ -224,6 +230,12 @@ class PhraseBackup(
             } finally {
                 bytes.fill(0)
             }
+        } catch (e: CancellationException) {
+            // The caller went away (the wallet page's effect restarts on every lock and
+            // unlock, #244 R3-F3): that says nothing about the entry, so what was known
+            // stands — unless this run began rewriting it, and then it's no longer known.
+            if (rewriting) _known.value = null
+            throw e
         } catch (e: Throwable) {
             // Not known any more: nothing may go on claiming the phrase is in Google.
             _known.value = null

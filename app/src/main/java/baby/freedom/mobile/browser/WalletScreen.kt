@@ -189,7 +189,7 @@ internal fun walletBackupDetail(cloudBackup: Boolean, known: PhraseBackup.Known?
         } else {
             "This phone (a Google backup kept from before, paused)"
         }
-        held == BackupHeld.UNKNOWN -> "This phone, and Google once it answers"
+        held == BackupHeld.UNKNOWN && cloudBackup -> "This phone, and Google once it answers"
         else -> "This phone only"
     }
 }
@@ -207,9 +207,9 @@ internal fun removeWalletKeepsBackupText(backup: BackupHeld): String = when (bac
         "Google account, until the phone has a screen lock and a Google account again. This page " +
         "offers to restore it."
     BackupHeld.UNKNOWN -> "This deletes the wallet and its recovery phrase from this phone. Google Play " +
-        "services isn’t answering, so it isn’t known whether its Google backup is still there; if it " +
-        "is, it stays, and this page offers to restore it. Without the recovery phrase written down, " +
-        "this wallet may be gone for good."
+        "services hasn’t answered, so it isn’t known whether a Google backup of this wallet is there; " +
+        "if it is, it stays, and this page offers to restore it. Without the recovery phrase written " +
+        "down, this wallet may be gone for good."
     BackupHeld.NONE -> "This deletes the wallet and its recovery phrase from this phone. There is no " +
         "undo and no copy anywhere else: without the recovery phrase written down, this wallet and " +
         "everything in it are gone for good."

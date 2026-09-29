@@ -43,8 +43,16 @@ class PhraseBackupTest {
             return e2ee
         }
 
+        /** When set, [store] waits here first, as a slow Play services write would. */
+        var storeGate: CompletableDeferred<Unit>? = null
+        val storing = CompletableDeferred<Unit>()
+
         override suspend fun store(key: String, bytes: ByteArray, backupToCloud: Boolean) {
             reach()
+            storeGate?.let {
+                storing.complete(Unit)
+                it.await()
+            }
             stores++
             // Copied, as Play services parcels it: the caller zeroes its own array.
             entries[key] = Stored(bytes.copyOf(), backupToCloud)
@@ -137,6 +145,31 @@ class PhraseBackupTest {
         reconciling.join()
         deleting.join()
         assertNull("the deleted entry came back", blockStore.entry())
+    }
+
+    @Test
+    fun `a cancelled reconcile leaves what was known, unless it had begun rewriting the entry`() = runBlocking {
+        // #244 R3-F3: the wallet page's effect restarts on every lock and unlock.
+        backup.store(phrase)
+        val before = backup.known.value!!
+        assertEquals(PhraseBackup.Status.CLOUD, before.status)
+        CompletableDeferred<Unit>().also { blockStore.retrieveGate = it }
+        val reading = launch { backup.reconcile() }
+        blockStore.retrieving.await()
+        reading.cancel()
+        reading.join()
+        blockStore.retrieveGate = null
+        assertEquals("a cancelled read changes nothing", before, backup.known.value)
+
+        // Cancelled while rewriting the entry device-only: whether the write landed isn't known.
+        blockStore.e2ee = false
+        CompletableDeferred<Unit>().also { blockStore.storeGate = it }
+        val rewriting = launch { backup.reconcile() }
+        blockStore.storing.await()
+        rewriting.cancel()
+        rewriting.join()
+        blockStore.storeGate = null
+        assertNull("still claimed in the Google account", backup.known.value)
     }
 
     @Test
@@ -363,10 +396,35 @@ class PhraseBackupTest {
         val restored = (v.state.value as Vault.State.Unlocked).info
         assertTrue(restored.cloudBackup)
         assertTrue(restored.cloudBackupOffered)
-        assertTrue("restored like an import: no reminder", restored.backedUp)
+        assertFalse("the entry is no written-down copy: the reminder follows it (#244 R3-F1)", restored.backedUp)
         assertTrue(v.withSeed { it.contentEquals(seed) })
         // The entry stays: it's this wallet's backup now.
         assertTrue(blockStore.entry() != null)
+    }
+
+    @Test
+    fun `a restored wallet's reminder comes back once its backup is paused or off`() = runBlocking {
+        // #244 R3-F1: restoring must not mark the phrase backed up for good.
+        val address = phrase.seed().let { seed -> EthAccounts.address(seed, 0).also { seed.fill(0) } }
+        backup.store(phrase)
+        val v = vault()
+        v.restore(auth, backup)
+        fun line() = baby.freedom.mobile.browser.walletAttentionLine(v.state.value, backup.known.value, address)
+        backup.reconcile()
+        assertNull("in the Google account: not the only copy", line())
+        // End-to-end encryption went: the cloud copy is taken down, this phone holds the only one.
+        blockStore.e2ee = false
+        backup.reconcile()
+        assertEquals(baby.freedom.mobile.browser.BACKUP_REMINDER, line())
+        blockStore.e2ee = true
+        backup.reconcile()
+        assertNull(line())
+        // Turned off: the entry is deleted.
+        v.disableCloudBackup(backup)
+        assertEquals(baby.freedom.mobile.browser.BACKUP_REMINDER, line())
+        // Seeing the phrase is what ends it for good.
+        v.markBackedUp()
+        assertNull(line())
     }
 
     @Test

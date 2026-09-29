@@ -166,7 +166,11 @@ class Vault internal constructor(
     /**
      * Seals [mnemonic] as the device's one wallet and leaves it unlocked.
      * A phrase created here has not been backed up yet; an [imported]
-     * one evidently has, so it gets no backup reminder.
+     * one evidently has, so it gets no backup reminder. A [restored] one
+     * hasn't, as far as this phone knows: its only other copy is the
+     * Block Store entry it came from, so the reminder goes by where that
+     * entry stands (hidden while it's in the Google account, back once
+     * backup is paused or off — #244 R3-F1), like a created wallet's.
      */
     suspend fun create(
         mnemonic: Mnemonic,
@@ -196,9 +200,11 @@ class Vault internal constructor(
                 plain.fill(0)
             }
             // A restored wallet's phrase is still the Block Store entry it came from: backup on.
+            // Not "backed up" though — that entry is no written-down copy, and may be paused or
+            // deleted later (#244 R3-F1).
             val record = VaultRecord(
                 protection, sealing.strongBox, iv, sealed,
-                backedUp = imported || restored,
+                backedUp = imported && !restored,
                 cloudBackup = restored,
                 cloudBackupOffered = restored,
             )
