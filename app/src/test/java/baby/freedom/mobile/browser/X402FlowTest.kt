@@ -306,4 +306,19 @@ class X402FlowTest {
         flow.detected(tab, a, "terms")
         assertFalse(flow.committed(tab, a)!!.allowanceMayPay(origin))
     }
+
+    @Test
+    fun `R6-M1 the site's form POST redirected back to it can't spend it, its 307 hops unseen`() {
+        // pay.example POST /x → 307 evil.example (POST, no callback) → 303 pay.example/a:
+        // only the last hop is reported, all on the paying origin.
+        flow.mainFrameRequested(tab, "https://pay.example/x", "POST", flow.epoch(tab), origin)
+        flow.redirected(tab, a)
+        flow.detected(tab, a, "terms")
+        assertFalse(flow.committed(tab, a)!!.allowanceMayPay(origin))
+        // A GET's same-site redirect still pays (its hops all reach shouldOverrideUrlLoading).
+        flow.navigationStarted(tab, byUser = false, fromOrigin = origin, url = b)
+        flow.redirected(tab, a)
+        flow.detected(tab, a, "terms")
+        assertTrue(flow.committed(tab, a)!!.allowanceMayPay(origin))
+    }
 }

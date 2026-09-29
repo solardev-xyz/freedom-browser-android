@@ -41,7 +41,11 @@ import java.util.concurrent.ConcurrentHashMap
  * where another origin's server sent it next, so a 402 at the end of a
  * chain that ever left the paying origin — the user's address on
  * `evil.example` redirected to `pay.example`, or `pay.example`'s link to
- * `evil.example` redirected back — asks (#218 R5-M1).
+ * `evil.example` redirected back — asks (#218 R5-M1). A form POST that
+ * was redirected asks too, wherever it went: a 307/308 keeps the POST,
+ * and WebView shows such a hop to neither `shouldOverrideUrlLoading` nor
+ * the interceptor, so a chain `pay.example` → 307 → `evil.example` → 303
+ * → `pay.example` would look as if it never left (#218 R6-M1).
  *
  * Main thread only, but for [epoch].
  */
@@ -67,7 +71,7 @@ internal class X402Flow<D : Any>(
      * URL it has been at — its start's, if known, and each server
      * redirect's (#218 R5-M1).
      */
-    private class Initiator(val byUser: Boolean, val fromOrigin: String?) {
+    private class Initiator(val byUser: Boolean, val fromOrigin: String?, val post: Boolean) {
         val hopOrigins = mutableListOf<String?>()
     }
 
@@ -140,7 +144,12 @@ internal class X402Flow<D : Any>(
         detections.remove(tab)
         retries[tab]?.hops?.add(target)
         // Where it goes next is the redirecting server's say (#218 R5-M1).
-        initiators[tab]?.hopOrigins?.add(originOf(target))
+        initiators[tab]?.hopOrigins?.let { hops ->
+            // A redirected POST may have passed through hops no callback shows (a 307/308
+            // keeps the POST): somewhere unknown, which no allowance's origin is (#218 R6-M1).
+            if (initiators[tab]?.post == true) hops.add(null)
+            hops.add(originOf(target))
+        }
     }
 
     /**
@@ -160,10 +169,12 @@ internal class X402Flow<D : Any>(
      * A navigation of [tab]'s to [url] (null: a Reload or Back/Forward,
      * of an entry already in the tab's history) began, [byUser] (their
      * address, Reload, Back/Forward) or from the page of [fromOrigin] on
-     * screen (its link, script or form). Called after [superseded].
+     * screen (its link, script or form); [post]: it's a form POST (or
+     * other non-GET), whose 307/308 redirects no callback shows. Called
+     * after [superseded].
      */
-    fun navigationStarted(tab: Long, byUser: Boolean, fromOrigin: String?, url: String?) {
-        initiators[tab] = Initiator(byUser, fromOrigin).also { if (url != null) it.hopOrigins.add(originOf(url)) }
+    fun navigationStarted(tab: Long, byUser: Boolean, fromOrigin: String?, url: String?, post: Boolean = false) {
+        initiators[tab] = Initiator(byUser, fromOrigin, post).also { if (url != null) it.hopOrigins.add(originOf(url)) }
     }
 
     /**
@@ -185,7 +196,7 @@ internal class X402Flow<D : Any>(
             return
         }
         superseded(tab)
-        navigationStarted(tab, byUser = false, fromOrigin = fromOrigin, url = url)
+        navigationStarted(tab, byUser = false, fromOrigin = fromOrigin, url = url, post = true)
     }
 
     /** `onPageFinished` for [url] on [tab]: a 402 noted for it that hasn't committed never will. */
