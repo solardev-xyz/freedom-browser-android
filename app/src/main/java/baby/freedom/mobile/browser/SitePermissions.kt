@@ -392,7 +392,7 @@ suspend fun askAndroidPermissionOnScreen(
 }
 
 /** Which modal prompt the on-screen tab shows now; see [modalPromptTurn]. */
-enum class PromptTurn { None, SitePermission, DownloadOffer, Radicle }
+enum class PromptTurn { None, SitePermission, DownloadOffer, Radicle, Ethereum }
 
 /**
  * Orders the prompts a page can raise on its tab: the site-permission
@@ -419,8 +419,11 @@ enum class PromptTurn { None, SitePermission, DownloadOffer, Radicle }
  * - The Radicle prompt keeps the turn once it has it ([radicleHasTurn])
  *   like the offer does; waiting, it comes after the permission prompt
  *   and before the offer.
+ * - The `window.ethereum` approval sheet (#110, [ethereumWaiting]) keeps
+ *   the turn once it has it ([ethereumHasTurn]) too; waiting, it comes
+ *   after the Radicle prompt and before the offer.
  *
- * [permissionWaiting] and [radicleWaiting] are already gated on the page
+ * [permissionWaiting], [radicleWaiting] and [ethereumWaiting] are already gated on the page
  * being on screen (no full-screen panel over it, the Downloads list
  * included); the offer keeps its own rules (see `BrowserScreen`).
  */
@@ -431,12 +434,16 @@ fun modalPromptTurn(
     androidDialogUp: Boolean,
     radicleWaiting: Boolean = false,
     radicleHasTurn: Boolean = false,
+    ethereumWaiting: Boolean = false,
+    ethereumHasTurn: Boolean = false,
 ): PromptTurn = when {
     androidDialogUp -> PromptTurn.None
     offerWaiting && offerHasTurn -> PromptTurn.DownloadOffer
     radicleWaiting && radicleHasTurn -> PromptTurn.Radicle
+    ethereumWaiting && ethereumHasTurn -> PromptTurn.Ethereum
     permissionWaiting -> PromptTurn.SitePermission
     radicleWaiting -> PromptTurn.Radicle
+    ethereumWaiting -> PromptTurn.Ethereum
     offerWaiting -> PromptTurn.DownloadOffer
     else -> PromptTurn.None
 }

@@ -40,11 +40,26 @@ import androidx.compose.ui.unit.dp
 import baby.freedom.mobile.chains.Chain
 import baby.freedom.mobile.chains.rpc.ChainTrust
 import baby.freedom.mobile.ui.isLight
+import baby.freedom.mobile.wallet.SendQuote
 import baby.freedom.mobile.wallet.TokenAmounts
 import baby.freedom.mobile.wallet.TokenBalance
 import baby.freedom.mobile.wallet.TokenRegistry
 import baby.freedom.mobile.wallet.WalletAccountList
 import baby.freedom.mobile.wallet.WalletAccountStore
+
+/**
+ * What the Nonce row says under the number, on both screens that review a
+ * [SendQuote] — the wallet's Send page and a site's transaction sheet
+ * (#215 R6-F1): how the nonce was read, and, when this send takes the
+ * place of one the user stopped tracking, that only one of the two can go
+ * through.
+ */
+internal fun nonceDetail(quote: SendQuote): String =
+    quote.replaces?.let { "${trustLabel(quote.nonceTrust)} · ${replacesNote(it)}" } ?: trustLabel(quote.nonceTrust)
+
+/** [SendQuote.replaces] in words: the stopped send [hash] this one outbids. */
+internal fun replacesNote(hash: String): String =
+    "replaces the send you stopped tracking ($hash), at a higher fee: only one of the two can go through"
 
 /** How a balance was checked, in a word or two under the amount (#104). */
 internal fun trustLabel(trust: ChainTrust): String = when (trust.level) {

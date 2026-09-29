@@ -108,7 +108,8 @@ internal fun sendStatusText(status: SendStatus): Pair<String, String> {
         is SendStatus.Stage.Confirmed -> "Sent" to "Mined in block ${"%,d".format(java.util.Locale.ROOT, s.block)}" +
             (s.feePaid?.let { " · fee ${feeText(it, chain)}" } ?: "")
         is SendStatus.Stage.Reverted -> "Failed on chain" to "Mined in block ${"%,d".format(java.util.Locale.ROOT, s.block)}, " +
-            "but the transfer itself failed, so nothing arrived. The network fee" +
+            (if (status.quote.request.dapp != null) "but the contract refused the transaction, so it changed nothing. The network fee"
+            else "but the transfer itself failed, so nothing arrived. The network fee") +
             (s.feePaid?.let { " (${feeText(it, chain)})" } ?: "") + " was still paid."
         SendStatus.Stage.Unconfirmed -> "Not mined yet" to "No receipt after ${WalletSender.CONFIRM_TIMEOUT_MS / 60_000} minutes. " +
             "It may still go through; the explorer shows where it stands."
@@ -485,10 +486,7 @@ private fun SendReviewSection(
         ReviewRow(
             "Nonce",
             quote.tx.nonce.toString(),
-            detail = quote.replaces?.let {
-                "${trustLabel(quote.nonceTrust)} · replaces the send you stopped tracking ($it), at a higher fee: " +
-                    "only one of the two can go through"
-            } ?: trustLabel(quote.nonceTrust),
+            detail = nonceDetail(quote),
         )
         Spacer(Modifier.height(4.dp))
         Text(
@@ -579,8 +577,10 @@ private fun SendStatusSection(
             }
         }
         Spacer(Modifier.height(8.dp))
+        // A site's transaction (#110): who asked for it, whatever it carries.
+        request.dapp?.let { ReviewRow("Requested by", permissionOriginDisplay(it.origin)) }
         ReviewRow("Amount", "${SendAmounts.exact(request.amount, request.token.decimals)} ${request.token.symbol} on ${request.chain.name}", mono = true)
-        ReviewRow("To", null, address = request.to)
+        ReviewRow(if (request.dapp != null) "Contract" else "To", null, address = request.to)
         status.hash?.let { hash ->
             Column(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
                 Text("Transaction", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -599,7 +599,8 @@ private fun SendStatusSection(
             stage is SendStatus.Stage.Failed && stage.mayHaveGone -> Button(onClick = onRetry, modifier = Modifier.fillMaxWidth()) {
                 Text("Try again")
             }
-            stage is SendStatus.Stage.Failed -> Button(onClick = onReviewAgain, modifier = Modifier.fillMaxWidth()) {
+            // A site's transaction is the site's to ask for again, not this page's.
+            stage is SendStatus.Stage.Failed && request.dapp == null -> Button(onClick = onReviewAgain, modifier = Modifier.fillMaxWidth()) {
                 Text("Review again")
             }
             stage == SendStatus.Stage.Unconfirmed -> Button(onClick = onCheckAgain, modifier = Modifier.fillMaxWidth()) {
@@ -672,7 +673,8 @@ internal fun SendEntrySection(status: SendStatus?, enabled: Boolean, onOpen: () 
             title = if (status == null) "Send" else sendStatusText(status).first,
             subtitle = status?.let {
                 val r = it.quote.request
-                "${SendAmounts.exact(r.amount, r.token.decimals)} ${r.token.symbol} on ${r.chain.name}"
+                val what = "${SendAmounts.exact(r.amount, r.token.decimals)} ${r.token.symbol} on ${r.chain.name}"
+                r.dapp?.let { d -> "$what, for ${permissionOriginDisplay(d.origin)}" } ?: what
             } ?: "Native currency or tokens, from this account",
             style = PageRowStyle.Inset,
             leadingIcon = Icons.AutoMirrored.Filled.Send,

@@ -96,7 +96,23 @@ object Recipients {
         NodeIdentity.checksum(ByteArray(20) { i -> lowerHex.substring(i * 2, i * 2 + 2).toInt(16).toByte() })
 }
 
-/** What the user asked for: [amount] base units of [token] from [from] to [to] on [chain]. */
+/**
+ * A site's `eth_sendTransaction` (#110): the site that asked ([origin],
+ * its provider origin key), the call data it wants sent, and the gas
+ * limit it named, if any.
+ */
+class DappCall(val origin: String, val data: ByteArray, val gasLimit: BigInteger?) {
+    init {
+        require(gasLimit == null || gasLimit.signum() > 0) { "gas limit" }
+    }
+}
+
+/**
+ * What the user asked for: [amount] base units of [token] from [from] to
+ * [to] on [chain] — or, with [dapp], what a site asked the wallet to
+ * send: [amount] of the native currency (which may be none) and the
+ * site's call data to [to].
+ */
 data class SendRequest(
     val chain: Chain,
     val token: Token,
@@ -104,20 +120,27 @@ data class SendRequest(
     /** EIP-55 checksummed ([Recipients.parse]). */
     val to: String,
     val amount: BigInteger,
+    val dapp: DappCall? = null,
 ) {
     init {
         require(token.chainId == chain.id) { "the token is on another chain" }
-        require(amount.signum() > 0) { "nothing to send" }
+        if (dapp == null) {
+            require(amount.signum() > 0) { "nothing to send" }
+        } else {
+            require(token.isNative) { "a site's transaction carries the native currency" }
+            require(amount.signum() >= 0) { "negative value" }
+        }
     }
 
     /**
      * What goes on chain: native passes straight through; an ERC-20 is a
-     * call to its contract with `transfer(to, amount)` and no value.
+     * call to its contract with `transfer(to, amount)` and no value; a
+     * site's transaction is its own call data, as it asked.
      */
-    fun call(): Triple<String, BigInteger, ByteArray> = if (token.address == null) {
-        Triple(to, amount, ByteArray(0))
-    } else {
-        Triple(token.address, BigInteger.ZERO, Erc20.transferData(to, amount))
+    fun call(): Triple<String, BigInteger, ByteArray> = when {
+        dapp != null -> Triple(to, amount, dapp.data)
+        token.address == null -> Triple(to, amount, ByteArray(0))
+        else -> Triple(token.address, BigInteger.ZERO, Erc20.transferData(to, amount))
     }
 }
 
@@ -639,7 +662,8 @@ class WalletSender internal constructor(
             val nonce = async { nonces.next(from, chainId) }
             val fees = async { gas.fees(chainId) }
             val held = tokenBalance.await() ?: native.await()
-            if (held.signum() == 0) throw SendException("This account has no ${token.symbol}")
+            // A site's call may carry no value: the fee check below says what's missing then.
+            if (held.signum() == 0 && request.dapp == null) throw SendException("This account has no ${token.symbol}")
             if (!all && request.amount > held) {
                 throw SendException(
                     "Not enough ${token.symbol}: this account has ${SendAmounts.exact(held, token.decimals)} ${token.symbol}",
@@ -660,7 +684,7 @@ class WalletSender internal constructor(
             var tx = EthTransaction(
                 chainId = chainId,
                 nonce = nonce.await().value,
-                gasLimit = gasLimit(estimate, data.isNotEmpty()),
+                gasLimit = gasLimit(estimate, data.isNotEmpty(), site = request.dapp?.gasLimit),
                 to = to,
                 value = value,
                 data = data,
@@ -677,7 +701,7 @@ class WalletSender internal constructor(
                 tx = tx.copy(value = rest)
             }
             if (tx.maxFee + tx.value > nativeBalance) {
-                val what = if (token.isNative) "the amount and the network fee" else "the network fee"
+                val what = if (token.isNative && tx.value.signum() > 0) "the amount and the network fee" else "the network fee"
                 throw SendException("Not enough $symbol for $what (up to $fee): $has")
             }
             SendQuote(sending, tx, nativeBalance, tokenBalance.await(), clock(), nonce.await().trust, replacing?.hash)
@@ -717,13 +741,7 @@ class WalletSender internal constructor(
      */
     fun submit(quote: SendQuote, sign: (EthTransaction) -> EthTransaction.Signed): Submit {
         synchronized(this) {
-            // The last process's send isn't read back yet: it may be one this would sign beside.
-            if (!restoredYet) return Submit.BUSY
-            val current = _status.value
-            if (current?.stage == SendStatus.Stage.Signing || current?.stage == SendStatus.Stage.Broadcasting) return Submit.BUSY
-            // One that may have gone out is settled by Try again (or given up on with
-            // discard, which makes the next send replace it), never by signing another beside it.
-            if (current?.unresolved == true) return Submit.BUSY
+            if (busyLocked()) return Submit.BUSY
             if (isStale(quote)) return Submit.STALE
             job?.cancel()
             signed = null
@@ -748,6 +766,19 @@ class WalletSender internal constructor(
             }
         }
         return Submit.STARTED
+    }
+
+    /** Whether [submit] would answer [Submit.BUSY] to any quote right now. */
+    fun busy(): Boolean = synchronized(this) { busyLocked() }
+
+    private fun busyLocked(): Boolean {
+        // The last process's send isn't read back yet: it may be one this would sign beside.
+        if (!restoredYet) return true
+        val current = _status.value
+        if (current?.stage == SendStatus.Stage.Signing || current?.stage == SendStatus.Stage.Broadcasting) return true
+        // One that may have gone out is settled by Try again (or given up on with
+        // discard, which makes the next send replace it), never by signing another beside it.
+        return current?.unresolved == true
     }
 
     /** After a [SendStatus.Stage.Failed] that [SendStatus.Stage.Failed.mayHaveGone]: the same bytes again. */
@@ -952,6 +983,21 @@ class WalletSender internal constructor(
         internal fun gasLimit(estimate: BigInteger, hasData: Boolean): BigInteger =
             if (!hasData && estimate == TRANSFER_GAS) estimate else estimate * BigInteger.valueOf(120) / BigInteger.valueOf(100)
 
+        /**
+         * The gas limit for a send with [site]'s `gas` (a dApp's
+         * `eth_sendTransaction`, #110), if it named one: taken as long as it
+         * covers the estimate, but never more than [SITE_GAS_CEILING] times
+         * it — a site's `0xffffffffffff` would otherwise price the "up to"
+         * fee past any balance, or past the block gas limit so no node
+         * takes it (#215 R6-M2). Below the estimate it's ignored, as the
+         * send would run out of gas.
+         */
+        internal fun gasLimit(estimate: BigInteger, hasData: Boolean, site: BigInteger?): BigInteger =
+            site?.takeIf { it >= estimate }?.min(estimate * SITE_GAS_CEILING) ?: gasLimit(estimate, hasData)
+
+        /** How many times the estimate a site's own `gas` may be ([gasLimit]). */
+        private val SITE_GAS_CEILING = BigInteger.valueOf(3)
+
         /** A receipt's outcome, or null if it's not a receipt this can read. */
         internal fun outcomeOf(receipt: JSONObject): SendStatus.Stage? {
             val block = receipt.optString("blockNumber").hexOrNull()?.toLong() ?: return null
@@ -983,8 +1029,12 @@ class WalletSender internal constructor(
                 e.insufficientFunds -> "Not enough $symbol to pay for this transaction."
                 e.data != null || e.code == ChainRpcException.EXECUTION_REVERTED || REVERTED.containsMatchIn(e.rpcMessage) -> {
                     val reason = e.data?.let(::revertReason) ?: REVERTED.find(e.rpcMessage)?.let { e.rpcMessage.substring(it.range.last + 1).trim(' ', ':') }
-                    val who = if (request.token.isNative) "The recipient" else "The ${request.token.symbol} contract"
-                    "$who would refuse this transfer" + (reason?.takeIf { it.isNotBlank() }?.let { ": ${clip(it)}" } ?: ".")
+                    val who = when {
+                        request.dapp != null -> "The contract would refuse this transaction"
+                        request.token.isNative -> "The recipient would refuse this transfer"
+                        else -> "The ${request.token.symbol} contract would refuse this transfer"
+                    }
+                    who + (reason?.takeIf { it.isNotBlank() }?.let { ": ${clip(it)}" } ?: ".")
                 }
                 else -> "The network couldn’t price this transaction: ${clip(e.rpcMessage)}"
             }
