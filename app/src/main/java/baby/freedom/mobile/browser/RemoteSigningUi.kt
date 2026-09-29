@@ -449,7 +449,7 @@ private fun SendTransactionBody(request: OpenLvSession.Request.SendTransaction) 
     )
     Spacer(Modifier.height(4.dp))
     Text(
-        "The phone signs and sends this itself and follows it in the wallet. Only the fee the network actually charges is paid.",
+        "The phone signs and sends this itself and follows it in the wallet. " + feeFootnote(quote.tx),
         style = MaterialTheme.typography.bodySmall,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
     )

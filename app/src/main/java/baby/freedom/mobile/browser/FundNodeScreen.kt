@@ -441,8 +441,8 @@ private fun FundReview(
             ReviewRow("Nonce", quote.tx.nonce.toString(), detail = nonceDetail(quote))
             Spacer(Modifier.height(4.dp))
             Text(
-                "A real transaction on Gnosis Chain that can't be undone. Only the fee the network actually charges " +
-                    "is paid; if the pool can't give at least the xBZZ above, it reverts and only that fee is lost.",
+                "A real transaction on Gnosis Chain that can't be undone. " + feeFootnote(quote.tx) +
+                    " If the pool can't give at least the xBZZ above, it reverts and only the fee is lost.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )

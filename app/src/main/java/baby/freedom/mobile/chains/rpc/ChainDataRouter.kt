@@ -88,12 +88,19 @@ class ChainDataRouter internal constructor(
     /**
      * Read [method] ([READ_METHODS]) on chain [chainId]. Throws
      * [ChainRpcException] (or `CancellationException`), never anything else.
+     *
+     * [agreeOn], when given, is applied to every endpoint's answer before
+     * the quorum compares them, and its output is the result: the part of
+     * an answer the caller needs, so fields providers shape differently
+     * (an empty `reward` present or absent, extra blob fields) don't cost
+     * an agreement on the part that matters. It must not throw.
      */
     suspend fun request(
         chainId: Long,
         method: String,
         params: JSONArray = JSONArray(),
         context: RoutingContext = RoutingContext.WALLET,
+        agreeOn: ((Any?) -> Any?)? = null,
     ): ChainDataResult {
         if (method !in READ_METHODS) throw ChainRpcException.UnsupportedMethod(method)
         val chain = chain(chainId)
@@ -118,6 +125,7 @@ class ChainDataRouter internal constructor(
                 val outcome: Any? = when (source) {
                     ChainSource.MYOTIS, ChainSource.COLIBRI ->
                         verified(source, chain, method, normalized, waitMs)
+                            .let { o -> if (agreeOn != null && o is ChainDataResult) o.copy(result = agreeOn(o.result)) else o }
                     ChainSource.QUORUM -> {
                         val members = quorumMembers(pool, policy.quorumK)
                         if (members.size < policy.quorumM) {
@@ -132,7 +140,7 @@ class ChainDataRouter internal constructor(
                                 // down. Legs nobody will reuse are cancelled
                                 // (never counted as failures) once the quorum
                                 // gives up.
-                                call(url, body, policy.timeoutMs)
+                                call(url, body, policy.timeoutMs, agreeOn)
                             }
                             quorum = run
                             when (val v = run.await(waitMs)) {
@@ -145,7 +153,7 @@ class ChainDataRouter internal constructor(
                             }
                         }
                     }
-                    ChainSource.DIRECT -> direct(chain, pool, body, policy, quorum) { nodeError = it }
+                    ChainSource.DIRECT -> direct(chain, pool, body, policy, quorum, agreeOn) { nodeError = it }
                 }
                 if (outcome is ChainDataResult) {
                     Log.i(TAG, "[chain-data] $method chain=$chainId via ${source.key} ${clock() - t0}ms " +
@@ -319,6 +327,7 @@ class ChainDataRouter internal constructor(
         body: String,
         policy: ChainAccessPolicy,
         quorum: QuorumRun?,
+        agreeOn: ((Any?) -> Any?)?,
         onNodeError: (ChainRpcException.Rpc) -> Unit,
     ): Any {
         quorum?.directCandidate()?.let { c ->
@@ -344,7 +353,7 @@ class ChainDataRouter internal constructor(
         var last: String? = null
         for (url in pool) {
             if (url in asked) continue
-            when (val leg = call(url, body, policy.timeoutMs)) {
+            when (val leg = call(url, body, policy.timeoutMs, agreeOn)) {
                 is Leg.Value -> return ChainDataResult(leg.result, direct(chain, url))
                 is Leg.Deterministic -> throw leg.error
                 is Leg.NodeError -> {
@@ -378,7 +387,7 @@ class ChainDataRouter internal constructor(
      * cancellation. Only a transport or envelope failure counts against
      * the RPC — a JSON-RPC error is the node answering per spec.
      */
-    private suspend fun call(url: String, body: String, timeoutMs: Long): Leg {
+    private suspend fun call(url: String, body: String, timeoutMs: Long, agreeOn: ((Any?) -> Any?)? = null): Leg {
         val text = try {
             transport.post(url, body, timeoutMs)
         } catch (e: CancellationException) {
@@ -394,7 +403,7 @@ class ChainDataRouter internal constructor(
         return when (val env = JsonRpc.parse(text)) {
             is JsonRpc.Envelope.Result -> {
                 failedAt.remove(url)
-                Leg.Value(env.value)
+                Leg.Value(if (agreeOn != null) agreeOn(env.value) else env.value)
             }
             is JsonRpc.Envelope.Error ->
                 if (env.error.deterministic) Leg.Deterministic(env.error) else Leg.NodeError(env.error)

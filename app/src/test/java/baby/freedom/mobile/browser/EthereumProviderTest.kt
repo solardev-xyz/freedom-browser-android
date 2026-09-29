@@ -98,6 +98,8 @@ class EthereumProviderTest {
         val outcomes = ArrayDeque<EthereumProvider.Submitted>()
         var prepareError: String? = null
         var busy = false
+        /** What the send is priced at. */
+        var fees: EthTransaction.Fees = EthTransaction.Fees.Eip1559(BigInteger.valueOf(2_000_000_000), BigInteger.ONE)
         override fun busy() = busy
         override suspend fun prepare(request: SendRequest): SendQuote {
             prepareError?.let { throw SendException(it) }
@@ -110,7 +112,7 @@ class EthereumProviderTest {
                 to = to,
                 value = value,
                 data = data,
-                fees = EthTransaction.Fees.Eip1559(BigInteger.valueOf(2_000_000_000), BigInteger.ONE),
+                fees = fees,
             )
             val trust = ChainTrust(ChainTrust.Level.VERIFIED, ChainSource.QUORUM, emptyList(), emptyList(), emptyList(), 3, 2, null)
             return SendQuote(request, tx, BigInteger.TEN.pow(18), null, 0, trust)
@@ -1102,6 +1104,37 @@ class EthereumProviderTest {
     }
 
     @Test
+    fun `a covered call at a fee above what one RPC's word may set asks, and says why (#233)`() {
+        grantTransferRule()
+        val gwei = BigInteger.valueOf(1_000_000_000)
+        // A tip past the cap (only a trusted base fee lets one through), or a high legacy price.
+        for (high in listOf(
+            EthTransaction.Fees.Eip1559(BigInteger.valueOf(200) * gwei, BigInteger.valueOf(60) * gwei),
+            EthTransaction.Fees.Legacy(BigInteger.valueOf(5_000) * gwei),
+        )) {
+            sends.fees = high
+            asks.clear()
+            answer = { EthAnswer.Rejected }
+            assertEquals(4001, code(call("eth_sendTransaction", tx("to" to token, "data" to transferData))))
+            val sheet = asks.single() as EthAsk.SendTransaction
+            assertTrue(sheet.ruled)
+        }
+        val high = autoApproveRuledNote(replaces = false, highFee = true, locked = false)
+        assertTrue(high.contains("network fee is higher"))
+        assertFalse(high.contains("locked"))
+        // Locked as well: both reasons, so the unlock prompt on confirm isn't unexplained (R1-M1).
+        val both = autoApproveRuledNote(replaces = false, highFee = true, locked = true)
+        assertTrue(both, both.contains("network fee is higher") && both.contains("the wallet is locked"))
+        // At the cap it still goes out silently.
+        sends.fees = EthTransaction.Fees.Eip1559(BigInteger.valueOf(10) * gwei, BigInteger.valueOf(5) * gwei)
+        asks.clear()
+        answer = { error("no sheet expected") }
+        sends.outcomes += sent(3)
+        assertEquals(sent(3).hash, ok(call("eth_sendTransaction", tx("to" to token, "data" to transferData))))
+        assertTrue(asks.isEmpty())
+    }
+
+    @Test
     fun `a covered call still asks while the wallet is locked`() {
         grantTransferRule()
         wallet.open = false
@@ -1113,8 +1146,10 @@ class EthereumProviderTest {
         assertNull(locked.quote.replaces)
         // Confirming there doesn't grant it a second time.
         assertEquals(1, rules.rules.size)
-        assertTrue(autoApproveRuledNote(replaces = false).contains("the wallet is locked"))
-        assertTrue(autoApproveRuledNote(replaces = true).contains("a send you stopped tracking"))
+        assertTrue(autoApproveRuledNote(replaces = false, highFee = false, locked = true).contains("the wallet is locked"))
+        assertTrue(autoApproveRuledNote(replaces = true, highFee = false, locked = true).contains("a send you stopped tracking"))
+        // No reason is claimed that the caller didn't state (R2-M2).
+        assertFalse(autoApproveRuledNote(replaces = false, highFee = false, locked = false).contains("locked"))
     }
 
     @Test
