@@ -215,7 +215,8 @@ object Eip712 {
     /**
      * [s] with every character that could hide or rearrange what's around it
      * — line breaks and other controls, bidi overrides and other format
-     * characters, line/paragraph separators — written as a visible `\n` or
+     * characters, line/paragraph separators, a combining mark stacked past
+     * [MessageSigning.MAX_STACKED_MARKS] on one letter — written as a visible `\n` or
      * `\u202E` escape, the way [MessageSigning.readableText] refuses them
      * for `personal_sign`. Everything else is shown as is.
      */
@@ -223,10 +224,9 @@ object Eip712 {
         if (!MessageSigning.anyHides(s)) return s
         val b = StringBuilder(s.length + 16)
         // Per code point: a supplementary format character (a tag character) is two Chars.
-        var prev = -1
+        val scan = MessageSigning.Scan()
         s.codePoints().forEach { c ->
-            val hidden = MessageSigning.hides(c, prev)
-            prev = c
+            val hidden = scan.hides(c)
             when {
                 !hidden -> b.appendCodePoint(c)
                 c == '\n'.code -> b.append("\\n")

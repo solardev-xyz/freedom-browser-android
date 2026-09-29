@@ -12,7 +12,7 @@
  *  - page → app: {type: 'ready'}
  *                {type: 'status', sid, status: 'connecting' | 'connected' | 'disconnected' | 'failed', message?}
  *                {type: 'request', sid, id, method, params}
- *  - app → page: {type: 'start', sid, uri} | {type: 'stop'}
+ *  - app → page: {type: 'start', sid, uri, max} | {type: 'stop'}
  *                {type: 'response', sid, id, result} | {type: 'response', sid, id, error: {code, message}}
  *
  * `sid` is the app's number for the session a message belongs to, so
@@ -38,7 +38,7 @@ const ALLOWED_METHODS = new Set([
 
 const post = (message) => channel.postMessage(JSON.stringify(message));
 
-let current = null; // {sid, session, pending: Map<id, resolve>}
+let current = null; // {sid, session, pending: Map<id, resolve>, max}
 let nextId = 1;
 
 function requestHandler(state) {
@@ -50,9 +50,21 @@ function requestHandler(state) {
       });
     }
     const id = nextId++;
+    let text;
+    try {
+      text = JSON.stringify({ type: 'request', sid: state.sid, id, method, params: Array.isArray(params) ? params : [] });
+    } catch {
+      text = null; // a cycle or a BigInt: not JSON, so nothing the app could read
+    }
+    // Over the app's limit (`max`, in UTF-16 units as both sides count
+    // them) the app would drop it unread; answer here instead of hanging.
+    if (text == null || text.length > state.max) {
+      const message = text == null ? 'The request isn’t valid JSON.' : 'The request is too large for the phone.';
+      return Promise.resolve({ error: { code: -32600, message } });
+    }
     return new Promise((resolve) => {
       state.pending.set(id, resolve);
-      post({ type: 'request', sid: state.sid, id, method, params: Array.isArray(params) ? params : [] });
+      channel.postMessage(text);
     });
   };
 }
@@ -87,9 +99,9 @@ function stop() {
   if (state.session) Promise.resolve(state.session.close()).catch(() => {});
 }
 
-async function start(sid, uri) {
+async function start(sid, uri, max) {
   stop();
-  const state = { sid, session: null, pending: new Map(), unsubscribe: null };
+  const state = { sid, session: null, pending: new Map(), unsubscribe: null, max };
   current = state;
   const report = (status, message) => {
     if (current === state) post({ type: 'status', sid, status, message });
@@ -144,7 +156,7 @@ channel.addEventListener('message', (event) => {
   }
   switch (message?.type) {
     case 'start':
-      start(message.sid, String(message.uri));
+      start(message.sid, String(message.uri), Number.isFinite(message.max) ? message.max : 0);
       break;
     case 'stop':
       stop();

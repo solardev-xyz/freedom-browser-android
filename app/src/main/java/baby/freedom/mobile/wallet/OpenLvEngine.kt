@@ -65,14 +65,26 @@ interface OpenLvEngine {
     fun respond(sid: Int, id: Int, response: OpenLvResponse)
 }
 
-/** One message from `assets/openlv/shim.js`. Our own code, but read strictly: anything malformed is dropped. */
+/**
+ * One message from `assets/openlv/shim.js`. Our own code, but read
+ * strictly: anything malformed is dropped — except a request whose
+ * session and ID can be read, which is [Refused] so the shim's promise,
+ * and the peer waiting on it, get an error instead of hanging until the
+ * session ends.
+ */
 internal sealed interface OpenLvShimMessage {
     data object Ready : OpenLvShimMessage
     data class Link(val sid: Int, val link: OpenLvLink) : OpenLvShimMessage
     data class Request(val sid: Int, val id: Int, val method: String, val params: JSONArray) : OpenLvShimMessage
+    data class Refused(val sid: Int, val id: Int) : OpenLvShimMessage
 
     companion object {
-        /** The most a request may carry: a typed-data payload, with room for its JSON quoting. */
+        /**
+         * The most a request may carry: a typed-data payload, with room for
+         * its JSON quoting. The shim is told it on `start` and answers a
+         * longer request itself with an error rather than send it, since
+         * nothing over it can be read far enough here to be answered.
+         */
         const val MAX_MESSAGE = 2 * Eip712.MAX_JSON
 
         fun parse(data: String): OpenLvShimMessage? {
@@ -100,8 +112,10 @@ internal sealed interface OpenLvShimMessage {
                 "request" -> {
                     val sid = o.intOrNull("sid") ?: return null
                     val id = o.intOrNull("id") ?: return null
-                    val method = o.optString("method").takeIf { it.isNotEmpty() && it.length <= 64 } ?: return null
-                    Request(sid, id, method, o.optJSONArray("params") ?: JSONArray())
+                    val method = o.optString("method").takeIf { it.isNotEmpty() && it.length <= 64 } ?: return Refused(sid, id)
+                    val params = o.opt("params")
+                    if (params != null && params !is JSONArray) return Refused(sid, id)
+                    Request(sid, id, method, (params as JSONArray?) ?: JSONArray())
                 }
                 else -> null
             }
@@ -149,7 +163,7 @@ class WebViewOpenLvEngine(context: Context) : OpenLvEngine {
     override fun start(sid: Int, uri: String) {
         currentSid = sid
         if (ready) {
-            post(JSONObject().put("type", "start").put("sid", sid).put("uri", uri))
+            post(JSONObject().put("type", "start").put("sid", sid).put("uri", uri).put("max", OpenLvShimMessage.MAX_MESSAGE))
             return
         }
         queued = sid to uri
@@ -178,7 +192,7 @@ class WebViewOpenLvEngine(context: Context) : OpenLvEngine {
     @SuppressLint("SetJavaScriptEnabled")
     private fun boot() {
         if (!WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER)) {
-            bootFailed("This phone’s Android System WebView is too old to connect to desktop Freedom. Update it and try again.")
+            bootFailed("This phone’s Android System WebView is too old to connect with a pairing code. Update it and try again.")
             return
         }
         val view = WebView(app)
@@ -245,6 +259,8 @@ class WebViewOpenLvEngine(context: Context) : OpenLvEngine {
                 }
                 listener?.onRequest(message.sid, message.id, message.method, message.params)
             }
+            is OpenLvShimMessage.Refused ->
+                respond(message.sid, message.id, OpenLvResponse.Error(INVALID_REQUEST, "The phone couldn’t read this request."))
         }
     }
 
@@ -274,5 +290,6 @@ class WebViewOpenLvEngine(context: Context) : OpenLvEngine {
         const val SHELL_URL = "https://$ASSET_HOST/assets/openlv/shell.html"
         const val CHANNEL = "freedomOpenLV"
         const val BOOT_TIMEOUT_MS = 15_000L
+        const val INVALID_REQUEST = -32600
     }
 }

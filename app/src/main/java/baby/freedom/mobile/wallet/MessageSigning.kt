@@ -38,9 +38,9 @@ internal object MessageSigning {
         } catch (e: java.nio.charset.CharacterCodingException) {
             return null
         }
-        var prev = -1
+        val scan = Scan()
         val invisible = text.codePoints().anyMatch { c ->
-            (hides(c, prev) && c != '\n'.code && c != '\t'.code && c != '\r'.code).also { prev = c }
+            scan.hides(c) && c != '\n'.code && c != '\t'.code && c != '\r'.code
         }
         return text.takeIf { !invisible && it.isNotBlank() }
     }
@@ -64,8 +64,18 @@ internal object MessageSigning {
      * Judged per code point, never per UTF-16 `Char`: half of a surrogate
      * pair is typed SURROGATE, which would let every supplementary format
      * character through.
+     *
+     * [marksBefore] is how many combining marks (non-spacing or enclosing)
+     * stand straight before [c]. A mark past the [MAX_STACKED_MARKS]th in a
+     * row hides: marks draw over their base without advancing, and a long
+     * enough stack ("Zalgo" text) paints ink far above and below its line —
+     * Compose doesn't clip glyphs to the line box — over the rows around it
+     * on the sheet, where it can blot out or overprint a spender or amount.
+     * Real text stacks two or three (Vietnamese, Hebrew points, Arabic
+     * harakat, a keycap emoji's selector and enclosing square).
      */
-    fun hides(c: Int, prev: Int = -1): Boolean = when {
+    fun hides(c: Int, prev: Int = -1, marksBefore: Int = 0): Boolean = when {
+        isMark(c) && marksBefore >= MAX_STACKED_MARKS -> true
         c == 0xFE0E || c == 0xFE0F -> prev < 0 || hides(prev) || Character.isWhitespace(prev)
         else -> Character.isISOControl(c) || Character.getType(c) == Character.FORMAT.toInt() ||
             Character.getType(c) == Character.SURROGATE.toInt() || c == 0x2028 || c == 0x2029 ||
@@ -74,9 +84,33 @@ internal object MessageSigning {
             c == 0x034F || c == 0x17B4 || c == 0x17B5
     }
 
-    /** Whether any code point of [s] [hides], each judged after the one before it. */
+    /** Combining marks allowed in a row on one base before the next one [hides]. */
+    const val MAX_STACKED_MARKS = 3
+
+    /** A non-spacing or enclosing combining mark: drawn over the character before it, not beside it. */
+    fun isMark(c: Int): Boolean = Character.getType(c).let {
+        it == Character.NON_SPACING_MARK.toInt() || it == Character.ENCLOSING_MARK.toInt()
+    }
+
+    /**
+     * [hides] over a string, a code point at a time in order: carries the
+     * previous code point and the length of the combining-mark run it ends.
+     */
+    class Scan {
+        private var prev = -1
+        private var marks = 0
+
+        fun hides(c: Int): Boolean {
+            val hidden = hides(c, prev, marks)
+            marks = if (isMark(c)) marks + 1 else 0
+            prev = c
+            return hidden
+        }
+    }
+
+    /** Whether any code point of [s] [hides], each judged after the ones before it. */
     fun anyHides(s: String): Boolean {
-        var prev = -1
-        return s.codePoints().anyMatch { c -> hides(c, prev).also { prev = c } }
+        val scan = Scan()
+        return s.codePoints().anyMatch { scan.hides(it) }
     }
 }

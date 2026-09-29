@@ -33,11 +33,22 @@ class OpenLvShimMessageTest {
             """{"type":"status","sid":1,"status":"sideways"}""",
             """{"type":"request","sid":1,"method":"eth_chainId"}""",
             """{"type":"request","sid":1,"id":1.5,"method":"eth_chainId"}""",
-            """{"type":"request","sid":1,"id":1,"method":""}""",
             "[".repeat(50_000),
             "x".repeat(OpenLvShimMessage.MAX_MESSAGE + 1),
         )) {
             assertNull(bad.take(40), OpenLvShimMessage.parse(bad))
+        }
+    }
+
+    @Test
+    fun `a request with a readable session and ID is refused, not dropped`() {
+        // R4-F3: dropped, the shim's promise and the peer waiting on it would hang until the session ends.
+        for (bad in listOf(
+            """{"type":"request","sid":1,"id":7,"method":""}""",
+            """{"type":"request","sid":1,"id":7,"method":"${"m".repeat(65)}"}""",
+            """{"type":"request","sid":1,"id":7,"method":"personal_sign","params":{"a":1}}""",
+        )) {
+            assertEquals(bad.take(60), OpenLvShimMessage.Refused(1, 7), OpenLvShimMessage.parse(bad))
         }
     }
 }

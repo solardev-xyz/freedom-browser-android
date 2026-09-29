@@ -6,6 +6,7 @@ import baby.freedom.mobile.ens.toHex
 import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
@@ -260,6 +261,32 @@ class Eip712Test {
         assertNull(MessageSigning.readableText("I ❤\uFE0F\uFE0F\uFE0E it".toByteArray()))
         assertNull(MessageSigning.readableText("\uFE0Fstart".toByteArray()))
         assertNull(MessageSigning.readableText("a \uFE0F b".toByteArray()))
+    }
+
+    @Test
+    fun `a stack of combining marks past three on one letter is escaped`() {
+        // R4-F1: "Zalgo" text paints far above and below its line, over the rows around it.
+        val zalgo = "ok" + (0x0300..0x0305).joinToString("") { String(Character.toChars(it)) } + " spender"
+        assertTrue(MessageSigning.anyHides(zalgo))
+        assertNull(MessageSigning.readableText(zalgo.toByteArray()))
+        assertEquals("ok\u0300\u0301\u0302\\u0303\\u0304\\u0305 spender", Eip712.visible(zalgo))
+        // Combining letters (U+0363-036F), enclosing marks (Me) and supplementary marks count the same.
+        assertTrue(MessageSigning.anyHides("a\u0363\u0364\u0365\u0366"))
+        assertTrue(MessageSigning.anyHides("1\u20DD\u20DD\u20DD\u20DD"))
+        assertTrue(MessageSigning.anyHides("a" + String(Character.toChars(0x1D167)).repeat(4)))
+        // The run is per letter: three on each of many letters is still text.
+        val three = "a\u0300\u0301\u0302".repeat(50)
+        assertEquals(three, MessageSigning.readableText(three.toByteArray()))
+        assertEquals(three, Eip712.visible(three))
+        // Real text that stacks: decomposed Vietnamese, Hebrew points, a keycap emoji.
+        for (text in listOf(
+            java.text.Normalizer.normalize("Tiếng Việt: Người ở đâu?", java.text.Normalizer.Form.NFD),
+            "\u05E9\u05C1\u05BC\u05B8\u05DC\u05D5\u05B9\u05DD",
+            "Press 1\uFE0F\u20E3",
+        )) {
+            assertFalse(text, MessageSigning.anyHides(text))
+            assertEquals(text, MessageSigning.readableText(text.toByteArray()))
+        }
     }
 
     @Test
