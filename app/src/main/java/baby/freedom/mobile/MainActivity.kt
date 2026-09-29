@@ -37,8 +37,10 @@ import baby.freedom.mobile.browser.OnchainApps
 import baby.freedom.mobile.browser.PhraseClipboard
 import baby.freedom.mobile.browser.RadApi
 import baby.freedom.mobile.browser.RadicleClient
+import baby.freedom.mobile.browser.Publisher
 import baby.freedom.mobile.browser.StampClient
 import baby.freedom.mobile.browser.RadicleProviders
+import baby.freedom.mobile.browser.SwarmProviders
 import baby.freedom.mobile.browser.RadicleControls
 import baby.freedom.mobile.browser.TorControls
 import baby.freedom.mobile.browser.TorRouting
@@ -323,6 +325,9 @@ class MainActivity : ComponentActivity() {
             }
         }
 
+        // A publish staged in the cache (#118) by a run that ended mid-upload.
+        lifecycleScope.launch(Dispatchers.IO) { Publisher.sweepStaging(this@MainActivity) }
+
         // The nodes follow the wallet's identity (#77): a wallet created,
         // imported or removed changes what the Swarm node boots as, and a
         // bound `:node` restarts it. (Unbound, it reads it at its next start.)
@@ -405,6 +410,8 @@ class MainActivity : ComponentActivity() {
         RadicleProviders.init(this)
         // `window.ethereum` (#110): the dApp provider behind every normal tab.
         EthereumProviders.init(this)
+        // `window.swarm` (#120): publishing, chunks and feeds.
+        SwarmProviders.init(this)
         X402Payments.init(this)
         lifecycleScope.launch {
             settings.radicleEnabled.collect {

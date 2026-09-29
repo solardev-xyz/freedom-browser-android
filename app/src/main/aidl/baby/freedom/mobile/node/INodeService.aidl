@@ -128,10 +128,11 @@ interface INodeService {
 
     /**
      * Postage stamps (#116) and the chequebook (#117): `method` is one of
-     * `status`, `quote`, `extendQuote` (no transaction) or `buy`,
-     * `extend`, `deposit` (SPEND, from the stamp and chequebook screens'
-     * confirmation only), or `connect` (#115: registers a batch the wallet
-     * bought for the node; a first one also sets up the chequebook) — with
+     * `status`, `quote`, `extendQuote`, `discover`
+     * (no transaction) or `buy`, `extend`, `deposit` (SPEND, from the stamp
+     * and chequebook screens' confirmation only), or `connect` (#115:
+     * registers a batch the wallet bought for the node; a first one also
+     * sets up the chequebook) — with
      * `argsJson` its arguments. Returns the read end of a pipe the answer
      * (ant's JSON, or `{"error": …}`) is written to, like [radicleCall].
      * A spend that has started runs to the end even if the read end is

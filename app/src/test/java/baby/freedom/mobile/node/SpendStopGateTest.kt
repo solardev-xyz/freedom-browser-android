@@ -14,6 +14,69 @@ class SpendStopGateTest {
     private val gate = SpendStopGate()
 
     @Test
+    fun `a discover and a spend never overlap`() {
+        assertTrue(gate.beginDiscover())
+        assertTrue(gate.discoverRunning)
+        assertFalse("a spend's permit must not open under a running discover", gate.begin())
+        assertFalse("one discover at a time", gate.beginDiscover())
+        gate.endDiscover()
+        assertFalse(gate.discoverRunning)
+        assertTrue(gate.begin())
+        assertFalse("a discover must not run under a spend's open permit", gate.beginDiscover())
+        gate.end()
+        assertTrue(gate.beginDiscover())
+        gate.endDiscover()
+    }
+
+    @Test
+    fun `a buy or a discover counts as work that may reload the gateway, an extend or deposit doesn't`() {
+        assertFalse(gate.gatewayWorkRunning)
+        assertTrue(gate.begin())
+        assertFalse("an extend or deposit sets up no chequebook", gate.gatewayWorkRunning)
+        assertTrue(gate.begin(buy = true))
+        assertTrue(gate.gatewayWorkRunning)
+        gate.end()
+        assertTrue("the buy still runs", gate.gatewayWorkRunning)
+        gate.end(buy = true)
+        assertFalse(gate.gatewayWorkRunning)
+        assertEquals(0, gate.spendsRunning)
+        assertTrue(gate.beginDiscover())
+        assertTrue(gate.gatewayWorkRunning)
+        gate.endDiscover()
+        assertFalse(gate.gatewayWorkRunning)
+    }
+
+    @Test
+    fun `a discover's outcome is kept for the search that asked, and only once it ended`() {
+        assertEquals(SpendStopGate.DiscoverStatus(running = false, outcome = null), gate.discoverStatus("a"))
+        assertTrue(gate.beginDiscover())
+        assertEquals(SpendStopGate.DiscoverStatus(running = true, outcome = null), gate.discoverStatus("a"))
+        gate.endDiscover("a", """{"error":"rpc down"}""")
+        assertEquals(SpendStopGate.DiscoverStatus(running = false, outcome = """{"error":"rpc down"}"""), gate.discoverStatus("a"))
+        // Another search's outcome is not this one's.
+        assertEquals(null, gate.discoverStatus("b").outcome)
+        assertEquals(null, gate.discoverStatus(null).outcome)
+        // A later search replaces it, and hides it while running.
+        assertTrue(gate.beginDiscover())
+        assertEquals(null, gate.discoverStatus("a").outcome)
+        gate.endDiscover("b", """{"registered":[]}""")
+        assertEquals(null, gate.discoverStatus("a").outcome)
+        assertEquals("""{"registered":[]}""", gate.discoverStatus("b").outcome)
+        // One that ended without an outcome (or an id) leaves none.
+        assertTrue(gate.beginDiscover())
+        gate.endDiscover("c", null)
+        assertEquals(null, gate.discoverStatus("c").outcome)
+        assertEquals(null, gate.discoverStatus("b").outcome)
+    }
+
+    @Test
+    fun `a discover doesn't count as a spend for a stop`() {
+        assertTrue(gate.beginDiscover())
+        assertFalse(gate.requestStop())
+        gate.endDiscover()
+    }
+
+    @Test
     fun `with no spend running a stop happens now`() {
         assertFalse(gate.requestStop())
         assertFalse(gate.shouldStopNow())

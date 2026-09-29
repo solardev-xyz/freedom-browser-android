@@ -965,6 +965,8 @@ fun BrowserScreen(
         if (source == SubmitSource.User) RadicleProviders.allowPrompts(target.id)
         // And a rejected `window.ethereum` sheet's (#110).
         if (source == SubmitSource.User) EthereumProviders.allowPrompts(target.id)
+        // And a rejected `window.swarm` sheet's (#120).
+        if (source == SubmitSource.User) SwarmProviders.allowPrompts(target.id)
         // Nor is it a load a restore put back over its page (#185 R4-F1).
         if (source == SubmitSource.User) target.userNavigated()
         // And the load it schedules is theirs: its redirects may end in
@@ -2003,10 +2005,12 @@ fun BrowserScreen(
             // Publish setup's identity step (#114): the wallet page opens
             // over the node page (it's composed after it).
             onOpenWallet = { showWallet = true },
-            // The fund-and-buy transaction's explorer page (#115), as the wallet's.
+            // A published page (#118), or the fund-and-buy transaction's
+            // explorer page (#115): a new tab in front, never a private one,
+            // with the pages the node page was opened over closed too.
             onOpenUrl = { url ->
-                showSettings = false
                 showNode = false
+                showSettings = false
                 tabs.requestOpenInNewTab?.invoke(url, false, false)
             },
             onDismiss = { showNode = false },
@@ -2143,6 +2147,7 @@ fun BrowserScreen(
     var offerHasTurn by remember(activeTabId) { mutableStateOf(false) }
     var radicleHasTurn by remember(activeTabId) { mutableStateOf(false) }
     var ethereumHasTurn by remember(activeTabId) { mutableStateOf(false) }
+    var swarmHasTurn by remember(activeTabId) { mutableStateOf(false) }
     val promptTurn = modalPromptTurn(
         permissionWaiting = pageUncovered && state.permissionPrompt != null,
         offerWaiting = tabOffers.isNotEmpty(),
@@ -2155,11 +2160,15 @@ fun BrowserScreen(
         // The `window.ethereum` approval sheets (#110), gated the same way.
         ethereumWaiting = pageUncovered && state.ethereumPrompt != null,
         ethereumHasTurn = ethereumHasTurn,
+        // The `window.swarm` approval sheets (#120), gated the same way.
+        swarmWaiting = pageUncovered && state.swarmPrompt != null,
+        swarmHasTurn = swarmHasTurn,
     )
     SideEffect {
         offerHasTurn = promptTurn == PromptTurn.DownloadOffer
         radicleHasTurn = promptTurn == PromptTurn.Radicle
         ethereumHasTurn = promptTurn == PromptTurn.Ethereum
+        swarmHasTurn = promptTurn == PromptTurn.Swarm
     }
     tabOffers.firstOrNull()?.takeIf { promptTurn == PromptTurn.DownloadOffer }?.let { offer ->
         DownloadOfferDialog(
@@ -2262,7 +2271,7 @@ fun BrowserScreen(
     // always sees the page that is asking, and it waits its turn with
     // the tab's download offer ([modalPromptTurn]).
     val pageOnScreen = pageUncovered && promptTurn != PromptTurn.DownloadOffer && promptTurn != PromptTurn.Radicle &&
-        promptTurn != PromptTurn.Ethereum
+        promptTurn != PromptTurn.Ethereum && promptTurn != PromptTurn.Swarm
     state.permissionPrompt?.takeIf { promptTurn == PromptTurn.SitePermission }?.let { prompt ->
         androidx.compose.runtime.key(prompt) { SitePermissionPrompt(prompt) }
     }
@@ -2271,6 +2280,9 @@ fun BrowserScreen(
     }
     state.ethereumPrompt?.takeIf { promptTurn == PromptTurn.Ethereum }?.let { prompt ->
         androidx.compose.runtime.key(prompt) { EthereumApprovalSheet(prompt) }
+    }
+    state.swarmPrompt?.takeIf { promptTurn == PromptTurn.Swarm }?.let { prompt ->
+        androidx.compose.runtime.key(prompt) { SwarmPromptSheet(prompt) }
     }
     // A Ledger conversation (#142) — a site's signature, a send, reading accounts — over whatever is up.
     LedgerActivityDialog()

@@ -110,14 +110,19 @@ internal class SwarmFunding(
     private var supersededSeen: Pair<String, Long>? = null
 
     /**
-     * The batch id and time ([now]) of an untrusted read that found its
-     * call reverted, not yet confirmed. Dropping the record loses the only
-     * copy of the batch id, so one public RPC's word (a buggy node, or one
-     * serving a block later reorged away) isn't enough: a trusted read
-     * drops it at once, an untrusted one only once a second read at least
-     * [confirmAfterMs] later agrees (#225 R5-F1).
+     * The batch id, receipt outcome and time ([now]) of an untrusted read
+     * that found its call mined, not yet confirmed. Either way one public
+     * RPC's word (a buggy node, or one serving a block later reorged away)
+     * isn't enough to act on: dropping a reverted record loses the only
+     * copy of the batch id (#225 R5-F1), and marking a call mined stops
+     * the lookups for good, so a call that never lands would be shown as a
+     * mined stamp forever (#225 R6-F1). A trusted read acts at once, an
+     * untrusted one only once a second read at least [confirmAfterMs]
+     * later agrees.
      */
-    private var revertedSeen: Pair<String, Long>? = null
+    private var receiptSeen: ReceiptSeen? = null
+
+    private data class ReceiptSeen(val batchId: String, val reverted: Boolean, val at: Long)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
     /**
@@ -152,9 +157,9 @@ internal class SwarmFunding(
                                 _superseded.first { it != p.batchId }
                                 wait = checkEveryMs
                             }
-                            val unconfirmed = synchronized(this@SwarmFunding) { supersededSeen?.first ?: revertedSeen?.first }
+                            val unconfirmed = synchronized(this@SwarmFunding) { supersededSeen?.first ?: receiptSeen?.batchId }
                             if (unconfirmed == p.batchId) {
-                                // Superseded or reverted at one read: confirm it as soon as it can be.
+                                // Superseded, mined or reverted at one read: confirm it as soon as it can be.
                                 delay(confirmAfterMs)
                             } else {
                                 delay(wait)
@@ -230,8 +235,9 @@ internal class SwarmFunding(
     /**
      * Looks an untracked, unmined record's call up by its hash: mined, its
      * batch is recorded as bought and connected; reverted, it bought
-     * nothing and is dropped — on a trusted read, or on two untrusted ones
-     * [confirmAfterMs] apart ([revertedSeen]); not there, it's still waiting — unless the
+     * nothing and is dropped — either on a trusted read, or on two
+     * untrusted ones [confirmAfterMs] apart ([receiptSeen]); not there,
+     * it's still waiting — unless the
      * paying account's nonce was used by another transaction, when it can
      * never be mined ([superseded]). A read that fails changes nothing.
      */
@@ -244,11 +250,18 @@ internal class SwarmFunding(
             val nonceUsed = if (p.from != null && p.nonce != null) c.minedCount(p.from) > p.nonce else false
             val read = c.receipt(hash)
             val outcome = read?.json?.let(WalletSender::outcomeOf)
-            val dropIt = outcome is SendStatus.Stage.Reverted && confirmReverted(p.batchId, read.trusted)
-            if (outcome !is SendStatus.Stage.Reverted) synchronized(this) { revertedSeen = null }
+            val settled = when (outcome) {
+                is SendStatus.Stage.Confirmed, is SendStatus.Stage.Reverted ->
+                    confirmReceipt(p.batchId, outcome is SendStatus.Stage.Reverted, read?.trusted == true)
+                else -> {
+                    synchronized(this) { receiptSeen = null }
+                    false
+                }
+            }
+            val dropIt = outcome is SendStatus.Stage.Reverted && settled
             var connectIt = false
             when (outcome) {
-                is SendStatus.Stage.Confirmed -> update { cur ->
+                is SendStatus.Stage.Confirmed -> if (settled) update { cur ->
                     if (cur?.batchId == p.batchId && !cur.mined) {
                         connectIt = true
                         cur.copy(mined = true)
@@ -268,6 +281,8 @@ internal class SwarmFunding(
                 Log.i(TAG, "the funding the wallet stopped following reverted; nothing was bought")
             } else if (outcome is SendStatus.Stage.Reverted) {
                 Log.i(TAG, "an unverified read says the funding reverted; confirming before dropping it")
+            } else if (outcome is SendStatus.Stage.Confirmed && !settled) {
+                Log.i(TAG, "an unverified read says the funding was mined; confirming before connecting it")
             }
         } catch (e: CancellationException) {
             throw e
@@ -300,21 +315,21 @@ internal class SwarmFunding(
     }
 
     /**
-     * Whether a read finding [batchId]'s call reverted, [trusted] or not,
-     * settles it ([revertedSeen]): a trusted one does at once, an
-     * untrusted one once an earlier untrusted one [confirmAfterMs] before
-     * agrees. A read with any other outcome starts over.
+     * Whether a read finding [batchId]'s call mined, [reverted] or not,
+     * [trusted] or not, settles it ([receiptSeen]): a trusted one does at
+     * once, an untrusted one once an earlier untrusted one [confirmAfterMs]
+     * before found the same. A read with any other outcome starts over.
      */
-    private fun confirmReverted(batchId: String, trusted: Boolean): Boolean = synchronized(this) {
+    private fun confirmReceipt(batchId: String, reverted: Boolean, trusted: Boolean): Boolean = synchronized(this) {
         val t = now()
-        val first = revertedSeen?.takeIf { it.first == batchId }
+        val first = receiptSeen?.takeIf { it.batchId == batchId && it.reverted == reverted }
         when {
-            trusted || (first != null && t - first.second >= confirmAfterMs) -> {
-                revertedSeen = null
+            trusted || (first != null && t - first.at >= confirmAfterMs) -> {
+                receiptSeen = null
                 true
             }
             first == null -> {
-                revertedSeen = batchId to t
+                receiptSeen = ReceiptSeen(batchId, reverted, t)
                 false
             }
             else -> false

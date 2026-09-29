@@ -307,9 +307,51 @@ class SwarmFundingTest {
         clock = 69_999
         runBlocking { f.checkChain() }
         assertEquals(false, f.pending.value?.mined)
-        // It really mined, successfully: kept, and connected.
+        // It really mined, successfully: kept, and connected once a second read agrees.
         chain.receipt = receipt("0x1")
         clock = 70_000
+        runBlocking { f.checkChain() }
+        assertEquals(false, f.pending.value?.mined)
+        clock = 100_000
+        runBlocking { f.checkChain() }
+        assertTrue(f.pending.value!!.mined)
+        assertEquals(listOf(batch), connects)
+    }
+
+    @Test
+    fun `one unverified read of a successful receipt doesn't mark the call mined, two 30 s apart do`() {
+        val chain = FakeChain()
+        var clock = 0L
+        val f = untracked(chain) { clock }
+        // A lone public RPC (buggy, or serving a block later reorged away) says it was mined.
+        chain.trusted = false
+        chain.receipt = receipt("0x1")
+        runBlocking { f.checkChain() }
+        assertEquals(false, f.pending.value?.mined)
+        assertTrue(connects.isEmpty())
+        clock = 29_999
+        runBlocking { f.checkChain() }
+        assertEquals(false, f.pending.value?.mined)
+        // The next read disagrees (not there after all): still looked up, the verdict starts over.
+        chain.receipt = null
+        clock = 30_000
+        runBlocking { f.checkChain() }
+        assertEquals(false, f.pending.value?.mined)
+        // Nor does a revert read confirm an earlier success read, or the other way round.
+        chain.receipt = receipt("0x1")
+        clock = 40_000
+        runBlocking { f.checkChain() }
+        chain.receipt = receipt("0x0")
+        clock = 70_000
+        runBlocking { f.checkChain() }
+        assertEquals(false, f.pending.value?.mined)
+        assertTrue(connects.isEmpty())
+        // Two agreeing reads 30 s apart: mined, and connected.
+        chain.receipt = receipt("0x1")
+        clock = 80_000
+        runBlocking { f.checkChain() }
+        assertEquals(false, f.pending.value?.mined)
+        clock = 110_000
         runBlocking { f.checkChain() }
         assertTrue(f.pending.value!!.mined)
         assertEquals(listOf(batch), connects)

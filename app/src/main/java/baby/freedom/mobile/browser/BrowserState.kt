@@ -369,6 +369,13 @@ class BrowserState(val id: Long, val private: Boolean = false) {
     var ethereumPrompt: EthereumPromptRequest? by mutableStateOf<EthereumPromptRequest?>(null)
         internal set
 
+    /**
+     * The `window.swarm` approval sheet this tab is waiting on (#120),
+     * or null. Owned by [SwarmProviders]; shown like [permissionPrompt].
+     */
+    var swarmPrompt: SwarmPromptRequest? by mutableStateOf<SwarmPromptRequest?>(null)
+        internal set
+
     var canGoBack by mutableStateOf(false)
         internal set
     var canGoForward by mutableStateOf(false)

@@ -510,6 +510,8 @@ internal fun PendingStampCard(
 ) {
     val connecting = spend is StampClient.Spend.Running && spend.kind == StampClient.Kind.Connect && spend.batchId == p.batchId
     val otherNode = fundingAddress(nodeInfo)?.equals(p.node, ignoreCase = true) == false
+    val discovery by StampClient.discovery.collectAsState()
+    val publishing by Publisher.state.collectAsState()
     SectionCard(title = "Stamp from your wallet") {
         DetailRow("Stamp", "${formatStampBytes(effectiveStampBytes(p.depth))}, ${daysLabel(p.days)}")
         DetailRow("Batch", shortBatchId(p.batchId), mono = true)
@@ -519,7 +521,9 @@ internal fun PendingStampCard(
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(
                     onClick = onConnect,
-                    enabled = spend !is StampClient.Spend.Running && !otherNode && stampSpendBlockedReason(nodeInfo) == null,
+                    // Not over a search or an upload: a connect may reload the gateway.
+                    enabled = StampClient.canRestartGateway(spend, discovery, publishing) &&
+                        !otherNode && stampSpendBlockedReason(nodeInfo) == null,
                 ) { Text("Connect") }
                 TextButton(onClick = onForget, enabled = !connecting) { Text("Dismiss") }
             }

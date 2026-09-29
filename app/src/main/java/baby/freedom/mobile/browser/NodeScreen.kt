@@ -18,6 +18,7 @@ import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.HourglassTop
 import androidx.compose.material.icons.filled.PowerSettingsNew
+import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -60,8 +61,8 @@ import java.util.Locale
  * Full-screen node-details page: the Swarm node's live status, peer
  * count, gateway URL and run-node on/off toggle, its mode and the ways into
  * publish setup (#114, [PublishSetupScreen]), the chequebook (#117,
- * [ChequebookScreen]) and the postage stamps (#116,
- * [StampsScreen]), the Tor client (#143)
+ * [ChequebookScreen]), the postage stamps (#116, [StampsScreen]) and the
+ * Publish page (#118, [PublishScreen]), the Tor client (#143)
  * with its start/stop switch, status and version, then the Myotis
  * Ethereum / Gnosis light client (#72) with its own switch and per-chain
  * sync state. Shares the same [FullScreenScaffold] chrome as Settings /
@@ -81,7 +82,10 @@ fun NodeScreen(
     onMyotisRecovery: (chainId: Long, repair: Boolean) -> Unit = { _, _ -> },
     /** Open the wallet page, for publish setup's identity step (#114). */
     onOpenWallet: () -> Unit = {},
-    /** Open a transaction's explorer page, from the fund-and-buy page (#115). */
+    /**
+     * Open a URL in a new tab: a published page's bzz:// link (#118), or
+     * a transaction's explorer page, from the fund-and-buy page (#115).
+     */
     onOpenUrl: (String) -> Unit = {},
 ) {
     val triple = nodeStatusTriple(nodeInfo.status)
@@ -98,6 +102,8 @@ fun NodeScreen(
     var showPublishSetup by rememberSaveable { mutableStateOf(false) }
     // The stamp pages (#116): "list", "buy" (from publish setup), or null.
     var showStamps by rememberSaveable { mutableStateOf<String?>(null) }
+    // The Publish page (#118); the stamp and setup pages it links to open over it.
+    var showPublish by rememberSaveable { mutableStateOf(false) }
     // The chequebook page (#117).
     var showChequebook by rememberSaveable { mutableStateOf(false) }
     // Fund the node and buy a stamp in one wallet transaction (#115).
@@ -131,6 +137,16 @@ fun NodeScreen(
         )
         return
     }
+    if (showPublish) {
+        PublishScreen(
+            nodeInfo = nodeInfo,
+            onOpenStamps = { showStamps = "list" },
+            onOpenSetup = { showPublishSetup = true },
+            onOpenUrl = onOpenUrl,
+            onDismiss = { showPublish = false },
+        )
+        return
+    }
     BackHandler(onBack = onDismiss)
 
     FullScreenScaffold(
@@ -160,6 +176,7 @@ fun NodeScreen(
                     onSetLightMode = setLightMode,
                     onOpenSetup = { showPublishSetup = true },
                     onOpenStamps = { showStamps = "list" },
+                    onOpenPublish = { showPublish = true },
                     onOpenChequebook = { showChequebook = true },
                 )
             }
@@ -264,9 +281,11 @@ private fun PublishingSection(
     onSetLightMode: (Boolean) -> Unit,
     onOpenSetup: () -> Unit,
     onOpenStamps: () -> Unit,
+    onOpenPublish: () -> Unit,
     onOpenChequebook: () -> Unit,
 ) {
     val spend by StampClient.spend.collectAsState()
+    val publishing by Publisher.state.collectAsState()
     val light = nodeInfo.status == NodeStatus.Running && nodeInfo.lightMode
     // What the chequebook holds (#117): part of the node's status in light
     // mode, and where a deposit shows up. Re-read at once when a spend ends.
@@ -296,6 +315,10 @@ private fun PublishingSection(
         if (light) {
             DetailRow("Chequebook", chequebookSummary(chequebook), singleLine = false)
         }
+        if (publishEntryShown(nodeInfo, publishing)) {
+            Spacer(Modifier.height(8.dp))
+            Button(onClick = onOpenPublish) { Text("Publish") }
+        }
         Spacer(Modifier.height(4.dp))
         FlowRow {
             TextButton(onClick = onOpenSetup) { Text("Set up publishing") }
@@ -315,6 +338,14 @@ private fun PublishingSection(
  */
 internal fun stampsEntryShown(nodeInfo: NodeInfo, spend: StampClient.Spend): Boolean =
     (nodeInfo.status == NodeStatus.Running && nodeInfo.lightMode) || spend !is StampClient.Spend.Idle
+
+/**
+ * Is the Publish entry offered (#118)? Uploads go to a light node, so
+ * while one runs; and while a publish is running or its outcome waits to
+ * be seen, so it stays reachable if the node is turned off meanwhile.
+ */
+internal fun publishEntryShown(nodeInfo: NodeInfo, publishing: Publisher.State): Boolean =
+    (nodeInfo.status == NodeStatus.Running && nodeInfo.lightMode) || publishing !is Publisher.State.Idle
 
 /** The chequebook line of the node's status (#117): what it holds, or that there's none yet. */
 internal fun chequebookSummary(state: ChequebookState): String = when {

@@ -91,6 +91,14 @@ internal object AntNative {
      */
     external fun storageConnectBatch(handle: Long, gnosisRpc: String, batchId: String): String
 
+    /**
+     * `ant_storage_discover`: registers every still-funded batch this
+     * account owns on Gnosis (#118). Sends nothing: the shim puts the
+     * broadcast gate back first, so the chequebook deploy ant may try
+     * along the way is refused.
+     */
+    external fun storageDiscover(handle: Long, gnosisRpc: String): String
+
     /** Tear the node down and free the handle — it must not be reused. */
     external fun shutdown(handle: Long)
 
