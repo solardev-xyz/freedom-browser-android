@@ -280,6 +280,48 @@ class EthereumProviderTest {
     }
 
     @Test
+    fun `the typed-data sheet names an application or contract only if the domain type declares it`() {
+        connect()
+        answer = { EthAnswer.Approved() }
+        ok(call("wallet_switchEthereumChain", JSONArray().put(JSONObject().put("chainId", "0x1"))))
+        asks.clear()
+        ok(call("eth_signTypedData_v4", JSONArray().put(main.address).put(mail)))
+        (asks.single() as EthAsk.SignTypedData).let {
+            assertEquals("Ether Mail", it.domainName)
+            assertEquals("0xCcCCccccCCCCcCCCCCCcCcCccCcCCCcCcccccccC", it.verifyingContract)
+        }
+        asks.clear()
+        // Only chainId is in the domain separator: the name and contract the domain names aren't signed.
+        val data = JSONObject(mail)
+        data.getJSONObject("types").put("EIP712Domain", JSONArray().put(JSONObject().put("name", "chainId").put("type", "uint256")))
+        data.getJSONObject("domain").put("name", "Uniswap")
+        ok(call("eth_signTypedData_v4", JSONArray().put(main.address).put(data)))
+        (asks.single() as EthAsk.SignTypedData).let {
+            assertNull(it.domainName)
+            assertNull(it.verifyingContract)
+        }
+        asks.clear()
+        // No EIP712Domain type: it's built from the domain's own keys, so they're all signed and shown.
+        data.getJSONObject("types").remove("EIP712Domain")
+        ok(call("eth_signTypedData_v4", JSONArray().put(main.address).put(data)))
+        assertEquals("Uniswap", (asks.single() as EthAsk.SignTypedData).domainName)
+    }
+
+    @Test
+    fun `an approval sheet lays out at most the first part of a huge text, never splitting a character`() {
+        assertEquals("short" to 0, sheetText("short"))
+        val (shown, cut) = sheetText("a".repeat(SHEET_MAX_CHARS + 500))
+        assertEquals(SHEET_MAX_CHARS, shown.length)
+        assertEquals(500, cut)
+        // A surrogate pair straddling the limit is left out whole.
+        val (s2, c2) = sheetText("ab\uD83D\uDE00cd", max = 3)
+        assertEquals("ab", s2)
+        assertEquals(4, c2)
+        assertEquals("00ff10", hexOf(byteArrayOf(0, -1, 16)))
+        assertEquals("00ff", hexOf(byteArrayOf(0, -1, 16), limit = 2))
+    }
+
+    @Test
     fun `typed data that would take minutes to hash is hashed once per type, or refused quickly`() {
         connect()
         answer = { EthAnswer.Approved() }

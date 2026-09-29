@@ -152,6 +152,17 @@ object Eip712 {
     fun encodeType(types: Map<String, List<Field>>, primary: String): String = Encoder(types).encodeType(primary)
 
     /**
+     * The domain's [field] as text, only if the `EIP712Domain` type declares
+     * it: a domain key the type doesn't list isn't hashed into the domain
+     * separator, so a site could otherwise show a trusted app's name or
+     * contract the signature doesn't bind (#215 R2-M1).
+     */
+    fun signedDomainString(data: TypedData, field: String): String? {
+        if (data.types["EIP712Domain"]?.none { it.name == field } != false) return null
+        return data.domain.opt(field) as? String
+    }
+
+    /**
      * The message as the signature covers it, for showing: only the
      * fields its types declare, nested structs (and arrays of them) the
      * same way. A key the types don't name isn't hashed, so a site could

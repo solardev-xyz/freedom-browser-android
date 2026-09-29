@@ -402,8 +402,9 @@ class EthereumProvider(
             origin = origin,
             account = account,
             chain = chain,
-            domainName = data.domain.opt("name") as? String,
-            verifyingContract = data.domain.opt("verifyingContract") as? String,
+            // Only what the domain separator covers: an undeclared key isn't signed.
+            domainName = Eip712.signedDomainString(data, "name"),
+            verifyingContract = Eip712.signedDomainString(data, "verifyingContract"),
             primaryType = data.primaryType,
             // Only what the signature covers: a key the types don't declare isn't signed.
             messageJson = shown,
@@ -624,6 +625,6 @@ class EthereumProvider(
             return s
         }
 
-        private fun ByteArray.hexString(): String = joinToString("") { "%02x".format(it) }
+        private fun ByteArray.hexString(): String = hexOf(this)
     }
 }

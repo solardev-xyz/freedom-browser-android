@@ -305,7 +305,7 @@ private fun ConnectBody(
 private fun SignMessageBody(ask: EthAsk.SignMessage) {
     AccountRow(ask.account)
     Label("Message")
-    Block(ask.text ?: ask.hex, mono = ask.text == null)
+    Block(ask.text ?: ask.hex, mono = ask.text == null, whole = "The signature covers the whole message.")
     if (ask.text == null) Note("This message isn't readable text; it's shown as hex bytes.")
     Spacer(Modifier.height(8.dp))
     Note("A signature can authorise actions off-chain, such as a login or an order. Only sign if you trust the site.")
@@ -319,7 +319,7 @@ private fun SignTypedDataBody(ask: EthAsk.SignTypedData) {
     ask.verifyingContract?.let { AddressRow("Contract", it) }
     Row0("Type", ask.primaryType, mono = true)
     Label("Data")
-    Block(ask.messageJson, mono = true)
+    Block(ask.messageJson, mono = true, whole = "The signature covers all of the data.")
     Spacer(Modifier.height(8.dp))
     Note(
         "Typed data can authorise a transfer or a trade (a permit, an order) without a transaction. " +
@@ -343,7 +343,9 @@ private fun SendBody(ask: EthAsk.SendTransaction) {
     Row0("Amount", "${SendAmounts.exact(request.amount, chain.decimals)} ${chain.symbol}", mono = true)
     if (data.isNotEmpty()) {
         Label("Data (${data.size} bytes)")
-        Block("0x" + data.joinToString("") { "%02x".format(it) }, mono = true, maxHeight = 120)
+        // Only the bytes the sheet shows are turned into hex, not megabytes of them.
+        val head = remember(data) { "0x" + hexOf(data, SHEET_MAX_CHARS / 2) }
+        Block(head, mono = true, maxHeight = 120, omitted = maxOf(0, data.size - SHEET_MAX_CHARS / 2) * 2, whole = "The transaction sends all of it.")
     }
     Row0("Network fee", "up to ${feeText(quote.tx.maxFee, chain)}", mono = true, detail = feeDetail(quote.tx))
     quote.nativeTotal?.takeIf { request.amount.signum() > 0 }?.let { Row0("Total", "up to ${feeText(it, chain)}", mono = true) }
@@ -426,9 +428,18 @@ private fun AddressRow(label: String, address: String) {
     HorizontalDivider()
 }
 
-/** A message or payload, whole, in its own scrolling box so the buttons stay in reach. */
+/**
+ * A message or payload in its own scrolling box so the buttons stay in
+ * reach. The text is the site's, and so is its size: past
+ * [SHEET_MAX_CHARS] only the start is laid out (a megabyte of text froze
+ * the UI for seconds before the sheet appeared, #215 R2-M2), with a note
+ * saying how much more there is and [whole] — that it's covered all the same.
+ * [omitted] counts characters the caller already left out.
+ */
 @Composable
-private fun Block(text: String, mono: Boolean, maxHeight: Int = 240) {
+private fun Block(text: String, mono: Boolean, maxHeight: Int = 240, omitted: Int = 0, whole: String? = null) {
+    val (shown, cut) = remember(text) { sheetText(text) }
+    val more = cut + omitted
     Box(
         Modifier
             .fillMaxWidth()
@@ -439,12 +450,44 @@ private fun Block(text: String, mono: Boolean, maxHeight: Int = 240) {
     ) {
         SelectionContainer {
             Text(
-                text,
+                shown,
                 fontFamily = if (mono) FontFamily.Monospace else FontFamily.Default,
                 style = if (mono) MaterialTheme.typography.bodySmall else MaterialTheme.typography.bodyMedium,
             )
         }
     }
+    if (more > 0) {
+        Spacer(Modifier.height(4.dp))
+        Note(
+            "Too long to show whole: ${"%,d".format(more)} more characters aren't shown. " + (whole ?: ""),
+            warn = true,
+        )
+    }
+}
+
+/** The most of a site-supplied text an approval sheet lays out. */
+internal const val SHEET_MAX_CHARS = 10_000
+
+/** [text]'s first [max] characters (never splitting a surrogate pair), and how many were left out. */
+internal fun sheetText(text: String, max: Int = SHEET_MAX_CHARS): Pair<String, Int> {
+    if (text.length <= max) return text to 0
+    var end = max
+    if (Character.isHighSurrogate(text[end - 1])) end--
+    return text.substring(0, end) to text.length - end
+}
+
+private val HEX_DIGITS = "0123456789abcdef".toCharArray()
+
+/** [bytes] (the first [limit] of them) as lowercase hex, no prefix. */
+internal fun hexOf(bytes: ByteArray, limit: Int = bytes.size): String {
+    val n = minOf(limit, bytes.size)
+    val out = CharArray(n * 2)
+    for (i in 0 until n) {
+        val b = bytes[i].toInt()
+        out[2 * i] = HEX_DIGITS[(b shr 4) and 0xf]
+        out[2 * i + 1] = HEX_DIGITS[b and 0xf]
+    }
+    return String(out)
 }
 
 @Composable
