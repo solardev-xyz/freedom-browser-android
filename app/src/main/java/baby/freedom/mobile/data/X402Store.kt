@@ -26,8 +26,8 @@ import org.json.JSONObject
  * paying without being asked, and the history of every payment signed —
  * desktop's `x402/permissions.js` and the x402 rows of `payment-history.js`.
  *
- *     "allow:<origin> <chainId> <asset> <account>" → {"cap": "…", "spent": "…", "created": ms, "expires": ms,
- *                                           "symbol": "USDC", "decimals": 6}
+ *     "allow:<origin> <chainId> <asset> <account>" → {"cap": "…", "spent": "…", "each": "…", "payTo": "0x…",
+ *                                           "created": ms, "expires": ms, "symbol": "USDC", "decimals": 6}
  *     "history" → [{…}, …] newest first, at most [MAX_HISTORY]
  *
  * An allowance is keyed by the site's origin (the provider origin key),
@@ -36,7 +36,11 @@ import org.json.JSONObject
  * on another chain, or another account's funds — after an account switch
  * the site asks again, from the account now active (#218 R2-F1). An
  * allowance written before the account was part of its key doesn't decode,
- * so it pays nothing. It is a total
+ * so it pays nothing. It pays only the address the payment that granted
+ * it went to ([Allowance.payTo]), and each payment at most that
+ * payment's amount ([Allowance.each]): a site can't take the rest of the
+ * cap in one request, nor have it sent to another address (#237); one
+ * written before those were part of it doesn't decode either. It is a total
  * over one window, never renewed by itself: when [Allowance.expires]
  * passes or [Allowance.spent] reaches [Allowance.cap], the site asks again.
  * Amounts are base-unit integers in text.
@@ -64,8 +68,16 @@ class X402Store internal constructor(
         val spent: BigInteger,
         val created: Long,
         val expires: Long,
+        /** The only address it pays, lower case: the one the payment that granted it went to (#237). */
+        val payTo: String,
+        /** The most it pays at a time: the amount of the payment that granted it (#237). */
+        val each: BigInteger,
     ) {
         val remaining: BigInteger get() = (cap - spent).max(BigInteger.ZERO)
+
+        /** It may pay [amount] to [to] as one payment, the window and the rest aside. */
+        fun allows(to: String, amount: BigInteger): Boolean =
+            to.lowercase() == payTo && amount.signum() > 0 && amount <= each && amount <= remaining
     }
 
     enum class Status {
@@ -144,15 +156,18 @@ class X402Store internal constructor(
 
     /**
      * Let [origin] pay up to [cap] of [asset] on [chainId] from [account] without asking,
+     * to [payTo] only and at most [each] at a time,
      * for [windowMs] from now, with [spentNow] (the payment the user just
      * approved) already counted. Replaces any allowance it had for that
-     * token. `false` if it couldn't be written, or [spentNow] is over [cap].
+     * token. `false` if it couldn't be written, or [spentNow] or [each] is over [cap].
      */
     suspend fun grant(
         origin: String,
         chainId: Long,
         asset: String,
         account: String,
+        payTo: String,
+        each: BigInteger,
         symbol: String,
         decimals: Int,
         cap: BigInteger,
@@ -160,8 +175,12 @@ class X402Store internal constructor(
         spentNow: BigInteger,
     ): Boolean {
         if (cap.signum() <= 0 || spentNow.signum() < 0 || spentNow > cap || windowMs <= 0) return false
+        if (each.signum() <= 0 || each > cap) return false
         val now = clock()
-        val a = Allowance(origin, chainId, asset.lowercase(), account.lowercase(), symbol, decimals, cap, spentNow, now, now + windowMs)
+        val a = Allowance(
+            origin, chainId, asset.lowercase(), account.lowercase(), symbol, decimals, cap, spentNow, now, now + windowMs,
+            payTo.lowercase(), each,
+        )
         return write { prefs ->
             dropDead(prefs, now)
             prefs[allowKey(origin, chainId, asset, account)] = encodeAllowance(a)
@@ -170,30 +189,38 @@ class X402Store internal constructor(
 
     /**
      * The allowance [origin] has for [asset] on [chainId] from [account]
-     * if it covers [amount] right now, else null. Nothing is counted: see [consume].
+     * if it covers [amount] to [payTo] right now, else null. Nothing is counted: see [consume].
      */
-    fun covering(all: List<Allowance>, origin: String, chainId: Long, asset: String, account: String, amount: BigInteger): Allowance? {
+    fun covering(
+        all: List<Allowance>,
+        origin: String,
+        chainId: Long,
+        asset: String,
+        account: String,
+        payTo: String,
+        amount: BigInteger,
+    ): Allowance? {
         val now = clock()
         return all.firstOrNull {
             it.origin == origin && it.chainId == chainId && it.asset == asset.lowercase() &&
-                it.account == account.lowercase() && live(it, now) && amount <= it.remaining
+                it.account == account.lowercase() && live(it, now) && it.allows(payTo, amount)
         }
     }
 
     /**
-     * Count [amount] against [origin]'s allowance for [asset] on [chainId]
+     * Count [amount] to [payTo] against [origin]'s allowance for [asset] on [chainId]
      * from [account], in one write: `true` only if the allowance is live, covers it, and
      * the new total was saved. Two payments racing for the last of an
      * allowance can't both get `true`.
      */
-    suspend fun consume(origin: String, chainId: Long, asset: String, account: String, amount: BigInteger): Boolean {
+    suspend fun consume(origin: String, chainId: Long, asset: String, account: String, payTo: String, amount: BigInteger): Boolean {
         if (amount.signum() <= 0) return false
         var ok = false
         val written = write { prefs ->
             ok = false
             val key = allowKey(origin, chainId, asset, account)
             val a = prefs[key]?.let { decodeAllowance(key.name.removePrefix(ALLOW), it) } ?: return@write
-            if (!live(a, clock()) || amount > a.remaining) return@write
+            if (!live(a, clock()) || !a.allows(payTo, amount)) return@write
             prefs[key] = encodeAllowance(a.copy(spent = a.spent + amount))
             ok = true
         }
@@ -227,6 +254,9 @@ class X402Store internal constructor(
      * only (#218 R2-F1). All of it is written or none of it (#218 R1-M2, R1-M4):
      * an allowance is never spent or granted for a payment the history
      * doesn't show. Undo with [withdraw] if the payment isn't sent after all.
+     * An automatic payment is covered only to the allowance's payee and up
+     * to its per-payment amount; a granted allowance takes both from
+     * [payment] (#237).
      */
     suspend fun commit(payment: Payment, grant: NewAllowance?): Commit {
         val amount = payment.amount
@@ -242,7 +272,7 @@ class X402Store internal constructor(
             var created: Long? = null
             if (payment.auto) {
                 val a = prefs[key]?.let { decodeAllowance(key.name.removePrefix(ALLOW), it) }
-                if (a == null || !live(a, now) || amount > a.remaining) {
+                if (a == null || !live(a, now) || !a.allows(payment.payTo, amount)) {
                     result = Commit.NotCovered
                     return@write
                 }
@@ -254,6 +284,7 @@ class X402Store internal constructor(
                     payment.origin, payment.chainId, payment.asset.lowercase(), payment.from.lowercase(),
                     grant.symbol, grant.decimals,
                     grant.cap, amount, now, now + grant.windowMs,
+                    payTo = payment.payTo.lowercase(), each = amount,
                 )
                 prefs[key] = encodeAllowance(a)
                 created = now
@@ -361,6 +392,7 @@ class X402Store internal constructor(
             .put("cap", a.cap.toString()).put("spent", a.spent.toString())
             .put("created", a.created).put("expires", a.expires)
             .put("symbol", a.symbol).put("decimals", a.decimals)
+            .put("payTo", a.payTo).put("each", a.each.toString())
             .toString()
 
         internal fun decodeAllowance(key: String, json: String): Allowance? = try {
@@ -383,6 +415,9 @@ class X402Store internal constructor(
                 spent = o.getString("spent").also { require(DIGITS.matches(it)) }.toBigInteger(),
                 created = o.getLong("created"),
                 expires = o.getLong("expires"),
+                // Without these (written before #237) it pays nothing: the site asks again.
+                payTo = o.getString("payTo").also { require(ADDRESS.matches(it)) }.lowercase(),
+                each = o.getString("each").also { require(DIGITS.matches(it)) }.toBigInteger().also { require(it.signum() > 0) },
             )
         } catch (e: Exception) {
             null

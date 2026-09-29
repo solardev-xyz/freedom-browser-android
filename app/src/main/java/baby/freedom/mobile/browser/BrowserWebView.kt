@@ -2306,19 +2306,37 @@ private fun buildRefreshableWebView(
         // forward) replaces whatever navigation was in flight without a
         // first hop through shouldOverrideUrlLoading: the replaced
         // navigation's gesture mustn't carry over to its redirects (#85).
-        this.onBrowserInitiatedLoad = { url, userNamed ->
+        this.onBrowserInitiatedLoad = { url, userNamed, usersStep, redirectHop ->
             navigationHadGesture = false
             // …nor does an address a restore had waiting for its own
             // load (#185 R2-F1).
             state.restoreLoadSuperseded()
             if (url != null && userNamed) userNamedChain.started(url) else userNamedChain.ended()
-            // …nor is what answers it a paid request's answer, or a 402
-            // noted before it (#218 R2-M2, R2-M3).
-            X402Payments.onNavigationSuperseded(state)
-            // The user's own: the address they named, or Reload /
-            // Back / Forward (no URL). A site's allowance may pay for
-            // it; not for the app's other loads (#218 R4-M3).
-            X402Payments.onNavigationStarted(state, byUser = userNamed || url == null, pageUrl = null, url = url)
+            if (redirectHop && url != null) {
+                // A redirect we cancelled to change the user agent (#180),
+                // its target loaded in its place: the same navigation, one
+                // hop on, for x402 as for the WebView's own redirects. Not
+                // the user's address on the target's site — another site's
+                // redirect took them there — so no hold is lifted and no
+                // allowance of the target's may pay unless the whole chain
+                // stayed on it (#237 R2-F1, #218 R5-M1).
+                X402Payments.onRedirect(state, url)
+            } else {
+                // …nor is what answers it a paid request's answer, or a 402
+                // noted before it (#218 R2-M2, R2-M3).
+                X402Payments.onNavigationSuperseded(state)
+                // The user's own Reload or Back / Forward on the page on
+                // screen lifts a hold on its site after a Refused payment
+                // (#237 R1-M1) — the bar's Back / Forward too, which runs
+                // `history.back()` in the page (a `javascript:` URL).
+                if (usersStep) X402Payments.onUsersStep(state)
+                // The user's own: the address they named, or their
+                // pull-to-refresh Reload (no URL). A site's allowance may pay
+                // for it; not for the app's other loads — its own reloads,
+                // nor a Back / Forward step, which may stay in the document
+                // with no commit to end it (#218 R4-M3).
+                X402Payments.onNavigationStarted(state, byUser = userNamed || (url == null && usersStep), pageUrl = null, url = url)
+            }
         }
         // Stop (or a new load's stop first) ends the navigation in flight
         // without a commit: neither its gesture nor the user's naming of
@@ -3178,8 +3196,12 @@ private fun buildRefreshableWebView(
                     } else {
                         X402Payments.onNavigationSuperseded(state)
                         // Started by the page on screen: only that site's
-                        // own allowance may pay for it (#218 R4-M3).
-                        X402Payments.onNavigationStarted(state, byUser = false, pageUrl = committedPageUrl, url = target)
+                        // own allowance may pay for it (#218 R4-M3), and
+                        // only on the user's tap, not the page's own
+                        // script chaining 402s (#237).
+                        X402Payments.onNavigationStarted(
+                            state, byUser = false, pageUrl = committedPageUrl, url = target, gesture = request.hasGesture(),
+                        )
                     }
                 }
                 return false
@@ -3642,7 +3664,7 @@ private fun buildRefreshableWebView(
         EthereumProviders.allowPrompts(state.id)
         RadicleProviders.allowPrompts(state.id)
         SwarmProviders.allowPrompts(state.id)
-        webView.reload()
+        webView.reloadByUser()
     }
     // Who owns a downward drag — the refresh spinner or the page.
     //
@@ -3928,7 +3950,12 @@ internal class PageWebView(context: Context) : WebView(context) {
         // user agent must not change while anything is loading.
         mainHandler.post {
             val url = redirectCorrection.issue() ?: return@post
-            if (named) loadUrlNamedByUser(url) else loadUrl(url)
+            loadingRedirectCorrection = true
+            try {
+                if (named) loadUrlNamedByUser(url) else loadUrl(url)
+            } finally {
+                loadingRedirectCorrection = false
+            }
         }
         return true
     }
@@ -4105,8 +4132,17 @@ internal class PageWebView(context: Context) : WebView(context) {
      * `url`: the URL loaded (`loadUrl`, `postUrl`), or `null` for a
      * reload, a history step or inline data. `userNamed`: the load is
      * the one a user's submit scheduled ([loadUrlNamedByUser], #173).
+     * `usersStep`: it's the user's own Reload ([reloadByUser]) or the
+     * bar's Back / Forward ([HISTORY_BACK_JS] / [HISTORY_FORWARD_JS]) on
+     * the page on screen — not a reload of the app's own.
+     * `redirectHop`: it's a redirect's target, loaded by us in place of
+     * the redirect we cancelled to change the user agent
+     * ([redirectCrossesUserAgent], #180) — a hop of the navigation in
+     * flight, not a new one: whoever started that navigation, and where
+     * its redirects have taken it, still say what it may do (#237 R2-F1).
      */
-    var onBrowserInitiatedLoad: (url: String?, userNamed: Boolean) -> Unit = { _, _ -> }
+    var onBrowserInitiatedLoad: (url: String?, userNamed: Boolean, usersStep: Boolean, redirectHop: Boolean) -> Unit =
+        { _, _, _, _ -> }
 
     /** `stopLoading()`: the navigation in flight ends without a commit. */
     // Nullable: read by an override WebView could call before this
@@ -4116,6 +4152,12 @@ internal class PageWebView(context: Context) : WebView(context) {
     // Set only for the duration of [loadUrlNamedByUser]'s own load.
     private var loadingNamedByUser = false
 
+    // Set only for the duration of [reloadByUser]'s own reload.
+    private var reloadingByUser = false
+
+    // Set only for the duration of a redirect correction's own load ([redirectCrossesUserAgent]).
+    private var loadingRedirectCorrection = false
+
     private fun browserInitiatedLoad(url: String? = null) {
         // This load, not a held put-back, is what the tab is on now.
         // Null only while WebView's own constructor runs.
@@ -4124,7 +4166,8 @@ internal class PageWebView(context: Context) : WebView(context) {
         // Any load but a sweep's own step supersedes its reload: a later
         // resubmission prompt is that load's, not the sweep's (R1-F1).
         sweptReload.navigationStarted()
-        onBrowserInitiatedLoad(url, url != null && loadingNamedByUser)
+        val usersStep = if (url == null) reloadingByUser else url == HISTORY_BACK_JS || url == HISTORY_FORWARD_JS
+        onBrowserInitiatedLoad(url, url != null && loadingNamedByUser, usersStep, url != null && loadingRedirectCorrection)
     }
 
     /**
@@ -4138,6 +4181,16 @@ internal class PageWebView(context: Context) : WebView(context) {
             loadUrl(url)
         } finally {
             loadingNamedByUser = false
+        }
+    }
+
+    /** The user's own Reload of the page on screen (pull-to-refresh), not one of the app's. */
+    fun reloadByUser() {
+        reloadingByUser = true
+        try {
+            reload()
+        } finally {
+            reloadingByUser = false
         }
     }
 

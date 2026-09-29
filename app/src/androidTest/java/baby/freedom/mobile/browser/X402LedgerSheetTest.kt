@@ -9,6 +9,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.performClick
 import androidx.compose.ui.unit.dp
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import baby.freedom.mobile.chains.BuiltInChains
@@ -100,5 +101,16 @@ class X402LedgerSheetTest {
         rule.onNodeWithTag("x402-auto").assertExists()
         rule.onNodeWithText("you confirm each payment on the Ledger", substring = true).assertDoesNotExist()
         rule.onNodeWithText("to confirm once the Ledger shows the payment", substring = true).assertDoesNotExist()
+    }
+
+    @Test
+    fun anAllowanceSaysWhomItPaysHowMuchAtATimeAndForWhichNavigations() {
+        // #237: the payee and the per-payment amount are this payment's; a page's own
+        // navigations and a site that refused a payment aren't paid silently.
+        show(WalletAccount(0, "Account 1", "0x1111111111111111111111111111111111111111"))
+        rule.onNodeWithTag("x402-auto").performClick()
+        rule.onNodeWithText("each at most 0.01 USDC, to the Pay to address above only", substring = true).assertExists()
+        rule.onNodeWithText("not ones it moves to on its own", substring = true).assertExists()
+        rule.onNodeWithText("after the site refuses a payment, not until you open or reload it yourself", substring = true).assertExists()
     }
 }

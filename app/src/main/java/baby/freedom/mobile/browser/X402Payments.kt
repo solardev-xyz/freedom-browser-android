@@ -100,12 +100,20 @@ data class X402Grant(val cap: BigInteger, val windowMs: Long)
  * header; the answer to that request is the payment's outcome in the
  * history ([X402Store.Status]).
  *
+ * An allowance pays silently only the payee and at most the amount of
+ * the payment it was granted with ([X402Store.Allowance]), only for a
+ * navigation the user made (their load, or their tap on the site's page),
+ * and not after the site answered a paid request Refused until the user
+ * navigates to it themselves ([X402Flow], #237).
+ *
  * Never in a private tab, and never automatically while the wallet is
  * locked: an allowance only pays when the wallet is open already; a
  * locked wallet gets the sheet, which asks for the screen lock. A paid
  * request the site answers with another 402 — at its URL or one it was
  * redirected to — is not paid again (desktop's loop guard): the history
- * says it was refused, and the user can reload to be asked. Which
+ * says it was refused, and the user can reload to try again (asked,
+ * unless an allowance of the site's covers it: their Reload lifts the
+ * hold a refusal puts on it, #237). Which
  * navigation a 402 or an answer belongs to is [X402Flow]'s. A rejected sheet pauses the tab's sheets (the provider's
  * anti-loop rule) until the user navigates the tab themselves — an
  * address, Reload or pull-to-refresh — so reloading the page asks again.
@@ -175,15 +183,22 @@ object X402Payments {
     fun onNavigationSuperseded(tab: BrowserState) = flow.superseded(tab.id)
 
     /**
-     * [tab] began a navigation to [url] (null: Reload or Back/Forward)
-     * (after [onNavigationSuperseded]): [byUser] — the address they
-     * named, their Reload or Back/Forward — or the page on screen's, at
-     * [pageUrl]. Only these may let a site's allowance pay without asking
-     * (#218 R4-M3), and only while its redirects stay on that site
-     * (#218 R5-M1).
+     * The user's own Reload or Back/Forward on [tab]'s page: a hold on its
+     * site after a Refused payment is lifted (#237 R1-M1).
      */
-    fun onNavigationStarted(tab: BrowserState, byUser: Boolean, pageUrl: String?, url: String?) =
-        flow.navigationStarted(tab.id, byUser, if (byUser) null else pageUrl?.let(::providerOriginKey), url)
+    fun onUsersStep(tab: BrowserState) = flow.usersStep(tab.id)
+
+    /**
+     * [tab] began a navigation to [url] (null: a reload or history step)
+     * (after [onNavigationSuperseded]): [byUser] — the address they
+     * named, their pull-to-refresh Reload — or the page on screen's, at
+     * [pageUrl], with the user's [gesture] or on its own. Only these may
+     * let a site's allowance pay without asking (#218 R4-M3) — the page's
+     * only with the user's gesture (#237) — and only while its redirects
+     * stay on that site (#218 R5-M1).
+     */
+    fun onNavigationStarted(tab: BrowserState, byUser: Boolean, pageUrl: String?, url: String?, gesture: Boolean = false) =
+        flow.navigationStarted(tab.id, byUser, if (byUser) null else pageUrl?.let(::providerOriginKey), url, gesture = gesture)
 
     /**
      * [tab]'s payment epoch, read on the interceptor's thread as a
@@ -275,8 +290,10 @@ object X402Payments {
             // the account it was granted for (#218 R2-F1), and only when the balance isn't known
             // to be short: otherwise the sheet says why (#218 R2-M1).
             val payer = account?.address
-            val covered = silentPayOption(allowanceMayPay, switched, payer, account?.isLedger == true, options) { o ->
-                store.covering(allowances, d.origin, o.chainId, o.asset, payer!!, o.amount) != null
+            // The hold is read again, not only as the 402 committed: a paid request of the
+            // site's may have been Refused, in another tab, since (#237 R2-M1).
+            val covered = silentPayOption(allowanceMayPay && !flow.holds(d.origin), switched, payer, account?.isLedger == true, options) { o ->
+                store.covering(allowances, d.origin, o.chainId, o.asset, payer!!, o.payTo, o.amount) != null
             }
             // Switched while the figures were read: read them again for the account now active.
             if (activeAccount(vault, walletAccounts)?.address != payer) {
@@ -286,7 +303,12 @@ object X402Payments {
             if (covered != null && account != null && vault.unlockedNow()) {
                 if (!stillOn(tab, doc, webView, d.url)) return
                 Log.i(TAG, "paying from the site's allowance")
-                if (pay(tab, doc, webView, d, covered, account, auto = true, grant = null) != Paid.NOT_COVERED) return
+                when (pay(tab, doc, webView, d, covered, account, auto = true, grant = null)) {
+                    Paid.NOT_COVERED -> Unit
+                    // Held while it was paid: worked out again, for the sheet (#237 R2-M1).
+                    Paid.HELD -> continue
+                    else -> return
+                }
             }
             if (!stillOn(tab, doc, webView, d.url)) return
             val ask = EthAsk.Payment(
@@ -387,7 +409,7 @@ object X402Payments {
         return EthereumProviders.currentDocument(tab.id) == doc && view.url == url
     }
 
-    private enum class Paid { SENT, NOT_SENT, NOT_COVERED }
+    private enum class Paid { SENT, NOT_SENT, NOT_COVERED, HELD }
 
     /**
      * Sign [option] from [account] and load the page again with the
@@ -395,7 +417,8 @@ object X402Payments {
      * payment is never made that the history doesn't show. The record,
      * and the allowance change that goes with it — an [auto] payment
      * counted against the site's allowance ([Paid.NOT_COVERED] if it no
-     * longer covers it: nothing is sent), or the allowance [grant]ed with
+     * longer covers it, [Paid.HELD] if the site was held after a Refused
+     * payment meanwhile: nothing is sent, #237 R2-M1), or the allowance [grant]ed with
      * a manual one — are one write ([X402Store.commit]), made only once
      * the payment is signed and its page is still on; if the page is gone
      * by the time that write is done, it's undone ([X402Store.withdraw]):
@@ -484,6 +507,13 @@ object X402Payments {
             // Never sent: the page it was for went while it was written.
             store.withdraw(payment, committed.allowanceCreated)
             return Paid.NOT_SENT
+        }
+        // A paid request of the site's was Refused (in any tab) while this
+        // one was read, signed and written: its allowance pays nothing more
+        // silently — undone, and the sheet asks instead (#237 R2-M1).
+        if (auto && flow.holds(d.origin)) {
+            store.withdraw(payment, committed.allowanceCreated)
+            return Paid.HELD
         }
         // No suspension from the check above to here: the request goes out on the page it was for.
         vault.noteActivity()

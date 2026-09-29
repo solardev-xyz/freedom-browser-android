@@ -46,6 +46,9 @@ class X402StoreTest {
     private val me = "0x6Fac4D18c912343BF86fa7049364Dd4E424Ab9C0"
     private val other = "0x1111111111111111111111111111111111111111"
 
+    /** Whom the test payments ([payment]) and allowances pay. */
+    private val payee = usdc
+
     private fun store() = X402Store(MemoryStore()) { now }
 
     private suspend fun X402Store.grant(
@@ -55,7 +58,8 @@ class X402StoreTest {
         chainId: Long = 8453,
         asset: String = usdc,
         account: String = me,
-    ) = grant(origin, chainId, asset, account, "USDC", 6, BigInteger.valueOf(cap), hour, BigInteger.valueOf(spent))
+        each: Long = cap,
+    ) = grant(origin, chainId, asset, account, payee, BigInteger.valueOf(each), "USDC", 6, BigInteger.valueOf(cap), hour, BigInteger.valueOf(spent))
 
     @Test
     fun `an allowance pays up to its cap, counting the payment that granted it`() = runBlocking {
@@ -64,24 +68,24 @@ class X402StoreTest {
         val a = s.allowances.first().single()
         assertEquals(BigInteger.valueOf(20), a.remaining)
         assertEquals(usdc.lowercase(), a.asset)
-        assertNotNull(s.covering(s.allowances.first(), site, 8453, usdc, me, BigInteger.valueOf(20)))
-        assertNull(s.covering(s.allowances.first(), site, 8453, usdc, me, BigInteger.valueOf(21)))
-        assertTrue(s.consume(site, 8453, usdc.uppercase().replace("0X", "0x"), me, BigInteger.valueOf(15)))
-        assertFalse(s.consume(site, 8453, usdc, me, BigInteger.valueOf(6)))
-        assertTrue(s.consume(site, 8453, usdc, me, BigInteger.valueOf(5)))
+        assertNotNull(s.covering(s.allowances.first(), site, 8453, usdc, me, payee, BigInteger.valueOf(20)))
+        assertNull(s.covering(s.allowances.first(), site, 8453, usdc, me, payee, BigInteger.valueOf(21)))
+        assertTrue(s.consume(site, 8453, usdc.uppercase().replace("0X", "0x"), me, payee, BigInteger.valueOf(15)))
+        assertFalse(s.consume(site, 8453, usdc, me, payee, BigInteger.valueOf(6)))
+        assertTrue(s.consume(site, 8453, usdc, me, payee, BigInteger.valueOf(5)))
         // Used up: it's gone from the list, and pays nothing more.
         assertEquals(emptyList<X402Store.Allowance>(), s.allowances.first())
-        assertFalse(s.consume(site, 8453, usdc, me, BigInteger.ONE))
+        assertFalse(s.consume(site, 8453, usdc, me, payee, BigInteger.ONE))
     }
 
     @Test
     fun `an allowance is for one site, one chain and one token`() = runBlocking {
         val s = store()
         s.grant(cap = 100)
-        assertFalse(s.consume("https://other.example", 8453, usdc, me, BigInteger.ONE))
-        assertFalse(s.consume(site, 1, usdc, me, BigInteger.ONE))
-        assertFalse(s.consume(site, 8453, "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48", me, BigInteger.ONE))
-        assertTrue(s.consume(site, 8453, usdc, me, BigInteger.ONE))
+        assertFalse(s.consume("https://other.example", 8453, usdc, me, payee, BigInteger.ONE))
+        assertFalse(s.consume(site, 1, usdc, me, payee, BigInteger.ONE))
+        assertFalse(s.consume(site, 8453, "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48", me, payee, BigInteger.ONE))
+        assertTrue(s.consume(site, 8453, usdc, me, payee, BigInteger.ONE))
     }
 
     @Test
@@ -89,15 +93,15 @@ class X402StoreTest {
         val s = store()
         s.grant(cap = 100)
         now += hour - 1
-        assertTrue(s.consume(site, 8453, usdc, me, BigInteger.ONE))
+        assertTrue(s.consume(site, 8453, usdc, me, payee, BigInteger.ONE))
         now += 1
-        assertFalse(s.consume(site, 8453, usdc, me, BigInteger.ONE))
+        assertFalse(s.consume(site, 8453, usdc, me, payee, BigInteger.ONE))
         assertEquals(emptyList<X402Store.Allowance>(), s.allowances.first())
 
         val t = store()
         t.grant(cap = 100)
         now -= 24 * hour
-        assertFalse(t.consume(site, 8453, usdc, me, BigInteger.ONE))
+        assertFalse(t.consume(site, 8453, usdc, me, payee, BigInteger.ONE))
     }
 
     @Test
@@ -107,7 +111,7 @@ class X402StoreTest {
         s.grant(cap = 50)
         assertEquals(BigInteger.valueOf(50), s.allowances.first().single().remaining)
         assertTrue(s.revoke(site, 8453, usdc, me))
-        assertFalse(s.consume(site, 8453, usdc, me, BigInteger.ONE))
+        assertFalse(s.consume(site, 8453, usdc, me, payee, BigInteger.ONE))
         assertEquals(emptyList<X402Store.Allowance>(), s.allowances.first())
     }
 
@@ -116,8 +120,8 @@ class X402StoreTest {
         val s = store()
         assertFalse(s.grant(cap = 10, spent = 11))
         assertFalse(s.grant(cap = 0))
-        assertFalse(s.grant(site, 8453, usdc, me, "USDC", 6, BigInteger.TEN, 0, BigInteger.ZERO))
-        assertFalse(s.consume(site, 8453, usdc, me, BigInteger.ZERO))
+        assertFalse(s.grant(site, 8453, usdc, me, payee, BigInteger.TEN, "USDC", 6, BigInteger.TEN, 0, BigInteger.ZERO))
+        assertFalse(s.consume(site, 8453, usdc, me, payee, BigInteger.ZERO))
         assertEquals(emptyList<X402Store.Allowance>(), s.allowances.first())
     }
 
@@ -125,7 +129,7 @@ class X402StoreTest {
     fun `payments racing for the last of an allowance can't both have it`() = runBlocking {
         val s = store()
         s.grant(cap = 10)
-        val results = (1..20).map { async { s.consume(site, 8453, usdc, me, BigInteger.ONE) } }.awaitAll()
+        val results = (1..20).map { async { s.consume(site, 8453, usdc, me, payee, BigInteger.ONE) } }.awaitAll()
         assertEquals(10, results.count { it })
     }
 
@@ -176,7 +180,7 @@ class X402StoreTest {
         assertEquals(emptyList<X402Store.Allowance>(), s.allowances.first())
         assertEquals(emptyList<X402Store.Payment>(), s.history.first())
         assertFalse(s.grant(cap = 10))
-        assertFalse(s.consume(site, 8453, usdc, me, BigInteger.ONE))
+        assertFalse(s.consume(site, 8453, usdc, me, payee, BigInteger.ONE))
         assertFalse(s.record(payment("a")))
         assertFalse(s.revoke(site, 8453, usdc, me))
     }
@@ -263,9 +267,9 @@ class X402StoreTest {
         s.grant(cap = 100)
         val all = s.allowances.first()
         assertEquals(me.lowercase(), all.single().account)
-        assertNotNull(s.covering(all, site, 8453, usdc, me.uppercase().replace("0X", "0x"), BigInteger.ONE))
-        assertNull(s.covering(all, site, 8453, usdc, other, BigInteger.ONE))
-        assertFalse(s.consume(site, 8453, usdc, other, BigInteger.ONE))
+        assertNotNull(s.covering(all, site, 8453, usdc, me.uppercase().replace("0X", "0x"), payee, BigInteger.ONE))
+        assertNull(s.covering(all, site, 8453, usdc, other, payee, BigInteger.ONE))
+        assertFalse(s.consume(site, 8453, usdc, other, payee, BigInteger.ONE))
         // After a switch, an automatic payment signed by the other account isn't covered: nothing written.
         assertEquals(X402Store.Commit.NotCovered, s.commit(paid("x", 1, auto = true).copy(from = other), grant = null))
         assertEquals(emptyList<X402Store.Payment>(), s.history.first())
@@ -285,9 +289,57 @@ class X402StoreTest {
     @Test
     fun `an allowance leaves the list when its window ends, with nothing else written (R2-M2)`() = runBlocking {
         val s = X402Store(MemoryStore())
-        assertTrue(s.grant(site, 8453, usdc, me, "USDC", 6, BigInteger.TEN, 300, BigInteger.ZERO))
+        assertTrue(s.grant(site, 8453, usdc, me, payee, BigInteger.TEN, "USDC", 6, BigInteger.TEN, 300, BigInteger.ZERO))
         val seen = withTimeout(5_000) { s.allowances.take(2).toList() }
         assertEquals(1, seen[0].size)
         assertEquals(emptyList<X402Store.Allowance>(), seen[1])
+    }
+
+    @Test
+    fun `#237 an allowance pays each time no more than the payment approved on the sheet`() = runBlocking {
+        val s = store()
+        assertTrue(s.commit(paid("a", 10, auto = false), X402Store.NewAllowance("USDC", 6, BigInteger.valueOf(100), hour)) is X402Store.Commit.Done)
+        // The rest of the cap in one request: not paid silently.
+        assertEquals(X402Store.Commit.NotCovered, s.commit(paid("b", 90, auto = true), grant = null))
+        assertEquals(X402Store.Commit.NotCovered, s.commit(paid("c", 11, auto = true), grant = null))
+        assertTrue(s.commit(paid("d", 10, auto = true), grant = null) is X402Store.Commit.Done)
+        val a = s.allowances.first().single()
+        assertEquals(BigInteger.valueOf(20), a.spent)
+        assertEquals(BigInteger.TEN, a.each)
+        assertNotNull(s.covering(listOf(a), site, 8453, usdc, me, payee, BigInteger.TEN))
+        assertNull(s.covering(listOf(a), site, 8453, usdc, me, payee, BigInteger.valueOf(11)))
+        assertFalse(s.consume(site, 8453, usdc, me, payee, BigInteger.valueOf(80)))
+        assertTrue(s.consume(site, 8453, usdc, me, payee, BigInteger.valueOf(9)))
+        // A grant's per-payment amount can't be over its cap, nor nothing.
+        assertFalse(s.grant(cap = 10, each = 11))
+        assertFalse(s.grant(cap = 10, each = 0))
+    }
+
+    @Test
+    fun `#237 an allowance pays only the address the approved payment went to`() = runBlocking {
+        val s = store()
+        assertTrue(s.commit(paid("a", 10, auto = false), X402Store.NewAllowance("USDC", 6, BigInteger.valueOf(100), hour)) is X402Store.Commit.Done)
+        assertEquals(X402Store.Commit.NotCovered, s.commit(paid("b", 10, auto = true).copy(payTo = other), grant = null))
+        assertTrue(s.commit(paid("c", 10, auto = true).copy(payTo = usdc.lowercase()), grant = null) is X402Store.Commit.Done)
+        val all = s.allowances.first()
+        assertEquals(payee.lowercase(), all.single().payTo)
+        assertNotNull(s.covering(all, site, 8453, usdc, me, payee.uppercase().replace("0X", "0x"), BigInteger.ONE))
+        assertNull(s.covering(all, site, 8453, usdc, me, other, BigInteger.ONE))
+        assertFalse(s.consume(site, 8453, usdc, me, other, BigInteger.ONE))
+    }
+
+    @Test
+    fun `#237 an allowance stored without its payee and per-payment amount pays nothing`() {
+        val key = "$site 8453 ${usdc.lowercase()} ${me.lowercase()}"
+        val old = """{"cap":"100","spent":"0","created":1,"expires":2,"symbol":"USDC","decimals":6}"""
+        assertNull(X402Store.decodeAllowance(key, old))
+        assertNull(X402Store.decodeAllowance(key, old.dropLast(1) + ""","payTo":"${payee.lowercase()}"}"""))
+        assertNull(X402Store.decodeAllowance(key, old.dropLast(1) + ""","each":"10"}"""))
+        assertNull(X402Store.decodeAllowance(key, old.dropLast(1) + ""","payTo":"nope","each":"10"}"""))
+        assertNull(X402Store.decodeAllowance(key, old.dropLast(1) + ""","payTo":"${payee.lowercase()}","each":"0"}"""))
+        val ok = X402Store.decodeAllowance(key, old.dropLast(1) + ""","payTo":"$payee","each":"10"}""")!!
+        assertEquals(payee.lowercase(), ok.payTo)
+        assertEquals(BigInteger.TEN, ok.each)
+        assertEquals(ok, X402Store.decodeAllowance(key, X402Store.encodeAllowance(ok)))
     }
 }
