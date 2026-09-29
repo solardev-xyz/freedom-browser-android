@@ -241,4 +241,43 @@ class Eip712Test {
         payload.getJSONObject("message").put("contents", "x".repeat(1000))
         Eip712.lines(Eip712.parse(payload.toString()))
     }
+
+    @Test
+    fun `invisible characters that aren't typed as format are caught too`() {
+        val vs = { cp: Int -> String(Character.toChars(cp)) }
+        // Bytes smuggled as variation selectors after one visible character (0xFE00-0xFE0F, 0xE0100-0xE01EF).
+        val smuggled = "hi" + vs(0xFE01) + vs(0xE0100) + vs(0xE01EF)
+        assertNull(MessageSigning.readableText(smuggled.toByteArray()))
+        assertEquals("hi\\uFE01\\u{E0100}\\u{E01EF}", Eip712.visible(smuggled))
+        // Hangul fillers, the blank Braille pattern, the grapheme joiner, Mongolian FVS, Khmer inherent vowels.
+        for (cp in listOf(0x115F, 0x1160, 0x3164, 0xFFA0, 0x2800, 0x034F, 0x180B, 0x17B4, 0x17B5)) {
+            assertNull("U+%04X".format(cp), MessageSigning.readableText("a${vs(cp)}b".toByteArray()))
+            assertTrue("U+%04X".format(cp), MessageSigning.anyHides("a${vs(cp)}b"))
+        }
+        // An emoji's own presentation selector is still text; a run of them, or one on its own, isn't.
+        assertEquals("I ❤️ it", MessageSigning.readableText("I ❤️ it".toByteArray()))
+        assertEquals("I ❤️ it", Eip712.visible("I ❤️ it"))
+        assertNull(MessageSigning.readableText("I ❤\uFE0F\uFE0F\uFE0E it".toByteArray()))
+        assertNull(MessageSigning.readableText("\uFE0Fstart".toByteArray()))
+        assertNull(MessageSigning.readableText("a \uFE0F b".toByteArray()))
+    }
+
+    @Test
+    fun `deeply nested typed data keeps every level's line`() {
+        // Order{string note; N0 n}, N0{N1 n} … N29{address spender; uint256 amount}: the R3-F1 payload.
+        val types = JSONObject()
+        types.put("EIP712Domain", JSONArray().put(JSONObject().put("name", "name").put("type", "string")))
+        types.put("Order", JSONArray().put(JSONObject().put("name", "note").put("type", "string")).put(JSONObject().put("name", "n").put("type", "N0")))
+        for (i in 0 until 29) types.put("N$i", JSONArray().put(JSONObject().put("name", "n").put("type", "N${i + 1}")))
+        types.put("N29", JSONArray().put(JSONObject().put("name", "spender").put("type", "address")).put(JSONObject().put("name", "amount").put("type", "uint256")))
+        var inner = JSONObject().put("spender", "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb").put("amount", "1000")
+        for (i in 29 downTo 1) inner = JSONObject().put("n", inner)
+        val payload = JSONObject().put("types", types).put("domain", JSONObject().put("name", "x")).put("primaryType", "Order")
+            .put("message", JSONObject().put("note", "hello").put("n", inner))
+        val (_, message) = Eip712.lines(Eip712.parse(payload.toString()))
+        val spender = message.single { it.label == "spender" }
+        assertEquals(30, spender.depth)
+        assertEquals("0x" + "b".repeat(40), spender.value.lowercase())
+        assertEquals("1000", message.single { it.label == "amount" }.value)
+    }
 }

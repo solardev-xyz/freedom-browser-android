@@ -223,9 +223,12 @@ object Eip712 {
         if (!MessageSigning.anyHides(s)) return s
         val b = StringBuilder(s.length + 16)
         // Per code point: a supplementary format character (a tag character) is two Chars.
+        var prev = -1
         s.codePoints().forEach { c ->
+            val hidden = MessageSigning.hides(c, prev)
+            prev = c
             when {
-                !MessageSigning.hides(c) -> b.appendCodePoint(c)
+                !hidden -> b.appendCodePoint(c)
                 c == '\n'.code -> b.append("\\n")
                 c == '\r'.code -> b.append("\\r")
                 c == '\t'.code -> b.append("\\t")

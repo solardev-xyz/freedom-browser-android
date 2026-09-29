@@ -132,10 +132,10 @@ internal fun HexRow(label: String, hex: String, selector: Boolean, detail: Strin
     HorizontalDivider()
 }
 
-/** What the connection with desktop Freedom is doing, in a line. */
+/** What the connection over a scanned code is doing, in a line: the code doesn't prove who's on the other end. */
 internal fun remoteStatusText(status: OpenLvSession.Status): String = when (status) {
     OpenLvSession.Status.Idle -> "Not connected."
-    OpenLvSession.Status.Connecting -> "Connecting to desktop Freedom…"
+    OpenLvSession.Status.Connecting -> "Connecting over the scanned code…"
     OpenLvSession.Status.Connected -> "Connected. Requests over this code show up here for you to approve."
     OpenLvSession.Status.Disconnected -> "Done: the other side closed the connection. Each request on the computer shows a new code to scan."
     is OpenLvSession.Status.Failed -> "Couldn’t connect: ${status.message}"
@@ -152,7 +152,7 @@ internal fun PairingSection(uri: String) {
     val context = LocalContext.current
     val session = remember(context) { OpenLvSession.get(context) }
     val status by session.status.collectAsState()
-    SectionCard(title = "Desktop Freedom") {
+    SectionCard(title = "Signing connection") {
         Row(verticalAlignment = Alignment.Top) {
             when (status) {
                 OpenLvSession.Status.Connecting -> CircularProgressIndicator(strokeWidth = 2.dp, modifier = Modifier.size(20.dp))
@@ -364,8 +364,24 @@ private fun TypedDataBody(request: OpenLvSession.Request.TypedData) {
     )
 }
 
+/** Indent steps a typed-data line gets on the sheet, [TYPED_INDENT_DP] each. */
+internal const val TYPED_MAX_INDENT = 4
+internal const val TYPED_INDENT_DP = 12
+
+/**
+ * How far in a typed-data line at [depth] is drawn: one step a level, but
+ * never more than [TYPED_MAX_INDENT]. Nesting is unbounded, and an
+ * uncapped indent pushes a deep field past the sheet's width, where it
+ * would be signed without ever being drawn.
+ */
+internal fun typedIndent(depth: Int): Int = depth.coerceIn(0, TYPED_MAX_INDENT)
+
+/** A typed-data line's label, naming its level once the indent stops showing it. */
+internal fun typedLabel(line: baby.freedom.mobile.wallet.Eip712.Line): String =
+    if (line.depth > TYPED_MAX_INDENT) "level ${line.depth} · ${line.label}" else line.label
+
 @Composable
-private fun TypedLines(title: String, lines: List<baby.freedom.mobile.wallet.Eip712.Line>) {
+internal fun TypedLines(title: String, lines: List<baby.freedom.mobile.wallet.Eip712.Line>) {
     if (lines.isEmpty()) return
     Column(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
         Text(title, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -373,8 +389,8 @@ private fun TypedLines(title: String, lines: List<baby.freedom.mobile.wallet.Eip
             Column {
                 for (line in lines) {
                     // Label and value on their own lines: a long address or number wraps whole, never cut.
-                    Column(Modifier.padding(start = (line.depth * 12).dp, top = 2.dp)) {
-                        Text(line.label, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Column(Modifier.padding(start = (typedIndent(line.depth) * TYPED_INDENT_DP).dp, top = 2.dp)) {
+                        Text(typedLabel(line), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         Text(line.value, style = MaterialTheme.typography.bodyMedium, fontFamily = FontFamily.Monospace)
                     }
                 }
