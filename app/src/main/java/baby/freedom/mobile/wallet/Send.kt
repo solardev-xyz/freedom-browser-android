@@ -428,8 +428,20 @@ class NonceTracker(
 
     private val sent = HashMap<String, Sent>()
 
-    /** A send stopped being tracked while it could still land: its nonce, fees and hash. */
-    class Abandoned(val nonce: BigInteger, val fees: EthTransaction.Fees, val hash: String)
+    /**
+     * A send stopped being tracked while it could still land: its nonce,
+     * fees and hash. [heldBy] is the hash of this app's own send that took
+     * its place and was then found mined ([noteMined]) — the record stays
+     * until the mined count settles it (#238), but a later send refused
+     * for its nonce then names that one, not the abandoned one, as what
+     * went through (#257 R2-F1). Kept in memory only (a restart forgets
+     * it, and the copy names the abandoned send again).
+     */
+    class Abandoned(val nonce: BigInteger, val fees: EthTransaction.Fees, val hash: String) {
+        @Volatile
+        var heldBy: String? = null
+            internal set
+    }
 
     private val abandoned = HashMap<String, Abandoned>()
 
@@ -521,6 +533,20 @@ class NonceTracker(
      */
     fun markUsed(address: String, chainId: Long, nonce: BigInteger) {
         synchronized(sent) { noteUsed(key(address, chainId), nonce) }
+    }
+
+    /**
+     * This app's own send [hash] with [nonce] was found mined (one RPC's
+     * receipt): if it took an abandoned send's place, that record still
+     * stays — one receipt doesn't drop the guard (#238) — but it notes
+     * [hash] as what holds the nonce, for [WalletSender.broadcastFailure]'s
+     * copy (#257 R2-F1).
+     */
+    fun noteMined(address: String, chainId: Long, nonce: BigInteger, hash: String) {
+        synchronized(sent) {
+            val a = abandoned[key(address, chainId)] ?: return
+            if (a.nonce == nonce && !a.hash.equals(hash, ignoreCase = true)) a.heldBy = hash
+        }
     }
 
     /** Under the lock: [nonce] is taken, so the local next is at least one past it. */
@@ -1338,12 +1364,14 @@ class WalletSender internal constructor(
                 // One RPC's receipt: an abandoned send's guard stays until
                 // the mined count settles it (#238).
                 nonces.markUsed(from, chainId, quote.tx.nonce)
+                nonces.noteMined(from, chainId, quote.tx.nonce, s.hash)
                 settle(start)
                 set(quote, SendStatus.Stage.Pending, s.hash)
                 follow(quote, s.hash)
                 return
             }
-            val (message, uncertain) = broadcastFailure(e, quote)
+            val heldBy = nonces.replacing(from, chainId, quote.tx.nonce)?.heldBy
+            val (message, uncertain) = broadcastFailure(e, quote, heldBy)
             // On a resend, a refusal is what a node says once the earlier
             // try's transaction is mined: "nonce used", or — from a client
             // that checks the balance or the fee before the nonce
@@ -1401,6 +1429,8 @@ class WalletSender internal constructor(
             if (receipt != null) {
                 val outcome = outcomeOf(receipt)
                 if (outcome != null) {
+                    // Mined, so it holds its nonce: if it took an abandoned send's place, a later refusal names it.
+                    nonces.noteMined(quote.request.from.address, quote.tx.chainId, quote.tx.nonce, hash)
                     set(quote, outcome, hash)
                     return
                 }
@@ -1564,7 +1594,12 @@ class WalletSender internal constructor(
             return "nonce too low" in m || "already been used" in m || "oldnonce" in m
         }
 
-        internal fun broadcastFailure(e: ChainRpcException, quote: SendQuote): Pair<String, Boolean> {
+        /**
+         * [heldBy]: this app's own send found mined on the abandoned
+         * send's nonce ([NonceTracker.Abandoned.heldBy]), named instead of
+         * [SendQuote.replaces] when the nonce is refused as used.
+         */
+        internal fun broadcastFailure(e: ChainRpcException, quote: SendQuote, heldBy: String? = null): Pair<String, Boolean> {
             val node = nodeErrorOf(e)
             val unanswered = (e as? ChainRpcException.AllSourcesFailed)?.unanswered == true
             val symbol = quote.request.chain.symbol
@@ -1580,6 +1615,9 @@ class WalletSender internal constructor(
                 node.insufficientFunds -> "Not sent: not enough $symbol for the amount and the fee any more." to false
                 "nonce too high" in m ->
                     "Not sent: nonce ${quote.tx.nonce} is ahead of what the network expects — an earlier transaction may not have reached it. Review it again." to false
+                nonceUsed(e) && quote.replaces != null && heldBy != null ->
+                    "Not sent: nonce ${quote.tx.nonce} was already used — most likely by your send that took the place of the one " +
+                        "you stopped tracking, which went through ($heldBy). Check it on the explorer before sending again." to false
                 nonceUsed(e) && quote.replaces != null ->
                     "Not sent: nonce ${quote.tx.nonce} was already used — most likely the send you stopped tracking went through " +
                         "(${quote.replaces}). Check it on the explorer before sending again." to false

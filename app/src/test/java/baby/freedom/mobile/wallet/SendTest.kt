@@ -1416,7 +1416,7 @@ class SendTest {
             "\"result\":{\"status\":\"0x1\",\"blockNumber\":\"0x10\",\"gasUsed\":\"0x5208\",\"effectiveGasPrice\":\"0x1\"}"
         }
         s.retry()
-        s.awaitStage { it is SendStatus.Stage.Confirmed }
+        val replacement = s.awaitStage { it is SendStatus.Stage.Confirmed }.hash!!
         s.acknowledge()
         // The mined count still says 7 is open: the guard stays, and the next send still takes
         // the abandoned one's place rather than going out beside it at 8.
@@ -1424,6 +1424,16 @@ class SendTest {
         val after = s.prepare(request())
         assertEquals(BigInteger.valueOf(7), after.tx.nonce)
         assertEquals(first.hash, after.replaces)
+        // Refused for that nonce, it names the replacement that went through, not the abandoned
+        // send (#257 R2-F1).
+        chain.on["eth_sendRawTransaction"] = { "\"error\":{\"code\":-32000,\"message\":\"nonce too low\"}" }
+        s.submit(after, signer())
+        val refused = s.awaitStage { it is SendStatus.Stage.Failed }.stage as SendStatus.Stage.Failed
+        assertFalse(refused.mayHaveGone)
+        assertTrue(refused.message, replacement in refused.message)
+        assertFalse(refused.message, first.hash!! in refused.message)
+        s.acknowledge()
+        chain.on.clear()
         // Once the chain's count agrees it's mined, it goes.
         chain.mined = 8
         assertNull(s.prepare(request()).replaces)
@@ -1441,6 +1451,26 @@ class SendTest {
         val other = NonceTracker(chain.rpc())
         other.markUsed(from.address, 100, BigInteger.valueOf(7))
         assertEquals(BigInteger.valueOf(8), other.next(from.address, 100).value)
+    }
+
+    @Test
+    fun `noteMined names the replacement holding an abandoned send's nonce but keeps the guard (#257 R2-F1)`() {
+        val chain = FakeChain()
+        val tracker = NonceTracker(chain.rpc())
+        val abandoned = "0x" + "ab".repeat(32)
+        val replacement = "0x" + "cd".repeat(32)
+        tracker.abandon(from.address, 100, BigInteger.valueOf(7), EthTransaction.Fees.Legacy(BigInteger.TEN), abandoned)
+        // Another nonce, or the abandoned send's own hash: not a replacement holding it.
+        tracker.noteMined(from.address, 100, BigInteger.valueOf(8), replacement)
+        tracker.noteMined(from.address, 100, BigInteger.valueOf(7), abandoned.uppercase().replace("0X", "0x"))
+        assertNull(tracker.replacing(from.address, 100, BigInteger.valueOf(7))?.heldBy)
+        tracker.noteMined(from.address, 100, BigInteger.valueOf(7), replacement)
+        val record = tracker.replacing(from.address, 100, BigInteger.valueOf(7))
+        assertEquals(abandoned, record?.hash)
+        assertEquals(replacement, record?.heldBy)
+        // Abandoned afresh: a new record, holding nothing yet.
+        tracker.abandon(from.address, 100, BigInteger.valueOf(7), EthTransaction.Fees.Legacy(BigInteger.TEN), abandoned)
+        assertNull(tracker.replacing(from.address, 100, BigInteger.valueOf(7))?.heldBy)
     }
 
     @Test
@@ -1555,6 +1585,11 @@ class SendTest {
         val (m, u) = WalletSender.broadcastFailure(rpc("nonce too low"), quote.copy(replaces = "0xab"))
         assertTrue(m, m.contains("the send you stopped tracking went through (0xab)"))
         assertFalse(u)
+        // Its own replacement found mined on that nonce: that's what's named (#257 R2-F1).
+        val (held, heldUncertain) = WalletSender.broadcastFailure(rpc("nonce too low"), quote.copy(replaces = "0xab"), heldBy = "0xcd")
+        assertTrue(held, held.contains("which went through (0xcd)"))
+        assertFalse(held, "0xab" in held)
+        assertFalse(heldUncertain)
         // An error this can't read proves nothing: a rate limit, a client's own "already have it" wording.
         check(rpc("something odd‮"), "The RPC answered with an error (something odd), so it may or may not", true)
         check(ChainRpcException.AllSourcesFailed(emptyList(), ChainRpcException.Rpc(-32005, "rate limited", null)), "The RPC answered with an error (rate limited)", true)
