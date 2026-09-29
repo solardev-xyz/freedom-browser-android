@@ -36,6 +36,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
@@ -44,6 +45,7 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlin.system.exitProcess
+import java.math.BigInteger
 import org.json.JSONObject
 
 /**
@@ -79,6 +81,16 @@ class NodeService : Service() {
     private var ipfsNode: IpfsNode? = null
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
+    /** Holds a stop back while a postage spend runs inside ant (#116); see [INodeService.stopWhenIdle]. */
+    private val stopGate = SpendStopGate()
+
+    /**
+     * Was this instance created in a `:node` process an earlier instance
+     * already doomed to exit after a spend ([ProcessExitLatch])? It then
+     * starts nothing; the exit takes it down and Android restarts it fresh.
+     */
+    private val doomed: Boolean get() = ProcessExitLatch.node.pending
+
     /** `radicleCall`s running at once: the browser's reads and the provider's calls (#124). */
     private val radicleCalls = Semaphore(MAX_RADICLE_CALLS)
 
@@ -112,7 +124,7 @@ class NodeService : Service() {
     private val callbacks = RemoteCallbackList<INodeCallback>()
 
     private val binder = object : INodeService.Stub() {
-        override fun getState(): NodeInfo = swarmNode.state.value
+        override fun getState(): NodeInfo = reportedNodeInfo(swarmNode.state.value, doomed)
 
         override fun getIpfsState(): IpfsInfo = ipfsNode?.state?.value ?: IpfsInfo()
 
@@ -125,7 +137,7 @@ class NodeService : Service() {
         override fun registerCallback(cb: INodeCallback?) {
             cb ?: return
             callbacks.register(cb)
-            runCatching { cb.onStateChanged(swarmNode.state.value) }
+            runCatching { cb.onStateChanged(reportedNodeInfo(swarmNode.state.value, doomed)) }
             runCatching { cb.onIpfsStateChanged(ipfsNode?.state?.value ?: IpfsInfo()) }
             runCatching { cb.onRadicleStateChanged(radicleNode.state.value) }
         }
@@ -136,6 +148,7 @@ class NodeService : Service() {
         }
 
         override fun ensureIpfsStarted() {
+            if (doomed) return
             scope.launch { maybeStartIpfs() }
         }
 
@@ -165,11 +178,13 @@ class NodeService : Service() {
         }
 
         override fun reloadIdentity() {
+            if (doomed) return
             scope.launch(Dispatchers.IO) { restartSwarmIfStale("node identity changed") }
         }
 
         override fun setSwarmMode(light: Boolean, gnosisRpc: String?) {
             val mode = if (light) SwarmNode.Mode.light(gnosisRpc.orEmpty()) else SwarmNode.Mode.ULTRA_LIGHT
+            if (doomed) return
             scope.launch(Dispatchers.IO) {
                 relayedMode = mode
                 restartSwarmIfStale("swarm mode is now $mode")
@@ -179,6 +194,7 @@ class NodeService : Service() {
         override fun getRadicleState(): RadicleInfo = radicleNode.state.value
 
         override fun startRadicle() {
+            if (doomed) return
             scope.launch { radicleNode.start() }
         }
 
@@ -220,6 +236,132 @@ class NodeService : Service() {
                 }
             }
             return read
+        }
+
+        override fun stampCall(method: String?, argsJson: String?): ParcelFileDescriptor {
+            val (read, write) = ParcelFileDescriptor.createPipe()
+            scope.launch(Dispatchers.IO) {
+                // Nothing is started for a reader that already gave up.
+                val answer = if (readerGone(write)) {
+                    null
+                } else {
+                    runCatching { stampCallNow(method.orEmpty(), JSONObject(argsJson ?: "{}")) }
+                        .getOrElse { e ->
+                            Log.w(TAG, "stamp call $method failed: ${e.javaClass.simpleName}: ${e.message}")
+                            JSONObject().put("error", e.message ?: "the Swarm node couldn't do that").toString()
+                        }
+                }
+                runCatching {
+                    ParcelFileDescriptor.AutoCloseOutputStream(write).use { out ->
+                        if (answer != null) out.write(answer.toByteArray())
+                    }
+                }
+                stopIfDeferredStopDue()
+            }
+            return read
+        }
+
+        override fun stopWhenIdle(): Boolean {
+            val deferred = stopGate.requestStop()
+            if (deferred) {
+                Log.i(TAG, "node turned off during a postage spend; stopping once it ends")
+                stopAnywayWhenOverdue()
+            }
+            return deferred
+        }
+    }
+
+    /**
+     * Runs a postage spend (#116) under [stopGate]: refused once the node
+     * is being turned off, and a stop asked for while it ran happens as
+     * soon as it (the last one) ends — never in the middle, where exiting
+     * the process could leave a batch paid for but unregistered.
+     */
+    private fun <T> spending(block: () -> T): T {
+        check(!doomed && stopGate.begin()) { "The Swarm node is turning off" }
+        try {
+            return block()
+        } finally {
+            stopGate.end()
+        }
+    }
+
+    /**
+     * Bounds a deferred stop (#116): if the spend is still running once
+     * [SPEND_STOP_WAIT_MS] has passed since the stop was asked for — ant
+     * hung — the service stops anyway, and [onDestroy] then exits without
+     * waiting further, so a node the user turned off doesn't go on
+     * peering indefinitely. Tagged with the stop's generation, so turning
+     * the node back on (and off again) meanwhile disarms it.
+     */
+    private fun stopAnywayWhenOverdue() {
+        val generation = stopGate.stopGeneration
+        val left = stopGate.budgetLeftMs(SPEND_STOP_WAIT_MS)
+        scope.launch {
+            delay(left)
+            if (stopGate.overdue(generation, SPEND_STOP_WAIT_MS)) {
+                Log.w(TAG, "postage spend still running ${SPEND_STOP_WAIT_MS / 60_000} min after the node was turned off; stopping anyway")
+                stopSelf()
+            }
+        }
+    }
+
+    /**
+     * Carries out a stop [INodeService.stopWhenIdle] deferred, if it's due
+     * now. Called once a stamp call's answer is written, so the process
+     * doesn't exit before the app has read how the spend went.
+     */
+    private fun stopIfDeferredStopDue() {
+        if (!stopGate.shouldStopNow()) return
+        scope.launch {
+            // Re-checked on the main thread, where onStartCommand cancels
+            // a stop the user took back meanwhile.
+            if (stopGate.shouldStopNow()) {
+                Log.i(TAG, "postage spend ended; carrying out the deferred stop")
+                stopSelf()
+            }
+        }
+    }
+
+    /**
+     * One [INodeService.stampCall] (#116), blocking. The spends are for
+     * the wallet identity's node only: the device-only key can't be
+     * restored anywhere, so nothing bought with it could be kept.
+     */
+    private fun stampCallNow(method: String, args: JSONObject): String {
+        fun days() = args.getLong("days").also { require(it in 1..MAX_STAMP_DAYS) { "bad duration" } }
+        fun amount() = BigInteger(args.getString("amountPerChunk")).also { require(it.signum() > 0) { "bad amount" } }
+        fun maxSwap() = BigInteger(args.getString("maxSwapWei")).also { require(it.signum() >= 0) { "bad xDAI total" } }
+        fun spendable() = check(swarmNode.state.value.walletIdentity) {
+            "The Swarm node isn't running as your wallet's identity"
+        }
+        return when (method) {
+            "status" -> swarmNode.storageStatus()
+            "quote" -> {
+                val depth = args.getInt("depth").also { require(it in MIN_STAMP_DEPTH..MAX_STAMP_DEPTH) { "bad depth" } }
+                swarmNode.storageQuote(depth, days())
+            }
+            "extendQuote" -> {
+                // ant prices its connected batch only; say so rather than price another.
+                val want = SwarmNode.normalizeBatchId(args.getString("batchId")) ?: throw IllegalArgumentException("bad batch id")
+                val connected = JSONObject(swarmNode.storageStatus())
+                check(SwarmNode.normalizeBatchId(connected.optString("batch_id")) == want) {
+                    "this stamp isn't the node's active one"
+                }
+                swarmNode.storageTopupQuote(days())
+            }
+            "buy" -> spending {
+                spendable()
+                val depth = args.getInt("depth").also { require(it in MIN_STAMP_DEPTH..MAX_STAMP_DEPTH) { "bad depth" } }
+                Log.i(TAG, "buying a postage batch (depth $depth), as the user confirmed")
+                swarmNode.buyStamp(depth, amount(), immutable = true, maxSwapWei = maxSwap())
+            }
+            "extend" -> spending {
+                spendable()
+                Log.i(TAG, "extending a postage batch, as the user confirmed")
+                swarmNode.extendStamp(args.getString("batchId"), amount(), maxSwap())
+            }
+            else -> throw IllegalArgumentException("unknown stamp call")
         }
     }
 
@@ -341,7 +483,7 @@ class NodeService : Service() {
     private fun repromoteForegroundIfDemoted() {
         if (!foregroundDemoted) return
         runCatching {
-            startForeground(NOTIFICATION_ID, buildNotification(swarmNode.state.value), foregroundTypeCompat())
+            startForeground(NOTIFICATION_ID, buildNotification(reportedNodeInfo(swarmNode.state.value, doomed)), foregroundTypeCompat())
         }.onSuccess {
             foregroundDemoted = false
             Log.i(TAG, "re-promoted to foreground service")
@@ -379,20 +521,28 @@ class NodeService : Service() {
 
         startForeground(
             NOTIFICATION_ID,
-            buildNotification(NodeInfo()),
+            buildNotification(reportedNodeInfo(NodeInfo(), doomed)),
             foregroundTypeCompat(),
         )
 
         swarmObserver = swarmNode.state
-            .onEach { info ->
+            .onEach { raw ->
+                // In a doomed process, why the node isn't up yet (#116).
+                val info = reportedNodeInfo(raw, doomed)
                 updateNotification(info)
                 broadcastState(info)
                 Log.i(TAG, "swarm → ${info.status}  peers=${info.connectedPeers}")
             }
             .launchIn(scope)
 
-        swarmNode.start()
-        registerNetworkCallback()
+        if (doomed) {
+            // An earlier instance's exit is pending (#116): starting ant
+            // here would collide with its still-live handle, and be killed.
+            Log.w(TAG, "created while :node waits to exit after a postage spend; starting nothing until the restart")
+        } else {
+            swarmNode.start()
+            registerNetworkCallback()
+        }
 
         // Radicle (#73) runs only while the user has it on: the UI calls
         // [INodeService.startRadicle] on every bind while the setting is
@@ -480,7 +630,12 @@ class NodeService : Service() {
         broadcastIpfsState(IpfsInfo())
     }
 
-    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int = START_STICKY
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // The user turned the node (back) on: a stop still waiting for a
+        // spend to end (#116) no longer stands.
+        stopGate.cancelStop()
+        return START_STICKY
+    }
 
     override fun onDestroy() {
         unregisterNetworkCallback()
@@ -498,8 +653,38 @@ class NodeService : Service() {
         // Kill the :node process so nothing native lingers (ant's
         // tokio runtime threads, the freedom-ipfs store lock). The next
         // startForegroundService() from the UI boots a fresh process.
-        Log.i(TAG, "exiting :node process to release state-store lock")
-        exitProcess(0)
+        //
+        // Not while a postage spend is still inside ant (#116), though:
+        // the UI defers its stop through [INodeService.stopWhenIdle], but
+        // a stop that got here some other way (the UI not yet bound when
+        // the user turned the node off) must still not exit mid-spend.
+        // The spend holds its read lock on ant's handle, so the teardown
+        // above never frees ant under it; only the exit waits for it.
+        stopGate.requestStop()
+        if (doomed) {
+            // An earlier instance's spend is still running in this process;
+            // its exit thread ends the process once that spend is done.
+            Log.i(TAG, "destroyed while :node waits to exit after a postage spend")
+            return
+        }
+        if (stopGate.spendsRunning == 0) {
+            Log.i(TAG, "exiting :node process to release state-store lock")
+            exitProcess(0)
+        }
+        Log.w(TAG, "destroyed during a postage spend; exiting once it ends")
+        // A service created in this process from now on starts nothing.
+        ProcessExitLatch.node.schedule()
+        // The wait counts from when the stop was first asked for: a
+        // deferred stop that already waited out its budget
+        // ([stopAnywayWhenOverdue]) exits right away.
+        val budget = stopGate.budgetLeftMs(SPEND_STOP_WAIT_MS)
+        Thread({
+            stopGate.awaitIdle(budget)
+            // A moment for the spend's answer to reach the app.
+            Thread.sleep(ANSWER_GRACE_MS)
+            Log.i(TAG, "exiting :node process to release state-store lock")
+            exitProcess(0)
+        }, "node-exit-after-spend").start()
     }
 
     private fun broadcastState(info: NodeInfo) {
@@ -555,7 +740,7 @@ class NodeService : Service() {
     private fun buildNotification(info: NodeInfo): Notification {
         val text = when (info.status) {
             NodeStatus.Stopped -> "Stopped"
-            NodeStatus.Starting -> "Starting…"
+            NodeStatus.Starting -> info.errorMessage ?: "Starting…"
             NodeStatus.Running -> "Running — ${info.connectedPeers} peers"
             NodeStatus.Error -> "Error: ${info.errorMessage ?: "unknown"}"
         }
@@ -575,7 +760,22 @@ class NodeService : Service() {
         }
 
     companion object {
+        /** The stamp sizes the buy screen offers (#116): 2^17 chunks (ant's and bee's smallest) up to 2^24. */
+        const val MIN_STAMP_DEPTH = 17
+        const val MAX_STAMP_DEPTH = 24
+
+        /** A stamp bought or extended for at most ten years at a time. */
+        const val MAX_STAMP_DAYS = 3650L
+
         private const val MAX_RADICLE_CALLS = 4
+
+        /**
+         * The longest a stop waits for a postage spend still running
+         * (#116), counted from when it was asked for: a deferred stop
+         * ([INodeService.stopWhenIdle]) and a destroyed service's exit alike.
+         */
+        private const val SPEND_STOP_WAIT_MS = 15 * 60_000L
+        private const val ANSWER_GRACE_MS = 1_000L
 
         private const val TAG = "NodeService"
         private const val CHANNEL_ID = "freedom_node"

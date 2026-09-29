@@ -155,7 +155,7 @@ object RadicleClient {
      * `poll()` rather than a blocking read, so the deadline holds however
      * slowly (or never) the other end writes.
      */
-    private fun readAll(pipe: ParcelFileDescriptor, timeoutMs: Long, maxBytes: Int): String? {
+    internal fun readAll(pipe: ParcelFileDescriptor, timeoutMs: Long, maxBytes: Int): String? {
         val fd = pipe.fileDescriptor
         val deadline = SystemClock.uptimeMillis() + timeoutMs
         val out = ByteArrayOutputStream()

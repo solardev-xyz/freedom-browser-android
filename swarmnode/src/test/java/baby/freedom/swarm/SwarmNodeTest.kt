@@ -2,6 +2,7 @@ package baby.freedom.swarm
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.File
@@ -47,8 +48,10 @@ class SwarmNodeTest {
             releaseInit.await(5, TimeUnit.SECONDS)
             return h
         }
+        /** The account [accountInfo] reports; `0xabc<handle>` by default. */
+        @Volatile var ethAddress: String? = null
         override fun accountInfo(handle: Long) =
-            """{"eth_address":"0xabc$handle","overlay":"ff$handle","peer_id":"16Uiu2","agent":"ant-test"}"""
+            """{"eth_address":"${ethAddress ?: "0xabc$handle"}","overlay":"ff$handle","peer_id":"16Uiu2","agent":"ant-test"}"""
         /** Each [startGateway]'s mode, as `light:<rpc>` or `ultra-light`. */
         val gatewayModes: MutableList<String> = Collections.synchronizedList(mutableListOf())
         override fun startGateway(handle: Long, apiAddr: String, lightMode: Boolean, gnosisRpc: String) {
@@ -65,6 +68,26 @@ class SwarmNodeTest {
         override fun shutdown(handle: Long) {
             calls += "shutdown:$handle"
             shutDown.countDown()
+        }
+
+        /** What [storageStatus] answers: the connected batch. */
+        @Volatile var storageStatusJson = """{"enabled":false}"""
+        /** Run inside each spend, in place of ant's transactions. */
+        @Volatile var onSpend: (String) -> String = { it }
+        override fun storageStatus(handle: Long) = storageStatusJson
+        override fun storageQuote(handle: Long, gnosisRpc: String, depth: Int, days: Long): String {
+            calls += "quote:$handle:$gnosisRpc:$depth:$days"
+            return """{"depth":$depth}"""
+        }
+        override fun storageTopupQuote(handle: Long, gnosisRpc: String, days: Long) = "{}"
+        override fun storageValidity(handle: Long, gnosisRpc: String) = "{}"
+        override fun storageBuyXdai(handle: Long, gnosisRpc: String, depth: Int, amountPerChunk: String, immutable: Boolean): String {
+            calls += "buy:$handle:$depth:$amountPerChunk:$immutable"
+            return onSpend("buy")
+        }
+        override fun storageTopupXdai(handle: Long, gnosisRpc: String, amountPerChunk: String): String {
+            calls += "topup:$handle:$amountPerChunk"
+            return onSpend("topup")
         }
     }
 
@@ -261,5 +284,115 @@ class SwarmNodeTest {
         assertEquals("https://rpc.example", light.gnosisRpc)
         // Its string form never carries the endpoint, which may hold a key.
         assertEquals("light", light.toString())
+    }
+
+    private fun lightNode(ops: FakeOps): SwarmNode {
+        ops.releaseSeed.countDown()
+        ops.releaseInit.countDown()
+        ops.ethAddress = "0x" + TestTx.OWNER.uppercase()
+        val node = SwarmNode(config.copy(mode = { SwarmNode.Mode.light("https://rpc.example/key123") }), ops)
+        node.start()
+        awaitStatus(node, NodeStatus.Running)
+        return node
+    }
+
+    @Test
+    fun storageCallsNeedARunningLightNode() {
+        val ops = FakeOps().apply { releaseSeed.countDown(); releaseInit.countDown() }
+        val node = SwarmNode(config, ops)
+        assertThrows(IllegalStateException::class.java) { node.storageQuote(17, 2) }
+        node.start()
+        awaitStatus(node, NodeStatus.Running)
+        // Ultra-light: no chain, nothing to buy with.
+        assertThrows(IllegalStateException::class.java) { node.storageQuote(17, 2) }
+        node.dispose()
+
+        val light = lightNode(FakeOps())
+        assertEquals("""{"depth":17}""", light.storageQuote(17, 2))
+        light.dispose()
+    }
+
+    @Test
+    fun aBuyRunsInsideAPermitForExactlyWhatWasConfirmed() {
+        val ops = FakeOps()
+        val node = lightNode(ops)
+        val amount = java.math.BigInteger("4325218560")
+        val confirmed = TestTx.request(TestTx.createBatch(TestTx.OWNER, amount, 17, false))
+        val other = TestTx.request(TestTx.createBatch(TestTx.OWNER, amount, 18, false))
+        val seen = mutableListOf<Boolean>()
+        ops.onSpend = {
+            seen += SpendGuard.admit(other)
+            seen += SpendGuard.admit(confirmed)
+            """{"enabled":true}"""
+        }
+        assertFalse(SpendGuard.admit(confirmed))
+        node.buyStamp(17, amount, immutable = false, maxSwapWei = java.math.BigInteger.TEN.pow(17))
+        assertEquals(listOf(false, true), seen)
+        // Closed again once the buy returns.
+        assertFalse(SpendGuard.admit(confirmed))
+        assertTrue("buy:1:17:4325218560:false" in ops.calls)
+        node.dispose()
+    }
+
+    @Test
+    fun extendingNeedsTheConnectedBatchAndPaysForItsDepth() {
+        val ops = FakeOps()
+        val node = lightNode(ops)
+        val id = "ab".repeat(32)
+        val amount = java.math.BigInteger("2162609281")
+        ops.storageStatusJson = """{"enabled":true,"batch_id":"0x${"cd".repeat(32)}","batch_depth":17}"""
+        assertThrows(IllegalStateException::class.java) {
+            node.extendStamp(id, amount, java.math.BigInteger.ONE)
+        }
+        assertFalse(ops.calls.any { it.startsWith("topup") })
+
+        ops.storageStatusJson = """{"enabled":true,"batch_id":"0x${id.uppercase()}","batch_depth":18}"""
+        val verdicts = mutableListOf<Boolean>()
+        ops.onSpend = {
+            verdicts += SpendGuard.admit(TestTx.request(TestTx.approve(amount.shiftLeft(17))))
+            verdicts += SpendGuard.admit(TestTx.request(TestTx.approve(amount.shiftLeft(18))))
+            verdicts += SpendGuard.admit(TestTx.request(TestTx.topUp("cd".repeat(32), amount)))
+            verdicts += SpendGuard.admit(TestTx.request(TestTx.topUp(id, amount)))
+            "{}"
+        }
+        node.extendStamp("0x$id", amount, java.math.BigInteger.ONE)
+        assertEquals(listOf(false, true, false, true), verdicts)
+        node.dispose()
+    }
+
+    @Test
+    fun aStopWaitsForAStorageCallStillInsideTheNode() {
+        val ops = FakeOps()
+        val node = lightNode(ops)
+        val inside = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        ops.onSpend = {
+            inside.countDown()
+            release.await(5, TimeUnit.SECONDS)
+            "{}"
+        }
+        val buyer = Thread { runCatching { node.buyStamp(17, java.math.BigInteger.TEN, false, java.math.BigInteger.ONE) } }
+        buyer.start()
+        assertTrue(inside.await(5, TimeUnit.SECONDS))
+        node.stop()
+        Thread.sleep(200)
+        assertFalse("shut down under a running buy", ops.calls.any { it.startsWith("shutdown") })
+        release.countDown()
+        buyer.join(5_000)
+        assertTrue(ops.shutDown.await(5, TimeUnit.SECONDS))
+        node.dispose()
+    }
+
+    @Test
+    fun errorsNeverCarryTheRpc() {
+        val ops = FakeOps()
+        val node = lightNode(ops)
+        ops.onSpend = { throw RuntimeException("rpc: error sending request for url (https://rpc.example/key123/)") }
+        val e = assertThrows(RuntimeException::class.java) {
+            node.buyStamp(17, java.math.BigInteger.TEN, false, java.math.BigInteger.ONE)
+        }
+        assertFalse(e.message!!.contains("key123"))
+        assertTrue(e.message!!.contains("the Gnosis RPC"))
+        node.dispose()
     }
 }
