@@ -478,7 +478,9 @@ class NonceTracker(
                 // Still waiting in a pool — or said mined only on one RPC's
                 // word, not yet confirmed (#238): take its place rather than
                 // queue behind it. Were it mined after all, this one is
-                // refused as a used nonce ("Not sent"), never sent beside it.
+                // refused as a used nonce, never sent beside it: "Not sent"
+                // when every RPC asked says so, "may have gone" (Try again,
+                // then followed to Unconfirmed) when one didn't answer.
                 return fromChain.copy(value = stood.nonce)
             }
         }
@@ -502,13 +504,29 @@ class NonceTracker(
     fun markSent(address: String, chainId: Long, nonce: BigInteger, hash: String? = null) {
         val dropped = synchronized(sent) {
             val k = key(address, chainId)
-            val next = nonce + BigInteger.ONE
-            if (sent[k]?.let { it.next >= next } != true) sent[k] = Sent(next, clock())
+            noteUsed(k, nonce)
             // Its replacement (or a later one) went out: the abandoned one can't land any more.
             (abandoned[k]?.let { nonce >= it.nonce && !it.hash.equals(hash, ignoreCase = true) } == true &&
                 abandoned.remove(k) != null).also { if (it) minedSeen.remove(k) }
         }
         if (dropped) onAbandonedChange()
+    }
+
+    /**
+     * A node said [nonce] is already used, but not by what: the next send
+     * goes past it, while an abandoned send's guard stays. That refusal may
+     * be one lying RPC's (the quorum defeated), or the abandoned send itself
+     * having mined; only [settleMined]'s reads of the mined count drop the
+     * guard, never one broadcast answer (#238).
+     */
+    fun markUsed(address: String, chainId: Long, nonce: BigInteger) {
+        synchronized(sent) { noteUsed(key(address, chainId), nonce) }
+    }
+
+    /** Under the lock: [nonce] is taken, so the local next is at least one past it. */
+    private fun noteUsed(k: String, nonce: BigInteger) {
+        val next = nonce + BigInteger.ONE
+        if (sent[k]?.let { it.next >= next } != true) sent[k] = Sent(next, clock())
     }
 
     /**
@@ -1317,7 +1335,9 @@ class WalletSender internal constructor(
             // asked after it then says the nonce is used: if this very
             // transaction is on chain, it went out.
             if (landed(chainId, s.hash)) {
-                nonces.markSent(from, chainId, quote.tx.nonce)
+                // One RPC's receipt: an abandoned send's guard stays until
+                // the mined count settles it (#238).
+                nonces.markUsed(from, chainId, quote.tx.nonce)
                 settle(start)
                 set(quote, SendStatus.Stage.Pending, s.hash)
                 follow(quote, s.hash)
@@ -1339,7 +1359,9 @@ class WalletSender internal constructor(
                 Log.i(TAG, "resend chain=$chainId nonce=${quote.tx.nonce} refused, following ${s.hash}")
                 // A used nonce is used whoever used it; for any other
                 // refusal the chain's own count tells the next send.
-                if (nonceUsed(e)) nonces.markSent(from, chainId, quote.tx.nonce) else nonces.forget(from, chainId)
+                // Not markSent: a refusal names no transaction, so it keeps
+                // an abandoned send's guard (one lying RPC can't drop it).
+                if (nonceUsed(e)) nonces.markUsed(from, chainId, quote.tx.nonce) else nonces.forget(from, chainId)
                 settle(start)
                 set(quote, SendStatus.Stage.Pending, s.hash)
                 follow(quote, s.hash)

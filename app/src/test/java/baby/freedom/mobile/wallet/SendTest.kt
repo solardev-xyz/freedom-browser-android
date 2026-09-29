@@ -1392,6 +1392,58 @@ class SendTest {
     }
 
     @Test
+    fun `on Try again of a replacement, a used-nonce refusal keeps the abandoned send's guard (#238)`() = runBlocking<Unit> {
+        val chain = FakeChain()
+        val s = sender(chain)
+        s.submit(s.prepare(request()), signer())
+        val first = s.awaitStage { it == SendStatus.Stage.Unconfirmed }
+        s.discard()
+        // Still in a pool: pending 8, mined 7. The replacement takes nonce 7.
+        chain.nonce = 8
+        chain.mined = 7
+        val next = s.prepare(request(amount = 2))
+        assertEquals(first.hash, next.replaces)
+        chain.on["eth_sendRawTransaction"] = { throw IOException("timed out") }
+        chain.on["eth_getTransactionReceipt"] = { throw IOException("timed out") }
+        s.submit(next, signer())
+        assertTrue(s.awaitStage { it is SendStatus.Stage.Failed }.mayHaveGone)
+        // Try again: every leg (one lying RPC, the quorum defeated) says the nonce is used, and
+        // the receipt, unreadable at first, then says the replacement mined.
+        chain.on["eth_sendRawTransaction"] = { "\"error\":{\"code\":-32000,\"message\":\"nonce too low\"}" }
+        var reads = 0
+        chain.on["eth_getTransactionReceipt"] = {
+            if (synchronized(chain) { reads++ } < 8) throw IOException("rate limited")
+            "\"result\":{\"status\":\"0x1\",\"blockNumber\":\"0x10\",\"gasUsed\":\"0x5208\",\"effectiveGasPrice\":\"0x1\"}"
+        }
+        s.retry()
+        s.awaitStage { it is SendStatus.Stage.Confirmed }
+        s.acknowledge()
+        // The mined count still says 7 is open: the guard stays, and the next send still takes
+        // the abandoned one's place rather than going out beside it at 8.
+        chain.on.clear()
+        val after = s.prepare(request())
+        assertEquals(BigInteger.valueOf(7), after.tx.nonce)
+        assertEquals(first.hash, after.replaces)
+        // Once the chain's count agrees it's mined, it goes.
+        chain.mined = 8
+        assertNull(s.prepare(request()).replaces)
+    }
+
+    @Test
+    fun `markUsed moves the next nonce past a used one but keeps an abandoned send's guard (#238)`() = runBlocking<Unit> {
+        val chain = FakeChain()
+        val tracker = NonceTracker(chain.rpc())
+        val hash = "0x" + "ab".repeat(32)
+        tracker.abandon(from.address, 100, BigInteger.valueOf(7), EthTransaction.Fees.Legacy(BigInteger.TEN), hash)
+        tracker.markUsed(from.address, 100, BigInteger.valueOf(7))
+        assertEquals(hash, tracker.replacing(from.address, 100, BigInteger.valueOf(7))?.hash)
+        // No abandoned send: one past the used nonce, as markSent.
+        val other = NonceTracker(chain.rpc())
+        other.markUsed(from.address, 100, BigInteger.valueOf(7))
+        assertEquals(BigInteger.valueOf(8), other.next(from.address, 100).value)
+    }
+
+    @Test
     fun `on Try again a used nonce with no receipt ends waiting, not as not sent`() = runBlocking<Unit> {
         val chain = FakeChain()
         val s = sender(chain)
