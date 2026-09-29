@@ -228,6 +228,10 @@ internal fun removeWalletKeepsBackupText(backup: BackupHeld): String = when (bac
         "Play services holds a Google backup of a wallet, which may be this one or another — this " +
         "wallet can’t be read to tell. That backup stays, and this page offers to restore it. " +
         "Without the recovery phrase written down, this wallet may be gone for good."
+    BackupHeld.MAYBE_UNATTRIBUTED -> "This deletes the wallet and its recovery phrase from this phone. Google " +
+        "Play services hasn’t answered, so it isn’t known whether it holds a Google backup of a wallet " +
+        "(this one or another — this wallet can’t be read to tell); if it does, it stays, and this page " +
+        "offers to restore it. Without the recovery phrase written down, this wallet may be gone for good."
     BackupHeld.UNKNOWN -> "This deletes the wallet and its recovery phrase from this phone. Google Play " +
         "services hasn’t answered, so it isn’t known whether a Google backup of this wallet is there; " +
         "if it is, it stays, and this page offers to restore it. Without the recovery phrase written " +
@@ -237,14 +241,21 @@ internal fun removeWalletKeepsBackupText(backup: BackupHeld): String = when (bac
         "everything in it are gone for good."
 }
 
-/** The Unreadable wallet card: with a Block Store entry there (#231), restoring it is the way back. */
-internal fun unreadableWalletDetail(googleBackupThere: Boolean): String =
-    "The wallet file on this phone isn’t one this version can open. " + if (googleBackupThere) {
-        "Google Play services holds a $GOOGLE_BACKUP_TITLE of a wallet: remove this one but keep that " +
+/**
+ * The Unreadable wallet card: with a Block Store entry there (#231),
+ * restoring it is the way back. [googleBackupThere] null: Play services
+ * hasn't said yet whether there is one (#244 R6-M1).
+ */
+internal fun unreadableWalletDetail(googleBackupThere: Boolean?): String =
+    "The wallet file on this phone isn’t one this version can open. " + when (googleBackupThere) {
+        true -> "Google Play services holds a $GOOGLE_BACKUP_TITLE of a wallet: remove this one but keep that " +
             "backup, then restore it (with a screen lock set). Or, if you have the recovery phrase, " +
             "remove it and import the phrase."
-    } else {
-        "If you have its recovery phrase, remove it and import the phrase to get your wallet back."
+        null -> "Google Play services hasn’t answered yet, so it isn’t known whether it holds a " +
+            "$GOOGLE_BACKUP_TITLE of a wallet. If it does, remove this one but keep that backup, then " +
+            "restore it (with a screen lock set). Or, if you have the recovery phrase, remove it and " +
+            "import the phrase."
+        false -> "If you have its recovery phrase, remove it and import the phrase to get your wallet back."
     }
 
 /** What the import field says under the phrase as it's typed. */
@@ -355,6 +366,8 @@ internal fun walletErrorMessage(
     googleBackup: Boolean = false,
     /** False when the backup there may be another wallet's (the vault can't be read to tell). */
     backupOwnerKnown: Boolean = true,
+    /** False when Play services hasn't said yet whether there is a backup at all (#244 R6-M1). */
+    backupThereKnown: Boolean = true,
 ): String? = when (e) {
     is VaultAuthCancelledException -> null
     is CancellationException -> null
@@ -364,8 +377,8 @@ internal fun walletErrorMessage(
     is DuplicateAccountException -> "Couldn’t $action: the next account of this wallet is already on the list, added from a " +
         "Ledger that holds the same recovery phrase. Remove that Ledger account to add it here."
     is VaultKeyLostException -> "Android has erased this wallet’s key. That happens when the screen lock is removed. " +
-        lostWalletAdvice(phraseBackedUp, googleBackup, backupOwnerKnown)
-    is VaultUnreadableException -> "This wallet can’t be read. " + lostWalletAdvice(phraseBackedUp, googleBackup, backupOwnerKnown)
+        lostWalletAdvice(phraseBackedUp, googleBackup, backupOwnerKnown, backupThereKnown)
+    is VaultUnreadableException -> "This wallet can’t be read. " + lostWalletAdvice(phraseBackedUp, googleBackup, backupOwnerKnown, backupThereKnown)
     // Google backup (#231). None of these messages can carry the phrase.
     is BackupUnavailableException -> "Couldn’t $action: ${e.message}."
     is BackupNotEncryptedException -> "Couldn’t $action: Google can’t end-to-end encrypt the backup on this " +
@@ -377,7 +390,17 @@ internal fun walletErrorMessage(
     else -> "Couldn’t $action (${e.javaClass.simpleName})"
 }
 
-private fun lostWalletAdvice(phraseBackedUp: Boolean, googleBackup: Boolean, ownerKnown: Boolean) = if (googleBackup && !ownerKnown) {
+private fun lostWalletAdvice(
+    phraseBackedUp: Boolean,
+    googleBackup: Boolean,
+    ownerKnown: Boolean,
+    thereKnown: Boolean,
+) = if (googleBackup && !thereKnown) {
+    "Google Play services hasn’t answered yet, so it isn’t known whether it holds a $GOOGLE_BACKUP_TITLE " +
+        "of a wallet (this one or another). If it does, remove this wallet but keep that backup, then " +
+        "restore it (with a screen lock set). " +
+        if (phraseBackedUp) "Or remove it and import your recovery phrase." else ""
+} else if (googleBackup && !ownerKnown) {
     "Google Play services holds a $GOOGLE_BACKUP_TITLE of a wallet, which may be this one or another: " +
         "remove this wallet but keep that backup, then restore it (with a screen lock set). " +
         if (phraseBackedUp) "Or remove it and import your recovery phrase." else ""
@@ -565,13 +588,13 @@ fun WalletScreen(
     // of *a* wallet, not of this one (#244 R4-F3).
     val googleBackupHeld = when {
         storedInfo != null -> backupHeld(storedInfo.cloudBackup, backupKnown, walletAddress)
-        state == Vault.State.Unreadable && backupEntry == true -> BackupHeld.UNATTRIBUTED
+        state == Vault.State.Unreadable -> unreadableBackupHeld(backupEntry)
         else -> BackupHeld.NONE
     }
     // The lost-key advice sends the user to restore the entry: only when it's there, and
     // theirs or possibly theirs.
     val googleBackupOn = googleBackupHeld == BackupHeld.CLOUD || googleBackupHeld == BackupHeld.DEVICE ||
-        googleBackupHeld == BackupHeld.UNATTRIBUTED
+        googleBackupHeld == BackupHeld.UNATTRIBUTED || googleBackupHeld == BackupHeld.MAYBE_UNATTRIBUTED
 
     // A feature asked for the wallet: hand it back as soon as it's open.
     LaunchedEffect(request, state) {
@@ -590,7 +613,9 @@ fun WalletScreen(
             } catch (e: Throwable) {
                 error = walletErrorMessage(
                     e, action, phraseBackedUp, googleBackupOn,
-                    backupOwnerKnown = googleBackupHeld != BackupHeld.UNATTRIBUTED,
+                    backupOwnerKnown = googleBackupHeld != BackupHeld.UNATTRIBUTED &&
+                        googleBackupHeld != BackupHeld.MAYBE_UNATTRIBUTED,
+                    backupThereKnown = googleBackupHeld != BackupHeld.MAYBE_UNATTRIBUTED,
                 )
                 if (e is CancellationException) throw e
             } finally {
@@ -855,7 +880,7 @@ fun WalletScreen(
                             icon = Icons.Filled.ErrorOutline,
                             color = Color(0xFFEF4444),
                             title = "Can’t be read",
-                            detail = unreadableWalletDetail(googleBackupThere = backupEntry == true),
+                            detail = unreadableWalletDetail(googleBackupThere = backupEntry),
                         )
                     }
                 }
@@ -1172,7 +1197,8 @@ fun WalletScreen(
                     // of". Otherwise whose the entry is is checked again under the lock:
                     // with Play services slow to answer the box shows before that's known,
                     // and another wallet's kept backup mustn't go with this one (#244 R5-F2).
-                    val deleteAny = storedInfo?.cloudBackup == true || googleBackupHeld == BackupHeld.UNATTRIBUTED
+                    val deleteAny = storedInfo?.cloudBackup == true || googleBackupHeld == BackupHeld.UNATTRIBUTED ||
+                        googleBackupHeld == BackupHeld.MAYBE_UNATTRIBUTED
                     val ownAddress = walletAddress
                     // Its publisher identities (maintainer decision 9), its history and the
                     // sites connected to it (#110) — or importing the same phrase later would
@@ -1531,7 +1557,7 @@ private fun ImportPhrasePage(
 private fun RemoveWalletDialog(backup: BackupHeld, onConfirm: (deleteBackup: Boolean) -> Unit, onDismiss: () -> Unit) {
     val cloudBackup = backup != BackupHeld.NONE
     // Whose the backup is can't be told (#244 R4-F3): "that" backup, never "its".
-    val unattributed = backup == BackupHeld.UNATTRIBUTED
+    val unattributed = backup == BackupHeld.UNATTRIBUTED || backup == BackupHeld.MAYBE_UNATTRIBUTED
     var acknowledged by remember { mutableStateOf(false) }
     // Remove wallet keeps its Google backup (#231) unless the user ticks it away: the way
     // back for a wallet whose key Android erased is to remove it and restore that backup,
@@ -1549,6 +1575,8 @@ private fun RemoveWalletDialog(backup: BackupHeld, onConfirm: (deleteBackup: Boo
                         "This deletes the wallet and its recovery phrase from this phone, and " +
                             (
                                 when {
+                                    backup == BackupHeld.MAYBE_UNATTRIBUTED ->
+                                        "that Google backup, whichever wallet it’s of, if there is one, "
                                     unattributed -> "that Google backup, whichever wallet it’s of, "
                                     // Deleted only once it's seen to be this wallet's (#244 R5-F2).
                                     backup == BackupHeld.UNKNOWN -> "its Google backup, if there is one, "
@@ -1595,6 +1623,7 @@ private fun RemoveWalletDialog(backup: BackupHeld, onConfirm: (deleteBackup: Boo
                         Spacer(Modifier.width(8.dp))
                         Text(
                             when {
+                                backup == BackupHeld.MAYBE_UNATTRIBUTED -> "Also delete that Google backup, if there is one"
                                 unattributed -> "Also delete that Google backup"
                                 backup == BackupHeld.UNKNOWN -> "Also delete its Google backup, if there is one"
                                 else -> "Also delete its Google backup"

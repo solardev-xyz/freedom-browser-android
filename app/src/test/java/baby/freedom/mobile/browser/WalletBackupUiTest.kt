@@ -124,6 +124,29 @@ class WalletBackupUiTest {
     }
 
     @Test
+    fun `an unreadable wallet with Play services not answered claims no backup either way`() {
+        // #244 R6-M1: not looked up yet (or timed out) is neither "no copy anywhere else" nor "there is one".
+        assertEquals(BackupHeld.MAYBE_UNATTRIBUTED, unreadableBackupHeld(null))
+        assertEquals(BackupHeld.UNATTRIBUTED, unreadableBackupHeld(true))
+        assertEquals(BackupHeld.NONE, unreadableBackupHeld(false))
+        val remove = removeWalletKeepsBackupText(BackupHeld.MAYBE_UNATTRIBUTED)
+        assertTrue(remove.contains("isn’t known"))
+        assertTrue(remove.contains("this one or another"))
+        assertFalse(remove.contains("no copy anywhere else"))
+        assertFalse(remove.contains("Its Google backup"))
+        val detail = unreadableWalletDetail(googleBackupThere = null)
+        assertTrue(detail.contains("hasn’t answered"))
+        assertTrue(detail.contains("keep that backup"))
+        val msg = walletErrorMessage(
+            VaultUnreadableException(), "unlock the wallet", phraseBackedUp = true, googleBackup = true,
+            backupOwnerKnown = false, backupThereKnown = false,
+        )!!
+        assertTrue(msg.contains("isn’t known whether"))
+        assertTrue(msg.contains("keep that backup"))
+        assertFalse(msg.contains("holds a Google backup of a wallet, which"))
+    }
+
+    @Test
     fun `the offer shows once, only where backup is possible`() {
         assertTrue(showGoogleBackupOffer(offered = false, on = false, availability = Availability.READY, entryThere = false, thisWallet = false))
         assertFalse(showGoogleBackupOffer(offered = true, on = false, availability = Availability.READY, entryThere = false, thisWallet = false))

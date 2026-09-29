@@ -130,6 +130,14 @@ internal enum class BackupHeld {
     UNATTRIBUTED,
 
     /**
+     * The wallet on this phone can't be read, and Block Store hasn't said
+     * yet whether it holds an entry at all (not looked up yet, or Play
+     * services not answering). There may be one, of this wallet or
+     * another; nothing may be claimed either way (#244 R6-M1).
+     */
+    MAYBE_UNATTRIBUTED,
+
+    /**
      * Block Store hasn't said whether it holds this wallet's phrase (not
      * reconciled yet, Play services not answering, or whose the entry is
      * can't be told). With backup on, there should be one; with it off,
@@ -154,6 +162,18 @@ internal fun backupHeld(on: Boolean, known: PhraseBackup.Known?, walletAddress: 
         // delete box while Play services is slow to say (#244 R3-F2).
         null -> BackupHeld.UNKNOWN
     }
+
+/**
+ * [BackupHeld] for a wallet that can't be read (#244 R4-F3, R6-M1): no
+ * address to compare with, so an entry there ([entryThere]) is of *a*
+ * wallet, and one not looked up yet (null) may or may not be there — never
+ * "no copy anywhere else".
+ */
+internal fun unreadableBackupHeld(entryThere: Boolean?): BackupHeld = when (entryThere) {
+    true -> BackupHeld.UNATTRIBUTED
+    false -> BackupHeld.NONE
+    null -> BackupHeld.MAYBE_UNATTRIBUTED
+}
 
 /** Account 0 of the wallet's own seed: what a Block Store entry's phrase is compared against. */
 internal fun walletSeedAddress(list: WalletAccountList?): String? =
