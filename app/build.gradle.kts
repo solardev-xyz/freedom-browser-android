@@ -152,6 +152,15 @@ dependencies {
     // dependencies, ~60 KB with its spec tables.
     implementation("io.github.adraffy:ens-normalize:0.3.1")
 
+    // The wallet's receive QR and QR scanner (#106): ZXing's core codec
+    // (pure Java, Apache-2.0) encodes and decodes on-device; CameraX
+    // feeds it frames. No Play Services / ML Kit, nothing leaves the phone.
+    implementation("com.google.zxing:core:3.5.3")
+    val cameraXVersion = "1.5.0"
+    implementation("androidx.camera:camera-camera2:$cameraXVersion")
+    implementation("androidx.camera:camera-lifecycle:$cameraXVersion")
+    implementation("androidx.camera:camera-view:$cameraXVersion")
+
     val roomVersion = "2.8.4"
     implementation("androidx.room:room-runtime:$roomVersion")
     implementation("androidx.room:room-ktx:$roomVersion")

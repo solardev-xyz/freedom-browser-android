@@ -35,6 +35,7 @@ import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.LockOpen
+import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -289,6 +290,9 @@ fun WalletScreen(
     var sending by remember { mutableStateOf(false) }
     val sender = remember(context) { WalletSender.get(context) }
     val sendStatus by sender.status.collectAsState()
+    // The receive and scan pages (#106).
+    var receiving by remember { mutableStateOf(false) }
+    var scanning by remember { mutableStateOf(false) }
     val publishers = remember(context) { PublisherIdentityStore.get(context) }
     var publisherSites by remember { mutableStateOf(0) }
     // The site the user opened Wallet from, fixed at that moment: the tab
@@ -378,6 +382,8 @@ fun WalletScreen(
         if (request != null || (state !is Vault.State.Locked && state !is Vault.State.Unlocked)) {
             publishing = false
             sending = false
+            receiving = false
+            scanning = false
         }
         // A send goes with the wallet it came from, settled or not (one that may
         // still land leaves its nonce to be replaced, should that account come back).
@@ -399,6 +405,19 @@ fun WalletScreen(
             phraseBackedUp = phraseBackedUp,
             onOpenUrl = onOpenUrl,
             onBack = { sending = false },
+        )
+        return
+    }
+    val receivingAccount = accountList?.active
+    if (receiving && receivingAccount != null && (state is Vault.State.Locked || state is Vault.State.Unlocked)) {
+        ReceivePage(account = receivingAccount, onBack = { receiving = false })
+        return
+    }
+    if (scanning && (state is Vault.State.Locked || state is Vault.State.Unlocked)) {
+        ScanPage(
+            chains = allChains.orEmpty(),
+            accounts = accountList?.accounts.orEmpty(),
+            onBack = { scanning = false },
         )
         return
     }
@@ -527,6 +546,10 @@ fun WalletScreen(
                                     walletAccounts.add()
                                 }
                             },
+                            onReceive = {
+                                error = null
+                                receiving = true
+                            },
                         )
                     }
                     item("send") {
@@ -547,6 +570,21 @@ fun WalletScreen(
                             onRefresh = { refreshTick++ },
                         )
                     }
+                }
+            }
+            if (info != null) item("scan") {
+                SectionCard(title = "Scan") {
+                    PageRow(
+                        title = SCAN_TITLE,
+                        subtitle = "An address, a payment request or a pairing code",
+                        style = PageRowStyle.Inset,
+                        leadingIcon = Icons.Filled.QrCodeScanner,
+                        enabled = !busy,
+                        onClick = {
+                            error = null
+                            scanning = true
+                        },
+                    )
                 }
             }
             val openPhrase = {

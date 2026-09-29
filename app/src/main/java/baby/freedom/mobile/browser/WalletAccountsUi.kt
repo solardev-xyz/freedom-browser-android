@@ -1,12 +1,9 @@
 package baby.freedom.mobile.browser
 
-import android.content.ClipData
-import android.content.ClipboardManager
-import android.content.Context
-import android.widget.Toast
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -100,6 +97,7 @@ internal fun AccountsSection(
     busy: Boolean,
     onSelect: (Int) -> Unit,
     onAdd: () -> Unit,
+    onReceive: () -> Unit,
 ) {
     val context = LocalContext.current
     val active = list.active
@@ -118,8 +116,10 @@ internal fun AccountsSection(
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-            TextButton(onClick = { copyAddress(context, active.address) }) { Text("Copy address") }
+        // Wraps a whole button to the next line at a large font size, never a label inside one.
+        FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+            TextButton(onClick = onReceive) { Text("Show QR code") }
+            TextButton(onClick = { copyToClipboard(context, active.address) }) { Text("Copy address") }
         }
         if (list.accounts.size > 1) {
             HorizontalDivider()
@@ -381,14 +381,5 @@ internal fun amountBreaks(amount: String): String = buildString {
     for (c in amount) {
         append(c)
         if (c == ',' || c == '.') append('\u200B')
-    }
-}
-
-private fun copyAddress(context: Context, address: String) {
-    val clipboard = context.getSystemService(ClipboardManager::class.java) ?: return
-    clipboard.setPrimaryClip(ClipData.newPlainText("Address", address))
-    // Android 13+ shows its own clipboard confirmation.
-    if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.TIRAMISU) {
-        Toast.makeText(context, "Address copied", Toast.LENGTH_SHORT).show()
     }
 }
