@@ -391,6 +391,8 @@ internal fun PublishSetupScreen(
                             }
                             PublishStepKey.Stamp -> if (step.status == StepStatus.Active) {
                                 Button(onClick = onBuyStamp) { Text("Buy a postage stamp") }
+                                // Or have the wallet pay for it, in one transaction (#115).
+                                OutlinedButton(onClick = onFundAndBuy) { Text("Pay from your wallet instead") }
                             }
                             else -> Unit
                         }
