@@ -54,10 +54,10 @@ import java.util.concurrent.ConcurrentHashMap
  * otherwise spend the whole allowance in seconds, one silent payment a
  * hop (#237). And once a paid request of a site's is answered Refused,
  * that site's allowance pays nothing silently — in any tab — until the
- * user navigates to it themselves ([navigationStarted] `byUser`: their
- * address on that site, or their Reload or Back/Forward on its page),
- * as the server may keep a refused payment's authorization and collect
- * it anyway (#237).
+ * user navigates to it themselves: their address on that site
+ * ([navigationStarted] `byUser`), or their own Reload or Back/Forward on
+ * its page ([usersStep]) — as the server may keep a refused payment's
+ * authorization and collect it anyway (#237).
  *
  * Main thread only, but for [epoch].
  */
@@ -78,8 +78,8 @@ internal class X402Flow<D : Any>(
     }
 
     /**
-     * Who started a navigation: the user (their address, Reload,
-     * Back/Forward), or a page of [fromOrigin]; and the origin of every
+     * Who started a navigation: the user (their address, their
+     * pull-to-refresh Reload), or a page of [fromOrigin]; and the origin of every
      * URL it has been at — its start's, if known, and each server
      * redirect's (#218 R5-M1).
      */
@@ -191,16 +191,16 @@ internal class X402Flow<D : Any>(
     }
 
     /**
-     * A navigation of [tab]'s to [url] (null: a Reload or Back/Forward,
+     * A navigation of [tab]'s to [url] (null: a reload or history step,
      * of an entry already in the tab's history) began, [byUser] (their
-     * address, Reload, Back/Forward) or from the page of [fromOrigin] on
-     * screen (its link, script or form) — with the user's [gesture]
-     * (`hasGesture`: their tap, or script run from it) or on its own;
-     * [post]: it's a form POST (or other non-GET), whose 307/308
-     * redirects no callback shows. Called after [superseded]. The user's
-     * own navigation to a site held after a Refused payment — their
-     * address on it, or their Reload or Back/Forward on its page — lets
-     * its allowance pay again (#237).
+     * address, or their own pull-to-refresh Reload) or from the page of
+     * [fromOrigin] on screen (its link, script or form) — with the
+     * user's [gesture] (`hasGesture`: their tap, or script run from it)
+     * or on its own; [post]: it's a form POST (or other non-GET), whose
+     * 307/308 redirects no callback shows. Called after [superseded].
+     * The user's address on a site held after a Refused payment lets its
+     * allowance pay again (#237); their Reload or Back/Forward does
+     * through [usersStep].
      */
     fun navigationStarted(
         tab: Long,
@@ -210,8 +210,20 @@ internal class X402Flow<D : Any>(
         post: Boolean = false,
         gesture: Boolean = false,
     ) {
-        if (byUser) (if (url != null) originOf(url) else pages[tab])?.let(held::remove)
+        if (byUser && url != null) originOf(url)?.let(held::remove)
         initiators[tab] = Initiator(byUser, fromOrigin, post, gesture).also { if (url != null) it.hopOrigins.add(originOf(url)) }
+    }
+
+    /**
+     * The user's own Reload or Back/Forward on [tab] — the bar's buttons,
+     * pull-to-refresh; never the app's own reloads (a Tor-down or sweep
+     * reload) nor the page's `history.back()` / `location.reload()` —
+     * on the page the tab last committed: a hold on that page's site
+     * after a Refused payment is lifted (#237 R1-M1). Only the hold: who
+     * started the navigation is still [navigationStarted]'s to say.
+     */
+    fun usersStep(tab: Long) {
+        pages[tab]?.let(held::remove)
     }
 
     /**

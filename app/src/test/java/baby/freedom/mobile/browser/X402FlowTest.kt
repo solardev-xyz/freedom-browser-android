@@ -368,11 +368,52 @@ class X402FlowTest {
         flow.navigationStarted(tab, byUser = false, fromOrigin = origin, url = b, gesture = true)
         flow.detected(tab, b, "terms")
         assertFalse(flow.committed(tab, b)!!.allowanceMayPay(origin))
-        // The user's own Reload of the site's page lifts it.
+        // The user's own Reload (pull-to-refresh) of the site's page lifts it.
         flow.superseded(tab)
+        flow.usersStep(tab)
         flow.navigationStarted(tab, byUser = true, fromOrigin = null, url = null)
         flow.detected(tab, b, "terms")
         assertTrue(flow.committed(tab, b)!!.allowanceMayPay(origin))
+    }
+
+    /** The refused page on [tab]: [a] answered Refused and committed. */
+    private fun refusedOnScreen() {
+        send(a, "r1")
+        assertTrue(flow.httpError(tab, a, "GET", 402))
+        flow.committed(tab, a)
+    }
+
+    /** A link the user taps on the site's page on [tab]: may its allowance pay silently? */
+    private fun tappedLinkPays(): Boolean {
+        flow.superseded(tab)
+        flow.navigationStarted(tab, byUser = false, fromOrigin = origin, url = b, gesture = true)
+        flow.detected(tab, b, "terms")
+        return flow.committed(tab, b)!!.allowanceMayPay(origin)
+    }
+
+    @Test
+    fun `#237 R1-M1 the bar's Back on the held site's page lifts the hold`() {
+        refusedOnScreen()
+        // The bar's Back runs `history.back()` in the page: a `javascript:` URL, not the user's
+        // own load for an allowance (it may stay in the document, with no commit to end it)...
+        flow.superseded(tab)
+        flow.usersStep(tab)
+        flow.navigationStarted(tab, byUser = false, fromOrigin = null, url = HISTORY_BACK_JS)
+        flow.detected(tab, b, "terms")
+        assertFalse(flow.committed(tab, b)!!.allowanceMayPay(origin))
+        // ...but it lifts the hold: the site's link the user taps next pays silently again.
+        assertTrue(tappedLinkPays())
+    }
+
+    @Test
+    fun `#237 R1-M1 the app's own reload of the held site's page doesn't lift the hold`() {
+        refusedOnScreen()
+        // A Tor-down or sweep reload: the app's, not the user's.
+        flow.superseded(tab)
+        flow.navigationStarted(tab, byUser = false, fromOrigin = null, url = null)
+        flow.detected(tab, a, "terms")
+        assertFalse(flow.committed(tab, a)!!.allowanceMayPay(origin))
+        assertFalse(tappedLinkPays())
     }
 
     @Test
@@ -393,6 +434,7 @@ class X402FlowTest {
         val other = "https://other.example/"
         flow.navigationStarted(2L, byUser = true, fromOrigin = null, url = other)
         flow.committed(2L, other)
+        flow.usersStep(2L)
         flow.navigationStarted(2L, byUser = true, fromOrigin = null, url = null)
         flow.navigationStarted(tab, byUser = false, fromOrigin = origin, url = b, gesture = true)
         flow.detected(tab, b, "terms")

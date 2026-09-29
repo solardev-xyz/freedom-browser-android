@@ -183,9 +183,15 @@ object X402Payments {
     fun onNavigationSuperseded(tab: BrowserState) = flow.superseded(tab.id)
 
     /**
-     * [tab] began a navigation to [url] (null: Reload or Back/Forward)
+     * The user's own Reload or Back/Forward on [tab]'s page: a hold on its
+     * site after a Refused payment is lifted (#237 R1-M1).
+     */
+    fun onUsersStep(tab: BrowserState) = flow.usersStep(tab.id)
+
+    /**
+     * [tab] began a navigation to [url] (null: a reload or history step)
      * (after [onNavigationSuperseded]): [byUser] — the address they
-     * named, their Reload or Back/Forward — or the page on screen's, at
+     * named, their pull-to-refresh Reload — or the page on screen's, at
      * [pageUrl], with the user's [gesture] or on its own. Only these may
      * let a site's allowance pay without asking (#218 R4-M3) — the page's
      * only with the user's gesture (#237) — and only while its redirects
