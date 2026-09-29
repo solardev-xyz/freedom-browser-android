@@ -283,7 +283,30 @@ class EthereumProviderTest {
             ok(call("personal_sign", JSONArray().put(shown.hex).put(main.address)))
             assertNull((asks.single() as EthAsk.SignMessage).text)
         }
-        assertEquals("Sign in\nNonce: 1 ✓ 🐄", EthereumProvider.readableUtf8("Sign in\nNonce: 1 ✓ 🐄".toByteArray()))
+        assertEquals("Sign in\nNonce: 1 ✓ 🐄", MessageSigning.readableText("Sign in\nNonce: 1 ✓ 🐄".toByteArray()))
+    }
+
+    @Test
+    fun `personal_sign text that hides or overprints what's around it shows hex, as desktop signing does`() {
+        // Each passed the page-signing check before #229; desktop signing already refused them all.
+        connect()
+        answer = { EthAnswer.Approved() }
+        for (text in listOf(
+            "line\u2028separator",
+            "smuggled a\uFE00\uFE01\uFE02\uFE03",
+            "blank \u2800 braille",
+            "hangul\u3164filler",
+            "Zalgo a" + "\u0301".repeat(8) + " spender",
+            "   ",
+        )) {
+            asks.clear()
+            ok(call("personal_sign", JSONArray().put(text).put(main.address)))
+            assertNull(text, (asks.single() as EthAsk.SignMessage).text)
+        }
+        // Real text with a few stacked marks (Vietnamese) still reads as text.
+        asks.clear()
+        ok(call("personal_sign", JSONArray().put("Xin chào, Việt Nam").put(main.address)))
+        assertEquals("Xin chào, Việt Nam", (asks.single() as EthAsk.SignMessage).text)
     }
 
     @Test

@@ -621,8 +621,9 @@ class EthereumProvider(
         }
         requireSameAccount(address, account)
         val bytes = Eip712.hex(message) ?: message.toByteArray(Charsets.UTF_8)
-        // Plain text too: one with a bidi override or an invisible character is shown as hex.
-        val text = readableUtf8(bytes)
+        // Plain text too: one with a bidi override, an invisible character or a
+        // stack of combining marks is shown as hex — the same check desktop signing uses (#229).
+        val text = MessageSigning.readableText(bytes)
         val answer = ask(EthAsk.SignMessage(origin, account, text, "0x" + bytes.hexString()))
         if (answer !is EthAnswer.Approved) return refused(answer)
         return signed { wallet.signMessage(account, bytes) }
@@ -879,32 +880,6 @@ class EthereumProvider(
             val sum = NodeIdentity.checksum(ByteArray(20) { i -> digits.substring(i * 2, i * 2 + 2).toInt(16).toByte() })
             val mixed = digits.any { it in 'a'..'f' } && digits.any { it in 'A'..'F' }
             return if (mixed && sum != address) null else sum
-        }
-
-        /**
-         * [bytes] as text if it's UTF-8 with no control characters but tab
-         * and newlines and no format characters (Unicode `Cf`: bidi
-         * overrides and isolates, zero-width spaces and joiners, the BOM),
-         * which would make the sheet show something other than, or in
-         * another order than, what's signed; else null (shown as hex).
-         */
-        internal fun readableUtf8(bytes: ByteArray): String? {
-            val decoder = Charsets.UTF_8.newDecoder()
-                .onMalformedInput(java.nio.charset.CodingErrorAction.REPORT)
-                .onUnmappableCharacter(java.nio.charset.CodingErrorAction.REPORT)
-            val s = try {
-                decoder.decode(java.nio.ByteBuffer.wrap(bytes)).toString()
-            } catch (e: java.nio.charset.CharacterCodingException) {
-                return null
-            }
-            var i = 0
-            while (i < s.length) {
-                val cp = s.codePointAt(i)
-                val control = Character.isISOControl(cp) && cp != '\n'.code && cp != '\t'.code && cp != '\r'.code
-                if (control || Character.getType(cp) == Character.FORMAT.toInt()) return null
-                i += Character.charCount(cp)
-            }
-            return s
         }
 
         private fun ByteArray.hexString(): String = hexOf(this)
