@@ -178,9 +178,10 @@ internal fun SendPage(
     val back = {
         val current = status
         when {
-            // A send still on its way stays for the next visit; a settled one is done with.
+            // A send still on its way, or one that may have gone out (Try again
+            // settles it), stays for the next visit; a settled one is done with.
             current != null -> {
-                if (!current.inFlight) sender.acknowledge()
+                if (!current.unresolved) sender.acknowledge()
                 onBack()
             }
             quote != null -> {
@@ -597,7 +598,13 @@ private fun SendStatusSection(
         }
         if (stage != SendStatus.Stage.Signing && stage != SendStatus.Stage.Broadcasting) {
             TextButton(onClick = onDone, modifier = Modifier.fillMaxWidth()) {
-                Text(if (stage == SendStatus.Stage.Pending) "Close (it keeps going)" else "Done")
+                Text(
+                    when {
+                        stage == SendStatus.Stage.Pending -> "Close (it keeps going)"
+                        status.mayHaveGone -> "Close (Try again stays here)"
+                        else -> "Done"
+                    },
+                )
             }
         }
     }

@@ -179,6 +179,30 @@ class SendTest {
         assertEquals(BigInteger.valueOf(7), tracker.next(from.address, 100).value)
     }
 
+    @Test
+    fun `a local nonce is honoured only while the chain may not have seen the send yet`() = runBlocking<Unit> {
+        val chain = FakeChain()
+        var now = 1_000_000L
+        val tracker = NonceTracker(chain.rpc(), { now }, ttlMs = 60_000)
+        tracker.markSent(from.address, 100, BigInteger.valueOf(7))
+        now += 59_999
+        assertEquals(BigInteger.valueOf(8), tracker.next(from.address, 100).value)
+        // Long enough that every RPC would count it if it were still around: the chain's count again.
+        now += 1
+        assertEquals(BigInteger.valueOf(7), tracker.next(from.address, 100).value)
+        // A clock set back since: not trusted either.
+        tracker.markSent(from.address, 100, BigInteger.valueOf(7))
+        now -= 10
+        assertEquals(BigInteger.valueOf(7), tracker.next(from.address, 100).value)
+        // Ending unconfirmed forgets only that send's own mark, never a later one's.
+        now += 10
+        tracker.markSent(from.address, 100, BigInteger.valueOf(8))
+        tracker.forgetSent(from.address, 100, BigInteger.valueOf(7))
+        assertEquals(BigInteger.valueOf(9), tracker.next(from.address, 100).value)
+        tracker.forgetSent(from.address, 100, BigInteger.valueOf(8))
+        assertEquals(BigInteger.valueOf(7), tracker.next(from.address, 100).value)
+    }
+
     // ---- prepare ----
 
     @Test
@@ -339,6 +363,50 @@ class SendTest {
         s.awaitStage { it == SendStatus.Stage.Pending }
         assertEquals(1, chain.sent.toSet().size)
         assertTrue(chain.sent.size >= 2)
+    }
+
+    @Test
+    fun `a send that may have gone out outlives Done and blocks a fresh signature until Try again settles it`() = runBlocking<Unit> {
+        val chain = FakeChain()
+        val s = sender(chain)
+        val quote = s.prepare(request())
+        // Every RPC times out, but one of them took it: it's in the mempool.
+        chain.on["eth_sendRawTransaction"] = { req ->
+            synchronized(chain.sent) { chain.sent += req.getJSONArray("params").getString(0) }
+            chain.nonce = 8
+            throw IOException("timed out")
+        }
+        chain.on["eth_getTransactionReceipt"] = { throw IOException("timed out") }
+        s.submit(quote, signer())
+        val failed = s.awaitStage { it is SendStatus.Stage.Failed }
+        assertTrue(failed.mayHaveGone)
+        assertTrue(failed.unresolved)
+        // Done / Back: the status and its signed bytes stay.
+        s.acknowledge()
+        assertEquals(failed, s.status.value)
+        // The same payment entered again is priced (the chain's pending count says 8) but not signed.
+        chain.on.remove("eth_getTransactionReceipt")
+        val second = s.prepare(request())
+        assertEquals(WalletSender.Submit.BUSY, s.submit(second, signer()))
+        assertEquals(1, chain.sent.toSet().size)
+        // Try again settles it with the very same bytes.
+        chain.on.clear()
+        s.retry()
+        s.awaitStage { it == SendStatus.Stage.Pending }
+        assertEquals(1, chain.sent.toSet().size)
+        s.acknowledge()
+        assertNull(s.status.value)
+    }
+
+    @Test
+    fun `a send that ends unconfirmed leaves the next nonce to the chain`() = runBlocking<Unit> {
+        val chain = FakeChain()
+        val s = sender(chain)
+        s.submit(s.prepare(request()), signer())
+        s.awaitStage { it == SendStatus.Stage.Unconfirmed }
+        s.acknowledge()
+        // Dropped from every pool meanwhile: nonce 7 again, not 8 past a gap that would never fill.
+        assertEquals(BigInteger.valueOf(7), s.prepare(request()).tx.nonce)
     }
 
     @Test

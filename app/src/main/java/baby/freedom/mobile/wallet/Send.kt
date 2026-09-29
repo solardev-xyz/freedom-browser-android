@@ -184,13 +184,32 @@ class GasOracle(private val rpc: WalletRpc) {
  * yet — then one past that. A failed or uncertain broadcast forgets the
  * local value, so the next send reads the chain again rather than leave
  * a gap that would hold every later transaction back.
+ *
+ * The local value only bridges the moments before every RPC has seen
+ * the transaction in its pool: it's honoured for [ttlMs] after the send,
+ * and [forgetSent] drops it once the send ends without a receipt (it may
+ * have been evicted). Past that, the chain's count is the answer — a
+ * reused nonce can at worst replace a transaction (one of the two
+ * mines), while a nonce past a dropped one never mines at all.
  */
-class NonceTracker(private val rpc: WalletRpc) {
-    private val sent = HashMap<String, BigInteger>()
+class NonceTracker(
+    private val rpc: WalletRpc,
+    private val clock: () -> Long = System::currentTimeMillis,
+    private val ttlMs: Long = LOCAL_TTL_MS,
+) {
+    private class Sent(val next: BigInteger, val at: Long)
+
+    private val sent = HashMap<String, Sent>()
 
     suspend fun next(address: String, chainId: Long): WalletRpc.Reading<BigInteger> {
         val fromChain = rpc.transactionCount(chainId, address)
-        val local = synchronized(sent) { sent[key(address, chainId)] }
+        val now = clock()
+        val local = synchronized(sent) {
+            val k = key(address, chainId)
+            val s = sent[k]
+            if (s != null && now - s.at !in 0 until ttlMs) sent.remove(k)
+            sent[k]?.next
+        }
         return if (local != null && local > fromChain.value) fromChain.copy(value = local) else fromChain
     }
 
@@ -198,7 +217,7 @@ class NonceTracker(private val rpc: WalletRpc) {
         synchronized(sent) {
             val k = key(address, chainId)
             val next = nonce + BigInteger.ONE
-            if (sent[k]?.let { it >= next } != true) sent[k] = next
+            if (sent[k]?.let { it.next >= next } != true) sent[k] = Sent(next, clock())
         }
     }
 
@@ -206,7 +225,20 @@ class NonceTracker(private val rpc: WalletRpc) {
         synchronized(sent) { sent.remove(key(address, chainId)) }
     }
 
+    /** The send with [nonce] ended with no receipt: unless a later send has been marked since, read the chain again. */
+    fun forgetSent(address: String, chainId: Long, nonce: BigInteger) {
+        synchronized(sent) {
+            val k = key(address, chainId)
+            if (sent[k]?.next == nonce + BigInteger.ONE) sent.remove(k)
+        }
+    }
+
     private fun key(address: String, chainId: Long) = "$chainId:${address.lowercase()}"
+
+    companion object {
+        /** As long as a page waits for a receipt: past that, a transaction not in the chain's count may be gone. */
+        const val LOCAL_TTL_MS = 3 * 60_000L
+    }
 }
 
 /** Where one confirmed send stands (#105). */
@@ -237,6 +269,16 @@ data class SendStatus(val quote: SendQuote, val stage: Stage, val hash: String? 
 
     /** Signing, broadcasting or waiting for its receipt: it's still going. */
     val inFlight: Boolean get() = stage == Stage.Signing || stage == Stage.Broadcasting || stage == Stage.Pending
+
+    /**
+     * Failed, but it may have gone out: only Try again (the very same
+     * bytes) settles it, so it stays until then — dropping it would let
+     * the next send sign a second payment next to one in a mempool.
+     */
+    val mayHaveGone: Boolean get() = (stage as? Stage.Failed)?.mayHaveGone == true
+
+    /** Still going, or not yet known not to have gone: the page leaves it for the next visit. */
+    val unresolved: Boolean get() = inFlight || mayHaveGone
 }
 
 /**
@@ -258,7 +300,7 @@ class WalletSender internal constructor(
     private val pollMs: Long = POLL_MS,
     private val confirmTimeoutMs: Long = CONFIRM_TIMEOUT_MS,
 ) {
-    private val nonces = NonceTracker(rpc)
+    private val nonces = NonceTracker(rpc, clock)
     private val gas = GasOracle(rpc)
 
     private val _status = MutableStateFlow<SendStatus?>(null)
@@ -350,7 +392,7 @@ class WalletSender internal constructor(
         /** Signing and broadcasting it; [status] follows it. */
         STARTED,
 
-        /** Another send is still being signed or broadcast. */
+        /** Another send is still being signed or broadcast, or may have gone out and awaits Try again. */
         BUSY,
 
         /** Older than [QUOTE_TTL_MS]: nothing signed, price it again. */
@@ -366,8 +408,10 @@ class WalletSender internal constructor(
      */
     fun submit(quote: SendQuote, sign: (EthTransaction) -> EthTransaction.Signed): Submit {
         synchronized(this) {
-            val current = _status.value?.stage
-            if (current == SendStatus.Stage.Signing || current == SendStatus.Stage.Broadcasting) return Submit.BUSY
+            val current = _status.value
+            if (current?.stage == SendStatus.Stage.Signing || current?.stage == SendStatus.Stage.Broadcasting) return Submit.BUSY
+            // One that may have gone out is settled by Try again, never by signing another.
+            if (current?.mayHaveGone == true) return Submit.BUSY
             if (isStale(quote)) return Submit.STALE
             job?.cancel()
             signed = null
@@ -416,11 +460,17 @@ class WalletSender internal constructor(
         }
     }
 
-    /** The page is done with the outcome. A send still being signed or broadcast stays. */
+    /**
+     * The page is done with the outcome. A send still being signed or
+     * broadcast stays, and so does one that [may have gone out][SendStatus.mayHaveGone]:
+     * its signed bytes are what Try again resends, and without them a
+     * fresh send could pay a second time.
+     */
     fun acknowledge() {
         synchronized(this) {
-            val stage = _status.value?.stage ?: return
-            if (stage == SendStatus.Stage.Signing || stage == SendStatus.Stage.Broadcasting) return
+            val current = _status.value ?: return
+            val stage = current.stage
+            if (stage == SendStatus.Stage.Signing || stage == SendStatus.Stage.Broadcasting || current.mayHaveGone) return
             job?.cancel()
             job = null
             signed = null
@@ -511,6 +561,9 @@ class WalletSender internal constructor(
             if (clock() >= deadline) break
             delay(pollMs)
         }
+        // Not mined in all that time: it may have been dropped, so the next
+        // send reads the chain's count rather than sign past a gap.
+        nonces.forgetSent(quote.request.from.address, quote.tx.chainId, quote.tx.nonce)
         set(quote, SendStatus.Stage.Unconfirmed, hash)
     }
 
