@@ -290,4 +290,23 @@ class X402StoreTest {
         assertEquals(1, seen[0].size)
         assertEquals(emptyList<X402Store.Allowance>(), seen[1])
     }
+
+    @Test
+    fun `#237 an allowance pays each time no more than the payment approved on the sheet`() = runBlocking {
+        val s = store()
+        assertTrue(s.commit(paid("a", 10, auto = false), X402Store.NewAllowance("USDC", 6, BigInteger.valueOf(100), hour)) is X402Store.Commit.Done)
+        // The rest of the cap in one request: not paid silently.
+        assertEquals(X402Store.Commit.NotCovered, s.commit(paid("b", 90, auto = true), grant = null))
+        assertEquals(X402Store.Commit.NotCovered, s.commit(paid("c", 11, auto = true), grant = null))
+        assertTrue(s.commit(paid("d", 10, auto = true), grant = null) is X402Store.Commit.Done)
+        assertEquals(BigInteger.valueOf(20), s.allowances.first().single().spent)
+    }
+
+    @Test
+    fun `#237 an allowance pays only the address the approved payment went to`() = runBlocking {
+        val s = store()
+        assertTrue(s.commit(paid("a", 10, auto = false), X402Store.NewAllowance("USDC", 6, BigInteger.valueOf(100), hour)) is X402Store.Commit.Done)
+        assertEquals(X402Store.Commit.NotCovered, s.commit(paid("b", 10, auto = true).copy(payTo = other), grant = null))
+        assertTrue(s.commit(paid("c", 10, auto = true).copy(payTo = usdc.lowercase()), grant = null) is X402Store.Commit.Done)
+    }
 }

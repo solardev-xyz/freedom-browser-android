@@ -321,4 +321,36 @@ class X402FlowTest {
         flow.detected(tab, a, "terms")
         assertTrue(flow.committed(tab, a)!!.allowanceMayPay(origin))
     }
+
+    @Test
+    fun `#237 a page-driven chain of 402s isn't paid silently hop after hop`() {
+        // The user opens the page: the allowance pays it.
+        flow.navigationStarted(tab, byUser = true, fromOrigin = null, url = a)
+        flow.detected(tab, a, "terms")
+        assertTrue(flow.committed(tab, a)!!.allowanceMayPay(origin))
+        send(a, "r1")
+        assertNull(flow.committed(tab, a))
+        assertEquals(listOf(Triple("r1", Status.PAID, null)), settled)
+        // The paid page sets location.href to the next 402 on its own, with no tap.
+        flow.superseded(tab)
+        flow.navigationStarted(tab, byUser = false, fromOrigin = origin, url = b)
+        flow.detected(tab, b, "terms")
+        assertFalse(flow.committed(tab, b)!!.allowanceMayPay(origin))
+    }
+
+    @Test
+    fun `#237 after a Refused payment the site's allowance pays nothing until the user navigates`() {
+        flow.navigationStarted(tab, byUser = true, fromOrigin = null, url = a)
+        flow.detected(tab, a, "terms")
+        assertTrue(flow.committed(tab, a)!!.allowanceMayPay(origin))
+        send(a, "r1")
+        assertTrue(flow.httpError(tab, a, "GET", 402))
+        assertNull(flow.committed(tab, a))
+        assertEquals(listOf(Triple("r1", Status.REFUSED, 402)), settled)
+        // A link the user taps on the refused page: the sheet asks.
+        flow.superseded(tab)
+        flow.navigationStarted(tab, byUser = false, fromOrigin = origin, url = b)
+        flow.detected(tab, b, "terms")
+        assertFalse(flow.committed(tab, b)!!.allowanceMayPay(origin))
+    }
 }
