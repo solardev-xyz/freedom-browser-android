@@ -4,6 +4,7 @@ import android.app.AlarmManager
 import android.app.PendingIntent
 import android.content.BroadcastReceiver
 import android.content.ClipData
+import android.content.ClipDescription
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
@@ -12,6 +13,7 @@ import android.os.Handler
 import android.os.Looper
 import android.os.PersistableBundle
 import android.os.SystemClock
+import android.provider.Settings
 import baby.freedom.mobile.wallet.Mnemonic
 import java.security.MessageDigest
 
@@ -24,8 +26,13 @@ import java.security.MessageDigest
  *
  * Android only lets an app *read* the clipboard while it has window
  * focus (API 29+), but clearing it needs no focus. So at the deadline:
- * - with focus, the clipboard is read and cleared only if it still holds
- *   the phrase — something the user copied since is left alone;
+ * - with focus, the clipboard is cleared only if it still holds the
+ *   phrase — something the user copied since is left alone. Its
+ *   [ClipDescription] is looked at first: a clip without our
+ *   [CLIP_LABEL] is someone else's and is left alone *unread*, so
+ *   Android 12+ shows no "Freedom pasted from your clipboard" toast and
+ *   no other app's `content:` item is opened on the main thread. Only
+ *   a clip carrying our label has its (plain-text) items hashed;
  * - without focus (the user went off to paste the words somewhere, the
  *   usual case), what's on it can't be seen, so it's cleared outright.
  *   Something copied in another app during that minute goes too — the
@@ -39,22 +46,35 @@ import java.security.MessageDigest
  * cached-app freezer (the Handler then waits for the thaw) or killed
  * (swiped from Recents, reclaimed), and the alarm wakes or restarts it.
  * Without the exact-alarm permission (API 31+) that alarm is inexact:
- * measured on API 36 its window is 45 s past the minute, which is why
- * the page says "or up to a minute later". A force stop cancels it;
- * the clear then waits for the next focus.
- * The deadline itself is kept in a private preference so a new process
- * still knows a clear is owed ([clearIfDue] from the alarm or from
- * `MainActivity.onWindowFocusChanged`). Only a SHA-256 of the phrase is
+ * measured on API 36 its window is 45 s past the minute. That is only
+ * the normal case, though: in Doze an allow-while-idle alarm can be
+ * held back further (Android rations them to about one per 9 minutes
+ * per app), a rarely-used app's standby bucket defers it, and with the
+ * battery setting "Restricted" (background-restricted) it isn't
+ * delivered at all while Freedom is in the background. A force stop
+ * cancels it outright. In those cases the clear waits for Freedom's
+ * next window focus, and the page says so ([COPY_NOTE]).
+ * The deadline itself is kept in a private preference, with the boot
+ * it was set in ([Settings.Global.BOOT_COUNT], since `elapsedRealtime`
+ * restarts from 0 on a reboot), so a new process still knows a clear is
+ * owed ([clearIfDue] from the alarm or from
+ * `MainActivity.onWindowFocusChanged`) and a deadline left over from an
+ * earlier boot is dropped instead of clearing whatever was copied
+ * since. Only a SHA-256 of the phrase is
  * kept to recognise it — never the words — and only in memory; a
  * process that lost it clears outright. Main thread only.
  */
 internal object PhraseClipboard {
     const val TTL_MS = 60_000L
 
+    /** The label our clip carries; how a readable clipboard is told to be ours without reading it. */
+    internal const val CLIP_LABEL = "Recovery phrase"
+
     /** `ClipDescription.EXTRA_IS_SENSITIVE`, a plain string key, so it's set on every API level. */
     private const val EXTRA_IS_SENSITIVE = "android.content.extra.IS_SENSITIVE"
     private const val PREFS = "phrase_clipboard"
     private const val KEY_DUE_AT = "due_at_elapsed"
+    private const val KEY_BOOT = "due_at_boot"
 
     private val main = Handler(Looper.getMainLooper())
     private var pendingHash: ByteArray? = null
@@ -62,12 +82,12 @@ internal object PhraseClipboard {
     fun copy(context: Context, words: List<String>, now: Long = SystemClock.elapsedRealtime()) {
         val app = context.applicationContext
         val clipboard = app.getSystemService(ClipboardManager::class.java) ?: return
-        val clip = ClipData.newPlainText("Recovery phrase", words.joinToString(" "))
+        val clip = ClipData.newPlainText(CLIP_LABEL, words.joinToString(" "))
         clip.description.extras = PersistableBundle().apply { putBoolean(EXTRA_IS_SENSITIVE, true) }
         clipboard.setPrimaryClip(clip)
         pendingHash = phraseHash(words)
         val dueAt = now + TTL_MS
-        prefs(app).edit().putLong(KEY_DUE_AT, dueAt).commit()
+        prefs(app).edit().putLong(KEY_DUE_AT, dueAt).putInt(KEY_BOOT, bootCount(app)).commit()
         main.removeCallbacksAndMessages(null)
         main.postDelayed({ clearIfDue(app) }, TTL_MS)
         runCatching {
@@ -85,29 +105,60 @@ internal object PhraseClipboard {
 
     /**
      * Takes the copied phrase off the clipboard if its minute is up: if
-     * the clipboard can be read, only when it still holds the phrase;
-     * if it can't (no window focus) or this process no longer knows the
-     * phrase's hash, outright.
+     * the clipboard can be read, only when it still holds the phrase
+     * (see [shouldClear]); if it can't (no window focus), outright.
      */
     fun clearIfDue(context: Context, now: Long = SystemClock.elapsedRealtime()) {
         val app = context.applicationContext
-        val dueAt = prefs(app).getLong(KEY_DUE_AT, 0L)
+        val prefs = prefs(app)
+        val dueAt = prefs.getLong(KEY_DUE_AT, 0L)
         if (dueAt == 0L) return
-        // After a reboot `elapsedRealtime` starts again from 0 (and the
-        // clipboard is empty anyway): a deadline further off than a
-        // fresh copy's is from an earlier boot.
-        if (dueAt > now + TTL_MS) return forget(app)
-        if (now < dueAt) return
+        when (deadline(dueAt, prefs.getInt(KEY_BOOT, -1), bootCount(app), now)) {
+            Deadline.STALE -> return forget(app)
+            Deadline.PENDING -> return
+            Deadline.DUE -> Unit
+        }
         runCatching {
             val clipboard = app.getSystemService(ClipboardManager::class.java)
             if (clipboard != null) {
-                val clip = runCatching { clipboard.primaryClip }.getOrNull()
-                val texts = clip?.let { c -> (0 until c.itemCount).map { c.getItemAt(it).coerceToText(app) } }
-                if (shouldClear(texts, pendingHash)) clipboard.clearPrimaryClip()
+                // The description, not the clip: reading it neither shows
+                // Android 12+'s paste toast nor opens any item's content.
+                val description = runCatching { clipboard.primaryClipDescription }.getOrNull()
+                val clear = shouldClear(
+                    readable = description != null,
+                    label = description?.label,
+                    readTexts = {
+                        val clip = runCatching { clipboard.primaryClip }.getOrNull()
+                        // `text` only — never `coerceToText`, which opens a `content:` URI.
+                        clip?.let { c -> (0 until c.itemCount).map { c.getItemAt(it).text } }.orEmpty()
+                    },
+                    hash = pendingHash,
+                )
+                if (clear) clipboard.clearPrimaryClip()
             }
         }
         forget(app)
     }
+
+    internal enum class Deadline { PENDING, DUE, STALE }
+
+    /**
+     * Where a saved deadline [dueAt] (in `elapsedRealtime`, set in boot
+     * [savedBoot]) stands at [now] in boot [currentBoot]. A deadline from
+     * another boot is stale: `elapsedRealtime` restarted from 0, so its
+     * number means nothing now, and the clipboard it was about didn't
+     * survive the reboot. A boot count that can't be read (-1) falls back
+     * to "further off than a fresh copy's deadline means another boot".
+     */
+    internal fun deadline(dueAt: Long, savedBoot: Int, currentBoot: Int, now: Long): Deadline = when {
+        savedBoot != currentBoot -> Deadline.STALE
+        dueAt > now + TTL_MS -> Deadline.STALE
+        now < dueAt -> Deadline.PENDING
+        else -> Deadline.DUE
+    }
+
+    private fun bootCount(app: Context): Int =
+        runCatching { Settings.Global.getInt(app.contentResolver, Settings.Global.BOOT_COUNT, -1) }.getOrDefault(-1)
 
     private fun forget(app: Context) {
         pendingHash = null
@@ -126,15 +177,26 @@ internal object PhraseClipboard {
     )
 
     /**
-     * Whether to clear, given the clipboard's item texts ([texts] null
-     * when it can't be read — no focus, which Android can't tell apart
-     * from empty) and the phrase's [hash] (null in a process that
-     * didn't do the copy). Unknown means clear: the words must not
-     * outlive the minute.
+     * Whether to clear the clipboard at the deadline.
+     * - Not [readable] (no focus, which Android can't tell apart from
+     *   empty): clear — the words must not outlive the minute.
+     * - Readable, but its [label] isn't our [CLIP_LABEL]: someone else's
+     *   clip, left alone and never read ([readTexts] isn't called).
+     * - Ours, and this process knows the phrase's [hash]: clear only if
+     *   an item still hashes to it (the label alone could be a lookalike
+     *   from another app).
+     * - Ours, hash lost with the process that did the copy: clear.
      */
-    internal fun shouldClear(texts: List<CharSequence?>?, hash: ByteArray?): Boolean {
-        if (texts == null || hash == null) return true
-        return texts.any { clipIsPhrase(it, hash) }
+    internal fun shouldClear(
+        readable: Boolean,
+        label: CharSequence?,
+        readTexts: () -> List<CharSequence?>,
+        hash: ByteArray?,
+    ): Boolean {
+        if (!readable) return true
+        if (label?.toString() != CLIP_LABEL) return false
+        if (hash == null) return true
+        return readTexts().any { clipIsPhrase(it, hash) }
     }
 
     internal fun phraseHash(words: List<String>): ByteArray =
