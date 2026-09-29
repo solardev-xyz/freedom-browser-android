@@ -4,6 +4,7 @@ import baby.freedom.mobile.chains.BuiltInChains
 import baby.freedom.mobile.chains.Chain
 import baby.freedom.mobile.chains.rpc.ChainSource
 import baby.freedom.mobile.chains.rpc.ChainTrust
+import baby.freedom.mobile.wallet.WalletAccount
 import baby.freedom.mobile.wallet.X402
 import java.math.BigInteger
 import java.util.Base64
@@ -32,13 +33,27 @@ class X402SheetTest {
         return X402.parseRequired(Base64.getEncoder().encodeToString(json.toString().toByteArray()))!!.offers
     }
 
-    private fun ask(balance: Long?, vararg amounts: String) = X402Ask(
+    private val account1 = WalletAccount(0, "Account 1", "0x1111111111111111111111111111111111111111")
+    private val account2 = WalletAccount(1, "Account 2", "0x2222222222222222222222222222222222222222")
+
+    private fun ask(balance: Long?, vararg amounts: String, account: WalletAccount? = account1) = X402Ask(
         url = "https://api.example/paid",
         description = null,
+        account = account,
         options = offers(*amounts).map { X402Option(it, BuiltInChains.BASE, "USDC", 6, listed = true, balance = balance?.let(BigInteger::valueOf)) },
         unusable = emptyList(),
         allowanceWaitingOnUnlock = false,
     )
+
+    @Test
+    fun `Pay only from the account the sheet's figures are for`() {
+        val a = ask(balance = 100_000, "10000")
+        assertTrue(a.paysFrom(account1))
+        assertTrue(a.paysFrom(account1.copy(address = account1.address.uppercase().replace("0X", "0x"))))
+        assertFalse(a.paysFrom(account2))
+        assertFalse(a.paysFrom(null))
+        assertFalse(ask(balance = null, "10000", account = null).paysFrom(account1))
+    }
 
     @Test
     fun `the first offer the balance covers is picked, and Pay answers it`() {

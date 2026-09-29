@@ -58,6 +58,13 @@ class X402Ask internal constructor(
     /** The page that asked to be paid for. */
     val url: String,
     val description: String?,
+    /**
+     * The account that pays, and that every figure here — balances,
+     * [allowanceWaitingOnUnlock] — was worked out for; null: no wallet.
+     * The sheet names this one, never whichever is active when it's drawn
+     * (#218 R4-F1).
+     */
+    val account: WalletAccount?,
     /** The offers the wallet can pay, in the server's order. */
     val options: List<X402Option>,
     /** Why each other offer can't be paid. */
@@ -245,43 +252,82 @@ object X402Payments {
         val store = X402Store.get(app)
         val vault = Vault.get(app)
         val walletAccounts = WalletAccounts.get(app)
-        val account = activeAccount(vault, walletAccounts)
-        val chains = ChainStore.get(app).chainsOrUnreadable.first().orEmpty()
-        val rpc = WalletRpc(ChainDataRouter.get(app))
-        val (options, unreadable) = options(d.required, chains, rpc, account?.address)
-        val unusable = d.required.unusable + unreadable
-        val allowances = store.allowances.first()
+        // Everything on the sheet — balances, what Pay allows, the allowance note — is worked
+        // out for one account, and only that account pays. If the user switches accounts
+        // while the sheet waits (or is up), it's taken down and worked out again for the
+        // new one (#218 R4-F1).
+        while (true) {
+            val account = activeAccount(vault, walletAccounts)
+            val chains = ChainStore.get(app).chainsOrUnreadable.first().orEmpty()
+            val rpc = WalletRpc(ChainDataRouter.get(app))
+            val (options, unreadable) = options(d.required, chains, rpc, account?.address)
+            val unusable = d.required.unusable + unreadable
+            val allowances = store.allowances.first()
 
-        // An allowance pays silently — only with the wallet open, never unlocking it for a site,
-        // only for a navigation the user or the site itself started (#218 R4-M3), only from
-        // the account it was granted for (#218 R2-F1), and only when the balance isn't known
-        // to be short: otherwise the sheet says why (#218 R2-M1).
-        val payer = account?.address
-        val covered = if (!allowanceMayPay || payer == null) null else autoPayOption(options) { o ->
-            store.covering(allowances, d.origin, o.chainId, o.asset, payer, o.amount) != null
-        }
-        if (covered != null && account != null && vault.unlockedNow()) {
+            // An allowance pays silently — only with the wallet open, never unlocking it for a site,
+            // only for a navigation the user or the site itself started (#218 R4-M3), only from
+            // the account it was granted for (#218 R2-F1), and only when the balance isn't known
+            // to be short: otherwise the sheet says why (#218 R2-M1).
+            val payer = account?.address
+            val covered = if (!allowanceMayPay || payer == null) null else autoPayOption(options) { o ->
+                store.covering(allowances, d.origin, o.chainId, o.asset, payer, o.amount) != null
+            }
+            // Switched while the figures were read: read them again for the account now active.
+            if (activeAccount(vault, walletAccounts)?.address != payer) continue
+            if (covered != null && account != null && vault.unlockedNow()) {
+                if (!stillOn(tab, doc, webView, d.url)) return
+                Log.i(TAG, "paying from the site's allowance")
+                if (pay(tab, doc, webView, d, covered, account, auto = true, grant = null) != Paid.NOT_COVERED) return
+            }
             if (!stillOn(tab, doc, webView, d.url)) return
-            Log.i(TAG, "paying from the site's allowance")
-            if (pay(tab, doc, webView, d, covered, account, auto = true, grant = null) != Paid.NOT_COVERED) return
+            val ask = EthAsk.Payment(
+                origin = d.origin,
+                payment = X402Ask(
+                    url = d.url,
+                    description = d.required.description,
+                    account = account,
+                    options = options,
+                    unusable = unusable,
+                    allowanceWaitingOnUnlock = covered != null && account != null,
+                ),
+            )
+            val answer = askWhileActive(walletAccounts, payer) { EthereumProviders.askOnDocument(tab, doc, ask) }
+                ?: continue
+            val choice = (answer as? EthAnswer.Approved)?.payment ?: return
+            val option = options.getOrNull(choice.option) ?: return
+            if (account == null || activeAccount(vault, walletAccounts)?.address != payer) continue
+            if (!stillOn(tab, doc, webView, d.url)) return
+            pay(tab, doc, webView, d, option, account, auto = false, grant = choice.allowance)
+            return
         }
-        if (!stillOn(tab, doc, webView, d.url)) return
-        val ask = EthAsk.Payment(
-            origin = d.origin,
-            payment = X402Ask(
-                url = d.url,
-                description = d.required.description,
-                options = options,
-                unusable = unusable,
-                allowanceWaitingOnUnlock = covered != null && account != null,
-            ),
-        )
-        val answer = EthereumProviders.askOnDocument(tab, doc, ask)
-        val choice = (answer as? EthAnswer.Approved)?.payment ?: return
-        val option = options.getOrNull(choice.option) ?: return
-        val chosen = activeAccount(vault, walletAccounts) ?: return
-        if (!stillOn(tab, doc, webView, d.url)) return
-        pay(tab, doc, webView, d, option, chosen, auto = false, grant = choice.allowance)
+    }
+
+    /**
+     * [ask], or null if the wallet's active account stops being [address]
+     * before it's answered: the sheet is taken down (not as a rejection —
+     * the tab's sheets aren't paused) so it can be put up again with
+     * figures for the account now active (#218 R4-F1).
+     */
+    private suspend fun askWhileActive(
+        accounts: WalletAccounts,
+        address: String?,
+        ask: suspend () -> EthAnswer,
+    ): EthAnswer? = coroutineScope {
+        var switched = false
+        val asking = async { ask() }
+        val watch = launch {
+            accounts.accounts.first { it != null && it.active.address != address }
+            switched = true
+            asking.cancel()
+        }
+        try {
+            asking.await()
+        } catch (e: CancellationException) {
+            if (!switched) throw e
+            null
+        } finally {
+            watch.cancel()
+        }
     }
 
     /**

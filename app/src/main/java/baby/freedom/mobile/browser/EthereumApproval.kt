@@ -136,7 +136,7 @@ fun EthereumApprovalSheet(request: EthereumPromptRequest) {
         ask is EthAsk.Payment
     val canApprove = when (ask) {
         is EthAsk.Connect -> connectAccount != null
-        is EthAsk.Payment -> accountList?.active != null && payment?.choice() != null
+        is EthAsk.Payment -> ask.payment.paysFrom(accountList?.active) && payment?.choice() != null
         else -> true
     }
 
@@ -209,7 +209,7 @@ fun EthereumApprovalSheet(request: EthereumPromptRequest) {
                     is EthAsk.Payment -> X402PaymentBody(
                         ask = ask.payment,
                         state = payment!!,
-                        account = accountList?.active,
+                        account = ask.payment.account,
                         noWallet = vaultState == Vault.State.Empty || accounts == null,
                         locked = vaultState is Vault.State.Locked,
                         onSetUp = request.setUpWallet,

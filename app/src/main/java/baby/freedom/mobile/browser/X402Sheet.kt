@@ -40,6 +40,14 @@ internal enum class X402Window(val label: String, val ms: Long) {
     WEEK("7 days", 7 * 24 * 60 * 60 * 1000L),
 }
 
+/**
+ * Pay may be tapped with [active] the wallet's active account: only when
+ * it's the account the sheet's balances and notes were worked out for
+ * ([X402Ask.account]) — a switch meanwhile gets a fresh sheet (#218 R4-F1).
+ */
+internal fun X402Ask.paysFrom(active: WalletAccount?): Boolean =
+    account != null && active != null && active.address.equals(account.address, ignoreCase = true)
+
 /** What the user has picked on an x402 sheet: an offer, and whether (and how much) to allow paying without asking. */
 internal class X402SheetState(val ask: X402Ask) {
     var selected by mutableIntStateOf(ask.options.indexOfFirst { it.fundable }.coerceAtLeast(0))
