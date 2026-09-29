@@ -136,4 +136,14 @@ interface INodeService {
      * closed; one the reader gave up on before it started doesn't run.
      */
     ParcelFileDescriptor stampCall(String method, String argsJson);
+
+    /**
+     * The user turned the node off (#116). Returns true if a postage spend
+     * is running inside ant: the service then stays up and stops itself
+     * once it ends — the caller just unbinds, and must not stopService,
+     * which would exit the process mid-spend. Returns false if none runs:
+     * stop the service now. Either way no new spend starts until the
+     * service is started again.
+     */
+    boolean stopWhenIdle();
 }

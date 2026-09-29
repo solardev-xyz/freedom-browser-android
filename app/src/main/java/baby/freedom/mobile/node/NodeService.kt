@@ -80,6 +80,9 @@ class NodeService : Service() {
     private var ipfsNode: IpfsNode? = null
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
+    /** Holds a stop back while a postage spend runs inside ant (#116); see [INodeService.stopWhenIdle]. */
+    private val stopGate = SpendStopGate()
+
     /** `radicleCall`s running at once: the browser's reads and the provider's calls (#124). */
     private val radicleCalls = Semaphore(MAX_RADICLE_CALLS)
 
@@ -241,8 +244,49 @@ class NodeService : Service() {
                         if (answer != null) out.write(answer.toByteArray())
                     }
                 }
+                stopIfDeferredStopDue()
             }
             return read
+        }
+
+        override fun stopWhenIdle(): Boolean {
+            val deferred = stopGate.requestStop()
+            if (deferred) {
+                Log.i(TAG, "node turned off during a postage spend; stopping once it ends")
+            }
+            return deferred
+        }
+    }
+
+    /**
+     * Runs a postage spend (#116) under [stopGate]: refused once the node
+     * is being turned off, and a stop asked for while it ran happens as
+     * soon as it (the last one) ends — never in the middle, where exiting
+     * the process could leave a batch paid for but unregistered.
+     */
+    private fun <T> spending(block: () -> T): T {
+        check(stopGate.begin()) { "The Swarm node is turning off" }
+        try {
+            return block()
+        } finally {
+            stopGate.end()
+        }
+    }
+
+    /**
+     * Carries out a stop [INodeService.stopWhenIdle] deferred, if it's due
+     * now. Called once a stamp call's answer is written, so the process
+     * doesn't exit before the app has read how the spend went.
+     */
+    private fun stopIfDeferredStopDue() {
+        if (!stopGate.shouldStopNow()) return
+        scope.launch {
+            // Re-checked on the main thread, where onStartCommand cancels
+            // a stop the user took back meanwhile.
+            if (stopGate.shouldStopNow()) {
+                Log.i(TAG, "postage spend ended; carrying out the deferred stop")
+                stopSelf()
+            }
         }
     }
 
@@ -273,13 +317,13 @@ class NodeService : Service() {
                 }
                 swarmNode.storageTopupQuote(days())
             }
-            "buy" -> {
+            "buy" -> spending {
                 spendable()
                 val depth = args.getInt("depth").also { require(it in MIN_STAMP_DEPTH..MAX_STAMP_DEPTH) { "bad depth" } }
                 Log.i(TAG, "buying a postage batch (depth $depth), as the user confirmed")
                 swarmNode.buyStamp(depth, amount(), immutable = true, maxSwapWei = maxSwap())
             }
-            "extend" -> {
+            "extend" -> spending {
                 spendable()
                 Log.i(TAG, "extending a postage batch, as the user confirmed")
                 swarmNode.extendStamp(args.getString("batchId"), amount(), maxSwap())
@@ -545,7 +589,12 @@ class NodeService : Service() {
         broadcastIpfsState(IpfsInfo())
     }
 
-    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int = START_STICKY
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // The user turned the node (back) on: a stop still waiting for a
+        // spend to end (#116) no longer stands.
+        stopGate.cancelStop()
+        return START_STICKY
+    }
 
     override fun onDestroy() {
         unregisterNetworkCallback()
@@ -563,8 +612,26 @@ class NodeService : Service() {
         // Kill the :node process so nothing native lingers (ant's
         // tokio runtime threads, the freedom-ipfs store lock). The next
         // startForegroundService() from the UI boots a fresh process.
-        Log.i(TAG, "exiting :node process to release state-store lock")
-        exitProcess(0)
+        //
+        // Not while a postage spend is still inside ant (#116), though:
+        // the UI defers its stop through [INodeService.stopWhenIdle], but
+        // a stop that got here some other way (the UI not yet bound when
+        // the user turned the node off) must still not exit mid-spend.
+        // The spend holds its read lock on ant's handle, so the teardown
+        // above never frees ant under it; only the exit waits for it.
+        stopGate.requestStop()
+        if (stopGate.spendsRunning == 0) {
+            Log.i(TAG, "exiting :node process to release state-store lock")
+            exitProcess(0)
+        }
+        Log.w(TAG, "destroyed during a postage spend; exiting once it ends")
+        Thread({
+            stopGate.awaitIdle(DESTROY_SPEND_WAIT_MS)
+            // A moment for the spend's answer to reach the app.
+            Thread.sleep(ANSWER_GRACE_MS)
+            Log.i(TAG, "exiting :node process to release state-store lock")
+            exitProcess(0)
+        }, "node-exit-after-spend").start()
     }
 
     private fun broadcastState(info: NodeInfo) {
@@ -648,6 +715,10 @@ class NodeService : Service() {
         const val MAX_STAMP_DAYS = 3650L
 
         private const val MAX_RADICLE_CALLS = 4
+
+        /** How long a destroyed service holds its exit back for a postage spend still running (#116). */
+        private const val DESTROY_SPEND_WAIT_MS = 15 * 60_000L
+        private const val ANSWER_GRACE_MS = 1_000L
 
         private const val TAG = "NodeService"
         private const val CHANNEL_ID = "freedom_node"

@@ -8,6 +8,7 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.fillMaxSize
@@ -835,8 +836,15 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun stopAndUnbindService() {
+        // A postage spend still inside ant (#116) must finish first: the
+        // service then stops itself once it has, rather than exit mid-spend.
+        val deferred = runCatching { binder?.stopWhenIdle() }.getOrNull() == true
         unbindFromService()
-        NodeService.stop(this)
+        if (deferred) {
+            Toast.makeText(this, R.string.node_stop_after_spend, Toast.LENGTH_LONG).show()
+        } else {
+            NodeService.stop(this)
+        }
         infoFlow.value = NodeInfo()
         ipfsInfoFlow.value = IpfsInfo()
         radicleInfoFlow.value = RadicleInfo()

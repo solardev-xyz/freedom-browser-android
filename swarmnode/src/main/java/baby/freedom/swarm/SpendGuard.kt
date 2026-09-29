@@ -56,6 +56,17 @@ sealed interface SpendPlan {
  * most that can leave the account is what the user confirmed. A gateway
  * request racing the app's own spend can at worst use up one of its
  * slots, which makes the app's spend fail rather than spend twice.
+ *
+ * One slot doesn't pin its recipient: a buy's chequebook settlement
+ * deposit ([SpendPermit.Slot.SettlementDeposit], at most
+ * [SpendPermit.MAX_SETTLEMENT_DEPOSIT_PLUR] = 0.001 xBZZ) may be a `transfer` to any
+ * address, because the chequebook it funds is created in the same flow
+ * and its address can't be known before ant sends the deposit. That is
+ * safe only because no ant gateway route transfers xBZZ to an address the
+ * caller chooses, so during a buy the only `transfer` ant can sign is its
+ * own deposit. If ant ever gains such a route (a withdraw, a cash-out),
+ * pin this slot to the deployed chequebook first — until then a request
+ * racing a buy could send up to 0.001 xBZZ to an address of its choice.
  */
 object SpendGuard {
     @Volatile
@@ -172,6 +183,9 @@ class SpendPermit(val plan: SpendPlan) {
                 Slot.DeployChequebook.takeIf { address(0) == owner }
             plan is SpendPlan.BuyStamp && to == BZZ_TOKEN && selector == SEL_TRANSFER && words == 64 ->
                 // The chequebook's settlement deposit: ant's 0.001 xBZZ target at most.
+                // The recipient (the chequebook ant just deployed) isn't known here, so
+                // any address passes — safe only while no ant gateway route transfers
+                // xBZZ to a caller-chosen address; see the class KDoc.
                 Slot.SettlementDeposit.takeIf {
                     address(0) != null && uint(1).signum() > 0 && uint(1) <= MAX_SETTLEMENT_DEPOSIT_PLUR
                 }
