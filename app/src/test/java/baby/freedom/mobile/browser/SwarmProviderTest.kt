@@ -806,6 +806,21 @@ class SwarmProviderTest {
     }
 
     @Test
+    fun `a queued createFeed for a feed made and orphaned meanwhile is feed_owner_unavailable too`() {
+        connect()
+        feeds.grant(site)
+        // New when checked (no record, so no feed to carry); by the time its sheet was due an earlier
+        // queued createFeed had made it and its identity had gone: askOnTab answers OWNER_GONE.
+        answer = SwarmProvider.Answer.OWNER_GONE
+        val before = commits
+        val e = err(call("swarm_createFeed", JSONObject().put("name", "notes")))
+        assertEquals("feed_owner_unavailable", e.reason)
+        assertEquals(-32603, e.code)
+        assertEquals("nothing committed", before, commits)
+        assertNull("no feed made", feeds.feed(site, "notes"))
+    }
+
+    @Test
     fun `createFeed on a feed whose key no longer derives its owner is refused like updateFeed`() {
         connect()
         feeds.grant(site)

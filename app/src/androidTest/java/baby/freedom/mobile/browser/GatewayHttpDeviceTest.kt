@@ -4,6 +4,7 @@ import java.io.IOException
 import java.net.InetAddress
 import java.net.ServerSocket
 import java.net.Socket
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Test
@@ -71,6 +72,33 @@ class GatewayHttpDeviceTest {
             val ms = (System.nanoTime() - started) / 1_000_000
             assertTrue("took $ms ms", ms < 3_000)
             acceptor.join(10_000)
+        }
+    }
+
+    @Test
+    fun `an answer read to its end in time is returned even if the deadline passes while it's handed back`() {
+        ServerSocket(0, 1, InetAddress.getLoopbackAddress()).use { server ->
+            val acceptor = Thread {
+                runCatching {
+                    server.accept().use { s ->
+                        s.getInputStream().read(ByteArray(4096))
+                        s.getOutputStream().apply {
+                            write("HTTP/1.1 200 OK\r\nContent-Length: 2\r\nX-Tag: 7\r\n\r\nok".toByteArray())
+                            flush()
+                        }
+                        Thread.sleep(2_000)
+                    }
+                }
+            }.apply { isDaemon = true; start() }
+            // The watchdog fires between the body's end and the answer being returned (#224 R5).
+            val answer = GatewayHttp.requestAt(
+                "http://127.0.0.1:${server.localPort}", "GET", "/chunks/x", emptyMap(), null, 300,
+                afterAnswer = { Thread.sleep(800) },
+            )
+            assertEquals(200, answer.status)
+            assertEquals("ok", String(answer.body))
+            assertEquals("7", answer.headers["x-tag"])
+            acceptor.join(5_000)
         }
     }
 }

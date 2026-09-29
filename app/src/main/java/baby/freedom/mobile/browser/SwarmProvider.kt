@@ -448,7 +448,9 @@ class SwarmProvider(
             if (signed.feed != null && identity == null) return feedOwnerGone(signed.feed)
             val answer = calls.ask(SwarmAsk.Sign(origin, method, kind, !granted, signed.feedName, signed.detail, identity, needsWallet))
             // Lost while queued behind another sheet: the same answer as above, not a refusal nobody made.
-            if (answer.ownerGone && signed.feed != null) return feedOwnerGone(signed.feed)
+            // Also for a feed that was new when this was checked: an earlier queued ask may have
+            // created it since, and its identity gone before this sheet was due ([current]).
+            if (answer.ownerGone) return feedOwnerGone(signed.feed?.name ?: signed.feedName.orEmpty())
             if (!answer.allowed) return rejected()
             if (needsWallet && !publishers.walletExists()) return rejected()
             if (!feeds.granted(origin)) saving("the site's feed access") { feeds.grant(origin) }
@@ -490,9 +492,11 @@ class SwarmProvider(
         if (feed == null) site.active else site.identities.firstOrNull { it.id == feed.identityId }
 
     /** [feed]'s owner isn't on this device (any more): nothing can sign for it. */
-    private fun feedOwnerGone(feed: FeedRecord) = Reply.Err(
+    private fun feedOwnerGone(feed: FeedRecord) = feedOwnerGone(feed.name)
+
+    private fun feedOwnerGone(name: String) = Reply.Err(
         INTERNAL,
-        "The identity that owns feed ${feed.name} is no longer on this device",
+        "The identity that owns feed $name is no longer on this device",
         reason("feed_owner_unavailable"),
     )
 

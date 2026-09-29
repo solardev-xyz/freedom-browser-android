@@ -23,7 +23,7 @@ import java.net.URL
 import java.util.WeakHashMap
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
-import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
@@ -391,6 +391,9 @@ object SwarmProviders {
  */
 internal object GatewayHttp : SwarmProvider.Http {
     private const val MAX_ANSWER_BYTES = 16 * 1024 * 1024
+    private const val RUNNING = 0
+    private const val EXPIRED = 1
+    private const val DONE = 2
 
     private val watchdog = Executors.newSingleThreadScheduledExecutor { r ->
         Thread(r, "swarm-gateway-watchdog").apply { isDaemon = true }
@@ -412,15 +415,22 @@ internal object GatewayHttp : SwarmProvider.Http {
         headers: Map<String, String>,
         body: ByteArray?,
         timeoutMs: Int,
+        /** Tests only: runs once the answer is complete, before it's returned. */
+        afterAnswer: () -> Unit = {},
     ): SwarmProvider.Http.Answer {
         val conn = URL(base + path).openConnection() as HttpURLConnection
-        val expired = AtomicBoolean(false)
+        // RUNNING until either the answer is read to its end (DONE) or
+        // the deadline passes first (EXPIRED) — whichever gets there
+        // first decides, so an answer complete in time is never turned
+        // into a timeout by a watchdog firing while it's being returned.
+        val state = AtomicInteger(RUNNING)
         // Disconnecting from this thread would block behind the stalled
         // write; the watchdog's thread aborts it at once.
         val abort = watchdog.schedule(
-            { expired.set(true); runCatching { conn.disconnect() } },
+            { if (state.compareAndSet(RUNNING, EXPIRED)) runCatching { conn.disconnect() } },
             timeoutMs.toLong(), TimeUnit.MILLISECONDS,
         )
+        val expired = { state.get() == EXPIRED }
         try {
             conn.requestMethod = method
             conn.connectTimeout = minOf(timeoutMs, 10_000)
@@ -441,20 +451,22 @@ internal object GatewayHttp : SwarmProvider.Http {
                 while (true) {
                     val n = input.read(buf)
                     // Between reads too: a node trickling its answer never trips the read timeout.
-                    if (expired.get()) throw SocketTimeoutException("the node didn't answer in $timeoutMs ms")
+                    if (expired()) throw SocketTimeoutException("the node didn't answer in $timeoutMs ms")
                     if (n < 0) break
                     if (out.size() + n > MAX_ANSWER_BYTES) throw IOException("the node's answer is too large")
                     out.write(buf, 0, n)
                 }
                 out.toByteArray()
             } ?: ByteArray(0)
+            // Read to its end: done, unless the deadline got there first.
+            if (!state.compareAndSet(RUNNING, DONE)) throw SocketTimeoutException("the node didn't answer in $timeoutMs ms")
+            afterAnswer()
             val answerHeaders = conn.headerFields.entries
                 .filter { it.key != null && it.value.isNotEmpty() }
                 .associate { it.key to it.value.first() }
-            if (expired.get()) throw SocketTimeoutException("the node didn't answer in $timeoutMs ms")
             return SwarmProvider.Http.Answer(status, answerHeaders, bytes)
         } catch (e: IOException) {
-            if (expired.get() && e !is SocketTimeoutException) throw SocketTimeoutException("the node didn't answer in $timeoutMs ms")
+            if (expired() && e !is SocketTimeoutException) throw SocketTimeoutException("the node didn't answer in $timeoutMs ms")
             throw e
         } finally {
             abort.cancel(false)
