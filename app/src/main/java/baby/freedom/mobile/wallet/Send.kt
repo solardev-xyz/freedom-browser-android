@@ -175,6 +175,13 @@ data class SendQuote(
      * one of the two can ever be mined ([NonceTracker.abandon]).
      */
     val replaces: String? = null,
+    /**
+     * How many sends from this account on this chain [WalletSender.submit]
+     * had started when this was priced: once another has started since,
+     * it may have gone out on this one's nonce, and this is priced again
+     * rather than signed beside it.
+     */
+    val sendsBefore: Long = 0,
 ) {
     /** For a native send, the amount plus the most the fee can be; null for a token (two currencies). */
     val nativeTotal: BigInteger? get() = if (request.token.isNative) request.amount + tx.maxFee else null
@@ -662,6 +669,13 @@ class WalletSender internal constructor(
         coroutineScope {
             val chainId = request.chain.id
             val from = request.from.address
+            // Before the nonce is read: a send started from here on may take
+            // it, and so may one started already whose nonce isn't yet in
+            // [nonces] (still signing or broadcasting), so that one isn't
+            // counted as before this quote.
+            val sendsBefore = synchronized(this@WalletSender) {
+                started[startKey(from, chainId)]?.let { if (it.settled) it.count else it.count - 1 } ?: 0L
+            }
             val token = request.token
             val native = async { rpc.balance(chainId, from).value }
             val tokenBalance = async {
@@ -715,7 +729,7 @@ class WalletSender internal constructor(
                 val what = if (token.isNative && tx.value.signum() > 0) "the amount and the network fee" else "the network fee"
                 throw SendException("Not enough $symbol for $what (up to $fee): $has")
             }
-            SendQuote(sending, tx, nativeBalance, tokenBalance.await(), clock(), nonce.await().trust, replacing?.hash)
+            SendQuote(sending, tx, nativeBalance, tokenBalance.await(), clock(), nonce.await().trust, replacing?.hash, sendsBefore)
         }
     } catch (e: CancellationException) {
         throw e
@@ -728,6 +742,41 @@ class WalletSender internal constructor(
     /** Whether [quote] is too old to sign as is (its fees may no longer get it mined). */
     fun isStale(quote: SendQuote): Boolean = clock() - quote.preparedAt !in 0 until QUOTE_TTL_MS
 
+    /**
+     * Sends [submit] started per (account, chain), and the quote that
+     * started the last one. [settled] once that send's nonce is in
+     * [nonces] (marked sent, or forgotten) or it ended without one: until
+     * then a quote priced beside it reads the nonce it is taking.
+     */
+    private class Started(val count: Long, val by: SendQuote) {
+        /** Under [WalletSender]'s lock. */
+        var settled = false
+    }
+
+    /** [start]'s nonce is now what [NonceTracker.next] answers from (called after it got there). */
+    private fun settle(start: Started?) {
+        if (start != null) synchronized(this) { start.settled = true }
+    }
+
+    /** Under this object's lock. */
+    private val started = HashMap<String, Started>()
+
+    private fun startKey(from: String, chainId: Long) = "${from.lowercase()}|$chainId"
+
+    /**
+     * Whether another send from [quote]'s account on its chain has
+     * started since [quote] was priced, or had started but not yet
+     * recorded its nonce when it was, so its nonce may be taken: two
+     * quotes priced side by side (a site's sheet still up while a send an
+     * auto-approve rule covers goes out, or the wallet page's own) hold
+     * the same one. Its own earlier start (a retry after it failed
+     * without going out) doesn't count. Under this object's lock.
+     */
+    private fun overtakenLocked(quote: SendQuote): Boolean {
+        val last = started[startKey(quote.request.from.address, quote.tx.chainId)] ?: return false
+        return last.count != quote.sendsBefore && last.by !== quote
+    }
+
     /** What [submit] did with a quote. */
     enum class Submit {
         /** Signing and broadcasting it; [status] follows it. */
@@ -739,7 +788,11 @@ class WalletSender internal constructor(
          */
         BUSY,
 
-        /** Older than [QUOTE_TTL_MS]: nothing signed, price it again. */
+        /**
+         * Older than [QUOTE_TTL_MS], or another send from its account on
+         * its chain started after it was priced (its nonce may be taken):
+         * nothing signed, price it again.
+         */
         STALE,
     }
 
@@ -747,36 +800,52 @@ class WalletSender internal constructor(
      * Signs [quote]'s transaction with [sign] (the account's key, which
      * it zeroes) and broadcasts it, then follows it to a receipt —
      * unless another send is still being signed or broadcast, or the
-     * quote has gone [stale][isStale] (checked here, at the moment of
-     * signing, however long an unlock prompt kept the user before it).
+     * quote has gone [stale][isStale] or another send from its account
+     * on its chain started after it was priced (checked here, at the
+     * moment of signing, however long an unlock prompt kept the user
+     * before it).
      */
     fun submit(quote: SendQuote, sign: (EthTransaction) -> EthTransaction.Signed): Submit {
         synchronized(this) {
             if (busyLocked()) return Submit.BUSY
-            if (isStale(quote)) return Submit.STALE
+            if (isStale(quote) || overtakenLocked(quote)) return Submit.STALE
+            val k = startKey(quote.request.from.address, quote.tx.chainId)
+            val start = Started((started[k]?.count ?: 0L) + 1, quote)
+            started[k] = start
             job?.cancel()
             signed = null
             show(SendStatus(quote, SendStatus.Stage.Signing))
             job = scope.launch {
-                val s = try {
-                    sign(quote.tx)
-                } catch (e: CancellationException) {
-                    throw e
-                } catch (e: VaultLockedException) {
-                    fail(quote, "The wallet locked before the transaction was signed. Nothing was sent; confirm again to unlock it.", false)
-                    return@launch
-                } catch (e: Exception) {
-                    Log.w(TAG, "signing failed: ${e.javaClass.simpleName}")
-                    fail(quote, "Couldn’t sign the transaction. Nothing was sent.", false)
-                    return@launch
+                // Every way this ends without broadcast settling it (signing
+                // failed, the save failed, discarded or cancelled) leaves the
+                // nonce as it was, or abandoned by [discard] before the cancel.
+                try {
+                    signAndBroadcast(quote, sign, start)
+                } finally {
+                    settle(start)
                 }
-                // On disk before it goes out: a process killed mid-broadcast
-                // must come back to these bytes, never to an empty form that
-                // would sign a second payment next to them.
-                if (journalBeforeBroadcast(quote, s)) broadcast(quote, s)
             }
         }
         return Submit.STARTED
+    }
+
+    private suspend fun signAndBroadcast(quote: SendQuote, sign: (EthTransaction) -> EthTransaction.Signed, start: Started) {
+        val s = try {
+            sign(quote.tx)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: VaultLockedException) {
+            fail(quote, "The wallet locked before the transaction was signed. Nothing was sent; confirm again to unlock it.", false)
+            return
+        } catch (e: Exception) {
+            Log.w(TAG, "signing failed: ${e.javaClass.simpleName}")
+            fail(quote, "Couldn’t sign the transaction. Nothing was sent.", false)
+            return
+        }
+        // On disk before it goes out: a process killed mid-broadcast
+        // must come back to these bytes, never to an empty form that
+        // would sign a second payment next to them.
+        if (journalBeforeBroadcast(quote, s)) broadcast(quote, s, start = start)
     }
 
     /** How far a [submitAndAwaitBroadcast] got. */
@@ -909,7 +978,12 @@ class WalletSender internal constructor(
      * (Try again), so a node refusing them (the nonce is used, the
      * balance is too low) may be saying it about this very transaction.
      */
-    private suspend fun broadcast(quote: SendQuote, s: EthTransaction.Signed, resend: Boolean = false) {
+    private suspend fun broadcast(
+        quote: SendQuote,
+        s: EthTransaction.Signed,
+        resend: Boolean = false,
+        start: Started? = null,
+    ) {
         val from = quote.request.from.address
         val chainId = quote.tx.chainId
         // Discarded meanwhile (signing isn't a suspension point, so cancelling alone can't stop this).
@@ -928,6 +1002,7 @@ class WalletSender internal constructor(
             // transaction is on chain, it went out.
             if (landed(chainId, s.hash)) {
                 nonces.markSent(from, chainId, quote.tx.nonce)
+                settle(start)
                 set(quote, SendStatus.Stage.Pending, s.hash)
                 follow(quote, s.hash)
                 return
@@ -949,16 +1024,19 @@ class WalletSender internal constructor(
                 // A used nonce is used whoever used it; for any other
                 // refusal the chain's own count tells the next send.
                 if (nonceUsed(e)) nonces.markSent(from, chainId, quote.tx.nonce) else nonces.forget(from, chainId)
+                settle(start)
                 set(quote, SendStatus.Stage.Pending, s.hash)
                 follow(quote, s.hash)
                 return
             }
             nonces.forget(from, chainId)
+            settle(start)
             Log.i(TAG, "broadcast chain=$chainId nonce=${quote.tx.nonce} failed (uncertain=$uncertain)")
             fail(quote, message, uncertain)
             return
         }
         nonces.markSent(from, chainId, quote.tx.nonce)
+        settle(start)
         Log.i(TAG, "sent ${s.hash} chain=$chainId nonce=${quote.tx.nonce}")
         set(quote, SendStatus.Stage.Pending, s.hash)
         follow(quote, s.hash)

@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
@@ -36,6 +37,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.SheetValue
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
@@ -109,6 +111,8 @@ fun EthereumApprovalSheet(request: EthereumPromptRequest) {
     var busy by remember(request) { mutableStateOf(false) }
     var error by remember(request) { mutableStateOf<String?>(null) }
     var picked by remember(request) { mutableStateOf<String?>(null) }
+    // The auto-approve switch (#112): off every time the sheet comes up.
+    var always by remember(request) { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     val sheetState = rememberModalBottomSheetState(
         skipPartiallyExpanded = true,
@@ -142,7 +146,7 @@ fun EthereumApprovalSheet(request: EthereumPromptRequest) {
         scope.launch {
             try {
                 if (!vault.unlockedNow()) vault.unlock(BiometricVaultAuthenticator(context))
-                request.respond(EthAnswer.Approved())
+                request.respond(EthAnswer.Approved(alwaysApprove = ask is EthAsk.SendTransaction && always))
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Throwable) {
@@ -189,7 +193,7 @@ fun EthereumApprovalSheet(request: EthereumPromptRequest) {
                     )
                     is EthAsk.SignMessage -> SignMessageBody(ask)
                     is EthAsk.SignTypedData -> SignTypedDataBody(ask)
-                    is EthAsk.SendTransaction -> SendBody(ask)
+                    is EthAsk.SendTransaction -> SendBody(ask, always, enabled = armed && !busy, onAlways = { always = it })
                     is EthAsk.SwitchChain -> SwitchBody(ask)
                     is EthAsk.AddChain -> AddChainBody(ask)
                 }
@@ -297,7 +301,7 @@ private fun ConnectBody(
     Spacer(Modifier.height(8.dp))
     Note(
         "The site will see this account's address and can read its balances. It can ask you to sign " +
-            "messages and send transactions, and each one asks you here first. Disconnect it any time on the wallet page or in Settings → Site permissions.",
+            "messages and send transactions, and each one asks you here first (unless you later turn on auto-approve for a call). Disconnect it any time on the wallet page or in Settings → Site permissions.",
     )
 }
 
@@ -328,7 +332,7 @@ private fun SignTypedDataBody(ask: EthAsk.SignTypedData) {
 }
 
 @Composable
-private fun SendBody(ask: EthAsk.SendTransaction) {
+private fun SendBody(ask: EthAsk.SendTransaction, always: Boolean, enabled: Boolean, onAlways: (Boolean) -> Unit) {
     val quote = ask.quote
     val request = quote.request
     val chain = request.chain
@@ -362,12 +366,62 @@ private fun SendBody(ask: EthAsk.SendTransaction) {
     Row0("Network fee", "up to ${feeText(quote.tx.maxFee, chain)}", mono = true, detail = feeDetail(quote.tx))
     quote.nativeTotal?.takeIf { request.amount.signum() > 0 }?.let { Row0("Total", "up to ${feeText(it, chain)}", mono = true) }
     Row0("Nonce", quote.tx.nonce.toString(), detail = nonceDetail(quote))
+    ask.autoApprove?.let { rule ->
+        Spacer(Modifier.height(8.dp))
+        if (ask.ruled) {
+            Note(autoApproveRuledNote(quote.replaces != null))
+        } else {
+            AutoApproveSwitch(rule, chain.name, always, enabled, onAlways)
+        }
+    }
     Spacer(Modifier.height(8.dp))
     Note(
         "Only the fee the network actually charges is paid. A transaction can't be undone once it's sent: " +
             "only confirm if you trust the site and expect it.",
     )
 }
+
+/**
+ * "Always approve … on this contract" (#112), with exactly what it covers
+ * written out in full under it. Off until the user turns it on; it only
+ * takes effect with the sheet's own Confirm.
+ */
+@Composable
+private fun AutoApproveSwitch(rule: AutoApproveRule, chain: String, checked: Boolean, enabled: Boolean, onChange: (Boolean) -> Unit) {
+    Surface(
+        shape = RoundedCornerShape(12.dp),
+        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(Modifier.padding(12.dp)) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .toggleable(value = checked, enabled = enabled, role = Role.Switch, onValueChange = onChange)
+                    .testTag("ethereum-always-approve"),
+            ) {
+                Text(autoApproveSwitchLabel(rule), style = MaterialTheme.typography.bodyLarge, modifier = Modifier.weight(1f))
+                Spacer(Modifier.width(8.dp))
+                Switch(checked = checked, onCheckedChange = null, enabled = enabled)
+            }
+            Spacer(Modifier.height(4.dp))
+            Text(
+                autoApproveScope(rule, chain),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+}
+
+/** Why a send a rule covers still has a sheet. */
+internal fun autoApproveRuledNote(replaces: Boolean): String =
+    "An auto-approve rule you turned on covers this call. " + if (replaces) {
+        "It's asked here because it takes the place of a send you stopped tracking."
+    } else {
+        "It's asked here because the wallet is locked; it goes out once you confirm."
+    }
 
 @Composable
 private fun SwitchBody(ask: EthAsk.SwitchChain) {

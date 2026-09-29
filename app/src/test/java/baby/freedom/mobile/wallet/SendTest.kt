@@ -1115,6 +1115,78 @@ class SendTest {
     }
 
     @Test
+    fun `a quote priced beside a send that went out since is priced again, not signed on the same nonce`() = runBlocking<Unit> {
+        val chain = FakeChain()
+        val s = sender(chain)
+        // A site's sheet is up with one quote while another (a covered call) is priced beside it.
+        val waiting = s.prepare(request())
+        val covered = s.prepare(request(amount = 2))
+        assertEquals(waiting.tx.nonce, covered.tx.nonce)
+        assertEquals(WalletSender.Submit.STARTED, s.submit(covered, signer()))
+        s.awaitStage { it == SendStatus.Stage.Pending }
+        chain.receipt = """{"status":"0x1","blockNumber":"0x10","gasUsed":"0x5208","effectiveGasPrice":"0x1"}"""
+        s.awaitStage { it is SendStatus.Stage.Confirmed }
+        // Still within the quote's minute, and nothing is busy: but its nonce is taken.
+        var signed = false
+        assertEquals(WalletSender.Submit.STALE, s.submit(waiting) { tx -> signed = true; tx.sign(key.copyOf(), from.address) })
+        assertFalse(signed)
+        assertEquals(1, chain.sent.size)
+        s.acknowledge()
+        chain.receipt = "null"
+        chain.nonce = 8
+        val again = s.prepare(request())
+        assertEquals(BigInteger.valueOf(8), again.tx.nonce)
+        assertEquals(WalletSender.Submit.STARTED, s.submit(again, signer()))
+        s.awaitStage { it == SendStatus.Stage.Pending }
+    }
+
+    @Test
+    fun `a quote priced while another send was still being signed is priced again, not signed on its nonce`() = runBlocking<Unit> {
+        val chain = FakeChain()
+        val s = sender(chain)
+        // A covered call starts first; the sheet's quote is priced while it
+        // is still signing (counted as started, its nonce not yet marked sent).
+        val covered = s.prepare(request(amount = 2))
+        val gate = java.util.concurrent.CountDownLatch(1)
+        val signing = java.util.concurrent.CountDownLatch(1)
+        assertEquals(
+            WalletSender.Submit.STARTED,
+            s.submit(covered) { tx -> signing.countDown(); gate.await(); tx.sign(key.copyOf(), from.address) },
+        )
+        signing.await()
+        val waiting = s.prepare(request())
+        assertEquals(covered.tx.nonce, waiting.tx.nonce)
+        // It goes out and is mined (nothing busy any more); the sheet is confirmed within its minute.
+        chain.receipt = """{"status":"0x1","blockNumber":"0x10","gasUsed":"0x5208","effectiveGasPrice":"0x1"}"""
+        gate.countDown()
+        s.awaitStage { it is SendStatus.Stage.Confirmed }
+        var signed = false
+        assertEquals(WalletSender.Submit.STALE, s.submit(waiting) { tx -> signed = true; tx.sign(key.copyOf(), from.address) })
+        assertFalse(signed)
+        assertEquals(1, chain.sent.size)
+        // Priced again, it takes the next nonce and goes out.
+        s.acknowledge()
+        chain.receipt = "null"
+        val again = s.prepare(request())
+        assertEquals(covered.tx.nonce + BigInteger.ONE, again.tx.nonce)
+        assertEquals(WalletSender.Submit.STARTED, s.submit(again, signer()))
+        s.awaitStage { it == SendStatus.Stage.Pending }
+        assertEquals(2, chain.sent.size)
+    }
+
+    @Test
+    fun `a quote whose own send failed before going out can be confirmed again`() = runBlocking<Unit> {
+        val chain = FakeChain()
+        val s = sender(chain)
+        val quote = s.prepare(request())
+        assertEquals(WalletSender.Submit.STARTED, s.submit(quote) { throw VaultLockedException() })
+        s.awaitStage { it is SendStatus.Stage.Failed }
+        assertEquals(WalletSender.Submit.STARTED, s.submit(quote, signer()))
+        s.awaitStage { it == SendStatus.Stage.Pending }
+        assertEquals(1, chain.sent.size)
+    }
+
+    @Test
     fun `what the pages show`() {
         assertEquals("0.00002101 xDAI", feeText(BigInteger.valueOf(21_000) * (gwei + BigInteger.valueOf(28)), gnosis))
         assertEquals("0 xDAI", feeText(BigInteger.ZERO, gnosis))

@@ -73,6 +73,8 @@ class EthereumProviderTest {
     private inner class FakeWallet : EthereumProvider.Wallet {
         var list: List<WalletAccount>? = listOf(main, second)
         var activity = 0
+        var open = true
+        override fun unlocked() = open
         override suspend fun accounts() = list
         override fun noteActivity() {
             activity++
@@ -108,6 +110,17 @@ class EthereumProviderTest {
         override suspend fun submit(quote: SendQuote) = outcomes.removeFirst()
     }
 
+    private class FakeAutoApprove : EthereumProvider.AutoApprove {
+        val rules = LinkedHashSet<String>()
+        var failWrites = false
+        /** The store can't be read: nothing matches. */
+        var unreadable = false
+        override suspend fun matches(rule: AutoApproveRule) = !unreadable && rule.key in rules
+        override suspend fun grant(rule: AutoApproveRule) = !failWrites && rules.add(rule.key).let { true }
+        override suspend fun revokeOrigin(origin: String) = !failWrites && rules.removeAll { it.startsWith("$origin|") }.let { true }
+        override suspend fun clear() = !failWrites && rules.clear().let { true }
+    }
+
     private val sepolia = Chain(id = 11155111, name = "Sepolia", symbol = "ETH", rpcUrls = listOf("https://rpc.sepolia.org"), isTestnet = true)
     /** What Settings → Chains has; null when it can't be read. */
     private var chainList: List<Chain>? = BuiltInChains.ALL + sepolia
@@ -116,6 +129,7 @@ class EthereumProviderTest {
     private val grants = FakeGrants()
     private val wallet = FakeWallet()
     private val sends = FakeSends()
+    private val rules = FakeAutoApprove()
     private val readsSeen = mutableListOf<String>()
     private var readAnswer: (String) -> Any? = { "0x1" }
     private val events = mutableListOf<Triple<String, String, String>>()
@@ -135,6 +149,7 @@ class EthereumProviderTest {
             readAnswer(method)
         },
         sends = sends,
+        autoApprove = rules,
     ).also { p -> p.events = EthereumProvider.Events { o, e, d -> events += Triple(o, e, d.toString()) } }
 
     private fun call(method: String, params: JSONArray = JSONArray(), origin: String = site) = runBlocking {
@@ -389,7 +404,7 @@ class EthereumProviderTest {
                 kotlinx.coroutines.Dispatchers.Default.dispatch(context, block)
             }
         }
-        val p = EthereumProvider(grants, wallet, { BuiltInChains.ALL }, { _, _, _, _ -> null }, sends, compute)
+        val p = EthereumProvider(grants, wallet, { BuiltInChains.ALL }, { _, _, _, _ -> null }, sends, rules, compute)
         connect()
         grants.grants[site] = EthereumProvider.Grant(main.address, 1)
         val sig = runBlocking { p.request(site, "eth_signTypedData_v4", JSONArray().put(main.address).put(mail)) { EthAnswer.Approved() } }
@@ -854,6 +869,271 @@ class EthereumProviderTest {
                 "only one of the two can go through",
             nonceDetail(replacing),
         )
+    }
+
+    // ---- Auto-approve rules (#112) ----
+
+    private val token = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
+    private val otherToken = "0x6B175474E89094C44Da98b954EedeAC495271d0F"
+    private val transferData = "0xa9059cbb" + "00".repeat(64)
+    private val approveData = "0x095ea7b3" + "00".repeat(64)
+    private fun sent(n: Int) = EthereumProvider.Submitted.Sent("0x" + "%064x".format(n))
+
+    /** Connect, then send [transferData] to [token] once with the sheet's switch turned on. */
+    private fun grantTransferRule() {
+        connect()
+        answer = { EthAnswer.Approved(alwaysApprove = true) }
+        sends.outcomes += sent(1)
+        ok(call("eth_sendTransaction", tx("to" to token, "data" to transferData)))
+        asks.clear()
+        answer = { error("no sheet expected") }
+    }
+
+    @Test
+    fun `a send's sheet offers the rule for its site, contract, function and chain, and turning it on grants it`() {
+        connect()
+        answer = { EthAnswer.Approved() }
+        sends.outcomes += sent(1)
+        ok(call("eth_sendTransaction", tx("to" to token, "data" to transferData)))
+        val offered = (asks.single() as EthAsk.SendTransaction)
+        assertEquals(AutoApproveRule(site, token.lowercase(), "0xa9059cbb", 100), offered.autoApprove)
+        assertFalse(offered.ruled)
+        // Approved without the switch: nothing granted, the next one asks too.
+        assertTrue(rules.rules.isEmpty())
+        grantTransferRule()
+        assertEquals(setOf("$site|${token.lowercase()}|0xa9059cbb|100"), rules.rules)
+    }
+
+    @Test
+    fun `a rule turned on with a send that didn't go out is not written`() {
+        connect()
+        answer = { EthAnswer.Approved(alwaysApprove = true) }
+        sends.outcomes += EthereumProvider.Submitted.Busy
+        assertEquals(-32603, code(call("eth_sendTransaction", tx("to" to token, "data" to transferData))))
+        sends.outcomes += EthereumProvider.Submitted.Failed("The wallet locked before the transaction was signed.", null)
+        assertEquals(-32603, code(call("eth_sendTransaction", tx("to" to token, "data" to transferData))))
+        repeat(3) { sends.outcomes += EthereumProvider.Submitted.Stale }
+        assertEquals(-32603, code(call("eth_sendTransaction", tx("to" to token, "data" to transferData))))
+        assertTrue(rules.rules.isEmpty())
+        // So the next one asks again.
+        asks.clear()
+        answer = { EthAnswer.Rejected }
+        assertEquals(4001, code(call("eth_sendTransaction", tx("to" to token, "data" to transferData))))
+        assertFalse((asks.single() as EthAsk.SendTransaction).ruled)
+    }
+
+    @Test
+    fun `after a reprice, the switch of the sheet confirmed last decides`() {
+        connect()
+        var n = 0
+        answer = { EthAnswer.Approved(alwaysApprove = n++ == 0) }
+        sends.outcomes += EthereumProvider.Submitted.Stale
+        sends.outcomes += sent(1)
+        ok(call("eth_sendTransaction", tx("to" to token, "data" to transferData)))
+        assertTrue(rules.rules.isEmpty())
+        n = 0
+        answer = { EthAnswer.Approved(alwaysApprove = n++ == 1) }
+        sends.outcomes += EthereumProvider.Submitted.Stale
+        sends.outcomes += sent(2)
+        ok(call("eth_sendTransaction", tx("to" to token, "data" to transferData)))
+        assertEquals(1, rules.rules.size)
+    }
+
+    @Test
+    fun `a call a rule covers goes out without a sheet while the wallet is unlocked`() {
+        grantTransferRule()
+        sends.outcomes += sent(2)
+        assertEquals(sent(2).hash, ok(call("eth_sendTransaction", tx("from" to main.address, "to" to token.lowercase(), "data" to transferData))))
+        assertTrue(asks.isEmpty())
+        // Still the wallet's own send flow, priced as any other.
+        assertEquals(site, sends.prepared.last().dapp!!.origin)
+    }
+
+    @Test
+    fun `a rule covers nothing wider - another contract, function, chain, site, or a call that sends funds asks`() {
+        grantTransferRule()
+        answer = { EthAnswer.Rejected }
+        assertEquals(4001, code(call("eth_sendTransaction", tx("to" to otherToken, "data" to transferData))))
+        assertEquals(4001, code(call("eth_sendTransaction", tx("to" to token, "data" to approveData))))
+        assertEquals(4001, code(call("eth_sendTransaction", tx("to" to token, "data" to transferData, "value" to "0x1"))))
+        // A plain send to the same address is never covered, and offers no rule.
+        assertEquals(4001, code(call("eth_sendTransaction", tx("to" to token))))
+        assertNull((asks.last() as EthAsk.SendTransaction).autoApprove)
+        // A value-bearing call offers none either.
+        assertNull((asks[2] as EthAsk.SendTransaction).autoApprove)
+        // Another site, connected to the same account, sending the same call.
+        val other = "https://evil.example"
+        answer = { EthAnswer.Approved(main) }
+        ok(call("eth_requestAccounts", origin = other))
+        answer = { EthAnswer.Rejected }
+        assertEquals(4001, code(call("eth_sendTransaction", tx("to" to token, "data" to transferData), origin = other)))
+        // The same site after switching chains.
+        answer = { EthAnswer.Approved() }
+        ok(call("wallet_switchEthereumChain", JSONArray().put(JSONObject().put("chainId", "0x1"))))
+        answer = { EthAnswer.Rejected }
+        assertEquals(4001, code(call("eth_sendTransaction", tx("to" to token, "data" to transferData))))
+        assertEquals(1L, (asks.last() as EthAsk.SendTransaction).autoApprove!!.chainId)
+        assertEquals(6, asks.count { it is EthAsk.SendTransaction })
+        assertTrue(sends.outcomes.isEmpty())
+    }
+
+    @Test
+    fun `a covered call still asks while the wallet is locked`() {
+        grantTransferRule()
+        wallet.open = false
+        answer = { EthAnswer.Approved() }
+        sends.outcomes += sent(2)
+        ok(call("eth_sendTransaction", tx("to" to token, "data" to transferData)))
+        val locked = asks.single() as EthAsk.SendTransaction
+        assertTrue(locked.ruled)
+        assertNull(locked.quote.replaces)
+        // Confirming there doesn't grant it a second time.
+        assertEquals(1, rules.rules.size)
+        assertTrue(autoApproveRuledNote(replaces = false).contains("the wallet is locked"))
+        assertTrue(autoApproveRuledNote(replaces = true).contains("a send you stopped tracking"))
+    }
+
+    @Test
+    fun `a send replacing one the user stopped tracking is always asked`() {
+        grantTransferRule()
+        val replacing = object : EthereumProvider.Sends by sends {
+            override suspend fun prepare(request: SendRequest) = sends.prepare(request).copy(replaces = "0x" + "aa".repeat(32))
+        }
+        val p = EthereumProvider(grants, wallet, { chainList!! }, { _, _, _, _ -> null }, replacing, rules)
+        sends.outcomes += sent(2)
+        runBlocking {
+            p.request(site, "eth_sendTransaction", tx("to" to token, "data" to transferData)) { ask ->
+                asks += ask
+                EthAnswer.Approved()
+            }
+        }
+        assertTrue((asks.single() as EthAsk.SendTransaction).ruled)
+    }
+
+    @Test
+    fun `while the rules can't be read a covered call asks`() {
+        grantTransferRule()
+        rules.unreadable = true
+        answer = { EthAnswer.Rejected }
+        assertEquals(4001, code(call("eth_sendTransaction", tx("to" to token, "data" to transferData))))
+        assertFalse((asks.single() as EthAsk.SendTransaction).ruled)
+    }
+
+    @Test
+    fun `a covered call is refused while another send is going out, and priced again if its quote went stale`() {
+        grantTransferRule()
+        sends.busy = true
+        assertEquals(-32603, code(call("eth_sendTransaction", tx("to" to token, "data" to transferData))))
+        sends.busy = false
+        val before = sends.prepared.size
+        sends.outcomes += EthereumProvider.Submitted.Stale
+        sends.outcomes += sent(3)
+        assertEquals(sent(3).hash, ok(call("eth_sendTransaction", tx("to" to token, "data" to transferData))))
+        assertEquals(before + 2, sends.prepared.size)
+        assertTrue(asks.isEmpty())
+    }
+
+    @Test
+    fun `disconnecting a site drops its rules, so connecting again asks`() {
+        grantTransferRule()
+        answer = { EthAnswer.Approved(main) }
+        ok(call("eth_requestAccounts", origin = "https://other.example"))
+        rules.rules += "https://other.example|${token.lowercase()}|0xa9059cbb|100"
+        assertTrue(runBlocking { provider.disconnect(site) })
+        assertEquals(setOf("https://other.example|${token.lowercase()}|0xa9059cbb|100"), rules.rules)
+        connect()
+        answer = { EthAnswer.Rejected }
+        assertEquals(4001, code(call("eth_sendTransaction", tx("to" to token, "data" to transferData))))
+    }
+
+    @Test
+    fun `a disconnect whose rules can't be removed leaves the site connected, to try again`() {
+        grantTransferRule()
+        rules.failWrites = true
+        events.clear()
+        assertFalse(runBlocking { provider.disconnect(site) })
+        assertEquals(main.address, grants.grants[site]?.account)
+        assertTrue(events.isEmpty())
+        rules.failWrites = false
+        assertTrue(runBlocking { provider.disconnect(site) })
+        assertTrue(rules.rules.isEmpty())
+        assertNull(grants.grants[site])
+    }
+
+    @Test
+    fun `removing the wallet drops every rule`() {
+        grantTransferRule()
+        assertTrue(runBlocking { provider.disconnectAll() })
+        assertTrue(rules.rules.isEmpty())
+    }
+
+    @Test
+    fun `a rule turned on in a sheet the site disconnected under is not written, so reconnecting asks`() {
+        connect()
+        sends.outcomes += sent(1)
+        runBlocking {
+            provider.request(site, "eth_sendTransaction", tx("to" to token, "data" to transferData)) { ask ->
+                asks += ask
+                // The page's own wallet_revokePermissions, while the sheet is up.
+                assertTrue(provider.disconnect(site))
+                EthAnswer.Approved(alwaysApprove = true)
+            }
+        }
+        assertTrue(rules.rules.isEmpty())
+        connect()
+        answer = { EthAnswer.Rejected }
+        assertEquals(4001, code(call("eth_sendTransaction", tx("to" to token, "data" to transferData))))
+        assertEquals(1, asks.size)
+    }
+
+    @Test
+    fun `a rule turned on in a sheet the site reconnected under with another account is not written`() {
+        connect()
+        sends.outcomes += sent(1)
+        runBlocking {
+            provider.request(site, "eth_sendTransaction", tx("to" to token, "data" to transferData)) { ask ->
+                asks += ask
+                assertTrue(provider.disconnect(site))
+                assertEquals(
+                    second.address,
+                    (provider.request(site, "eth_requestAccounts", JSONArray()) { EthAnswer.Approved(second) } as EthereumProvider.Reply.Ok)
+                        .value.let { (it as JSONArray).getString(0) },
+                )
+                EthAnswer.Approved(alwaysApprove = true)
+            }
+        }
+        assertTrue(rules.rules.isEmpty())
+    }
+
+    @Test
+    fun `connecting drops rules an earlier connection left, so they never cover another account`() {
+        grantTransferRule()
+        // Account 1 was the site's; the wallet's list no longer has it, so the site shows as unconnected.
+        wallet.list = listOf(second)
+        answer = { EthAnswer.Approved(second) }
+        assertEquals(second.address, (ok(call("eth_requestAccounts")) as JSONArray).getString(0))
+        assertTrue(rules.rules.isEmpty())
+        answer = { EthAnswer.Rejected }
+        assertEquals(4001, code(call("eth_sendTransaction", tx("to" to token, "data" to transferData))))
+    }
+
+    @Test
+    fun `a connect whose old rules can't be dropped is not saved`() {
+        grantTransferRule()
+        wallet.list = listOf(second)
+        rules.failWrites = true
+        answer = { EthAnswer.Approved(second) }
+        assertEquals(-32603, code(call("eth_requestAccounts")))
+        assertEquals(main.address, grants.grants[site]?.account)
+    }
+
+    @Test
+    fun `removing the wallet disconnects every site even if the rules can't be cleared`() {
+        grantTransferRule()
+        rules.failWrites = true
+        assertFalse(runBlocking { provider.disconnectAll() })
+        assertTrue(grants.grants.isEmpty())
+        assertEquals(listOf(Triple(site, "accountsChanged", "[]")), events)
     }
 
     @Test
