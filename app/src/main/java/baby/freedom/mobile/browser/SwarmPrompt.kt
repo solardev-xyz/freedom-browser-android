@@ -132,6 +132,24 @@ private fun swarmMessagingCopy(ask: SwarmAsk.Message): SwarmPromptCopy = when {
     )
 }
 
+/**
+ * A messaging topic as the sheet shows it: the page's string, with every
+ * control and format character (bidi overrides and isolates, zero-width
+ * joiners, line separators) written out as `<U+XXXX>`, so it can't
+ * reorder or hide part of the row. The topic itself goes to the node as is.
+ */
+internal fun swarmShownTopic(topic: String): String = buildString {
+    var i = 0
+    while (i < topic.length) {
+        val cp = topic.codePointAt(i)
+        val type = Character.getType(cp)
+        val hidden = Character.isISOControl(cp) || type == Character.FORMAT.toInt() ||
+            type == Character.LINE_SEPARATOR.toInt() || type == Character.PARAGRAPH_SEPARATOR.toInt()
+        if (hidden) append("<U+%04X>".format(cp)) else appendCodePoint(cp)
+        i += Character.charCount(cp)
+    }
+}
+
 /** "3 files", "text/html", "Swarm chunk": what a publish is. */
 internal fun swarmPublishWhat(ask: SwarmAsk.Publish): String = when (ask.kind) {
     SwarmAsk.Publish.Kind.Files -> if (ask.paths.size == 1) "1 file" else "${ask.paths.size} files"
@@ -292,7 +310,8 @@ fun SwarmPromptSheet(request: SwarmPromptRequest) {
                         DetailRow("Signs as", swarmSignIdentity(ask))
                     }
                     is SwarmAsk.Message -> {
-                        ask.topic?.let { DetailRow("Topic", it) }
+                        ask.topic?.let { DetailRow("Topic", swarmShownTopic(it)) }
+                        ask.address?.let { DetailRow("Room address", it) }
                         if (ask.send != null) DetailRow("Size", formatStampBytes(ask.size.toLong()))
                     }
                 }

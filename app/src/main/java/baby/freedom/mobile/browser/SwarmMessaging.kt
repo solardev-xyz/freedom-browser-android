@@ -140,7 +140,12 @@ internal object SwarmGsoc {
  *   the page has its id.
  * - Subscriptions go with the document that made them ([cancelWhere]:
  *   its tab starts another document or closes) and with the site's
- *   connection ([cancelByOrigin]).
+ *   connection ([cancelByOrigin]; a subscription still coming up checks
+ *   the grant again before it goes live).
+ * - The page confirms each id it got ([confirm]); one it never confirms
+ *   ([dropUnconfirmed]) was answered to a document that had already gone
+ *   — a late request from the outgoing page, filed under the next one —
+ *   and is closed, so it doesn't hold a pipeline and a slot for nobody.
  *
  * Delivery is at-least-once and payload-transparent, as on desktop: every
  * frame the node pushes goes to the page as it is, with no de-duplication
@@ -185,6 +190,7 @@ class SwarmSubscriptions(
         val key: String,
         val subscriber: Subscriber,
         @Volatile var pending: Boolean = true,
+        @Volatile var confirmed: Boolean = false,
     ) {
         val socketKey get() = "$kind:$key"
     }
@@ -205,10 +211,21 @@ class SwarmSubscriptions(
      * Open (or join) the `(kind, key)` pipeline for [origin]'s document
      * [subscriber] and return the subscription's id once it's up. Throws
      * [Failure]: `too_many_subscriptions`, `node_subscription_limit`,
-     * `establish_timeout`, or `subscription_cancelled` if the document
-     * went away (or the subscription was dropped) while it waited.
+     * `establish_timeout`, `subscription_cancelled` if the document went
+     * away (or the subscription was dropped) while it waited, or
+     * [REVOKED] if [allowed] — asked once the socket is up, before the
+     * subscription goes live — says the site no longer holds the grant.
+     * The grant is revoked before [cancelByOrigin] runs, so a
+     * subscription either was registered in time for that to close it or
+     * sees the revoked grant here.
      */
-    suspend fun subscribe(origin: String, kind: String, key: String, subscriber: Subscriber): String {
+    suspend fun subscribe(
+        origin: String,
+        kind: String,
+        key: String,
+        subscriber: Subscriber,
+        allowed: suspend () -> Boolean = { true },
+    ): String {
         val sub: Sub
         val socket: Socket
         synchronized(lock) {
@@ -227,6 +244,7 @@ class SwarmSubscriptions(
         try {
             val up = withTimeoutOrNull(establishTimeoutMs) { socket.established.await() }
             if (up == null) throw Failure("establish_timeout", "Subscription did not establish within $establishTimeoutMs ms")
+            if (!allowed()) throw Failure(REVOKED, "The site's messaging permission was withdrawn")
         } catch (e: Throwable) {
             remove(sub)
             throw e
@@ -241,6 +259,19 @@ class SwarmSubscriptions(
             sub.pending = false
         }
         return sub.id
+    }
+
+    /** [origin]'s page has subscription [id]'s id; false if it has none by that id. */
+    fun confirm(origin: String, id: String): Boolean {
+        val sub = synchronized(lock) { subs[id]?.takeIf { it.origin == origin } } ?: return false
+        sub.confirmed = true
+        return true
+    }
+
+    /** Close subscription [id] if its page never [confirm]ed it: nobody got its id. */
+    fun dropUnconfirmed(id: String) {
+        val sub = synchronized(lock) { subs[id]?.takeIf { !it.pending && !it.confirmed } } ?: return
+        remove(sub)
     }
 
     /** Close [origin]'s subscription [id]; false if it has none by that id. */
@@ -305,6 +336,12 @@ class SwarmSubscriptions(
     companion object {
         const val MAX_SUBSCRIPTIONS = 32
         const val ESTABLISH_TIMEOUT_MS = 30_000L
+
+        /** How long a page has to [confirm] a subscription's id before it's [dropUnconfirmed]. */
+        const val CONFIRM_TIMEOUT_MS = 60_000L
+
+        /** A [Failure] reason: the site lost its messaging grant while subscribing. */
+        const val REVOKED = "revoked"
     }
 }
 

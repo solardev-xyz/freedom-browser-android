@@ -185,7 +185,12 @@ class SwarmProviderTest {
     }
 
     private val sockets = mutableListOf<FakeSocket>()
-    private val subscriptions = SwarmSubscriptions({ kind, key, onMessage -> FakeSocket(kind, key, onMessage).also { sockets += it } }, clock = { 42 })
+    /** Run as a pipeline opens: stands in for what happens while the socket comes up. */
+    private var onOpen: () -> Unit = {}
+    private val subscriptions = SwarmSubscriptions(
+        { kind, key, onMessage -> onOpen(); FakeSocket(kind, key, onMessage).also { sockets += it } },
+        clock = { 42 },
+    )
     private val page = FakeSubscriber()
 
     private val grants = MemoryGrants()
@@ -989,6 +994,62 @@ class SwarmProviderTest {
     }
 
     @Test
+    fun `the app's confirmation of a subscription id is parsed strictly`() {
+        val id = "0123456789abcdef".repeat(2)
+        assertEquals(id, parseSwarmConfirm("""{"confirm":"$id"}"""))
+        assertNull(parseSwarmConfirm("""{"confirm":"${id.uppercase()}"}"""))
+        assertNull(parseSwarmConfirm("""{"confirm":"$id","id":1}"""))
+        assertNull(parseSwarmConfirm("""{"confirm":1}"""))
+        assertNull(parseSwarmConfirm("""{"id":1,"method":"swarm_subscribe"}"""))
+        assertNull(parseSwarmConfirm("""{"confirm":"${id}0"}"""))
+        assertNull(parseSwarmConfirm(null))
+    }
+
+    @Test
+    fun `the page script confirms a subscription id it gets, and nothing else`() {
+        val cx = RhinoContext.enter()
+        try {
+            cx.languageVersion = RhinoContext.VERSION_ES6
+            val scope = cx.initStandardObjects()
+            cx.evaluateString(
+                scope,
+                """
+                var sent = [], handler = null, settled = null;
+                var window = {
+                  location: { protocol: 'https:' },
+                  setTimeout: function () { return 1; }, clearTimeout: function () {},
+                  Promise: Promise, Error: Error, Map: Map, Uint8Array: Uint8Array, ArrayBuffer: ArrayBuffer,
+                  BigInt: undefined, btoa: function (s) { return s; },
+                  abcdefghij: { postMessage: function (m) { sent.push(m); }, addEventListener: function (t, h) { handler = h; } }
+                };
+                window.top = window;
+                """.trimIndent(),
+                "setup", 1, null,
+            )
+            cx.evaluateString(scope, swarmProviderJs("abcdefghij"), "swarm.js", 1, null)
+            val id = "ab".repeat(16)
+            cx.evaluateString(
+                scope,
+                """
+                window.swarm.subscribe({ kind: 'pss', topic: 't' }).then(function (r) { settled = r.subscriptionId; });
+                window.swarm.getCapabilities();
+                window.swarm.request({ method: 'swarm_subscribe', params: { kind: 'pss', topic: 'u' } });
+                handler({ data: JSON.stringify({ id: 2, result: { subscriptionId: 'not-a-subscribe' } }) });
+                handler({ data: JSON.stringify({ id: 3, error: { code: 4100, message: 'no' } }) });
+                handler({ data: JSON.stringify({ id: 1, result: { subscriptionId: '$id', kind: 'pss', key: 'k' } }) });
+                """.trimIndent(),
+                "call", 1, null,
+            )
+            cx.processMicrotasks()
+            assertEquals(id, cx.evaluateString(scope, "String(settled)", "settled", 1, null).toString())
+            assertEquals("4", cx.evaluateString(scope, "String(sent.length)", "n", 1, null).toString())
+            assertEquals(id, parseSwarmConfirm(cx.evaluateString(scope, "sent[3]", "confirm", 1, null).toString()))
+        } finally {
+            RhinoContext.exit()
+        }
+    }
+
+    @Test
     fun `an approved request stops the page's timer and still waits for its result`() {
         val cx = RhinoContext.enter()
         try {
@@ -1258,6 +1319,50 @@ class SwarmProviderTest {
         page.alive = false
         assertEquals("subscription_cancelled", err(call("swarm_subscribe", JSONObject().put("kind", "pss").put("topic", "t"))).reason)
         assertEquals(0, subscriptions.count(site))
+    }
+
+    @Test
+    fun `a site disconnected while its subscription comes up gets no live subscription`() {
+        connect()
+        grants.messaging += site
+        // Disconnect (the wallet page) while the socket comes up: the grant
+        // goes first, then its subscriptions — before this one was registered.
+        onOpen = {
+            grants.connected -= site
+            grants.messaging -= site
+            subscriptions.cancelByOrigin(site)
+        }
+        val e = err(call("swarm_subscribe", JSONObject().put("kind", "gsoc").put("topic", "room")))
+        assertEquals(4100, e.code)
+        assertEquals("not_connected", e.reason)
+        assertEquals(0, subscriptions.count(site))
+        assertTrue(sockets.single().cancelled)
+        sockets.single().onMessage(byteArrayOf(1))
+        assertTrue(page.got.isEmpty())
+    }
+
+    @Test
+    fun `a subscription by address names the address, not a topic`() {
+        connect()
+        okJson(call("swarm_subscribe", JSONObject().put("kind", "gsoc").put("address", "AB".repeat(32))))
+        val sheet = asked.single() as SwarmAsk.Message
+        assertNull(sheet.topic)
+        assertEquals("ab".repeat(32), sheet.address)
+        okJson(call("swarm_subscribe", JSONObject().put("kind", "gsoc").put("topic", "room")))
+        grants.messaging -= site
+        okJson(call("swarm_subscribe", JSONObject().put("kind", "pss").put("topic", "chat")))
+        val byTopic = asked.last() as SwarmAsk.Message
+        assertEquals("chat", byTopic.topic)
+        assertNull(byTopic.address)
+    }
+
+    @Test
+    fun `a topic's control and bidi characters are written out on the sheet`() {
+        assertEquals("room:doc-42", swarmShownTopic("room:doc-42"))
+        assertEquals("abc<U+202E>fed", swarmShownTopic("abc\u202Efed"))
+        assertEquals("a<U+2066>b<U+2069><U+200B><U+2028>c<U+007F>", swarmShownTopic("a\u2066b\u2069\u200B\u2028c\u007F"))
+        // Right-to-left text itself is left as it is; emoji keep their surrogate pairs.
+        assertEquals("שלום \uD83D\uDE00", swarmShownTopic("שלום \uD83D\uDE00"))
     }
 
     @Test

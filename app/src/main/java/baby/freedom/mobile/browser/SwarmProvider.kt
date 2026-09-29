@@ -876,14 +876,17 @@ class SwarmProvider(
         val topic = if (hasTopic) messagingTopic(params.opt("topic")) else null
         val subscriber = calls.subscriber ?: fail("subscribe requires a page to deliver to")
         reachableOrFail()
-        approveMessaging(origin, calls, SwarmAsk.Message(origin, SwarmAsk.Message.Op.Subscribe, null, topic ?: key, 0))
+        approveMessaging(origin, calls, SwarmAsk.Message(origin, SwarmAsk.Message.Op.Subscribe, null, topic, 0, address = key))
         // Topic-derived: GSOC mines the room's address, PSS hashes the topic.
         val resolved = key ?: if (kind == "gsoc") withContext(io) { SwarmGsoc.derive(topic!!).address } else SwarmChunks.topic(topic!!).swarmHex()
         if (!subscriber.live()) return subscriptionCancelled()
         val id = try {
-            subscriptions.subscribe(origin, kind, resolved, subscriber)
+            // Still the site's once it's up: a Disconnect while the room
+            // was mined or the socket came up must not leave it live.
+            subscriptions.subscribe(origin, kind, resolved, subscriber) { grants.messaging(origin) }
         } catch (e: SwarmSubscriptions.Failure) {
             return when (e.reason) {
+                SwarmSubscriptions.REVOKED -> notConnected()
                 "too_many_subscriptions" -> invalid(
                     e.message.orEmpty(), e.reason, JSONObject().put("limit", SwarmSubscriptions.MAX_SUBSCRIPTIONS),
                 )
@@ -1511,9 +1514,9 @@ sealed interface SwarmAsk {
 
     /**
      * The messaging tier (#121): see a messaging identity, subscribe
-     * ([topic]: the topic, or a room's address), or send a [kind] message
-     * of [size] bytes on [topic]. [grant] is the first time: approving
-     * gives the site the tier. [send] is the send's kind, null otherwise.
+     * (to [topic], or to a room by its [address]), or send a [kind]
+     * message of [size] bytes on [topic]. [grant] is the first time:
+     * approving gives the site the tier. [send] is the send's kind, null otherwise.
      */
     data class Message(
         override val origin: String,
@@ -1522,6 +1525,7 @@ sealed interface SwarmAsk {
         val topic: String?,
         val size: Int,
         val grant: Boolean = false,
+        val address: String? = null,
     ) : SwarmAsk {
         enum class Op { Identity, Subscribe, Send }
         enum class Kind { Pss, Gsoc }

@@ -28,6 +28,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.MainScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.withContext
@@ -83,8 +84,10 @@ class SwarmPromptRequest internal constructor(val ask: SwarmAsk) {
  * its messages go down that document's own channel as `message` events,
  * only while it's still its tab's document, and it's closed (with its
  * share of the node's pipelines) when the tab starts another document or
- * closes, or the user disconnects the site. Same-document navigations
- * (a hash or `pushState` route) keep it.
+ * closes, the Activity goes for good, or the user disconnects the site.
+ * Same-document navigations (a hash or `pushState` route) keep it. The
+ * page script confirms each subscription id it receives; one never
+ * confirmed went to a document that was already gone and is closed.
  */
 object SwarmProviders {
     @Volatile
@@ -104,11 +107,11 @@ object SwarmProviders {
     private val pending = HashMap<Long, MutableSet<SwarmPromptRequest>>()
     private val blockedTabs = HashSet<Long>()
 
-    /** Opens the wallet page to create, import or unlock a wallet ([Vault.requireUnlocked]); set by [init]. */
     /** The pages' messaging subscriptions; set by [init]. */
     @Volatile
     private var subscriptions: SwarmSubscriptions? = null
 
+    /** Opens the wallet page to create, import or unlock a wallet ([Vault.requireUnlocked]); set by [init]. */
     @Volatile
     internal var setUpWallet: suspend (reason: String) -> Boolean = { false }
 
@@ -232,8 +235,13 @@ object SwarmProviders {
         val tab = bridge.tab
         val deadline = SystemClock.elapsedRealtime() + SHEET_WAIT_MS
         if (message.type != WebMessageCompat.TYPE_STRING) return
-        val request = parseSwarmRequest(message.data) ?: return
         val origin = providerOriginKey(sourceOrigin)
+        parseSwarmConfirm(message.data)?.let { id ->
+            // The page script got a subscription's id (see [confirmLater]).
+            if (isMainFrame && origin != null) subscriptions?.confirm(origin, id)
+            return
+        }
+        val request = parseSwarmRequest(message.data) ?: return
         if (!isMainFrame || origin == null) {
             val why = if (!isMainFrame) "window.swarm is only available to the top-level page" else "Origin not permitted"
             answer(reply, request.id, SwarmProvider.Reply.Err(SwarmProvider.UNAUTHORIZED, why))
@@ -265,6 +273,26 @@ object SwarmProviders {
                 SwarmProvider.Reply.Err(SwarmProvider.INTERNAL, "Internal error")
             }
             answer(reply, request.id, result)
+            if (request.method == "swarm_subscribe") confirmLater(result)
+        }
+    }
+
+    /**
+     * A subscription whose id was just posted to its page stays only if
+     * the page script confirms it got it. Which document a request came
+     * from is a guess ([radicleDocumentFor]): a late `swarm_subscribe`
+     * from the outgoing document on the same origin is filed under the new
+     * one and so survives the commit sweep, but its answer goes to a
+     * document that's gone — nobody confirms it, and it's closed rather
+     * than hold a node pipeline and one of the site's slots for nobody.
+     */
+    private fun confirmLater(result: SwarmProvider.Reply) {
+        val id = ((result as? SwarmProvider.Reply.Ok)?.value as? JSONObject)?.optString("subscriptionId")
+        if (id.isNullOrEmpty()) return
+        val subs = subscriptions ?: return
+        scope.launch {
+            delay(SwarmSubscriptions.CONFIRM_TIMEOUT_MS)
+            subs.dropUnconfirmed(id)
         }
     }
 
@@ -542,6 +570,23 @@ internal fun parseSwarmRequest(data: String?): SwarmRequest? {
     return SwarmRequest(id, method, params)
 }
 
+/**
+ * The page script's `{"confirm": "<subscriptionId>"}`: it got that
+ * subscription's id ([SwarmSubscriptions.confirm]). Null for anything else.
+ */
+internal fun parseSwarmConfirm(data: String?): String? {
+    if (data == null || data.length > 256 || !data.startsWith("{\"confirm\"")) return null
+    val json = try {
+        JSONObject(data)
+    } catch (e: Exception) {
+        return null
+    }
+    if (json.length() != 1) return null
+    return (json.opt("confirm") as? String)?.takeIf { SUBSCRIPTION_ID.matches(it) }
+}
+
+private val SUBSCRIPTION_ID = Regex("[0-9a-f]{32}")
+
 /** Bigger than any valid request: 50 MB of files, base64-encoded, and their paths. */
 private const val MAX_SWARM_REQUEST_CHARS = 72 * 1024 * 1024
 
@@ -628,6 +673,10 @@ internal fun swarmProviderJs(channel: String): String {
     if (msg.approved === true) { clearT(p.timer); return; }
     pending.delete(msg.id);
     clearT(p.timer);
+    // Tell the app this document has the subscription's id, or it's closed.
+    if (p.method === 'swarm_subscribe' && msg.result && typeof msg.result.subscriptionId === 'string') {
+      try { send(stringify({ confirm: msg.result.subscriptionId })); } catch (e) {}
+    }
     if (msg.error) {
       var err = new E(msg.error.message || 'Unknown error');
       err.code = msg.error.code;
@@ -661,7 +710,7 @@ internal fun swarmProviderJs(channel: String): String {
           reject(t);
         }
       }, LONG[method] ? 300000 : 60000);
-      pending.set(id, { resolve: resolve, reject: reject, timer: timer });
+      pending.set(id, { resolve: resolve, reject: reject, timer: timer, method: method });
       try {
         send(body);
       } catch (e) {

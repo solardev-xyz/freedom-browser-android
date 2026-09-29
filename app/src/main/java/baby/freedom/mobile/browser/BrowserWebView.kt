@@ -1254,6 +1254,12 @@ fun BrowserWebViewHost(
                 // As when the last private tab closes (#86): the private
                 // cache goes through a private WebView, before they all do.
                 privateIds.firstNotNullOfOrNull { webViews[it] }?.let { runCatching { it.clearCache(true) } }
+                // No host follows, so every page goes with its WebView —
+                // and so do its Swarm subscriptions (#121), whose node
+                // sockets are process-wide and would otherwise stay open
+                // (and keep reconnecting) for as long as the process is
+                // cached, with no page to deliver to.
+                for (tab in tabs.tabs) SwarmProviders.onDocumentStarted(tab, url = null)
             }
             for (wv in webViews.values) {
                 UnverifiedOrigins.release(wv)

@@ -228,6 +228,46 @@ class SwarmMessagingTest {
         assertEquals(1, r.count("https://b.example"))
     }
 
+    @Test
+    fun `a disconnect while a subscription comes up leaves nothing live`() = runBlocking {
+        val r = registry()
+        var granted = true
+        val doc = Doc(1, 1)
+        val job = async { runCatching { r.subscribe("https://a.example", "gsoc", "k", doc) { granted } } }
+        yield()
+        // Revoked, then cancelByOrigin — before this one was registered it
+        // would have missed it; the check before it goes live catches it.
+        granted = false
+        sockets[0].established.complete(Unit)
+        val failure = job.await().exceptionOrNull() as SwarmSubscriptions.Failure
+        assertEquals(SwarmSubscriptions.REVOKED, failure.reason)
+        assertTrue(sockets[0].cancelled)
+        assertEquals(0, r.count("https://a.example"))
+        assertEquals(0, r.sockets())
+        sockets[0].onMessage(byteArrayOf(1))
+        assertTrue(doc.got.isEmpty())
+    }
+
+    @Test
+    fun `a subscription its page never confirms is closed, a confirmed one stays`() = runBlocking {
+        val r = registry()
+        val a = async { r.subscribe("https://a.example", "gsoc", "k", Doc(1, 2)) }
+        val b = async { r.subscribe("https://a.example", "gsoc", "j", Doc(1, 2)) }
+        yield()
+        sockets.forEach { it.established.complete(Unit) }
+        val gone = a.await()
+        val kept = b.await()
+        // Only the site that holds it can confirm it.
+        assertFalse(r.confirm("https://b.example", kept))
+        assertTrue(r.confirm("https://a.example", kept))
+        r.dropUnconfirmed(gone)
+        r.dropUnconfirmed(kept)
+        assertEquals(listOf(true, false), sockets.map { it.cancelled })
+        assertEquals(1, r.count("https://a.example"))
+        assertFalse(r.unsubscribe("https://a.example", gone))
+        assertTrue(r.unsubscribe("https://a.example", kept))
+    }
+
     // -------------------------------------------------------------------
     // The node socket
     // -------------------------------------------------------------------
