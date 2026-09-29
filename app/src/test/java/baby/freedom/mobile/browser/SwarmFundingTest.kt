@@ -17,6 +17,8 @@ import java.io.File
 import java.math.BigInteger
 import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.runBlocking
+import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -35,13 +37,14 @@ class SwarmFundingTest {
     private val label = SwarmFundLabel(node, batch, 17, 2)
     private val hash = "0x" + "aa".repeat(32)
     private val connects = mutableListOf<String>()
+    private val payer = "0x9858EfFD232B4033E47d90003D41EC34EcaEda94"
 
     private fun funding(file: File = File(tmp.root, "funding.json")) =
         SwarmFunding(file, connect = { connects += it; true }, spends = emptyFlow())
 
     private fun status(stage: SendStatus.Stage, l: SwarmFundLabel? = label): SendStatus {
         val gnosis = BuiltInChains.GNOSIS
-        val from = WalletAccount(0, "Account 1", "0x9858EfFD232B4033E47d90003D41EC34EcaEda94")
+        val from = WalletAccount(0, "Account 1", payer)
         val data = byteArrayOf(0x83.toByte(), 0x4a, 0xeb.toByte(), 0x80.toByte())
         return SendStatus(
             SendQuote(
@@ -58,7 +61,7 @@ class SwarmFundingTest {
     fun `going out it's recorded, mined it's connected once, and the record outlives the process`() {
         val f = funding()
         f.noteSend(status(SendStatus.Stage.Signing))
-        assertEquals(SwarmFunding.Pending(node, batch, 17, 2, null, mined = false), f.pending.value)
+        assertEquals(SwarmFunding.Pending(node, batch, 17, 2, null, mined = false, from = payer, nonce = BigInteger.ONE), f.pending.value)
         f.noteSend(status(SendStatus.Stage.Pending))
         assertEquals(hash, f.pending.value!!.hash)
         assertTrue(connects.isEmpty())
@@ -143,7 +146,10 @@ class SwarmFundingTest {
         // Stop tracking (or Remove wallet): the sender publishes null.
         f.start(flowOf(status(SendStatus.Stage.Pending), status(SendStatus.Stage.Unconfirmed), null))
         awaitPending(f) { it?.tracked == false }
-        assertEquals(SwarmFunding.Pending(node, batch, 17, 2, hash, mined = false, tracked = false), f.pending.value)
+        assertEquals(
+            SwarmFunding.Pending(node, batch, 17, 2, hash, mined = false, tracked = false, from = payer, nonce = BigInteger.ONE),
+            f.pending.value,
+        )
         // Not blocking funding for good, and connectable in case it was mined after all.
         val light = NodeInfo(status = NodeStatus.Running, accountAddress = node, walletIdentity = true, lightMode = true)
         assertFalse(fundNodeBlockedReason(light, f.pending.value)!!.contains("still going out"))
@@ -178,5 +184,117 @@ class SwarmFundingTest {
         followed.start(emptyFlow()) { status(SendStatus.Stage.Pending) }
         Thread.sleep(200)
         assertTrue(followed.pending.value!!.tracked)
+    }
+
+    /** A chain whose answers the test sets; [reads] counts receipt lookups. */
+    private class FakeChain : SwarmFunding.ChainReader {
+        @Volatile var receipt: JSONObject? = null
+        @Volatile var minedCount: BigInteger = BigInteger.ONE
+        @Volatile var fail = false
+        @Volatile var reads = 0
+
+        override suspend fun receipt(hash: String): JSONObject? {
+            reads++
+            if (fail) throw java.io.IOException("offline")
+            return receipt
+        }
+
+        override suspend fun minedCount(address: String): BigInteger {
+            if (fail) throw java.io.IOException("offline")
+            return minedCount
+        }
+    }
+
+    private fun receipt(status: String) = JSONObject().put("blockNumber", "0x10").put("status", status)
+
+    /** A record the wallet stopped following before its call ([hash], nonce 1) was mined. */
+    private fun untracked(chain: FakeChain): SwarmFunding {
+        funding().apply {
+            noteSend(status(SendStatus.Stage.Unconfirmed))
+            untrack()
+        }
+        return SwarmFunding(File(tmp.root, "funding.json"), connect = { connects += it; true }, spends = emptyFlow(), chain = chain)
+    }
+
+    @Test
+    fun `an untracked call that lands later is found by its hash and connected, across a restart`() {
+        val chain = FakeChain()
+        val f = untracked(chain)
+        assertEquals(payer, f.pending.value!!.from)
+        assertEquals(BigInteger.ONE, f.pending.value!!.nonce)
+        // Not mined yet, and the nonce not used: still waiting, and not certain to have bought nothing.
+        runBlocking { f.checkChain() }
+        assertFalse(f.pending.value!!.mined)
+        assertNull(f.superseded.value)
+        assertTrue(connects.isEmpty())
+
+        chain.receipt = receipt("0x1")
+        chain.minedCount = BigInteger.TWO
+        runBlocking { f.checkChain() }
+        assertTrue(f.pending.value!!.mined)
+        assertNull(f.superseded.value)
+        assertEquals(listOf(batch), connects)
+        // Mined: not looked up, nor connected, again.
+        val reads = chain.reads
+        runBlocking { f.checkChain() }
+        assertEquals(reads, chain.reads)
+        assertEquals(1, connects.size)
+    }
+
+    @Test
+    fun `an untracked call that reverted is dropped, one whose nonce went elsewhere is marked, and a failed read changes nothing`() {
+        val chain = FakeChain()
+        val f = untracked(chain)
+        chain.fail = true
+        runBlocking { f.checkChain() }
+        assertEquals(false, f.pending.value?.mined)
+        assertNull(f.superseded.value)
+
+        chain.fail = false
+        chain.minedCount = BigInteger.TWO
+        runBlocking { f.checkChain() }
+        // Can never be mined: kept for the user to dismiss, now safely.
+        assertEquals(batch, f.superseded.value)
+        assertEquals(false, f.pending.value?.mined)
+
+        chain.receipt = receipt("0x0")
+        runBlocking { f.checkChain() }
+        assertNull(f.pending.value)
+        assertNull(funding().pending.value)
+        assertTrue(connects.isEmpty())
+    }
+
+    @Test
+    fun `once the wallet stops following the call, it's looked up on chain until it's mined`() {
+        val chain = FakeChain()
+        val f = SwarmFunding(File(tmp.root, "funding.json"), connect = { connects += it; true }, spends = emptyFlow(), chain = chain, checkEveryMs = 20)
+        f.start(flowOf(status(SendStatus.Stage.Pending), status(SendStatus.Stage.Unconfirmed), null))
+        awaitPending(f) { it?.tracked == false }
+        val until = System.currentTimeMillis() + 5_000
+        while (chain.reads < 2 && System.currentTimeMillis() < until) Thread.sleep(10)
+        assertTrue(chain.reads >= 2)
+        chain.receipt = receipt("0x1")
+        awaitPending(f) { it?.mined == true }
+        assertEquals(listOf(batch), connects)
+        val reads = chain.reads
+        Thread.sleep(200)
+        assertEquals(reads, chain.reads)
+    }
+
+    @Test
+    fun `the card only tells the user to dismiss an unmined stamp when the chain shows it can never land`() {
+        val light = NodeInfo(status = NodeStatus.Running, accountAddress = node, walletIdentity = true, lightMode = true)
+        val p = SwarmFunding.Pending(node, batch, 17, 2, hash, mined = false, tracked = false)
+        val failed = StampClient.Spend.Failed(StampClient.Kind.Connect, batch, "batch not found")
+        val waiting = pendingStampText(p, light, failed, superseded = false)
+        assertTrue(waiting, waiting.startsWith("Connecting it failed: batch not found"))
+        assertTrue(waiting, waiting.contains("keeps checking"))
+        assertFalse(waiting, waiting.contains("dismiss it"))
+        assertTrue(pendingStampText(p, light, failed, superseded = true).contains("There's no stamp, so dismiss it."))
+        // Another batch's connect is neither "connecting" nor a failure of this one.
+        val other = SwarmFunder.batchId(ByteArray(32) { 9 })
+        assertFalse(pendingStampText(p, light, StampClient.Spend.Running(StampClient.Kind.Connect, other), false).contains("connecting it"))
+        assertEquals("The node is connecting it…", pendingStampText(p, light, StampClient.Spend.Running(StampClient.Kind.Connect, batch), false))
+        assertFalse(pendingStampText(p, light, failed.copy(batchId = other), false).contains("failed"))
     }
 }

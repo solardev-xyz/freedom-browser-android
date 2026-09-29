@@ -107,7 +107,8 @@ internal fun FundNodeScreen(nodeInfo: NodeInfo, onOpenUrl: (String) -> Unit, onD
     val vault = remember(context) { Vault.get(context) }
     val auth = remember(context) { BiometricVaultAuthenticator(context) }
     val sender = remember(context) { WalletSender.get(context) }
-    val funding = remember(context) { SwarmFunding.get(context) }
+    // Read off the main thread: the first one in a process reads its file and starts the sender.
+    val funding by produceState(SwarmFunding.loaded(), context) { value = SwarmFunding.load(context) }
     val rpc = remember(context) { WalletRpc(ChainDataRouter.get(context)) }
     val chains by remember(context) { ChainStore.get(context).chains }.collectAsState(initial = null)
     val chain: Chain = chains?.firstOrNull { it.id == SwarmFunder.CHAIN_ID } ?: BuiltInChains.GNOSIS
@@ -120,7 +121,8 @@ internal fun FundNodeScreen(nodeInfo: NodeInfo, onOpenUrl: (String) -> Unit, onD
         else -> true
     }
     val sendStatus by sender.status.collectAsState()
-    val pending by funding.pending.collectAsState()
+    val pending = funding?.pending?.collectAsState()?.value
+    val superseded = funding?.superseded?.collectAsState()?.value
     val spend by StampClient.spend.collectAsState()
     val node = fundingAddress(nodeInfo)
 
@@ -131,7 +133,8 @@ internal fun FundNodeScreen(nodeInfo: NodeInfo, onOpenUrl: (String) -> Unit, onD
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     var notice by remember { mutableStateOf<String?>(null) }
-    val blocked = fundNodeBlockedReason(nodeInfo, pending)
+    // Until the record's been read, a stamp already on its way can't be ruled out.
+    val blocked = if (funding == null) "Checking for a stamp your wallet already bought…" else fundNodeBlockedReason(nodeInfo, pending)
 
     // The node's price for the batch (ant's quote: what a buy would pay per
     // chunk, and the chequebook deposit a first one makes), and the pool's
@@ -221,7 +224,12 @@ internal fun FundNodeScreen(nodeInfo: NodeInfo, onOpenUrl: (String) -> Unit, onD
                     )
                 }
             }
-            pending?.let { p -> item("pending") { PendingStampCard(p, nodeInfo, spend, onConnect = { funding.connectNow() }, onForget = funding::forget) } }
+            val f = funding
+            if (pending != null && f != null) {
+                item("pending") {
+                    PendingStampCard(pending, nodeInfo, spend, superseded == pending.batchId, onConnect = { f.connectNow() }, onForget = f::forget)
+                }
+            }
             when {
                 status != null -> item("send") {
                     SendStatusSection(
@@ -424,6 +432,42 @@ private fun FundReview(
 }
 
 /**
+ * The pending stamp card's explanation. [superseded]: the chain shows its
+ * call can never be mined ([SwarmFunding.superseded]) — the only case in
+ * which an unmined record is certain to have bought nothing.
+ */
+internal fun pendingStampText(
+    p: SwarmFunding.Pending,
+    nodeInfo: NodeInfo,
+    spend: StampClient.Spend,
+    superseded: Boolean,
+): String {
+    val connecting = spend is StampClient.Spend.Running && spend.kind == StampClient.Kind.Connect && spend.batchId == p.batchId
+    val failed = (spend as? StampClient.Spend.Failed)?.takeIf { it.kind == StampClient.Kind.Connect && it.batchId == p.batchId }
+    val otherNode = fundingAddress(nodeInfo)?.equals(p.node, ignoreCase = true) == false
+    // Unmined and not followed by the wallet: say what the chain shows, and what Dismiss would lose.
+    val untracked = when {
+        superseded -> "Its transaction can never be mined: the paying account's nonce went to another transaction. " +
+            "There's no stamp, so dismiss it."
+        p.hash != null -> "It isn't mined yet as far as Gnosis Chain shows. The app keeps checking its transaction " +
+            "and connects the stamp if it lands. Dismissing forgets the batch: a stamp that lands afterwards " +
+            "can't be connected."
+        else -> "It may or may not have been mined. If it was, Connect adds the stamp to the node. Dismissing " +
+            "forgets the batch: a stamp that lands afterwards can't be connected."
+    }
+    return when {
+        !p.mined && p.tracked -> "Your wallet's transaction is going out; the node connects the stamp once it's mined."
+        connecting -> "The node is connecting it…"
+        otherNode -> "It was bought for another node account (${p.node}), which has to be running to connect it."
+        failed != null && p.mined -> "Connecting it failed: ${failed.message}"
+        failed != null -> "Connecting it failed: ${failed.message} $untracked"
+        !p.mined -> "Your wallet stopped following its transaction. $untracked"
+        else -> "Mined. The node connects it to publish with it" +
+            (stampsBlockedReason(nodeInfo)?.let { " once it can: $it" } ?: ".")
+    }
+}
+
+/**
  * The stamp the wallet bought (or is buying) for the node: still going
  * out, connecting, or mined and waiting to be connected — with Connect
  * when the node can, and a way to stop offering it.
@@ -433,33 +477,22 @@ internal fun PendingStampCard(
     p: SwarmFunding.Pending,
     nodeInfo: NodeInfo,
     spend: StampClient.Spend,
+    superseded: Boolean,
     onConnect: () -> Unit,
     onForget: () -> Unit,
 ) {
-    val connecting = spend is StampClient.Spend.Running && spend.kind == StampClient.Kind.Connect
-    val failed = (spend as? StampClient.Spend.Failed)?.takeIf { it.kind == StampClient.Kind.Connect && it.batchId == p.batchId }
+    val connecting = spend is StampClient.Spend.Running && spend.kind == StampClient.Kind.Connect && spend.batchId == p.batchId
     val otherNode = fundingAddress(nodeInfo)?.equals(p.node, ignoreCase = true) == false
     SectionCard(title = "Stamp from your wallet") {
         DetailRow("Stamp", "${formatStampBytes(effectiveStampBytes(p.depth))}, ${daysLabel(p.days)}")
         DetailRow("Batch", shortBatchId(p.batchId), mono = true)
-        MutedText(
-            when {
-                !p.mined && p.tracked -> "Your wallet's transaction is going out; the node connects the stamp once it's mined."
-                connecting -> "The node is connecting it…"
-                otherNode -> "It was bought for another node account (${p.node}), which has to be running to connect it."
-                failed != null -> "Connecting it failed: ${failed.message}" +
-                    (if (!p.mined) " If its transaction wasn't mined, there's no stamp: dismiss it." else "")
-                !p.mined -> "Your wallet stopped following its transaction, so it may or may not have been mined. If it was, Connect adds the stamp to the node; if not, dismiss it."
-                else -> "Mined. The node connects it to publish with it" +
-                    (stampsBlockedReason(nodeInfo)?.let { " once it can: $it" } ?: ".")
-            },
-        )
+        MutedText(pendingStampText(p, nodeInfo, spend, superseded))
         if (p.mined || !p.tracked) {
             Spacer(Modifier.height(8.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(
                     onClick = onConnect,
-                    enabled = !connecting && spend !is StampClient.Spend.Running && !otherNode && stampSpendBlockedReason(nodeInfo) == null,
+                    enabled = spend !is StampClient.Spend.Running && !otherNode && stampSpendBlockedReason(nodeInfo) == null,
                 ) { Text("Connect") }
                 TextButton(onClick = onForget, enabled = !connecting) { Text("Dismiss") }
             }

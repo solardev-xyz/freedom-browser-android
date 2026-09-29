@@ -333,8 +333,10 @@ internal fun PublishSetupScreen(
     )
     val blocked = publishBlockedReason(nodeInfo)
     // A stamp the wallet bought for the node (#115), until the node has connected it.
-    val funding = remember(context) { SwarmFunding.get(context) }
-    val pendingStamp by funding.pending.collectAsState()
+    // Read off the main thread: the first one in a process reads its file and starts the sender.
+    val funding by produceState(SwarmFunding.loaded(), context) { value = SwarmFunding.load(context) }
+    val pendingStamp = funding?.pending?.collectAsState()?.value
+    val superseded = funding?.superseded?.collectAsState()?.value
     val spend by StampClient.spend.collectAsState()
 
     FullScreenScaffold(title = "Set up publishing", onDismiss = onDismiss) {
@@ -343,6 +345,9 @@ internal fun PublishSetupScreen(
             contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
             modifier = Modifier.fillMaxSize(),
         ) {
+            // Nothing until the record's been read (once per process, briefly): a card added above
+            // the list's first item later would land out of sight, the list keeping that item in place.
+            if (funding == null) return@LazyColumn
             if (blocked != null) {
                 item("blocked") {
                     Text(
@@ -352,9 +357,13 @@ internal fun PublishSetupScreen(
                     )
                 }
             }
-            pendingStamp?.let { p ->
+            val f = funding
+            if (pendingStamp != null && f != null) {
                 item("pendingStamp") {
-                    PendingStampCard(p, nodeInfo, spend, onConnect = { funding.connectNow() }, onForget = funding::forget)
+                    PendingStampCard(
+                        pendingStamp, nodeInfo, spend, superseded == pendingStamp.batchId,
+                        onConnect = { f.connectNow() }, onForget = f::forget,
+                    )
                 }
             }
             steps.forEachIndexed { index, step ->
