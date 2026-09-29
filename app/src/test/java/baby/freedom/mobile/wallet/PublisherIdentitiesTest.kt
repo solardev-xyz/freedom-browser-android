@@ -117,8 +117,48 @@ class PublisherIdentitiesTest {
         tag = "vault-b"
         assertTrue(store.sites().isEmpty())
         assertNull(store.site(siteA))
-        // The new wallet starts its own allocation.
-        assertEquals("app-scoped:0", store.ensureSite(siteB).activeId)
+        // The new wallet may be the same phrase again: it goes on from the
+        // highest index this device has handed out rather than from 0.
+        assertEquals("app-scoped:1", store.ensureSite(siteB).activeId)
+    }
+
+    @Test
+    fun `remove wallet and re-import never hands a new site an old site's key`() {
+        store.ensureSite(siteA)
+        store.createAppScoped(siteA, "Two")
+        store.wipe()
+        // Re-importing the phrase makes a new vault, with a new tag.
+        tag = "vault-a-again"
+        assertTrue(store.sites().isEmpty())
+        assertEquals("app-scoped:2", store.ensureSite(siteB).activeId)
+        // The floor file holds only the number: no origin, label or vault tag.
+        val floor = File(file.parentFile, "publisher-key-index-floor")
+        assertEquals("3", floor.readText())
+    }
+
+    @Test
+    fun `a file set aside as corrupt doesn't restart allocation`() {
+        store.ensureSite(siteA)
+        file.writeText("{")
+        assertEquals("app-scoped:1", store.ensureSite(siteB).activeId)
+    }
+
+    @Test
+    fun `wipe also deletes copies set aside as corrupt`() {
+        store.ensureSite(siteA)
+        file.writeText("{ corrupt")
+        assertTrue(store.sites().isEmpty())
+        file.writeText("[".repeat(10))
+        assertTrue(store.sites().isEmpty())
+        val first = File(file.parentFile, "publisher-identities.corrupt.json")
+        val second = File(file.parentFile, "publisher-identities.corrupt-1.json")
+        assertTrue(first.exists() && second.exists())
+        val unrelated = File(file.parentFile, "vault.json").apply { writeText("keep") }
+        store.wipe()
+        assertFalse(first.exists())
+        assertFalse(second.exists())
+        assertFalse(file.exists())
+        assertTrue(unrelated.exists())
     }
 
     @Test

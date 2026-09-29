@@ -75,7 +75,6 @@ import baby.freedom.mobile.wallet.VaultProtection
 import baby.freedom.mobile.wallet.VaultUnreadableException
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -264,6 +263,10 @@ fun WalletScreen(
     var publishing by remember { mutableStateOf(false) }
     val publishers = remember(context) { PublisherIdentityStore.get(context) }
     var publisherSites by remember { mutableStateOf(0) }
+    // The site the user opened Wallet from, fixed at that moment: the tab
+    // behind keeps running, and a redirect or script navigation there must
+    // not change which origin "This site" → Set up applies to.
+    val cameFrom = remember { currentSite }
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     var confirmRemove by remember { mutableStateOf(false) }
@@ -315,7 +318,7 @@ fun WalletScreen(
     }
 
     if (publishing && (state is Vault.State.Locked || state is Vault.State.Unlocked)) {
-        PublisherIdentitiesPage(currentSite = currentSite, onBack = { publishing = false })
+        PublisherIdentitiesPage(currentSite = cameFrom, onBack = { publishing = false })
         return
     }
 
@@ -457,9 +460,9 @@ fun WalletScreen(
             onConfirm = {
                 confirmRemove = false
                 run("remove the wallet") {
-                    vault.remove()
-                    // Its publisher identities go with it (maintainer decision 9).
-                    withContext(NonCancellable + Dispatchers.IO) { publishers.wipe() }
+                    // Its publisher identities go with it (maintainer decision 9),
+                    // inside remove()'s own non-cancellable wipe.
+                    vault.remove(alsoWipe = publishers::wipe)
                 }
             },
             onDismiss = { confirmRemove = false },

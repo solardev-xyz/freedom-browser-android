@@ -124,11 +124,19 @@ data class SitePublisher(
  * Changes throw [IOException] when the file can't be read (or set aside)
  * or written — never starting afresh over one they couldn't read — and
  * [IllegalStateException] when there's no wallet.
+ *
+ * Allocation also never goes below [floor], a file holding only the
+ * highest next index this device has ever written — no origins, labels
+ * or vault tag. It outlives [wipe] and a change of wallet: the vault tag
+ * is new for every vault, even one imported from the same phrase, so
+ * without it Remove wallet and a re-import would start again at index 0
+ * and give a new site the key an earlier site published with.
  */
 class PublisherIdentityStore internal constructor(
     private val file: File,
     private val vaultTag: () -> String?,
     private val clock: () -> Long = System::currentTimeMillis,
+    private val floor: File = File(file.parentFile, "publisher-key-index-floor"),
 ) {
     private class Data(val nextIndex: Int, val sites: Map<String, SitePublisher>)
 
@@ -177,10 +185,21 @@ class PublisherIdentityStore internal constructor(
         updated
     }
 
-    /** Remove wallet: every site's publisher identities go with it. */
+    /**
+     * Remove wallet: every site's publisher identities go with it, and so
+     * do any unparseable copies set aside (they hold the same origins and
+     * labels). Only [floor] stays, so a later wallet — maybe the same
+     * phrase again — never reuses an index.
+     */
     fun wipe() = synchronized(lock) {
         file.delete()
         tmp().delete()
+        file.parentFile?.listFiles()?.forEach { if (isSetAside(it)) it.delete() }
+    }
+
+    private fun isSetAside(f: File): Boolean {
+        val base = file.nameWithoutExtension
+        return f.name == "$base.corrupt.json" || Regex(Regex.escape(base) + "\\.corrupt-\\d+\\.json").matches(f.name)
     }
 
     private fun createAppScopedIn(data: Data, origin: String, label: String?): SitePublisher {
@@ -221,7 +240,35 @@ class PublisherIdentityStore internal constructor(
      */
     private fun loadForWrite(): Data {
         val tag = vaultTag() ?: throw IllegalStateException("there is no wallet")
-        return read(tag) ?: Data(0, emptyMap())
+        val data = read(tag) ?: Data(0, emptyMap())
+        val least = readFloor()
+        return if (data.nextIndex >= least) data else Data(least, data.sites)
+    }
+
+    /**
+     * The highest next index ever written on this device, 0 if none.
+     * Throws [IOException] if the file is there but can't be read; one
+     * that doesn't hold a number (it never should) counts as 0, and the
+     * main file's own counter still applies.
+     */
+    private fun readFloor(): Int {
+        if (!floor.exists()) return 0
+        val text = floor.readText().trim()
+        return text.toIntOrNull()?.takeIf { it >= 0 } ?: run {
+            Log.w(TAG, "publisher key index floor can't be parsed")
+            0
+        }
+    }
+
+    /** Raises [floor] to [next], written before the file that uses it. */
+    private fun raiseFloor(next: Int) {
+        if (next <= readFloor()) return
+        val tmp = File(floor.parentFile, "${floor.name}.tmp")
+        tmp.writeText(next.toString())
+        if (!tmp.renameTo(floor)) {
+            tmp.delete()
+            throw IOException("couldn't write the publisher key index floor")
+        }
     }
 
     /** Null if there's no file, it's another wallet's, or it couldn't be parsed (and was set aside). */
@@ -302,6 +349,7 @@ class PublisherIdentityStore internal constructor(
             .put("origins", origins)
             .toString()
         file.parentFile?.mkdirs()
+        raiseFloor(data.nextIndex)
         val tmp = tmp()
         tmp.writeText(text)
         if (!tmp.renameTo(file)) {
