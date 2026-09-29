@@ -16,6 +16,7 @@ import baby.freedom.mobile.wallet.PublisherIdentityStore
 import baby.freedom.mobile.wallet.PublisherKeys
 import baby.freedom.mobile.wallet.Vault
 import baby.freedom.swarm.SwarmNode
+import java.io.File
 import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.SocketTimeoutException
@@ -26,8 +27,10 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.MainScope
+import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.withContext
@@ -78,6 +81,16 @@ class SwarmPromptRequest internal constructor(val ask: SwarmAsk) {
  * (a sheet or an "always allow") the page is told (`{"id", "approved"}`)
  * and stops its timer, since from then on its answer is the result of
  * something real — an upload, a signature — that it must not lose.
+ *
+ * A Swarm app's permission manifest (#122, [SwarmManifests]) is checked
+ * before any request that needs a grant ([MANIFEST_GATED]): once per
+ * committed document of the tab and origin, shared by every request that
+ * document makes meanwhile. `swarm_requestAccess` looks for one even on
+ * a site with no manifest record yet; other requests only re-check a
+ * site that has one. New rows put up the manifest sheet
+ * ([SwarmAsk.Manifest]) the way any other ask goes up; a site whose
+ * manifest can't be fetched for now gets `4900` (`manifest_unresolved`)
+ * rather than the grants its manifest gave.
  */
 object SwarmProviders {
     @Volatile
@@ -95,11 +108,19 @@ object SwarmProviders {
     private val pending = HashMap<Long, MutableSet<SwarmPromptRequest>>()
     private val blockedTabs = HashSet<Long>()
 
+    /** Tab → the document its manifest checks ran for, and each origin's shared check (#122). */
+    private val manifestChecks = HashMap<Long, Pair<Int, HashMap<String, ManifestCheck>>>()
+
+    private class ManifestCheck(val eager: Boolean, val result: Deferred<SwarmProvider.Reply.Err?>)
+
+    @Volatile
+    private var manifests: SwarmManifests? = null
+
     /** Opens the wallet page to create, import or unlock a wallet ([Vault.requireUnlocked]); set by [init]. */
     @Volatile
     internal var setUpWallet: suspend (reason: String) -> Boolean = { false }
 
-    private class Bridge(val tab: BrowserState) {
+    private class Bridge(val tab: BrowserState, val ensPins: EnsDocumentPins?) {
         /** The origin and channel of the top-level document that last spoke. */
         var origin: String? = null
         var reply: JavaScriptReplyProxy? = null
@@ -147,6 +168,10 @@ object SwarmProviders {
             node = GatewayHttp,
         )
         setUpWallet = { reason -> vault.requireUnlocked(reason) }
+        manifests = SwarmManifests(
+            SwarmManifestFile(File(app.filesDir, "swarm-manifests.json")),
+            manifestProjections(grantStore, feedStore, identities, vault),
+        )
         p.events = SwarmProvider.Events { origin, event, data ->
             scope.launch { emit(origin, event, data) }
         }
@@ -172,8 +197,93 @@ object SwarmProviders {
             }
         }
         if (!SwarmGrantStore.get(app).revoke(origin) || !feedsDropped) return false
+        // Manifest tracking goes with it: nothing the manifest granted is left to take back.
+        try {
+            manifests?.forget(origin)
+        } catch (e: IOException) {
+            Log.w(TAG, "couldn't drop the manifest record of a disconnected site")
+        }
         emit(origin, "disconnect", JSONObject().put("origin", swarmOriginKey(origin)))
         return true
+    }
+
+    /** The sites whose manifest manages some rows (#122), for the connected-sites list. */
+    fun manifestRows(): Map<String, List<ManifestCapability>> = manifests?.managedRows().orEmpty()
+
+    /**
+     * The user chose to be asked each time on [origin]: what its manifest
+     * granted is taken back (the connection stays, as theirs). False if
+     * that couldn't be saved.
+     */
+    suspend fun useIndividualApprovals(origin: String): Boolean = try {
+        manifests?.useIndividual(origin) ?: false
+    } catch (e: IOException) {
+        false
+    }
+
+    /** The grant stores behind [SwarmManifests]' projections. */
+    private fun manifestProjections(
+        grantStore: SwarmGrantStore,
+        feedStore: SwarmFeedStore,
+        identities: PublisherIdentityStore,
+        vault: Vault,
+    ) = object : SwarmManifests.Projections {
+        // Feed access and publisher identities belong to a wallet: with
+        // none yet, the first signing sheet sets one up.
+        override fun available(projection: ManifestProjection) = when (projection) {
+            ManifestProjection.Identity, ManifestProjection.FeedGrant -> vault.state.value != Vault.State.Empty
+            else -> true
+        }
+
+        override suspend fun enabled(origin: String, projection: ManifestProjection): Boolean = when (projection) {
+            ManifestProjection.Connection -> grantStore.grantFor(origin) != null
+            ManifestProjection.FeedGrant -> withContext(Dispatchers.IO) { feedStore.granted(origin) }
+            ManifestProjection.Identity -> withContext(Dispatchers.IO) { identities.site(origin) != null }
+            else -> grantStore.grantFor(origin)?.autoApprove?.contains(autoKind(projection)) == true
+        }
+
+        override suspend fun set(origin: String, projection: ManifestProjection, on: Boolean) {
+            when (projection) {
+                ManifestProjection.Connection -> if (on) {
+                    if (!grantStore.connect(origin)) throw IOException("couldn't save the connection")
+                    emit(origin, "connect", JSONObject().put("origin", swarmOriginKey(origin)))
+                } else {
+                    if (!grantStore.revoke(origin)) throw IOException("couldn't save the disconnection")
+                    emit(origin, "disconnect", JSONObject().put("origin", swarmOriginKey(origin)))
+                }
+                ManifestProjection.FeedGrant -> withContext(Dispatchers.IO) {
+                    try {
+                        if (on) feedStore.grant(origin) else feedStore.revoke(origin)
+                    } catch (e: IllegalStateException) {
+                        throw IOException("there is no wallet")
+                    }
+                }
+                // Ensure, never replace: an identity the site has is kept, and removal never deletes one.
+                ManifestProjection.Identity -> if (on) {
+                    withContext(Dispatchers.IO) {
+                        try {
+                            identities.ensureSite(origin)
+                        } catch (e: IllegalStateException) {
+                            throw IOException("there is no wallet")
+                        }
+                    }
+                }
+                else -> {
+                    // Turning an "always allow" off on a site that's no longer connected: nothing left to turn off.
+                    if (!on && grantStore.grantFor(origin) == null) return
+                    if (!grantStore.setAutoApprove(origin, autoKind(projection), on)) {
+                        throw IOException("couldn't save the auto-approve rule")
+                    }
+                }
+            }
+        }
+    }
+
+    private fun autoKind(projection: ManifestProjection) = when (projection) {
+        ManifestProjection.AutoPublish -> SwarmProvider.AutoApprove.Publish.wire
+        ManifestProjection.AutoFeeds -> SwarmProvider.AutoApprove.Feeds.wire
+        ManifestProjection.AutoSigning -> SwarmProvider.AutoApprove.Signing.wire
+        else -> throw IllegalArgumentException("not an auto-approve projection")
     }
 
     /**
@@ -181,9 +291,9 @@ object SwarmProviders {
      * channel and the script on it. Nothing for a private tab: its grants
      * would have nowhere to live that the private session could forget.
      */
-    fun install(webView: WebView, tab: BrowserState) {
+    fun install(webView: WebView, tab: BrowserState, ensPins: EnsDocumentPins? = null) {
         if (tab.private || !isSupported()) return
-        val bridge = Bridge(tab)
+        val bridge = Bridge(tab, ensPins)
         bridges[webView] = bridge
         try {
             val channel = newBottomUiChannelName()
@@ -234,9 +344,10 @@ object SwarmProviders {
             val result = try {
                 val p = provider ?: throw IllegalStateException("provider not ready")
                 val approved = { approved(reply, request.id) }
-                p.request(origin, request.method, request.params, approved) { ask ->
-                    askOnTab(tab, doc, ask, deadline - SystemClock.elapsedRealtime(), p::current, approved)
-                }
+                manifestFresh(bridge, doc, origin, request.method, deadline)
+                    ?: p.request(origin, request.method, request.params, approved) { ask ->
+                        askOnTab(tab, doc, ask, deadline - SystemClock.elapsedRealtime(), p::current, approved)
+                    }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Throwable) {
@@ -343,8 +454,74 @@ object SwarmProviders {
         }
     }
 
+    /**
+     * Whether [origin]'s manifest (#122) lets [method] go on for the
+     * tab's document [doc]: null to go on (no manifest authority
+     * involved, or it's fresh and decided), or the error the page gets —
+     * a refused manifest sheet, or a manifest that can't be fetched for
+     * now. One check per document and origin, shared by the requests
+     * that arrive while it runs; a refusal holds for the document, any
+     * other error is checked again on the next request. A request from
+     * an outgoing document ([STALE_DOCUMENT]) is checked on its own,
+     * and any sheet it would need is refused ([askOnTab]).
+     */
+    private suspend fun manifestFresh(bridge: Bridge, doc: Int, origin: String, method: String, deadline: Long): SwarmProvider.Reply.Err? {
+        val m = manifests ?: return null
+        if (method !in MANIFEST_GATED) return null
+        val tab = bridge.tab
+        val eager = method == "swarm_requestAccess"
+        if (doc == STALE_DOCUMENT) return manifestCheck(m, bridge, doc, origin, eager, deadline)
+        val slot = manifestChecks[tab.id]?.takeIf { it.first == doc }
+            ?: (doc to HashMap<String, ManifestCheck>()).also { manifestChecks[tab.id] = it }
+        var check = slot.second[origin]
+        if (check == null || (eager && !check.eager)) {
+            check = ManifestCheck(eager, scope.async { manifestCheck(m, bridge, doc, origin, eager, deadline) })
+            slot.second[origin] = check
+        }
+        val error = check.result.await()
+        if (error != null && error.code != SwarmProvider.USER_REJECTED && slot.second[origin] === check) {
+            slot.second.remove(origin)
+        }
+        return error
+    }
+
+    private suspend fun manifestCheck(
+        m: SwarmManifests,
+        bridge: Bridge,
+        doc: Int,
+        origin: String,
+        eager: Boolean,
+        deadline: Long,
+    ): SwarmProvider.Reply.Err? = try {
+        when (val check = m.check(origin, eager) { discoverManifest(origin, bridge.ensPins) }) {
+            SwarmManifests.Check.Legacy, SwarmManifests.Check.Ready -> null
+            is SwarmManifests.Check.Unresolved -> SwarmProvider.Reply.Err(
+                SwarmProvider.UNAVAILABLE,
+                "Couldn't refresh this app's permission manifest",
+                JSONObject().put("reason", "manifest_unresolved"),
+            )
+            is SwarmManifests.Check.Consent -> {
+                val ask = SwarmAsk.Manifest(origin, check.consent)
+                val answer = askOnTab(bridge.tab, doc, ask, deadline - SystemClock.elapsedRealtime())
+                if (m.decide(check.token, ask.outcomeOf(answer))) null else SwarmProvider.Reply.Err(SwarmProvider.USER_REJECTED, "User rejected the request")
+            }
+        }
+    } catch (e: IllegalStateException) {
+        // The decision was overtaken (another tab's answer, a redeploy): nothing was granted; the next request checks again.
+        SwarmProvider.Reply.Err(SwarmProvider.UNAVAILABLE, "This app's permissions changed; try again", JSONObject().put("reason", "manifest_stale"))
+    } catch (e: IOException) {
+        SwarmProvider.Reply.Err(SwarmProvider.INTERNAL, "Couldn't save this app's permissions on this device")
+    } catch (e: CancellationException) {
+        throw e
+    } catch (e: Exception) {
+        // Answered, not thrown: a thrown check would stay in the document's cache and fail every later request.
+        Log.w(TAG, "manifest check failed: ${e.javaClass.simpleName}")
+        SwarmProvider.Reply.Err(SwarmProvider.INTERNAL, "Internal error")
+    }
+
     /** The tab started (committed) a new document on [url] — null when it's being torn down. */
     fun onDocumentStarted(tab: BrowserState, url: String?) {
+        manifestChecks.remove(tab.id)
         documents[tab.id] = (documents[tab.id] ?: 0) + 1
         committedOrigins[tab.id] = providerOriginKey(url)
         withdraw(tab.id)
@@ -353,6 +530,7 @@ object SwarmProviders {
     /** The tab closed. */
     fun onTabClosed(tabId: Long) {
         withdraw(tabId)
+        manifestChecks.remove(tabId)
         documents.remove(tabId)
         committedOrigins.remove(tabId)
         promptLocks.remove(tabId)
@@ -370,6 +548,19 @@ object SwarmProviders {
     }
 
     private const val TAG = "SwarmProvider"
+
+    /**
+     * The methods a manifest's authority can stand behind (profile §4):
+     * all but the permission-free reads and introspection. Messaging
+     * (#121) isn't answered on this device yet, so it isn't checked.
+     */
+    internal val MANIFEST_GATED: Set<String> = setOf(
+        "swarm_requestAccess",
+        "swarm_getUploadStatus",
+        "swarm_publishData", "swarm_publishFiles", "swarm_publishChunk",
+        "swarm_createFeed", "swarm_updateFeed", "swarm_writeFeedEntry",
+        "swarm_writeSingleOwnerChunk", "swarm_getSigningIdentity",
+    )
 
     /** How long a sheet waits for the user: well short of the page's five-minute timer ([swarmProviderJs]). */
     internal const val SHEET_WAIT_MS = 270_000L
@@ -391,6 +582,9 @@ object SwarmProviders {
  */
 internal object GatewayHttp : SwarmProvider.Http {
     private const val MAX_ANSWER_BYTES = 16 * 1024 * 1024
+
+    /** The answer's body ran past the call's limit; the rest of it was never read. */
+    class AnswerTooLarge : IOException("the node's answer is too large")
     private const val RUNNING = 0
     private const val EXPIRED = 1
     private const val DONE = 2
@@ -417,6 +611,8 @@ internal object GatewayHttp : SwarmProvider.Http {
         timeoutMs: Int,
         /** Tests only: runs once the answer is complete, before it's returned. */
         afterAnswer: () -> Unit = {},
+        /** The most of the answer's body that is read: past it the call fails with [AnswerTooLarge]. */
+        maxBytes: Int = MAX_ANSWER_BYTES,
     ): SwarmProvider.Http.Answer {
         val conn = URL(base + path).openConnection() as HttpURLConnection
         // RUNNING until either the answer is read to its end (DONE) or
@@ -453,7 +649,7 @@ internal object GatewayHttp : SwarmProvider.Http {
                     // Between reads too: a node trickling its answer never trips the read timeout.
                     if (expired()) throw SocketTimeoutException("the node didn't answer in $timeoutMs ms")
                     if (n < 0) break
-                    if (out.size() + n > MAX_ANSWER_BYTES) throw IOException("the node's answer is too large")
+                    if (out.size() + n > maxBytes) throw AnswerTooLarge()
                     out.write(buf, 0, n)
                 }
                 out.toByteArray()
@@ -474,6 +670,68 @@ internal object GatewayHttp : SwarmProvider.Http {
         }
     }
 }
+
+/**
+ * Look for [origin]'s permission manifest (#122) the way its pages are
+ * served: `freedom-manifest.json` at the root of the content the
+ * interceptor serves the origin from — a raw bzz reference itself, or
+ * the Swarm content a name currently points at (the answer the tab's
+ * page on screen was served from, [pins], where there is one). Anything
+ * not on Swarm is [ManifestDiscovery.Unsupported]; a name that doesn't
+ * resolve for now is [ManifestDiscovery.Unresolved].
+ */
+internal suspend fun discoverManifest(origin: String, pins: EnsDocumentPins?): ManifestDiscovery = withContext(Dispatchers.IO) {
+    val root = VirtualOrigin.parseHostOfUrl(origin)
+    if (root !is ContentRoot.Bzz && root !is ContentRoot.Ens) return@withContext ManifestDiscovery.Unsupported
+    try {
+        Gateways.awaitExternalEndpointsBlocking()
+        val served = Gateways.servedRootFor(root, pins)
+            ?: return@withContext ManifestDiscovery.Unresolved("the name didn't resolve")
+        if (served !is ContentRoot.Bzz) return@withContext ManifestDiscovery.Unsupported
+        val url = Gateways.gatewayUrlFor(root, "/" + SwarmManifestFormat.FILE, pins)
+            ?: return@withContext ManifestDiscovery.Unresolved("the name didn't resolve")
+        fetchManifest(url)
+    } catch (e: RuntimeException) {
+        ManifestDiscovery.Unresolved(e.javaClass.simpleName)
+    }
+}
+
+/**
+ * GET the manifest at [url] (a gateway URL), reading at most
+ * [SwarmManifestFormat.MAX_BYTES] of it — the limit is enforced while
+ * reading — within [timeoutMs] for the whole call.
+ */
+internal fun fetchManifest(url: String, timeoutMs: Int = MANIFEST_TIMEOUT_MS): ManifestDiscovery {
+    val answer = try {
+        GatewayHttp.requestAt(url, "GET", "", emptyMap(), null, timeoutMs, maxBytes = SwarmManifestFormat.MAX_BYTES)
+    } catch (e: GatewayHttp.AnswerTooLarge) {
+        return ManifestDiscovery.Invalid("manifest exceeds 8 KiB")
+    } catch (e: IOException) {
+        // A body that started and died is the transport's failure, not an invalid manifest.
+        return ManifestDiscovery.Unresolved(e.javaClass.simpleName)
+    }
+    // HttpURLConnection ends a fixed-length body that the connection
+    // dropped part-way without an error: short of its length, it's the
+    // transport's failure too, not bytes to judge.
+    val length = answer.headers["content-length"]?.trim()?.toLongOrNull()
+    if (length != null && answer.body.size < length) return ManifestDiscovery.Unresolved("the answer was cut short")
+    return manifestFromAnswer(answer.status, answer.body)
+}
+
+/** What a gateway's answer for the manifest means (profile §2.3): only a 404 is absence, only a 5xx is transient. */
+internal fun manifestFromAnswer(status: Int, body: ByteArray): ManifestDiscovery = when {
+    status == 404 -> ManifestDiscovery.Absent
+    status in 400..499 -> ManifestDiscovery.Invalid("HTTP $status")
+    status !in 200..299 -> ManifestDiscovery.Unresolved("HTTP $status")
+    else -> try {
+        val manifest = SwarmManifestFormat.parse(body)
+        ManifestDiscovery.Found(manifest, SwarmManifestFormat.sha256Hex(body), SwarmManifestFormat.fingerprint(manifest))
+    } catch (e: InvalidManifestException) {
+        ManifestDiscovery.Invalid(e.message ?: "invalid manifest")
+    }
+}
+
+private const val MANIFEST_TIMEOUT_MS = 30_000
 
 /** One `window.swarm` request off the channel. */
 internal data class SwarmRequest(val id: Long, val method: String, val params: JSONObject)

@@ -353,6 +353,12 @@ fun WalletScreen(
     var disconnectFailed by remember { mutableStateOf<String?>(null) }
     val swarmGrants by remember(context) { SwarmGrantStore.get(context).all }.collectAsState(initial = emptyList())
     var swarmDisconnectFailed by remember { mutableStateOf<String?>(null) }
+    // The rows each Swarm app's permission manifest manages (#122), read again whenever the grants change.
+    var swarmAskEachTimeFailed by remember { mutableStateOf<String?>(null) }
+    var swarmManifestRows by remember { mutableStateOf<Map<String, List<ManifestCapability>>>(emptyMap()) }
+    LaunchedEffect(swarmGrants) {
+        swarmManifestRows = withContext(Dispatchers.IO) { SwarmProviders.manifestRows() }
+    }
     val allChains by chainStore.chains.collectAsState(initial = null)
     val walletChains = allChains?.filter { it.id in TokenRegistry.WALLET_CHAIN_IDS }
     val activeAddress = accountList?.active?.address
@@ -849,6 +855,15 @@ fun WalletScreen(
                             if (!SwarmProviders.disconnect(context, origin)) swarmDisconnectFailed = origin
                         }
                     },
+                    manifestRows = swarmManifestRows,
+                    onAskEachTime = { origin ->
+                        swarmAskEachTimeFailed = null
+                        scope.launch {
+                            if (!SwarmProviders.useIndividualApprovals(origin)) swarmAskEachTimeFailed = origin
+                            swarmManifestRows = withContext(Dispatchers.IO) { SwarmProviders.manifestRows() }
+                        }
+                    },
+                    askEachTimeFailed = swarmAskEachTimeFailed,
                 )
             }
             // Shown whatever the vault's state once there's anything in it, like the connected sites.
