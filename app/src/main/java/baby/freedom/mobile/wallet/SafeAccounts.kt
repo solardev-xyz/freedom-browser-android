@@ -681,7 +681,10 @@ class SafeChain(private val rpc: WalletRpc) {
      * Whether [guard] passes a v1.4.1 Safe's `setGuard` check (GS300):
      * it has code and answers `supportsInterface(Guard)` with true. A call
      * the node says reverts is a no, as it is for the Safe; any other
-     * failure throws, and means "not known".
+     * failure throws, and means "not known". The guard's author controls
+     * both reads (the code can be deployed later, and the answer can depend
+     * on the caller or change), so a false is never proof the Safe would
+     * refuse it when the transaction actually executes.
      */
     suspend fun guardSupported(chainId: Long, guard: String): Boolean {
         if (rpc.code(chainId, guard).value.length <= 2) return false

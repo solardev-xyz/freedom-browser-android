@@ -1701,9 +1701,14 @@ internal fun safeSelfCallCleared(call: SafeSelfCall?, acknowledged: Boolean): Bo
  * Module calls are counted against [modules] (`getModulesPaginated`, the same
  * kind of list; null until read): it refuses to enable no address (GS101) or
  * an enabled module (GS102), and to disable one that isn't enabled or with the
- * wrong `prevModule` (GS103). It refuses a guard that doesn't declare itself
- * one ([guardSupported] false; GS300) and itself as its fallback handler
- * (GS400).
+ * wrong `prevModule` (GS103), and itself as its fallback handler (GS400).
+ *
+ * A guard that doesn't currently declare itself one ([guardSupported] false;
+ * the Safe would refuse it, GS300) gets a note too, but never a "would fail":
+ * whether it answers is up to the guard's own code, which its author can
+ * deploy or change after the page reads it (a CREATE2 address with nothing
+ * there yet, or a guard that answers true only to the Safe), so the note says
+ * not to count on the transaction failing.
  */
 internal fun safeSelfCallFailure(
     call: SafeSelfCall,
@@ -1749,7 +1754,7 @@ internal fun safeSelfCallFailure(
         }
         is SafeSelfCall.SetGuard ->
             if (!call.guard.equals(SafeProtocol.ZERO_ADDRESS, ignoreCase = true) && guardSupported == false) {
-                "This address doesn’t declare itself a transaction guard, and the Safe only accepts one that does: this transaction would fail."
+                "This address doesn’t answer as a transaction guard right now, which the Safe would refuse. Its code can change before this executes, so don’t count on this failing: a guard can block every later transaction from this Safe, including one that removes it."
             } else {
                 null
             }

@@ -245,8 +245,12 @@ class SafeSelfCallTest {
             safeSelfCallFailure(SafeSelfCall.DisableModule(sentinel, owner), null, safe, modules = emptyList()),
         )
         assertNull(safeSelfCallFailure(SafeSelfCall.DisableModule(sentinel, attacker), null, safe))
-        // GS300: a guard that doesn't declare itself one; removing the guard (zero) is never checked.
-        assertTrue(safeSelfCallFailure(SafeSelfCall.SetGuard(attacker), null, safe, guardSupported = false)!!.endsWith("this transaction would fail."))
+        // GS300: a guard that doesn't answer as one right now gets a hedge, never "would fail": its author
+        // controls the code and the answer and can change both before execution. Removing the guard (zero)
+        // is never checked.
+        val guardNote = safeSelfCallFailure(SafeSelfCall.SetGuard(attacker), null, safe, guardSupported = false)!!
+        assertTrue(guardNote.contains("don’t count on this failing"))
+        assertFalse(guardNote.contains("would fail"))
         assertNull(safeSelfCallFailure(SafeSelfCall.SetGuard(attacker), null, safe, guardSupported = true))
         assertNull(safeSelfCallFailure(SafeSelfCall.SetGuard(attacker), null, safe))
         assertNull(safeSelfCallFailure(SafeSelfCall.SetGuard(zero), null, safe, guardSupported = false))
