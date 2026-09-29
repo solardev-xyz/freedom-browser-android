@@ -53,6 +53,8 @@ enum class ManifestProjection(val wire: String) {
     AutoPublish("autoApprove.publish"),
     AutoFeeds("autoApprove.feeds"),
     AutoSigning("autoApprove.signing"),
+    MessagingGrant("messagingGrant"),
+    AutoMessaging("autoApprove.messaging"),
     ;
 
     companion object {
@@ -1046,12 +1048,13 @@ class SwarmManifests(
         /** The grants disconnecting a site takes with it: the user's own keep a pruned connection. */
         private val CONNECTION_RIDERS = listOf(
             ManifestProjection.AutoPublish, ManifestProjection.AutoFeeds, ManifestProjection.AutoSigning, ManifestProjection.FeedGrant,
+            ManifestProjection.MessagingGrant, ManifestProjection.AutoMessaging,
         )
 
         /** Between unresolved attempts for one origin, this session (profile §2.2). */
         val BACKOFF_MS = longArrayOf(2_000, 10_000, 30_000, 60_000)
 
-        /** Profile §4. Messaging (#121) isn't on this device yet, so its row is only the base connection. */
+        /** Profile §4 (desktop's `PROJECTIONS`). */
         val PROJECTIONS: Map<ManifestCapability, List<ManifestProjection>> = mapOf(
             ManifestCapability.Publish to listOf(ManifestProjection.Connection, ManifestProjection.AutoPublish),
             ManifestCapability.Feeds to listOf(
@@ -1060,7 +1063,9 @@ class SwarmManifests(
             ManifestCapability.Signing to listOf(
                 ManifestProjection.Connection, ManifestProjection.Identity, ManifestProjection.FeedGrant, ManifestProjection.AutoSigning,
             ),
-            ManifestCapability.Messaging to listOf(ManifestProjection.Connection),
+            ManifestCapability.Messaging to listOf(
+                ManifestProjection.Connection, ManifestProjection.MessagingGrant, ManifestProjection.AutoMessaging,
+            ),
         )
     }
 }

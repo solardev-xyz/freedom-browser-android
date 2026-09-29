@@ -217,18 +217,20 @@ internal const val ASK_EACH_TIME_FAILED = "Couldn't switch to asking each time: 
 /** One read of the auto-approve rules; [rules] null when the store couldn't be read. */
 private class RulesRead(val rules: List<AutoApproveRule>?)
 
-/** What a Swarm-connected site's line says: what it may do without asking (#120). */
+/** What a Swarm-connected site's line says: what it may do without asking (#120), and whether it may message (#121). */
 internal fun swarmSiteSummary(grant: SwarmGrantStore.Grant): String {
     val always = listOfNotNull(
         "publishes".takeIf { "publish" in grant.autoApprove },
         "manages feeds".takeIf { "feeds" in grant.autoApprove },
         "signs".takeIf { "signing" in grant.autoApprove },
+        "sends messages".takeIf { grant.messaging && "messaging" in grant.autoApprove },
     )
-    return if (always.isEmpty()) {
+    val summary = if (always.isEmpty()) {
         "Asks before each upload and signature"
     } else {
         always.joinToString(", ").replaceFirstChar { it.uppercase() } + " without asking"
     }
+    return if (grant.messaging) "$summary · Can send and receive messages" else summary
 }
 
 /** What a site's line says about its permission manifest (#122): the rows it allowed through it, or null. */
@@ -240,12 +242,12 @@ internal fun swarmManifestSummary(rows: List<ManifestCapability>?): String? =
 /**
  * Sites connected to Swarm through `window.swarm` (#120), each with what
  * it may do without asking, and Disconnect — which also drops its
- * "always allow"s and feed access. [disconnectFailed] is the site whose
- * Disconnect couldn't be saved; its line says so. A site whose
- * permission manifest (#122) manages some rows says which
- * ([manifestRows]), with Ask each time to go back to a sheet per upload
- * and signature ([onAskEachTime]); [askEachTimeFailed] is the site where
- * that couldn't be saved.
+ * "always allow"s, feed access and messaging (closing its subscriptions).
+ * [disconnectFailed] is the site whose Disconnect couldn't be saved; its
+ * line says so. A site whose permission manifest (#122) manages some rows
+ * says which ([manifestRows]), with Ask each time to go back to a sheet
+ * per upload and signature ([onAskEachTime]); [askEachTimeFailed] is the
+ * site where that couldn't be saved.
  */
 @Composable
 internal fun SwarmSitesSection(

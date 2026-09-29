@@ -10,6 +10,8 @@ import baby.freedom.mobile.browser.ManifestProjection.AutoSigning
 import baby.freedom.mobile.browser.ManifestProjection.Connection
 import baby.freedom.mobile.browser.ManifestProjection.FeedGrant
 import baby.freedom.mobile.browser.ManifestProjection.Identity
+import baby.freedom.mobile.browser.ManifestProjection.MessagingGrant
+import baby.freedom.mobile.browser.ManifestProjection.AutoMessaging
 import java.io.IOException
 import java.net.InetAddress
 import java.net.ServerSocket
@@ -707,10 +709,25 @@ class SwarmManifestsTest {
     }
 
     @Test
-    fun `messaging is acknowledged but only ever connects`() {
+    fun `messaging grants the messaging tier and its always allow, as on desktop (#121)`() {
         val env = Env()
         env.decide(env.check(site, found(Messaging)), SwarmManifests.Outcome.AllowAll)
+        assertEquals(setOf(site to Connection, site to MessagingGrant, site to AutoMessaging), env.projections.on)
+        // Ask each time takes what the manifest granted for it; the connection becomes the user's.
+        assertTrue(runBlocking { env.manifests.useIndividual(site) })
         assertEquals(setOf(site to Connection), env.projections.on)
+    }
+
+    @Test
+    fun `a messaging tier the user granted by hand keeps the connection when the manifest drops it`() {
+        val env = Env()
+        env.decide(env.check(site, found(Publish)), SwarmManifests.Outcome.AllowAll)
+        // Later the user approves the messaging grant sheet by hand.
+        env.projections.on += site to MessagingGrant
+        env.check(site, ManifestDiscovery.Absent, eager = false)
+        assertFalse(env.has(site, AutoPublish))
+        assertTrue(env.has(site, Connection))
+        assertTrue(env.has(site, MessagingGrant))
     }
 
     @Test

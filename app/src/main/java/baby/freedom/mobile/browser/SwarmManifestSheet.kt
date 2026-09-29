@@ -46,7 +46,7 @@ internal fun manifestRowLabel(capability: ManifestCapability): Pair<String, Stri
     ManifestCapability.Publish -> "Publish content" to "Upload to Swarm with your postage stamps and bandwidth, without asking each time."
     ManifestCapability.Feeds -> "Manage feeds" to "Create and update this app's feeds without asking each time."
     ManifestCapability.Signing -> "Sign Swarm content" to "Sign with this app's publisher identity without asking each time."
-    ManifestCapability.Messaging -> "Send and receive messages" to "Not available on this device yet: messaging requests are refused."
+    ManifestCapability.Messaging -> "Send and receive messages" to "Use PSS and GSOC messaging."
 }
 
 /** The notes under the rows: what happens to the site's publisher identity, and what still asks. */
