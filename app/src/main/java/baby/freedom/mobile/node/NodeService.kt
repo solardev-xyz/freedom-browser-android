@@ -326,7 +326,7 @@ class NodeService : Service() {
     }
 
     /**
-     * One [INodeService.stampCall] (#116), blocking. The spends are for
+     * One [INodeService.stampCall] (#116, #117), blocking. The spends are for
      * the wallet identity's node only: the device-only key can't be
      * restored anywhere, so nothing bought with it could be kept.
      */
@@ -372,6 +372,12 @@ class NodeService : Service() {
                 spendable()
                 Log.i(TAG, "extending a postage batch, as the user confirmed")
                 swarmNode.extendStamp(args.getString("batchId"), amount(), maxSwap())
+            }
+            "deposit" -> spending {
+                spendable()
+                val plur = BigInteger(args.getString("amountPlur")).also { require(it.signum() > 0) { "bad amount" } }
+                Log.i(TAG, "depositing into the chequebook, as the user confirmed")
+                swarmNode.depositChequebook(args.getString("chequebook"), plur)
             }
             else -> throw IllegalArgumentException("unknown stamp call")
         }

@@ -301,6 +301,14 @@ Java_baby_freedom_swarm_AntNative_storageStatus(JNIEnv *env, jobject thiz, jlong
 }
 
 JNIEXPORT jstring JNICALL
+Java_baby_freedom_swarm_AntNative_settlementStatus(JNIEnv *env, jobject thiz, jlong handle) {
+    (void)thiz;
+    char *err = NULL;
+    char *json = ant_storage_settlement_status((const AntHandle *)(uintptr_t)handle, &err);
+    return json_or_throw(env, json, err, "ant_storage_settlement_status failed");
+}
+
+JNIEXPORT jstring JNICALL
 Java_baby_freedom_swarm_AntNative_storageQuote(JNIEnv *env, jobject thiz, jlong handle,
                                                jstring gnosis_rpc, jint depth, jlong days) {
     (void)thiz;

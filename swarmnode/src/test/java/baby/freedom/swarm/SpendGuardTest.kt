@@ -168,5 +168,53 @@ class SpendGuardTest {
         }
         assertEquals(BigInteger("50000000000000000"), SpendPermit.maxGasWei(buy = true)) // 5 × 0.01 xDAI
         assertEquals(BigInteger("30000000000000000"), SpendPermit.maxGasWei(buy = false)) // 3 × 0.01 xDAI
+
+        // A deposit: of all of the above plus its own transfer, only that one.
+        val p = SpendPermit(deposit)
+        val slots = (everything() + TestTx.transfer(chequebook, depositAmount)).mapNotNull { raw ->
+            val slot = LegacyTx.decode(raw)?.let(p::slotFor)
+            slot.takeIf { p.admits(raw) }
+        }.toSet()
+        assertEquals(SpendPermit.DEPOSIT_SLOTS, slots)
+        assertEquals(BigInteger("10000000000000000"), SpendPermit.DEPOSIT_MAX_GAS_WEI) // 1 × 0.01 xDAI
+    }
+
+    private val chequebook = "37".repeat(20)
+    private val depositAmount = BigInteger.TEN.pow(13) // 0.001 xBZZ
+    private val deposit = SpendPlan.DepositChequebook(TestTx.OWNER, chequebook, depositAmount)
+
+    @Test
+    fun aDepositAdmitsOneTransferOfTheConfirmedAmountToTheConfirmedChequebook() {
+        val p = SpendPermit(deposit)
+        assertTrue(p.admits(TestTx.transfer(chequebook, depositAmount)))
+        // Once: a second deposit, even an identical one with another nonce, doesn't get out.
+        assertFalse(p.admits(TestTx.tx(SpendPermit.BZZ_TOKEN, TestTx.call("a9059cbb", TestTx.addr(chequebook), TestTx.word(depositAmount)), nonce = 10)))
+
+        fun refused(raw: ByteArray) = assertFalse(SpendPermit(deposit).admits(raw))
+        refused(TestTx.transfer("cc".repeat(20), depositAmount)) // another recipient
+        refused(TestTx.transfer(chequebook, depositAmount.add(BigInteger.ONE))) // more
+        refused(TestTx.transfer(chequebook, depositAmount.subtract(BigInteger.ONE))) // less
+        refused(TestTx.approve(depositAmount, spender = chequebook)) // an allowance instead
+        refused(TestTx.swap(BigInteger.ONE)) // no swap: the xBZZ is already there
+        refused(TestTx.createBatch(TestTx.OWNER, amount, 17, false))
+        refused(TestTx.deployChequebook())
+        // A transfer that also carries xDAI, or goes to another token.
+        refused(TestTx.tx(SpendPermit.BZZ_TOKEN, TestTx.call("a9059cbb", TestTx.addr(chequebook), TestTx.word(depositAmount)), value = BigInteger.ONE))
+        refused(TestTx.tx("dd".repeat(20), TestTx.call("a9059cbb", TestTx.addr(chequebook), TestTx.word(depositAmount))))
+        // Another chain, a pre-EIP-155 signature, a high gas bill.
+        refused(TestTx.tx(SpendPermit.BZZ_TOKEN, TestTx.call("a9059cbb", TestTx.addr(chequebook), TestTx.word(depositAmount)), v = 37))
+        refused(TestTx.tx(SpendPermit.BZZ_TOKEN, TestTx.call("a9059cbb", TestTx.addr(chequebook), TestTx.word(depositAmount)), v = 27))
+        refused(TestTx.tx(SpendPermit.BZZ_TOKEN, TestTx.call("a9059cbb", TestTx.addr(chequebook), TestTx.word(depositAmount)), gasPrice = BigInteger.valueOf(200_000_000_000), gas = 100_000))
+        // A dirty address word, and trailing data.
+        refused(TestTx.tx(SpendPermit.BZZ_TOKEN, TestTx.call("a9059cbb", ByteArray(11) + byteArrayOf(1) + TestTx.bytes(chequebook), TestTx.word(depositAmount))))
+        refused(TestTx.tx(SpendPermit.BZZ_TOKEN, TestTx.call("a9059cbb", TestTx.addr(chequebook), TestTx.word(depositAmount), TestTx.word(BigInteger.ONE))))
+    }
+
+    @Test
+    fun aStampPermitAdmitsNoDepositBeyondItsSettlementSlot() {
+        // A buy's settlement slot takes at most 0.001 xBZZ, whatever the recipient;
+        // anything bigger — a deposit racing the buy — stays out.
+        assertFalse(SpendPermit(buy).admits(TestTx.transfer(chequebook, depositAmount.add(BigInteger.ONE))))
+        assertFalse(SpendPermit(extend).admits(TestTx.transfer(chequebook, depositAmount)))
     }
 }

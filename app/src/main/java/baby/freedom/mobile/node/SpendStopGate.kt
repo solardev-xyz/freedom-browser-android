@@ -185,5 +185,5 @@ internal fun reportedNodeInfo(info: NodeInfo, doomed: Boolean): NodeInfo =
     }
 
 internal const val WAITING_FOR_SPEND_NOTE =
-    "Waiting for a postage payment to finish; the node starts once it's done"
+    "Waiting for a payment (a postage stamp or a chequebook deposit) to finish; the node starts once it's done"
 

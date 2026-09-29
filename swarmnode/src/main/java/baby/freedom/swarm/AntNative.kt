@@ -58,6 +58,13 @@ internal object AntNative {
      */
     external fun storageStatus(handle: Long): String
 
+    /**
+     * `ant_storage_settlement_status`: whether this account has a
+     * chequebook set up on this device (`enabled`, `chequebook`) — read
+     * from ant's persisted association, no chain call.
+     */
+    external fun settlementStatus(handle: Long): String
+
     /** `ant_storage_quote`: what a [depth]-deep batch lasting [days] costs. No transaction. */
     external fun storageQuote(handle: Long, gnosisRpc: String, depth: Int, days: Long): String
 

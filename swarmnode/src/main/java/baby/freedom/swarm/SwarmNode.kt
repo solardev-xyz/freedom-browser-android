@@ -38,8 +38,28 @@ import kotlinx.coroutines.withContext
 class SwarmNode internal constructor(
     private val config: Config,
     private val ops: NodeOps,
+    /**
+     * A monotonic clock in ms, for how long an unconfirmed deposit blocks
+     * another. The hold is persisted, so the app's node (the public
+     * constructor) uses one every process reads alike and that keeps
+     * counting through deep sleep: `SystemClock.elapsedRealtime()`, time
+     * since boot, which a reboot restarts at 0 (see [holdElapsedMs]). The
+     * `System.nanoTime()` default, which stops in deep sleep, is for JVM
+     * tests only, where `SystemClock` isn't available.
+     */
+    private val clock: () -> Long = { System.nanoTime() / 1_000_000 },
+    /**
+     * This boot's id (null: unknown), kept with a hold so a later boot
+     * isn't mistaken for the one the hold's [clock] reading came from.
+     */
+    private val bootId: () -> String? = { null },
 ) {
-    constructor(config: Config) : this(config, NodeOps.Native)
+    constructor(config: Config) : this(
+        config,
+        NodeOps.Native,
+        { android.os.SystemClock.elapsedRealtime() },
+        { kernelBootId() },
+    )
 
     /** The native calls [SwarmNode] makes; swapped for a fake in tests. */
     internal interface NodeOps {
@@ -53,12 +73,20 @@ class SwarmNode internal constructor(
         fun stopGateway(handle: Long)
         fun shutdown(handle: Long)
         fun storageStatus(handle: Long): String
+        fun settlementStatus(handle: Long): String
         fun storageQuote(handle: Long, gnosisRpc: String, depth: Int, days: Long): String
         fun storageTopupQuote(handle: Long, gnosisRpc: String, days: Long): String
         fun storageValidity(handle: Long, gnosisRpc: String): String
         fun storageBuyXdai(handle: Long, gnosisRpc: String, depth: Int, amountPerChunk: String, immutable: Boolean): String
         fun storageTopupXdai(handle: Long, gnosisRpc: String, amountPerChunk: String): String
         fun storageDiscover(handle: Long, gnosisRpc: String): String
+
+        /**
+         * One request to the node's own gateway ([GATEWAY_URL] + [path]),
+         * from this process: its status code and body, or null when it
+         * couldn't be reached. Never logs the path's query.
+         */
+        fun gateway(method: String, path: String, timeoutMs: Int): GatewayAnswer?
 
         object Native : NodeOps {
             override fun seed(antDir: File) = BootnodeSeeder.seedIfEmpty(antDir)
@@ -73,6 +101,7 @@ class SwarmNode internal constructor(
             override fun stopGateway(handle: Long) = AntNative.stopGateway(handle)
             override fun shutdown(handle: Long) = AntNative.shutdown(handle)
             override fun storageStatus(handle: Long) = AntNative.storageStatus(handle)
+            override fun settlementStatus(handle: Long) = AntNative.settlementStatus(handle)
             override fun storageQuote(handle: Long, gnosisRpc: String, depth: Int, days: Long) =
                 AntNative.storageQuote(handle, gnosisRpc, depth, days)
             override fun storageTopupQuote(handle: Long, gnosisRpc: String, days: Long) =
@@ -83,8 +112,33 @@ class SwarmNode internal constructor(
             override fun storageTopupXdai(handle: Long, gnosisRpc: String, amountPerChunk: String) =
                 AntNative.storageTopupXdai(handle, gnosisRpc, amountPerChunk)
             override fun storageDiscover(handle: Long, gnosisRpc: String) = AntNative.storageDiscover(handle, gnosisRpc)
+            override fun gateway(method: String, path: String, timeoutMs: Int): GatewayAnswer? = try {
+                val conn = java.net.URL(GATEWAY_URL + path).openConnection() as java.net.HttpURLConnection
+                try {
+                    conn.requestMethod = method
+                    conn.connectTimeout = GATEWAY_CONNECT_TIMEOUT_MS
+                    conn.readTimeout = timeoutMs
+                    conn.useCaches = false
+                    if (method == "POST") {
+                        conn.doOutput = true
+                        conn.setFixedLengthStreamingMode(0)
+                        conn.outputStream.close()
+                    }
+                    val code = conn.responseCode
+                    val body = (if (code >= 400) conn.errorStream else conn.inputStream)
+                        ?.use { it.readBytes().toString(Charsets.UTF_8) }.orEmpty()
+                    GatewayAnswer(code, body)
+                } finally {
+                    conn.disconnect()
+                }
+            } catch (e: java.io.IOException) {
+                null
+            }
         }
     }
+
+    /** A gateway response: [code] and [body]. */
+    internal data class GatewayAnswer(val code: Int, val body: String)
 
     data class Config(
         val dataDir: String,
@@ -370,8 +424,17 @@ class SwarmNode internal constructor(
      * device, or before a reinstall) can be published with again. Runs
      * outside any [SpendGuard] permit, so nothing ant might try to send
      * meanwhile gets out. Returns `{"registered":[ids],"status":{…}}`.
+     * ant's discover also sets up settlement, which adopts a chequebook
+     * this account already owns (no transaction); the gateway is reloaded
+     * then, as after a buy, so the chequebook page (#117) sees it now.
      */
-    fun discoverStamps(): String = withLightNode { h, rpc -> ops.storageDiscover(h, rpc) }
+    fun discoverStamps(): String = withLightNode { h, rpc ->
+        try {
+            ops.storageDiscover(h, rpc)
+        } finally {
+            reloadGatewayForNewChequebook(h)
+        }
+    }
 
     /**
      * Buys a batch as the user confirmed it: [depth], [amountPerChunk] from
@@ -381,7 +444,21 @@ class SwarmNode internal constructor(
     fun buyStamp(depth: Int, amountPerChunk: BigInteger, immutable: Boolean, maxSwapWei: BigInteger): String =
         withLightNode { h, rpc ->
             val plan = SpendPlan.BuyStamp(owner(), depth, amountPerChunk, immutable, maxSwapWei)
-            SpendGuard.during(plan) { ops.storageBuyXdai(h, rpc, depth, amountPerChunk.toString(), immutable) }
+            try {
+                SpendGuard.during(plan) { ops.storageBuyXdai(h, rpc, depth, amountPerChunk.toString(), immutable) }
+            } finally {
+                // The first buy sets up the chequebook (deploys one, or adopts
+                // the one this account already owns), but the gateway only
+                // loads it when it starts — ant's contract is to restart the
+                // gateway then, or the chequebook (and a deposit into it,
+                // #117) waits for the next node restart. Also when the buy
+                // fails: it can set up the chequebook and then fail on the
+                // batch itself. Only then, though: a buy that failed before
+                // (no xDAI, another payment running) leaves ant with no
+                // chequebook, and restarting the gateway for it would only
+                // interrupt browsing.
+                reloadGatewayForNewChequebook(h)
+            }
         }
 
     /**
@@ -403,6 +480,204 @@ class SwarmNode internal constructor(
             val plan = SpendPlan.ExtendStamp(owner(), want, depth, amountPerChunk, maxSwapWei)
             SpendGuard.during(plan) { ops.storageTopupXdai(h, rpc, amountPerChunk.toString()) }
         }
+
+    /**
+     * Deposits [amountPlur] of the node's own xBZZ into its chequebook
+     * [chequebook] (#117), as the user confirmed it — through ant's
+     * `POST /chequebook/deposit`, the one transfer the permit admits.
+     * Refuses unless the gateway's chequebook is [chequebook] and the
+     * account holds the xBZZ (there's no swap). SPENDS. Returns ant's
+     * `{"transactionHash": …}`.
+     */
+    fun depositChequebook(chequebook: String, amountPlur: BigInteger): String {
+        require(amountPlur.signum() > 0) { "bad amount" }
+        val want = normalizeAddress(chequebook) ?: throw IllegalArgumentException("not a chequebook address")
+        return withLightNode { _, _ ->
+            when (gatewayChequebook()) {
+                null -> throw IllegalStateException("the node couldn't say which chequebook it has")
+                "" -> throw IllegalStateException("the node has no chequebook yet")
+                want -> Unit
+                else -> throw IllegalStateException("the node's chequebook isn't the one you confirmed")
+            }
+            val wallet = ops.gateway("GET", "/wallet", GATEWAY_READ_TIMEOUT_MS)
+                ?.takeIf { it.code == 200 }
+                ?.let { runCatching { BigInteger(JSONObject(it.body).getString("bzzBalance")) }.getOrNull() }
+                ?: throw IllegalStateException("the node couldn't read its xBZZ balance")
+            check(wallet >= amountPlur) { "the node holds only ${formatBzz(wallet)} xBZZ" }
+            val before = chequebookBalance()
+            synchronized(lock) {
+                loadUnconfirmedDeposit()
+                unconfirmedDeposit?.let { u ->
+                    // A deposit that ended without an answer may still be on
+                    // its way, and `/wallet` doesn't count a pending transfer:
+                    // another one now could move the xBZZ twice. Wait until
+                    // the chequebook shows it (or long enough that it won't).
+                    val landed = u.chequebook == want && u.balanceBefore != null && before != null &&
+                        before >= u.balanceBefore + u.amountPlur
+                    if (landed || u.chequebook != want || holdElapsedMs(clock(), u.atMs, sameBoot(u.bootId)) >= UNCONFIRMED_DEPOSIT_HOLD_MS) {
+                        setUnconfirmedDeposit(null)
+                    } else {
+                        throw IllegalStateException(
+                            "an earlier deposit may still be on its way; check the chequebook's balance, " +
+                                "and deposit again in a few minutes if it hasn't grown",
+                        )
+                    }
+                }
+            }
+            val plan = SpendPlan.DepositChequebook(owner(), want, amountPlur)
+            val answer = SpendGuard.during(plan) {
+                ops.gateway("POST", "/chequebook/deposit?amount=$amountPlur", DEPOSIT_TIMEOUT_MS)
+            }
+            val message = answer?.let { a ->
+                runCatching { JSONObject(a.body).optString("message") }.getOrNull()?.takeIf { it.isNotBlank() }
+            }
+            if (depositMaybeSent(answer, message)) {
+                synchronized(lock) { setUnconfirmedDeposit(UnconfirmedDeposit(want, before, amountPlur, clock(), bootId())) }
+                throw RuntimeException(
+                    "$DEPOSIT_MAYBE_SENT (${message ?: "the node's gateway didn't answer"}). " +
+                        "Check the chequebook's balance before depositing again",
+                )
+            }
+            if (answer!!.code !in 200..299) {
+                throw RuntimeException(message ?: "the deposit failed (HTTP ${answer.code})")
+            }
+            answer.body
+        }
+    }
+
+    /**
+     * A deposit whose outcome the node couldn't tell (#117): into
+     * [chequebook], which held [balanceBefore] PLUR (null: unknown), of
+     * [amountPlur], at [atMs] on [clock], during the boot [bootId]
+     * (null: unknown).
+     */
+    private data class UnconfirmedDeposit(
+        val chequebook: String,
+        val balanceBefore: BigInteger?,
+        val amountPlur: BigInteger,
+        val atMs: Long,
+        val bootId: String?,
+    )
+
+    /** Whether a hold taken during boot [holdBoot] is from this boot (null: can't tell). */
+    private fun sameBoot(holdBoot: String?): Boolean? {
+        val current = bootId() ?: return null
+        return holdBoot?.let { it == current }
+    }
+
+    /**
+     * The last deposit that may or may not have gone out. Guarded by
+     * [lock]. Kept in [unconfirmedDepositFile] too: the `:node` process
+     * dies when the node is turned off, and a toggle off and on mustn't
+     * lift the hold.
+     */
+    private var unconfirmedDeposit: UnconfirmedDeposit? = null
+    private var unconfirmedDepositLoaded = false
+    private val unconfirmedDepositFile get() = File(config.dataDir, UNCONFIRMED_DEPOSIT_FILE)
+
+    /** Reads the persisted hold once, off the main thread (the first deposit). Under [lock]. */
+    private fun loadUnconfirmedDeposit() {
+        if (unconfirmedDepositLoaded) return
+        unconfirmedDepositLoaded = true
+        unconfirmedDeposit = runCatching {
+            val o = JSONObject(unconfirmedDepositFile.readText())
+            UnconfirmedDeposit(
+                chequebook = normalizeAddress(o.getString("chequebook"))!!,
+                balanceBefore = o.optString("balanceBefore").takeIf { it.isNotEmpty() }?.let(::BigInteger),
+                amountPlur = BigInteger(o.getString("amountPlur")),
+                atMs = o.getLong("atMs"),
+                bootId = o.optString("bootId").takeIf { it.isNotEmpty() },
+            )
+        }.getOrNull()
+    }
+
+    /** Sets (null: lifts) the hold, on disk too. Under [lock]. */
+    private fun setUnconfirmedDeposit(u: UnconfirmedDeposit?) {
+        unconfirmedDeposit = u
+        unconfirmedDepositLoaded = true
+        runCatching {
+            if (u == null) {
+                unconfirmedDepositFile.delete()
+            } else {
+                val json = JSONObject()
+                    .put("chequebook", u.chequebook)
+                    .put("balanceBefore", u.balanceBefore?.toString() ?: "")
+                    .put("amountPlur", u.amountPlur.toString())
+                    .put("atMs", u.atMs)
+                    .put("bootId", u.bootId ?: "")
+                    .toString()
+                val tmp = File(config.dataDir, "$UNCONFIRMED_DEPOSIT_FILE.tmp")
+                tmp.writeText(json)
+                check(tmp.renameTo(unconfirmedDepositFile))
+            }
+        }.onFailure { Log.w(TAG, "couldn't persist the deposit hold: ${it.javaClass.simpleName}") }
+    }
+
+    /**
+     * Whether ant has a chequebook set up for this account on this device
+     * (its persisted association, which the gateway reads only when it
+     * starts). If ant can't say, assume it may: a needless reload only
+     * interrupts browsing, a missing one strands the chequebook.
+     */
+    private fun antHasChequebook(h: Long): Boolean =
+        runCatching { JSONObject(ops.settlementStatus(h)).getBoolean("enabled") }.getOrDefault(true)
+
+    /**
+     * Reloads the gateway of [h] when ant has a chequebook set up that the
+     * gateway, which reads it only when it starts, doesn't report yet —
+     * after a buy or a discover may have set one up.
+     */
+    private fun reloadGatewayForNewChequebook(h: Long) {
+        if (antHasChequebook(h) && gatewayChequebook() == "") {
+            reloadGateway(h, mode = synchronized(lock) { handleMode })
+        }
+    }
+
+    /** What the gateway's chequebook holds, in PLUR; null when it couldn't say. */
+    private fun chequebookBalance(): BigInteger? =
+        ops.gateway("GET", "/chequebook/balance", GATEWAY_READ_TIMEOUT_MS)?.takeIf { it.code == 200 }
+            ?.let { runCatching { BigInteger(JSONObject(it.body).getString("totalBalance")) }.getOrNull() }
+
+    /**
+     * The chequebook the gateway loaded, as 40 lowercase hex; `""` for
+     * none; null when it couldn't say (not answering, still reading the
+     * chain).
+     */
+    private fun gatewayChequebook(): String? {
+        val answer = ops.gateway("GET", "/chequebook/address", GATEWAY_READ_TIMEOUT_MS)?.takeIf { it.code == 200 }
+            ?: return null
+        val address = runCatching { JSONObject(answer.body).getString("chequebookAddress") }.getOrNull() ?: return null
+        val hex = normalizeAddress(address) ?: return null
+        return if (hex.all { it == '0' }) "" else hex
+    }
+
+    /**
+     * Stops and starts the gateway of [h] in [mode], so it loads what ant
+     * persisted meanwhile (a chequebook). Only while [h] is still the
+     * node's handle; a failure takes the node down into Error rather than
+     * leaving it Running with no gateway.
+     */
+    private fun reloadGateway(h: Long, mode: Mode) {
+        synchronized(lock) { if (handle != h) return }
+        try {
+            ops.stopGateway(h)
+            ops.startGateway(handle = h, apiAddr = GATEWAY_ADDR, lightMode = mode.light, gnosisRpc = mode.gnosisRpc)
+            Log.i(TAG, "reloaded the gateway so it reports the node's chequebook")
+        } catch (t: Throwable) {
+            Log.w(TAG, "reloading the gateway failed: ${t.javaClass.simpleName}")
+            synchronized(lock) {
+                if (handle == h) {
+                    // Take the node down as [stop] does (the peer poller, and
+                    // the handle once no call uses it), so a start from Error
+                    // doesn't init a second node on the same data dir.
+                    stop()
+                    _state.update {
+                        it.copy(status = NodeStatus.Error, errorMessage = "The gateway didn't come back after a postage purchase")
+                    }
+                }
+            }
+        }
+    }
 
     /** The node's account, as [SpendPlan.owner]. */
     private fun owner(): String = _state.value.accountAddress.removePrefix("0x").lowercase()
@@ -453,6 +728,71 @@ class SwarmNode internal constructor(
         const val GATEWAY_URL: String = "http://$GATEWAY_ADDR"
 
         private const val TAG = "SwarmNode"
+
+        private const val GATEWAY_CONNECT_TIMEOUT_MS = 5_000
+        private const val GATEWAY_READ_TIMEOUT_MS = 15_000
+
+        /** ant waits up to 3 min for a deposit's receipt; a little longer here. */
+        private const val DEPOSIT_TIMEOUT_MS = 4 * 60_000
+
+        /**
+         * How long a deposit that ended without a clear answer blocks
+         * another into the same chequebook, unless its balance shows it
+         * landed first. Past it, a transfer still unmined isn't coming.
+         */
+        private const val UNCONFIRMED_DEPOSIT_HOLD_MS = 15 * 60_000L
+
+        /**
+         * A lower bound on the time since a hold taken at [atMs], with the
+         * [clock] now reading [now]. The clock is time since boot and the
+         * hold is persisted, so a reboot restarts it at 0: a hold from an
+         * earlier boot ([sameBoot] false) came before this one, so at least
+         * [now] has passed. Without boot ids to compare (null), a reading
+         * below [atMs] still proves a reboot; one above it is taken as the
+         * same boot, which can only run the hold longer (#117). Never more
+         * than the real time: the hold is never cut short.
+         */
+        internal fun holdElapsedMs(now: Long, atMs: Long, sameBoot: Boolean? = null): Long = when {
+            sameBoot == false || now < atMs -> now
+            else -> now - atMs
+        }
+
+        /**
+         * The kernel's id for this boot (a fresh UUID each boot, readable
+         * by apps), or null if it can't be read.
+         */
+        internal fun kernelBootId(): String? = runCatching {
+            File("/proc/sys/kernel/random/boot_id").readText().trim().takeIf { it.isNotEmpty() }
+        }.getOrNull()
+
+        /**
+         * Whether a deposit that got [answer] (null: none, e.g. a read
+         * timeout) with ant's [message] may have broadcast its transfer.
+         * ant answers 504 when the receipt wait runs out and 502 for an RPC
+         * error, which can come after the send; only a revert (mined,
+         * nothing moved) or a refusal before the chain (4xx, 501, 503) is
+         * sure it moved nothing.
+         */
+        internal fun depositMaybeSent(answer: GatewayAnswer?, message: String?): Boolean = when {
+            answer == null -> true
+            answer.code in 200..299 -> false
+            answer.code == 504 -> true
+            answer.code == 502 -> message?.contains("transaction reverted") != true
+            else -> false
+        }
+
+        private const val UNCONFIRMED_DEPOSIT_FILE = "unconfirmed-deposit.json"
+
+        /** How a deposit that may have gone out after all ([depositMaybeSent]) starts its error. */
+        const val DEPOSIT_MAYBE_SENT = "it may already have been sent"
+
+        /** [address] as 40 lowercase hex without `0x`, or null if it isn't an address. */
+        fun normalizeAddress(address: String): String? = address.trim().removePrefix("0x").removePrefix("0X").lowercase()
+            .takeIf { s -> s.length == 40 && s.all { it in '0'..'9' || it in 'a'..'f' } }
+
+        /** PLUR as xBZZ (16 decimals), trailing zeros dropped. */
+        internal fun formatBzz(plur: BigInteger): String =
+            java.math.BigDecimal(plur).movePointLeft(16).stripTrailingZeros().toPlainString()
 
         /** [id] as 64 lowercase hex without `0x`, or null if it isn't a batch id. */
         fun normalizeBatchId(id: String): String? = id.trim().removePrefix("0x").removePrefix("0X").lowercase()

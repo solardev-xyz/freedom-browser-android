@@ -50,6 +50,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import baby.freedom.swarm.NodeInfo
 import baby.freedom.swarm.NodeStatus
+import baby.freedom.swarm.SwarmNode
 import java.text.DateFormat
 import java.util.Date
 import kotlinx.coroutines.CancellationException
@@ -101,21 +102,26 @@ internal fun discoverStatusText(discovery: StampClient.Discovery): String? = whe
 /** One line under a spend in flight, or its outcome. */
 internal fun spendStatusText(spend: StampClient.Spend): String? = when (spend) {
     StampClient.Spend.Idle -> null
-    is StampClient.Spend.Running -> if (spend.kind == StampClient.Kind.Buy) {
-        "Buying the stamp… The node swaps xDAI for the xBZZ it needs, buys the stamp, and waits for " +
+    is StampClient.Spend.Running -> when (spend.kind) {
+        StampClient.Kind.Buy -> "Buying the stamp… The node swaps xDAI for the xBZZ it needs, buys the stamp, and waits for " +
             "each transaction to confirm on Gnosis Chain. This takes a minute or two."
-    } else {
-        "Extending the stamp… The node swaps xDAI for the xBZZ it needs, tops the stamp up, and " +
+        StampClient.Kind.Extend -> "Extending the stamp… The node swaps xDAI for the xBZZ it needs, tops the stamp up, and " +
             "waits for each transaction to confirm. This takes a minute or two."
+        StampClient.Kind.Deposit -> "Depositing… The node moves the xBZZ into its chequebook and waits for the " +
+            "transaction to confirm on Gnosis Chain. This takes up to a minute."
     }
-    is StampClient.Spend.Done -> if (spend.kind == StampClient.Kind.Buy) {
-        "Stamp bought. It becomes usable once the network has seen it, usually within a minute."
-    } else {
-        "Stamp extended."
+    is StampClient.Spend.Done -> when (spend.kind) {
+        StampClient.Kind.Buy -> "Stamp bought. It becomes usable once the network has seen it, usually within a minute."
+        StampClient.Kind.Extend -> "Stamp extended."
+        StampClient.Kind.Deposit -> "Deposited into the chequebook."
     }
-    is StampClient.Spend.Failed ->
-        (if (spend.kind == StampClient.Kind.Buy) "Buying the stamp failed: " else "Extending the stamp failed: ") +
-            spend.message
+    is StampClient.Spend.Failed -> when (spend.kind) {
+        StampClient.Kind.Buy -> "Buying the stamp failed: "
+        StampClient.Kind.Extend -> "Extending the stamp failed: "
+        // Ended without a clear answer (#117): not a failure, it may be out.
+        StampClient.Kind.Deposit ->
+            if (spend.message.startsWith(SwarmNode.DEPOSIT_MAYBE_SENT)) "The deposit didn't report back: " else "The deposit failed: "
+    } + spend.message
 }
 
 /**
@@ -492,7 +498,7 @@ private fun QuoteCard(state: QuoteState, deposit: Boolean) {
  * on screen, so a tap meant for the page under it can't confirm.
  */
 @Composable
-private fun SpendConfirmDialog(
+internal fun SpendConfirmDialog(
     title: String,
     body: String,
     confirmLabel: String,
@@ -521,7 +527,7 @@ private fun SpendConfirmDialog(
 }
 
 @Composable
-private fun SpendBanner(spend: StampClient.Spend, text: String) {
+internal fun SpendBanner(spend: StampClient.Spend, text: String) {
     SectionCard(
         title = when (spend) {
             is StampClient.Spend.Running -> "In progress"
@@ -553,7 +559,7 @@ private fun SpendBanner(spend: StampClient.Spend, text: String) {
 }
 
 @Composable
-private fun ChoiceRow(selected: Boolean, label: String, sub: String? = null, onClick: () -> Unit) {
+internal fun ChoiceRow(selected: Boolean, label: String, sub: String? = null, onClick: () -> Unit) {
     Row(
         verticalAlignment = Alignment.CenterVertically,
         modifier = Modifier
@@ -581,12 +587,12 @@ private fun UsableBadge(usable: Boolean) {
 }
 
 @Composable
-private fun MutedText(text: String) {
+internal fun MutedText(text: String) {
     Text(text, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
 }
 
 @Composable
-private fun SubLine(text: String) {
+internal fun SubLine(text: String) {
     Text(
         text,
         style = MaterialTheme.typography.bodySmall,
