@@ -321,6 +321,32 @@ class TxHistoryTest {
     }
 
     @Test
+    fun `a refresh begun before the file is read waits for it, so a replaced record it holds is still rechecked`() = runBlocking<Unit> {
+        val chain = FakeChain(gnosis)
+        chain.mined = 8
+        val hash = "0x" + "11".repeat(32)
+        val gate = java.util.concurrent.CountDownLatch(1)
+        val store = object : TxHistoryStore {
+            override fun save(records: List<TxRecord>) = true
+            override fun load(): List<TxRecord> {
+                gate.await()
+                return listOf(record(hash).copy(status = TxRecord.Status.REPLACED, settledAt = now.get()))
+            }
+        }
+        val h = history(chain, store)
+        // The page's first poll, begun while the file is still being read.
+        val first = async(Dispatchers.Default) { h.refresh() }
+        delay(100)
+        assertFalse(first.isCompleted)
+        gate.countDown()
+        // Nothing pending, but the replaced record is inside its recheck window: poll again.
+        assertTrue(withTimeout(5_000) { first.await() })
+        chain.receipts[hash] = ok(20)
+        assertFalse(h.refresh())
+        assertEquals(TxRecord.Status.CONFIRMED, h.records.value.single().status)
+    }
+
+    @Test
     fun `a record sent too long ago for its missing receipt to mean anything reads unknown, not replaced`() = runBlocking<Unit> {
         val chain = FakeChain(gnosis)
         chain.mined = 8

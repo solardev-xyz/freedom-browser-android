@@ -8,6 +8,7 @@ import java.io.File
 import java.io.FileOutputStream
 import java.math.BigInteger
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -234,6 +235,14 @@ class TxHistory internal constructor(
 
     private val refreshing = Mutex()
 
+    /**
+     * Done once the file has been read and merged (or the read will never
+     * run, its scope gone). [refresh] waits for it: a refresh begun first
+     * would see an empty list, answer "nothing due", and a caller polling
+     * on that answer would never come back for the records the file brings.
+     */
+    private val fileRead = CompletableDeferred<Unit>()
+
     init {
         scope.launch(Dispatchers.IO) {
             val saved = store.load()
@@ -252,8 +261,9 @@ class TxHistory internal constructor(
                 }
                 writeAfterLoad
             }
+            fileRead.complete(Unit)
             if (write) persistNow()
-        }
+        }.invokeOnCompletion { fileRead.complete(Unit) }
     }
 
     /**
@@ -299,8 +309,15 @@ class TxHistory internal constructor(
      * a chain that's still set up. A pending record whose chain was
      * removed from Settings doesn't count — nothing can be read for it
      * until the chain comes back and the page is refreshed.
+     *
+     * Waits for the file to be read first, so the answer covers what it holds.
      */
-    suspend fun refresh(): Boolean = refreshing.withLock {
+    suspend fun refresh(): Boolean {
+        fileRead.await()
+        return refreshLoaded()
+    }
+
+    private suspend fun refreshLoaded(): Boolean = refreshing.withLock {
         val (mine, due) = synchronized(this) { generation to _records.value.filter { due(it, clock()) } }
         val unknownChains = mutableSetOf<Long>()
         for (r in due) {

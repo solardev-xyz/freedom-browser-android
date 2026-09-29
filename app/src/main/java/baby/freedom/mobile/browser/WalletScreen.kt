@@ -349,6 +349,8 @@ fun WalletScreen(
     // change — a pending send, or one judged replaced within the last minutes (whose receipt
     // a node behind may not have had yet). The wait grows while nothing settles, so a send
     // that never went out doesn't keep the page reading the chain every few seconds.
+    // refresh() waits for the history file to be read, so the first answer here already
+    // covers a replaced record the file brings back, even with nothing pending to restart this.
     val pendingCount = txRecords.count { it.pending }
     LaunchedEffect(refreshTick, pendingCount) {
         var wait = TX_HISTORY_POLL_MS
