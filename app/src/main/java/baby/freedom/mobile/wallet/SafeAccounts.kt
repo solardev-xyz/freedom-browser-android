@@ -404,6 +404,12 @@ class SafeAccounts internal constructor(
      * Adds [signature] to pending [id]: it must recover to an owner of the
      * Safe who hasn't signed yet. Throws [SafeException] saying what's
      * wrong otherwise. Returns the updated entry.
+     *
+     * Once the entry is [SafePending.ready] its signatures are frozen and a
+     * further one is dropped (the entry comes back unchanged): Execute sends
+     * exactly these signatures, and [noteSend] recognises the mined
+     * execution by that calldata, so an extra one added while it's out would
+     * leave the executed transaction on the board.
      */
     suspend fun addSignature(id: String, signature: String): SafePending = update { s ->
         val entry = s.pending.firstOrNull { it.id == id } ?: throw SafeException("This request was discarded.")
@@ -417,17 +423,20 @@ class SafeAccounts internal constructor(
         }
         if (entry.hasSigned(signer)) return@update s to entry
         if (entry.superseded) throw SafeException("This transaction can no longer be executed. Discard it.")
+        if (entry.ready) return@update s to entry
         val next = entry.copy(signatures = entry.signatures + SafeProtocol.OwnerSignature(signer, sig))
         s.copy(pending = s.pending.map { if (it.id == id) next else it }) to next
     }
 
     /**
      * Signs pending [id] with [account] (one of the Safe's owners in this
-     * wallet), on this phone, and adds the signature. Throws
+     * wallet), on this phone, and adds the signature — unless it's already
+     * [SafePending.ready], when it's left as it is (see [addSignature]). Throws
      * [VaultLockedException] if the wallet isn't open.
      */
     suspend fun signWith(id: String, account: WalletAccount): SafePending {
         val entry = _state.value?.pending?.firstOrNull { it.id == id } ?: throw SafeException("This request was discarded.")
+        if (entry.ready) return entry
         val hash = withContext(Dispatchers.Default) { SafeProtocol.hash(JSONObject(entry.typedData)) }
         val signature = withContext(Dispatchers.Default) { MessageSigning.sign(vault, account, hash) }
         return addSignature(id, signature)

@@ -1154,15 +1154,17 @@ private fun SafeRequestPage(
                                 Text(
                                     when {
                                         signed -> "Signed"
-                                        mine != null -> "Signs on this phone"
                                         p.ready -> "Not needed: enough owners have signed"
+                                        mine != null -> "Signs on this phone"
                                         else -> "Waiting: share the request below"
                                     },
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 )
                             }
-                            if (!signed && mine != null && !p.superseded) {
+                            // Not once it's ready: Execute sends exactly the signatures it has, and
+                            // an extra one would change the calldata the mined execution is matched by.
+                            if (!signed && mine != null && !p.ready && !p.superseded) {
                                 TextButton(
                                     onClick = {
                                         act("sign") {

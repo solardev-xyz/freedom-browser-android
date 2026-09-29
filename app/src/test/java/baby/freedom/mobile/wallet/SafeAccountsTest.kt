@@ -235,6 +235,40 @@ class SafeAccountsTest {
     }
 
     @Test
+    fun `a ready transaction takes no more signatures, so its execution still clears it once mined`() = runBlocking<Unit> {
+        val s = opened()
+        val safe = s.create("", listOf(account1.address, account2.address, other), 2, local)
+        s.markDeployed(safe.address)
+        val tx = SafeProtocol.SafeTx(other, BigInteger.ONE, ByteArray(0), BigInteger.ZERO)
+        val p = s.proposeTx(safe, tx, SafePending.Payment(other, BigInteger.ONE, "xDAI", 18, null))
+        val hash = SafeProtocol.hash(JSONObject(p.typedData))
+        vault.unlock(auth)
+        s.signWith(p.id, account1)
+        val ready = s.addSignature(p.id, MessageSigning.sign(otherKey, other, hash))
+        assertTrue(ready.ready)
+        val exec = SafeProtocol.execTransactionData(tx, ready.signatures)
+        val gnosis = BuiltInChains.GNOSIS
+        val sent = "0x" + "cc".repeat(32)
+        fun status(stage: SendStatus.Stage) = SendStatus(
+            SendQuote(
+                SendRequest(gnosis, TokenRegistry.native(gnosis), account1, safe.address, BigInteger.ZERO, DappCall(null, exec, null, SafeCallLabel(safe.address, safe.name, false))),
+                EthTransaction(100, BigInteger.ONE, BigInteger.valueOf(300_000), safe.address, BigInteger.ZERO, exec, EthTransaction.Fees.Legacy(BigInteger.ONE)),
+                BigInteger.TEN, null, 0L, ChainTrustsForTest.unverified,
+            ),
+            stage,
+            sent,
+        )
+        s.noteSend(status(SendStatus.Stage.Pending))
+        assertEquals(sent, s.state.value!!.pending.single().execHash)
+        // The third owner, here on this phone, signing while it's out changes nothing …
+        assertEquals(s.state.value!!.pending.single(), s.signWith(p.id, account2))
+        assertEquals(ready.signatures, s.state.value!!.pending.single().signatures)
+        // … so the mined execution still matches the entry and clears it.
+        s.noteSend(status(SendStatus.Stage.Confirmed(20, null)))
+        assertTrue(s.state.value!!.pending.isEmpty())
+    }
+
+    @Test
     fun `a superseded transaction takes no more signatures, and removing the wallet takes the Safes with it`() = runBlocking<Unit> {
         val s = opened()
         val safe = s.create("", listOf(account1.address, other), 1, local)
