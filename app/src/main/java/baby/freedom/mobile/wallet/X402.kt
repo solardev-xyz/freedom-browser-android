@@ -65,6 +65,20 @@ object X402 {
      */
     internal const val MIN_TIMEOUT_SECONDS = MIN_RUNWAY_SECONDS + 10
 
+    /**
+     * Below this many seconds to confirm in ([confirmSeconds]), the sheet
+     * of a Ledger account warns that the payment may run out while it's
+     * reviewed on the device: the Ledger shows the authorization field by
+     * field, which takes longer than a tap on the phone (#218 R1-F1).
+     */
+    internal const val LEDGER_CONFIRM_SECONDS = 60L
+
+    /**
+     * How long, from when [offer]'s authorization is made, it can take to
+     * sign it and still be sent: its validity less [MIN_RUNWAY_SECONDS].
+     */
+    fun confirmSeconds(offer: Offer): Long = minOf(offer.maxTimeoutSeconds, MAX_VALIDITY_SECONDS) - MIN_RUNWAY_SECONDS
+
     /** v1 network names this browser pays on (desktop's `V1_NETWORKS`). */
     private val V1_NETWORKS = mapOf("base" to 8453L, "ethereum" to 1L)
 

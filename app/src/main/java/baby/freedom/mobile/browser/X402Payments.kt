@@ -417,14 +417,19 @@ object X402Payments {
         val vault = Vault.get(app)
         val offer = option.offer
         val nonce = ByteArray(32).also(random::nextBytes)
-        val now = System.currentTimeMillis() / 1000
-        val authorization = X402.authorize(d.required.version, offer, account.address, now, nonce)
-        val digest = X402.digest(offer, authorization)
+        fun authorize() = X402.authorize(d.required.version, offer, account.address, System.currentTimeMillis() / 1000, nonce)
+        val authorization: X402.Authorization
         val signature = if (account.isLedger) {
             // Signed on the Ledger (#142), which shows the transfer; its dialog carries Cancel.
             if (auto) return Paid.NOT_SENT
-            try {
-                Ledger.get(app).signTypedData(account, Eip712.parse(X402.typedData(offer, authorization)), digest)
+            // Made once the Ledger is connected and ready to show it, so its
+            // time limit isn't spent on the connect and the unlock (#218 R1-F1).
+            var made: X402.Authorization? = null
+            val sig = try {
+                Ledger.get(app).signTypedData(account) {
+                    val a = authorize().also { made = it }
+                    Eip712.parse(X402.typedData(offer, a)) to X402.digest(offer, a)
+                }
             } catch (e: LedgerException) {
                 Log.i(TAG, "not signed on the Ledger: ${e.kind}")
                 // Refused or cancelled there is the user's answer; anything else they're told.
@@ -433,11 +438,17 @@ object X402Payments {
                 }
                 return Paid.NOT_SENT
             }
+            authorization = made ?: return Paid.NOT_SENT
+            sig
         } else {
+            authorization = authorize()
+            val digest = X402.digest(offer, authorization)
             withContext(Dispatchers.Default) { MessageSigning.sign(vault, account, digest) }
         }
         if (X402.runway(authorization, System.currentTimeMillis() / 1000) < X402.MIN_RUNWAY_SECONDS) {
             Log.w(TAG, "the authorization ran out while it was signed; not sending it")
+            // The user approved it: say why nothing happened, and what to do.
+            if (stillOn(tab, doc, webView, d.url)) Toast.makeText(app, timedOutMessage(account.isLedger, offer), Toast.LENGTH_LONG).show()
             return Paid.NOT_SENT
         }
         // The page left while it was signed: nothing to pay for.
@@ -484,6 +495,15 @@ object X402Payments {
         flow.paid(tab.id, d.url, payment.id)
         return Paid.SENT
     }
+
+    /**
+     * What the user is told when a payment they approved ran out before it
+     * could be sent (#218 R1-F1): nothing was paid, and reloading asks again.
+     */
+    internal fun timedOutMessage(ledger: Boolean, offer: X402.Offer): String =
+        "Not paid: the site allows ${X402.confirmSeconds(offer)} s to " +
+            (if (ledger) "confirm a payment on the Ledger" else "sign a payment") +
+            ", and that ran out. Reload the page to try again."
 
     /**
      * The payable offers of [required] with their chain, token and

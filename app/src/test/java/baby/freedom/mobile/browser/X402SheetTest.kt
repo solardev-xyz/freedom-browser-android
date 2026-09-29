@@ -21,12 +21,14 @@ import org.junit.Test
 class X402SheetTest {
     private val usdc = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
 
-    private fun offers(vararg amounts: String): List<X402.Offer> {
+    private fun offers(vararg amounts: String): List<X402.Offer> = offersTimed(60, *amounts)
+
+    private fun offersTimed(timeout: Int, vararg amounts: String): List<X402.Offer> {
         val accepts = JSONArray()
         amounts.forEach { a ->
             accepts.put(
                 JSONObject().put("scheme", "exact").put("network", "eip155:8453").put("amount", a).put("asset", usdc)
-                    .put("payTo", "0x209693Bc6afc0C5328bA36FaF03C514EF312287C").put("maxTimeoutSeconds", 60)
+                    .put("payTo", "0x209693Bc6afc0C5328bA36FaF03C514EF312287C").put("maxTimeoutSeconds", timeout)
                     .put("extra", JSONObject().put("name", "USD Coin").put("version", "2")),
             )
         }
@@ -166,5 +168,38 @@ class X402SheetTest {
         // A chain a site added (wallet_addEthereumChain) with its own RPCs: even a quorum of them is the site's word.
         val siteChain = Chain(id = 42161, name = "Arbitrum One", symbol = "ETH", rpcUrls = listOf("https://rpc.site.example", "https://rpc2.site.example"))
         assertFalse(X402Payments.tokenReadTrusted(siteChain, listOf(verified, verified)))
+    }
+
+    @Test
+    fun anAuthorizationHasItsTimeLimitLessTheRunwayToBeSigned() {
+        // #218 R1-F1: what's left to sign in once the authorization is made.
+        assertEquals(10L, X402.confirmSeconds(offersTimed(30, "1").single()))
+        assertEquals(40L, X402.confirmSeconds(offersTimed(60, "1").single()))
+        assertEquals(X402.MAX_VALIDITY_SECONDS - X402.MIN_RUNWAY_SECONDS, X402.confirmSeconds(offersTimed(3600, "1").single()))
+    }
+
+    @Test
+    fun aLedgerSheetWarnsWhenTheOfferLeavesLittleTimeToConfirm() {
+        // #218 R1-F1: a review on the Ledger can outlast a short time limit.
+        assertEquals(
+            "The site allows only 10 s to confirm once the Ledger shows the payment; after that it isn't sent.",
+            ledgerHurry(offersTimed(30, "1").single()),
+        )
+        assertTrue(ledgerHurry(offersTimed(79, "1").single())!!.contains("only 59 s"))
+        assertNull(ledgerHurry(offersTimed(80, "1").single()))
+        assertNull(ledgerHurry(offersTimed(3600, "1").single()))
+    }
+
+    @Test
+    fun aPaymentThatRanOutSaysSoAndHowToTryAgain() {
+        val o = offersTimed(45, "1").single()
+        assertEquals(
+            "Not paid: the site allows 25 s to confirm a payment on the Ledger, and that ran out. Reload the page to try again.",
+            X402Payments.timedOutMessage(ledger = true, offer = o),
+        )
+        assertEquals(
+            "Not paid: the site allows 25 s to sign a payment, and that ran out. Reload the page to try again.",
+            X402Payments.timedOutMessage(ledger = false, offer = o),
+        )
     }
 }

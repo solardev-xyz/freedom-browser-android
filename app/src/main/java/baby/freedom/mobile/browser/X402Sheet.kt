@@ -31,6 +31,7 @@ import androidx.compose.ui.unit.dp
 import baby.freedom.mobile.wallet.SendAmounts
 import baby.freedom.mobile.wallet.TokenAmounts
 import baby.freedom.mobile.wallet.WalletAccount
+import baby.freedom.mobile.wallet.X402
 import java.math.BigInteger
 
 /** How long an allowance granted on the sheet lasts: the choices, shortest first. */
@@ -47,6 +48,17 @@ internal enum class X402Window(val label: String, val ms: Long) {
  */
 internal fun X402Ask.paysFrom(active: WalletAccount?): Boolean =
     account != null && active != null && active.address.equals(account.address, ignoreCase = true)
+
+/**
+ * For a Ledger account: how little time [offer] leaves to confirm on the
+ * device once it shows the payment, when that's short enough to run out
+ * during a review ([X402.LEDGER_CONFIRM_SECONDS]); null otherwise (#218 R1-F1).
+ */
+internal fun ledgerHurry(offer: X402.Offer): String? {
+    val s = X402.confirmSeconds(offer)
+    return if (s >= X402.LEDGER_CONFIRM_SECONDS) null
+    else "The site allows only $s s to confirm once the Ledger shows the payment; after that it isn't sent."
+}
 
 /** What the user has picked on an x402 sheet: an offer, and whether (and how much) to allow paying without asking. */
 internal class X402SheetState(val ask: X402Ask) {
@@ -171,6 +183,7 @@ internal fun X402PaymentBody(
     Spacer(Modifier.height(8.dp))
     if (state.ledger) {
         Note("A Ledger account doesn't pay sites automatically: you confirm each payment on the Ledger.")
+        ledgerHurry(o.offer)?.let { Note(it, warn = true) }
     } else Row(
         verticalAlignment = Alignment.CenterVertically,
         modifier = Modifier
