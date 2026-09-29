@@ -83,6 +83,14 @@ internal object AntNative {
     /** `ant_storage_topup_xdai` on the connected batch: SPENDS, likewise only through [SpendGuard.during]. */
     external fun storageTopupXdai(handle: Long, gnosisRpc: String, amountPerChunk: String): String
 
+    /**
+     * `ant_storage_connect_batch` (#115): registers [batchId], which the
+     * node's account must already own on chain, and — first time only —
+     * sets up the chequebook, which broadcasts: only through
+     * [SpendGuard.during] with a [SpendPlan.ConnectBatch].
+     */
+    external fun storageConnectBatch(handle: Long, gnosisRpc: String, batchId: String): String
+
     /** Tear the node down and free the handle — it must not be reused. */
     external fun shutdown(handle: Long)
 

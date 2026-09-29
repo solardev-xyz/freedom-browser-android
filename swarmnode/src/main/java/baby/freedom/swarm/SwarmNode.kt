@@ -79,6 +79,7 @@ class SwarmNode internal constructor(
         fun storageValidity(handle: Long, gnosisRpc: String): String
         fun storageBuyXdai(handle: Long, gnosisRpc: String, depth: Int, amountPerChunk: String, immutable: Boolean): String
         fun storageTopupXdai(handle: Long, gnosisRpc: String, amountPerChunk: String): String
+        fun storageConnectBatch(handle: Long, gnosisRpc: String, batchId: String): String
 
         /**
          * One request to the node's own gateway ([GATEWAY_URL] + [path]),
@@ -110,6 +111,8 @@ class SwarmNode internal constructor(
                 AntNative.storageBuyXdai(handle, gnosisRpc, depth, amountPerChunk, immutable)
             override fun storageTopupXdai(handle: Long, gnosisRpc: String, amountPerChunk: String) =
                 AntNative.storageTopupXdai(handle, gnosisRpc, amountPerChunk)
+            override fun storageConnectBatch(handle: Long, gnosisRpc: String, batchId: String) =
+                AntNative.storageConnectBatch(handle, gnosisRpc, batchId)
             override fun gateway(method: String, path: String, timeoutMs: Int): GatewayAnswer? = try {
                 val conn = java.net.URL(GATEWAY_URL + path).openConnection() as java.net.HttpURLConnection
                 try {
@@ -462,6 +465,27 @@ class SwarmNode internal constructor(
             val plan = SpendPlan.ExtendStamp(owner(), want, depth, amountPerChunk, maxSwapWei)
             SpendGuard.during(plan) { ops.storageTopupXdai(h, rpc, amountPerChunk.toString()) }
         }
+
+    /**
+     * Connects batch [batchId] (hex, `0x` optional), which the wallet
+     * bought for this node through SwarmNodeFunder (#115): ant checks on
+     * chain that the node's account owns it and registers it, so the node
+     * stamps with it. A first connect also sets up the chequebook, as a
+     * first buy does — the only transactions the permit lets out — and
+     * the gateway is reloaded to pick it up. Returns ant's storage status.
+     */
+    fun connectBatch(batchId: String): String {
+        val id = normalizeBatchId(batchId) ?: throw IllegalArgumentException("not a batch id")
+        return withLightNode { h, rpc ->
+            try {
+                SpendGuard.during(SpendPlan.ConnectBatch(owner())) { ops.storageConnectBatch(h, rpc, "0x$id") }
+            } finally {
+                if (antHasChequebook(h) && gatewayChequebook() == "") {
+                    reloadGateway(h, mode = synchronized(lock) { handleMode })
+                }
+            }
+        }
+    }
 
     /**
      * Deposits [amountPlur] of the node's own xBZZ into its chequebook

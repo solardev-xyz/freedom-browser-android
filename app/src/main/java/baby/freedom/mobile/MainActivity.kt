@@ -335,6 +335,8 @@ class MainActivity : ComponentActivity() {
         // The wallet's accounts (#104) follow it the same way: verified on
         // every unlock, forgotten on Remove wallet.
         WalletAccounts.get(this).start()
+        // Connects a stamp the wallet bought for the node (#115) once its call is mined.
+        baby.freedom.mobile.browser.SwarmFunding.get(this)
         // A send the last process left unresolved resumes, and mined abandoned sends are swept (#105).
         lifecycleScope.launch(Dispatchers.IO) {
             try {

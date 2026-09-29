@@ -95,6 +95,10 @@ class SwarmNodeTest {
             calls += "topup:$handle:$amountPerChunk"
             return onSpend("topup")
         }
+        override fun storageConnectBatch(handle: Long, gnosisRpc: String, batchId: String): String {
+            calls += "connect:$handle:$batchId"
+            return onSpend("connect")
+        }
 
         /** The gateway's chequebook, 40 hex (all zeros for none), and the account's xBZZ in PLUR. */
         @Volatile var chequebookHex = "0".repeat(40)
@@ -508,6 +512,32 @@ class SwarmNodeTest {
         awaitStatus(node, NodeStatus.Running)
         assertThrows(IllegalStateException::class.java) { node.depositChequebook(chequebook, milliBzz) }
         assertFalse(ops.calls.any { it.startsWith("gateway:GET") || it.startsWith("gateway:POST") })
+        node.dispose()
+    }
+
+    @Test
+    fun connectingABatchLetsOutOnlyTheChequebookSetupAndReloadsTheGatewayForIt() {
+        // #115: the wallet bought the batch; ant connects it, and a first connect
+        // sets up the chequebook — nothing else may get out meanwhile.
+        val ops = FakeOps()
+        val node = lightNode(ops)
+        val id = "ab".repeat(32)
+        val verdicts = mutableListOf<Boolean>()
+        ops.onSpend = {
+            verdicts += SpendGuard.admit(TestTx.request(TestTx.createBatch(TestTx.OWNER, java.math.BigInteger.TEN, 17, false)))
+            verdicts += SpendGuard.admit(TestTx.request(TestTx.swap(java.math.BigInteger.ONE)))
+            verdicts += SpendGuard.admit(TestTx.request(TestTx.deployChequebook()))
+            verdicts += SpendGuard.admit(TestTx.request(TestTx.transfer("cc".repeat(20), milliBzz)))
+            """{"enabled":true}"""
+        }
+        assertThrows(IllegalArgumentException::class.java) { node.connectBatch("0x1234") }
+        node.connectBatch("0x" + id.uppercase())
+        assertEquals(listOf(false, false, true, true), verdicts)
+        assertTrue("connect:1:0x$id" in ops.calls)
+        assertFalse(SpendGuard.admit(TestTx.request(TestTx.deployChequebook())))
+        // ant set up a chequebook the gateway didn't load at start: reload it.
+        val after = ops.calls.dropWhile { !it.startsWith("connect:") }
+        assertEquals(listOf("stopGateway:1", "gateway:1"), after.filter { it.startsWith("stopGateway:") || it.startsWith("gateway:") && !it.startsWith("gateway:GET") })
         node.dispose()
     }
 

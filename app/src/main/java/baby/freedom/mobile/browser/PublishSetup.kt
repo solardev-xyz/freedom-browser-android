@@ -31,6 +31,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
@@ -68,8 +69,9 @@ import org.json.JSONObject
  * differs: identity, light mode, xDAI, chequebook, postage stamp. The
  * stamp step opens the stamp pages (#116, [StampsScreen]); buying the
  * first stamp also deploys the chequebook, whose step then shows what it
- * holds and opens the deposit page (#117, [ChequebookScreen]). Funding in
- * one transaction (#115) comes in its own issue.
+ * holds and opens the deposit page (#117, [ChequebookScreen]). The fund
+ * step also offers funding the node and buying its first stamp in one
+ * wallet transaction (#115, [FundNodeScreen]).
  */
 
 /** A checklist step's state, as on iOS: ○ pending, ▶ active (yours to do), ⏳ waiting, ✓ done. */
@@ -193,7 +195,8 @@ internal fun publishSteps(r: PublishReadiness): List<PublishStep> {
                 r.xdaiWei != null && r.xdaiWei.signum() > 0 -> "Funded with ${formatXdai(r.xdaiWei)}."
                 chequebookDeployed -> "Funded: the node has deployed its chequebook."
                 else -> "Send xDAI on Gnosis Chain to the node's address below. It pays the gas for the " +
-                    "chequebook and the postage stamps." +
+                    "chequebook and the postage stamps. Or pay from your wallet in one transaction that " +
+                    "funds the node and buys its first stamp." +
                     if (r.xdaiUnavailable) " Its balance can't be read right now; this updates once it can." else ""
             },
             // The balance still being read: wait for it before asking for funds.
@@ -271,7 +274,8 @@ internal suspend fun gatewayGet(path: String, timeoutMs: Int = GATEWAY_TIMEOUT_M
 /**
  * The publish setup page, over the node page. [lightModeWanted] is the
  * setting; [onSwitchToLightMode] turns it on, [onOpenWallet] opens the
- * wallet page for the identity step, [onBuyStamp] the stamp buy page.
+ * wallet page for the identity step, [onBuyStamp] the stamp buy page,
+ * [onFundAndBuy] the one-transaction fund-and-buy page (#115).
  */
 @Composable
 internal fun PublishSetupScreen(
@@ -282,6 +286,7 @@ internal fun PublishSetupScreen(
     onBuyStamp: () -> Unit,
     onOpenChequebook: () -> Unit,
     onDismiss: () -> Unit,
+    onFundAndBuy: () -> Unit = {},
 ) {
     BackHandler(onBack = onDismiss)
     val context = LocalContext.current
@@ -327,6 +332,10 @@ internal fun PublishSetupScreen(
         ),
     )
     val blocked = publishBlockedReason(nodeInfo)
+    // A stamp the wallet bought for the node (#115), until the node has connected it.
+    val funding = remember(context) { SwarmFunding.get(context) }
+    val pendingStamp by funding.pending.collectAsState()
+    val spend by StampClient.spend.collectAsState()
 
     FullScreenScaffold(title = "Set up publishing", onDismiss = onDismiss) {
         LazyColumn(
@@ -341,6 +350,11 @@ internal fun PublishSetupScreen(
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
+                }
+            }
+            pendingStamp?.let { p ->
+                item("pendingStamp") {
+                    PendingStampCard(p, nodeInfo, spend, onConnect = { funding.connectNow() }, onForget = funding::forget)
                 }
             }
             steps.forEachIndexed { index, step ->
@@ -365,6 +379,10 @@ internal fun PublishSetupScreen(
                                     Spacer(Modifier.height(4.dp))
                                     OutlinedButton(onClick = { copyNodeAddress(context, address) }) {
                                         Text("Copy address")
+                                    }
+                                    // One wallet transaction instead (#115): needs light mode, for the node's price.
+                                    if (light) {
+                                        Button(onClick = onFundAndBuy) { Text("Fund and buy a stamp from your wallet") }
                                     }
                                 }
                             }

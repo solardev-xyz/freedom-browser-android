@@ -324,7 +324,7 @@ class NodeService : Service() {
     }
 
     /**
-     * One [INodeService.stampCall] (#116, #117), blocking. The spends are for
+     * One [INodeService.stampCall] (#115, #116, #117), blocking. The spends are for
      * the wallet identity's node only: the device-only key can't be
      * restored anywhere, so nothing bought with it could be kept.
      */
@@ -360,6 +360,12 @@ class NodeService : Service() {
                 spendable()
                 Log.i(TAG, "extending a postage batch, as the user confirmed")
                 swarmNode.extendStamp(args.getString("batchId"), amount(), maxSwap())
+            }
+            "connect" -> spending {
+                // A batch the wallet bought for the node (#115); ant checks the node owns it.
+                spendable()
+                Log.i(TAG, "connecting a postage batch the wallet bought for the node")
+                swarmNode.connectBatch(args.getString("batchId"))
             }
             "deposit" -> spending {
                 spendable()

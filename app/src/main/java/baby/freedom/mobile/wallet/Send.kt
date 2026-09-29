@@ -116,20 +116,38 @@ object Recipients {
  * accounts (#141): the Safe's activation or an `execTransaction` its
  * owners signed, sent and paid for by one of this wallet's owner
  * accounts. [origin] is null then — no site or pairing code asked.
+ * Likewise with a [swarm]: funding the Swarm node and buying its stamp
+ * (#115).
  */
-class DappCall(val origin: String?, val data: ByteArray, val gasLimit: BigInteger?, val safe: SafeCallLabel? = null) {
+class DappCall(
+    val origin: String?,
+    val data: ByteArray,
+    val gasLimit: BigInteger?,
+    val safe: SafeCallLabel? = null,
+    val swarm: SwarmFundLabel? = null,
+) {
     init {
         require(gasLimit == null || gasLimit.signum() > 0) { "gas limit" }
         require(safe == null || origin == null) { "a Safe's own call has no site" }
+        require(swarm == null || (origin == null && safe == null)) { "the node's funding is the wallet's own call" }
     }
 
     // By content, so a send read back from the journal equals the one that was written.
     override fun equals(other: Any?): Boolean =
         other is DappCall && origin == other.origin && data.contentEquals(other.data) && gasLimit == other.gasLimit &&
-            safe == other.safe
+            safe == other.safe && swarm == other.swarm
 
-    override fun hashCode(): Int = ((origin.hashCode() * 31 + data.contentHashCode()) * 31 + gasLimit.hashCode()) * 31 + safe.hashCode()
+    override fun hashCode(): Int =
+        (((origin.hashCode() * 31 + data.contentHashCode()) * 31 + gasLimit.hashCode()) * 31 + safe.hashCode()) * 31 + swarm.hashCode()
 }
+
+/**
+ * The wallet's own `SwarmNodeFunder` call (#115, [SwarmFunder]): it funds
+ * the Swarm node [node] (EIP-55) and buys it batch [batchId] (64 lowercase
+ * hex), [depth] deep for about [days] days — which the node connects once
+ * the call is mined.
+ */
+data class SwarmFundLabel(val node: String, val batchId: String, val depth: Int, val days: Long)
 
 /** Which Safe account (#141) a wallet-composed call is for ([address], shown by [name]), and whether it [activates] it or executes a transaction its owners signed. */
 data class SafeCallLabel(val address: String, val name: String, val activates: Boolean)

@@ -154,6 +154,8 @@ internal data class StampQuote(
     val totalCostBzz: String,
     /** The node's chequebook deposit a first buy also makes, or null for none. */
     val depositBzz: String?,
+    /** The same in PLUR; zero for none. */
+    val depositPlur: BigInteger = BigInteger.ZERO,
     /** xBZZ the node has, and how much more it swaps xDAI for. */
     val accountBzz: String,
     val neededBzz: String,
@@ -175,6 +177,7 @@ internal fun stampQuoteFrom(o: JSONObject): StampQuote? = runCatching {
         amountPerChunk = amount,
         totalCostBzz = o.getString("total_cost_bzz"),
         depositBzz = if (deposit.signum() > 0) o.optString("settlement_deposit_bzz") else null,
+        depositPlur = deposit.max(BigInteger.ZERO),
         accountBzz = o.optString("account_bzz_display"),
         neededBzz = o.optString("needed_bzz_display"),
         xdaiRequired = BigInteger(o.getString("xdai_required")),
@@ -217,8 +220,9 @@ internal fun withUnit(amount: String, unit: String): String =
 
 /**
  * The UI process's way to the node's storage calls, which run in `:node`
- * ([INodeService.stampCall]), and the one spend (a stamp buy or extend, or
- * a chequebook deposit, #117) in flight
+ * ([INodeService.stampCall]), and the one spend (a stamp buy or extend, a
+ * chequebook deposit, #117, or connecting a stamp the wallet bought, #115)
+ * in flight
  * — held here, not by a screen, so it outlives leaving the page, and so
  * there's only ever one. [MainActivity] keeps [service] current.
  */
@@ -249,7 +253,7 @@ internal object StampClient {
         return o.optString("error").takeIf { it.isNotEmpty() }?.let { Answer.Failed(it) } ?: Answer.Ok(o)
     }
 
-    enum class Kind { Buy, Extend, Deposit }
+    enum class Kind { Buy, Extend, Deposit, Connect }
 
     sealed interface Spend {
         data object Idle : Spend
@@ -286,6 +290,14 @@ internal object StampClient {
         JSONObject().put("chequebook", chequebook).put("amountPlur", amountPlur.toString())
     }
 
+    /**
+     * Connects batch [batchId], which the wallet bought for the node
+     * through SwarmNodeFunder (#115, [SwarmFunding]), so the node stamps
+     * with it; a first one also sets up the node's chequebook. False if
+     * a spend is already running.
+     */
+    fun connect(batchId: String): Boolean = start(Kind.Connect, batchId) { JSONObject().put("batchId", batchId) }
+
     /** Forget a finished spend's outcome once it's been shown. */
     fun acknowledge() {
         _spend.value.let { if (it is Spend.Done || it is Spend.Failed) _spend.compareAndSet(it, Spend.Idle) }
@@ -302,6 +314,7 @@ internal object StampClient {
                 Kind.Buy -> "buy"
                 Kind.Extend -> "extend"
                 Kind.Deposit -> "deposit"
+                Kind.Connect -> "connect"
             }
             val outcome = try {
                 when (val a = call(method, args(), SPEND_TIMEOUT_MS)) {

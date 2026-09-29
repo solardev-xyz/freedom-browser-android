@@ -2003,6 +2003,12 @@ fun BrowserScreen(
             // Publish setup's identity step (#114): the wallet page opens
             // over the node page (it's composed after it).
             onOpenWallet = { showWallet = true },
+            // The fund-and-buy transaction's explorer page (#115), as the wallet's.
+            onOpenUrl = { url ->
+                showSettings = false
+                showNode = false
+                tabs.requestOpenInNewTab?.invoke(url, false, false)
+            },
             onDismiss = { showNode = false },
         )
     }
