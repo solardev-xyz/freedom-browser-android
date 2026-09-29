@@ -381,7 +381,12 @@ class BrowserState(val id: Long, val private: Boolean = false) {
      * `beforeunload`) this tab's page is blocked on (#246), or null.
      * Set by the tab's `WebChromeClient`; [BrowserScreen] shows it in
      * turn with the prompts above ([modalPromptTurn]) while this is the
-     * active tab, and cancels it the moment it isn't.
+     * active tab. The moment it isn't — or while it's still waiting
+     * under a full-screen panel — BrowserScreen answers it with
+     * [JsDialogRequest.withdraw] rather than Cancel: `alert` returns,
+     * `confirm` is false, and a `beforeunload` the user never saw lets
+     * the navigation go (Leave); one they were shown keeps the page
+     * (Stay). A dialog already up keeps its turn over a panel.
      */
     internal var jsDialog: JsDialogRequest? by mutableStateOf<JsDialogRequest?>(null)
 

@@ -437,8 +437,12 @@ enum class PromptTurn { None, SitePermission, DownloadOffer, Radicle, Ethereum, 
  *   `confirm`, `prompt`, `beforeunload`) keeps the turn once it has it
  *   ([jsDialogHasTurn]) — even if a full-screen panel then opens under
  *   it (an intent can open one; the user can't reach the chrome past a
- *   modal dialog): it is up, naming its page, and taking it down would
- *   answer the page for the user. Waiting, it comes after the
+ *   modal dialog): it is up, naming its page, and the user may be
+ *   mid-answer. Taking it down wouldn't answer the page (only its
+ *   buttons, back/outside tap, or [JsDialogRequest.withdraw] do) — it
+ *   would still leave it waiting, and a waiting one under a panel is
+ *   withdrawn (below), answering for the user a dialog they were
+ *   looking at. Waiting, it comes after the
  *   `window.swarm` sheet and before the offer. The page is frozen until
  *   it's answered, so nothing it asks for can arrive behind it. A
  *   waiting one doesn't wait out a panel like the other prompts:
