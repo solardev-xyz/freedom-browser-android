@@ -38,11 +38,14 @@ class WalletBackupUiTest {
     fun `the status card's Backup line claims Google only when it's really there`() {
         assertEquals("This phone only", walletBackupDetail(false, null, A))
         assertEquals("This phone only", walletBackupDetail(false, Known(Status.CLOUD, B), A))
-        assertEquals("This phone and Google (end-to-end encrypted)", walletBackupDetail(true, Known(Status.CLOUD, A), A))
+        assertEquals(
+            "This phone, and Google if this phone’s Google backup is on (end-to-end encrypted)",
+            walletBackupDetail(true, Known(Status.CLOUD, A), A),
+        )
         assertEquals("This phone (Google backup paused)", walletBackupDetail(true, Known(Status.PAUSED, A), A))
         assertEquals("This phone (Google backup missing)", walletBackupDetail(true, Known(Status.NONE, null), A))
         assertFalse(walletBackupDetail(true, null, A).contains("encrypted"))
-        // This wallet's entry kept from before, backup off (#244 R2-F2): it is in Google.
+        // This wallet's entry kept from before, backup off (#244 R2-F2).
         assertTrue(walletBackupDetail(false, Known(Status.CLOUD, A.lowercase()), A).contains("kept from before"))
         assertTrue(walletBackupDetail(false, Known(Status.PAUSED, A), A).contains("paused"))
     }
@@ -156,18 +159,31 @@ class WalletBackupUiTest {
     }
 
     @Test
-    fun `the not-backed-up reminder goes only while Google really holds this wallet`() {
+    fun `Google backup never ends the not-backed-up reminder`() {
+        // #244 R5-F1: an entry written for the cloud only gets there with the phone's own
+        // Google backup on, which no app can check — the phone may hold the only copy.
         val fresh = Vault.Info(VaultProtection.SCREEN_LOCK, strongBox = false, backedUp = false)
-        val on = Vault.State.Locked(fresh.copy(cloudBackup = true))
         assertEquals(BACKUP_REMINDER, walletAttentionLine(Vault.State.Locked(fresh)))
-        assertNull(walletAttentionLine(on, Known(Status.CLOUD, A), A))
-        // #244 R2-F1: backup on, but paused (device-only), gone, or not known: the phone is the only copy.
-        assertEquals(BACKUP_REMINDER, walletAttentionLine(on, Known(Status.PAUSED, A), A))
-        assertEquals(BACKUP_REMINDER, walletAttentionLine(on, Known(Status.NONE, null), A))
-        assertEquals(BACKUP_REMINDER, walletAttentionLine(on))
-        // Backup off, but this wallet's entry kept from before is in Google; another wallet's isn't.
-        assertNull(walletAttentionLine(Vault.State.Locked(fresh), Known(Status.CLOUD, A), A))
-        assertEquals(BACKUP_REMINDER, walletAttentionLine(Vault.State.Locked(fresh), Known(Status.CLOUD, B), A))
+        assertEquals(BACKUP_REMINDER, walletAttentionLine(Vault.State.Locked(fresh.copy(cloudBackup = true))))
+        assertEquals(BACKUP_REMINDER, walletAttentionLine(Vault.State.Unlocked(fresh.copy(cloudBackup = true))))
+        assertNull(walletAttentionLine(Vault.State.Locked(fresh.copy(cloudBackup = true, backedUp = true))))
+        // The card says why Google backup isn't enough, and doesn't claim the phone is the only copy.
+        val withGoogle = backupReminderText(VaultProtection.SCREEN_LOCK, googleBackup = true)
+        assertTrue(withGoogle.contains("Freedom can’t check"))
+        assertTrue(withGoogle.contains("may be gone for good"))
+        assertTrue(backupReminderText(VaultProtection.SCREEN_LOCK, googleBackup = false).startsWith("This wallet exists only on this phone."))
+    }
+
+    @Test
+    fun `nothing claims a backup written for the cloud is in the Google account`() {
+        // #244 R5-F1: every CLOUD line names the phone's own Google backup as the condition.
+        assertTrue(googleBackupStatus(true, Availability.READY, Status.CLOUD).contains("if this phone’s Google backup is on"))
+        assertTrue(walletBackupDetail(true, Known(Status.CLOUD, A), A).contains("if this phone’s Google backup is on"))
+        assertTrue(walletBackupDetail(false, Known(Status.CLOUD, A), A).contains("if this phone’s Google backup is on"))
+        val remove = removeWalletKeepsBackupText(BackupHeld.CLOUD)
+        assertTrue(remove.contains("only if this phone’s Google backup is on"))
+        assertTrue(remove.contains("may still lose this wallet"))
+        assertTrue(GOOGLE_BACKUP_E2EE_NOTE.contains("Freedom can’t check it"))
     }
 
     @Test

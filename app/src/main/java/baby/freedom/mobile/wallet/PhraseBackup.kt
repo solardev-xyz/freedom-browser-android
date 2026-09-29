@@ -117,8 +117,8 @@ class PhraseBackup(
      * What the entry is, as of the last [reconcile], [store] or [delete];
      * null until one has run, or when the last [reconcile] couldn't (Block
      * Store didn't answer, or the entry isn't readable). What the wallet
-     * page and Settings go by to say whether the phrase is held off this
-     * phone, and whether a kept entry is this wallet's.
+     * page goes by to say where Google backup holds the phrase, and
+     * whether a kept entry is this wallet's.
      */
     data class Known(
         val status: Status,
@@ -149,7 +149,12 @@ class PhraseBackup(
         /** No entry. */
         NONE,
 
-        /** Backed up to the cloud, end-to-end encrypted. */
+        /**
+         * Written for backup to the cloud, end-to-end encrypted. Block Store
+         * uploads it with the phone's own Google backup, which may be off
+         * and which no app can ask about: not proof it left the phone
+         * (#244 R5-F1).
+         */
         CLOUD,
 
         /** Kept on this phone only until end-to-end encryption is available again. */
@@ -180,10 +185,41 @@ class PhraseBackup(
         _known.value = Known(Status.NONE, null)
     }
 
+    /**
+     * Deletes the entry only if its phrase is the wallet whose account-0
+     * address is [address], read afresh under the lock: for a delete asked
+     * while whose the entry is wasn't known (Remove wallet with Play
+     * services slow to answer), which must not take another wallet's kept
+     * backup with it (#244 R5-F2). True if deleted; false with no entry;
+     * null when an entry stays because it isn't that wallet's, can't be
+     * read, or [address] is null.
+     */
+    private suspend fun deleteIfOfHeld(address: String?): Boolean? {
+        val bytes = blockStore.retrieve(KEY) ?: run {
+            _known.value = Known(Status.NONE, null)
+            return false
+        }
+        val entryAddress = try {
+            addressOf(Mnemonic.parse(decode(bytes).phrase))
+        } catch (_: BackupUnreadableException) {
+            null
+        } catch (_: Mnemonic.ParseException) {
+            null
+        } finally {
+            bytes.fill(0)
+        }
+        if (address == null || entryAddress == null || !entryAddress.equals(address, ignoreCase = true)) return null
+        deleteHeld()
+        return true
+    }
+
     /** [store] and [delete] for code already holding the entry lock, inside [exclusive]. */
     inner class Held internal constructor() {
         suspend fun store(mnemonic: Mnemonic) = storeHeld(mnemonic)
         suspend fun delete() = deleteHeld()
+
+        /** See [deleteIfOfHeld]. */
+        suspend fun deleteIfOf(address: String?): Boolean? = deleteIfOfHeld(address)
     }
 
     /**

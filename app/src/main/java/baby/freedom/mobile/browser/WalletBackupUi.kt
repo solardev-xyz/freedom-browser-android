@@ -31,13 +31,17 @@ internal const val GOOGLE_BACKUP_TITLE = "Google backup"
 
 /**
  * How Block Store's end-to-end encryption hangs on the screen lock, in
- * the words every Google backup surface uses (#231: "explain that dependency").
+ * the words every Google backup surface uses (#231: "explain that
+ * dependency") — and how its upload hangs on the phone's own Google
+ * backup, which no app can check (#244 R5-F1).
  */
 internal const val GOOGLE_BACKUP_E2EE_NOTE =
     "Google encrypts the backup on this phone with a key protected by your screen lock, so Google " +
         "can’t read it. Restoring it on a new phone asks for this phone’s PIN, pattern or password " +
         "while you set that phone up. Without a screen lock (or a Google account) there’s no " +
-        "encryption, so no backup."
+        "encryption, so no backup. It goes to your Google account with this phone’s own Google " +
+        "backup, so that must be on in Android settings; Freedom can’t check it, so write your " +
+        "recovery phrase down too."
 
 /**
  * The Google backup row's status line: whether it's on and, if so, where
@@ -52,7 +56,10 @@ internal fun googleBackupStatus(
     entryKnown: Boolean = true,
 ): String = if (on) {
     when (status) {
-        PhraseBackup.Status.CLOUD -> "On · end-to-end encrypted in your Google account backup"
+        // Written for the cloud; it only gets there with the phone's own Google backup on,
+        // which no app can see (#244 R5-F1).
+        PhraseBackup.Status.CLOUD -> "On · end-to-end encrypted, for your Google account backup (if this " +
+            "phone’s Google backup is on)"
         PhraseBackup.Status.PAUSED -> "On, paused · this phone can’t end-to-end encrypt it now (no screen " +
             "lock or no Google account), so it’s kept on this phone only until it can"
         PhraseBackup.Status.NONE -> "On, but the backup is missing from Google Play services · turn it " +
@@ -107,7 +114,12 @@ internal enum class BackupHeld {
     /** In Block Store on this phone only: backup is paused (no end-to-end encryption now). */
     DEVICE,
 
-    /** In the Google account's backup, end-to-end encrypted: a copy off this phone. */
+    /**
+     * Written for the Google account's backup, end-to-end encrypted. Not
+     * proof of a copy off this phone: Block Store only uploads it with the
+     * phone's own Google backup, which may be off and which no app can
+     * check (#244 R5-F1). So it never stands in for the phrase written down.
+     */
     CLOUD,
 
     /**
@@ -127,10 +139,11 @@ internal enum class BackupHeld {
 }
 
 /**
- * What the reminder, Remove wallet and the lost-key advice go by (#244
+ * What Remove wallet, the Backup line and the lost-key advice go by (#244
  * R2-F1): the reconciled entry ([known]) and whose it is, never the
  * vault's flag alone — backup on says nothing about an entry since
- * paused or gone.
+ * paused or gone. Not the not-backed-up reminder: even [BackupHeld.CLOUD]
+ * doesn't prove a copy off the phone (#244 R5-F1).
  */
 internal fun backupHeld(on: Boolean, known: PhraseBackup.Known?, walletAddress: String?): BackupHeld =
     when (backupEntryIsThisWallet(on, known, walletAddress)) {
@@ -252,7 +265,8 @@ internal fun GoogleBackupOffer(busy: Boolean, onTurnOn: () -> Unit, onNotNow: ()
         Text(
             "Keep an end-to-end encrypted copy of this wallet’s recovery phrase in your Google " +
                 "account backup, so a new phone can restore the wallet. It stays off unless you " +
-                "turn it on, and you can turn it off at any time here.",
+                "turn it on, and you can turn it off at any time here. It’s no substitute for " +
+                "writing the phrase down.",
             style = MaterialTheme.typography.bodyMedium,
         )
         Spacer(Modifier.height(8.dp))

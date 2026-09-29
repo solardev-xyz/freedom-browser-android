@@ -168,9 +168,10 @@ class Vault internal constructor(
      * A phrase created here has not been backed up yet; an [imported]
      * one evidently has, so it gets no backup reminder. A [restored] one
      * hasn't, as far as this phone knows: its only other copy is the
-     * Block Store entry it came from, so the reminder goes by where that
-     * entry stands (hidden while it's in the Google account, back once
-     * backup is paused or off — #244 R3-F1), like a created wallet's.
+     * Block Store entry it came from, which is no written-down copy — it
+     * reaches the Google account only with the phone's own Google backup
+     * on, which no app can check (#244 R3-F1, R5-F1) — so it gets the
+     * reminder like a created wallet.
      */
     suspend fun create(
         mnemonic: Mnemonic,

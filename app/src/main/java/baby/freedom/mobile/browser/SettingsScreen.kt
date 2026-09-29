@@ -89,7 +89,6 @@ import baby.freedom.mobile.data.DappGrantStore
 import baby.freedom.mobile.data.NodeSettings
 import baby.freedom.mobile.ens.EnsRpcConfig
 import baby.freedom.mobile.ui.isLight
-import baby.freedom.mobile.wallet.PhraseBackup
 import baby.freedom.mobile.wallet.Vault
 import baby.freedom.mobile.wallet.WalletAccount
 import baby.freedom.mobile.wallet.WalletAccounts
@@ -213,9 +212,6 @@ fun SettingsScreen(
 
     val vault = remember(context) { Vault.get(context) }
     val walletState by vault.state.collectAsState()
-    // Google backup (#231) as last reconciled: the backup reminder goes only once it holds the phrase off the phone.
-    val phraseBackupKnown by remember(context) { PhraseBackup.get(context).known }.collectAsState()
-    val walletAddress = walletSeedAddress(walletAccountList)
 
     val scope = rememberCoroutineScope()
     val appVersion = remember(context) { appVersionLabel(context) }
@@ -223,7 +219,7 @@ fun SettingsScreen(
     // Each section's rows for the current query; an empty set hides the
     // section. The index is what the page shows right now (see
     // [SettingsRow]) — IPFS only while advanced options reveal it.
-    val walletRows = visibleSettingsRows(query, SECTION_WALLET, walletSettingsRows(walletState, phraseBackupKnown, walletAddress))
+    val walletRows = visibleSettingsRows(query, SECTION_WALLET, walletSettingsRows(walletState))
     val searchRows = visibleSettingsRows(
         query, SECTION_SEARCH, searchSectionRows(searchEngine, customSearchTemplate),
     )
@@ -347,11 +343,7 @@ fun SettingsScreen(
                 modifier = Modifier.fillMaxSize(),
             ) {
                 if (walletRows.isNotEmpty()) item("wallet") {
-                    WalletSection(
-                        state = walletState,
-                        attention = walletAttentionLine(walletState, phraseBackupKnown, walletAddress),
-                        onOpen = onOpenWallet,
-                    )
+                    WalletSection(state = walletState, onOpen = onOpenWallet)
                 }
                 if (searchRows.isNotEmpty()) item("search") {
                     SearchSection(
@@ -660,14 +652,14 @@ private fun customSearchTemplateLine(engineId: String, customTemplate: String): 
  * wrapped, never cut.
  */
 @Composable
-private fun WalletSection(state: Vault.State, attention: String?, onOpen: () -> Unit) {
+private fun WalletSection(state: Vault.State, onOpen: () -> Unit) {
     SectionCard(title = SECTION_WALLET) {
         PageRow(
             title = WALLET_TITLE,
             subtitle = walletSummary(state),
             style = PageRowStyle.Inset,
             leadingIcon = Icons.Filled.AccountBalanceWallet,
-            thirdLine = attention,
+            thirdLine = walletAttentionLine(state),
             onClick = onOpen,
         )
     }

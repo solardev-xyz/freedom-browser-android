@@ -404,28 +404,47 @@ class PhraseBackupTest {
     }
 
     @Test
-    fun `a restored wallet's reminder comes back once its backup is paused or off`() = runBlocking {
-        // #244 R3-F1: restoring must not mark the phrase backed up for good.
-        val address = phrase.seed().let { seed -> EthAccounts.address(seed, 0).also { seed.fill(0) } }
+    fun `a restored wallet keeps its reminder until the phrase is seen`() = runBlocking {
+        // #244 R3-F1: restoring must not mark the phrase backed up. #244 R5-F1: nor does its
+        // entry reconciled as cloud-backed end it — that only reaches Google with the phone's
+        // own Google backup on, which no app can check.
         backup.store(phrase)
         val v = vault()
         v.restore(auth, backup)
-        fun line() = baby.freedom.mobile.browser.walletAttentionLine(v.state.value, backup.known.value, address)
-        backup.reconcile()
-        assertNull("in the Google account: not the only copy", line())
-        // End-to-end encryption went: the cloud copy is taken down, this phone holds the only one.
+        fun line() = baby.freedom.mobile.browser.walletAttentionLine(v.state.value)
+        assertEquals(PhraseBackup.Status.CLOUD, backup.reconcile())
+        assertEquals(baby.freedom.mobile.browser.BACKUP_REMINDER, line())
         blockStore.e2ee = false
         backup.reconcile()
-        assertEquals(baby.freedom.mobile.browser.BACKUP_REMINDER, line())
-        blockStore.e2ee = true
-        backup.reconcile()
-        assertNull(line())
-        // Turned off: the entry is deleted.
-        v.disableCloudBackup(backup)
         assertEquals(baby.freedom.mobile.browser.BACKUP_REMINDER, line())
         // Seeing the phrase is what ends it for good.
         v.markBackedUp()
         assertNull(line())
+    }
+
+    @Test
+    fun `a delete asked before whose the entry is was known spares another wallet's`() = runBlocking {
+        // #244 R5-F2: Remove wallet with Play services slow to answer shows the delete box;
+        // it must not take a different wallet's kept backup with it.
+        val other = Mnemonic.parse(
+            "legal winner thank year wave sausage worth useful legal winner thank yellow",
+        )
+        val mine = phrase.seed().let { seed -> EthAccounts.address(seed, 0).also { seed.fill(0) } }
+        backup.store(other)
+        assertEquals(null, backup.exclusive { deleteIfOf(mine) })
+        assertTrue("another wallet's backup stays", blockStore.entry() != null)
+        assertEquals(null, backup.exclusive { deleteIfOf(null) })
+        assertTrue("with no address to compare, nothing is deleted", blockStore.entry() != null)
+        // This wallet's own (any case) is deleted, and known follows.
+        backup.store(phrase)
+        assertEquals(true, backup.exclusive { deleteIfOf(mine.lowercase()) })
+        assertNull(blockStore.entry())
+        assertEquals(PhraseBackup.Status.NONE, backup.known.value?.status)
+        assertEquals(false, backup.exclusive { deleteIfOf(mine) })
+        // An unreadable entry isn't known to be this wallet's either.
+        blockStore.entries[PhraseBackup.KEY] = FakeBlockStore.Stored("junk".toByteArray(), true)
+        assertEquals(null, backup.exclusive { deleteIfOf(mine) })
+        assertTrue(blockStore.entry() != null)
     }
 
     @Test
