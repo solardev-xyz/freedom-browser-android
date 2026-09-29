@@ -1,6 +1,7 @@
 package baby.freedom.mobile.browser
 
 import android.content.Context
+import android.os.SystemClock
 import android.util.Log
 import android.webkit.WebView
 import androidx.webkit.JavaScriptReplyProxy
@@ -27,6 +28,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONObject
 
 /**
@@ -64,7 +66,15 @@ class SwarmPromptRequest internal constructor(val ask: SwarmAsk) {
  * user refuses one, that tab's pages get no more sheets — every ask is
  * refused at once — until the user navigates the tab themselves
  * ([allowPrompts]), so a page can't hold the browser behind a loop of
- * them.
+ * them. A sheet that needs a wallet opens wallet setup only once the
+ * user approves it, and a setup the user backs out of counts as a
+ * refusal too.
+ *
+ * A sheet waits at most [SHEET_WAIT_MS] from the request's arrival, short
+ * of the page's own five-minute timer; once a request is approved
+ * (a sheet or an "always allow") the page is told (`{"id", "approved"}`)
+ * and stops its timer, since from then on its answer is the result of
+ * something real — an upload, a signature — that it must not lose.
  */
 object SwarmProviders {
     @Volatile
@@ -81,6 +91,10 @@ object SwarmProviders {
     private val promptLocks = HashMap<Long, Mutex>()
     private val pending = HashMap<Long, MutableSet<SwarmPromptRequest>>()
     private val blockedTabs = HashSet<Long>()
+
+    /** Opens the wallet page to create, import or unlock a wallet ([Vault.requireUnlocked]); set by [init]. */
+    @Volatile
+    internal var setUpWallet: suspend (reason: String) -> Boolean = { false }
 
     private class Bridge(val tab: BrowserState) {
         /** The origin and channel of the top-level document that last spoke. */
@@ -121,7 +135,6 @@ object SwarmProviders {
             },
             publishers = object : SwarmProvider.Publishers {
                 override fun walletExists() = vault.state.value != Vault.State.Empty
-                override suspend fun setUpWallet(reason: String) = vault.requireUnlocked(reason)
                 override fun unlocked() = vault.unlockedNow()
                 override fun site(origin: String) = identities.site(origin)
                 override fun ensureSite(origin: String) = identities.ensureSite(origin)
@@ -130,6 +143,7 @@ object SwarmProviders {
             },
             node = GatewayHttp,
         )
+        setUpWallet = { reason -> vault.requireUnlocked(reason) }
         p.events = SwarmProvider.Events { origin, event, data ->
             scope.launch { emit(origin, event, data) }
         }
@@ -192,6 +206,7 @@ object SwarmProviders {
         reply: JavaScriptReplyProxy,
     ) {
         val tab = bridge.tab
+        val deadline = SystemClock.elapsedRealtime() + SHEET_WAIT_MS
         if (message.type != WebMessageCompat.TYPE_STRING) return
         val request = parseSwarmRequest(message.data) ?: return
         val origin = providerOriginKey(sourceOrigin)
@@ -215,7 +230,10 @@ object SwarmProviders {
         scope.launch {
             val result = try {
                 val p = provider ?: throw IllegalStateException("provider not ready")
-                p.request(origin, request.method, request.params) { ask -> askOnTab(tab, doc, ask) }
+                val approved = { approved(reply, request.id) }
+                p.request(origin, request.method, request.params, approved) { ask ->
+                    askOnTab(tab, doc, ask, deadline - SystemClock.elapsedRealtime(), approved)
+                }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Throwable) {
@@ -236,6 +254,11 @@ object SwarmProviders {
         runCatching { reply.postMessage(body.toString()) }
     }
 
+    /** The request was approved: the page stops its timer and waits for the result. */
+    private fun approved(reply: JavaScriptReplyProxy, id: Long) {
+        runCatching { reply.postMessage(JSONObject().put("id", id).put("approved", true).toString()) }
+    }
+
     private fun emit(origin: String, event: String, data: Any) {
         val message = JSONObject().put("event", event).put("data", data).toString()
         for (bridge in bridges.values.toList()) {
@@ -247,26 +270,50 @@ object SwarmProviders {
     /**
      * Put [ask] up on [tab] and wait for the answer — a refusal at once if
      * the tab is blocked from prompting, the document that asked ([doc])
-     * is no longer the tab's, or the tab moves on or closes while it waits.
+     * is no longer the tab's, or the tab moves on or closes while it waits,
+     * and a refusal (that doesn't block the tab) once [waitMs] runs out
+     * with the sheet unanswered. [approved] is told as soon as the user
+     * approves. A [SwarmAsk.Sign] that [needs a wallet][SwarmAsk.Sign.needsWallet]
+     * then opens wallet setup, right from the user's tap on the sheet —
+     * and a setup the user backs out of blocks the tab like a refused
+     * sheet, so a page can't reopen the wallet page in a loop.
      */
-    private suspend fun askOnTab(tab: BrowserState, doc: Int, ask: SwarmAsk): SwarmProvider.Answer {
+    internal suspend fun askOnTab(
+        tab: BrowserState,
+        doc: Int,
+        ask: SwarmAsk,
+        waitMs: Long = SHEET_WAIT_MS,
+        approved: () -> Unit = {},
+    ): SwarmProvider.Answer {
         fun live() = (documents[tab.id] ?: 0) == doc && tab.id !in blockedTabs
-        if (!live()) return SwarmProvider.Answer.REJECTED
+        if (!live() || waitMs <= 0) return SwarmProvider.Answer.REJECTED
         val lock = promptLocks.getOrPut(tab.id) { Mutex() }
-        return lock.withLock {
-            if (!live()) return@withLock SwarmProvider.Answer.REJECTED
-            val request = SwarmPromptRequest(ask)
-            pending.getOrPut(tab.id) { mutableSetOf() }.add(request)
-            tab.swarmPrompt = request
-            val answer = try {
-                request.answer.await()
-            } finally {
-                pending[tab.id]?.remove(request)
-                if (tab.swarmPrompt === request) tab.swarmPrompt = null
+        return withTimeoutOrNull(waitMs) {
+            lock.withLock {
+                if (!live()) return@withLock SwarmProvider.Answer.REJECTED
+                val request = SwarmPromptRequest(ask)
+                pending.getOrPut(tab.id) { mutableSetOf() }.add(request)
+                tab.swarmPrompt = request
+                val answer = try {
+                    request.answer.await()
+                } finally {
+                    pending[tab.id]?.remove(request)
+                    if (tab.swarmPrompt === request) tab.swarmPrompt = null
+                }
+                if (!answer.allowed && live()) blockedTabs += tab.id
+                if (answer.allowed && live()) answer else SwarmProvider.Answer.REJECTED
             }
-            if (!answer.allowed && live()) blockedTabs += tab.id
-            if (answer.allowed && live()) answer else SwarmProvider.Answer.REJECTED
-        }
+        }?.let { answer ->
+            if (!answer.allowed) return answer
+            approved()
+            if (ask !is SwarmAsk.Sign || !ask.needsWallet) return answer
+            // Past the sheet's deadline now: setting a wallet up (and
+            // writing its phrase down) takes as long as it takes, and the
+            // page has stopped its timer.
+            val set = setUpWallet(swarmWalletReason(ask.origin))
+            if (!set && live()) blockedTabs += tab.id
+            if (set && live()) answer else SwarmProvider.Answer.REJECTED
+        } ?: SwarmProvider.Answer.REJECTED
     }
 
     /** The tab started (committed) a new document on [url] — null when it's being torn down. */
@@ -296,6 +343,9 @@ object SwarmProviders {
     }
 
     private const val TAG = "SwarmProvider"
+
+    /** How long a sheet waits for the user: well short of the page's five-minute timer ([swarmProviderJs]). */
+    internal const val SHEET_WAIT_MS = 270_000L
 }
 
 /**
@@ -385,7 +435,11 @@ private const val MAX_SWARM_REQUEST_CHARS = 72 * 1024 * 1024
  * The natives the script relies on are saved at document start, so a
  * page that later overrides them can't see or change what's sent.
  * Uploads, signing and prompts time out after five minutes, anything
- * else after one (desktop's).
+ * else after one (desktop's) — until the request is approved
+ * (`{"id", "approved": true}`): then its timer stops, and the page waits
+ * for the result of the upload or signature it approved, which the node's
+ * own timeouts bound, rather than lose the reference to something that
+ * got published.
  */
 internal fun swarmProviderJs(channel: String): String {
     require(Regex("[a-z]{8,64}").matches(channel)) { "channel must be lower-case letters" }
@@ -450,6 +504,7 @@ internal fun swarmProviderJs(channel: String): String {
     }
     var p = pending.get(msg.id);
     if (!p) return;
+    if (msg.approved === true) { clearT(p.timer); return; }
     pending.delete(msg.id);
     clearT(p.timer);
     if (msg.error) {

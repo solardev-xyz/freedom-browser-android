@@ -39,13 +39,17 @@ class SwarmProviderTest {
     private class MemoryFeeds : SwarmProvider.Feeds {
         val granted = HashSet<String>()
         val feeds = HashMap<String, MutableMap<String, SwarmProvider.FeedRecord>>()
+        /** Thrown by the next writes: the store's IOException, or IllegalStateException with no wallet. */
+        var failWrites: Exception? = null
         override fun granted(origin: String) = origin in granted
         override fun grant(origin: String) {
+            failWrites?.let { throw it }
             granted += origin
         }
         override fun feed(origin: String, name: String) = feeds[origin]?.get(name)
         override fun all(origin: String) = feeds[origin]?.values?.sortedBy { it.createdAt }.orEmpty()
         override fun put(origin: String, record: SwarmProvider.FeedRecord) {
+            failWrites?.let { throw it }
             feeds.getOrPut(origin) { LinkedHashMap() }[record.name] = record
         }
     }
@@ -54,16 +58,10 @@ class SwarmProviderTest {
     private class FakePublishers : SwarmProvider.Publishers {
         var wallet = true
         var unlocked = true
-        var setUpAnswer = false
-        val setUps = mutableListOf<String>()
         val sites = HashMap<String, SitePublisher>()
         var activity = 0
         val keysHandedOut = mutableListOf<ByteArray>()
         override fun walletExists() = wallet
-        override suspend fun setUpWallet(reason: String): Boolean {
-            setUps += reason
-            return setUpAnswer
-        }
         override fun unlocked() = unlocked
         override fun site(origin: String) = sites[origin]
         override fun ensureSite(origin: String) = sites.getOrPut(origin) {
@@ -164,6 +162,9 @@ class SwarmProviderTest {
     private val provider = SwarmProvider(grants, feeds, publishers, node, clock = { now }, io = Dispatchers.Unconfined)
     private val asked = mutableListOf<SwarmAsk>()
     private var answer = SwarmProvider.Answer(true)
+    /** Run when a sheet is answered allowed: stands in for what approving it does (setting up a wallet). */
+    private var onApproved: () -> Unit = {}
+    private var commits = 0
     private val events = mutableListOf<Triple<String, String, Any>>()
 
     init {
@@ -171,9 +172,9 @@ class SwarmProviderTest {
     }
 
     private fun call(method: String, params: JSONObject = JSONObject(), origin: String = site) = runBlocking {
-        provider.request(origin, method, params) { ask ->
+        provider.request(origin, method, params, { commits++ }) { ask ->
             asked += ask
-            answer
+            answer.also { if (it.allowed) onApproved() }
         }
     }
 
@@ -434,6 +435,15 @@ class SwarmProviderTest {
         assertEquals("rate_limited", err(call("swarm_listFeeds", origin = other)).reason)
     }
 
+    @Test
+    fun `read budgets of origins that stopped reading are dropped`() {
+        for (i in 0 until 50) ok(call("swarm_listFeeds", origin = "https://s$i.example"))
+        assertEquals(50, provider.budgetOrigins())
+        now += SwarmProvider.BUDGET_WINDOW_MS
+        ok(call("swarm_listFeeds"))
+        assertEquals(1, provider.budgetOrigins())
+    }
+
     // -------------------------------------------------------------------
     // Feeds and signing
     // -------------------------------------------------------------------
@@ -585,12 +595,90 @@ class SwarmProviderTest {
     }
 
     @Test
-    fun `with no wallet, signing opens wallet setup first`() {
+    fun `with no wallet, the sheet comes first and approving it is what sets a wallet up`() {
         connect()
         publishers.wallet = false
+        // Refused: nothing further, and the page isn't told to wait.
+        answer = SwarmProvider.Answer.REJECTED
         assertEquals(4001, err(call("swarm_getSigningIdentity")).code)
-        assertEquals(1, publishers.setUps.size)
+        val sign = asked.single() as SwarmAsk.Sign
+        assertTrue(sign.needsWallet)
+        assertTrue(sign.grant)
+        assertEquals(0, commits)
+        // Approved, but no wallet came of it (setup backed out of): refused, nothing granted.
+        answer = SwarmProvider.Answer(true)
+        assertEquals(4001, err(call("swarm_getSigningIdentity")).code)
+        assertFalse(feeds.granted(site))
+        assertTrue(publishers.keysHandedOut.isEmpty())
+        // Approved, and the wallet set up: signs, and feed access is granted.
+        onApproved = { publishers.wallet = true }
+        publishers.wallet = false
+        okJson(call("swarm_getSigningIdentity"))
+        assertTrue((asked.last() as SwarmAsk.Sign).needsWallet)
+        assertTrue(feeds.granted(site))
+        // Even an always-allow left from an earlier wallet doesn't skip the sheet with none now.
+        grants.auto += site to SwarmProvider.AutoApprove.Signing
+        onApproved = {}
+        publishers.wallet = false
+        asked.clear()
+        answer = SwarmProvider.Answer.REJECTED
+        assertEquals(4001, err(call("swarm_getSigningIdentity")).code)
+        assertEquals(1, asked.size)
+    }
+
+    @Test
+    fun `the page is told a request is committed only once it is approved`() {
+        connect()
+        answer = SwarmProvider.Answer.REJECTED
+        err(call("swarm_publishData", JSONObject().put("data", "x").put("contentType", "text/plain")))
+        assertEquals(0, commits)
+        answer = SwarmProvider.Answer(true)
+        ok(call("swarm_publishData", JSONObject().put("data", "x").put("contentType", "text/plain")))
+        assertEquals(1, commits)
+        // Auto-approved: no sheet, still committed before the upload.
+        grants.auto += site to SwarmProvider.AutoApprove.Publish
+        asked.clear()
+        ok(call("swarm_publishData", JSONObject().put("data", "x").put("contentType", "text/plain")))
         assertTrue(asked.isEmpty())
+        assertEquals(2, commits)
+    }
+
+    @Test
+    fun `the sign sheet names the identity that actually signs a feed`() {
+        connect()
+        feeds.grant(site)
+        okJson(call("swarm_createFeed", JSONObject().put("name", "notes")))
+        // The site switches its active identity to the Ant wallet one.
+        val wallet = PublisherIdentity.antWallet(2)
+        publishers.sites[site] = publishers.sites[site]!!.let { it.copy(activeId = wallet.id, identities = it.identities + wallet) }
+        asked.clear()
+        ok(call("swarm_updateFeed", JSONObject().put("feedId", "notes").put("reference", "cd".repeat(32))))
+        ok(call("swarm_writeFeedEntry", JSONObject().put("name", "notes").put("data", "hello")))
+        for (ask in asked) assertEquals("App-scoped identity 1 (App-scoped)", swarmSignIdentity(ask as SwarmAsk.Sign))
+        assertEquals(2, asked.size)
+        // A new feed or a SOC signs with (and names) the active one.
+        asked.clear()
+        ok(call("swarm_createFeed", JSONObject().put("name", "other")))
+        assertEquals(wallet.id, (asked.single() as SwarmAsk.Sign).identity!!.id)
+    }
+
+    @Test
+    fun `a failed save on this device is not reported as the node being down`() {
+        connect()
+        feeds.grant(site)
+        feeds.failWrites = java.io.IOException("disk full")
+        val created = err(call("swarm_createFeed", JSONObject().put("name", "notes")))
+        assertEquals(-32603, created.code)
+        assertNull(created.reason)
+        assertTrue(created.message, created.message.contains("on this device"))
+        feeds.failWrites = IllegalStateException("there is no wallet")
+        val noWallet = err(call("swarm_createFeed", JSONObject().put("name", "notes")))
+        assertEquals(-32603, noWallet.code)
+        assertEquals("There is no wallet on this device", noWallet.message)
+        // The node itself being down still says so.
+        feeds.failWrites = null
+        node.up = false
+        assertEquals("node-stopped", err(call("swarm_createFeed", JSONObject().put("name", "notes"))).reason)
     }
 
     @Test
@@ -699,9 +787,54 @@ class SwarmProviderTest {
             assertEquals("a/b", sent.getJSONObject("params").getString("contentType"))
             assertEquals("undefined", cx.evaluateString(scope, "typeof window.abcdefghij", "gone", 1, null).toString())
             assertEquals("true", cx.evaluateString(scope, "String(window.swarm.isFreedomBrowser)", "flag", 1, null).toString())
+
         } finally {
             RhinoContext.exit()
         }
         assertTrue(runCatching { swarmProviderJs("a'b") }.isFailure)
+    }
+
+    @Test
+    fun `an approved request stops the page's timer and still waits for its result`() {
+        val cx = RhinoContext.enter()
+        try {
+            cx.languageVersion = RhinoContext.VERSION_ES6
+            val scope = cx.initStandardObjects()
+            cx.evaluateString(
+                scope,
+                """
+                var handler = null, timers = [], cleared = [], settled = null;
+                var window = {
+                  location: { protocol: 'https:' },
+                  setTimeout: function (f, ms) { timers.push({ f: f, ms: ms }); return timers.length; },
+                  clearTimeout: function (id) { cleared.push(id); },
+                  Promise: Promise, Error: Error, Map: Map, Uint8Array: Uint8Array, ArrayBuffer: ArrayBuffer,
+                  BigInt: undefined, btoa: function (s) { return s; },
+                  abcdefghij: { postMessage: function (m) {}, addEventListener: function (t, h) { handler = h; } }
+                };
+                window.top = window;
+                """.trimIndent(),
+                "setup", 1, null,
+            )
+            cx.evaluateString(scope, swarmProviderJs("abcdefghij"), "swarm.js", 1, null)
+            cx.evaluateString(
+                scope,
+                """
+                window.swarm.publishData({ data: 'x', contentType: 'text/plain' })
+                  .then(function (r) { settled = 'ok:' + r.reference; }, function (e) { settled = 'err:' + e.message; });
+                handler({ data: JSON.stringify({ id: 1, approved: true }) });
+                """.trimIndent(),
+                "call", 1, null,
+            )
+            cx.processMicrotasks()
+            assertEquals("300000", cx.evaluateString(scope, "String(timers[0].ms)", "ms", 1, null).toString())
+            assertEquals("1", cx.evaluateString(scope, "cleared.join(',')", "cleared", 1, null).toString())
+            assertEquals("null", cx.evaluateString(scope, "String(settled)", "settled", 1, null).toString())
+            cx.evaluateString(scope, "handler({ data: JSON.stringify({ id: 1, result: { reference: 'ab' } }) });", "result", 1, null)
+            cx.processMicrotasks()
+            assertEquals("ok:ab", cx.evaluateString(scope, "String(settled)", "settled", 1, null).toString())
+        } finally {
+            RhinoContext.exit()
+        }
     }
 }

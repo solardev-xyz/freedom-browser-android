@@ -120,7 +120,11 @@ internal fun swarmPathsPreview(paths: List<String>): String =
 /** What a signing sheet's request row says: the method's own detail, or the feed it's on. */
 internal fun swarmSignRequest(ask: SwarmAsk.Sign): String = ask.detail ?: ask.feedName ?: "Feed operation"
 
-/** Which identity signs: the site's active one, or the new one its first grant will make. */
+/** The note on a signing sheet with no wallet on the device yet. */
+internal fun swarmNeedsWalletNote(copy: SwarmPromptCopy): String =
+    "You don't have a wallet yet: ${copy.approve} opens wallet setup first, and the site's identity comes from it."
+
+/** Which identity signs: the one a feed was created with, the site's active one, or the new one its first grant will make. */
 internal fun swarmSignIdentity(ask: SwarmAsk.Sign): String =
     ask.identity?.let { "${it.label} (${it.kind})" } ?: "A new app-scoped identity for this site"
 
@@ -134,7 +138,8 @@ internal fun swarmSignIdentity(ask: SwarmAsk.Sign): String =
  * one (off every time the sheet comes up), and Reject / the action.
  *
  * Signing needs the wallet open: the action asks for the screen lock
- * first when it isn't. Like the other approval sheets, the buttons, a
+ * first when it isn't, and with no wallet on the device at all it opens
+ * wallet setup once approved. Like the other approval sheets, the buttons, a
  * swipe down, a tap outside and Back all ignore input for the first
  * [PromptTapGuard.PROTECTION_MS] it is on screen, counted from its first
  * drawn frame. Everything but the action rejects.
@@ -163,7 +168,9 @@ fun SwarmPromptSheet(request: SwarmPromptRequest) {
         delay(guard.remainingMs())
         armed = true
     }
-    val needsUnlock = ask is SwarmAsk.Sign && vaultState !is Vault.State.Unlocked
+    // No wallet yet: approving opens wallet setup (SwarmProviders.askOnTab), so there's nothing to unlock here.
+    val needsWallet = ask is SwarmAsk.Sign && ask.needsWallet && vaultState is Vault.State.Empty
+    val needsUnlock = ask is SwarmAsk.Sign && !needsWallet && vaultState !is Vault.State.Unlocked
 
     fun reject() {
         if (guard.accepts() && !busy) request.respond(SwarmProvider.Answer.REJECTED)
@@ -172,7 +179,7 @@ fun SwarmPromptSheet(request: SwarmPromptRequest) {
     fun approve() {
         if (!guard.accepts() || busy) return
         val answer = SwarmProvider.Answer(allowed = true, always = copy.always != null && always)
-        if (ask !is SwarmAsk.Sign) {
+        if (ask !is SwarmAsk.Sign || needsWallet) {
             request.respond(answer)
             return
         }
@@ -263,6 +270,14 @@ fun SwarmPromptSheet(request: SwarmPromptRequest) {
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(vertical = 8.dp),
                 )
+                if (needsWallet) {
+                    Text(
+                        swarmNeedsWalletNote(copy),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.testTag("swarm-wallet-note"),
+                    )
+                }
                 if (needsUnlock) {
                     Text(
                         "Your wallet is locked: ${copy.approve} asks for your screen lock first.",

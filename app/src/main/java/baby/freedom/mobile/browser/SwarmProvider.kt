@@ -90,17 +90,19 @@ class SwarmProvider(
 
     /** The wallet and the sites' publisher identities (#119). */
     interface Publishers {
-        /** Whether there is a wallet at all. */
+        /**
+         * Whether there is a wallet at all. With none, a signing method's
+         * sheet ([SwarmAsk.Sign.needsWallet]) sets one up once approved:
+         * [SwarmProviders] opens the wallet page from the approved sheet,
+         * never straight from a page's request.
+         */
         fun walletExists(): Boolean
-
-        /** Opens the wallet page to create, import or unlock one ([baby.freedom.mobile.wallet.Vault.requireUnlocked]). */
-        suspend fun setUpWallet(reason: String): Boolean
         fun unlocked(): Boolean
 
         /** [origin]'s identities, or null if it has none. */
         fun site(origin: String): SitePublisher?
 
-        /** [origin]'s identities, giving it an app-scoped one first if it has none. Throws [IOException]. */
+        /** [origin]'s identities, giving it an app-scoped one first if it has none. Throws [IOException], or [IllegalStateException] with no wallet. */
         fun ensureSite(origin: String): SitePublisher
 
         /** [identity]'s 32-byte key, which the caller zeroes. Throws [VaultLockedException]. */
@@ -169,7 +171,11 @@ class SwarmProvider(
 
     private class Budget(var startedAt: Long, var requests: Int, var bytes: Long)
 
+    /** Per-origin read budgets; a window that has run out is dropped on the next read ([spendBudget]). */
     private val budgets = HashMap<String, Budget>()
+
+    /** How many origins have a read budget running: for tests. */
+    internal fun budgetOrigins(): Int = synchronized(budgets) { budgets.size }
 
     /** Upload tag → the origin that made it: nobody else may read its progress. Session only. */
     private val tagOwners = ConcurrentHashMap<Long, String>()
@@ -181,15 +187,19 @@ class SwarmProvider(
      * Answer one request from a page on [origin]. [ask] puts an approval
      * sheet up on the page's tab and returns the user's answer
      * ([Answer.REJECTED] for a refusal, a dismissal, or a sheet that
-     * couldn't be shown).
+     * couldn't be shown). [committed] is called once a write or signature
+     * is approved (by a sheet or an "always allow") and about to run: from
+     * then on the page must wait for the real answer rather than time out,
+     * or it would lose the reference to something that did get published.
      */
     suspend fun request(
         origin: String,
         method: String,
         params: JSONObject,
+        committed: () -> Unit = {},
         ask: suspend (SwarmAsk) -> Answer,
     ): Reply = try {
-        dispatch(origin, method, params, ask)
+        dispatch(origin, method, params, Calls(ask, committed))
     } catch (e: Invalid) {
         e.error
     } catch (e: CancellationException) {
@@ -197,15 +207,20 @@ class SwarmProvider(
     } catch (e: VaultLockedException) {
         Reply.Err(INTERNAL, VAULT_LOCKED)
     } catch (e: IOException) {
+        // Only the node's calls get here: the stores' writes are [saving].
         Reply.Err(UNAVAILABLE, "Swarm node is not available", reason("node-stopped"))
     }
+
+    /** One request's way back to its page: [ask] a sheet, and say it's [committed]. */
+    private class Calls(val ask: suspend (SwarmAsk) -> Answer, val committed: () -> Unit)
 
     private suspend fun dispatch(
         origin: String,
         method: String,
         params: JSONObject,
-        ask: suspend (SwarmAsk) -> Answer,
+        calls: Calls,
     ): Reply {
+        val ask = calls.ask
         if (method !in KNOWN_METHODS) return Reply.Err(UNSUPPORTED, "Unknown method: $method")
         if (method in MESSAGING_METHODS) return Reply.Err(UNSUPPORTED, "Messaging is not supported yet: $method")
         return when (method) {
@@ -218,13 +233,13 @@ class SwarmProvider(
             else -> {
                 if (!grants.connected(origin)) return notConnected()
                 when (method) {
-                    "swarm_publishData" -> publishData(origin, params, ask)
-                    "swarm_publishFiles" -> publishFiles(origin, params, ask)
-                    "swarm_publishChunk" -> publishChunk(origin, params, ask)
+                    "swarm_publishData" -> publishData(origin, params, calls)
+                    "swarm_publishFiles" -> publishFiles(origin, params, calls)
+                    "swarm_publishChunk" -> publishChunk(origin, params, calls)
                     "swarm_getUploadStatus" -> uploadStatus(origin, params)
                     "swarm_createFeed", "swarm_updateFeed", "swarm_writeFeedEntry",
                     "swarm_writeSingleOwnerChunk", "swarm_getSigningIdentity",
-                    -> signing(origin, method, params, ask)
+                    -> signing(origin, method, params, calls)
                     else -> Reply.Err(INTERNAL, "Internal error")
                 }
             }
@@ -275,7 +290,7 @@ class SwarmProvider(
     // Publishing
     // ---------------------------------------------------------------
 
-    private suspend fun publishData(origin: String, params: JSONObject, ask: suspend (SwarmAsk) -> Answer): Reply {
+    private suspend fun publishData(origin: String, params: JSONObject, calls: Calls): Reply {
         val data = params.opt("data")
         if (data == null || data == JSONObject.NULL) fail("data is required")
         val contentType = params.opt("contentType") as? String
@@ -284,7 +299,7 @@ class SwarmProvider(
         if (payload.size > MAX_DATA_BYTES) tooLarge("Payload exceeds maximum size of $MAX_DATA_BYTES bytes", MAX_DATA_BYTES, payload.size)
         val name = (params.opt("name") as? String)?.takeIf { it.isNotEmpty() }
         preflightOrFail()
-        approvePublish(origin, ask, SwarmAsk.Publish(origin, SwarmAsk.Publish.Kind.Data, payload.size.toLong(), contentType, name, emptyList()))
+        approvePublish(origin, calls, SwarmAsk.Publish(origin, SwarmAsk.Publish.Kind.Data, payload.size.toLong(), contentType, name, emptyList()))
         val batch = batchFor(payload.size.toLong())
         val query = "name=" + java.net.URLEncoder.encode(name ?: "data", "UTF-8").replace("+", "%20")
         val answer = call(
@@ -297,7 +312,7 @@ class SwarmProvider(
         return Reply.Ok(JSONObject().put("reference", reference).put("bzzUrl", "bzz://$reference"))
     }
 
-    private suspend fun publishFiles(origin: String, params: JSONObject, ask: suspend (SwarmAsk) -> Answer): Reply {
+    private suspend fun publishFiles(origin: String, params: JSONObject, calls: Calls): Reply {
         val files = params.opt("files") as? JSONArray
         if (files == null || files.length() == 0) fail("files must be a non-empty array", "empty_files")
         if (files.length() > MAX_FILE_COUNT) {
@@ -325,7 +340,7 @@ class SwarmProvider(
             fail("indexDocument must match an existing file path", "invalid_index_document")
         }
         preflightOrFail()
-        approvePublish(origin, ask, SwarmAsk.Publish(origin, SwarmAsk.Publish.Kind.Files, total, null, null, entries.map { it.first }))
+        approvePublish(origin, calls, SwarmAsk.Publish(origin, SwarmAsk.Publish.Kind.Files, total, null, null, entries.map { it.first }))
         val batch = batchFor(total)
         val headers = uploadHeaders(batch, deferred = true) + ("swarm-collection" to "true") +
             ("content-type" to "application/x-tar") +
@@ -340,12 +355,12 @@ class SwarmProvider(
         )
     }
 
-    private suspend fun publishChunk(origin: String, params: JSONObject, ask: suspend (SwarmAsk) -> Answer): Reply {
+    private suspend fun publishChunk(origin: String, params: JSONObject, calls: Calls): Reply {
         emptyOptions(params)
         val payload = chunkPayload(params.opt("data"))
         val span = span(params.opt("span"))
         preflightOrFail()
-        approvePublish(origin, ask, SwarmAsk.Publish(origin, SwarmAsk.Publish.Kind.Chunk, payload.size.toLong(), null, null, emptyList()))
+        approvePublish(origin, calls, SwarmAsk.Publish(origin, SwarmAsk.Publish.Kind.Chunk, payload.size.toLong(), null, null, emptyList()))
         val batch = batchFor(SwarmChunks.MAX_PAYLOAD.toLong())
         val cac = SwarmChunks.cac(payload, span)
         val answer = call("POST", "/chunks", uploadHeaders(batch, deferred = false), cac.data(), UPLOAD_TIMEOUT_MS)
@@ -378,11 +393,13 @@ class SwarmProvider(
         )
     }
 
-    private suspend fun approvePublish(origin: String, ask: suspend (SwarmAsk) -> Answer, what: SwarmAsk.Publish) {
-        if (grants.autoApprove(origin, AutoApprove.Publish)) return
-        val answer = ask(what)
-        if (!answer.allowed) throw Invalid(rejected())
-        if (answer.always) grants.setAutoApprove(origin, AutoApprove.Publish)
+    private suspend fun approvePublish(origin: String, calls: Calls, what: SwarmAsk.Publish) {
+        if (!grants.autoApprove(origin, AutoApprove.Publish)) {
+            val answer = calls.ask(what)
+            if (!answer.allowed) throw Invalid(rejected())
+            if (answer.always) grants.setAutoApprove(origin, AutoApprove.Publish)
+        }
+        calls.committed()
     }
 
     // ---------------------------------------------------------------
@@ -392,6 +409,8 @@ class SwarmProvider(
     /** Parameters a signing method was checked to have, for its sheet and its work. */
     private class Signed(
         val feedName: String?,
+        /** The feed it signs for, whose own identity signs ([signerOf]); null for a new feed or a SOC. */
+        val feed: FeedRecord?,
         val detail: String?,
         /** Whether it writes to Swarm, so the node must be able to publish before anyone is asked. */
         val writes: Boolean,
@@ -401,29 +420,57 @@ class SwarmProvider(
     /** The key a signing method signs with, and which identity it is. */
     private class Resolved(val identity: PublisherIdentity, val key: ByteArray)
 
-    private suspend fun signing(origin: String, method: String, params: JSONObject, ask: suspend (SwarmAsk) -> Answer): Reply {
+    private suspend fun signing(origin: String, method: String, params: JSONObject, calls: Calls): Reply {
         val kind = if (method == "swarm_writeSingleOwnerChunk" || method == "swarm_getSigningIdentity") AutoApprove.Signing else AutoApprove.Feeds
         val signed = checkSigning(origin, method, params)
         if (signed.writes) preflightOrFail()
-        if (!publishers.walletExists()) {
-            val reason = "${permissionOriginDisplay(origin)} wants to sign Swarm content with a publisher identity"
-            if (!publishers.setUpWallet(reason)) return rejected()
-        }
-        val granted = feeds.granted(origin)
+        // No wallet: the sheet comes first, gated like any other (its
+        // tab on screen, the asking document still there, a refused
+        // sheet blocking the tab), and approving it is what opens wallet
+        // setup (SwarmProviders.askOnTab). A page never opens the wallet
+        // page by itself.
+        val needsWallet = !publishers.walletExists()
+        val granted = !needsWallet && feeds.granted(origin)
         val autoApproved = granted && grants.autoApprove(origin, kind)
         if (!granted || !autoApproved || !publishers.unlocked()) {
-            val identity = publishers.site(origin)?.active
-            val answer = ask(SwarmAsk.Sign(origin, method, kind, !granted, signed.feedName, signed.detail, identity))
+            // The identity that will actually sign: a feed's own, not the site's active one.
+            val identity = publishers.site(origin)?.let { signerOf(it, signed.feed) }
+            val answer = calls.ask(SwarmAsk.Sign(origin, method, kind, !granted, signed.feedName, signed.detail, identity, needsWallet))
             if (!answer.allowed) return rejected()
-            if (!granted) withContext(io) { feeds.grant(origin) }
+            if (needsWallet && !publishers.walletExists()) return rejected()
+            if (!feeds.granted(origin)) saving("the site's feed access") { feeds.grant(origin) }
             if (answer.always) grants.setAutoApprove(origin, kind)
         }
+        calls.committed()
         return signed.work()
+    }
+
+    /**
+     * Which of [site]'s identities signs for [feed]: the one it was
+     * created with, or the site's active one for a new feed or a SOC. The
+     * sheet's "Signs as" and the signature itself both come from here.
+     */
+    private fun signerOf(site: SitePublisher, feed: FeedRecord?): PublisherIdentity =
+        feed?.let { f -> site.identities.firstOrNull { it.id == f.identityId } } ?: site.active
+
+    /**
+     * Runs a write to this device's stores: its [IOException] (or
+     * [IllegalStateException], with no wallet) is a storage failure,
+     * never the node's.
+     */
+    private suspend fun <T> saving(what: String, block: () -> T): T = withContext(io) {
+        try {
+            block()
+        } catch (e: IOException) {
+            throw Invalid(Reply.Err(INTERNAL, "Couldn't save $what on this device"))
+        } catch (e: IllegalStateException) {
+            throw Invalid(Reply.Err(INTERNAL, "There is no wallet on this device"))
+        }
     }
 
     /** Checks [method]'s parameters (before any sheet) and returns its work. */
     private fun checkSigning(origin: String, method: String, params: JSONObject): Signed = when (method) {
-        "swarm_getSigningIdentity" -> Signed(null, "Signing identity", writes = false) {
+        "swarm_getSigningIdentity" -> Signed(null, null, "Signing identity", writes = false) {
             withKey(origin, null) { r ->
                 Reply.Ok(
                     JSONObject().put("owner", PublisherKeys.address(r.key)).put("identityMode", r.identity.mode.wire),
@@ -435,21 +482,22 @@ class SwarmProvider(
             val identifier = hex32(params.opt("identifier"), "invalid_identifier", "identifier")
             val payload = chunkPayload(params.opt("data"))
             val span = span(params.opt("span"))
-            Signed(null, "Single Owner Chunk ${identifier.swarmHex()}", writes = true) {
+            Signed(null, null, "Single Owner Chunk ${identifier.swarmHex()}", writes = true) {
                 withKey(origin, null) { r -> writeSoc(r, identifier, payload, span) }
             }
         }
         "swarm_createFeed" -> {
             val name = feedName(params.opt("name"))
             // Creating an existing feed only returns it: nothing is written.
-            Signed(name, null, writes = feeds.feed(origin, name) == null) { createFeed(origin, name) }
+            val existing = feeds.feed(origin, name)
+            Signed(name, existing, null, writes = existing == null) { createFeed(origin, name) }
         }
         "swarm_updateFeed" -> {
             val feedId = (params.opt("feedId") as? String)?.takeIf { it.isNotEmpty() } ?: fail("feedId is required")
             val reference = (params.opt("reference") as? String)?.takeIf { HEX64.matches(it) }
                 ?: fail("reference must be a 64-character hex string", "invalid_reference")
-            if (feeds.feed(origin, feedId) == null) fail("Feed not found: $feedId", "feed_not_found")
-            Signed(feedId, null, writes = true) { updateFeed(origin, feedId, reference.lowercase()) }
+            val feed = feeds.feed(origin, feedId) ?: fail("Feed not found: $feedId", "feed_not_found")
+            Signed(feedId, feed, null, writes = true) { updateFeed(origin, feedId, reference.lowercase()) }
         }
         "swarm_writeFeedEntry" -> {
             val name = feedName(params.opt("name"))
@@ -459,8 +507,8 @@ class SwarmProvider(
             if (payload.isEmpty()) fail("data must not be empty")
             if (payload.size > MAX_DATA_BYTES) tooLarge("Payload exceeds maximum size of $MAX_DATA_BYTES bytes", MAX_DATA_BYTES, payload.size)
             val index = index(params.opt("index"))
-            if (feeds.feed(origin, name) == null) fail("Feed not found: $name. Create it with createFeed first.", "feed_not_found")
-            Signed(name, null, writes = true) { writeFeedEntry(origin, name, payload, index) }
+            val feed = feeds.feed(origin, name) ?: fail("Feed not found: $name. Create it with createFeed first.", "feed_not_found")
+            Signed(name, feed, null, writes = true) { writeFeedEntry(origin, name, payload, index) }
         }
         else -> fail("Unknown method: $method")
     }
@@ -471,8 +519,8 @@ class SwarmProvider(
      */
     private suspend fun withKey(origin: String, feed: FeedRecord?, block: suspend (Resolved) -> Reply): Reply {
         if (!feeds.granted(origin)) return notAuthorized("feed_not_granted")
-        val site = withContext(io) { publishers.ensureSite(origin) }
-        val identity = feed?.let { f -> site.identities.firstOrNull { it.id == f.identityId } } ?: site.active
+        val site = saving("the site's publisher identity") { publishers.ensureSite(origin) }
+        val identity = signerOf(site, feed)
         val key = withContext(io) { publishers.signingKey(identity) }
         return try {
             publishers.noteActivity()
@@ -521,7 +569,7 @@ class SwarmProvider(
                 ?.takeIf { HEX64.matches(it) }
                 ?: return@withKey Reply.Err(INTERNAL, "Feed manifest upload failed: ${answer.message()}")
             val record = FeedRecord(name, topic, owner, manifest, r.identity.id, clock())
-            withContext(io) { feeds.put(origin, record) }
+            saving("the new feed's record (it was created on Swarm)") { feeds.put(origin, record) }
             Reply.Ok(feedResult(record, r.identity.mode.wire))
         }
     }
@@ -546,7 +594,9 @@ class SwarmProvider(
                 uploadSoc(SwarmChunks.sign(SwarmChunks.feedIdentifier(feed.topic.hexToBytesOrNull()!!, next), SwarmChunks.cac(payload), r.key), batch)
                 next
             }
-            withContext(io) { feeds.put(origin, feed.copy(lastUpdated = clock(), lastReference = reference)) }
+            saving("the feed's record (the update was published)") {
+                feeds.put(origin, feed.copy(lastUpdated = clock(), lastReference = reference))
+            }
             Reply.Ok(
                 JSONObject()
                     .put("feedId", feedId)
@@ -750,6 +800,8 @@ class SwarmProvider(
         val maxBytes = if (connected) 5L * 1024 * 1024 else 512L * 1024
         val over = synchronized(budgets) {
             val now = clock()
+            // Drop every window that has run out, so origins that stopped reading don't stay forever.
+            budgets.values.removeAll { now - it.startedAt !in 0 until BUDGET_WINDOW_MS }
             val existing = budgets[origin]
             val bucket = if (existing != null && now - existing.startedAt in 0 until BUDGET_WINDOW_MS) existing else Budget(now, 0, 0)
             bucket.requests += requests
@@ -1170,5 +1222,11 @@ sealed interface SwarmAsk {
         val feedName: String?,
         val detail: String?,
         val identity: PublisherIdentity?,
+        /** There's no wallet yet: approving sets one up first ([SwarmProviders]' askOnTab). */
+        val needsWallet: Boolean = false,
     ) : SwarmAsk
 }
+
+/** Why the wallet page opens, for a site whose approved signing sheet needs a wallet. */
+internal fun swarmWalletReason(origin: String) =
+    "${permissionOriginDisplay(origin)} wants to sign Swarm content with a publisher identity"
