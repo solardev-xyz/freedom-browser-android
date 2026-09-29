@@ -38,7 +38,8 @@ class SwarmFundingTest {
     private val batch = SwarmFunder.batchId(ByteArray(32) { 7 })
     private val label = SwarmFundLabel(node, batch, 17, 2)
     private val hash = "0x" + "aa".repeat(32)
-    private val connects = mutableListOf<String>()
+    // Added to from the funding's own threads as well as the test's.
+    private val connects: MutableList<String> = java.util.Collections.synchronizedList(mutableListOf())
     private val payer = "0x9858EfFD232B4033E47d90003D41EC34EcaEda94"
 
     private fun funding(file: File = File(tmp.root, "funding.json")) =
@@ -196,14 +197,15 @@ class SwarmFundingTest {
     /** A chain whose answers the test sets; [reads] counts receipt lookups. */
     private class FakeChain : SwarmFunding.ChainReader {
         @Volatile var receipt: JSONObject? = null
+        @Volatile var trusted = true
         @Volatile var minedCount: BigInteger = BigInteger.ONE
         @Volatile var fail = false
         @Volatile var reads = 0
 
-        override suspend fun receipt(hash: String): JSONObject? {
+        override suspend fun receipt(hash: String): SwarmFunding.Receipt? {
             reads++
             if (fail) throw java.io.IOException("offline")
-            return receipt
+            return receipt?.let { SwarmFunding.Receipt(it, trusted) }
         }
 
         override suspend fun minedCount(address: String): BigInteger {
@@ -283,6 +285,53 @@ class SwarmFundingTest {
     }
 
     @Test
+    fun `one unverified read of a reverted receipt doesn't drop the record, two 30 s apart do`() {
+        val chain = FakeChain()
+        var clock = 0L
+        val f = untracked(chain) { clock }
+        // A lone public RPC (buggy, or serving a block later reorged away) says it reverted.
+        chain.trusted = false
+        chain.receipt = receipt("0x0")
+        runBlocking { f.checkChain() }
+        assertEquals(false, f.pending.value?.mined)
+        clock = 29_999
+        runBlocking { f.checkChain() }
+        assertEquals(false, f.pending.value?.mined)
+        // The next read disagrees (not there after all): the verdict starts over.
+        chain.receipt = null
+        clock = 30_000
+        runBlocking { f.checkChain() }
+        chain.receipt = receipt("0x0")
+        clock = 40_000
+        runBlocking { f.checkChain() }
+        clock = 69_999
+        runBlocking { f.checkChain() }
+        assertEquals(false, f.pending.value?.mined)
+        // It really mined, successfully: kept, and connected.
+        chain.receipt = receipt("0x1")
+        clock = 70_000
+        runBlocking { f.checkChain() }
+        assertTrue(f.pending.value!!.mined)
+        assertEquals(listOf(batch), connects)
+    }
+
+    @Test
+    fun `two unverified reads 30 s apart agreeing it reverted drop the record`() {
+        val chain = FakeChain()
+        var clock = 0L
+        val f = untracked(chain) { clock }
+        chain.trusted = false
+        chain.receipt = receipt("0x0")
+        runBlocking { f.checkChain() }
+        assertEquals(false, f.pending.value?.mined)
+        clock = 30_000
+        runBlocking { f.checkChain() }
+        assertNull(f.pending.value)
+        assertNull(funding().pending.value)
+        assertTrue(connects.isEmpty())
+    }
+
+    @Test
     fun `a count read ahead of the receipt read doesn't call a just-mined call superseded`() {
         val chain = FakeChain()
         var clock = 0L
@@ -331,12 +380,16 @@ class SwarmFundingTest {
             File(tmp.root, "funding.json"), connect = { connects += it; true }, spends = emptyFlow(), chain = chain,
             checkEveryMs = 10, checkAtMostEveryMs = 60_000, confirmAfterMs = 10,
         )
+        val started = System.nanoTime()
         f.start(flowOf(status(SendStatus.Stage.Pending), status(SendStatus.Stage.Unconfirmed), null))
         awaitPending(f) { it?.tracked == false }
-        // Backing off from 10 ms (10, 20, 40, 80, 160, 320…): a handful of reads in 600 ms, not 60.
+        // Backing off from 10 ms (10, 20, 40, 80, 160, 320…): a handful of reads in 600 ms, not 60. Bounded by the
+        // time that really went by, which a loaded machine stretches past the 600 ms slept (#225 R5-F3).
         Thread.sleep(600)
         val backedOff = chain.reads
-        assertTrue("$backedOff reads", backedOff in 2..8)
+        val elapsedMs = (System.nanoTime() - started) / 1_000_000
+        val atMost = 2 + (64 - java.lang.Long.numberOfLeadingZeros(elapsedMs / 10 + 1))
+        assertTrue("$backedOff reads in $elapsedMs ms (at most $atMost)", backedOff in 2..atMost)
 
         // The nonce went elsewhere: confirmed at the next read, then nothing more is read.
         chain.minedCount = BigInteger.TWO
@@ -412,11 +465,11 @@ class SwarmFundingTest {
     @Test
     fun `the pool's price sizes the swap only when a quorum, a proof, or the user's own undisputed RPC gave it`() {
         val u = ChainTrustsForTest.unverified
-        assertFalse(poolPriceTrusted(u))
-        assertTrue(poolPriceTrusted(u.copy(level = ChainTrust.Level.VERIFIED, source = ChainSource.QUORUM, k = 3, m = 2)))
-        assertTrue(poolPriceTrusted(u.copy(level = ChainTrust.Level.VERIFIED, dissented = listOf("b.example"), k = 3, m = 2)))
-        assertTrue(poolPriceTrusted(u.copy(level = ChainTrust.Level.USER_CONFIGURED)))
-        assertFalse(poolPriceTrusted(u.copy(level = ChainTrust.Level.USER_CONFIGURED, dissented = listOf("b.example"))))
+        assertFalse(chainReadTrusted(u))
+        assertTrue(chainReadTrusted(u.copy(level = ChainTrust.Level.VERIFIED, source = ChainSource.QUORUM, k = 3, m = 2)))
+        assertTrue(chainReadTrusted(u.copy(level = ChainTrust.Level.VERIFIED, dissented = listOf("b.example"), k = 3, m = 2)))
+        assertTrue(chainReadTrusted(u.copy(level = ChainTrust.Level.USER_CONFIGURED)))
+        assertFalse(chainReadTrusted(u.copy(level = ChainTrust.Level.USER_CONFIGURED, dissented = listOf("b.example"))))
     }
 
     @Test

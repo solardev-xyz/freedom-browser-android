@@ -93,15 +93,19 @@ internal fun fundNodeSummary(plan: SwarmFunder.Plan, days: Long): String =
         "${formatXdai(plan.xdaiForNode)} and the xBZZ the stamp doesn't use."
 
 /**
- * Whether the pool's `slot0()` read, with [trust], may size the swap
- * (#225 R4-F2). The price sets how much xDAI is swapped, while the
- * slippage floor stays at what the stamp needs: a lone RPC claiming xBZZ
- * is 10x dearer would have the call swap 10x the xDAI and accept ~90%
- * slippage, the surplus open to a sandwich. So only a proof or a quorum
- * agreeing, or the user's own RPC with no one answering otherwise, counts
- * — as for an onchain app's bytes ([OnchainApp]'s `trusted`).
+ * Whether a Gnosis Chain read with [trust] may be acted on where a wrong
+ * answer costs the user: only a proof or a quorum agreeing, or the user's
+ * own RPC with no one answering otherwise, counts — as for an onchain
+ * app's bytes ([OnchainApp]'s `trusted`).
+ *
+ * The pool's `slot0()` price sizes the swap only so (#225 R4-F2): the
+ * price sets how much xDAI is swapped, while the slippage floor stays at
+ * what the stamp needs, so a lone RPC claiming xBZZ is 10x dearer would
+ * have the call swap 10x the xDAI and accept ~90% slippage, the surplus
+ * open to a sandwich. And a funding call's reverted receipt drops its
+ * record at once only so ([SwarmFunding.checkChain], #225 R5-F1).
  */
-internal fun poolPriceTrusted(trust: ChainTrust): Boolean = when (trust.level) {
+internal fun chainReadTrusted(trust: ChainTrust): Boolean = when (trust.level) {
     ChainTrust.Level.VERIFIED -> true
     ChainTrust.Level.USER_CONFIGURED -> trust.dissented.isEmpty()
     ChainTrust.Level.UNVERIFIED -> false
@@ -170,7 +174,7 @@ internal fun FundNodeScreen(nodeInfo: NodeInfo, onOpenUrl: (String) -> Unit, onD
                 is StampClient.Answer.Failed -> throw SendException(a.message)
             }
             val slot0 = rpc.call(SwarmFunder.CHAIN_ID, JSONObject().put("to", SwarmFunder.POOL).put("data", SwarmFunder.SLOT0_DATA))
-            if (!poolPriceTrusted(slot0.trust)) {
+            if (!chainReadTrusted(slot0.trust)) {
                 Log.i(TAG, "pool price not verified (${slot0.trust.level.name.lowercase()}, ${slot0.trust.dissented.size} dissented)")
                 throw SendException(POOL_PRICE_UNVERIFIED)
             }

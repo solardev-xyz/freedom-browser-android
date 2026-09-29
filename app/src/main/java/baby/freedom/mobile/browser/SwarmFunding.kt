@@ -51,11 +51,14 @@ internal class SwarmFunding(
     /** Gnosis Chain reads for a call the wallet no longer follows. */
     interface ChainReader {
         /** The call's receipt, or null while it isn't mined (or is unknown). */
-        suspend fun receipt(hash: String): JSONObject?
+        suspend fun receipt(hash: String): Receipt?
 
         /** How many of [address]'s transactions are mined: its next nonce at the latest block. */
         suspend fun minedCount(address: String): BigInteger
     }
+
+    /** A receipt as read, and whether the read was one to act on alone ([chainReadTrusted]). */
+    data class Receipt(val json: JSONObject, val trusted: Boolean)
 
     /**
      * The one stamp being bought or waiting to be connected. [mined]:
@@ -105,6 +108,16 @@ internal class SwarmFunding(
      * verdict waits for a second read [confirmAfterMs] later that agrees.
      */
     private var supersededSeen: Pair<String, Long>? = null
+
+    /**
+     * The batch id and time ([now]) of an untrusted read that found its
+     * call reverted, not yet confirmed. Dropping the record loses the only
+     * copy of the batch id, so one public RPC's word (a buggy node, or one
+     * serving a block later reorged away) isn't enough: a trusted read
+     * drops it at once, an untrusted one only once a second read at least
+     * [confirmAfterMs] later agrees (#225 R5-F1).
+     */
+    private var revertedSeen: Pair<String, Long>? = null
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
     /**
@@ -139,8 +152,9 @@ internal class SwarmFunding(
                                 _superseded.first { it != p.batchId }
                                 wait = checkEveryMs
                             }
-                            if (synchronized(this@SwarmFunding) { supersededSeen?.first } == p.batchId) {
-                                // Superseded at one read: confirm it as soon as it can be.
+                            val unconfirmed = synchronized(this@SwarmFunding) { supersededSeen?.first ?: revertedSeen?.first }
+                            if (unconfirmed == p.batchId) {
+                                // Superseded or reverted at one read: confirm it as soon as it can be.
                                 delay(confirmAfterMs)
                             } else {
                                 delay(wait)
@@ -216,7 +230,8 @@ internal class SwarmFunding(
     /**
      * Looks an untracked, unmined record's call up by its hash: mined, its
      * batch is recorded as bought and connected; reverted, it bought
-     * nothing and is dropped; not there, it's still waiting — unless the
+     * nothing and is dropped — on a trusted read, or on two untrusted ones
+     * [confirmAfterMs] apart ([revertedSeen]); not there, it's still waiting — unless the
      * paying account's nonce was used by another transaction, when it can
      * never be mined ([superseded]). A read that fails changes nothing.
      */
@@ -227,7 +242,10 @@ internal class SwarmFunding(
         try {
             // The count first: read after the receipt, it could count this very call mined in between.
             val nonceUsed = if (p.from != null && p.nonce != null) c.minedCount(p.from) > p.nonce else false
-            val outcome = c.receipt(hash)?.let(WalletSender::outcomeOf)
+            val read = c.receipt(hash)
+            val outcome = read?.json?.let(WalletSender::outcomeOf)
+            val dropIt = outcome is SendStatus.Stage.Reverted && confirmReverted(p.batchId, read.trusted)
+            if (outcome !is SendStatus.Stage.Reverted) synchronized(this) { revertedSeen = null }
             var connectIt = false
             when (outcome) {
                 is SendStatus.Stage.Confirmed -> update { cur ->
@@ -238,15 +256,18 @@ internal class SwarmFunding(
                         cur
                     }
                 }
-                is SendStatus.Stage.Reverted -> update { cur -> cur?.takeUnless { it.batchId == p.batchId && !it.mined } }
+                is SendStatus.Stage.Reverted ->
+                    if (dropIt) update { cur -> cur?.takeUnless { it.batchId == p.batchId && !it.mined } }
                 else -> {}
             }
             noteSuperseded(p.batchId, outcome == null && nonceUsed)
             if (connectIt) {
                 Log.i(TAG, "the funding the wallet stopped following was mined; connecting its stamp")
                 connectNow()
-            } else if (outcome is SendStatus.Stage.Reverted) {
+            } else if (dropIt) {
                 Log.i(TAG, "the funding the wallet stopped following reverted; nothing was bought")
+            } else if (outcome is SendStatus.Stage.Reverted) {
+                Log.i(TAG, "an unverified read says the funding reverted; confirming before dropping it")
             }
         } catch (e: CancellationException) {
             throw e
@@ -278,6 +299,28 @@ internal class SwarmFunding(
         }
     }
 
+    /**
+     * Whether a read finding [batchId]'s call reverted, [trusted] or not,
+     * settles it ([revertedSeen]): a trusted one does at once, an
+     * untrusted one once an earlier untrusted one [confirmAfterMs] before
+     * agrees. A read with any other outcome starts over.
+     */
+    private fun confirmReverted(batchId: String, trusted: Boolean): Boolean = synchronized(this) {
+        val t = now()
+        val first = revertedSeen?.takeIf { it.first == batchId }
+        when {
+            trusted || (first != null && t - first.second >= confirmAfterMs) -> {
+                revertedSeen = null
+                true
+            }
+            first == null -> {
+                revertedSeen = batchId to t
+                false
+            }
+            else -> false
+        }
+    }
+
     /** Forget the stamp (the user dismissed it); the batch stays on chain, owned by the node. */
     fun forget() = update { null }
 
@@ -285,8 +328,10 @@ internal class SwarmFunding(
         synchronized(this) {
             val next = f(_pending.value)
             if (next == _pending.value) return
-            _pending.value = next
+            // Saved before it's published: whoever sees the new record can count on it being on disk
+            // (a test's next instance reading the file raced a late save here, #225 R5-F3).
             save(next)
+            _pending.value = next
         }
     }
 
@@ -361,7 +406,8 @@ internal class SwarmFunding(
         private fun rpcReader(context: Context): ChainReader {
             val rpc = WalletRpc(ChainDataRouter.get(context))
             return object : ChainReader {
-                override suspend fun receipt(hash: String) = rpc.receipt(SwarmFunder.CHAIN_ID, hash).value
+                override suspend fun receipt(hash: String) = rpc.receipt(SwarmFunder.CHAIN_ID, hash)
+                    .let { r -> r.value?.let { SwarmFunding.Receipt(it, chainReadTrusted(r.trust)) } }
                 override suspend fun minedCount(address: String) =
                     rpc.transactionCount(SwarmFunder.CHAIN_ID, address, "latest").value
             }
