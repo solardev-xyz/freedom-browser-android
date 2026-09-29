@@ -442,12 +442,28 @@ class SitePermissionsTest {
 
     @Test
     fun `a long-press menu is only let in while no prompt is up`() {
-        assertTrue(contextMenuAdmitted(PromptTurn.None))
-        assertTrue(contextMenuAdmitted(PromptTurn.ContextMenu))
+        assertTrue(contextMenuAdmitted(PromptTurn.None, pageUncovered = true))
+        assertTrue(contextMenuAdmitted(PromptTurn.ContextMenu, pageUncovered = true))
         // The site-permission prompt has no "has the turn" flag: the menu
         // mustn't be let in to un-show it, nor any other prompt on screen.
         for (up in PromptTurn.entries - PromptTurn.None - PromptTurn.ContextMenu) {
-            assertFalse(up.name, contextMenuAdmitted(up))
+            assertFalse(up.name, contextMenuAdmitted(up, pageUncovered = true))
         }
+    }
+
+    @Test
+    fun `a long-press menu isn't kept for when a full-screen panel closes`() {
+        // Under a panel the turn is None, just as on an idle page; the
+        // menu is dropped rather than left to open once the panel goes.
+        for (turn in PromptTurn.entries) {
+            assertFalse(turn.name, contextMenuAdmitted(turn, pageUncovered = false))
+        }
+        assertEquals(
+            PromptTurn.None,
+            modalPromptTurn(
+                false, false, false, false, pageUncovered = false,
+                contextMenuWaiting = contextMenuAdmitted(PromptTurn.None, pageUncovered = false),
+            ),
+        )
     }
 }

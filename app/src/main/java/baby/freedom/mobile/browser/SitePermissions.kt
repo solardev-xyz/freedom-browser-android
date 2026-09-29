@@ -454,7 +454,8 @@ enum class PromptTurn { None, SitePermission, DownloadOffer, Radicle, Ethereum, 
  *   has just asked for it, while a prompt raised in the same moment (a
  *   page's `contextmenu` handler calling the wallet) can wait — so once
  *   up it keeps the turn. A menu that arrives while a prompt already
- *   has the turn isn't let in at all ([contextMenuAdmitted]).
+ *   has the turn, or while a full-screen panel covers the page, isn't
+ *   let in at all ([contextMenuAdmitted]).
  */
 fun modalPromptTurn(
     permissionWaiting: Boolean,
@@ -491,15 +492,18 @@ fun modalPromptTurn(
 
 /**
  * Whether a long-press menu (#84) may take its turn in [modalPromptTurn],
- * given the turn as of the last composition ([lastTurn]): only while no
- * prompt was up, or the menu itself was. A menu that arrives while a
- * prompt has the turn is dropped instead (#246) — it must not un-show a
- * prompt the user is reading (the site-permission prompt has no "has
- * the turn" flag of its own to hold it), and one shown only once that
- * prompt is answered would open out of nowhere.
+ * given the turn as of the last composition ([lastTurn]): only while the
+ * page is on screen ([pageUncovered]) and no prompt was up, or the menu
+ * itself was. Any other menu is dropped instead (#246) — it must not
+ * un-show a prompt the user is reading (the site-permission prompt has
+ * no "has the turn" flag of its own to hold it), and one shown only once
+ * that prompt is answered, or once a full-screen panel that opened while
+ * the page's verdict was still out is closed, would open out of nowhere.
+ * ([modalPromptTurn] is [PromptTurn.None] under a panel, so [lastTurn]
+ * alone can't tell a covered page from an idle one.)
  */
-fun contextMenuAdmitted(lastTurn: PromptTurn): Boolean =
-    lastTurn == PromptTurn.None || lastTurn == PromptTurn.ContextMenu
+fun contextMenuAdmitted(lastTurn: PromptTurn, pageUncovered: Boolean): Boolean =
+    pageUncovered && (lastTurn == PromptTurn.None || lastTurn == PromptTurn.ContextMenu)
 
 /**
  * Tap protection for the permission prompt. A page chooses *when* its

@@ -50,9 +50,12 @@ internal fun jsDialogTitle(kind: JsDialogKind, url: String?): String {
  * navigation without a commit (#180, R2-F2). [onSettled] lets the tab
  * forget the request. Main thread only.
  *
- * Taking the dialog's window down is not an answer: a dialog that
- * loses its turn for a moment (the host Activity going away and coming
- * back) is shown again when it gets the turn back, still waiting.
+ * Taking the dialog's window down is not itself an answer; whatever
+ * takes it down answers it with [withdraw] — its tab closing, the user
+ * switching away from it, or the WebView host going away (the Activity
+ * finishing or being relaunched alike: every WebView goes with the
+ * host, so a dialog isn't carried over to the next one). A dialog is
+ * never shown again for a page that went away under it.
  */
 internal class JsDialogRequest(
     val kind: JsDialogKind,
@@ -126,9 +129,10 @@ internal fun answerJsResult(result: JsResult, confirmed: Boolean, text: String?)
  * snapshot. Same buttons and results as WebView's: OK/Cancel, the
  * prompt's text field (learning off, as in the tab's other fields), and
  * back/outside tap = Cancel. Returns the dialog so the caller can take
- * it down when it loses its turn — which leaves the request waiting, to
- * be shown again or [JsDialogRequest.withdraw]n — or null, with the
- * request withdrawn, when there's no Activity to show it in.
+ * it down when it loses its turn — which by itself leaves the request
+ * unanswered; whatever took the turn [JsDialogRequest.withdraw]s it — or
+ * null, with the request withdrawn, when there's no Activity to show it
+ * in.
  */
 internal fun showJsDialog(context: Context, request: JsDialogRequest): AlertDialog? {
     val kind = request.kind

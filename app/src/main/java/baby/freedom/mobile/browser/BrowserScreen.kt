@@ -2091,10 +2091,11 @@ fun BrowserScreen(
     var swarmHasTurn by remember(activeTabId) { mutableStateOf(false) }
     var jsDialogHasTurn by remember(activeTabId) { mutableStateOf(false) }
     // The turn as of the last composition: a long-press menu is only
-    // let in while no prompt was up ([contextMenuAdmitted]), so it
-    // can't un-show a prompt the user is already reading.
+    // let in while the page is on screen and no prompt was up
+    // ([contextMenuAdmitted]), so it can't un-show a prompt the user is
+    // already reading, nor open when a panel that covered it closes.
     var lastPromptTurn by remember(activeTabId) { mutableStateOf(PromptTurn.None) }
-    val contextMenuAdmitted = contextMenuAdmitted(lastPromptTurn)
+    val contextMenuAdmitted = contextMenuAdmitted(lastPromptTurn, pageUncovered)
     val promptTurn = modalPromptTurn(
         permissionWaiting = state.permissionPrompt != null,
         offerWaiting = tabOffers.isNotEmpty(),
@@ -2150,7 +2151,10 @@ fun BrowserScreen(
     // closed, or another tab came to the front — or when it arrives
     // while one of the page's prompts is up (#246): it takes turns with
     // them rather than stacking, and one shown only once that prompt is
-    // answered would open out of nowhere.
+    // answered would open out of nowhere. Likewise while a full-screen
+    // panel covers the page (the page's verdict can take a moment to
+    // land, and the user may have opened the tab switcher meanwhile):
+    // it's not kept for when the panel closes.
     tabs.pageContextMenu?.let { request ->
         val owner = tabs.tabs.firstOrNull { it.id == request.tabId }
         if (pageContextMenuIsStale(request, tabs.active.id, owner?.url, owner?.navCounter) ||
@@ -2325,11 +2329,12 @@ fun BrowserScreen(
     }
     state.jsDialog?.takeIf { promptTurn == PromptTurn.JsDialog }?.let { request ->
         // Taken down if it loses its turn — its tab closed or left the
-        // screen, this screen leaving composition. That alone doesn't
-        // answer the page: whatever took the turn answers it
-        // ([JsDialogRequest.withdraw] for a tab closed, switched away
-        // from or losing its WebView), and a dialog still waiting when
-        // it gets the turn back is shown again.
+        // screen, this screen leaving composition. Taking it down
+        // doesn't itself answer the page; whatever took it down does
+        // ([JsDialogRequest.withdraw]): the tab closing, the user
+        // switching away from it, or the WebView host going away —
+        // the Activity finishing or being relaunched alike, since every
+        // WebView goes with the host — so it isn't shown again later.
         DisposableEffect(request) {
             val dialog = showJsDialog(context, request)
             onDispose { dialog?.dismiss() }
