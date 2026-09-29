@@ -332,6 +332,51 @@ class SafeAccountsTest {
     }
 
     @Test
+    fun `a Ledger owner signs on its Ledger, with the typed data and its digest, the vault staying locked`() = runBlocking<Unit> {
+        vault.create(abandon12, auth, imported = true)
+        val ledgerOwner = WalletAccount(7, "Ledger 1", other, baby.freedom.mobile.wallet.ledger.LedgerKey("44'/60'/0'/0/0", "AA:BB", "Nano X"))
+        var asked: Pair<Eip712.TypedData, ByteArray>? = null
+        val s = SafeAccounts(vault, SafeStore(file), scope, Dispatchers.Unconfined, clock = { 42L }, ledgerSign = { account, data, digest ->
+            assertEquals(ledgerOwner, account)
+            asked = data to digest
+            MessageSigning.sign(otherKey, other, digest)
+        }).also { it.reconcile(vault.state.value) }
+        val safe = s.create("", listOf(other, stranger), 1, listOf(other))
+        s.markDeployed(safe.address)
+        val p = s.proposeTx(safe, SafeProtocol.SafeTx(stranger, BigInteger.ONE, ByteArray(0), BigInteger.ZERO), SafePending.Payment(stranger, BigInteger.ONE, "xDAI", 18, null))
+        vault.lock()
+        val signed = s.signWith(p.id, ledgerOwner)
+        assertTrue(signed.ready)
+        assertEquals("SafeTx", asked!!.first.primaryType)
+        assertTrue(asked!!.second.contentEquals(SafeProtocol.hash(JSONObject(p.typedData))))
+        // A seed owner still needs the vault open.
+        try {
+            s.ownerSignature(account1, p.typedData)
+            fail("expected VaultLockedException")
+        } catch (e: VaultLockedException) {
+        }
+    }
+
+    @Test
+    fun `a transaction marked superseded while an abandoned execution's receipt lagged settles as executed once it's known`() = runBlocking<Unit> {
+        val s = opened()
+        val safe = s.create("", listOf(account1.address, other), 1, local)
+        s.markDeployed(safe.address)
+        val p = s.proposeTx(safe, SafeProtocol.SafeTx(other, BigInteger.ONE, ByteArray(0), BigInteger.ZERO), SafePending.Payment(other, BigInteger.ONE, "xDAI", 18, null))
+        val h1 = "0x" + "c1".repeat(32)
+        s.noteExecution(p.id, h1, account1.address, BigInteger.valueOf(3))
+        s.clearExecution(p.id, h1, abandoned = true)
+        // The Safe's nonce moved on and h1's receipt wasn't known yet: marked superseded.
+        assertEquals(SafeMovedOn.SUPERSEDED, safeMovedOn(s.state.value!!.pending.single()) { null })
+        s.markSuperseded(p.id)
+        val marked = s.state.value!!.pending.single()
+        assertTrue(marked.superseded)
+        // Its abandoned executions are kept, so the page's later look finds h1 did land.
+        assertEquals(listOf(h1), marked.abandonedExecs.map { it.hash })
+        assertEquals(SafeMovedOn.EXECUTED, safeMovedOn(marked) { if (it == h1) true else null })
+    }
+
+    @Test
     fun `every abandoned execution is kept, so an earlier one that got mined still counts as executed`() = runBlocking<Unit> {
         vault.create(abandon12, auth, imported = true)
         val sends = MutableStateFlow<SendStatus?>(null)

@@ -10,6 +10,7 @@ import baby.freedom.mobile.chains.rpc.ChainTrust
 import baby.freedom.mobile.ens.Keccak256
 import baby.freedom.mobile.ens.hexToBytes
 import baby.freedom.mobile.ens.toHex
+import baby.freedom.mobile.wallet.ledger.LedgerKey
 import java.io.File
 import java.io.FileOutputStream
 import java.math.BigInteger
@@ -176,7 +177,12 @@ internal object SendJournalCodec {
                 JSONObject().put("address", r.token.address ?: JSONObject.NULL).put("symbol", r.token.symbol)
                     .put("name", r.token.name).put("decimals", r.token.decimals),
             )
-            .put("from", JSONObject().put("index", r.from.index).put("name", r.from.name).put("address", r.from.address))
+            .put(
+                "from",
+                JSONObject().put("index", r.from.index).put("name", r.from.name).put("address", r.from.address).apply {
+                    r.from.ledger?.let { put("ledger", JSONObject().put("path", it.path).put("device", it.device).put("deviceName", it.deviceName)) }
+                },
+            )
             .put("to", r.to)
             .put("amount", r.amount.toString())
             .put(
@@ -230,7 +236,8 @@ internal object SendJournalCodec {
         val t = o.getJSONObject("token")
         val token = Token(chain.id, t.optStringOrNull("address"), t.getString("symbol"), t.getString("name"), t.getInt("decimals"))
         val f = o.getJSONObject("from")
-        val from = WalletAccount(f.getInt("index"), f.getString("name"), f.getString("address"))
+        val ledger = f.optJSONObject("ledger")?.let { LedgerKey(it.getString("path"), it.getString("device"), it.getString("deviceName")) }
+        val from = WalletAccount(f.getInt("index"), f.getString("name"), f.getString("address"), ledger)
         val dapp = o.optJSONObject("dapp")?.let { d ->
             DappCall(
                 d.optStringOrNull("origin"),

@@ -30,6 +30,8 @@ import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
 import androidx.compose.ui.semantics.Role
+import androidx.compose.foundation.clickable
+import androidx.compose.ui.draw.clip
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.CheckCircle
@@ -83,10 +85,13 @@ import baby.freedom.mobile.chains.Chain
 import baby.freedom.mobile.chains.BuiltInChains
 import baby.freedom.mobile.data.BrowsingRepository
 import baby.freedom.mobile.data.ChainStore
+import baby.freedom.mobile.data.DappGrantStore
 import baby.freedom.mobile.data.NodeSettings
 import baby.freedom.mobile.ens.EnsRpcConfig
 import baby.freedom.mobile.ui.isLight
 import baby.freedom.mobile.wallet.Vault
+import baby.freedom.mobile.wallet.WalletAccount
+import baby.freedom.mobile.wallet.WalletAccounts
 import baby.freedom.swarm.IpfsInfo
 import baby.freedom.swarm.IpfsStatus
 import kotlinx.coroutines.flow.drop
@@ -187,6 +192,15 @@ fun SettingsScreen(
     val sitePermissions = remember(context) { SitePermissionBroker.get(context) }
     val permissionEntries by remember(sitePermissions) { sitePermissions.entries }
         .collectAsState(initial = emptyList())
+    // Sites connected to the wallet (#110), listed with the other site permissions (#111).
+    val dappGrants by remember(context) { DappGrantStore.get(context).all }
+        .collectAsState(initial = emptyList())
+    val walletAccountList by remember(context) { WalletAccounts.get(context).accounts }.collectAsState()
+    val walletAccounts = walletAccountList?.accounts.orEmpty()
+    // The connected site whose page is open, by origin, so it follows the stored grant.
+    var openSite by remember { mutableStateOf<String?>(null) }
+    // The connected site whose × couldn't be saved: its row says so, as the site's page does.
+    var disconnectFailed by remember { mutableStateOf<String?>(null) }
 
     val chainStore = remember(context) { ChainStore.get(context) }
     val chains by remember(chainStore) { chainStore.chains }
@@ -219,7 +233,7 @@ fun SettingsScreen(
         query, SECTION_BROWSING, browsingDataRows(history.size, bookmarks.size),
     )
     val permissionRows = visibleSettingsRows(
-        query, SECTION_PERMISSIONS, sitePermissionRows(permissionEntries),
+        query, SECTION_PERMISSIONS, sitePermissionRows(permissionEntries, dappGrants, walletAccounts, chains),
     )
     val nodeRows = visibleSettingsRows(
         query, SECTION_NODES,
@@ -300,7 +314,20 @@ fun SettingsScreen(
         }
         null -> Unit
     }
-    if (chainPage == null) FullScreenScaffold(
+    // A connected site's page (#111) stands in for the list the same way; it
+    // closes by itself once the site is disconnected, from here or elsewhere.
+    val site = openSite?.let { origin -> dappGrants.firstOrNull { it.origin == origin } }
+    if (openSite != null && site == null) LaunchedEffect(openSite) { openSite = null }
+    if (chainPage == null && site != null) {
+        ConnectedSitePage(
+            grant = site,
+            accounts = walletAccounts,
+            chains = chains,
+            onDisconnect = { EthereumProviders.disconnect(context, it) },
+            onBack = { openSite = null },
+        )
+    }
+    if (chainPage == null && site == null) FullScreenScaffold(
         title = "Settings",
         onDismiss = onDismiss,
     ) {
@@ -373,6 +400,17 @@ fun SettingsScreen(
                         visible = permissionRows,
                         entries = permissionEntries,
                         onRevoke = sitePermissions::revoke,
+                        grants = dappGrants,
+                        accounts = walletAccounts,
+                        chains = chains,
+                        onOpenSite = { openSite = it },
+                        disconnectFailed = disconnectFailed,
+                        onDisconnect = { origin ->
+                            disconnectFailed = null
+                            scope.launch {
+                                if (!EthereumProviders.disconnect(context, origin)) disconnectFailed = origin
+                            }
+                        },
                     )
                 }
                 if (nodeRows.isNotEmpty()) item("nodes") {
@@ -1377,14 +1415,36 @@ private fun BrowsingDataSection(
  * without restarting the app.
  */
 private const val PERMISSIONS_EMPTY =
-    "Sites you allow or block from using your camera, microphone or location, or from opening links in other apps, appear here."
+    "Sites you allow or block from using your camera, microphone or location, or from opening links in other apps, " +
+        "and sites you connect your wallet to, appear here."
 
-/** One row per decision, keyed by the entry; the explainer while there are none. */
-private fun sitePermissionRows(entries: List<SitePermissionEntry>) =
-    if (entries.isEmpty()) {
+/** A wallet connection's row key in Site permissions: its own type, so it never equals a [SitePermissionEntry]. */
+internal data class DappConnectionRow(val origin: String)
+
+/** "Wallet · Account 1 · 0x9858…da94 · Gnosis Chain": a connected site's line in Site permissions. */
+internal fun dappConnectionDetail(grant: DappGrantStore.Grant, accounts: List<WalletAccount>, chains: List<Chain>) =
+    "Wallet · ${connectedSiteSummary(grant, accounts, chains)}"
+
+/**
+ * One row per wallet connection (#111), then one per decision, each keyed by
+ * its own item; the explainer while there are none.
+ */
+internal fun sitePermissionRows(
+    entries: List<SitePermissionEntry>,
+    grants: List<DappGrantStore.Grant>,
+    accounts: List<WalletAccount>,
+    chains: List<Chain>,
+) =
+    if (entries.isEmpty() && grants.isEmpty()) {
         listOf(settingsRow("empty", PERMISSIONS_EMPTY))
     } else {
-        entries.map { entry ->
+        grants.map { grant ->
+            settingsRow(
+                DappConnectionRow(grant.origin),
+                permissionOriginDisplay(grant.origin),
+                dappConnectionDetail(grant, accounts, chains),
+            )
+        } + entries.map { entry ->
             settingsRow(
                 entry,
                 permissionOriginDisplay(entry.origin),
@@ -1401,15 +1461,63 @@ private fun SitePermissionsSection(
     visible: Set<Any>,
     entries: List<SitePermissionEntry>,
     onRevoke: (SitePermissionEntry) -> Unit,
+    grants: List<DappGrantStore.Grant>,
+    accounts: List<WalletAccount>,
+    chains: List<Chain>,
+    onOpenSite: (String) -> Unit,
+    disconnectFailed: String?,
+    onDisconnect: (String) -> Unit,
 ) {
     SectionCard(title = SECTION_PERMISSIONS) {
-        if (entries.isEmpty() && "empty" in visible) {
+        if (entries.isEmpty() && grants.isEmpty() && "empty" in visible) {
             Text(
                 PERMISSIONS_EMPTY,
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
             )
+        }
+        // Wallet connections first: they're what a site can do the most with.
+        for (grant in grants) {
+            if (DappConnectionRow(grant.origin) !in visible) continue
+            val site = permissionOriginDisplay(grant.origin)
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(MaterialTheme.shapes.small)
+                    .clickable(onClickLabel = "Open") { onOpenSite(grant.origin) }
+                    .padding(start = 12.dp, top = 6.dp, bottom = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(
+                    Icons.Filled.AccountBalanceWallet,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onSurface,
+                )
+                Spacer(Modifier.width(12.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(site, fontWeight = FontWeight.Medium)
+                    Text(
+                        dappConnectionDetail(grant, accounts, chains),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    if (disconnectFailed == grant.origin) {
+                        Text(
+                            DISCONNECT_FAILED,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error,
+                        )
+                    }
+                }
+                IconButton(onClick = { onDisconnect(grant.origin) }) {
+                    Icon(
+                        Icons.Filled.Close,
+                        contentDescription = "Disconnect $site from the wallet",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
         }
         for (entry in entries) {
             if (entry !in visible) continue

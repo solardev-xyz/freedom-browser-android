@@ -8,6 +8,8 @@ import baby.freedom.mobile.chains.rpc.ChainTrust
 import baby.freedom.mobile.chains.rpc.WalletRpc
 import baby.freedom.mobile.ens.hexToBytes
 import baby.freedom.mobile.ens.toHex
+import baby.freedom.mobile.wallet.ledger.Ledger
+import baby.freedom.mobile.wallet.ledger.LedgerException
 import java.math.BigInteger
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
@@ -189,6 +191,13 @@ data class SendQuote(
      * one of the two can ever be mined ([NonceTracker.abandon]).
      */
     val replaces: String? = null,
+    /**
+     * How many sends from this account on this chain [WalletSender.submit]
+     * had started when this was priced: once another has started since,
+     * it may have gone out on this one's nonce, and this is priced again
+     * rather than signed beside it.
+     */
+    val sendsBefore: Long = 0,
 ) {
     /** For a native send, the amount plus the most the fee can be; null for a token (two currencies). */
     val nativeTotal: BigInteger? get() = if (request.token.isNative) request.amount + tx.maxFee else null
@@ -411,8 +420,23 @@ data class SendStatus(val quote: SendQuote, val stage: Stage, val hash: String? 
          * it took the transaction, but one may have — Try again resends
          * the very same signed bytes, so it can't be sent twice.
          * Otherwise it certainly wasn't sent, and the send is reviewed again.
+         * [stale]: it wasn't sent because its quote got older than
+         * [WalletSender.SIGNED_TTL_MS] while it was being signed (a Ledger
+         * waited on): priced again, it can be confirmed again.
+         * [droppedSigned]: of those, it was signed — approved on the
+         * Ledger — and only then found older than
+         * [WalletSender.SIGNED_TTL_MS]; otherwise the Ledger found it
+         * over [WalletSender.QUOTE_TTL_MS] old before showing it.
+         * [rejected]: the user refused it on their Ledger, or cancelled
+         * waiting for it — a site that asked for it hears a rejection (4001).
          */
-        data class Failed(val message: String, val mayHaveGone: Boolean) : Stage
+        data class Failed(
+            val message: String,
+            val mayHaveGone: Boolean,
+            val stale: Boolean = false,
+            val rejected: Boolean = false,
+            val droppedSigned: Boolean = false,
+        ) : Stage
 
         data object Pending : Stage
         data class Confirmed(val block: Long, val feePaid: BigInteger?) : Stage
@@ -693,6 +717,13 @@ class WalletSender internal constructor(
         coroutineScope {
             val chainId = request.chain.id
             val from = request.from.address
+            // Before the nonce is read: a send started from here on may take
+            // it, and so may one started already whose nonce isn't yet in
+            // [nonces] (still signing or broadcasting), so that one isn't
+            // counted as before this quote.
+            val sendsBefore = synchronized(this@WalletSender) {
+                started[startKey(from, chainId)]?.let { if (it.settled) it.count else it.count - 1 } ?: 0L
+            }
             val token = request.token
             val native = async { rpc.balance(chainId, from).value }
             val tokenBalance = async {
@@ -746,7 +777,7 @@ class WalletSender internal constructor(
                 val what = if (token.isNative && tx.value.signum() > 0) "the amount and the network fee" else "the network fee"
                 throw SendException("Not enough $symbol for $what (up to $fee): $has")
             }
-            SendQuote(sending, tx, nativeBalance, tokenBalance.await(), clock(), nonce.await().trust, replacing?.hash)
+            SendQuote(sending, tx, nativeBalance, tokenBalance.await(), clock(), nonce.await().trust, replacing?.hash, sendsBefore)
         }
     } catch (e: CancellationException) {
         throw e
@@ -759,6 +790,51 @@ class WalletSender internal constructor(
     /** Whether [quote] is too old to sign as is (its fees may no longer get it mined). */
     fun isStale(quote: SendQuote): Boolean = clock() - quote.preparedAt !in 0 until QUOTE_TTL_MS
 
+    /**
+     * Whether [quote], signed just now, is too old to broadcast: priced
+     * over [SIGNED_TTL_MS] ago. Longer than [QUOTE_TTL_MS], which was
+     * already checked as the signing began (and, on a Ledger, again once
+     * it was connected and unlocked, just before it showed the
+     * transaction), so the time the user spends reviewing it on the
+     * device doesn't throw away what they just approved.
+     */
+    private fun tooOldToSend(quote: SendQuote): Boolean = clock() - quote.preparedAt !in 0 until SIGNED_TTL_MS
+
+    /**
+     * Sends [submit] started per (account, chain), and the quote that
+     * started the last one. [settled] once that send's nonce is in
+     * [nonces] (marked sent, or forgotten) or it ended without one: until
+     * then a quote priced beside it reads the nonce it is taking.
+     */
+    private class Started(val count: Long, val by: SendQuote) {
+        /** Under [WalletSender]'s lock. */
+        var settled = false
+    }
+
+    /** [start]'s nonce is now what [NonceTracker.next] answers from (called after it got there). */
+    private fun settle(start: Started?) {
+        if (start != null) synchronized(this) { start.settled = true }
+    }
+
+    /** Under this object's lock. */
+    private val started = HashMap<String, Started>()
+
+    private fun startKey(from: String, chainId: Long) = "${from.lowercase()}|$chainId"
+
+    /**
+     * Whether another send from [quote]'s account on its chain has
+     * started since [quote] was priced, or had started but not yet
+     * recorded its nonce when it was, so its nonce may be taken: two
+     * quotes priced side by side (a site's sheet still up while a send an
+     * auto-approve rule covers goes out, or the wallet page's own) hold
+     * the same one. Its own earlier start (a retry after it failed
+     * without going out) doesn't count. Under this object's lock.
+     */
+    private fun overtakenLocked(quote: SendQuote): Boolean {
+        val last = started[startKey(quote.request.from.address, quote.tx.chainId)] ?: return false
+        return last.count != quote.sendsBefore && last.by !== quote
+    }
+
     /** What [submit] did with a quote. */
     enum class Submit {
         /** Signing and broadcasting it; [status] follows it. */
@@ -770,7 +846,11 @@ class WalletSender internal constructor(
          */
         BUSY,
 
-        /** Older than [QUOTE_TTL_MS]: nothing signed, price it again. */
+        /**
+         * Older than [QUOTE_TTL_MS], or another send from its account on
+         * its chain started after it was priced (its nonce may be taken):
+         * nothing signed, price it again.
+         */
         STALE,
     }
 
@@ -778,36 +858,70 @@ class WalletSender internal constructor(
      * Signs [quote]'s transaction with [sign] (the account's key, which
      * it zeroes) and broadcasts it, then follows it to a receipt —
      * unless another send is still being signed or broadcast, or the
-     * quote has gone [stale][isStale] (checked here, at the moment of
-     * signing, however long an unlock prompt kept the user before it).
+     * quote has gone [stale][isStale] or another send from its account
+     * on its chain started after it was priced (checked here, at the
+     * moment of signing, however long an unlock prompt kept the user
+     * before it — and again once it's signed, since a Ledger's connect,
+     * unlock and on-device review all happen inside [sign]: a quote
+     * priced over [SIGNED_TTL_MS] ago by then is thrown away unsent and
+     * ends [SendStatus.Stage.Failed.stale], to be priced again).
      */
-    fun submit(quote: SendQuote, sign: (EthTransaction) -> EthTransaction.Signed): Submit {
+    fun submit(quote: SendQuote, sign: suspend (EthTransaction) -> EthTransaction.Signed): Submit {
         synchronized(this) {
             if (busyLocked()) return Submit.BUSY
-            if (isStale(quote)) return Submit.STALE
+            if (isStale(quote) || overtakenLocked(quote)) return Submit.STALE
+            val k = startKey(quote.request.from.address, quote.tx.chainId)
+            val start = Started((started[k]?.count ?: 0L) + 1, quote)
+            started[k] = start
             job?.cancel()
             signed = null
             show(SendStatus(quote, SendStatus.Stage.Signing))
             job = scope.launch {
-                val s = try {
-                    sign(quote.tx)
-                } catch (e: CancellationException) {
-                    throw e
-                } catch (e: VaultLockedException) {
-                    fail(quote, "The wallet locked before the transaction was signed. Nothing was sent; confirm again to unlock it.", false)
-                    return@launch
-                } catch (e: Exception) {
-                    Log.w(TAG, "signing failed: ${e.javaClass.simpleName}")
-                    fail(quote, "Couldn’t sign the transaction. Nothing was sent.", false)
-                    return@launch
+                // Every way this ends without broadcast settling it (signing
+                // failed, the save failed, discarded or cancelled) leaves the
+                // nonce as it was, or abandoned by [discard] before the cancel.
+                try {
+                    signAndBroadcast(quote, sign, start)
+                } finally {
+                    settle(start)
                 }
-                // On disk before it goes out: a process killed mid-broadcast
-                // must come back to these bytes, never to an empty form that
-                // would sign a second payment next to them.
-                if (journalBeforeBroadcast(quote, s)) broadcast(quote, s)
             }
         }
         return Submit.STARTED
+    }
+
+    private suspend fun signAndBroadcast(quote: SendQuote, sign: suspend (EthTransaction) -> EthTransaction.Signed, start: Started) {
+        val s = try {
+            sign(quote.tx)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: QuoteStaleException) {
+            failStale(quote, droppedSigned = false)
+            return
+        } catch (e: VaultLockedException) {
+            fail(quote, "The wallet locked before the transaction was signed. Nothing was sent; confirm again to unlock it.", false)
+            return
+        } catch (e: LedgerException) {
+            // The Ledger's own words: rejected, locked, disconnected, timed out… (#142)
+            val nothing = if (e.message.orEmpty().contains("Nothing was")) "" else " Nothing was sent."
+            val rejected = e.kind == LedgerException.Kind.REJECTED || e.kind == LedgerException.Kind.CANCELLED
+            fail(quote, e.message + nothing, false, rejected)
+            return
+        } catch (e: Exception) {
+            Log.w(TAG, "signing failed: ${e.javaClass.simpleName}")
+            fail(quote, "Couldn’t sign the transaction. Nothing was sent.", false)
+            return
+        }
+        // Signing may have taken minutes (a Ledger unlocked, opened, reviewed on):
+        // bytes whose fee cap was priced too long ago are dropped, never sent.
+        if (tooOldToSend(quote)) {
+            failStale(quote, droppedSigned = true)
+            return
+        }
+        // On disk before it goes out: a process killed mid-broadcast
+        // must come back to these bytes, never to an empty form that
+        // would sign a second payment next to them.
+        if (journalBeforeBroadcast(quote, s)) broadcast(quote, s, start = start)
     }
 
     /** How far a [submitAndAwaitBroadcast] got. */
@@ -821,8 +935,18 @@ class WalletSender internal constructor(
         /** [Submit.BUSY]: another send is still unresolved; nothing signed. */
         data object Busy : Broadcast
 
-        /** [Submit.STALE]: nothing signed, price it again. */
-        data object Stale : Broadcast
+        /**
+         * [Submit.STALE], or it went stale while a Ledger signed it
+         * ([SendStatus.Stage.Failed.stale]): nothing sent, price it again.
+         * [droppedSigned]: it was approved on the Ledger and dropped
+         * only then, priced over [SIGNED_TTL_MS] ago
+         * ([SendStatus.Stage.Failed.droppedSigned]); otherwise it was
+         * over [QUOTE_TTL_MS] old (or overtaken) before anything was signed.
+         */
+        data class Stale(val droppedSigned: Boolean) : Broadcast
+
+        /** Refused on the Ledger, or its wait cancelled ([SendStatus.Stage.Failed.rejected]): nothing sent. */
+        data object Rejected : Broadcast
     }
 
     /**
@@ -831,10 +955,10 @@ class WalletSender internal constructor(
      * (desktop Freedom over OpenLV, #113). The send is the wallet's own
      * from here on, followed to its receipt and journalled like any other.
      */
-    suspend fun submitAndAwaitBroadcast(quote: SendQuote, sign: (EthTransaction) -> EthTransaction.Signed): Broadcast {
+    suspend fun submitAndAwaitBroadcast(quote: SendQuote, sign: suspend (EthTransaction) -> EthTransaction.Signed): Broadcast {
         when (submit(quote, sign)) {
             Submit.BUSY -> return Broadcast.Busy
-            Submit.STALE -> return Broadcast.Stale
+            Submit.STALE -> return Broadcast.Stale(droppedSigned = false)
             Submit.STARTED -> Unit
         }
         val s = status.first { it?.quote !== quote || (it.stage != SendStatus.Stage.Signing && it.stage != SendStatus.Stage.Broadcasting) }
@@ -843,7 +967,11 @@ class WalletSender internal constructor(
             return Broadcast.Failed("The send was stopped on the phone while it was going out; it may still go through.", true)
         }
         return when (val stage = s.stage) {
-            is SendStatus.Stage.Failed -> Broadcast.Failed(stage.message, stage.mayHaveGone)
+            is SendStatus.Stage.Failed -> when {
+                stage.stale -> Broadcast.Stale(stage.droppedSigned)
+                stage.rejected -> Broadcast.Rejected
+                else -> Broadcast.Failed(stage.message, stage.mayHaveGone)
+            }
             else -> s.hash?.let { Broadcast.Sent(it) } ?: Broadcast.Failed("No transaction hash came back.", true)
         }
     }
@@ -940,7 +1068,12 @@ class WalletSender internal constructor(
      * (Try again), so a node refusing them (the nonce is used, the
      * balance is too low) may be saying it about this very transaction.
      */
-    private suspend fun broadcast(quote: SendQuote, s: EthTransaction.Signed, resend: Boolean = false) {
+    private suspend fun broadcast(
+        quote: SendQuote,
+        s: EthTransaction.Signed,
+        resend: Boolean = false,
+        start: Started? = null,
+    ) {
         val from = quote.request.from.address
         val chainId = quote.tx.chainId
         // Discarded meanwhile (signing isn't a suspension point, so cancelling alone can't stop this).
@@ -959,6 +1092,7 @@ class WalletSender internal constructor(
             // transaction is on chain, it went out.
             if (landed(chainId, s.hash)) {
                 nonces.markSent(from, chainId, quote.tx.nonce)
+                settle(start)
                 set(quote, SendStatus.Stage.Pending, s.hash)
                 follow(quote, s.hash)
                 return
@@ -980,16 +1114,19 @@ class WalletSender internal constructor(
                 // A used nonce is used whoever used it; for any other
                 // refusal the chain's own count tells the next send.
                 if (nonceUsed(e)) nonces.markSent(from, chainId, quote.tx.nonce) else nonces.forget(from, chainId)
+                settle(start)
                 set(quote, SendStatus.Stage.Pending, s.hash)
                 follow(quote, s.hash)
                 return
             }
             nonces.forget(from, chainId)
+            settle(start)
             Log.i(TAG, "broadcast chain=$chainId nonce=${quote.tx.nonce} failed (uncertain=$uncertain)")
             fail(quote, message, uncertain)
             return
         }
         nonces.markSent(from, chainId, quote.tx.nonce)
+        settle(start)
         Log.i(TAG, "sent ${s.hash} chain=$chainId nonce=${quote.tx.nonce}")
         set(quote, SendStatus.Stage.Pending, s.hash)
         follow(quote, s.hash)
@@ -1033,18 +1170,57 @@ class WalletSender internal constructor(
     private suspend fun set(quote: SendQuote, stage: SendStatus.Stage, hash: String?): Boolean =
         journalThenShow(quote) { SendStatus(quote, stage, hash) }
 
-    private suspend fun fail(quote: SendQuote, message: String, mayHaveGone: Boolean) =
-        journalThenShow(quote) { it.copy(stage = SendStatus.Stage.Failed(message, mayHaveGone)) }
+    private suspend fun fail(quote: SendQuote, message: String, mayHaveGone: Boolean, rejected: Boolean = false) =
+        journalThenShow(quote) { it.copy(stage = SendStatus.Stage.Failed(message, mayHaveGone, rejected = rejected)) }
+
+    private suspend fun failStale(quote: SendQuote, droppedSigned: Boolean) = journalThenShow(quote) {
+        val message = if (droppedSigned) STALE_WHILE_SIGNING else STALE_BEFORE_SIGNING
+        it.copy(stage = SendStatus.Stage.Failed(message, mayHaveGone = false, stale = true, droppedSigned = droppedSigned))
+    }
 
     companion object {
+        /**
+         * Signs as [account]: on its Ledger if it's a Ledger's (#142),
+         * which the user confirms there; else [vaultSigner]. [fresh] is
+         * asked once the Ledger is ready, before it shows the transaction:
+         * false (the quote aged while it was unlocked) ends it with
+         * [QuoteStaleException], so nothing is reviewed that would be dropped.
+         */
+        fun signerFor(
+            context: android.content.Context,
+            vault: Vault,
+            account: WalletAccount,
+            fresh: () -> Boolean = { true },
+        ): suspend (EthTransaction) -> EthTransaction.Signed = if (account.ledger != null) {
+            val ledger = Ledger.get(context);
+            { tx -> ledger.signTransaction(account, tx, fresh) }
+        } else {
+            vaultSigner(vault, account)
+        }
+
         private const val TAG = "WalletSend"
 
         /** A send the last process died broadcasting, as the next one finds it. */
         internal const val INTERRUPTED = "The app closed while this was going out, so it may or may not have gone out. " +
             "Try again sends the very same transaction, so it can’t be paid twice."
 
-        /** A quote older than this is priced again before it's signed. */
+        /** Why a send was dropped unsent: its quote aged past [SIGNED_TTL_MS] while it was signed. */
+        internal const val STALE_WHILE_SIGNING = "The network fee was worked out over three minutes ago, before this was signed, " +
+            "so it may no longer get the transaction in. Nothing was sent; review the new fee and confirm again."
+
+        /** Why a send was dropped unsigned: the Ledger found its quote over [QUOTE_TTL_MS] old before showing it. */
+        internal const val STALE_BEFORE_SIGNING = "The network fee was worked out over a minute ago, so it may no longer " +
+            "get the transaction in. Nothing was signed or sent; review the new fee and confirm again."
+
+        /** A quote older than this is priced again before it's signed (or shown on a Ledger). */
         const val QUOTE_TTL_MS = 60_000L
+
+        /**
+         * Signed bytes whose quote is older than this are dropped, not
+         * broadcast: [QUOTE_TTL_MS] to confirm, plus time to review it
+         * on a Ledger (#220 R2-M1).
+         */
+        const val SIGNED_TTL_MS = 3 * 60_000L
 
         /** Between receipt reads: about a Gnosis block, under an Ethereum one. */
         const val POLL_MS = 4_000L
@@ -1236,7 +1412,7 @@ class WalletSender internal constructor(
          * one signature and zeroed after. Throws [VaultLockedException] if
          * the wallet isn't open.
          */
-        fun vaultSigner(vault: Vault, account: WalletAccount): (EthTransaction) -> EthTransaction.Signed = { tx ->
+        fun vaultSigner(vault: Vault, account: WalletAccount): suspend (EthTransaction) -> EthTransaction.Signed = { tx ->
             val key = vault.withSeed { seed -> HdKeys.secp256k1(seed, account.path) }
             try {
                 tx.sign(key, account.address)
@@ -1246,3 +1422,6 @@ class WalletSender internal constructor(
         }
     }
 }
+
+/** A signer found the quote it was signing too old to use ([WalletSender.QUOTE_TTL_MS]): nothing was signed. */
+class QuoteStaleException : Exception("quote went stale before signing")

@@ -79,7 +79,9 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import baby.freedom.mobile.ui.isLight
 import baby.freedom.mobile.wallet.BiometricVaultAuthenticator
+import baby.freedom.mobile.wallet.DuplicateAccountException
 import baby.freedom.mobile.wallet.Mnemonic
+import baby.freedom.mobile.wallet.OpenLvSession
 import baby.freedom.mobile.wallet.PublisherIdentityStore
 import baby.freedom.mobile.wallet.SafeAccounts
 import baby.freedom.mobile.wallet.Vault
@@ -253,6 +255,8 @@ internal fun walletErrorMessage(e: Throwable, action: String, phraseBackedUp: Bo
     is VaultAuthFailedException -> "Couldn’t $action: ${e.message}"
     is VaultLockedException -> "Couldn’t $action: the wallet locked. Unlock it and try again."
     is TooManyAccountsException -> "Couldn’t $action: ${e.message}."
+    is DuplicateAccountException -> "Couldn’t $action: the next account of this wallet is already on the list, added from a " +
+        "Ledger that holds the same recovery phrase. Remove that Ledger account to add it here."
     is VaultKeyLostException -> "Android has erased this wallet’s key. That happens when the screen lock is removed. " +
         lostWalletAdvice(phraseBackedUp)
     is VaultUnreadableException -> "This wallet can’t be read. " + lostWalletAdvice(phraseBackedUp)
@@ -312,6 +316,8 @@ fun WalletScreen(
     // The receive and scan pages (#106).
     var receiving by remember { mutableStateOf(false) }
     var scanning by remember { mutableStateOf(false) }
+    // Connect a Ledger (#142).
+    var connectingLedger by remember { mutableStateOf(false) }
     val publishers = remember(context) { PublisherIdentityStore.get(context) }
     var publisherSites by remember { mutableStateOf(0) }
     // The site the user opened Wallet from, fixed at that moment: the tab
@@ -333,6 +339,10 @@ fun WalletScreen(
     val chainStore = remember(context) { ChainStore.get(context) }
     val dappGrantStore = remember(context) { DappGrantStore.get(context) }
     val dappGrants by dappGrantStore.all.collectAsState(initial = emptyList())
+    // The connected site whose page is open (#111), by origin, so it follows the stored grant.
+    var openSite by remember { mutableStateOf<String?>(null) }
+    // The connected site whose Disconnect couldn't be saved: its line says so, as the site's page does.
+    var disconnectFailed by remember { mutableStateOf<String?>(null) }
     val allChains by chainStore.chains.collectAsState(initial = null)
     val walletChains = allChains?.filter { it.id in TokenRegistry.WALLET_CHAIN_IDS }
     val activeAddress = accountList?.active?.address
@@ -422,6 +432,7 @@ fun WalletScreen(
             sending = false
             receiving = false
             scanning = false
+            connectingLedger = false
             historyOpen = false
             openTx = null
             openSafe = null
@@ -475,6 +486,14 @@ fun WalletScreen(
         ReceivePage(account = receivingAccount, onBack = { receiving = false })
         return
     }
+    if (connectingLedger && accountList != null && (state is Vault.State.Locked || state is Vault.State.Unlocked)) {
+        LedgerConnectPage(
+            accounts = accountList?.accounts.orEmpty(),
+            onAdded = { connectingLedger = false },
+            onBack = { connectingLedger = false },
+        )
+        return
+    }
     if (state is Vault.State.Locked || state is Vault.State.Unlocked) {
         coSigning?.let { raw ->
             SafeCoSignPage(
@@ -524,6 +543,22 @@ fun WalletScreen(
             onBack = { scanning = false },
         )
         return
+    }
+    if (openSite != null) {
+        // Looked up again on every change: gone (disconnected here, by the site or from
+        // Settings) closes the page. Shown whatever the vault's state, like the list.
+        val grant = dappGrants.firstOrNull { it.origin == openSite }
+        if (grant != null) {
+            ConnectedSitePage(
+                grant = grant,
+                accounts = accountList?.accounts.orEmpty(),
+                chains = allChains.orEmpty(),
+                onDisconnect = { EthereumProviders.disconnect(context, it) },
+                onBack = { openSite = null },
+            )
+            return
+        }
+        LaunchedEffect(openSite) { openSite = null }
     }
     val stored = (state as? Vault.State.Locked)?.info ?: (state as? Vault.State.Unlocked)?.info
     if (showingPhrase && stored != null) {
@@ -654,6 +689,24 @@ fun WalletScreen(
                                 error = null
                                 receiving = true
                             },
+                            onConnectLedger = {
+                                error = null
+                                connectingLedger = true
+                            },
+                            onRemoveLedger = { account ->
+                                run("remove the Ledger account") {
+                                    // Its sites first (#220 R2-M2): told they lost it now, and not
+                                    // quietly reconnected if the same Ledger account is added again.
+                                    if (!EthereumProviders.accountRemoved(context, account.address)) {
+                                        error = "Couldn’t remove the Ledger account: the sites connected to it " +
+                                            "couldn’t be disconnected. Try again."
+                                        return@run
+                                    }
+                                    // And desktop's OpenLV session, if it was given it (#220 R1-M2).
+                                    OpenLvSession.accountRemovedFromWallet(account.address)
+                                    walletAccounts.removeLedger(account.index)
+                                }
+                            },
                         )
                     }
                     item("send") {
@@ -760,8 +813,13 @@ fun WalletScreen(
                     grants = dappGrants,
                     chains = allChains.orEmpty(),
                     accounts = accountList?.accounts.orEmpty(),
+                    onOpen = { openSite = it },
+                    disconnectFailed = disconnectFailed,
                     onRevoke = { origin ->
-                        scope.launch { EthereumProviders.disconnect(context, origin) }
+                        disconnectFailed = null
+                        scope.launch {
+                            if (!EthereumProviders.disconnect(context, origin)) disconnectFailed = origin
+                        }
                     },
                 )
             }
@@ -1383,37 +1441,5 @@ private fun PhraseWord(
         )
         Spacer(Modifier.width(PHRASE_NUMBER_GAP))
         Text(word, style = wordStyle)
-    }
-}
-
-/**
- * Sites connected to the wallet through `window.ethereum` (#110): which
- * account each was given and which network it's on. A site can drop its
- * own connection (`wallet_revokePermissions`); this is the user's way to
- * drop it for them.
- */
-@Composable
-private fun DappSitesSection(
-    grants: List<DappGrantStore.Grant>,
-    chains: List<baby.freedom.mobile.chains.Chain>,
-    accounts: List<baby.freedom.mobile.wallet.WalletAccount>,
-    onRevoke: (String) -> Unit,
-) {
-    SectionCard(title = "Connected sites") {
-        grants.forEach { grant ->
-            val account = accounts.firstOrNull { it.address.equals(grant.account, ignoreCase = true) }
-            val network = chains.firstOrNull { it.id == grant.chainId }?.name ?: "chain ${grant.chainId}"
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Column(modifier = Modifier.weight(1f).padding(vertical = 4.dp)) {
-                    Text(permissionOriginDisplay(grant.origin), fontWeight = FontWeight.Medium)
-                    Text(
-                        "${account?.name ?: "An account this wallet no longer has"} · ${shortAddress(grant.account)} · $network",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-                TextButton(onClick = { onRevoke(grant.origin) }) { Text("Disconnect") }
-            }
-        }
     }
 }

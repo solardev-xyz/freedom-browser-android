@@ -13,6 +13,7 @@ import baby.freedom.mobile.chains.rpc.RpcTransport
 import baby.freedom.mobile.chains.rpc.WalletRpc
 import baby.freedom.mobile.ens.hexToBytes
 import baby.freedom.mobile.ens.toHex
+import baby.freedom.mobile.wallet.ledger.LedgerException
 import java.io.IOException
 import java.math.BigInteger
 import kotlinx.coroutines.CoroutineScope
@@ -650,7 +651,28 @@ class SendTest {
 
         val old = WalletSender(chain.rpc(), scope, clock = { System.currentTimeMillis() + WalletSender.QUOTE_TTL_MS }, pollMs = 10, confirmTimeoutMs = 300)
         old.awaitRestored()
-        assertEquals(WalletSender.Broadcast.Stale, old.submitAndAwaitBroadcast(quote, signer()))
+        assertEquals(WalletSender.Broadcast.Stale(droppedSigned = false), old.submitAndAwaitBroadcast(quote, signer()))
+    }
+
+    @Test
+    fun `submitAndAwaitBroadcast answers a Ledger refusal as a rejection and a quote that aged on it as stale`() = runBlocking<Unit> {
+        val chain = FakeChain()
+        var now = 1_000L
+        val s = sender(chain) { now }
+        for (kind in listOf(LedgerException.Kind.REJECTED, LedgerException.Kind.CANCELLED)) {
+            assertEquals(WalletSender.Broadcast.Rejected, s.submitAndAwaitBroadcast(s.prepare(call())) { throw LedgerException(kind) })
+            s.acknowledge()
+        }
+        val timedOut = s.submitAndAwaitBroadcast(s.prepare(call())) { throw LedgerException(LedgerException.Kind.TIMEOUT) }
+        assertTrue(timedOut is WalletSender.Broadcast.Failed)
+        s.acknowledge()
+        // Reviewed on the device past the allowance: dropped unsent, to be priced again.
+        val aged = s.submitAndAwaitBroadcast(s.prepare(call())) { tx ->
+            now += WalletSender.SIGNED_TTL_MS
+            tx.sign(key.copyOf(), from.address)
+        }
+        assertEquals(WalletSender.Broadcast.Stale(droppedSigned = true), aged)
+        assertTrue(chain.sent.isEmpty())
     }
 
     @Test
@@ -1174,6 +1196,153 @@ class SendTest {
         assertEquals(WalletSender.Submit.STALE, s.submit(quote) { tx -> signed = true; tx.sign(key.copyOf(), from.address) })
         assertFalse(signed)
         assertNull(s.status.value)
+        assertTrue(chain.sent.isEmpty())
+    }
+
+    @Test
+    fun `a quote that went stale while a Ledger signed it is dropped, not broadcast`() = runBlocking<Unit> {
+        val chain = FakeChain()
+        var now = 1_000L
+        val s = sender(chain) { now }
+        val quote = s.prepare(request())
+        now += WalletSender.QUOTE_TTL_MS - 1
+        // Fresh when confirmed; the unlock and the review on the device took minutes.
+        assertEquals(
+            WalletSender.Submit.STARTED,
+            s.submit(quote) { tx ->
+                now += 150_000
+                tx.sign(key.copyOf(), from.address)
+            },
+        )
+        val failed = s.awaitStage { it is SendStatus.Stage.Failed }.stage as SendStatus.Stage.Failed
+        assertTrue(failed.stale)
+        assertFalse(failed.mayHaveGone)
+        assertEquals(WalletSender.STALE_WHILE_SIGNING, failed.message)
+        assertTrue(failed.droppedSigned)
+        assertTrue(chain.sent.isEmpty())
+        // Nothing holds the next send back: priced again, it goes.
+        now += 1
+        assertEquals(WalletSender.Submit.STARTED, s.submit(s.prepare(request()), signer()))
+        s.awaitStage { it == SendStatus.Stage.Pending }
+        assertEquals(1, chain.sent.size)
+    }
+
+    @Test
+    fun `a quote priced beside a send that went out since is priced again, not signed on the same nonce`() = runBlocking<Unit> {
+        val chain = FakeChain()
+        val s = sender(chain)
+        // A site's sheet is up with one quote while another (a covered call) is priced beside it.
+        val waiting = s.prepare(request())
+        val covered = s.prepare(request(amount = 2))
+        assertEquals(waiting.tx.nonce, covered.tx.nonce)
+        assertEquals(WalletSender.Submit.STARTED, s.submit(covered, signer()))
+        s.awaitStage { it == SendStatus.Stage.Pending }
+        chain.receipt = """{"status":"0x1","blockNumber":"0x10","gasUsed":"0x5208","effectiveGasPrice":"0x1"}"""
+        s.awaitStage { it is SendStatus.Stage.Confirmed }
+        // Still within the quote's minute, and nothing is busy: but its nonce is taken.
+        var signed = false
+        assertEquals(WalletSender.Submit.STALE, s.submit(waiting) { tx -> signed = true; tx.sign(key.copyOf(), from.address) })
+        assertFalse(signed)
+        assertEquals(1, chain.sent.size)
+        s.acknowledge()
+        chain.receipt = "null"
+        chain.nonce = 8
+        val again = s.prepare(request())
+        assertEquals(BigInteger.valueOf(8), again.tx.nonce)
+        assertEquals(WalletSender.Submit.STARTED, s.submit(again, signer()))
+        s.awaitStage { it == SendStatus.Stage.Pending }
+    }
+
+    @Test
+    fun `a quote priced while another send was still being signed is priced again, not signed on its nonce`() = runBlocking<Unit> {
+        val chain = FakeChain()
+        val s = sender(chain)
+        // A covered call starts first; the sheet's quote is priced while it
+        // is still signing (counted as started, its nonce not yet marked sent).
+        val covered = s.prepare(request(amount = 2))
+        val gate = java.util.concurrent.CountDownLatch(1)
+        val signing = java.util.concurrent.CountDownLatch(1)
+        assertEquals(
+            WalletSender.Submit.STARTED,
+            s.submit(covered) { tx -> signing.countDown(); gate.await(); tx.sign(key.copyOf(), from.address) },
+        )
+        signing.await()
+        val waiting = s.prepare(request())
+        assertEquals(covered.tx.nonce, waiting.tx.nonce)
+        // It goes out and is mined (nothing busy any more); the sheet is confirmed within its minute.
+        chain.receipt = """{"status":"0x1","blockNumber":"0x10","gasUsed":"0x5208","effectiveGasPrice":"0x1"}"""
+        gate.countDown()
+        s.awaitStage { it is SendStatus.Stage.Confirmed }
+        var signed = false
+        assertEquals(WalletSender.Submit.STALE, s.submit(waiting) { tx -> signed = true; tx.sign(key.copyOf(), from.address) })
+        assertFalse(signed)
+        assertEquals(1, chain.sent.size)
+        // Priced again, it takes the next nonce and goes out.
+        s.acknowledge()
+        chain.receipt = "null"
+        val again = s.prepare(request())
+        assertEquals(covered.tx.nonce + BigInteger.ONE, again.tx.nonce)
+        assertEquals(WalletSender.Submit.STARTED, s.submit(again, signer()))
+        s.awaitStage { it == SendStatus.Stage.Pending }
+        assertEquals(2, chain.sent.size)
+    }
+
+    @Test
+    fun `a quote whose own send failed before going out can be confirmed again`() = runBlocking<Unit> {
+        val chain = FakeChain()
+        val s = sender(chain)
+        val quote = s.prepare(request())
+        assertEquals(WalletSender.Submit.STARTED, s.submit(quote) { throw VaultLockedException() })
+        s.awaitStage { it is SendStatus.Stage.Failed }
+        assertEquals(WalletSender.Submit.STARTED, s.submit(quote, signer()))
+        s.awaitStage { it == SendStatus.Stage.Pending }
+        assertEquals(1, chain.sent.size)
+    }
+
+    @Test
+    fun `a transaction approved on the Ledger within the review allowance is sent, not dropped`() = runBlocking<Unit> {
+        val chain = FakeChain()
+        var now = 1_000L
+        val s = sender(chain) { now }
+        val quote = s.prepare(request())
+        // Confirmed after 35 s (the pre-sign check passes); approved on the device 30 s later.
+        now += 35_000
+        assertEquals(
+            WalletSender.Submit.STARTED,
+            s.submit(quote) { tx ->
+                now += 30_000
+                tx.sign(key.copyOf(), from.address)
+            },
+        )
+        s.awaitStage { it == SendStatus.Stage.Pending }
+        assertEquals(1, chain.sent.size)
+    }
+
+    @Test
+    fun `a transaction refused or cancelled on the Ledger fails as a rejection`() = runBlocking<Unit> {
+        for (kind in LedgerException.Kind.entries) {
+            val chain = FakeChain()
+            val s = sender(chain) { 1_000L }
+            assertEquals(WalletSender.Submit.STARTED, s.submit(s.prepare(request())) { throw LedgerException(kind) })
+            val failed = s.awaitStage { it is SendStatus.Stage.Failed }.stage as SendStatus.Stage.Failed
+            val rejection = kind == LedgerException.Kind.REJECTED || kind == LedgerException.Kind.CANCELLED
+            assertEquals(kind.name, rejection, failed.rejected)
+            assertFalse(failed.mayHaveGone)
+            assertFalse(failed.stale)
+            assertTrue(chain.sent.isEmpty())
+        }
+    }
+
+    @Test
+    fun `a signer that finds its quote stale before signing ends the send the same way`() = runBlocking<Unit> {
+        val chain = FakeChain()
+        val s = sender(chain) { 1_000L }
+        assertEquals(WalletSender.Submit.STARTED, s.submit(s.prepare(request())) { throw QuoteStaleException() })
+        val failed = s.awaitStage { it is SendStatus.Stage.Failed }.stage as SendStatus.Stage.Failed
+        assertTrue(failed.stale)
+        // Found stale before the Ledger showed it: nothing was signed, and the message says a minute, not three.
+        assertFalse(failed.droppedSigned)
+        assertEquals(WalletSender.STALE_BEFORE_SIGNING, failed.message)
         assertTrue(chain.sent.isEmpty())
     }
 

@@ -67,7 +67,6 @@ import baby.freedom.mobile.ens.toHex
 import baby.freedom.mobile.ui.isLight
 import baby.freedom.mobile.wallet.DappCall
 import baby.freedom.mobile.wallet.Eip712
-import baby.freedom.mobile.wallet.MessageSigning
 import baby.freedom.mobile.wallet.Recipients
 import baby.freedom.mobile.wallet.SafeAccount
 import baby.freedom.mobile.wallet.SafeAccounts
@@ -89,6 +88,7 @@ import baby.freedom.mobile.wallet.Vault
 import baby.freedom.mobile.wallet.VaultAuthenticator
 import baby.freedom.mobile.wallet.WalletAccount
 import baby.freedom.mobile.wallet.WalletSender
+import baby.freedom.mobile.wallet.ledger.LedgerException
 import java.math.BigInteger
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
@@ -142,6 +142,8 @@ internal fun safeErrorMessage(e: Throwable, action: String, phraseBackedUp: Bool
     is SendException -> e.message
     is Eip712.Invalid -> e.message
     is ChainRpcException -> WalletSender.readFailure(e)
+    // A Ledger owner's or payer's signature (#142): cancelled on the phone says nothing.
+    is LedgerException -> e.message.takeIf { e.kind != LedgerException.Kind.CANCELLED }
     else -> walletErrorMessage(e, action, phraseBackedUp)
 }
 
@@ -558,7 +560,7 @@ internal fun SafePage(
                             error = null
                         },
                         onConfirm = {
-                            confirmSafeCall(q, sender, vault, auth, scope,
+                            confirmSafeCall(context, q, sender, vault, auth, scope,
                                 setBusy = { busy = it },
                                 onStarted = { quote = null; notice = null },
                                 onError = { error = safeErrorMessage(it, "unlock the wallet", phraseBackedUp) },
@@ -791,6 +793,7 @@ private fun SafeCallReview(
 
 /** Unlocks the wallet if it has to and hands [q] to the sender, signed by its paying account (as Send's Confirm does). */
 private fun confirmSafeCall(
+    context: android.content.Context,
     q: SendQuote,
     sender: WalletSender,
     vault: Vault,
@@ -809,8 +812,9 @@ private fun confirmSafeCall(
     scope.launch {
         var stale = false
         try {
-            if (!vault.unlockedNow()) vault.unlock(auth)
-            when (sender.submit(q, WalletSender.vaultSigner(vault, q.request.from))) {
+            // A Ledger payer's key is on the Ledger: nothing to unlock here, it's confirmed there (#142).
+            if (!q.request.from.isLedger && !vault.unlockedNow()) vault.unlock(auth)
+            when (sender.submit(q, WalletSender.signerFor(context, vault, q.request.from) { !sender.isStale(q) })) {
                 WalletSender.Submit.STARTED -> onStarted()
                 WalletSender.Submit.BUSY -> onError(SafeException("Another send is still going out, or may have. Settle it (or stop tracking it) on the Send page first."))
                 WalletSender.Submit.STALE -> stale = true
@@ -1003,7 +1007,11 @@ private fun SafeProposePage(
     }
 }
 
-/** Signs [p] with each of this wallet's owners of [safe] that hasn't yet, until the threshold is met (desktop's free signatures). */
+/**
+ * Signs [p] with each of this wallet's owners of [safe] that hasn't yet, until the threshold is met
+ * (desktop's free signatures). Only the seed's: a Ledger owner signs when its Sign is tapped, on the
+ * device (#142), not in a run of prompts nobody asked for.
+ */
 private suspend fun signWithLocalOwners(
     p: SafePending,
     safe: SafeAccount,
@@ -1012,7 +1020,7 @@ private suspend fun signWithLocalOwners(
     vault: Vault,
     auth: VaultAuthenticator,
 ) {
-    val local = safe.owners.mapNotNull { o -> accounts.firstOrNull { it.address.equals(o, ignoreCase = true) } }.filterNot { p.hasSigned(it.address) }
+    val local = safe.owners.mapNotNull { o -> accounts.firstOrNull { !it.isLedger && it.address.equals(o, ignoreCase = true) } }.filterNot { p.hasSigned(it.address) }
     if (local.isEmpty() || p.ready) return
     if (!vault.unlockedNow()) vault.unlock(auth)
     var current = p
@@ -1095,7 +1103,18 @@ private fun SafeRequestPage(
 
     // A transaction executed elsewhere (or replaced) since it was proposed is told apart on opening.
     LaunchedEffect(p.id, p.execHash) {
-        if (p.kind == SafePending.Kind.TX && !p.superseded) runCatching { stillExecutable() }
+        if (p.kind == SafePending.Kind.TX) {
+            runCatching {
+                if (!p.superseded) {
+                    stillExecutable()
+                } else if (p.abandonedExecs.isNotEmpty()) {
+                    // Marked superseded while an abandoned execution's receipt wasn't known yet (read
+                    // from a node a block behind): looked up again, one that did land settles it as executed.
+                    val c = chain ?: return@runCatching
+                    if (safeMovedOn(p) { chainReads.succeeded(c.id, it) } == SafeMovedOn.EXECUTED) safes.discard(p.id)
+                }
+            }
+        }
         // An execution the sender isn't following any more (Stop tracking in an earlier process,
         // before its end reached this record) isn't going out: Discard and Execute open up again.
         val exec = p.execHash ?: return@LaunchedEffect
@@ -1166,7 +1185,7 @@ private fun SafeRequestPage(
                                     when {
                                         signed -> "Signed"
                                         p.ready -> "Not needed: enough owners have signed"
-                                        mine != null -> "Signs on this phone"
+                                        mine != null -> if (mine.isLedger) "Signs on its Ledger" else "Signs on this phone"
                                         else -> "Waiting: share the request below"
                                     },
                                     style = MaterialTheme.typography.bodySmall,
@@ -1179,7 +1198,7 @@ private fun SafeRequestPage(
                                 TextButton(
                                     onClick = {
                                         act("sign") {
-                                            if (!vault.unlockedNow()) vault.unlock(auth)
+                                            if (!mine.isLedger && !vault.unlockedNow()) vault.unlock(auth)
                                             safes.signWith(p.id, mine)
                                         }
                                     },
@@ -1202,7 +1221,7 @@ private fun SafeRequestPage(
                         error = error,
                         onCancel = { quote = null },
                         onConfirm = {
-                            confirmSafeCall(q, sender, vault, auth, scope,
+                            confirmSafeCall(context, q, sender, vault, auth, scope,
                                 setBusy = { busy = it },
                                 onStarted = { quote = null; notice = null },
                                 onError = { error = safeErrorMessage(it, "unlock the wallet", phraseBackedUp) },
@@ -1422,6 +1441,7 @@ internal fun SafeCoSignPage(
 ) {
     val context = LocalContext.current
     val chainReads = remember(context) { SafeChain.get(context) }
+    val safes = remember(context) { SafeAccounts.get(context) }
     val scope = rememberCoroutineScope()
     val parsed = remember(raw) { runCatching { SafeProtocol.parseRequest(raw) } }
     val request = parsed.getOrNull()
@@ -1552,8 +1572,8 @@ internal fun SafeCoSignPage(
                                         error = null
                                         scope.launch {
                                             try {
-                                                if (!vault.unlockedNow()) vault.unlock(auth)
-                                                val sig = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) { MessageSigning.sign(vault, account, request.hash) }
+                                                if (!account.isLedger && !vault.unlockedNow()) vault.unlock(auth)
+                                                val sig = safes.ownerSignature(account, request.typedData.toString())
                                                 signature = account to sig
                                             } catch (e: CancellationException) {
                                                 throw e

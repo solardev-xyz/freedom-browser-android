@@ -6,6 +6,7 @@ import androidx.annotation.VisibleForTesting
 import baby.freedom.mobile.chains.rpc.ChainDataRouter
 import baby.freedom.mobile.chains.rpc.WalletRpc
 import baby.freedom.mobile.ens.toHex
+import baby.freedom.mobile.wallet.ledger.Ledger
 import java.io.File
 import java.math.BigInteger
 import kotlinx.coroutines.CancellationException
@@ -292,6 +293,8 @@ class SafeAccounts internal constructor(
     private val scope: CoroutineScope,
     private val io: CoroutineDispatcher = Dispatchers.IO,
     private val clock: () -> Long = System::currentTimeMillis,
+    /** Signs typed data as a Ledger account (#142): on the device, which shows it. */
+    private val ledgerSign: suspend (WalletAccount, Eip712.TypedData, ByteArray) -> String = { _, _, _ -> throw SafeException("This account’s key is on a Ledger.") },
 ) {
     private val _state = MutableStateFlow<SafeState?>(null)
 
@@ -510,9 +513,21 @@ class SafeAccounts internal constructor(
     suspend fun signWith(id: String, account: WalletAccount): SafePending {
         val entry = _state.value?.pending?.firstOrNull { it.id == id } ?: throw SafeException("This request was discarded.")
         if (entry.ready) return entry
-        val hash = withContext(Dispatchers.Default) { SafeProtocol.hash(JSONObject(entry.typedData)) }
-        val signature = withContext(Dispatchers.Default) { MessageSigning.sign(vault, account, hash) }
+        val signature = ownerSignature(account, entry.typedData)
         return addSignature(id, signature)
+    }
+
+    /**
+     * [account]'s signature over the Safe typed data [typedData] (a SafeTx or
+     * SafeMessage): from the vault's seed, or on its Ledger (#142), which
+     * shows the typed data and is confirmed there. Throws [VaultLockedException]
+     * for a seed account if the wallet isn't open.
+     */
+    suspend fun ownerSignature(account: WalletAccount, typedData: String): String {
+        val data = withContext(Dispatchers.Default) { Eip712.parseStrict(typedData) }
+        val digest = withContext(Dispatchers.Default) { Eip712.digest(data) }
+        return if (account.isLedger) ledgerSign(account, data, digest)
+        else withContext(Dispatchers.Default) { MessageSigning.sign(vault, account, digest) }
     }
 
     /** Takes pending [id] off the board (its signatures are thrown away). */
@@ -627,6 +642,7 @@ class SafeAccounts internal constructor(
                 vault = Vault.get(app),
                 store = SafeStore.get(app),
                 scope = CoroutineScope(SupervisorJob() + Dispatchers.Default),
+                ledgerSign = { account, data, digest -> Ledger.get(app).signTypedData(account, data, digest) },
             )
         }
     }

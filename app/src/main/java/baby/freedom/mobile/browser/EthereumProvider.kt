@@ -16,10 +16,12 @@ import baby.freedom.mobile.wallet.SendRequest
 import baby.freedom.mobile.wallet.TokenRegistry
 import baby.freedom.mobile.wallet.VaultLockedException
 import baby.freedom.mobile.wallet.WalletAccount
+import baby.freedom.mobile.wallet.ledger.LedgerException
 import java.math.BigInteger
 import kotlin.coroutines.CoroutineContext
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -55,8 +57,21 @@ sealed interface EthAsk {
         val messageJson: String,
     ) : EthAsk
 
-    /** `eth_sendTransaction`, priced ([quote]); [repriced] when an earlier quote went stale and this is its fresh price. */
-    data class SendTransaction(override val origin: String, val quote: SendQuote, val repriced: Boolean) : EthAsk
+    /**
+     * `eth_sendTransaction`, priced ([quote]); [repriced] when an earlier
+     * quote went stale and this is its fresh price. [autoApprove] is the
+     * rule (#112) the user may turn on with it — null when the call can't
+     * have one ([AutoApproveRule.eligible]); [ruled] when that rule is
+     * already on and the sheet shows only because the wallet is locked or
+     * the send replaces one the user stopped tracking.
+     */
+    data class SendTransaction(
+        override val origin: String,
+        val quote: SendQuote,
+        val repriced: Boolean,
+        val autoApprove: AutoApproveRule? = null,
+        val ruled: Boolean = false,
+    ) : EthAsk
 
     /** `wallet_switchEthereumChain` (or `wallet_addEthereumChain` for a chain the wallet already has). */
     data class SwitchChain(override val origin: String, val from: Chain, val to: Chain) : EthAsk
@@ -75,8 +90,12 @@ sealed interface EthAnswer {
      */
     data object Paused : EthAnswer
 
-    /** [account]: the one the user picked to share, for [EthAsk.Connect]. */
-    data class Approved(val account: WalletAccount? = null) : EthAnswer
+    /**
+     * [account]: the one the user picked to share, for [EthAsk.Connect].
+     * [alwaysApprove]: for [EthAsk.SendTransaction], also turn its
+     * [EthAsk.SendTransaction.autoApprove] rule on.
+     */
+    data class Approved(val account: WalletAccount? = null, val alwaysApprove: Boolean = false) : EthAnswer
 }
 
 /**
@@ -93,7 +112,9 @@ sealed interface EthAnswer {
  *    account the user chose ([Grants]).
  *  - Connected sites only: `personal_sign`, `eth_signTypedData_v4` and
  *    `eth_sendTransaction`, each asked every time, from the account the
- *    site was given and no other.
+ *    site was given and no other — except a transaction an auto-approve
+ *    rule the user turned on covers ([AutoApprove], #112), which goes out
+ *    without a sheet while the wallet is unlocked.
  *
  * Each site is on a chain of its own: Gnosis until it switches (desktop's
  * default), an onchain app's own chain always. A switch moves that site
@@ -111,6 +132,7 @@ class EthereumProvider(
     private val chains: suspend () -> List<Chain>,
     private val reads: suspend (chainId: Long, method: String, params: JSONArray, origin: String) -> Any?,
     private val sends: Sends,
+    private val autoApprove: AutoApprove,
     /** Where typed data is parsed and hashed: never the main thread, which a page's payload could otherwise hold up. */
     private val compute: CoroutineContext = Dispatchers.Default,
 ) {
@@ -140,16 +162,43 @@ class EthereumProvider(
     /** [Grants] can't be read right now; which sites are connected, and on which chain, is unknown. */
     class GrantsUnreadable : Exception("connected sites unreadable")
 
+    /**
+     * Auto-approve rules (#112, [baby.freedom.mobile.data.AutoApproveStore]).
+     * [matches] is false while the store can't be read: the sheet shows.
+     */
+    interface AutoApprove {
+        suspend fun matches(rule: AutoApproveRule): Boolean
+        suspend fun grant(rule: AutoApproveRule): Boolean
+
+        /** Drop every rule of [origin]; true if it's written. */
+        suspend fun revokeOrigin(origin: String): Boolean
+
+        /** Drop every rule (the wallet was removed); true if it's written. */
+        suspend fun clear(): Boolean
+    }
+
     /** The wallet: its accounts (public), activity, and signing a digest. */
     interface Wallet {
         /** The wallet's accounts, or null when there's no wallet (or it has never been opened). */
         suspend fun accounts(): List<WalletAccount>?
 
+        /** Whether the wallet is open right now, so a send can be signed without asking to unlock. */
+        fun unlocked(): Boolean
+
         /** A connected site is using the wallet: the idle lock waits (maintainer decision 7). */
         fun noteActivity()
 
-        /** [MessageSigning.sign]; throws [VaultLockedException] if the wallet isn't open. */
-        fun sign(account: WalletAccount, digest: ByteArray): String
+        /**
+         * `personal_sign` of [message] as [account]: with its key on the
+         * phone ([MessageSigning.sign] over [MessageSigning.personalDigest];
+         * throws [VaultLockedException] if the wallet isn't open), or on its
+         * Ledger (#142), which shows the message and throws
+         * [LedgerException] for a rejection, a disconnect, a timeout…
+         */
+        suspend fun signMessage(account: WalletAccount, message: ByteArray): String
+
+        /** `eth_signTypedData_v4` of [data], whose EIP-712 digest is [digest]: as [signMessage], on the phone or the Ledger. */
+        suspend fun signTypedData(account: WalletAccount, data: Eip712.TypedData, digest: ByteArray): String
     }
 
     /** The send flow ([baby.freedom.mobile.wallet.WalletSender]). */
@@ -172,6 +221,9 @@ class EthereumProvider(
         data class Sent(val hash: String) : Submitted
         data object Stale : Submitted
         data object Busy : Submitted
+
+        /** Refused on the Ledger, or the user cancelled waiting for it: nothing sent. */
+        data object Rejected : Submitted
         data class Failed(val message: String, val hash: String?) : Submitted
     }
 
@@ -246,40 +298,116 @@ class EthereumProvider(
 
     /**
      * Disconnect [origin] (`wallet_revokePermissions`, or Disconnect on the
-     * wallet page): its pages see no accounts. The site stays on the chain
+     * wallet page): its pages see no accounts, and its auto-approve rules
+     * (#112) are dropped, so connecting again later starts with none. The
+     * rules go first: if they can't be written the site stays connected
+     * and the caller can try again, never a disconnected site with rules
+     * left over. The site stays on the chain
      * it was on for the rest of this session — its pages were told that
      * chain and get no `chainChanged` — as a site that never connected
      * keeps the one it switched to. False if it couldn't be written.
+     *
+     * Runs to the end even if the caller is cancelled (a page closed while
+     * the write is in flight): the store commits the revoke regardless, and
+     * a revoke that commits must also tell the site's pages. Holds
+     * [siteLinks], so a rule turned on from a sheet that was open meanwhile
+     * can't be written after the site's rules were dropped.
      */
-    suspend fun disconnect(origin: String): Boolean {
-        val grant = try {
-            grants.grantFor(origin)
-        } catch (e: GrantsUnreadable) {
-            return false
-        } ?: return true
-        if (!grants.revoke(origin)) return false
-        synchronized(sessionChains) { sessionChains[origin] = grant.chainId }
-        events.emit(origin, "accountsChanged", JSONArray())
-        return true
+    suspend fun disconnect(origin: String): Boolean = withContext(NonCancellable) {
+        siteLinks.withLock {
+            val grant = try {
+                grants.grantFor(origin)
+            } catch (e: GrantsUnreadable) {
+                return@withLock false
+            } ?: return@withLock autoApprove.revokeOrigin(origin)
+            if (!autoApprove.revokeOrigin(origin)) return@withLock false
+            if (!grants.revoke(origin)) return@withLock false
+            synchronized(sessionChains) { sessionChains[origin] = grant.chainId }
+            events.emit(origin, "accountsChanged", JSONArray())
+            true
+        }
     }
 
     /**
-     * The wallet was removed: every site is disconnected, so importing the
+     * The wallet was removed: every site is disconnected and every
+     * auto-approve rule dropped, so importing the
      * same phrase later doesn't quietly reconnect them, and their open
      * pages see no accounts. Each keeps its chain for the session, as
-     * [disconnect]. False if the store couldn't be written.
+     * [disconnect]. False if either store couldn't be written — but each is
+     * still cleared as far as it can be: a rule store that can't be written
+     * doesn't keep every site connected past the wallet's removal (and a
+     * rule left behind is dropped when its site next connects, [connect]).
+     * Not cancellable, as [disconnect].
      */
-    suspend fun disconnectAll(): Boolean {
-        // Unreadable: clear them all the same; only which pages to tell is unknown.
-        val all = try {
-            grants.all()
-        } catch (e: GrantsUnreadable) {
-            emptyMap()
+    suspend fun disconnectAll(): Boolean = withContext(NonCancellable) {
+        siteLinks.withLock {
+            // Unreadable: clear them all the same; only which pages to tell is unknown.
+            val all = try {
+                grants.all()
+            } catch (e: GrantsUnreadable) {
+                emptyMap()
+            }
+            val rulesCleared = autoApprove.clear()
+            if (!grants.clear()) return@withLock false
+            synchronized(sessionChains) { all.forEach { (origin, g) -> sessionChains[origin] = g.chainId } }
+            all.keys.forEach { events.emit(it, "accountsChanged", JSONArray()) }
+            rulesCleared
         }
-        if (!grants.clear()) return false
-        synchronized(sessionChains) { all.forEach { (origin, g) -> sessionChains[origin] = g.chainId } }
-        all.keys.forEach { events.emit(it, "accountsChanged", JSONArray()) }
-        return true
+    }
+
+    /**
+     * Held while a site's connection or its auto-approve rules change
+     * ([connect], [disconnect], [disconnectAll], [grantRule]), so a rule is
+     * only ever written for a site that is connected, with the account it
+     * was turned on for, at the moment it's written.
+     */
+    private val siteLinks = Mutex()
+
+    /**
+     * Turn [rule] on for [origin]'s send from [account] — if the site is
+     * still connected with that account now that the sheet is closed. The
+     * page may have disconnected itself (`wallet_revokePermissions`), or the
+     * user it, while the sheet was up; a rule written then would outlive
+     * the disconnect and cover the site's next connection (R1-F1).
+     */
+    private suspend fun grantRule(origin: String, account: WalletAccount, rule: AutoApproveRule) {
+        siteLinks.withLock {
+            val now = try {
+                connectedAccount(origin)
+            } catch (e: GrantsUnreadable) {
+                null
+            }
+            if (now != null && now.address.equals(account.address, ignoreCase = true)) autoApprove.grant(rule)
+        }
+    }
+
+    /**
+     * The Ledger account [address] was taken off the wallet: every site
+     * connected with it is disconnected, as [disconnect] (its auto-approve
+     * rules dropped first, so none is left for a later connection), so
+     * adding the account again later doesn't quietly reconnect them, and
+     * their open pages see no accounts. False if the grants couldn't be
+     * read, or a site's rules or grant couldn't be written. Not
+     * cancellable, and holds [siteLinks], as [disconnect].
+     */
+    suspend fun accountRemoved(address: String): Boolean = withContext(NonCancellable) {
+        siteLinks.withLock {
+            val all = try {
+                grants.all()
+            } catch (e: GrantsUnreadable) {
+                return@withLock false
+            }
+            var ok = true
+            all.filterValues { it.account.equals(address, ignoreCase = true) }.forEach { (origin, grant) ->
+                if (!autoApprove.revokeOrigin(origin) || !grants.revoke(origin)) {
+                    ok = false
+                    return@forEach
+                }
+                synchronized(sessionChains) { sessionChains[origin] = grant.chainId }
+                events.emit(origin, "accountsChanged", JSONArray())
+            }
+            ok
+        }
     }
 
     // ---- Chains ----
@@ -436,7 +564,13 @@ class EthereumProvider(
         val picked = answer.account ?: return rejected()
         // Only an account this wallet has, whatever the sheet handed back.
         val account = wallet.accounts()?.firstOrNull { it.address.equals(picked.address, ignoreCase = true) } ?: return rejected()
-        if (!grants.grant(origin, account.address, chain.id)) return Reply.Err(INTERNAL, "Couldn't save the connection")
+        // A new connection starts with no rules: any the site's last one left (a grant for an
+        // account this wallet no longer lists, or a rule store the wallet's removal couldn't
+        // clear) were turned on for another account's sends, not this one's (R1-M1).
+        val saved = withContext(NonCancellable) {
+            siteLinks.withLock { autoApprove.revokeOrigin(origin) && grants.grant(origin, account.address, chain.id) }
+        }
+        if (!saved) return Reply.Err(INTERNAL, "Couldn't save the connection")
         synchronized(sessionChains) { sessionChains.remove(origin) }
         wallet.noteActivity()
         events.emit(origin, "accountsChanged", JSONArray().put(account.address))
@@ -483,7 +617,7 @@ class EthereumProvider(
         val text = readableUtf8(bytes)
         val answer = ask(EthAsk.SignMessage(origin, account, text, "0x" + bytes.hexString()))
         if (answer !is EthAnswer.Approved) return refused(answer)
-        return signed { wallet.sign(account, MessageSigning.personalDigest(bytes)) }
+        return signed { wallet.signMessage(account, bytes) }
     }
 
     private suspend fun signTypedData(origin: String, account: WalletAccount, params: JSONArray, ask: suspend (EthAsk) -> EthAnswer): Reply {
@@ -519,13 +653,22 @@ class EthereumProvider(
             messageJson = shown,
         )
         ask(ask0).let { if (it !is EthAnswer.Approved) return refused(it) }
-        return signed { wallet.sign(account, digest) }
+        return signed { wallet.signTypedData(account, data, digest) }
     }
 
-    private fun signed(sign: () -> String): Reply = try {
+    private suspend fun signed(sign: suspend () -> String): Reply = try {
         Reply.Ok(sign())
+    } catch (e: CancellationException) {
+        throw e
     } catch (e: VaultLockedException) {
         Reply.Err(UNAUTHORIZED, "The wallet locked before signing. Nothing was signed.")
+    } catch (e: LedgerException) {
+        when (e.kind) {
+            // Refused on the device, or the user cancelled waiting for it: a rejection, as EIP-1193 says it.
+            LedgerException.Kind.REJECTED, LedgerException.Kind.CANCELLED ->
+                Reply.Err(USER_REJECTED, "User rejected the request on the Ledger.")
+            else -> Reply.Err(INTERNAL, "Ledger: ${e.message}")
+        }
     } catch (e: Exception) {
         Reply.Err(INTERNAL, "Couldn't sign. Nothing was signed.")
     }
@@ -558,14 +701,36 @@ class EthereumProvider(
             is SendQuote -> q
             else -> return q as Reply
         }
+        // The one rule that could cover this call (#112): this site, this contract, this function, this chain.
+        // None for a Ledger's account (#142): the Ledger asks for every transaction, so "goes out
+        // without asking" can't hold, and its dialog would pop up with no sheet to say what for.
+        val rule = if (account.isLedger) null else AutoApproveRule.eligible(origin, to, value, data, chain.id)
         var repriced = false
+        // Turned on in the last sheet confirmed; written only once its send has gone out (R2-M1).
+        var turnedOn = false
         repeat(MAX_REPRICES) {
             // Before the sheet, not after the user confirmed one that can't go.
             if (sends.busy()) return busy()
-            ask(EthAsk.SendTransaction(origin, quote, repriced)).let { if (it !is EthAnswer.Approved) return refused(it) }
+            val ruled = rule != null && autoApprove.matches(rule)
+            // No sheet only with the wallet open (else the sheet's button asks to unlock), and never
+            // for a send that takes the place of one the user stopped tracking: that warning is theirs to read.
+            if (!ruled || !wallet.unlocked() || quote.replaces != null) {
+                val answer = ask(EthAsk.SendTransaction(origin, quote, repriced, rule, ruled))
+                if (answer !is EthAnswer.Approved) return refused(answer)
+                // A repriced sheet opens with the switch off: what counts is the one confirmed last.
+                turnedOn = answer.alwaysApprove && rule != null && !ruled
+            }
             when (val s = sends.submit(quote)) {
-                is Submitted.Sent -> return Reply.Ok(s.hash)
+                is Submitted.Sent -> {
+                    // Only together with the send it was confirmed with: one that was busy,
+                    // failed or ran out of reprices leaves no rule behind. A rule that couldn't
+                    // be saved doesn't undo the send.
+                    if (turnedOn && rule != null) grantRule(origin, account, rule)
+                    return Reply.Ok(s.hash)
+                }
                 Submitted.Busy -> return busy()
+                // As personal_sign and typed data answer the same refusal (EIP-1193 4001).
+                Submitted.Rejected -> return Reply.Err(USER_REJECTED, "User rejected the transaction on the Ledger.")
                 is Submitted.Failed -> return Reply.Err(INTERNAL, s.message, s.hash?.let { JSONObject().put("hash", it) })
                 // Priced too long ago to trust its fee: price it again and let the user look.
                 Submitted.Stale -> {
