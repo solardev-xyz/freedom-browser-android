@@ -15,6 +15,8 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.take
+import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -119,6 +121,32 @@ class ChainStoreTest {
         assertEquals(BuiltInChains.ALL, store.chains.first())
         assertEquals(ChainStore.AddResult.FAILED, store.add(polygon))
         assertEquals(ChainStore.RemoveResult.FAILED, store.remove(137))
+    }
+
+    @Test
+    fun aReadErrorIsNullInChainsOrUnreadableNotAListWithoutTheCustomChains() = runBlocking {
+        // One transient IOException, then the stored custom chain reads fine.
+        val saved = MemoryStore()
+        saved.edit { it[stringPreferencesKey("chain:137")] = ChainStore.encode(polygon, 1) }
+        var reads = 0
+        val flaky = object : DataStore<Preferences> {
+            override val data: Flow<Preferences> = flow {
+                if (reads++ == 0) throw IOException("transient")
+                emit(saved.data.value)
+            }
+            override suspend fun updateData(transform: suspend (t: Preferences) -> Preferences) = throw IOException()
+        }
+        val store = ChainStore(flaky, backOff = {})
+        assertEquals(
+            // A reader acting on removals sees "unreadable", never "every custom chain was removed" (#215 R4-F1).
+            listOf(null, listOf(1L, 100L, 8453L, 137L)),
+            store.chainsOrUnreadable.take(2).toList().map { l -> l?.map { it.id } },
+        )
+        reads = 0
+        assertEquals(
+            listOf(listOf(1L, 100L, 8453L), listOf(1L, 100L, 8453L, 137L)),
+            store.chains.take(2).toList().map { l -> l.map { it.id } },
+        )
     }
 
     // ---- the user's own RPCs (#108) ----

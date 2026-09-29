@@ -22,6 +22,7 @@ import baby.freedom.mobile.wallet.Vault
 import baby.freedom.mobile.wallet.WalletAccount
 import baby.freedom.mobile.wallet.WalletAccounts
 import baby.freedom.mobile.wallet.WalletSender
+import java.io.IOException
 import java.util.WeakHashMap
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
@@ -153,7 +154,7 @@ object EthereumProviders {
                 override fun noteActivity() = vault.noteActivity()
                 override fun sign(account: WalletAccount, digest: ByteArray) = MessageSigning.sign(vault, account, digest)
             },
-            chains = { chainStore.chains.first() },
+            chains = { chainStore.chainsOrUnreadable.first() ?: throw IOException("chain list unreadable") },
             reads = { chainId, method, params, origin ->
                 router.request(chainId, method, params, RoutingContext.forPage(origin)).result
             },
@@ -166,7 +167,8 @@ object EthereumProviders {
         p.events = EthereumProvider.Events { origin, event, data -> scope.launch { emit(origin, event, data) } }
         provider = p
         // A chain removed in Settings → Chains moves the sites on it off it, and tells their pages (#215 R3-F2).
-        scope.launch { chainStore.chains.collect { p.chainsChanged(it) } }
+        // A list that couldn't be read (null) moves nobody: that's a read error, not a removal (#215 R4-F1).
+        scope.launch { chainStore.chainsOrUnreadable.collect { list -> list?.let { p.chainsChanged(it) } } }
     }
 
     /**
