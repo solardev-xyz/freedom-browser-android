@@ -25,7 +25,7 @@
 # tags it, so that check fails (and this workflow refuses to build) until
 # it's retagged.
 # The library is built with ant's `chain` feature, the Radicle node and
-# the Tor client (see the build step).
+# the Tor client, and with fat LTO (see the build step).
 #
 # COLIBRI_REF pins the corpus-core/colibri-stateless tag libc4.so (the
 # Colibri verifier behind proven name resolution, #100) is built from;
@@ -90,10 +90,13 @@ jobs:
           # Radicle node) and `chain,radicle,tor` (the Arti client for
           # .onion, #143). The helpers fail the job if the script's cargo
           # call ever changes shape under a new FFI_REF; they're the same
-          # ones the README's local build uses.
+          # ones the README's local build uses. enable-ffi-fat-lto.sh
+          # then switches the release-android profile from thin to fat
+          # LTO (~10% smaller .so at the same speed, #230).
           "$GITHUB_WORKSPACE/scripts/enable-ffi-chain.sh" .
           "$GITHUB_WORKSPACE/scripts/enable-ffi-radicle.sh" .
           "$GITHUB_WORKSPACE/scripts/enable-ffi-tor.sh" .
+          "$GITHUB_WORKSPACE/scripts/enable-ffi-fat-lto.sh" .
           ./scripts/build-android.sh
           # build-android.sh checks the node exports but not Tor's; the
           # JNI shim links against these, so fail here, not at link time.
