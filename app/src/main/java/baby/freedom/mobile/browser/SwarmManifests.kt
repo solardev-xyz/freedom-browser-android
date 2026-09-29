@@ -552,7 +552,11 @@ class SwarmManifests(
             )
             val token = synchronized(tokens) {
                 // Another tab of the same app checking the same state shares
-                // this consent: the second answer replays the first.
+                // this consent. The bridge takes the other tabs' sheets down
+                // once the first answer is recorded, and they follow it
+                // ([decided]); a second answer only reaches [decide] when it
+                // lands while the first is still being recorded, and then
+                // replays the first rather than overriding it.
                 val shared = outstanding(pending)
                 if (shared != null) {
                     tokens[shared]?.expiresAt = pending.expiresAt

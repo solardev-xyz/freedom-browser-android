@@ -132,8 +132,9 @@ object SwarmProviders {
      * A manifest check's result: [error] for the page (null: go on), and
      * whether it [holds] for the rest of the document — a decision does
      * (the user's own answer, or the one recorded for a consent they
-     * answered in another tab); anything else is checked again on the
-     * next request.
+     * answered in another tab), and so does a refusal on a tab blocked
+     * for the document, whose sheets can't show until the user navigates
+     * it; anything else is checked again on the next request.
      */
     internal class ManifestVerdict(val error: SwarmProvider.Reply.Err?, val holds: Boolean)
 
@@ -488,6 +489,10 @@ object SwarmProviders {
         }
     }
 
+    /** Whether [tab]'s document [doc] is still on screen with its asks refused without a sheet ([blockTab]). */
+    internal fun blocked(tab: BrowserState, doc: Int): Boolean =
+        (documents[tab.id] ?: 0) == doc && tab.id in blockedTabs
+
     /** The user refused a sheet on [tab]'s document [doc]: its further asks are refused without one, while it's still that document. */
     internal fun blockTab(tab: BrowserState, doc: Int) {
         if ((documents[tab.id] ?: 0) == doc) blockedTabs += tab.id
@@ -519,14 +524,26 @@ object SwarmProviders {
     private suspend fun manifestFresh(bridge: Bridge, doc: Int, origin: String, method: String, deadline: Long): SwarmProvider.Reply.Err? {
         val m = manifests ?: return null
         if (method !in MANIFEST_GATED) return null
-        val tab = bridge.tab
-        val eager = method == "swarm_requestAccess"
-        if (doc == STALE_DOCUMENT) return manifestCheck(m, bridge, doc, origin, eager, deadline).error
+        return manifestCached(bridge.tab, doc, origin, method == "swarm_requestAccess") { eager ->
+            manifestCheck(m, bridge, doc, origin, eager, deadline)
+        }
+    }
+
+    /** [manifestFresh]'s per-document cache for [tab], around [run] (the check itself, eager or not), shared in [on]. */
+    internal suspend fun manifestCached(
+        tab: BrowserState,
+        doc: Int,
+        origin: String,
+        eager: Boolean,
+        on: CoroutineScope = scope,
+        run: suspend (eager: Boolean) -> ManifestVerdict,
+    ): SwarmProvider.Reply.Err? {
+        if (doc == STALE_DOCUMENT) return run(eager).error
         val slot = manifestChecks[tab.id]?.takeIf { it.first == doc }
             ?: (doc to HashMap<String, ManifestCheck>()).also { manifestChecks[tab.id] = it }
         var check = slot.second[origin]
         if (check == null || (eager && !check.eager)) {
-            check = ManifestCheck(eager, scope.async { manifestCheck(m, bridge, doc, origin, eager, deadline) })
+            check = ManifestCheck(eager, on.async { run(eager) })
             slot.second[origin] = check
         }
         val verdict = check.result.await()
@@ -603,8 +620,16 @@ object SwarmProviders {
                     }
                     // Nobody decided (a sheet that timed out or never
                     // showed): this request is refused, and the next one
-                    // asks again, as the Connect sheet would (#226 R3-F1).
-                    null -> ManifestVerdict(SwarmProvider.Reply.Err(SwarmProvider.USER_REJECTED, "User rejected the request"), holds = false)
+                    // asks again, as the Connect sheet would (#226 R3-F1) —
+                    // unless the tab is blocked for this document: then
+                    // every later sheet is refused without showing too, so
+                    // the refusal holds for the document rather than
+                    // re-resolving and re-fetching the manifest on each
+                    // request of a page looping on it (#226 R4-F1).
+                    null -> ManifestVerdict(
+                        SwarmProvider.Reply.Err(SwarmProvider.USER_REJECTED, "User rejected the request"),
+                        holds = blocked(tab, doc),
+                    )
                 }
             }
         }
@@ -662,6 +687,8 @@ object SwarmProviders {
     /** The user navigated [tabId] themselves: its pages may ask again. */
     fun allowPrompts(tabId: Long) {
         blockedTabs.remove(tabId)
+        // A manifest refusal held only because the tab was blocked is asked again (#226 R4-F1).
+        manifestChecks.remove(tabId)
     }
 
     private fun withdraw(tabId: Long) {

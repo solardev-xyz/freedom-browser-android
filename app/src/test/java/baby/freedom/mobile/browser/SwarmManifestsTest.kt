@@ -585,7 +585,7 @@ class SwarmManifestsTest {
     }
 
     @Test
-    fun `two tabs checking the same state share one consent, and the second answer replays the first`() {
+    fun `two tabs checking the same state share one consent, and an answer landing while the first is recorded replays it`() {
         val env = Env()
         val a = env.check(site, found(Publish)) as SwarmManifests.Check.Consent
         val b = env.check(site, found(Publish)) as SwarmManifests.Check.Consent
@@ -849,5 +849,52 @@ class SwarmManifestsTest {
             r.await()
         }
         assertTrue(sign.allowed)
+    }
+
+    @Test
+    fun `a blocked tab's manifest refusal holds for the document, without re-discovering (#226 R4-F1)`() {
+        val env = Env()
+        val tab = tab()
+        // The user refuses a sheet: the tab is blocked for its document.
+        runBlocking {
+            val r = async { SwarmProviders.askOnTab(tab, 0, SwarmAsk.Connect(site)) }
+            while (tab.swarmPrompt == null && !r.isCompleted) yield()
+            tab.swarmPrompt!!.respond(SwarmProvider.Answer.REJECTED)
+            assertFalse(r.await().allowed)
+        }
+        assertTrue(SwarmProviders.blocked(tab, 0))
+        var discoveries = 0
+        runBlocking {
+            repeat(5) {
+                val err = SwarmProviders.manifestCached(tab, 0, site, eager = true, on = this) { eager ->
+                    SwarmProviders.manifestCheck(env.manifests, tab, 0, site, eager, { SwarmProviders.SHEET_WAIT_MS }) {
+                        discoveries++
+                        found(Publish)
+                    }
+                }
+                assertEquals(SwarmProvider.USER_REJECTED, err!!.code)
+                assertNull("no sheet on a blocked tab", tab.swarmPrompt)
+            }
+        }
+        assertEquals("one check for the document, not one per request", 1, discoveries)
+        assertFalse("nothing was decided", env.has(site, AutoPublish))
+        // The user navigates the tab themselves: it asks again, and the answer counts.
+        SwarmProviders.allowPrompts(tab.id)
+        val allowed = runBlocking {
+            val r = async {
+                SwarmProviders.manifestCached(tab, 0, site, eager = true, on = this) { eager ->
+                    SwarmProviders.manifestCheck(env.manifests, tab, 0, site, eager, { SwarmProviders.SHEET_WAIT_MS }) {
+                        discoveries++
+                        found(Publish)
+                    }
+                }
+            }
+            while (tab.swarmPrompt == null && !r.isCompleted) yield()
+            tab.swarmPrompt!!.respond(SwarmProvider.Answer(true, always = true))
+            r.await()
+        }
+        assertNull(allowed)
+        assertEquals(2, discoveries)
+        assertTrue(env.has(site, AutoPublish))
     }
 }
