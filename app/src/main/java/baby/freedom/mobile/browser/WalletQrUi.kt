@@ -467,34 +467,46 @@ private fun ImageProxy.luminance(): Pair<ByteArray, Int> {
 }
 
 /**
- * iOS's `lastCode`, bounded in time: [isNew] is false for a code the
- * camera already reported less than [goneAfterMs] ago, true otherwise.
- * A code in view is decoded several times a second, so the window keeps
- * renewing while it stays there; once it has been out of view for
- * [goneAfterMs], pointing the camera at it again reads it again. The
- * window is kept per code, not just for the latest one: with two codes
- * in frame the decoder can read A, B, A, B…, and a single `lastCode`
- * would call each of them new every frame and flip the result between
- * them. So a code only reads again once it has itself been out of view
- * for the window, whatever else was read in between.
+ * Decides whether a decoded code should replace the scan result.
+ *
+ * The code the result already shows doesn't read again while it stays in
+ * view: [isNew] is false for it until it has been out of view for
+ * [goneAfterMs] (a code in view is decoded several times a second, so its
+ * window keeps renewing), and pointing the camera at it again after that
+ * reads it again. A code not seen within the window reads at once.
+ *
+ * A code that *was* seen within the window but isn't the one shown (the
+ * camera read A, then B, and is back on A) reads once the decoder has
+ * returned it on [steadyReads] frames in a row with no other code in
+ * between. That is what tells "the camera is on A now" apart from two
+ * codes in frame, where the decoder reads A, B, A, B… and letting each
+ * read as new would flip the result between them every frame: an
+ * alternation never forms a streak, so the result stays on whichever
+ * code read first, while a code the camera settles on reads within a few
+ * frames even if it was in view moments ago.
  *
  * A paste ([holdRecent]) is stronger than that window. The window runs on
  * the clock, which also runs while the camera is stopped (app in the
  * background, camera card scrolled away) or can't decode a frame (blur,
  * glare), so a code still in front of the camera would read as new again
  * and replace what was pasted. Instead, the codes the camera was reading
- * when the paste landed are held back with no time limit: its last code,
- * and every other code it reported within [goneAfterMs] of that one (two
- * codes in frame, or a neighbouring code the decoder picked up between
- * frames of the first). A code outside that set replaces the paste;
- * [release] (the paste field was cleared) lets the held codes read again
- * on their very next frame, even if they never left view.
+ * when the paste landed are held back with no time limit, however steady:
+ * its last code, and every other code it reported within [goneAfterMs] of
+ * that one (two codes in frame, or a neighbouring code the decoder picked
+ * up between frames of the first). A code outside that set replaces the
+ * paste; [release] (the paste field was cleared) lets the held codes read
+ * again on their very next frame, even if they never left view.
  */
 internal class ScanDedup(
     private val clock: () -> Long = SystemClock::elapsedRealtime,
     private val goneAfterMs: Long = 2_000,
+    private val steadyReads: Int = 3,
 ) {
     private var last: String? = null
+    /** How many frames in a row [last] was read, this one included. */
+    private var streak = 0
+    /** The code the result shows, if it came from the camera. */
+    private var shown: String? = null
     /** Every code reported within [goneAfterMs] of the latest report, with when it was last seen. */
     private val recent = HashMap<String, Long>()
     private var held: Set<String> = emptySet()
@@ -510,10 +522,17 @@ internal class ScanDedup(
         }
         val seen = recent[text]?.let { now - it in 0 until goneAfterMs } == true
         note(text, now)
-        return !seen
+        val new = when {
+            !seen -> true
+            text == shown -> false
+            else -> streak >= steadyReads
+        }
+        if (new) shown = text
+        return new
     }
 
     private fun note(text: String, now: Long) {
+        streak = if (text == last) streak + 1 else 1
         last = text
         recent[text] = now
         recent.values.removeAll { now - it !in 0 until goneAfterMs }
@@ -523,11 +542,15 @@ internal class ScanDedup(
     fun holdRecent() {
         val latest = last ?: return
         held = held + recent.keys + latest
+        shown = null
     }
 
     /** The paste was cleared: the held codes read again at once, even while still in view. */
     fun release() {
-        if (last in held) last = null
+        if (last in held) {
+            last = null
+            streak = 0
+        }
         recent.keys.removeAll(held)
         held = emptySet()
     }

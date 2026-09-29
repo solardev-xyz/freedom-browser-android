@@ -131,7 +131,7 @@ class WalletQrUiTest {
     }
 
     @Test
-    fun `a code reads once while it stays in view, and again once it has left`() {
+    fun `the code shown doesn't read again while it stays in view, and does once it has left`() {
         var now = 0L
         val dedup = ScanDedup(clock = { now }, goneAfterMs = 2_000)
         assertTrue(dedup.isNew("A"))
@@ -273,9 +273,39 @@ class WalletQrUiTest {
             now += 150
             assertFalse(dedup.isNew("B"))
         }
-        // B leaves view: A alone keeps being held; B back after the window reads again.
-        repeat(20) { now += 150; assertFalse(dedup.isNew("A")) }
+        // B leaves view and the camera settles on A alone: A reads once its
+        // frames run unbroken, and then not again while it stays in view.
+        repeat(2) { now += 150; assertFalse(dedup.isNew("A")) }
         now += 150
+        assertTrue(dedup.isNew("A"))
+        repeat(20) { now += 150; assertFalse(dedup.isNew("A")) }
+    }
+
+    @Test
+    fun `a code the camera returns to within the window reads once it holds steady`() {
+        var now = 1_000L
+        val dedup = ScanDedup(clock = { now }, goneAfterMs = 2_000, steadyReads = 3)
+        assertTrue(dedup.isNew("A"))
+        // Pan to the neighbouring B: it reads at once.
+        now += 300
         assertTrue(dedup.isNew("B"))
+        repeat(3) { now += 150; assertFalse(dedup.isNew("B")) }
+        // Back to A well within A's window, and held there: the result
+        // moves to A after a few unbroken frames, not never.
+        now += 150
+        assertFalse(dedup.isNew("A"))
+        now += 150
+        assertFalse(dedup.isNew("A"))
+        now += 150
+        assertTrue(dedup.isNew("A"))
+        // A stray frame of B, still within B's window, doesn't flip it back...
+        now += 150
+        assertFalse(dedup.isNew("B"))
+        // ...and A, now shown, doesn't read again while it stays.
+        repeat(20) { now += 150; assertFalse(dedup.isNew("A")) }
+
+        // While a paste holds A back, even a steady A doesn't replace it.
+        dedup.holdRecent()
+        repeat(20) { now += 150; assertFalse(dedup.isNew("A")) }
     }
 }
