@@ -190,6 +190,12 @@ internal object SendJournalCodec {
                 r.dapp?.let {
                     JSONObject().put("origin", it.origin ?: JSONObject.NULL).put("data", it.data.toHex())
                         .put("gasLimit", it.gasLimit?.toString() ?: JSONObject.NULL)
+                        .put(
+                            "safe",
+                            it.safe?.let { l ->
+                                JSONObject().put("address", l.address).put("name", l.name).put("activates", l.activates)
+                            } ?: JSONObject.NULL,
+                        )
                 } ?: JSONObject.NULL,
             )
             .put(
@@ -233,7 +239,12 @@ internal object SendJournalCodec {
         val ledger = f.optJSONObject("ledger")?.let { LedgerKey(it.getString("path"), it.getString("device"), it.getString("deviceName")) }
         val from = WalletAccount(f.getInt("index"), f.getString("name"), f.getString("address"), ledger)
         val dapp = o.optJSONObject("dapp")?.let { d ->
-            DappCall(d.optStringOrNull("origin"), d.getString("data").hexToBytes(), d.optStringOrNull("gasLimit")?.let(::BigInteger))
+            DappCall(
+                d.optStringOrNull("origin"),
+                d.getString("data").hexToBytes(),
+                d.optStringOrNull("gasLimit")?.let(::BigInteger),
+                d.optJSONObject("safe")?.let { l -> SafeCallLabel(l.getString("address"), l.getString("name"), l.getBoolean("activates")) },
+            )
         }
         val request = SendRequest(chain, token, from, o.getString("to"), BigInteger(o.getString("amount")), dapp)
         val x = o.getJSONObject("tx")

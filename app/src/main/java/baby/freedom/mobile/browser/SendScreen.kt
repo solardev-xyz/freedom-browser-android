@@ -545,7 +545,7 @@ internal fun ReviewRow(label: String, value: String?, mono: Boolean = false, add
 
 /** Where a confirmed send is, with what can be done next. */
 @Composable
-private fun SendStatusSection(
+internal fun SendStatusSection(
     status: SendStatus,
     onOpenUrl: (String) -> Unit,
     onRetry: () -> Unit,
@@ -587,7 +587,7 @@ private fun SendStatusSection(
         ReviewRow("Amount", "${SendAmounts.exact(request.amount, request.token.decimals)} ${request.token.symbol} on ${request.chain.name}", mono = true)
         ReviewRow(if (request.dapp != null) "Contract" else "To", null, address = request.to)
         // One desktop Freedom composed (#113): what it calls is part of what was sent.
-        request.dapp?.takeIf { it.origin == null }?.let { HexRow("Data", "0x" + it.data.toHex(), selector = true, detail = "Asked for over a scanned pairing code") }
+        request.dapp?.takeIf { it.origin == null && it.safe == null }?.let { HexRow("Data", "0x" + it.data.toHex(), selector = true, detail = "Asked for over a scanned pairing code") }
         status.hash?.let { hash ->
             Column(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
                 Text("Transaction", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -691,5 +691,11 @@ internal fun SendEntrySection(status: SendStatus?, enabled: Boolean, onOpen: () 
     }
 }
 
-/** Who asked for a composed transaction: the site, or — for desktop Freedom's (#113) — the code that was scanned. */
-internal fun dappRequester(d: DappCall): String = d.origin?.let(::permissionOriginDisplay) ?: "a scanned pairing code"
+/**
+ * Who asked for a composed transaction: the site, the wallet's own Safe
+ * account (#141) it activates or executes for, or — for desktop Freedom's
+ * (#113) — the code that was scanned.
+ */
+internal fun dappRequester(d: DappCall): String = d.origin?.let(::permissionOriginDisplay)
+    ?: d.safe?.let { if (it.activates) "Safe “${it.name}” (activation)" else "Safe “${it.name}” (its owners’ transaction)" }
+    ?: "a scanned pairing code"

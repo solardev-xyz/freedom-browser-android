@@ -102,14 +102,33 @@ internal const val SCAN_TITLE = "Scan QR code"
  * [content] as a QR code's modules: iOS's `ReceiveView` settings — error
  * correction M, and no margin here, since [QrCodeImage] draws the quiet
  * zone itself.
+ *
+ * Text beyond ASCII (a Safe message request's own words: curly quotes,
+ * `€`, Cyrillic, CJK, emoji) is encoded as UTF-8 and marked so with an
+ * ECI header, which ZXing's reader (and every current scanner) honours.
+ * Without the hint ZXing writes ISO-8859-1 and turns everything outside
+ * Latin-1 into `?`, so the text scanned on the other phone no longer
+ * matches what it's asked to sign. Plain ASCII (addresses, payment URIs,
+ * signatures) stays exactly as before, with no ECI header an older
+ * scanner might stumble on.
  */
 internal fun qrMatrix(content: String): BitMatrix = QRCodeWriter().encode(
     content,
     BarcodeFormat.QR_CODE,
     0,
     0,
-    mapOf(EncodeHintType.ERROR_CORRECTION to ErrorCorrectionLevel.M, EncodeHintType.MARGIN to 0),
+    buildMap {
+        put(EncodeHintType.ERROR_CORRECTION, ErrorCorrectionLevel.M)
+        put(EncodeHintType.MARGIN, 0)
+        if (content.any { it.code > 0x7F }) put(EncodeHintType.CHARACTER_SET, Charsets.UTF_8.name())
+    },
 )
+
+/**
+ * How many bytes [content] takes in a QR code: what a code's capacity
+ * limits, not its character count — a CJK character is 3 bytes, an emoji 4.
+ */
+internal fun qrBytes(content: String): Int = content.toByteArray(Charsets.UTF_8).size
 
 /** The quiet zone around a QR code, in modules: the spec's minimum. */
 private const val QUIET_ZONE = 4
@@ -268,7 +287,7 @@ internal fun scannedLines(code: ScannedCode, chains: List<Chain>, accounts: List
             } ?: ScannedLine("Amount", "Not given")
             listOfNotNull(ScannedLine("Pay to", code.recipient, own(code.recipient)), network, asset, amount)
         }
-        is ScannedCode.Pairing, is ScannedCode.Unrecognized -> emptyList()
+        is ScannedCode.Pairing, is ScannedCode.SafeRequest, is ScannedCode.Unrecognized -> emptyList()
     }
 }
 
@@ -288,7 +307,7 @@ internal fun exactAmount(raw: BigInteger, decimals: Int): String =
  * saved-instance-state bundle.
  */
 @Composable
-internal fun ScanPage(chains: List<Chain>, accounts: List<WalletAccount>, onBack: () -> Unit) {
+internal fun ScanPage(chains: List<Chain>, accounts: List<WalletAccount>, onSafeRequest: (String) -> Unit, onBack: () -> Unit) {
     val context = LocalContext.current
     val session = remember(context) { OpenLvSession.get(context) }
     var result by remember { mutableStateOf<ScannedCode?>(null) }
@@ -297,6 +316,8 @@ internal fun ScanPage(chains: List<Chain>, accounts: List<WalletAccount>, onBack
     fun show(code: ScannedCode) {
         result = code
         if (code is ScannedCode.Pairing) session.start(code.uri)
+        // Another Safe owner's request (#141) opens its own review: nothing is signed before the user asks.
+        if (code is ScannedCode.SafeRequest) onSafeRequest(code.json)
     }
     // The same code seen frame after frame reads once while it stays in view (iOS's lastCode).
     val dedup = remember { ScanDedup() }
@@ -327,7 +348,7 @@ internal fun ScanPage(chains: List<Chain>, accounts: List<WalletAccount>, onBack
                     )
                     Spacer(Modifier.height(8.dp))
                     Text(
-                        "Point the camera at an address, a payment request or a pairing code. " +
+                        "Point the camera at an address, a payment request, a pairing code or a Safe request. " +
                             "Codes are read on this phone; nothing the camera sees is saved or sent.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -382,6 +403,7 @@ private fun ScannedCodeSection(code: ScannedCode, lines: List<ScannedLine>, onCo
         is ScannedCode.Address -> "Address"
         is ScannedCode.Payment -> "Payment request"
         is ScannedCode.Pairing -> "Pairing code"
+        is ScannedCode.SafeRequest -> "Safe request"
         is ScannedCode.Unrecognized -> "Can’t use this code"
     }
     SectionCard(title = title) {
@@ -432,7 +454,7 @@ private fun ScannedCodeSection(code: ScannedCode, lines: List<ScannedLine>, onCo
                     }
                 }
             }
-            is ScannedCode.Pairing -> Unit
+            is ScannedCode.Pairing, is ScannedCode.SafeRequest -> Unit
             is ScannedCode.Unrecognized -> Text(code.reason, style = MaterialTheme.typography.bodyMedium)
         }
     }

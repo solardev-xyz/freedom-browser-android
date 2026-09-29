@@ -22,6 +22,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.json.JSONObject
@@ -32,6 +33,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Test
@@ -393,6 +395,47 @@ class SendTest {
     }
 
     @Test
+    fun `changes hands a slow follower every status, where status would skip a Confirmed acknowledged meanwhile`() = runBlocking<Unit> {
+        val chain = FakeChain()
+        val s = sender(chain)
+        // Two followers, each stuck on its first send status (as SafeAccounts is, writing it to disk).
+        val gate = kotlinx.coroutines.CompletableDeferred<Unit>()
+        fun follow(flow: kotlinx.coroutines.flow.Flow<SendStatus?>): Pair<MutableList<SendStatus?>, kotlinx.coroutines.Job> {
+            val seen = java.util.Collections.synchronizedList(mutableListOf<SendStatus?>())
+            val job = scope.launch {
+                flow.collect {
+                    seen += it
+                    if (it != null) gate.await()
+                }
+            }
+            return seen to job
+        }
+        val (viaStatus, statusJob) = follow(s.status)
+        val (viaChanges, changesJob) = follow(s.changes)
+        // Both subscribed before the send starts (the StateFlow one says so with its initial null).
+        withTimeout(5_000) { while (viaStatus.isEmpty()) delay(5) }
+        delay(100)
+        chain.receipt = """{"status":"0x1","blockNumber":"0x10","gasUsed":"0x5208","effectiveGasPrice":"0x1"}"""
+        s.submit(s.prepare(request()), signer())
+        s.awaitStage { it is SendStatus.Stage.Confirmed }
+        // Done, while both followers are still busy with the send's first status.
+        s.acknowledge()
+        gate.complete(Unit)
+        withTimeout(5_000) {
+            while (viaChanges.lastOrNull() != null || viaChanges.size < 2) delay(10)
+            while (viaStatus.lastOrNull() != null || viaStatus.size < 2) delay(10)
+        }
+        statusJob.cancel()
+        changesJob.cancel()
+        // status conflates (its follower resumes on Done's null, how R4-M2 happens); changes has every step, in order.
+        assertEquals(null, viaStatus.last())
+        val stages = viaChanges.map { it?.stage }
+        val pending = stages.indexOf(SendStatus.Stage.Pending)
+        val confirmed = stages.indexOfFirst { it is SendStatus.Stage.Confirmed }
+        assertTrue("$stages", pending >= 0 && confirmed > pending && stages.last() == null)
+    }
+
+    @Test
     fun `a send that may have gone out outlives Done and blocks a fresh signature until Try again settles it`() = runBlocking<Unit> {
         val chain = FakeChain()
         val s = sender(chain)
@@ -703,6 +746,26 @@ class SendTest {
         assertTrue(restored.dapp!!.data.contentEquals(data))
         assertEquals(BigInteger.valueOf(90_000), restored.dapp!!.gasLimit)
         assertEquals(pending.hash, again.status.value!!.hash)
+    }
+
+    @Test
+    fun `a Safe's own call keeps its label across a restart, and names the Safe as who asked`() = runBlocking<Unit> {
+        val chain = FakeChain()
+        chain.estimate = 250_000
+        val s = sender(chain, journal = FileSendJournal(journalFile()))
+        val data = byteArrayOf(0x16, 0x88.toByte(), 0xf0.toByte(), 0xb9.toByte())
+        val label = SafeCallLabel("0x6d21181D5e0F3a4a438F0CC65FACFd418443b096", "Team", activates = true)
+        val quote = s.prepare(SendRequest(gnosis, xdai, from, SafeProtocol.FACTORY, BigInteger.ZERO, DappCall(null, data, null, label)))
+        // Code is involved: the estimate plus desktop's 20%.
+        assertEquals(BigInteger.valueOf(300_000), quote.tx.gasLimit)
+        chain.on["eth_getTransactionReceipt"] = { throw IOException("timed out") }
+        s.submit(quote, signer())
+        s.awaitStage { it == SendStatus.Stage.Pending }
+        val restored = sender(chain, journal = FileSendJournal(journalFile())).status.value!!.quote.request.dapp!!
+        assertEquals(label, restored.safe)
+        assertNull(restored.origin)
+        assertEquals("Safe “Team” (activation)", baby.freedom.mobile.browser.dappRequester(restored))
+        assertThrows(IllegalArgumentException::class.java) { DappCall("https://app.example", data, null, label) }
     }
 
     @Test

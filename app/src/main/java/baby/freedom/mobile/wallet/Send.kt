@@ -18,10 +18,14 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
@@ -107,18 +111,28 @@ object Recipients {
  * a scanned OpenLV pairing code (#113), which can't say who made the code.
  * [data] is the call data exactly as asked, and [gasLimit] the gas limit
  * it named, if any.
+ *
+ * With a [safe], the wallet composed it itself for one of its Safe
+ * accounts (#141): the Safe's activation or an `execTransaction` its
+ * owners signed, sent and paid for by one of this wallet's owner
+ * accounts. [origin] is null then — no site or pairing code asked.
  */
-class DappCall(val origin: String?, val data: ByteArray, val gasLimit: BigInteger?) {
+class DappCall(val origin: String?, val data: ByteArray, val gasLimit: BigInteger?, val safe: SafeCallLabel? = null) {
     init {
         require(gasLimit == null || gasLimit.signum() > 0) { "gas limit" }
+        require(safe == null || origin == null) { "a Safe's own call has no site" }
     }
 
     // By content, so a send read back from the journal equals the one that was written.
     override fun equals(other: Any?): Boolean =
-        other is DappCall && origin == other.origin && data.contentEquals(other.data) && gasLimit == other.gasLimit
+        other is DappCall && origin == other.origin && data.contentEquals(other.data) && gasLimit == other.gasLimit &&
+            safe == other.safe
 
-    override fun hashCode(): Int = (origin.hashCode() * 31 + data.contentHashCode()) * 31 + gasLimit.hashCode()
+    override fun hashCode(): Int = ((origin.hashCode() * 31 + data.contentHashCode()) * 31 + gasLimit.hashCode()) * 31 + safe.hashCode()
 }
+
+/** Which Safe account (#141) a wallet-composed call is for ([address], shown by [name]), and whether it [activates] it or executes a transaction its owners signed. */
+data class SafeCallLabel(val address: String, val name: String, val activates: Boolean)
 
 /**
  * What the user asked for: [amount] base units of [token] from [from] to
@@ -484,13 +498,30 @@ class WalletSender internal constructor(
     /** The current (or last) confirmed send; null once acknowledged. */
     val status: StateFlow<SendStatus?> = _status.asStateFlow()
 
+    private val _changes = MutableSharedFlow<SendStatus?>(replay = 1, extraBufferCapacity = Channel.UNLIMITED)
+
+    /**
+     * Every value [status] takes, in order, none skipped (the latest is
+     * replayed to a new collector): [status] conflates, so a collector
+     * busy with a Pending could see it followed straight by the null of
+     * Done and never see the Confirmed between. For a follower that must
+     * not miss an outcome ([SafeAccounts]).
+     */
+    val changes: SharedFlow<SendStatus?> = _changes.asSharedFlow()
+
+    /** Sets [status] and hands [value] to [changes]; under this object's lock. */
+    private fun setStatus(value: SendStatus?) {
+        _status.value = value
+        _changes.tryEmit(value)
+    }
+
     /**
      * Shows [value] and reports it to the [history] (#109), which records
      * a send once it went out or may have. Under this object's lock; the
      * history never blocks on storage there.
      */
     private fun show(value: SendStatus?) {
-        _status.value = value
+        setStatus(value)
         value?.let { history?.note(it) }
     }
 
@@ -554,7 +585,7 @@ class WalletSender internal constructor(
                         // its history wiped with it: the discard below gives the send up
                         // (abandoning its nonce) without recording it in the emptied history
                         // or following it.
-                        _status.value = shown
+                        setStatus(shown)
                     } else {
                         show(shown)
                         if (status.stage == SendStatus.Stage.Pending) job = scope.launch { follow(status.quote, send.signed.hash) }
