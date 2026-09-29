@@ -136,5 +136,14 @@
             android:exported="false"
             android:process=":tor" />
 
+        <!--
+          The recovery phrase's clipboard clear (#78) when the process
+          died within its minute: see PhraseClipboard. Only our own
+          AlarmManager PendingIntent reaches it.
+        -->
+        <receiver
+            android:name=".browser.PhraseClipboard$ClearReceiver"
+            android:exported="false" />
+
     </application>
 </manifest>
