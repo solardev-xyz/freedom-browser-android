@@ -37,16 +37,29 @@ internal class SpendStopGate(private val nanoTime: () -> Long = System::nanoTime
     private var stopAskedAt = 0L
     private var generation = 0L
     private var discovering = false
+    private var buying = 0
 
     /**
      * A spend is about to start; false (don't start it) while the node is
-     * being turned off, or while a discover runs.
+     * being turned off, or while a discover runs. [buy]: it's a stamp buy,
+     * which may reload the gateway as it ends ([gatewayWorkRunning]).
      */
-    fun begin(): Boolean = synchronized(monitor) {
+    fun begin(buy: Boolean = false): Boolean = synchronized(monitor) {
         if (stopping || discovering) return false
         running++
+        if (buy) buying++
         true
     }
+
+    /**
+     * Whether stamp work that may end by reloading the gateway runs now: a
+     * buy (the first sets up the chequebook) or a discover (which can adopt
+     * one). The app asks before a publish sends its upload (#222 R4-F1),
+     * since what it remembers of its own calls doesn't cover one it
+     * stopped waiting for, nor one a UI process that was restarted since
+     * started.
+     */
+    val gatewayWorkRunning: Boolean get() = synchronized(monitor) { discovering || buying > 0 }
 
     /** A discover is about to start; false (don't start it) while a spend or another discover runs. */
     fun beginDiscover(): Boolean = synchronized(monitor) {
@@ -87,10 +100,14 @@ internal class SpendStopGate(private val nanoTime: () -> Long = System::nanoTime
 
     private var lastDiscover: Pair<String, String?>? = null
 
-    /** A spend [begin] let start has ended, however. True if the service should now stop itself. */
-    fun end(): Boolean = synchronized(monitor) {
+    /** A spend [begin] let start (as a [buy] or not) has ended, however. True if the service should now stop itself. */
+    fun end(buy: Boolean = false): Boolean = synchronized(monitor) {
         check(running > 0) { "end() without begin()" }
         running--
+        if (buy) {
+            check(buying > 0) { "end(buy) without begin(buy)" }
+            buying--
+        }
         if (running == 0) monitor.notifyAll()
         stopWhenIdle && running == 0
     }

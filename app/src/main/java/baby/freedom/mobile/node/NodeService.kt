@@ -277,14 +277,14 @@ class NodeService : Service() {
      * soon as it (the last one) ends — never in the middle, where exiting
      * the process could leave a batch paid for but unregistered.
      */
-    private fun <T> spending(block: () -> T): T {
-        check(!doomed && stopGate.begin()) {
+    private fun <T> spending(buy: Boolean = false, block: () -> T): T {
+        check(!doomed && stopGate.begin(buy)) {
             if (!doomed && stopGate.discoverRunning) "The node is searching for your stamps. Try again once it's done." else "The Swarm node is turning off"
         }
         try {
             return block()
         } finally {
-            stopGate.end()
+            stopGate.end(buy)
         }
     }
 
@@ -380,7 +380,11 @@ class NodeService : Service() {
                     status.outcome?.let { o -> runCatching { JSONObject(o) }.getOrNull()?.let { put("outcome", it) } }
                 }.toString()
             }
-            "buy" -> spending {
+            // Whether a buy or a discover runs, either of which may end by
+            // reloading the gateway: a publish waits for it before sending
+            // (#222 R4-F1).
+            "gatewayWork" -> JSONObject().put("running", stopGate.gatewayWorkRunning).toString()
+            "buy" -> spending(buy = true) {
                 spendable()
                 val depth = args.getInt("depth").also { require(it in MIN_STAMP_DEPTH..MAX_STAMP_DEPTH) { "bad depth" } }
                 Log.i(TAG, "buying a postage batch (depth $depth), as the user confirmed")

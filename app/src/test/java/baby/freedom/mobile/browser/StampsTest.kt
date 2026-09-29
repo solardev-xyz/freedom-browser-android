@@ -123,20 +123,20 @@ class StampsTest {
     fun `a search the page stopped waiting for stays running until the node says it ended`() {
         fun ok(running: Boolean) = StampClient.Answer.Ok(JSONObject().put("running", running))
         val timedOut = StampClient.Answer.Failed(StampClient.TIMED_OUT)
-        assertTrue(StampClient.discoverStillRunning(ok(true)))
+        assertTrue(StampClient.nodeWorkStillRunning(ok(true)))
         // Busy, not gone: keep holding a publish back.
-        assertTrue(StampClient.discoverStillRunning(timedOut))
-        assertFalse(StampClient.discoverStillRunning(ok(false)))
+        assertTrue(StampClient.nodeWorkStillRunning(timedOut))
+        assertFalse(StampClient.nodeWorkStillRunning(ok(false)))
         // Unbound: the Activity may be being recreated while `:node` scans on — keep holding.
         val unbound = StampClient.Answer.Failed("The Swarm node isn't running", unbound = true)
-        assertTrue(StampClient.discoverStillRunning(unbound))
+        assertTrue(StampClient.nodeWorkStillRunning(unbound))
         // The call to `:node` failed: the process, and its search, went away.
-        assertFalse(StampClient.discoverStillRunning(StampClient.Answer.Failed("The Swarm node isn't running")))
+        assertFalse(StampClient.nodeWorkStillRunning(StampClient.Answer.Failed("The Swarm node isn't running")))
 
         val answers = ArrayDeque(listOf(ok(true), timedOut, unbound, ok(true), ok(false), ok(true)))
         var asks = 0
         var pauses = 0
-        val end = StampClient.awaitDiscoverEnd(ask = { asks++; answers.removeFirst() }) { pauses++ }
+        val end = StampClient.awaitNodeWorkEnd(ask = { asks++; answers.removeFirst() }) { pauses++ }
         assertEquals(5, asks)
         assertEquals(5, pauses)
         assertEquals(ok(false).json.toString(), (end as StampClient.Answer.Ok).json.toString())

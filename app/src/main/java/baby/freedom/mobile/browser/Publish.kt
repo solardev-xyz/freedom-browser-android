@@ -765,7 +765,16 @@ internal fun planPublish(resolver: ContentResolver, source: PublishSource): Publ
 internal object Publisher {
     sealed interface State {
         data object Idle : State
-        data class Running(val recordId: String, val name: String, val kind: PublishKind) : State
+        /**
+         * [waitingForNode]: staged, and held back until `:node` ends stamp
+         * work that may reload the gateway ([StampClient.awaitGatewayQuiet]).
+         */
+        data class Running(
+            val recordId: String,
+            val name: String,
+            val kind: PublishKind,
+            val waitingForNode: Boolean = false,
+        ) : State
         data class Finished(val recordId: String) : State
     }
 
@@ -788,7 +797,7 @@ internal object Publisher {
         val releaseSource = RunOnce { releaseGrant(app, plan.source) }
         scope.launch {
             try {
-                val (reference, bytes) = run(app, plan, batch, releaseSource::invoke)
+                val (reference, bytes) = run(app, plan, batch, releaseSource::invoke) { waitingForNode(record.id, it) }
                 history.completed(record.id, reference, batchId, bytes)
             } catch (e: PublishException) {
                 history.failed(record.id, e.message ?: "The upload failed")
@@ -821,6 +830,11 @@ internal object Publisher {
             }
         }
 
+    /** Marks the running publish of [recordId] as held back for `:node`'s stamp work, or not any more. */
+    internal fun waitingForNode(recordId: String, waiting: Boolean) = synchronized(this) {
+        _state.value.let { if (it is State.Running && it.recordId == recordId) _state.value = it.copy(waitingForNode = waiting) }
+    }
+
     /** Ends the publish of [recordId], given the history's [records] now. */
     internal fun finish(recordId: String, records: List<PublishRecord>) = synchronized(this) {
         _state.value = finishedState(recordId, records)
@@ -849,9 +863,16 @@ internal object Publisher {
      * known up front and capped, and uploads it. Returns the reference and
      * the bytes published. [sourceRead] is called as soon as the source
      * has been read in full, before the upload, which needs only the
-     * staged copy.
+     * staged copy. [waiting] says when the upload is held back for
+     * `:node`'s stamp work, and when that ended.
      */
-    private fun run(app: Context, plan: PublishPlan, batch: PostageBatch, sourceRead: () -> Unit): Pair<String, Long> {
+    private fun run(
+        app: Context,
+        plan: PublishPlan,
+        batch: PostageBatch,
+        sourceRead: () -> Unit,
+        waiting: (Boolean) -> Unit,
+    ): Pair<String, Long> {
         val batchId = batch.id
         val resolver = app.contentResolver
         val dir = stagingDir(app)
@@ -901,6 +922,12 @@ internal object Publisher {
                     )
                 }
             }
+            // A buy or search `:node` runs that this process doesn't know
+            // of (it stopped waiting for it, or this process was started
+            // again since) may still end by reloading the gateway, which
+            // would cut the upload off: wait it out (#222 R4-F1).
+            StampClient.awaitGatewayQuiet(onWaiting = { waiting(true) })
+            waiting(false)
             val reference = uploadToGateway(SwarmNode.GATEWAY_URL, request, { staged.inputStream() }, staged.length())
             return reference to published
         } catch (e: SecurityException) {

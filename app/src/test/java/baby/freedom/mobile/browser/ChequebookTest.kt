@@ -116,10 +116,16 @@ class ChequebookTest {
             ),
         )
         assertEquals(
-            "Buying the stamp failed: The node is still sending the transactions. The list shows the stamp once they confirm.",
+            "Extending the stamp failed: The node is still sending the transactions. The list shows the stamp once they confirm.",
             spendStatusText(
-                StampClient.Spend.Failed(StampClient.Kind.Buy, null, StampClient.stillSendingMessage(StampClient.Kind.Buy)),
+                StampClient.Spend.Failed(StampClient.Kind.Extend, null, StampClient.stillSendingMessage(StampClient.Kind.Extend)),
             ),
+        )
+        // A buy the app stopped waiting for is shown once `:node` ended it (#222 R4-F1): not as a failure.
+        assertEquals(
+            "The stamp purchase didn't report back: it took longer than expected, and ended without telling the app " +
+                "how it went. The list shows the stamp if it was bought.",
+            spendStatusText(StampClient.Spend.Failed(StampClient.Kind.Buy, null, StampClient.BUY_OVERRAN)),
         )
         // Its outcome keeps the node page's entries reachable with the node off, as a stamp's does.
         assertTrue(stampsEntryShown(light.copy(status = NodeStatus.Stopped), StampClient.Spend.Done(StampClient.Kind.Deposit, null)))

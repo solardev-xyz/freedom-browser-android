@@ -363,6 +363,16 @@ internal fun PublishScreen(
 internal const val STAMP_WORK_RUNNING_NOTE =
     "The node is buying or searching for stamps, which can restart it. Publish once that has finished."
 
+/** What a running publish is doing: uploading, or held back for the node's stamp work. */
+internal fun runningText(p: Publisher.State.Running): String =
+    if (p.waitingForNode) {
+        "Waiting for the node to finish buying or searching for stamps, which can restart it. " +
+            "The upload starts once that has finished. You can leave this page meanwhile."
+    } else {
+        "The node splits it into chunks, stamps each one and pushes them to the network. " +
+            "The link comes once every chunk is accepted. You can leave this page meanwhile."
+    }
+
 /** Why Publish waits: there's one upload at a time. */
 internal const val ANOTHER_PUBLISH_NOTE = "Another publish is uploading. Publish this once it's done."
 
@@ -400,10 +410,7 @@ private fun RunningCard(p: Publisher.State.Running) {
             Spacer(Modifier.width(12.dp))
             Column(Modifier.weight(1f)) {
                 Text(p.name, fontWeight = FontWeight.Medium)
-                Muted(
-                    "The node splits it into chunks, stamps each one and pushes them to the network. " +
-                        "The link comes once every chunk is accepted. You can leave this page meanwhile.",
-                )
+                Muted(runningText(p))
             }
         }
     }

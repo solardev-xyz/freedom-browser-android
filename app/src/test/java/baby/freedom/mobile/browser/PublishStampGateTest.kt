@@ -5,6 +5,7 @@ import java.lang.reflect.Proxy
 import java.math.BigInteger
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import org.json.JSONObject
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -100,6 +101,80 @@ class PublishStampGateTest {
         assertFalse(StampClient.discovery.value is StampClient.Discovery.Running)
         val r = assertNotNull(Publisher.claim("site", PublishKind.Folder) { record("p4") })
         Publisher.finish(r.id, emptyList())
+    }
+
+    @Test
+    fun `a buy the page stopped waiting for stays running until the node ends it`() {
+        val timedOut = StampClient.Answer.Failed(StampClient.TIMED_OUT)
+        var waited = 0
+        val buy = StampClient.spendOutcome(StampClient.Kind.Buy, null, timedOut) { waited++ }
+        assertEquals("a timed-out buy waits for :node before it ends", 1, waited)
+        assertEquals(StampClient.Spend.Failed(StampClient.Kind.Buy, null, StampClient.BUY_OVERRAN), buy)
+
+        // An extend or a deposit never reloads the gateway: no wait.
+        val extend = StampClient.spendOutcome(StampClient.Kind.Extend, "ab", timedOut) { waited++ }
+        assertEquals(StampClient.Spend.Failed(StampClient.Kind.Extend, "ab", StampClient.stillSendingMessage(StampClient.Kind.Extend)), extend)
+        StampClient.spendOutcome(StampClient.Kind.Deposit, null, timedOut) { waited++ }
+        // Nor a buy that answered, either way.
+        assertEquals(StampClient.Spend.Done(StampClient.Kind.Buy, null), StampClient.spendOutcome(StampClient.Kind.Buy, null, StampClient.Answer.Ok(JSONObject())) { waited++ })
+        assertEquals(
+            StampClient.Spend.Failed(StampClient.Kind.Buy, null, "not enough xDAI"),
+            StampClient.spendOutcome(StampClient.Kind.Buy, null, StampClient.Answer.Failed("not enough xDAI")) { waited++ },
+        )
+        assertEquals(1, waited)
+    }
+
+    @Test
+    fun `a publish sends at once when the node runs no stamp work`() {
+        var asks = 0
+        var waiting = false
+        StampClient.awaitGatewayQuiet(
+            ask = { asks++; StampClient.Answer.Ok(JSONObject().put("running", false)) },
+            pause = { throw AssertionError("no wait") },
+            onWaiting = { waiting = true },
+        )
+        assertEquals(1, asks)
+        assertFalse(waiting)
+        // Nor when :node has gone (the upload then fails on its own), or is
+        // an older one that doesn't know the call.
+        StampClient.awaitGatewayQuiet(ask = { StampClient.Answer.Failed("The Swarm node isn't running") }, pause = { throw AssertionError() })
+        StampClient.awaitGatewayQuiet(ask = { StampClient.Answer.Failed("unknown stamp call") }, pause = { throw AssertionError() })
+    }
+
+    @Test
+    fun `a publish waits out a buy or search the node runs that this process doesn't know of`() {
+        // This process's own state says nothing runs (a UI process started
+        // again while :node buys, or a buy it stopped waiting for)…
+        assertEquals(StampClient.Spend.Idle, StampClient.spend.value)
+        val r = assertNotNull(Publisher.claim("site", PublishKind.Folder) { record("p5") })
+        // …but :node does: busy, then unbound for a moment, then done.
+        val answers = ArrayDeque(
+            listOf(
+                StampClient.Answer.Ok(JSONObject().put("running", true)),
+                StampClient.Answer.Failed(StampClient.TIMED_OUT),
+                StampClient.Answer.Failed("The Swarm node isn't running", unbound = true),
+                StampClient.Answer.Ok(JSONObject().put("running", true)),
+                StampClient.Answer.Ok(JSONObject().put("running", false)),
+            ),
+        )
+        var pauses = 0
+        StampClient.awaitGatewayQuiet(
+            ask = { answers.removeFirst() },
+            pause = { pauses++ },
+            onWaiting = { Publisher.waitingForNode(r.id, true) },
+        )
+        assertTrue("asked until :node said it ended", answers.isEmpty())
+        assertEquals(4, pauses)
+        assertEquals(Publisher.State.Running("p5", "site", PublishKind.Folder, waitingForNode = true), Publisher.state.value)
+        assertTrue(runningText(Publisher.state.value as Publisher.State.Running).startsWith("Waiting for the node"))
+        Publisher.waitingForNode(r.id, false)
+        assertEquals(Publisher.State.Running("p5", "site", PublishKind.Folder), Publisher.state.value)
+        // Another publish's id doesn't touch it.
+        Publisher.waitingForNode("other", true)
+        assertEquals(Publisher.State.Running("p5", "site", PublishKind.Folder), Publisher.state.value)
+        Publisher.finish(r.id, emptyList())
+        Publisher.waitingForNode(r.id, true)
+        assertEquals(Publisher.State.Idle, Publisher.state.value)
     }
 
     private fun <T> assertNotNull(value: T?): T {

@@ -272,7 +272,7 @@ internal object StampClient {
                     // restart the gateway. The search stays Running (so no
                     // publish starts under it) until `:node` says it ended,
                     // and then shows how it ended.
-                    val end = awaitDiscoverEnd(
+                    val end = awaitNodeWorkEnd(
                         ask = { call("discovering", JSONObject().put("id", id), timeoutMs = DISCOVERING_TIMEOUT_MS) },
                     ) { Thread.sleep(DISCOVER_POLL_MS) }
                     overranOutcome(end)
@@ -288,36 +288,37 @@ internal object StampClient {
             .orEmpty()
 
     /**
-     * Waits, [pause] between asks, until [ask] (`:node`'s "discovering")
-     * says no search runs any more ([discoverStillRunning]). Its last
-     * answer: the one that said so.
+     * Waits, [pause] between asks, until [ask] (`:node`'s "discovering" or
+     * "gatewayWork") says the work it asks after runs no more
+     * ([nodeWorkStillRunning]). Its last answer: the one that said so.
      */
-    internal fun awaitDiscoverEnd(ask: () -> Answer, pause: () -> Unit): Answer {
+    internal fun awaitNodeWorkEnd(ask: () -> Answer, pause: () -> Unit): Answer {
         var a: Answer
         do {
             pause()
             a = ask()
-        } while (discoverStillRunning(a))
+        } while (nodeWorkStillRunning(a))
         return a
     }
 
     /**
-     * Is `:node`'s search still running, by its answer to "discovering"?
-     * Yes when it says so; when it didn't answer in time (busy, not gone);
-     * and while this process isn't bound to it ([Answer.Failed.unbound]):
-     * the Activity that binds it may be being recreated while `:node`
-     * scans on, and it answers again once it's rebound. No once it says
-     * not, or once the call to it fails — the `:node` process went away,
-     * and the search with it (a `:node` started again says not running).
+     * Is `:node`'s search (or buy) still running, by its answer to
+     * "discovering" (or "gatewayWork")? Yes when it says so; when it didn't
+     * answer in time (busy, not gone); and while this process isn't bound
+     * to it ([Answer.Failed.unbound]): the Activity that binds it may be
+     * being recreated while `:node` works on, and it answers again once
+     * it's rebound. No once it says not, or once the call to it fails —
+     * the `:node` process went away, and the work with it (a `:node`
+     * started again says not running).
      */
-    internal fun discoverStillRunning(a: Answer): Boolean = when (a) {
+    internal fun nodeWorkStillRunning(a: Answer): Boolean = when (a) {
         is Answer.Ok -> a.json.optBoolean("running", false)
         is Answer.Failed -> a.message == TIMED_OUT || a.unbound
     }
 
     /**
      * How a search that outlived the page's wait ended, from `:node`'s
-     * last "discovering" answer ([awaitDiscoverEnd]): what it found, or
+     * last "discovering" answer ([awaitNodeWorkEnd]): what it found, or
      * why it failed, if `:node` kept its outcome; [DISCOVER_OVERRAN] if
      * not (`:node` went away mid-search).
      */
@@ -392,6 +393,30 @@ internal object StampClient {
         (spend is Spend.Running && spend.kind == Kind.Buy) || discovery is Discovery.Running
 
     /**
+     * Blocks while `:node` runs a buy or a search that may end by
+     * reloading the gateway ("gatewayWork"), for a publish about to send
+     * its upload (#222 R4-F1). [Publisher.claim] already refuses a publish
+     * under stamp work this process knows is running, but that isn't all
+     * of it: a UI process started again since knows nothing of what
+     * `:node` was already doing. Nothing new can start meanwhile — this
+     * process is the only one that starts stamp work, and it refuses to
+     * while a publish runs ([canRestartGateway]) — so once this returns,
+     * the upload can't be cut off by one. [onWaiting] is called once, if
+     * it has to wait.
+     */
+    internal fun awaitGatewayQuiet(
+        ask: () -> Answer = ::askGatewayWork,
+        pause: () -> Unit = { Thread.sleep(DISCOVER_POLL_MS) },
+        onWaiting: () -> Unit = {},
+    ) {
+        if (!nodeWorkStillRunning(ask())) return
+        onWaiting()
+        awaitNodeWorkEnd(ask, pause)
+    }
+
+    private fun askGatewayWork(): Answer = call("gatewayWork", timeoutMs = DISCOVERING_TIMEOUT_MS)
+
+    /**
      * Whether a buy or a search for owned stamps may start now: nothing
      * else of the node's stamp work is running, and no publish is
      * uploading through the gateway it may restart. [Publisher] checks
@@ -461,13 +486,8 @@ internal object StampClient {
                 Kind.Deposit -> "deposit"
             }
             val outcome = try {
-                when (val a = call(method, args(), SPEND_TIMEOUT_MS)) {
-                    is Answer.Ok -> Spend.Done(kind, batchId)
-                    // Past the deadline the node is most likely still on it.
-                    is Answer.Failed -> Spend.Failed(
-                        kind, batchId,
-                        if (a.message != TIMED_OUT) a.message else stillSendingMessage(kind),
-                    )
+                spendOutcome(kind, batchId, call(method, args(), SPEND_TIMEOUT_MS)) {
+                    awaitNodeWorkEnd(::askGatewayWork) { Thread.sleep(DISCOVER_POLL_MS) }
                 }
             } catch (t: Throwable) {
                 Log.w(TAG, "stamp $method failed: ${t.javaClass.simpleName}")
@@ -479,8 +499,28 @@ internal object StampClient {
     }
 
     /**
-     * The outcome of a spend that outlived [SPEND_TIMEOUT_MS]: the node is
-     * most likely still on it. A deposit's leads with
+     * What a spend of [kind] ended as, by `:node`'s answer [a]. Past the
+     * deadline the node is most likely still on it; and a buy may yet end
+     * by reloading the gateway (the chequebook), so for a buy it first
+     * [awaitBuyEnd]s — the spend stays Running meanwhile, so no publish
+     * starts under it — until `:node` says it ended (#222 R4-F1).
+     */
+    internal fun spendOutcome(kind: Kind, batchId: String?, a: Answer, awaitBuyEnd: () -> Unit): Spend = when (a) {
+        is Answer.Ok -> Spend.Done(kind, batchId)
+        is Answer.Failed -> when {
+            a.message != TIMED_OUT -> Spend.Failed(kind, batchId, a.message)
+            kind == Kind.Buy -> {
+                awaitBuyEnd()
+                Spend.Failed(kind, batchId, BUY_OVERRAN)
+            }
+            else -> Spend.Failed(kind, batchId, stillSendingMessage(kind))
+        }
+    }
+
+    /**
+     * The outcome of an extend or deposit that outlived [SPEND_TIMEOUT_MS]:
+     * the node is most likely still on it. (A buy's waits on for `:node`
+     * to end it instead: [BUY_OVERRAN].) A deposit's leads with
      * [SwarmNode.DEPOSIT_MAYBE_SENT], so it reads as "didn't report back",
      * not as a failure (#117).
      */
@@ -491,12 +531,24 @@ internal object StampClient {
     }
 
     private const val NOT_BOUND = "The Swarm node isn't running"
+
+    /**
+     * How a buy that outlived [SPEND_TIMEOUT_MS] ended, once `:node` said
+     * it had: `:node` doesn't keep a buy's outcome for the app to read.
+     */
+    internal const val BUY_OVERRAN =
+        "it took longer than expected, and ended without telling the app how it went. " +
+            "The list shows the stamp if it was bought."
     internal const val TIMED_OUT = "The Swarm node didn't answer in time"
     internal const val DISCOVER_OVERRAN =
         "The search took longer than expected, and ended without telling the app what it found. " +
             "The list shows any stamps it registered."
 
-    /** How often a search that outlived [DISCOVER_TIMEOUT_MS] is asked after, and how long each ask waits. */
+    /**
+     * How often `:node` is asked after a search that outlived
+     * [DISCOVER_TIMEOUT_MS], a buy that outlived [SPEND_TIMEOUT_MS], or
+     * stamp work a publish waits for; and how long each ask waits.
+     */
     private const val DISCOVER_POLL_MS = 5_000L
     private const val DISCOVERING_TIMEOUT_MS = 15_000L
     const val READ_TIMEOUT_MS = 60_000L
@@ -507,7 +559,8 @@ internal object StampClient {
     /**
      * A spend's: up to five transactions, each waited on for up to a
      * minute by ant, plus its chain reads. Past this the page stops
-     * waiting — the node goes on, and the list shows what it bought.
+     * waiting for the answer — the node goes on, and the list shows what
+     * it bought. A buy still shows as running until `:node` says it ended.
      */
     const val SPEND_TIMEOUT_MS = 10 * 60_000L
     private const val MAX_ANSWER_BYTES = 256 * 1024

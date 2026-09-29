@@ -117,7 +117,9 @@ internal fun spendStatusText(spend: StampClient.Spend): String? = when (spend) {
         StampClient.Kind.Deposit -> "Deposited into the chequebook."
     }
     is StampClient.Spend.Failed -> when (spend.kind) {
-        StampClient.Kind.Buy -> "Buying the stamp failed: "
+        // Outlived the page's wait (#222 R4-F1): no answer, so not a failure either.
+        StampClient.Kind.Buy ->
+            if (spend.message == StampClient.BUY_OVERRAN) "The stamp purchase didn't report back: " else "Buying the stamp failed: "
         StampClient.Kind.Extend -> "Extending the stamp failed: "
         // Ended without a clear answer (#117): not a failure, it may be out.
         StampClient.Kind.Deposit ->

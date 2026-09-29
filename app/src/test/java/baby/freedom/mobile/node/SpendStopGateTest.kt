@@ -29,6 +29,24 @@ class SpendStopGateTest {
     }
 
     @Test
+    fun `a buy or a discover counts as work that may reload the gateway, an extend or deposit doesn't`() {
+        assertFalse(gate.gatewayWorkRunning)
+        assertTrue(gate.begin())
+        assertFalse("an extend or deposit sets up no chequebook", gate.gatewayWorkRunning)
+        assertTrue(gate.begin(buy = true))
+        assertTrue(gate.gatewayWorkRunning)
+        gate.end()
+        assertTrue("the buy still runs", gate.gatewayWorkRunning)
+        gate.end(buy = true)
+        assertFalse(gate.gatewayWorkRunning)
+        assertEquals(0, gate.spendsRunning)
+        assertTrue(gate.beginDiscover())
+        assertTrue(gate.gatewayWorkRunning)
+        gate.endDiscover()
+        assertFalse(gate.gatewayWorkRunning)
+    }
+
+    @Test
     fun `a discover's outcome is kept for the search that asked, and only once it ended`() {
         assertEquals(SpendStopGate.DiscoverStatus(running = false, outcome = null), gate.discoverStatus("a"))
         assertTrue(gate.beginDiscover())
