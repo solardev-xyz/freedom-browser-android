@@ -1534,7 +1534,20 @@ internal fun SafeCoSignPage(
                             val token = TokenRegistry.builtins.firstOrNull { it.chainId == request.chainId && it.address.equals(tx.to, ignoreCase = true) }
                             val transfer = token?.let { erc20Transfer(tx.data) }
                             if (selfCall != null) {
-                                SafeSelfCallRows(selfCall, tx, chain, owners, accounts, safeBalance, modules, guardSupported)
+                                // Owners, modules and balance are the Safe as it is now: they only say what this
+                                // call does if it is the Safe's next transaction, since earlier ones can change them.
+                                val current = safeStateApplies(nonce, tx.nonce)
+                                SafeSelfCallRows(
+                                    selfCall,
+                                    tx,
+                                    chain,
+                                    owners.takeIf { current },
+                                    accounts,
+                                    safeBalance.takeIf { current },
+                                    modules.takeIf { current },
+                                    guardSupported,
+                                    queuedNote = safeSelfCallQueuedNote(selfCall, nonce, tx.nonce),
+                                )
                             } else if (transfer != null) {
                                 ReviewRow("Sends", "${SendAmounts.exact(transfer.second, token.decimals)} ${token.symbol}", mono = true, address = token.address)
                                 ReviewRow("To", null, address = transfer.first)
@@ -1806,6 +1819,32 @@ internal fun safeCancelDetail(nonce: BigInteger, value: BigInteger, balance: Big
         "A call from the Safe to itself with no data, sending $amount straight back to it. It uses up Safe nonce $nonce only if the Safe holds that much when it executes; otherwise it fails and the nonce stays open."
 }
 
+/**
+ * Whether what the page read from the Safe now (owners, modules, balance)
+ * is what a SafeTx at [txNonce] runs against: only when it is the Safe's
+ * next transaction ([safeNonce], null until read). One queued behind earlier
+ * nonces runs after them, and they can add or remove owners and modules or
+ * move funds first — so a "would fail" or an owner count read now could
+ * pass off a transaction that does its harm once those have executed.
+ */
+internal fun safeStateApplies(safeNonce: BigInteger?, txNonce: BigInteger): Boolean = safeNonce != null && safeNonce == txNonce
+
+/**
+ * For an owner, threshold or module self-call queued behind the Safe's next
+ * nonce ([safeNonce]; null until read): why it isn't checked against the
+ * Safe's owners or modules now ([safeStateApplies]). Null otherwise.
+ */
+internal fun safeSelfCallQueuedNote(call: SafeSelfCall, safeNonce: BigInteger?, txNonce: BigInteger): String? {
+    if (safeNonce == null || safeNonce >= txNonce) return null
+    val (what, count) = when (call) {
+        is SafeSelfCall.AddOwner, is SafeSelfCall.RemoveOwner, is SafeSelfCall.SwapOwner, is SafeSelfCall.ChangeThreshold ->
+            "owners" to "failing, or on how many owners it leaves"
+        is SafeSelfCall.EnableModule, is SafeSelfCall.DisableModule -> "modules" to "failing"
+        else -> return null
+    }
+    return "Transactions before Safe nonce $txNonce execute first and can change the Safe’s $what, so this isn’t checked against the $what it has now: don’t count on it $count. Judge what it does once those have executed."
+}
+
 /** The head of a Safe's owner (and module) linked list: the `prevOwner` of its first owner, the `prevModule` of its first module. */
 internal const val SAFE_OWNERS_SENTINEL = "0x0000000000000000000000000000000000000001"
 
@@ -1824,9 +1863,12 @@ private fun SafeSelfCallRows(
     safeBalance: BigInteger?,
     modules: List<String>?,
     guardSupported: Boolean?,
+    queuedNote: String?,
 ) {
     // Whether the Safe would refuse a module, guard or handler call: on its Changes row, which has nothing else to say.
-    val fails = safeSelfCallFailure(call, owners, tx.to, modules, guardSupported)
+    // A call queued behind earlier ones says instead that those can change what it's checked against.
+    val fails = listOfNotNull(safeSelfCallFailure(call, owners, tx.to, modules, guardSupported), queuedNote)
+        .joinToString("\n\n").ifEmpty { null }
     val amount = chain?.let { "${SendAmounts.exact(tx.value, it.decimals)} ${it.symbol}" } ?: "${tx.value} base units"
     fun none(address: String) = if (address.equals(SafeProtocol.ZERO_ADDRESS, ignoreCase = true)) "None" else null
     // A removed owner that is this wallet's own account is named, so signing yourself out can't pass as a bare address.
@@ -1840,12 +1882,12 @@ private fun SafeSelfCallRows(
             ReviewRow("Does", "Nothing: cancels", detail = safeCancelDetail(tx.nonce, tx.value, safeBalance, amount))
         }
         is SafeSelfCall.AddOwner -> {
-            ReviewRow("Changes", "Adds an owner")
+            ReviewRow("Changes", "Adds an owner", detail = queuedNote)
             ReviewRow("New owner", safeOwnAccountLabel(call.owner, accounts), address = call.owner)
             ReviewRow("Threshold", call.threshold.toString(), mono = true, detail = safeSelfCallThreshold(call, owners, tx.to))
         }
         is SafeSelfCall.RemoveOwner -> {
-            ReviewRow("Changes", "Removes an owner")
+            ReviewRow("Changes", "Removes an owner", detail = queuedNote)
             Removed(call.owner)
             ReviewRow("Threshold", call.threshold.toString(), mono = true, detail = safeSelfCallThreshold(call, owners, tx.to))
         }
@@ -1856,7 +1898,7 @@ private fun SafeSelfCallRows(
             ReviewRow("New owner", safeOwnAccountLabel(call.new, accounts), address = call.new)
         }
         is SafeSelfCall.ChangeThreshold -> {
-            ReviewRow("Changes", "The threshold")
+            ReviewRow("Changes", "The threshold", detail = queuedNote)
             ReviewRow("Threshold", call.threshold.toString(), mono = true, detail = safeSelfCallThreshold(call, owners, tx.to))
         }
         is SafeSelfCall.EnableModule -> {

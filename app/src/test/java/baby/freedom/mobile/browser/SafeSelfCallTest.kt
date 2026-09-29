@@ -287,4 +287,43 @@ class SafeSelfCallTest {
         assertEquals(false, SafeProtocol.decodeBool("0x" + word(0)))
         assertNull(SafeProtocol.decodeBool("0x"))
     }
+
+    @Test
+    fun `a self-call queued behind the Safe's next nonce isn't checked against its owners or modules now`() {
+        // R1-F1: {A, B, X} threshold 2, next nonce N. X's removal is queued at N, and
+        // addOwnerWithThreshold(X, 1) at N+1: read now, X still owns the Safe, so it looked harmless.
+        val n = BigInteger.valueOf(7)
+        val next = n + BigInteger.ONE
+        val readdX = SafeSelfCall.AddOwner(attacker, BigInteger.ONE)
+        val owners = listOf(owner, safe.replace('6', '7'), attacker)
+        assertTrue(safeSelfCallFailure(readdX, owners, safe)!!.contains("would fail"))
+        // The page only counts against what it read when this is the next transaction.
+        assertTrue(safeStateApplies(n, n))
+        assertFalse(safeStateApplies(n, next))
+        assertFalse(safeStateApplies(null, n))
+        assertFalse(safeStateApplies(next, n))
+        // …so a queued one gets no "would fail" and no owner count, and says why.
+        val queuedOwners = owners.takeIf { safeStateApplies(n, next) }
+        assertNull(safeSelfCallFailure(readdX, queuedOwners, safe))
+        assertNull(safeSelfCallThreshold(readdX, queuedOwners, safe))
+        val note = safeSelfCallQueuedNote(readdX, n, next)!!
+        assertTrue(note.contains("before Safe nonce 8"))
+        assertTrue(note.contains("don’t count on it failing"))
+        assertTrue(note.contains("owners"))
+        // Modules too: "already enabled" read now says nothing about nonce N+1.
+        assertTrue(safeSelfCallQueuedNote(SafeSelfCall.EnableModule(attacker), n, next)!!.contains("modules"))
+        assertTrue(safeSelfCallQueuedNote(SafeSelfCall.DisableModule(sentinel, attacker), n, next)!!.contains("modules"))
+        for (c in listOf(
+            SafeSelfCall.RemoveOwner(sentinel, attacker, BigInteger.ONE),
+            SafeSelfCall.SwapOwner(sentinel, owner, attacker),
+            SafeSelfCall.ChangeThreshold(BigInteger.ONE),
+        )) assertTrue(safeSelfCallQueuedNote(c, n, next)!!.contains("owners"))
+        // No note for the next transaction, before the nonce is read, or for calls that don't depend on owners or modules.
+        assertNull(safeSelfCallQueuedNote(readdX, n, n))
+        assertNull(safeSelfCallQueuedNote(readdX, null, next))
+        assertNull(safeSelfCallQueuedNote(SafeSelfCall.SetGuard(attacker), n, next))
+        assertNull(safeSelfCallQueuedNote(SafeSelfCall.SetFallbackHandler(attacker), n, next))
+        assertNull(safeSelfCallQueuedNote(SafeSelfCall.Cancel, n, next))
+        assertNull(safeSelfCallQueuedNote(SafeSelfCall.Unknown, n, next))
+    }
 }
