@@ -30,6 +30,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONObject
 import org.junit.After
 import org.junit.Rule
@@ -60,6 +61,10 @@ class SendTest {
 
     @After
     fun tearDown() = scope.cancel()
+
+    private companion object {
+        const val CONFIRM_TIMEOUT_MS = 300L
+    }
 
     /** A fake chain every RPC agrees on; [on] can override any method's answer (a JSON-RPC member). */
     private inner class FakeChain {
@@ -136,12 +141,35 @@ class SendTest {
         )
     }
 
+    /**
+     * The senders' clock: still unless a test moves it, so no receipt wait runs
+     * out on its own however slow the runner — a send the test expects confirmed
+     * can't end Unconfirmed first. [awaitStage] moves it for a test waiting for
+     * Unconfirmed.
+     */
+    private val clock = AtomicLong(1_700_000_000_000L)
+
     private fun sender(
         chain: FakeChain,
         journal: SendJournal = SendJournal.None,
-        clock: () -> Long = System::currentTimeMillis,
-    ) = WalletSender(chain.rpc(), scope, clock, pollMs = 10, confirmTimeoutMs = 300, journal = journal)
+        clock: () -> Long = { this.clock.get() },
+    ) = WalletSender(chain.rpc(), scope, clock, pollMs = 10, confirmTimeoutMs = CONFIRM_TIMEOUT_MS, journal = journal)
         .also { runBlocking { it.awaitRestored() } }
+
+    /**
+     * Runs [block] on a thread of its own and checks it returned while [held]
+     * (the storage it must not wait on) was still closed. Its return is the
+     * proof, not how fast it came; the join's bound only turns a hang into a
+     * failure.
+     */
+    private fun returnsWhileHeld(held: java.util.concurrent.CountDownLatch, block: () -> Unit) {
+        var failure: Throwable? = null
+        val t = kotlin.concurrent.thread { try { block() } catch (e: Throwable) { failure = e } }
+        t.join(30_000)
+        assertFalse("still waiting on storage it was meant to leave to another thread", t.isAlive)
+        failure?.let { throw it }
+        assertEquals(1L, held.count)
+    }
 
     /** A journal file that outlives one [WalletSender], as the app's outlives its process. */
     private fun journalFile() = java.io.File(tmp.root, "wallet/send.json")
@@ -150,8 +178,22 @@ class SendTest {
 
     private fun request(token: Token = xdai, amount: Long = 1) = SendRequest(gnosis, token, from, to, BigInteger.valueOf(amount))
 
+    /**
+     * Until [status] reaches a stage [predicate] takes. If it would take
+     * Unconfirmed, the test is waiting for a receipt wait to run out: [clock]
+     * is moved past it, and again, until the send gets there.
+     */
     private suspend fun WalletSender.awaitStage(predicate: (SendStatus.Stage) -> Boolean): SendStatus =
-        withTimeout(5_000) { status.first { it != null && predicate(it.stage) }!! }
+        withTimeout(5_000) {
+            suspend fun reached() = status.first { it != null && predicate(it.stage) }!!
+            if (!predicate(SendStatus.Stage.Unconfirmed)) return@withTimeout reached()
+            var seen: SendStatus? = null
+            while (seen == null) {
+                seen = withTimeoutOrNull(10) { reached() }
+                if (seen == null) clock.addAndGet(CONFIRM_TIMEOUT_MS)
+            }
+            seen
+        }
 
     // ---- input ----
 
@@ -413,20 +455,20 @@ class SendTest {
     @Test
     fun `a local nonce is honoured only while the chain may not have seen the send yet`() = runBlocking<Unit> {
         val chain = FakeChain()
-        var now = 1_000_000L
-        val tracker = NonceTracker(chain.rpc(), { now }, ttlMs = 60_000)
+        val now = AtomicLong(1_000_000L)
+        val tracker = NonceTracker(chain.rpc(), { now.get() }, ttlMs = 60_000)
         tracker.markSent(from.address, 100, BigInteger.valueOf(7))
-        now += 59_999
+        now.addAndGet(59_999)
         assertEquals(BigInteger.valueOf(8), tracker.next(from.address, 100).value)
         // Long enough that every RPC would count it if it were still around: the chain's count again.
-        now += 1
+        now.addAndGet(1)
         assertEquals(BigInteger.valueOf(7), tracker.next(from.address, 100).value)
         // A clock set back since: not trusted either.
         tracker.markSent(from.address, 100, BigInteger.valueOf(7))
-        now -= 10
+        now.addAndGet(-10)
         assertEquals(BigInteger.valueOf(7), tracker.next(from.address, 100).value)
         // Ending unconfirmed forgets only that send's own mark, never a later one's.
-        now += 10
+        now.addAndGet(10)
         tracker.markSent(from.address, 100, BigInteger.valueOf(8))
         tracker.forgetSent(from.address, 100, BigInteger.valueOf(7))
         assertEquals(BigInteger.valueOf(9), tracker.next(from.address, 100).value)
@@ -510,14 +552,14 @@ class SendTest {
 
     @Test
     fun `a quote goes stale after a minute`() = runBlocking<Unit> {
-        var now = 1_000_000L
-        val s = sender(FakeChain()) { now }
+        val now = AtomicLong(1_000_000L)
+        val s = sender(FakeChain()) { now.get() }
         val quote = s.prepare(request())
         assertFalse(s.isStale(quote))
-        now += WalletSender.QUOTE_TTL_MS
+        now.addAndGet(WalletSender.QUOTE_TTL_MS)
         assertTrue(s.isStale(quote))
         // A clock set back since: not trusted either.
-        now = 0
+        now.set(0)
         assertTrue(s.isStale(quote))
     }
 
@@ -604,7 +646,8 @@ class SendTest {
         val gate = kotlinx.coroutines.CompletableDeferred<Unit>()
         fun follow(flow: kotlinx.coroutines.flow.Flow<SendStatus?>): Pair<MutableList<SendStatus?>, kotlinx.coroutines.Job> {
             val seen = java.util.Collections.synchronizedList(mutableListOf<SendStatus?>())
-            val job = scope.launch {
+            // Undispatched: subscribed before launch returns, so before the send starts.
+            val job = scope.launch(start = kotlinx.coroutines.CoroutineStart.UNDISPATCHED) {
                 flow.collect {
                     seen += it
                     if (it != null) gate.await()
@@ -614,9 +657,7 @@ class SendTest {
         }
         val (viaStatus, statusJob) = follow(s.status)
         val (viaChanges, changesJob) = follow(s.changes)
-        // Both subscribed before the send starts (the StateFlow one says so with its initial null).
-        withTimeout(5_000) { while (viaStatus.isEmpty()) delay(5) }
-        delay(100)
+        assertEquals(listOf(null), viaStatus.toList())
         chain.receipt = """{"status":"0x1","blockNumber":"0x10","gasUsed":"0x5208","effectiveGasPrice":"0x1"}"""
         s.submit(s.prepare(request()), signer())
         s.awaitStage { it is SendStatus.Stage.Confirmed }
@@ -859,8 +900,8 @@ class SendTest {
     @Test
     fun `submitAndAwaitBroadcast answers a Ledger refusal as a rejection and a quote that aged on it as stale`() = runBlocking<Unit> {
         val chain = FakeChain()
-        var now = 1_000L
-        val s = sender(chain) { now }
+        val now = AtomicLong(1_000L)
+        val s = sender(chain) { now.get() }
         for (kind in listOf(LedgerException.Kind.REJECTED, LedgerException.Kind.CANCELLED)) {
             assertEquals(WalletSender.Broadcast.Rejected, s.submitAndAwaitBroadcast(s.prepare(call())) { throw LedgerException(kind) })
             s.acknowledge()
@@ -870,7 +911,7 @@ class SendTest {
         s.acknowledge()
         // Reviewed on the device past the allowance: dropped unsent, to be priced again.
         val aged = s.submitAndAwaitBroadcast(s.prepare(call())) { tx ->
-            now += WalletSender.SIGNED_TTL_MS
+            now.addAndGet(WalletSender.SIGNED_TTL_MS)
             tx.sign(key.copyOf(), from.address)
         }
         assertEquals(WalletSender.Broadcast.Stale(droppedSigned = true), aged)
@@ -1166,13 +1207,14 @@ class SendTest {
                 return file.load()
             }
         }
-        val t0 = System.nanoTime()
-        val s = WalletSender(chain.rpc(), scope, pollMs = 10, confirmTimeoutMs = 300, journal = slow)
-        // Not read back yet: nothing is signed meanwhile, and a discard (the wallet deleted) waits for it.
-        assertNull(s.status.value)
-        assertEquals(WalletSender.Submit.BUSY, s.submit(first.status.value!!.quote, signer()))
-        s.discard()
-        assertTrue(System.nanoTime() - t0 < 1_000_000_000L)
+        lateinit var s: WalletSender
+        returnsWhileHeld(gate) {
+            s = WalletSender(chain.rpc(), scope, clock = { clock.get() }, pollMs = 10, confirmTimeoutMs = CONFIRM_TIMEOUT_MS, journal = slow)
+            // Not read back yet: nothing is signed meanwhile, and a discard (the wallet deleted) waits for it.
+            assertNull(s.status.value)
+            assertEquals(WalletSender.Submit.BUSY, s.submit(first.status.value!!.quote, signer()))
+            s.discard()
+        }
         gate.countDown()
         s.awaitRestored()
         // The discard applied to what was read back: the send is given up on and replaced.
@@ -1190,14 +1232,14 @@ class SendTest {
             override fun load(): SendJournal.State? = file.load()
         }
         FileSendJournal(journalFile()).save(SendJournal.State(saved, emptyMap()))
-        val third = WalletSender(chain.rpc(), scope, pollMs = 10, confirmTimeoutMs = 300, journal = blocking)
+        val third = WalletSender(chain.rpc(), scope, clock = { clock.get() }, pollMs = 10, confirmTimeoutMs = CONFIRM_TIMEOUT_MS, journal = blocking)
         third.awaitRestored()
         assertEquals(failed, third.status.value)
-        val t1 = System.nanoTime()
-        third.retry()
-        third.discard()
-        third.acknowledge()
-        assertTrue(System.nanoTime() - t1 < 1_000_000_000L)
+        returnsWhileHeld(stuck) {
+            third.retry()
+            third.discard()
+            third.acknowledge()
+        }
         assertNull(third.status.value)
         stuck.countDown()
         // The Stop tracking landed while Try again's write was held up: those bytes never go out.
@@ -1412,10 +1454,10 @@ class SendTest {
     @Test
     fun `a quote that went stale while the unlock prompt stood is not signed`() = runBlocking<Unit> {
         val chain = FakeChain()
-        var now = 1_000L
-        val s = sender(chain) { now }
+        val now = AtomicLong(1_000L)
+        val s = sender(chain) { now.get() }
         val quote = s.prepare(request())
-        now += WalletSender.QUOTE_TTL_MS + 1
+        now.addAndGet(WalletSender.QUOTE_TTL_MS + 1)
         var signed = false
         assertEquals(WalletSender.Submit.STALE, s.submit(quote) { tx -> signed = true; tx.sign(key.copyOf(), from.address) })
         assertFalse(signed)
@@ -1426,15 +1468,15 @@ class SendTest {
     @Test
     fun `a quote that went stale while a Ledger signed it is dropped, not broadcast`() = runBlocking<Unit> {
         val chain = FakeChain()
-        var now = 1_000L
-        val s = sender(chain) { now }
+        val now = AtomicLong(1_000L)
+        val s = sender(chain) { now.get() }
         val quote = s.prepare(request())
-        now += WalletSender.QUOTE_TTL_MS - 1
+        now.addAndGet(WalletSender.QUOTE_TTL_MS - 1)
         // Fresh when confirmed; the unlock and the review on the device took minutes.
         assertEquals(
             WalletSender.Submit.STARTED,
             s.submit(quote) { tx ->
-                now += 150_000
+                now.addAndGet(150_000)
                 tx.sign(key.copyOf(), from.address)
             },
         )
@@ -1445,7 +1487,7 @@ class SendTest {
         assertTrue(failed.droppedSigned)
         assertTrue(chain.sent.isEmpty())
         // Nothing holds the next send back: priced again, it goes.
-        now += 1
+        now.addAndGet(1)
         assertEquals(WalletSender.Submit.STARTED, s.submit(s.prepare(request()), signer()))
         s.awaitStage { it == SendStatus.Stage.Pending }
         assertEquals(1, chain.sent.size)
@@ -1559,15 +1601,15 @@ class SendTest {
     @Test
     fun `a transaction approved on the Ledger within the review allowance is sent, not dropped`() = runBlocking<Unit> {
         val chain = FakeChain()
-        var now = 1_000L
-        val s = sender(chain) { now }
+        val now = AtomicLong(1_000L)
+        val s = sender(chain) { now.get() }
         val quote = s.prepare(request())
         // Confirmed after 35 s (the pre-sign check passes); approved on the device 30 s later.
-        now += 35_000
+        now.addAndGet(35_000)
         assertEquals(
             WalletSender.Submit.STARTED,
             s.submit(quote) { tx ->
-                now += 30_000
+                now.addAndGet(30_000)
                 tx.sign(key.copyOf(), from.address)
             },
         )

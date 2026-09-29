@@ -107,14 +107,17 @@ class BalancesTest {
     @Test
     fun `a read still running when the wallet is removed files nothing`() = runBlocking {
         val gate = CompletableDeferred<Unit>()
+        val reading = java.util.concurrent.CountDownLatch(1)
         val balances = WalletBalances {
             fetcher {
+                reading.countDown()
                 runBlocking { gate.await() }
                 "\"result\":\"0x1\""
             }
         }
         val running = async(Dispatchers.IO) { balances.refresh(holder, listOf(xdai)) }
-        Thread.sleep(200)
+        // Removed once the read is under way, not before it began.
+        assertTrue(reading.await(5, java.util.concurrent.TimeUnit.SECONDS))
         balances.forget()
         gate.complete(Unit)
         running.await()

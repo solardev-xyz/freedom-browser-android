@@ -203,6 +203,9 @@ dependencies {
     ksp("androidx.room:room-compiler:$roomVersion")
 
     testImplementation("junit:junit:4.13.2")
+    // Virtual time (runTest / StandardTestDispatcher) for tests of timeouts
+    // and deadlines: exact on any runner, however slow.
+    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.10.1")
     // Real org.json for unit tests: the android.jar stub returns null from
     // every method, which breaks anything that builds JSON-RPC bodies.
     testImplementation("org.json:json:20240303")

@@ -245,11 +245,11 @@ class Eip712Test {
         val json = fanOut()
         assertTrue(json.length <= Eip712.MAX_JSON)
         val td = Eip712.parseStrict(json)
-        val started = System.nanoTime()
-        // Hashed, or refused (its type chain is past the encoder's depth bound) — either way quickly, never a crash.
-        runCatching { Eip712.digest(td) }.exceptionOrNull()?.let { assertTrue(it.toString(), it is Eip712.Invalid) }
-        val ms = (System.nanoTime() - started) / 1_000_000
-        assertTrue("digest took $ms ms", ms < 2_000)
+        // Refused, never a crash: its type chain is past the encoder's depth bound, so the
+        // first type walk stops it (checked by what it throws, not timed — a wall-clock
+        // bound failed on slow runners; every step is also charged to Eip712.MAX_WORK).
+        val refused = assertThrows(Eip712.Invalid::class.java) { Eip712.digest(td) }
+        assertTrue(refused.message, refused.message!!.contains("nests too deeply"))
         assertThrows(Eip712.Invalid::class.java) { Eip712.lines(td) }
     }
 
