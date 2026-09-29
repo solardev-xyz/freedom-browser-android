@@ -1745,7 +1745,10 @@ internal fun safeSelfCallThreshold(call: SafeSelfCall, owners: List<String>?, sa
  * ([amount], formatted) at [nonce], given the Safe's [balance] (null: not
  * read). The Safe can't send more than it holds, and with no `safeTxGas` or
  * `gasPrice` (all Freedom signs) a failed call reverts the whole execution
- * (GS013), so the nonce is only used up if the balance covers [value].
+ * (GS013), so the nonce is only used up if the balance covers [value] at
+ * execution. [balance] is one read taken when the page opened, from an RPC
+ * whose answer may be untrusted, and the Safe can be drained before
+ * execution, so even a covering balance only hedges, never promises.
  */
 internal fun safeCancelDetail(nonce: BigInteger, value: BigInteger, balance: BigInteger?, amount: String): String = when {
     value.signum() == 0 ->
@@ -1753,7 +1756,7 @@ internal fun safeCancelDetail(nonce: BigInteger, value: BigInteger, balance: Big
     balance != null && balance < value ->
         "A call from the Safe to itself with no data, sending $amount — more than the Safe now holds. It would fail, and Safe nonce $nonce would stay open for another transaction."
     balance != null ->
-        "A call from the Safe to itself with no data: the $amount it sends comes straight back. It only uses up Safe nonce $nonce, so no other transaction with that nonce can execute."
+        "A call from the Safe to itself with no data: the $amount it sends comes straight back. The Safe holds that much now, so it uses up Safe nonce $nonce and no other transaction with that nonce can execute, as long as the Safe still holds that much when it executes. If not, it fails and the nonce stays open."
     else ->
         "A call from the Safe to itself with no data, sending $amount straight back to it. It uses up Safe nonce $nonce only if the Safe holds that much when it executes; otherwise it fails and the nonce stays open."
 }

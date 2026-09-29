@@ -185,7 +185,10 @@ class SafeSelfCallTest {
         val short = safeCancelDetail(n, ten, BigInteger.ONE, "10 wei")
         assertTrue(short, short.contains("more than the Safe now holds") && short.contains("nonce 7 would stay open"))
         assertFalse(short, short.contains("only uses up"))
-        assertTrue(safeCancelDetail(n, ten, ten, "10 wei").contains("It only uses up Safe nonce 7"))
+        // Enough now: one untrusted read, and the Safe can be drained before execution, so still hedged.
+        val enough = safeCancelDetail(n, ten, ten, "10 wei")
+        assertTrue(enough, enough.contains("uses up Safe nonce 7") && enough.contains("as long as the Safe still holds that much when it executes"))
+        assertFalse(enough, enough.contains("only uses up"))
         // Unread: hedged, not a claim either way.
         val unread = safeCancelDetail(n, ten, null, "10 wei")
         assertTrue(unread, unread.contains("only if the Safe holds that much") && !unread.contains("It only uses up"))
