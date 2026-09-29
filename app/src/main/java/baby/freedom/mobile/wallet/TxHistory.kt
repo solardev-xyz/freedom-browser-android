@@ -266,6 +266,9 @@ class TxHistory internal constructor(
         }.invokeOnCompletion { fileRead.complete(Unit) }
     }
 
+    /** Until the file has been read and merged (off the main thread, from [init]). */
+    internal suspend fun awaitLoaded() = fileRead.await()
+
     /**
      * [status] as [WalletSender] now has it. A send is recorded once it
      * went out or may have (pending, not mined in time, or a broadcast

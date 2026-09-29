@@ -27,6 +27,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONObject
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -53,6 +54,10 @@ class TxHistoryTest {
 
     @After
     fun tearDown() = scope.cancel()
+
+    private companion object {
+        const val CONFIRM_TIMEOUT_MS = 300L
+    }
 
     private fun ok(block: Long = 16) = """{"status":"0x1","blockNumber":"0x${block.toString(16)}","gasUsed":"0x5208","effectiveGasPrice":"0x2"}"""
 
@@ -103,16 +108,29 @@ class TxHistoryTest {
     private fun history(chain: FakeChain, store: TxHistoryStore = TxHistoryStore.None) =
         TxHistory(chain.rpc(), scope, store, clock = { now.get() })
 
+    /** The senders' own clock: still unless a test moves it, so no receipt wait runs out on its own on a slow runner. */
+    private val senderClock = AtomicLong(1_700_000_000_000L)
+
     private fun sender(chain: FakeChain, history: TxHistory) =
-        WalletSender(chain.rpc(), scope, pollMs = 10, confirmTimeoutMs = 300, history = history)
+        WalletSender(chain.rpc(), scope, { senderClock.get() }, pollMs = 10, confirmTimeoutMs = CONFIRM_TIMEOUT_MS, history = history)
             .also { runBlocking { it.awaitRestored() } }
 
     private fun signer(): (EthTransaction) -> EthTransaction.Signed = { tx -> tx.sign(key.copyOf(), from.address) }
 
     private fun request(token: Token = xdai, amount: Long = 1) = SendRequest(gnosis, token, from, to, BigInteger.valueOf(amount))
 
+    /** Until [status] reaches a stage [predicate] takes; waiting for Unconfirmed, [senderClock] is moved past the receipt wait. */
     private suspend fun WalletSender.awaitStage(predicate: (SendStatus.Stage) -> Boolean): SendStatus =
-        withTimeout(5_000) { status.first { it != null && predicate(it.stage) }!! }
+        withTimeout(5_000) {
+            suspend fun reached() = status.first { it != null && predicate(it.stage) }!!
+            if (!predicate(SendStatus.Stage.Unconfirmed)) return@withTimeout reached()
+            var seen: SendStatus? = null
+            while (seen == null) {
+                seen = withTimeoutOrNull(10) { reached() }
+                if (seen == null) senderClock.addAndGet(CONFIRM_TIMEOUT_MS)
+            }
+            seen
+        }
 
     private suspend fun TxHistory.awaitRecord(hash: String, predicate: (TxRecord) -> Boolean = { true }): TxRecord =
         withTimeout(5_000) { records.first { list -> list.any { it.hash == hash && predicate(it) } }.first { it.hash == hash } }
@@ -130,7 +148,7 @@ class TxHistoryTest {
     )
 
     /** A store in memory that a second [TxHistory] can load, as the file outlives a process. */
-    private class MemoryStore(var saved: List<TxRecord> = emptyList()) : TxHistoryStore {
+    private class MemoryStore(@Volatile var saved: List<TxRecord> = emptyList()) : TxHistoryStore {
         override fun save(records: List<TxRecord>): Boolean {
             saved = records
             return true
@@ -202,7 +220,7 @@ class TxHistoryTest {
         s2.submit(s2.prepare(request()), signer())
         val notSent = s2.awaitStage { it is SendStatus.Stage.Failed }
         assertFalse((notSent.stage as SendStatus.Stage.Failed).mayHaveGone)
-        delay(50)
+        // The history hears each stage before it's shown: nothing can still be on its way.
         assertTrue(h2.records.value.isEmpty())
     }
 
@@ -382,11 +400,23 @@ class TxHistoryTest {
         val chain = FakeChain(gnosis)
         val h = history(chain)
         val s = sender(chain, h)
+        // What the history holds at the very moment each stage shows (Unconfined: inside the
+        // sender's show()): it has heard first, so whoever reacts to a stage finds it there.
+        val seen = java.util.concurrent.CopyOnWriteArrayList<Pair<SendStatus.Stage, TxRecord.Status?>>()
+        val watcher = async(Dispatchers.Unconfined) {
+            s.changes.first { st ->
+                if (st?.hash != null) seen += st.stage to h.records.value.singleOrNull()?.status
+                st?.stage is SendStatus.Stage.Confirmed
+            }
+        }
         val quote = s.prepare(request())
         s.submit(quote, signer())
         val hash = s.awaitStage { it == SendStatus.Stage.Pending }.hash!!
         chain.receipts[hash.lowercase()] = ok()
         val done = s.awaitStage { it is SendStatus.Stage.Confirmed }
+        withTimeout(5_000) { watcher.await() }
+        assertEquals(TxRecord.Status.PENDING, seen.first { it.first == SendStatus.Stage.Pending }.second)
+        assertEquals(TxRecord.Status.CONFIRMED, seen.first { it.first is SendStatus.Stage.Confirmed }.second)
         // A late report of an earlier stage (a restored journal, say) changes nothing.
         h.note(done.copy(stage = SendStatus.Stage.Pending))
         h.note(done.copy(stage = SendStatus.Stage.Unconfirmed))
@@ -436,7 +466,7 @@ class TxHistoryTest {
         val confirmed = record(hash, status = TxRecord.Status.CONFIRMED, sentAt = now.get() - 5_000).copy(block = 5, settledAt = now.get())
         val gate = java.util.concurrent.CountDownLatch(1)
         val store = object : TxHistoryStore {
-            var saved: List<TxRecord> = listOf(confirmed)
+            @Volatile var saved: List<TxRecord> = listOf(confirmed)
             override fun save(records: List<TxRecord>): Boolean {
                 saved = records
                 return true
@@ -452,7 +482,10 @@ class TxHistoryTest {
         h.note(SendStatus(quote, SendStatus.Stage.Pending, hash))
         h.note(SendStatus(quote, SendStatus.Stage.Pending, "0x" + "33".repeat(32)))
         gate.countDown()
-        val list = withTimeout(5_000) { h.records.first { it.size == 2 } }
+        // Both are in the list before the file is read, so wait for the merge itself, not for the size.
+        h.awaitLoaded()
+        val list = h.records.value
+        assertEquals(2, list.size)
         val kept = list.first { it.hash == hash }
         assertEquals(TxRecord.Status.CONFIRMED, kept.status)
         assertEquals(5L, kept.block)
@@ -556,7 +589,7 @@ class TxHistoryTest {
         assertTrue(unread.wipeNow())
         assertTrue(store.saved.isEmpty())
         gate.countDown()
-        delay(100)
+        unread.awaitLoaded()
         assertTrue(unread.records.value.isEmpty())
         assertTrue(store.saved.isEmpty())
     }
@@ -591,20 +624,20 @@ class TxHistoryTest {
             }
         }
         val h = history(chain)
-        val s = WalletSender(chain.rpc(), scope, pollMs = 10, confirmTimeoutMs = 300, journal = slow, history = h)
+        val s = WalletSender(chain.rpc(), scope, { senderClock.get() }, pollMs = 10, confirmTimeoutMs = CONFIRM_TIMEOUT_MS, journal = slow, history = h)
         s.discard()
         h.wipeNow()
         gate.countDown()
         s.awaitRestored()
         assertNull(s.status.value)
-        delay(200)
+        // Read back and discarded before awaitRestored returned; the history hears synchronously.
         assertTrue(h.records.value.isEmpty())
         // Given up on, not forgotten: the next send from that account replaces it.
         assertEquals(hash, s.prepare(request()).replaces)
 
         // Without the removal, the same journal is recorded as pending.
         val h2 = history(chain)
-        WalletSender(chain.rpc(), scope, pollMs = 10, confirmTimeoutMs = 300, journal = journal, history = h2).awaitRestored()
+        WalletSender(chain.rpc(), scope, { senderClock.get() }, pollMs = 10, confirmTimeoutMs = CONFIRM_TIMEOUT_MS, journal = journal, history = h2).awaitRestored()
         assertEquals(TxRecord.Status.PENDING, h2.awaitRecord(hash).status)
     }
 

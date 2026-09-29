@@ -10,7 +10,6 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.concurrent.thread
 import kotlinx.coroutines.async
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -134,37 +133,53 @@ class PinnedHttpTransportTest {
         }
     }
 
+    /**
+     * Headers and a first byte, then one more byte every 200 ms until the client
+     * hangs up: never idle long enough for a socket's own read timeout, and never
+     * done on its own (1000 bytes take ~200 s). Only the transport's own deadline
+     * or cancellation ends it, so a bound far below 200 s tells those apart from
+     * the stream just running out, on however slow a runner. [answering] opens
+     * once the first byte is out.
+     */
+    private fun trickle(answering: CountDownLatch? = null): (String, java.io.OutputStream) -> Unit = { _, out ->
+        out.write(http("200 OK", "Content-Length: 1000\r\n", "{"))
+        out.flush()
+        answering?.countDown()
+        while (true) {
+            Thread.sleep(200)
+            out.write(' '.code)
+            out.flush()
+        }
+    }
+
     @Test
     fun aStalledServerIsCutOffAtTheDeadline() = runBlocking {
-        Server { _, out ->
-            out.write(http("200 OK", "Content-Length: 1000\r\n", "{"))
-            // …and then nothing: the server just waits for the client to hang up.
-        }.use { server ->
+        Server(trickle()).use { server ->
             val started = System.currentTimeMillis()
             try {
                 PinnedHttpTransport().post(server.url, "{}", 700)
                 fail()
             } catch (e: RpcTimeoutException) {
                 val took = System.currentTimeMillis() - started
-                assertTrue("took $took", took in 600..2_000)
+                assertTrue("took $took: not before the deadline, nor as long as the stream would run", took in 600..20_000)
             }
-            assertTrue("the socket is closed, not left to its own timeout", server.closed.await(2, TimeUnit.SECONDS))
+            assertTrue("the socket is closed, not left to its own timeout", server.closed.await(20, TimeUnit.SECONDS))
         }
     }
 
     @Test
     fun aCancelledCallerIsLetGoAndTheSocketClosed() = runBlocking {
-        Server { _, out ->
-            out.write(http("200 OK", "Content-Length: 1000\r\n", "{"))
-            // …and then nothing: the server just waits for the client to hang up.
-        }.use { server ->
-            val call = async { PinnedHttpTransport().post(server.url, "{}", 30_000) }
-            delay(300)
+        val answering = CountDownLatch(1)
+        Server(trickle(answering)).use { server ->
+            val call = async(kotlinx.coroutines.Dispatchers.Default) { PinnedHttpTransport().post(server.url, "{}", 600_000) }
+            // Cancelled mid-read: the call's own deadline (10 minutes) and the stream (~200 s) are both far off.
+            assertTrue(answering.await(20, TimeUnit.SECONDS))
             val started = System.currentTimeMillis()
             call.cancel()
             call.join()
-            assertTrue(System.currentTimeMillis() - started < 500)
-            assertTrue(server.closed.await(2, TimeUnit.SECONDS))
+            val took = System.currentTimeMillis() - started
+            assertTrue("took $took", took < 20_000)
+            assertTrue(server.closed.await(20, TimeUnit.SECONDS))
         }
     }
 

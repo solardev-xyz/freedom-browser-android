@@ -169,6 +169,18 @@ class EthereumProviderTest {
         }
     }
 
+    /**
+     * Runs [block] under a loose wall-clock ceiling: far above any runner's real cost, so it
+     * doesn't flake, but it catches a hashing step that went super-linear and takes minutes.
+     */
+    private fun <T> withinMinute(block: () -> T): T {
+        val started = System.nanoTime()
+        val result = block()
+        val ms = (System.nanoTime() - started) / 1_000_000
+        assertTrue("took $ms ms", ms < 60_000)
+        return result
+    }
+
     private fun ok(r: EthereumProvider.Reply): Any = (r as? EthereumProvider.Reply.Ok)?.value ?: error("not ok: $r")
     private fun code(r: EthereumProvider.Reply): Int = (r as? EthereumProvider.Reply.Err)?.code ?: error("not an error: $r")
     private fun message(r: EthereumProvider.Reply): String = (r as? EthereumProvider.Reply.Err)?.message ?: error("not an error: $r")
@@ -477,20 +489,22 @@ class EthereumProviderTest {
             return JSONObject().put("types", types).put("primaryType", "Main")
                 .put("domain", JSONObject().put("name", "x")).put("message", JSONObject().put("items", items))
         }
-        // The bound only has to catch the old minutes-long hashing; shared CI runners are several
-        // times slower than a dev machine (1.4 s locally for the whole test), so keep it generous.
-        var start = System.nanoTime()
+        // Counted in work first: every field, element and type-walk step is charged to
+        // Eip712.MAX_WORK, and a hashing that re-walked Root's 400 types for each item
+        // (~1200 units an item, against ~400 memoized) would blow the budget at 2000 items
+        // and be refused as too large — not hashed in full as here.
+        assertTrue(2000 * 400 < Eip712.MAX_WORK && 2000 * 1200 > Eip712.MAX_WORK)
+        // The budget bounds running time only while each charged unit is O(1) (#215 R3's
+        // baseType rescan was O(n²) per unit and was caught only by timing), so each call also
+        // gets a wall-clock ceiling — loose enough for the slowest CI runner (~1.4 s locally
+        // for the whole test), tight enough to catch a minutes-long regression.
         // Hashed in full, then refused as too long to show whole (#229): 2000 items print past the sheet's limit.
-        val long = call("eth_signTypedData_v4", JSONArray().put(main.address).put(payload(2000))) as EthereumProvider.Reply.Err
-        assertTrue("took ${(System.nanoTime() - start) / 1_000_000} ms", System.nanoTime() - start < 15_000_000_000L)
+        val long = withinMinute { call("eth_signTypedData_v4", JSONArray().put(main.address).put(payload(2000))) } as EthereumProvider.Reply.Err
         assertTrue(long.message, long.message.contains("too long to show"))
-        start = System.nanoTime()
-        ok(call("eth_signTypedData_v4", JSONArray().put(main.address).put(payload(500))))
-        assertTrue("took ${(System.nanoTime() - start) / 1_000_000} ms", System.nanoTime() - start < 15_000_000_000L)
+        ok(withinMinute { call("eth_signTypedData_v4", JSONArray().put(main.address).put(payload(500))) })
         asks.clear()
-        start = System.nanoTime()
-        val err = call("eth_signTypedData_v4", JSONArray().put(main.address).put(payload(20_000))) as EthereumProvider.Reply.Err
-        assertTrue("took ${(System.nanoTime() - start) / 1_000_000} ms", System.nanoTime() - start < 15_000_000_000L)
+        // Past the budget: refused once it's spent, before any sheet.
+        val err = withinMinute { call("eth_signTypedData_v4", JSONArray().put(main.address).put(payload(20_000))) } as EthereumProvider.Reply.Err
         assertEquals(-32602, err.code)
         assertTrue(err.message, err.message.contains("too large"))
         assertTrue(asks.isEmpty())
@@ -719,10 +733,11 @@ class EthereumProviderTest {
             .put("types", JSONObject().put("Mail", JSONArray().put(JSONObject().put("name", "a").put("type", type))))
             .put("primaryType", "Mail").put("domain", JSONObject().put("name", "x"))
             .put("message", JSONObject().put("a", JSONArray()))
-        val start = System.nanoTime()
-        val err = call("eth_signTypedData_v4", JSONArray().put(main.address).put(payload("uint256" + "[]".repeat(450_000)).toString()))
-        assertTrue("took ${(System.nanoTime() - start) / 1_000_000} ms", System.nanoTime() - start < 2_000_000_000L)
+        // Refused by its length, checked before anything walks the string; the loose
+        // wall-clock ceiling still catches a walk that went quadratic (#215 R3: ~100 s).
+        val err = withinMinute { call("eth_signTypedData_v4", JSONArray().put(main.address).put(payload("uint256" + "[]".repeat(450_000)).toString())) }
         assertEquals(-32602, code(err))
+        assertTrue((err as EthereumProvider.Reply.Err).message, err.message.contains("has a type that's too long"))
         assertTrue(asks.isEmpty())
         // Up to the cap, suffixes are still fine.
         ok(call("eth_signTypedData_v4", JSONArray().put(main.address).put(payload("uint256" + "[]".repeat(100)))))

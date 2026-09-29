@@ -318,7 +318,8 @@ class OpenLvSessionTest {
         // Anything the old session still says is ignored.
         s.onLink(1, OpenLvLink.Connected)
         s.onRequest(1, 3, "eth_chainId", JSONArray())
-        Thread.sleep(200)
+        // Both handled (and dropped) by the time a task queued after them on the session's thread runs.
+        runBlocking { withContext(thread) {} }
         assertEquals(OpenLvSession.Status.Disconnected, s.status.value)
         assertTrue(engine.responses.isEmpty())
     }

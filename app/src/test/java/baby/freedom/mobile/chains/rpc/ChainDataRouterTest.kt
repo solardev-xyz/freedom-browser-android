@@ -9,10 +9,15 @@ import java.io.IOException
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.test.currentTime
+import kotlinx.coroutines.test.TestScope
+import kotlinx.coroutines.test.runCurrent
+import kotlinx.coroutines.test.runTest
 import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
@@ -65,7 +70,13 @@ class ChainDataRouterTest {
         fun count(url: String) = calls[url]?.get() ?: 0
     }
 
-    private fun router(
+    /**
+     * On the test's virtual clock, quorum legs included (they run in its
+     * `backgroundScope`): every leg that can run has run before any time
+     * passes, so which answers are in when the quorum decides, and every
+     * deadline, come out the same on however slow a runner.
+     */
+    private fun TestScope.router(
         net: Net,
         chains: List<Chain>,
         policy: ((Chain) -> ChainAccessPolicy)? = null,
@@ -77,12 +88,13 @@ class ChainDataRouterTest {
         verifiedSources = sources,
         policyFor = policy ?: { ChainAccessPolicy.default(it.id) },
         clock = clock,
+        legScope = backgroundScope,
     )
 
     // ---- quorum ----
 
     @Test
-    fun quorumVerifiesTwoMatchingAnswers() = runBlocking {
+    fun quorumVerifiesTwoMatchingAnswers() = runTest {
         val net = Net()
         net.handlers[a] = { ok("0x10") }
         net.handlers[b] = { delay(100); ok("0x10") }
@@ -99,21 +111,22 @@ class ChainDataRouterTest {
     }
 
     @Test
-    fun quorumSettlesWithoutWaitingForTheStraggler() = runBlocking {
+    fun quorumSettlesWithoutWaitingForTheStraggler() = runTest {
         val net = Net()
-        net.handlers[a] = { ok("0x1") }
-        net.handlers[b] = { ok("0x1") }
-        net.handlers[c] = { awaitCancellation() }
-        val started = System.currentTimeMillis()
+        // a and b agree once c has been asked, so there is a straggler to cut off.
+        val cAsked = CompletableDeferred<Unit>()
+        net.handlers[a] = { cAsked.await(); ok("0x1") }
+        net.handlers[b] = { cAsked.await(); ok("0x1") }
+        net.handlers[c] = { cAsked.complete(Unit); awaitCancellation() }
         val r = router(net, listOf(chain())).request(137, "eth_blockNumber")
         assertEquals(ChainTrust.Level.VERIFIED, r.trust.level)
-        assertTrue(System.currentTimeMillis() - started < 1_000)
-        delay(100)
+        assertEquals("no (virtual) time spent waiting on c", 0L, currentTime)
+        runCurrent()
         assertEquals("the straggler is cut off, not left running", listOf(c), net.cancelled.toList())
     }
 
     @Test
-    fun conflictFallsToDirectReusingTheFirstMembersAnswer() = runBlocking {
+    fun conflictFallsToDirectReusingTheFirstMembersAnswer() = runTest {
         val net = Net()
         net.handlers[a] = { delay(50); ok("0x1") }
         net.handlers[b] = { ok("0x2") }
@@ -129,7 +142,7 @@ class ChainDataRouterTest {
     }
 
     @Test
-    fun failedQuorumLetsDirectAskOnlyTheRestOfThePool() = runBlocking {
+    fun failedQuorumLetsDirectAskOnlyTheRestOfThePool() = runTest {
         val net = Net()
         net.handlers[a] = { throw IOException("down") }
         net.handlers[b] = { throw IOException("down") }
@@ -143,7 +156,7 @@ class ChainDataRouterTest {
     }
 
     @Test
-    fun matchingRevertsAreAVerifiedAnswerThatEndsTheWalk() = runBlocking {
+    fun matchingRevertsAreAVerifiedAnswerThatEndsTheWalk() = runTest {
         val net = Net()
         net.handlers[a] = { err(3, "execution reverted: nope", "0xdeadbeef") }
         net.handlers[b] = { err(3, "execution reverted", "0xDEADBEEF") }
@@ -159,7 +172,7 @@ class ChainDataRouterTest {
     }
 
     @Test
-    fun aPoolSmallerThanMSkipsTheQuorum() = runBlocking {
+    fun aPoolSmallerThanMSkipsTheQuorum() = runTest {
         val net = Net()
         net.handlers[a] = { ok("0x5") }
         val r = router(net, listOf(chain(rpcs = listOf(a)))).request(137, "eth_blockNumber")
@@ -171,7 +184,7 @@ class ChainDataRouterTest {
     // ---- direct ----
 
     @Test
-    fun directMovesPastNodeErrorsAndReportsTheLastOne() = runBlocking {
+    fun directMovesPastNodeErrorsAndReportsTheLastOne() = runTest {
         val net = Net()
         net.handlers[a] = { err(-32005, "rate limited") }
         net.handlers[b] = { ok("0x9") }
@@ -190,7 +203,7 @@ class ChainDataRouterTest {
     }
 
     @Test
-    fun directStopsAtADeterministicError() = runBlocking {
+    fun directStopsAtADeterministicError() = runTest {
         val net = Net()
         net.handlers[a] = { err(-32602, "invalid argument 0") }
         net.handlers[b] = { ok("0x1") }
@@ -212,7 +225,7 @@ class ChainDataRouterTest {
     }
 
     @Test
-    fun theUsersOwnRpcIsTriedFirstAndLabelledAsTheirs() = runBlocking {
+    fun theUsersOwnRpcIsTriedFirstAndLabelledAsTheirs() = runTest {
         val net = Net()
         net.handlers[mine] = { ok("0x42") }
         net.handlers[a] = { ok("0x42") }
@@ -228,16 +241,16 @@ class ChainDataRouterTest {
     }
 
     @Test
-    fun aFailedUserRpcStaysAheadOfThePublicOnes() = runBlocking {
+    fun aFailedUserRpcStaysAheadOfThePublicOnes() = runTest {
         val net = Net()
-        var now = 1_000_000L
+        val now = AtomicLong(1_000_000L)
         var down = true
         net.handlers[mine] = { if (down) throw IOException("restarting") else ok("0x5") }
         listOf(a, b, c).forEach { url -> net.handlers[url] = { ok("0x5") } }
-        val r = router(net, listOf(chain(rpcs = listOf(a, b, c), user = listOf(mine))), clock = { now })
+        val r = router(net, listOf(chain(rpcs = listOf(a, b, c), user = listOf(mine))), clock = { now.get() })
         assertEquals(ChainTrust.Level.VERIFIED, r.request(137, "eth_blockNumber").trust.level)
         down = false
-        now += 1_000
+        now.addAndGet(1_000)
         val next = r.request(137, "eth_blockNumber")
         assertEquals(
             "one blip doesn't drop the user's own RPC out of the quorum for ten minutes",
@@ -248,11 +261,15 @@ class ChainDataRouterTest {
     }
 
     @Test
-    fun oneProviderIsOneVoteInTheQuorum() = runBlocking {
+    fun oneProviderIsOneVoteInTheQuorum() = runTest {
         val net = Net()
         val sameAsA = "https://a.example/?key=1"
         val sibling = "https://eu.b.example"
-        listOf(sameAsA, a, sibling, b, c).forEach { url -> net.handlers[url] = { ok("0x1") } }
+        // The first two agree only once c has been asked: otherwise their agreement could
+        // cut the quorum short before c's leg ever ran, and c would read as never asked.
+        val cAsked = CompletableDeferred<Unit>()
+        listOf(sameAsA, a, sibling, b).forEach { url -> net.handlers[url] = { cAsked.await(); ok("0x1") } }
+        net.handlers[c] = { cAsked.complete(Unit); ok("0x1") }
         val r = router(net, listOf(chain(rpcs = listOf(a, sibling, b, c), user = listOf(sameAsA))))
             .request(137, "eth_blockNumber")
         assertEquals(listOf("a.example", "eu.b.example", "c.example"), r.trust.queried)
@@ -264,7 +281,7 @@ class ChainDataRouterTest {
     }
 
     @Test
-    fun theUsersNodeUnderTwoLoopbackSpellingsIsOneVote() = runBlocking {
+    fun theUsersNodeUnderTwoLoopbackSpellingsIsOneVote() = runTest {
         val net = Net()
         val local1 = "http://localhost:8545"
         val local2 = "http://127.0.0.1:8545"
@@ -303,30 +320,29 @@ class ChainDataRouterTest {
     }
 
     @Test
-    fun aDirectTierNotRightAfterTheQuorumDoesntWaitOnItsCancelledLegs() = runBlocking {
+    fun aDirectTierNotRightAfterTheQuorumDoesntWaitOnItsCancelledLegs() = runTest {
         val net = Net()
-        // a and b refuse at once, so the quorum can't form while c is
-        // still in flight; c hangs when the quorum asks, answers when asked again.
-        net.handlers[a] = { err(-32005, "rate limited") }
-        net.handlers[b] = { err(-32005, "rate limited") }
-        net.handlers[c] = { if (net.count(c) == 1) awaitCancellation() else ok("0x9") }
+        // a and b refuse as soon as c has been asked, so the quorum can't form while
+        // c is still in flight; c hangs when the quorum asks, answers when asked again.
+        // (Refusing before c's leg even started would leave nothing in flight to cancel.)
+        val cAsked = CompletableDeferred<Unit>()
+        net.handlers[a] = { cAsked.await(); err(-32005, "rate limited") }
+        net.handlers[b] = { cAsked.await(); err(-32005, "rate limited") }
+        net.handlers[c] = { if (net.count(c) == 1) { cAsked.complete(Unit); awaitCancellation() } else ok("0x9") }
         val eth = chain(id = 1, rpcs = listOf(a, b, c))
         val policy = ChainAccessPolicy(
             readOrder = listOf(ChainSource.QUORUM, ChainSource.COLIBRI, ChainSource.DIRECT),
             broadcastOrder = listOf(ChainSource.DIRECT),
         )
-        val started = System.currentTimeMillis()
-        val r = kotlinx.coroutines.withTimeout(10_000) {
-            router(net, listOf(eth), { policy }).request(1, "eth_blockNumber")
-        }
+        val r = router(net, listOf(eth), { policy }).request(1, "eth_blockNumber")
         assertEquals("0x9", r.result)
-        assertTrue(System.currentTimeMillis() - started < 2_000)
+        assertEquals("no (virtual) time spent waiting out c's cancelled leg", 0L, currentTime)
         assertEquals("c's cancelled leg never answered, so direct asks it again", 2, net.count(c))
         assertEquals("a and b did answer, so aren't asked twice", listOf(1, 1), listOf(a, b).map(net::count))
     }
 
     @Test
-    fun filtersSkipTheVerifiedTiers() = runBlocking {
+    fun filtersSkipTheVerifiedTiers() = runTest {
         val net = Net()
         listOf(a, b, c, d).forEach { url -> net.handlers[url] = { ok("0x1") } }
         val r = router(net, listOf(chain())).request(137, "eth_newBlockFilter")
@@ -337,7 +353,7 @@ class ChainDataRouterTest {
     // ---- interactive deadline ----
 
     @Test
-    fun aPageReadStopsWaitingForTheQuorumButKeepsItsAnswers() = runBlocking {
+    fun aPageReadStopsWaitingForTheQuorumButKeepsItsAnswers() = runTest {
         val net = Net()
         listOf(a, b, c).forEach { url -> net.handlers[url] = { delay(2_600); ok("0x3") } }
         net.handlers[d] = { ok("0x4") }
@@ -346,6 +362,7 @@ class ChainDataRouterTest {
         val page = router(net, listOf(chain()), policy)
             .request(137, "eth_blockNumber", context = RoutingContext.forPage("https://app.example"))
         assertEquals("the late quorum member serves the direct tier", "0x3", page.result)
+        assertEquals("answered as the member did, past the page's deadline", 2_600L, currentTime)
         assertEquals(ChainTrust.Level.UNVERIFIED, page.trust.level)
         assertEquals("no second request to a member, none to the rest", listOf(1, 1, 1, 0), listOf(a, b, c, d).map(net::count))
 
@@ -354,7 +371,7 @@ class ChainDataRouterTest {
     }
 
     @Test
-    fun aPageReadsShortWaitDoesntQuarantineASlowButHealthyRpc() = runBlocking {
+    fun aPageReadsShortWaitDoesntQuarantineASlowButHealthyRpc() = runTest {
         val net = Net()
         listOf(a, b, c).forEach { url -> net.handlers[url] = { delay(2_600); ok("0x3") } }
         net.handlers[d] = { ok("0x4") }
@@ -409,7 +426,7 @@ class ChainDataRouterTest {
     )
 
     @Test
-    fun aLightClientAnswersFirstWhenWired() = runBlocking {
+    fun aLightClientAnswersFirstWhenWired() = runTest {
         val net = Net()
         val myotis = FakeSource { ChainDataResult("0x77", proof) }
         val r = router(net, listOf(BuiltInChains.ETHEREUM), sources = mapOf(ChainSource.MYOTIS to myotis))
@@ -420,7 +437,7 @@ class ChainDataRouterTest {
     }
 
     @Test
-    fun unwiredOrFailingVerifiedSourcesAreSkipped() = runBlocking {
+    fun unwiredOrFailingVerifiedSourcesAreSkipped() = runTest {
         val net = Net()
         BuiltInChains.ETHEREUM.rpcUrls.forEach { url -> net.handlers[url] = { ok("0x5") } }
         val failing = FakeSource { throw IOException("prover down") }
@@ -435,20 +452,18 @@ class ChainDataRouterTest {
     }
 
     @Test
-    fun aSlowVerifiedSourceGetsTwoSecondsOnAPageRead() = runBlocking {
+    fun aSlowVerifiedSourceGetsTwoSecondsOnAPageRead() = runTest {
         val net = Net()
         BuiltInChains.ETHEREUM.rpcUrls.forEach { url -> net.handlers[url] = { ok("0x5") } }
         val slow = FakeSource { delay(10_000); ChainDataResult("0x0", proof) }
-        val started = System.currentTimeMillis()
         val r = router(net, listOf(BuiltInChains.ETHEREUM), sources = mapOf(ChainSource.MYOTIS to slow))
             .request(1, "eth_blockNumber", context = RoutingContext.forPage("web3://app.eth"))
-        val took = System.currentTimeMillis() - started
         assertEquals(ChainSource.QUORUM, r.trust.source)
-        assertTrue("took $took", took in 1_900..3_500)
+        assertEquals(ChainDataRouter.INTERACTIVE_DEADLINE_MS, currentTime)
     }
 
     @Test
-    fun aRevertFromAVerifiedSourceEndsTheWalk() = runBlocking {
+    fun aRevertFromAVerifiedSourceEndsTheWalk() = runTest {
         val net = Net()
         val reverting = FakeSource { throw ChainRpcException.Rpc(3, "execution reverted", "0x08c379a0") }
         try {
@@ -464,7 +479,7 @@ class ChainDataRouterTest {
     // ---- walk-wide ----
 
     @Test
-    fun unknownChainsAndNonReadMethodsAreRefused() = runBlocking {
+    fun unknownChainsAndNonReadMethodsAreRefused() = runTest {
         val r = router(Net(), listOf(chain()))
         try {
             r.request(999, "eth_blockNumber"); fail()
@@ -481,7 +496,7 @@ class ChainDataRouterTest {
     }
 
     @Test
-    fun everySourceFailingSaysWhyPerTier() = runBlocking {
+    fun everySourceFailingSaysWhyPerTier() = runTest {
         val net = Net()
         try {
             router(net, listOf(chain())).request(137, "eth_blockNumber")
@@ -495,27 +510,27 @@ class ChainDataRouterTest {
     }
 
     @Test
-    fun anRpcThatJustFailedMovesToTheBackOfThePool() = runBlocking {
+    fun anRpcThatJustFailedMovesToTheBackOfThePool() = runTest {
         val net = Net()
-        var now = 1_000_000L
+        val now = AtomicLong(1_000_000L)
         val aFailed = kotlinx.coroutines.CompletableDeferred<Unit>()
         net.handlers[a] = { aFailed.complete(Unit); throw IOException("down") }
-        // The others answer only after a has failed (and a moment more for
-        // the router to record it): agreeing first would cancel a's leg,
-        // and a cancelled leg's failure is — rightly — never counted.
+        // The others answer only after a has failed (and a virtual moment more,
+        // by which a's leg has run on and recorded it): agreeing first would
+        // cancel a's leg, and a cancelled leg's failure is — rightly — never counted.
         listOf(b, c, d).forEach { url -> net.handlers[url] = { aFailed.await(); kotlinx.coroutines.delay(100); ok("0x1") } }
-        val r = router(net, listOf(chain()), clock = { now })
+        val r = router(net, listOf(chain()), clock = { now.get() })
         r.request(137, "eth_blockNumber")
         assertEquals(1, net.count(a))
         val second = r.request(137, "eth_blockNumber")
         assertEquals(listOf("b.example", "c.example", "d.example"), second.trust.queried)
         assertEquals(1, net.count(a))
-        now += ChainDataRouter.QUARANTINE_MS
+        now.addAndGet(ChainDataRouter.QUARANTINE_MS)
         assertEquals("a.example", r.request(137, "eth_blockNumber").trust.queried.first())
     }
 
     @Test
-    fun everyEndpointGetsTheSameNormalizedBody() = runBlocking {
+    fun everyEndpointGetsTheSameNormalizedBody() = runTest {
         val net = Net()
         listOf(a, b, c).forEach { url -> net.handlers[url] = { ok("0x") } }
         val call = JSONObject().put("to", "0x1").put("input", "0xabcd").put("value", "1000").put("gas", 21000)
@@ -533,7 +548,7 @@ class ChainDataRouterTest {
     private val txHash = "0x" + Keccak256.digest(rawTx.hexToBytes()).toHex()
 
     @Test
-    fun broadcastWalksThePoolAndTakesAlreadyKnownAsSent() = runBlocking {
+    fun broadcastWalksThePoolAndTakesAlreadyKnownAsSent() = runTest {
         val net = Net()
         net.handlers[a] = { throw IOException("reset") }
         net.handlers[b] = { err(-32000, "already known") }
@@ -545,7 +560,7 @@ class ChainDataRouterTest {
     }
 
     @Test
-    fun broadcastTakesEveryClientsAlreadyKnownWordingAsSent() = runBlocking {
+    fun broadcastTakesEveryClientsAlreadyKnownWordingAsSent() = runTest {
         for (wording in listOf("already known", "AlreadyKnown", "known transaction: abc", "Transaction already imported")) {
             val net = Net()
             net.handlers[a] = { err(-32010, wording) }
@@ -555,7 +570,7 @@ class ChainDataRouterTest {
     }
 
     @Test
-    fun broadcastAnswersTheTransactionsOwnHashWhateverTheNodeSays() = runBlocking {
+    fun broadcastAnswersTheTransactionsOwnHashWhateverTheNodeSays() = runTest {
         for (reply in listOf(ok(true), ok("0xdeadbeef"), ok(null))) {
             val net = Net()
             net.handlers[a] = { reply }
@@ -565,7 +580,7 @@ class ChainDataRouterTest {
     }
 
     @Test
-    fun broadcastSurfacesTheNodesRejection() = runBlocking {
+    fun broadcastSurfacesTheNodesRejection() = runTest {
         val net = Net()
         net.handlers[a] = { err(-32000, "nonce too low") }
         try {
@@ -585,7 +600,7 @@ class ChainDataRouterTest {
     }
 
     @Test
-    fun aBroadcastWithAnRpcThatNeverAnsweredSaysSoWhateverTheOthersRefused() = runBlocking {
+    fun aBroadcastWithAnRpcThatNeverAnsweredSaysSoWhateverTheOthersRefused() = runTest {
         for (refusal in listOf(err(-32005, "rate limit exceeded"), err(-32000, "insufficient funds for gas * price + value"))) {
             val net = Net()
             net.handlers[a] = { throw IOException("timed out") }
@@ -602,7 +617,7 @@ class ChainDataRouterTest {
     }
 
     @Test
-    fun anUncertainLightClientBroadcastIsNeverResent() = runBlocking {
+    fun anUncertainLightClientBroadcastIsNeverResent() = runTest {
         val net = Net()
         BuiltInChains.ETHEREUM.rpcUrls.forEach { url -> net.handlers[url] = { ok(txHash) } }
         val myotis = object : VerifiedChainSource {
@@ -621,7 +636,7 @@ class ChainDataRouterTest {
     }
 
     @Test
-    fun broadcastRefusesSomethingThatIsntATransaction() = runBlocking {
+    fun broadcastRefusesSomethingThatIsntATransaction() = runTest {
         try {
             router(Net(), listOf(chain())).broadcast(137, "hello")
             fail()
