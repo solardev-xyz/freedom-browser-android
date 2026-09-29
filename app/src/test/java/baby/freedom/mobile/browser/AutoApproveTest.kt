@@ -5,6 +5,7 @@ import java.math.BigInteger
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /** Which transactions an auto-approve rule (#112) may cover, and how one is named — as iOS's `AutoApproveOfferTests`. */
@@ -43,12 +44,68 @@ class AutoApproveTest {
 
     @Test
     fun `the sheet's words say exactly what the rule covers, the contract in full`() {
-        val rule = AutoApproveRule.eligible(site, usdc.lowercase(), BigInteger.ZERO, call("0x095ea7b3"), 1)!!
-        assertEquals("Token approvals", autoApproveRuleTitle(rule))
+        val rule = AutoApproveRule.eligible(site, usdc.lowercase(), BigInteger.ZERO, call("0x23b872dd", 3), 1)!!
+        assertEquals("Token transfers", autoApproveRuleTitle(rule))
         assertEquals(
-            "Function 0x095ea7b3 on $usdc, on Ethereum, from this site only. " +
+            "Function 0x23b872dd on $usdc, on Ethereum, from this site only. " +
                 "Every such call is covered, whatever its recipient, spender or amount. Calls that also send funds still ask.",
             autoApproveScope(rule, "Ethereum"),
+        )
+    }
+
+    // #234 (security audit #229): each of these hands out more than the one call on the sheet — an
+    // approval or permit lets a spender the site picks take tokens later; a multicall or execute entry
+    // point runs whatever calls its data carries, so a router holding the user's approvals could send
+    // them anywhere. Written as hex, not derived, so a slip in the list or in the hashing shows here.
+    private val refused = mapOf(
+        "0x095ea7b3" to "approve(address,uint256)",
+        "0x39509351" to "increaseAllowance(address,uint256)",
+        "0xa22cb465" to "setApprovalForAll(address,bool)",
+        "0xd505accf" to "permit (EIP-2612)",
+        "0x87517c45" to "Permit2 approve",
+        "0x2b67b570" to "Permit2 permit",
+        "0x2a2d80d1" to "Permit2 permit batch",
+        "0xac9650d8" to "multicall(bytes[])",
+        "0x5ae401dc" to "multicall(uint256,bytes[])",
+        "0x252dba42" to "Multicall aggregate",
+        "0x82ad56cb" to "Multicall3 aggregate3",
+        "0x24856bc3" to "Universal Router execute(bytes,bytes[])",
+        "0x3593564c" to "Universal Router execute(bytes,bytes[],uint256)",
+        "0xb61d27f6" to "ERC-4337 execute(address,uint256,bytes)",
+        "0x47e1da2a" to "ERC-4337 executeBatch(address[],uint256[],bytes[])",
+        "0xe9ae5c53" to "ERC-7579 execute(bytes32,bytes)",
+        "0x6a761202" to "Safe execTransaction",
+    )
+
+    @Test
+    fun `an approval, permit, multicall or execute function can't have a rule, whatever the case of its selector`() {
+        for ((selector, name) in refused) {
+            assertNull(name, AutoApproveRule.eligible(site, usdc, BigInteger.ZERO, call(selector, 4), 100))
+            assertNull(name, AutoApproveRule.eligible(site, usdc, BigInteger.ZERO, call(selector.uppercase().replace("0X", "0x"), 4), 100))
+            assertNull(name, AutoApproveRule.of(site, usdc, selector, 100))
+            assertNull(name, AutoApproveRule.of(site, usdc, selector.uppercase().replace("0X", "0x"), 100))
+        }
+    }
+
+    @Test
+    fun `every refused signature hashes to its selector, and every one listed here is refused`() {
+        assertEquals("0xa9059cbb", selectorOf("transfer(address,uint256)"))
+        val listed = REFUSED_SELECTOR_SIGNATURES.map { selectorOf(it) }
+        assertEquals("no duplicates", listed.size, listed.toSet().size)
+        assertTrue(listed.containsAll(refused.keys))
+    }
+
+    @Test
+    fun `transfers have no warning, a function the wallet can't name has one`() {
+        assertNull(autoApproveWarning(AutoApproveRule.eligible(site, usdc, BigInteger.ZERO, call("0xa9059cbb"), 100)!!))
+        assertNull(autoApproveWarning(AutoApproveRule.eligible(site, usdc, BigInteger.ZERO, call("0x23b872dd", 3), 100)!!))
+        // Uniswap V2's swapExactTokensForTokens: a router function no list could name in full.
+        val swap = AutoApproveRule.eligible(site, usdc, BigInteger.ZERO, call("0x38ed1739", 5), 100)!!
+        assertEquals(
+            "The wallet can't tell what this function does. If it can move tokens you've approved this contract " +
+                "to use, or run calls it's handed (as a swap router can), this rule lets the site do that with " +
+                "no sheet, to anyone. Only turn it on for a function you know.",
+            autoApproveWarning(swap),
         )
     }
 

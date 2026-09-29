@@ -1031,6 +1031,24 @@ class EthereumProviderTest {
     }
 
     @Test
+    fun `an approve, multicall or router execute call offers no rule, and a switch said on grants nothing (#234)`() {
+        connect()
+        answer = { EthAnswer.Approved(alwaysApprove = true) }
+        val multicallData = "0xac9650d8" + "00".repeat(64)
+        val routerExecuteData = "0x3593564c" + "00".repeat(96)
+        for ((n, data) in listOf(approveData, multicallData, routerExecuteData).withIndex()) {
+            sends.outcomes += sent(n + 1)
+            ok(call("eth_sendTransaction", tx("to" to token, "data" to data)))
+            assertNull(data.take(10), (asks.last() as EthAsk.SendTransaction).autoApprove)
+        }
+        assertTrue(rules.rules.isEmpty())
+        // So the next approve asks again.
+        answer = { EthAnswer.Rejected }
+        assertEquals(4001, code(call("eth_sendTransaction", tx("to" to token, "data" to approveData))))
+        assertEquals(4, asks.size)
+    }
+
+    @Test
     fun `a rule turned on with a send that didn't go out is not written`() {
         connect()
         answer = { EthAnswer.Approved(alwaysApprove = true) }
