@@ -15,13 +15,17 @@ import kotlinx.coroutines.suspendCancellableCoroutine
  * [confirmationRequired]: whether a passive biometric (a face) must also be
  * confirmed with a tap. Opening the wallet or showing the phrase must not
  * happen just because the phone was pointed at its owner's face by someone
- * else holding it (#229); sealing a new phrase gives nobody anything.
+ * else holding it (#229); sealing a new phrase gives nobody anything. Restoring
+ * from Google backup leaves an unlocked wallet, so it's held to Unlock's bar;
+ * backing up opens the phrase, so it's held to Show recovery phrase's (#244).
  */
 enum class VaultAuthPurpose(val title: String, val subtitle: String, val confirmationRequired: Boolean) {
     CREATE("Create your wallet", "Confirm it’s you to encrypt your new recovery phrase", false),
     IMPORT("Import your wallet", "Confirm it’s you to encrypt your recovery phrase", false),
     UNLOCK("Unlock your wallet", "Confirm it’s you to open your wallet", true),
     REVEAL("Show recovery phrase", "Confirm it’s you to see your recovery phrase", true),
+    BACKUP("Back up with Google", "Confirm it’s you to back up your recovery phrase", true),
+    RESTORE("Restore your wallet", "Confirm it’s you to restore your wallet from Google backup", true),
 }
 
 /** The user backed out of the prompt (or the system dismissed it); not an error to show. */

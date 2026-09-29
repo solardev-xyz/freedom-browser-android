@@ -60,6 +60,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -2071,16 +2072,102 @@ fun BrowserScreen(
         )
     }
 
+    // Nothing a page asks to download is saved without a yes here: the
+    // listener fires for script-driven downloads too, with no tap.
+    // Only the tab in view asks — a background tab's offers wait until
+    // the user switches to it — and a no blocks that tab's pages from
+    // asking again until the user navigates it ([DownloadOffers]), so a
+    // page firing downloads in a loop can't hold the browser behind
+    // this modal prompt.
+    val downloadOffers by downloads.offers.collectAsState()
+    val droppedOffers by downloads.droppedOffers.collectAsState()
+    val activeTabId = tabs.active.id
+    val tabOffers = downloadOffers.filter { it.tabId == activeTabId }
+    // It takes turns with the site-permission prompt (#81) on the same
+    // tab — they never stack; see [modalPromptTurn] for the order.
+    // Every one of them waits while a full-screen panel covers the
+    // page (the Downloads list included, via [overlayShown]).
+    val pageUncovered = !overlayShown
+    val androidDialogUp by sitePermissions.androidDialogUp.collectAsState()
+    var offerHasTurn by remember(activeTabId) { mutableStateOf(false) }
+    var radicleHasTurn by remember(activeTabId) { mutableStateOf(false) }
+    var ethereumHasTurn by remember(activeTabId) { mutableStateOf(false) }
+    var swarmHasTurn by remember(activeTabId) { mutableStateOf(false) }
+    var jsDialogHasTurn by remember(activeTabId) { mutableStateOf(false) }
+    // The turn as of the last composition: a long-press menu is only
+    // let in while the page is on screen and no prompt was up
+    // ([contextMenuAdmitted]), so it can't un-show a prompt the user is
+    // already reading, nor open when a panel that covered it closes.
+    var lastPromptTurn by remember(activeTabId) { mutableStateOf(PromptTurn.None) }
+    val contextMenuAdmitted = contextMenuAdmitted(lastPromptTurn, pageUncovered)
+    val promptTurn = modalPromptTurn(
+        permissionWaiting = state.permissionPrompt != null,
+        offerWaiting = tabOffers.isNotEmpty(),
+        offerHasTurn = offerHasTurn,
+        androidDialogUp = androidDialogUp,
+        // The `window.radicle` consent prompt (#124).
+        radicleWaiting = state.radiclePrompt != null,
+        radicleHasTurn = radicleHasTurn,
+        // The `window.ethereum` approval sheets (#110).
+        ethereumWaiting = state.ethereumPrompt != null,
+        ethereumHasTurn = ethereumHasTurn,
+        // The `window.swarm` approval sheets (#120).
+        swarmWaiting = state.swarmPrompt != null,
+        swarmHasTurn = swarmHasTurn,
+        // The page's `alert`/`confirm`/`prompt`/`beforeunload` (#246).
+        jsDialogWaiting = state.jsDialog != null,
+        jsDialogHasTurn = jsDialogHasTurn,
+        // The long-press link/image menu (#84), the user's own.
+        contextMenuWaiting = contextMenuAdmitted && tabs.pageContextMenu?.tabId == activeTabId,
+        // All of them, the download offer included, only over the page.
+        pageUncovered = pageUncovered,
+    )
+    SideEffect {
+        offerHasTurn = promptTurn == PromptTurn.DownloadOffer
+        radicleHasTurn = promptTurn == PromptTurn.Radicle
+        ethereumHasTurn = promptTurn == PromptTurn.Ethereum
+        swarmHasTurn = promptTurn == PromptTurn.Swarm
+        jsDialogHasTurn = promptTurn == PromptTurn.JsDialog
+        lastPromptTurn = promptTurn
+    }
+    // A page waiting on a JavaScript dialog blocks the renderer every
+    // tab shares (the tab in view freezes too), so a dialog only waits
+    // for its turn while its page is on screen: another tab's is
+    // answered straight away ([JsDialogRequest.withdraw]: `alert`
+    // returns, `confirm` is false, a `beforeunload` nobody saw lets the
+    // navigation go), as Chrome does for a background tab — and so is
+    // one waiting in the tab in view while a full-screen panel covers
+    // it, and the one a tab had when the user switches away from it.
+    // A dialog already up keeps its turn over a panel ([modalPromptTurn]).
+    val pageCovered by rememberUpdatedState(overlayShown)
+    val jsDialogUp by rememberUpdatedState(jsDialogHasTurn)
+    LaunchedEffect(tabs) {
+        snapshotFlow {
+            val activeId = tabs.active.id
+            val activeUnseen = pageCovered && !jsDialogUp
+            tabs.tabs.mapNotNull { tab ->
+                tab.jsDialog?.takeIf { tab.id != activeId || activeUnseen }
+            }
+        }.collect { stale -> stale.forEach { it.withdraw() } }
+    }
     // Long-press menu for a link / image on the page (#84). Dropped the
     // moment it stops describing what is on screen: the tab navigated,
-    // closed, or another tab came to the front.
+    // closed, or another tab came to the front — or when it arrives
+    // while one of the page's prompts is up (#246): it takes turns with
+    // them rather than stacking, and one shown only once that prompt is
+    // answered would open out of nowhere. Likewise while a full-screen
+    // panel covers the page (the page's verdict can take a moment to
+    // land, and the user may have opened the tab switcher meanwhile):
+    // it's not kept for when the panel closes.
     tabs.pageContextMenu?.let { request ->
         val owner = tabs.tabs.firstOrNull { it.id == request.tabId }
-        if (pageContextMenuIsStale(request, tabs.active.id, owner?.url, owner?.navCounter)) {
+        if (pageContextMenuIsStale(request, tabs.active.id, owner?.url, owner?.navCounter) ||
+            !contextMenuAdmitted
+        ) {
             LaunchedEffect(request) {
                 if (tabs.pageContextMenu === request) tabs.pageContextMenu = null
             }
-        } else if (owner != null) {
+        } else if (owner != null && promptTurn == PromptTurn.ContextMenu) {
             fun withImage(url: String, action: suspend (FetchedImage) -> Boolean, failure: String) {
                 scope.launch {
                     // The sheet is already gone: a refetch that isn't back
@@ -2131,50 +2218,6 @@ fun BrowserScreen(
         }
     }
 
-    // Nothing a page asks to download is saved without a yes here: the
-    // listener fires for script-driven downloads too, with no tap.
-    // Only the tab in view asks — a background tab's offers wait until
-    // the user switches to it — and a no blocks that tab's pages from
-    // asking again until the user navigates it ([DownloadOffers]), so a
-    // page firing downloads in a loop can't hold the browser behind
-    // this modal prompt.
-    val downloadOffers by downloads.offers.collectAsState()
-    val droppedOffers by downloads.droppedOffers.collectAsState()
-    val activeTabId = tabs.active.id
-    val tabOffers = downloadOffers.filter { it.tabId == activeTabId }
-    // It takes turns with the site-permission prompt (#81) on the same
-    // tab — they never stack; see [modalPromptTurn] for the order.
-    // Every one of them waits while a full-screen panel covers the
-    // page (the Downloads list included, via [overlayShown]).
-    val pageUncovered = !overlayShown
-    val androidDialogUp by sitePermissions.androidDialogUp.collectAsState()
-    var offerHasTurn by remember(activeTabId) { mutableStateOf(false) }
-    var radicleHasTurn by remember(activeTabId) { mutableStateOf(false) }
-    var ethereumHasTurn by remember(activeTabId) { mutableStateOf(false) }
-    var swarmHasTurn by remember(activeTabId) { mutableStateOf(false) }
-    val promptTurn = modalPromptTurn(
-        permissionWaiting = state.permissionPrompt != null,
-        offerWaiting = tabOffers.isNotEmpty(),
-        offerHasTurn = offerHasTurn,
-        androidDialogUp = androidDialogUp,
-        // The `window.radicle` consent prompt (#124).
-        radicleWaiting = state.radiclePrompt != null,
-        radicleHasTurn = radicleHasTurn,
-        // The `window.ethereum` approval sheets (#110).
-        ethereumWaiting = state.ethereumPrompt != null,
-        ethereumHasTurn = ethereumHasTurn,
-        // The `window.swarm` approval sheets (#120).
-        swarmWaiting = state.swarmPrompt != null,
-        swarmHasTurn = swarmHasTurn,
-        // All of them, the download offer included, only over the page.
-        pageUncovered = pageUncovered,
-    )
-    SideEffect {
-        offerHasTurn = promptTurn == PromptTurn.DownloadOffer
-        radicleHasTurn = promptTurn == PromptTurn.Radicle
-        ethereumHasTurn = promptTurn == PromptTurn.Ethereum
-        swarmHasTurn = promptTurn == PromptTurn.Swarm
-    }
     tabOffers.firstOrNull()?.takeIf { promptTurn == PromptTurn.DownloadOffer }?.let { offer ->
         DownloadOfferDialog(
             offer = offer,
@@ -2275,8 +2318,7 @@ fun BrowserScreen(
     // History, Bookmarks, Downloads) covers the page, so the user
     // always sees the page that is asking, and it waits its turn with
     // the tab's download offer ([modalPromptTurn]).
-    val pageOnScreen = pageUncovered && promptTurn != PromptTurn.DownloadOffer && promptTurn != PromptTurn.Radicle &&
-        promptTurn != PromptTurn.Ethereum && promptTurn != PromptTurn.Swarm
+    val pageOnScreen = pageUncovered && (promptTurn == PromptTurn.None || promptTurn == PromptTurn.SitePermission)
     state.permissionPrompt?.takeIf { promptTurn == PromptTurn.SitePermission }?.let { prompt ->
         androidx.compose.runtime.key(prompt) { SitePermissionPrompt(prompt) }
     }
@@ -2288,6 +2330,19 @@ fun BrowserScreen(
     }
     state.swarmPrompt?.takeIf { promptTurn == PromptTurn.Swarm }?.let { prompt ->
         androidx.compose.runtime.key(prompt) { SwarmPromptSheet(prompt) }
+    }
+    state.jsDialog?.takeIf { promptTurn == PromptTurn.JsDialog }?.let { request ->
+        // Taken down if it loses its turn — its tab closed or left the
+        // screen, this screen leaving composition. Taking it down
+        // doesn't itself answer the page; whatever took it down does
+        // ([JsDialogRequest.withdraw]): the tab closing, the user
+        // switching away from it, or the WebView host going away —
+        // the Activity finishing or being relaunched alike, since every
+        // WebView goes with the host — so it isn't shown again later.
+        DisposableEffect(request) {
+            val dialog = showJsDialog(context, request)
+            onDispose { dialog?.dismiss() }
+        }
     }
     // A Ledger conversation (#142) — a site's signature, a send, reading accounts — over whatever is up.
     LedgerActivityDialog()

@@ -1235,6 +1235,10 @@ fun BrowserWebViewHost(
 
     DisposableEffect(Unit) {
         onDispose {
+            // Every WebView goes with this host, so a dialog a page is
+            // blocked on is answered now: it would otherwise be shown
+            // again, by the next host, for a page that's gone (#246).
+            for (tab in tabs.tabs) tab.jsDialog?.withdraw()
             // The Activity is being relaunched (#183) and the tabs live
             // on in [TabsSession] — the ViewModel store is kept on
             // exactly this condition. Each tab keeps its WebView's state
@@ -3420,16 +3424,17 @@ private fun buildRefreshableWebView(
                 state.title = sanitizeTitle(title, view?.url)
             }
 
-            // JavaScript dialogs from a private tab (#86) go in a secure
-            // window of our own ([showPrivateJsDialog]); a normal tab's
-            // keep WebView's default dialog (false).
+            // Every tab's JavaScript dialogs wait their turn with the
+            // page's other prompts (#246, [BrowserState.jsDialog]):
+            // never WebView's default dialog (false), which would pop
+            // over a dApp approval sheet, the long-press menu or
+            // another tab, and would be outside the secure window a
+            // private tab (#86) needs.
             override fun onJsAlert(view: WebView?, url: String?, message: String?, result: JsResult?): Boolean =
-                state.private && result != null &&
-                    showPrivateJsDialog(context, JsDialogKind.ALERT, url, message, null, result)
+                result != null && queueJsDialog(JsDialogKind.ALERT, url, message, null, result)
 
             override fun onJsConfirm(view: WebView?, url: String?, message: String?, result: JsResult?): Boolean =
-                state.private && result != null &&
-                    showPrivateJsDialog(context, JsDialogKind.CONFIRM, url, message, null, result)
+                result != null && queueJsDialog(JsDialogKind.CONFIRM, url, message, null, result)
 
             override fun onJsPrompt(
                 view: WebView?,
@@ -3438,8 +3443,41 @@ private fun buildRefreshableWebView(
                 defaultValue: String?,
                 result: JsPromptResult?,
             ): Boolean =
-                state.private && result != null &&
-                    showPrivateJsDialog(context, JsDialogKind.PROMPT, url, message, defaultValue, result)
+                result != null && queueJsDialog(JsDialogKind.PROMPT, url, message, defaultValue, result)
+
+            /**
+             * Holds a dialog on the tab for [BrowserScreen] to show in
+             * its turn. A page blocks on one dialog at a time, so one
+             * already waiting means a second can't be answered by the
+             * user in any sensible order: it's cancelled.
+             */
+            private fun queueJsDialog(
+                kind: JsDialogKind,
+                url: String?,
+                message: String?,
+                defaultValue: String?,
+                result: JsResult,
+                onAnswered: (confirmed: Boolean) -> Unit = {},
+            ): Boolean {
+                if (state.jsDialog != null) {
+                    result.cancel()
+                    onAnswered(false)
+                    return true
+                }
+                state.jsDialog = JsDialogRequest(
+                    kind = kind,
+                    url = url,
+                    message = message,
+                    defaultValue = defaultValue,
+                    secure = state.private,
+                    answer = { confirmed, text ->
+                        answerJsResult(result, confirmed, text)
+                        onAnswered(confirmed)
+                    },
+                    onSettled = { if (state.jsDialog === it) state.jsDialog = null },
+                )
+                return true
+            }
 
             // Ours in every tab, not only a private one: Stay ends the
             // navigation that asked without a commit, and nothing else
@@ -3451,9 +3489,8 @@ private fun buildRefreshableWebView(
                     result.confirm()
                     true
                 } else {
-                    showPrivateJsDialog(
-                        context, JsDialogKind.BEFORE_UNLOAD, url, message, null, result,
-                        secure = state.private,
+                    queueJsDialog(
+                        JsDialogKind.BEFORE_UNLOAD, url, message, null, result,
                         onAnswered = { leave ->
                             if (!leave) {
                                 // Over, as after Stop: nothing will call

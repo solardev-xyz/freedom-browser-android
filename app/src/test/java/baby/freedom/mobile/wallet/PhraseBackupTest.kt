@@ -1,0 +1,716 @@
+package baby.freedom.mobile.wallet
+
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.async
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.yield
+import kotlinx.coroutines.runBlocking
+import org.junit.After
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
+import org.junit.Assert.fail
+import org.junit.Test
+
+/**
+ * Google backup of the recovery phrase (#231) behind a fake Block Store:
+ * what gets stored and when, the cloud flag following end-to-end
+ * encryption, restore, turning it off, and Remove wallet.
+ */
+class PhraseBackupTest {
+    /** Block Store as the app sees it: entries by key, each with the cloud flag it was stored with. */
+    class FakeBlockStore(var e2ee: Boolean = true) : BlockStorePort {
+        class Stored(val bytes: ByteArray, val cloud: Boolean)
+
+        val entries = mutableMapOf<String, Stored>()
+        var reachable = true
+        var stores = 0
+        var failDelete = false
+
+        /** When set, [retrieve] reads the entry and then waits here, as a slow Play services answer would. */
+        var retrieveGate: CompletableDeferred<Unit>? = null
+        val retrieving = CompletableDeferred<Unit>()
+
+        /** When set, every call throws [BackupNoAnswerException], as a timed-out Play services call does. */
+        var noAnswer = false
+
+        private fun reach() {
+            if (!reachable) throw BackupUnavailableException("Google Play services isn’t available")
+            if (noAnswer) throw BackupNoAnswerException()
+        }
+
+        override suspend fun endToEndEncryptionAvailable(): Boolean {
+            reach()
+            return e2ee
+        }
+
+        /** When set, [store] waits here first, as a slow Play services write would. */
+        var storeGate: CompletableDeferred<Unit>? = null
+        val storing = CompletableDeferred<Unit>()
+
+        /**
+         * When set, [store] throws [BackupNoAnswerException] as a timed-out Play services
+         * write does: after writing the entry when true (it landed late), before when false.
+         */
+        var storeNoAnswer: Boolean? = null
+
+        override suspend fun store(key: String, bytes: ByteArray, backupToCloud: Boolean) {
+            reach()
+            if (storeNoAnswer == false) throw BackupNoAnswerException()
+            storeGate?.let {
+                storing.complete(Unit)
+                it.await()
+            }
+            stores++
+            // Copied, as Play services parcels it: the caller zeroes its own array.
+            entries[key] = Stored(bytes.copyOf(), backupToCloud)
+            if (storeNoAnswer == true) throw BackupNoAnswerException()
+        }
+
+        override suspend fun retrieve(key: String): ByteArray? {
+            reach()
+            val bytes = entries[key]?.bytes?.copyOf()
+            retrieveGate?.let {
+                retrieving.complete(Unit)
+                it.await()
+            }
+            return bytes
+        }
+
+        /** When set, [delete] throws [BackupNoAnswerException] after deleting when true (it landed late), before when false. */
+        var deleteNoAnswer: Boolean? = null
+
+        override suspend fun delete(key: String) {
+            reach()
+            if (failDelete) throw BackupUnavailableException("Google Play services didn’t answer")
+            if (deleteNoAnswer == false) throw BackupNoAnswerException()
+            entries.remove(key)
+            if (deleteNoAnswer == true) throw BackupNoAnswerException()
+        }
+
+        fun entry(): Stored? = entries[PhraseBackup.KEY]
+        fun text(): String? = entry()?.bytes?.toString(Charsets.UTF_8)
+    }
+
+    private val job = Job()
+    private val scope = CoroutineScope(Dispatchers.Unconfined + job)
+    private val store = VaultTest.FakeStore()
+    private val auth = VaultTest.FakeAuth()
+    private val blockStore = FakeBlockStore()
+    private val backup = PhraseBackup(blockStore)
+
+    private fun vault() = Vault(store, scope, clock = { 1_000_000L }, io = Dispatchers.Unconfined, compute = Dispatchers.Unconfined)
+
+    private val phrase = Mnemonic.parse(
+        "void come effort suffer camp survey warrior heavy shoot primary clutch crush " +
+            "open amazing screen patrol group space point ten exist slush involve unfold",
+    )
+
+    @After
+    fun tearDown() = job.cancel()
+
+    private fun info(v: Vault) = when (val s = v.state.value) {
+        is Vault.State.Locked -> s.info
+        is Vault.State.Unlocked -> s.info
+        else -> null
+    }
+
+    // ---- PhraseBackup on its own ----
+
+    @Test
+    fun `availability follows Block Store's end-to-end encryption, and its absence`() = runBlocking {
+        assertEquals(PhraseBackup.Availability.READY, backup.availability())
+        blockStore.e2ee = false
+        assertEquals(PhraseBackup.Availability.NOT_ENCRYPTED, backup.availability())
+        blockStore.reachable = false
+        assertEquals(PhraseBackup.Availability.UNSUPPORTED, backup.availability())
+        assertNull(backup.exists())
+    }
+
+    @Test
+    fun `Play services not answering isn't reported as no Play services`() = runBlocking {
+        // #244 R2-M1: a stuck call must not read as "this phone doesn't have Play services".
+        blockStore.noAnswer = true
+        assertEquals(PhraseBackup.Availability.NO_ANSWER, backup.availability())
+        blockStore.noAnswer = false
+        assertEquals(PhraseBackup.Availability.READY, backup.availability())
+    }
+
+    @Test
+    fun `a delete Play services doesn't answer forgets the entry and its marker`() = runBlocking {
+        // #244 R2-M2: like a store, a delete that got no answer may still land.
+        for (landed in listOf(true, false)) {
+            val marker = WrittenHere.InMemory()
+            val b = PhraseBackup(blockStore, writtenHere = marker)
+            blockStore.deleteNoAnswer = null
+            b.store(phrase)
+            assertEquals(PhraseBackup.Status.CLOUD, b.known.value!!.status)
+            assertEquals(true, marker.get())
+            blockStore.deleteNoAnswer = landed
+            try {
+                b.delete()
+                fail("no answer, yet deleted")
+            } catch (_: BackupNoAnswerException) {
+            }
+            assertNull("still claims the entry ($landed)", b.known.value)
+            assertNull(marker.get())
+            blockStore.deleteNoAnswer = null
+            // The next reconcile finds out what happened.
+            assertEquals(if (landed) PhraseBackup.Status.NONE else PhraseBackup.Status.CLOUD, b.reconcile())
+            assertEquals(landed, blockStore.entry() == null)
+        }
+    }
+
+    @Test
+    fun `stores for the cloud only when it will be end-to-end encrypted`() = runBlocking {
+        blockStore.e2ee = false
+        try {
+            backup.store(phrase)
+            fail("stored without end-to-end encryption")
+        } catch (_: BackupNotEncryptedException) {
+        }
+        assertNull(blockStore.entry())
+        assertEquals(0, blockStore.stores)
+
+        blockStore.e2ee = true
+        backup.store(phrase)
+        assertTrue(blockStore.entry()!!.cloud)
+        assertEquals(phrase.words, backup.read()!!.words)
+        assertEquals(true, backup.exists())
+    }
+
+    @Test
+    fun `a reconcile in flight can't write back an entry a delete just removed`() = runBlocking {
+        backup.store(phrase)
+        blockStore.e2ee = false // the screen lock went: reconcile will rewrite device-only
+        val gate = CompletableDeferred<Unit>().also { blockStore.retrieveGate = it }
+        val reconciling = launch { backup.reconcile() }
+        blockStore.retrieving.await() // it has read the entry
+        blockStore.retrieveGate = null
+        val deleting = launch { backup.delete() } // Turn off / Remove wallet meanwhile
+        repeat(5) { yield() }
+        gate.complete(Unit)
+        reconciling.join()
+        deleting.join()
+        assertNull("the deleted entry came back", blockStore.entry())
+    }
+
+    @Test
+    fun `a cancelled reconcile leaves what was known, unless it had begun rewriting the entry`() = runBlocking {
+        // #244 R3-F3: the wallet page's effect restarts on every lock and unlock.
+        backup.store(phrase)
+        val before = backup.known.value!!
+        assertEquals(PhraseBackup.Status.CLOUD, before.status)
+        CompletableDeferred<Unit>().also { blockStore.retrieveGate = it }
+        val reading = launch { backup.reconcile() }
+        blockStore.retrieving.await()
+        reading.cancel()
+        reading.join()
+        blockStore.retrieveGate = null
+        assertEquals("a cancelled read changes nothing", before, backup.known.value)
+
+        // Cancelled while rewriting the entry device-only: whether the write landed isn't known.
+        blockStore.e2ee = false
+        CompletableDeferred<Unit>().also { blockStore.storeGate = it }
+        val rewriting = launch { backup.reconcile() }
+        blockStore.storing.await()
+        rewriting.cancel()
+        rewriting.join()
+        blockStore.storeGate = null
+        assertNull("still claimed in the Google account", backup.known.value)
+    }
+
+    @Test
+    fun `a reconcile in flight can't put an older phrase back over a new store`() = runBlocking {
+        val other = Mnemonic.parse(
+            "legal winner thank year wave sausage worth useful legal winner thank yellow",
+        )
+        blockStore.e2ee = false
+        blockStore.store(PhraseBackup.KEY, PhraseBackup.encode(PhraseBackup.Entry(other.phrase(), cloud = false)), false)
+        blockStore.e2ee = true // reconcile will rewrite the old entry for the cloud
+        val gate = CompletableDeferred<Unit>().also { blockStore.retrieveGate = it }
+        val reconciling = launch { backup.reconcile() }
+        blockStore.retrieving.await()
+        blockStore.retrieveGate = null
+        val storing = launch { backup.store(phrase) }
+        repeat(5) { yield() }
+        gate.complete(Unit)
+        reconciling.join()
+        storing.join()
+        assertEquals(phrase.words, backup.read()!!.words)
+    }
+
+    @Test
+    fun `reconcile takes the cloud copy down while encryption is gone, and puts it back`() = runBlocking {
+        assertEquals(PhraseBackup.Status.NONE, backup.reconcile())
+        backup.store(phrase)
+        assertEquals(PhraseBackup.Status.CLOUD, backup.reconcile())
+        assertEquals("nothing changed, nothing rewritten", 1, blockStore.stores)
+
+        // The screen lock was removed: Block Store would upload it unencrypted.
+        blockStore.e2ee = false
+        assertEquals(PhraseBackup.Status.PAUSED, backup.reconcile())
+        assertFalse(blockStore.entry()!!.cloud)
+        assertEquals(2, blockStore.stores)
+        assertEquals(PhraseBackup.Status.PAUSED, backup.reconcile())
+        assertEquals(2, blockStore.stores)
+        // Still on the phone, still restorable.
+        assertEquals(phrase.words, backup.read()!!.words)
+
+        blockStore.e2ee = true
+        assertEquals(PhraseBackup.Status.CLOUD, backup.reconcile())
+        assertTrue(blockStore.entry()!!.cloud)
+        assertEquals(3, blockStore.stores)
+    }
+
+    @Test
+    fun `known follows the entry, whose it is, and forgets it when Block Store can't say`() = runBlocking {
+        assertNull("nothing known before anything ran", backup.known.value)
+        val address = phrase.seed().let { seed -> EthAccounts.address(seed, 0).also { seed.fill(0) } }
+        assertEquals(PhraseBackup.Known(PhraseBackup.Status.NONE, null), backup.reconcile().let { backup.known.value })
+        backup.store(phrase)
+        assertEquals(PhraseBackup.Known(PhraseBackup.Status.CLOUD, address), backup.known.value)
+        blockStore.e2ee = false
+        backup.reconcile()
+        assertEquals(PhraseBackup.Known(PhraseBackup.Status.PAUSED, address), backup.known.value)
+        // Play services stopped answering: nothing may go on claiming the phrase is in Google.
+        blockStore.reachable = false
+        assertNull(backup.reconcileQuietly())
+        assertNull(backup.known.value)
+        blockStore.reachable = true
+        blockStore.e2ee = true
+        backup.reconcile()
+        assertEquals(PhraseBackup.Status.CLOUD, backup.known.value?.status)
+        // An unreadable entry: not known whose, or where.
+        blockStore.entries[PhraseBackup.KEY] = FakeBlockStore.Stored("junk".toByteArray(), true)
+        assertNull(backup.reconcileQuietly())
+        assertNull(backup.known.value)
+        backup.delete()
+        assertEquals(PhraseBackup.Known(PhraseBackup.Status.NONE, null), backup.known.value)
+    }
+
+    @Test
+    fun `reconcileQuietly never throws for a background caller`() = runBlocking {
+        backup.store(phrase)
+        blockStore.reachable = false
+        assertNull(backup.reconcileQuietly())
+        blockStore.reachable = true
+        blockStore.entries[PhraseBackup.KEY] = FakeBlockStore.Stored("junk".toByteArray(), true)
+        assertNull(backup.reconcileQuietly())
+    }
+
+    @Test
+    fun `an unreadable entry never quotes its bytes`() = runBlocking {
+        val secretish = "void come effort suffer {not json"
+        blockStore.entries[PhraseBackup.KEY] = FakeBlockStore.Stored(secretish.toByteArray(), true)
+        try {
+            backup.read()
+            fail("read junk")
+        } catch (e: BackupUnreadableException) {
+            assertNull(e.cause)
+            assertFalse(e.message!!.contains("void"))
+        }
+        // Valid JSON, but not a phrase.
+        blockStore.entries[PhraseBackup.KEY] = FakeBlockStore.Stored(
+            PhraseBackup.encode(PhraseBackup.Entry("void come effort", true)), true,
+        )
+        try {
+            backup.read()
+            fail("read a non-phrase")
+        } catch (e: BackupUnreadableException) {
+            assertNull(e.cause)
+        }
+        // A future version isn't guessed at.
+        blockStore.entries[PhraseBackup.KEY] = FakeBlockStore.Stored(
+            """{"version":2,"phrase":"${phrase.phrase()}","cloud":true}""".toByteArray(), true,
+        )
+        try {
+            backup.read()
+            fail("read version 2")
+        } catch (_: BackupUnreadableException) {
+        }
+    }
+
+    // ---- Through the vault ----
+
+    @Test
+    fun `turning backup on asks the user, stores the phrase and records it`() = runBlocking {
+        val v = vault()
+        v.create(phrase, auth, imported = false)
+        assertEquals(false, info(v)!!.cloudBackup)
+        assertEquals(false, info(v)!!.cloudBackupOffered)
+        assertNull(blockStore.entry())
+
+        v.enableCloudBackup(auth, backup)
+        assertEquals(listOf(VaultAuthPurpose.CREATE, VaultAuthPurpose.BACKUP), auth.asked)
+        assertTrue(info(v)!!.cloudBackup)
+        assertTrue(info(v)!!.cloudBackupOffered)
+        assertTrue(store.record!!.cloudBackup)
+        assertTrue(blockStore.entry()!!.cloud)
+        assertEquals(phrase.words, backup.read()!!.words)
+        // The vault file on disk still never holds the words.
+        assertFalse(store.record!!.encode().contains("void come"))
+    }
+
+    @Test
+    fun `a cancelled prompt or no encryption leaves backup off and nothing stored`() = runBlocking {
+        val v = vault()
+        v.create(phrase, auth, imported = false)
+        auth.cancel = true
+        try {
+            v.enableCloudBackup(auth, backup)
+            fail("enabled without the user")
+        } catch (_: VaultAuthCancelledException) {
+        }
+        auth.cancel = false
+        blockStore.e2ee = false
+        try {
+            v.enableCloudBackup(auth, backup)
+            fail("enabled without encryption")
+        } catch (_: BackupNotEncryptedException) {
+        }
+        assertNull(blockStore.entry())
+        assertFalse(info(v)!!.cloudBackup)
+    }
+
+    @Test
+    fun `if recording it fails the entry is taken out again`() = runBlocking {
+        val v = vault()
+        v.create(phrase, auth, imported = false)
+        store.onWrite = { error("disk full") }
+        try {
+            v.enableCloudBackup(auth, backup)
+            fail("claimed on")
+        } catch (_: IllegalStateException) {
+        }
+        assertNull(blockStore.entry())
+        // (The fake keeps the record it failed on; the page goes by the published state.)
+        assertFalse(info(v)!!.cloudBackup)
+    }
+
+    @Test
+    fun `turning backup off deletes the entry before saying off`() = runBlocking {
+        val v = vault()
+        v.create(phrase, auth, imported = false)
+        v.enableCloudBackup(auth, backup)
+
+        blockStore.failDelete = true
+        try {
+            v.disableCloudBackup(backup)
+            fail("said off with the entry still there")
+        } catch (_: BackupUnavailableException) {
+        }
+        assertTrue(info(v)!!.cloudBackup)
+        assertTrue(blockStore.entry() != null)
+
+        blockStore.failDelete = false
+        v.disableCloudBackup(backup)
+        assertNull(blockStore.entry())
+        assertFalse(info(v)!!.cloudBackup)
+        assertFalse(store.record!!.cloudBackup)
+    }
+
+    @Test
+    fun `Not now answers the offer and turns nothing on`() = runBlocking {
+        val v = vault()
+        v.create(phrase, auth, imported = true)
+        v.markCloudBackupOffered()
+        assertTrue(info(v)!!.cloudBackupOffered)
+        assertFalse(info(v)!!.cloudBackup)
+        assertNull(blockStore.entry())
+        // Survives the file round trip, like the other flags.
+        val back = VaultRecord.decode(store.record!!.encode())!!
+        assertTrue(back.cloudBackupOffered)
+        assertFalse(back.cloudBackup)
+    }
+
+    @Test
+    fun `a fresh install restores the backed-up wallet behind the screen lock`() = runBlocking {
+        // The old install backed it up...
+        val old = vault()
+        old.create(phrase, auth, imported = false)
+        old.enableCloudBackup(auth, backup)
+        val seed = phrase.seed()
+        // ...then the app was reinstalled: the vault file and key are gone, Block Store kept its entry.
+        store.wipe()
+        auth.asked.clear()
+
+        val v = vault()
+        assertEquals(Vault.State.Empty, v.state.value)
+        assertEquals(true, backup.exists())
+        v.restore(auth, backup)
+        assertEquals(listOf(VaultAuthPurpose.RESTORE), auth.asked)
+        assertEquals(VaultProtection.SCREEN_LOCK, store.keyProtection)
+        val restored = (v.state.value as Vault.State.Unlocked).info
+        assertTrue(restored.cloudBackup)
+        assertTrue(restored.cloudBackupOffered)
+        assertFalse("the entry is no written-down copy: the reminder follows it (#244 R3-F1)", restored.backedUp)
+        assertTrue(v.withSeed { it.contentEquals(seed) })
+        // The entry stays: it's this wallet's backup now.
+        assertTrue(blockStore.entry() != null)
+    }
+
+    @Test
+    fun `a restored wallet keeps its reminder until the phrase is seen`() = runBlocking {
+        // #244 R3-F1: restoring must not mark the phrase backed up. #244 R5-F1: nor does its
+        // entry reconciled as cloud-backed end it — that only reaches Google with the phone's
+        // own Google backup on, which no app can check.
+        backup.store(phrase)
+        val v = vault()
+        v.restore(auth, backup)
+        fun line() = baby.freedom.mobile.browser.walletAttentionLine(v.state.value)
+        assertEquals(PhraseBackup.Status.CLOUD, backup.reconcile())
+        assertEquals(baby.freedom.mobile.browser.BACKUP_REMINDER, line())
+        blockStore.e2ee = false
+        backup.reconcile()
+        assertEquals(baby.freedom.mobile.browser.BACKUP_REMINDER, line())
+        // Seeing the phrase is what ends it for good.
+        v.markBackedUp()
+        assertNull(line())
+    }
+
+    @Test
+    fun `a delete asked before whose the entry is was known spares another wallet's`() = runBlocking {
+        // #244 R5-F2: Remove wallet with Play services slow to answer shows the delete box;
+        // it must not take a different wallet's kept backup with it.
+        val other = Mnemonic.parse(
+            "legal winner thank year wave sausage worth useful legal winner thank yellow",
+        )
+        val mine = phrase.seed().let { seed -> EthAccounts.address(seed, 0).also { seed.fill(0) } }
+        backup.store(other)
+        assertEquals(PhraseBackup.DeleteIfOf.OTHER_WALLET, backup.exclusive { deleteIfOf(mine) })
+        assertTrue("another wallet's backup stays", blockStore.entry() != null)
+        // #244 R1-M3: no address to compare isn't "another wallet's".
+        assertEquals(PhraseBackup.DeleteIfOf.UNKNOWN, backup.exclusive { deleteIfOf(null) })
+        assertTrue("with no address to compare, nothing is deleted", blockStore.entry() != null)
+        // This wallet's own (any case) is deleted, and known follows.
+        backup.store(phrase)
+        assertEquals(PhraseBackup.DeleteIfOf.DELETED, backup.exclusive { deleteIfOf(mine.lowercase()) })
+        assertNull(blockStore.entry())
+        assertEquals(PhraseBackup.Status.NONE, backup.known.value?.status)
+        assertEquals(PhraseBackup.DeleteIfOf.NO_ENTRY, backup.exclusive { deleteIfOf(mine) })
+        // An unreadable entry isn't known to be this wallet's either, nor another's.
+        blockStore.entries[PhraseBackup.KEY] = FakeBlockStore.Stored("junk".toByteArray(), true)
+        assertEquals(PhraseBackup.DeleteIfOf.UNKNOWN, backup.exclusive { deleteIfOf(mine) })
+        assertTrue(blockStore.entry() != null)
+    }
+
+    @Test
+    fun `Remove wallet says another wallet's only when it is, and not knowing otherwise`() {
+        // #244 R1-M3.
+        val other = baby.freedom.mobile.browser.backupKeptMessage(PhraseBackup.DeleteIfOf.OTHER_WALLET)!!
+        val unknown = baby.freedom.mobile.browser.backupKeptMessage(PhraseBackup.DeleteIfOf.UNKNOWN)!!
+        assertTrue(other.contains("another wallet’s"))
+        assertFalse(unknown.contains("another wallet’s"))
+        assertTrue(unknown.contains("couldn’t tell whether"))
+        assertNull(baby.freedom.mobile.browser.backupKeptMessage(PhraseBackup.DeleteIfOf.DELETED))
+        assertNull(baby.freedom.mobile.browser.backupKeptMessage(PhraseBackup.DeleteIfOf.NO_ENTRY))
+        assertNull(baby.freedom.mobile.browser.backupKeptMessage(null))
+    }
+
+    @Test
+    fun `an entry this install didn't write is rewritten once, for this phone`() = runBlocking {
+        // #244 R1-M1: the payload's cloud flag is what the old phone asked for; what the entry
+        // restored here is flagged with, Block Store doesn't say.
+        blockStore.store(PhraseBackup.KEY, PhraseBackup.encode(PhraseBackup.Entry(phrase.phrase(), cloud = true)), false)
+        val fresh = PhraseBackup(blockStore)
+        assertEquals(PhraseBackup.Status.CLOUD, fresh.reconcile())
+        assertEquals("rewritten from this phone", 2, blockStore.stores)
+        assertTrue(blockStore.entry()!!.cloud)
+        assertEquals(PhraseBackup.Status.CLOUD, fresh.reconcile())
+        assertEquals("only once", 2, blockStore.stores)
+        // Deleted and written again elsewhere (a later restore onto this phone): again once.
+        fresh.delete()
+        blockStore.store(PhraseBackup.KEY, PhraseBackup.encode(PhraseBackup.Entry(phrase.phrase(), cloud = true)), false)
+        fresh.reconcile()
+        assertEquals(4, blockStore.stores)
+        assertTrue(blockStore.entry()!!.cloud)
+    }
+
+    @Test
+    fun `the written-here marker is kept in a file, and a bad one reads as not written`() = runBlocking {
+        val dir = java.nio.file.Files.createTempDirectory("written-here").toFile()
+        try {
+            val file = java.io.File(dir, "m")
+            val marker = WrittenHere.InFile(file)
+            assertNull(marker.get())
+            marker.set(true)
+            assertEquals(true, WrittenHere.InFile(file).get())
+            marker.set(false)
+            assertEquals(false, marker.get())
+            marker.set(null)
+            assertNull(marker.get())
+            file.writeText("junk")
+            assertNull(WrittenHere.InFile(file).get())
+        } finally {
+            dir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `an unwritable marker costs one rewrite, not one on every reconcile`() = runBlocking {
+        // #244 R2-M4: the marker's directory doesn't exist, so the file can never be written.
+        val dir = java.nio.file.Files.createTempDirectory("written-here").toFile()
+        try {
+            val marker = WrittenHere.InFile(java.io.File(java.io.File(dir, "gone"), "m"))
+            blockStore.store(PhraseBackup.KEY, PhraseBackup.encode(PhraseBackup.Entry(phrase.phrase(), cloud = true)), true)
+            val b = PhraseBackup(blockStore, writtenHere = marker)
+            b.reconcile()
+            assertEquals("rewritten once from this install", 2, blockStore.stores)
+            assertTrue("the failed write is reported", marker.writeFailed)
+            assertEquals(true, marker.get())
+            repeat(3) { b.reconcile() }
+            assertEquals(2, blockStore.stores)
+        } finally {
+            dir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `restoring an entry from another phone writes it from this one`() = runBlocking {
+        // #244 R1-M1: a new phone's install has never written the entry D2D or cloud restore gave it.
+        blockStore.store(PhraseBackup.KEY, PhraseBackup.encode(PhraseBackup.Entry(phrase.phrase(), cloud = true)), false)
+        val v = vault()
+        v.restore(auth, PhraseBackup(blockStore))
+        assertEquals(2, blockStore.stores)
+        assertTrue(blockStore.entry()!!.cloud)
+    }
+
+    @Test
+    fun `a Turn on Play services doesn't answer can't leave a cloud backup behind`() = runBlocking {
+        // #244 R1-M2: a Task can't be cancelled, so a timed-out store can still land.
+        val v = vault()
+        v.create(phrase, auth, imported = false)
+        blockStore.storeNoAnswer = true // it landed after all
+        try {
+            v.enableCloudBackup(auth, backup)
+            fail("no answer, yet on")
+        } catch (_: BackupNoAnswerException) {
+        }
+        assertNull("the late write was taken back", blockStore.entry())
+        assertFalse(info(v)!!.cloudBackup)
+        assertEquals(PhraseBackup.Known(PhraseBackup.Status.NONE, null), backup.known.value)
+
+        // It never landed: another wallet's kept backup stays.
+        val other = Mnemonic.parse("legal winner thank year wave sausage worth useful legal winner thank yellow")
+        blockStore.storeNoAnswer = null
+        backup.store(other)
+        blockStore.storeNoAnswer = false
+        try {
+            v.enableCloudBackup(auth, backup)
+            fail("no answer, yet on")
+        } catch (_: BackupNoAnswerException) {
+        }
+        assertEquals(other.words, backup.read()!!.words)
+
+        // This wallet's own backup, there before: left as it was, not deleted.
+        blockStore.storeNoAnswer = null
+        backup.store(phrase)
+        blockStore.storeNoAnswer = true
+        try {
+            v.enableCloudBackup(auth, backup)
+            fail("no answer, yet on")
+        } catch (_: BackupNoAnswerException) {
+        }
+        assertEquals(phrase.words, backup.read()!!.words)
+    }
+
+    @Test
+    fun `restore needs a screen lock and doesn't read the phrase without one`() = runBlocking {
+        backup.store(phrase)
+        store.secure = false
+        blockStore.reachable = false // proves Block Store isn't even asked
+        val v = vault()
+        try {
+            v.restore(auth, backup)
+            fail("restored with no screen lock")
+        } catch (_: RestoreNeedsScreenLockException) {
+        }
+        assertEquals(Vault.State.Empty, v.state.value)
+        assertTrue(auth.asked.isEmpty())
+    }
+
+    @Test
+    fun `a cancelled restore leaves no wallet and keeps the backup`() = runBlocking {
+        backup.store(phrase)
+        val v = vault()
+        auth.cancel = true
+        try {
+            v.restore(auth, backup)
+            fail("restored without the user")
+        } catch (_: VaultAuthCancelledException) {
+        }
+        assertEquals(Vault.State.Empty, v.state.value)
+        assertNull(store.record)
+        assertTrue(blockStore.entry() != null)
+    }
+
+    @Test
+    fun `restore with the entry gone meanwhile says so`() = runBlocking {
+        val v = vault()
+        try {
+            v.restore(auth, backup)
+            fail("restored nothing")
+        } catch (_: BackupMissingException) {
+        }
+        assertEquals(Vault.State.Empty, v.state.value)
+    }
+
+    @Test
+    fun `Remove wallet's wipe deletes the entry`() = runBlocking {
+        val v = vault()
+        v.create(phrase, auth, imported = false)
+        v.enableCloudBackup(auth, backup)
+        // As the wallet page calls it: the backup goes inside remove()'s own wipe, the
+        // entry's lock taken first.
+        backup.exclusive { v.remove(alsoWipe = { delete() }) }
+        assertEquals(Vault.State.Empty, v.state.value)
+        assertNull(blockStore.entry())
+        assertEquals(false, backup.exists())
+    }
+
+    @Test
+    fun `turning backup off behind a stuck reconcile doesn't hold up unlocking`() = runBlocking {
+        // #244 R4-F4: a reconcile waiting on an unresponsive Play services holds the entry's
+        // lock; Turn off (and Enable, and Remove with the backup) wait for it without holding
+        // the vault's, so unlock and the rest go ahead meanwhile.
+        val v = vault()
+        v.create(phrase, auth, imported = false)
+        v.enableCloudBackup(auth, backup)
+        v.lock()
+        val gate = CompletableDeferred<Unit>().also { blockStore.retrieveGate = it }
+        val reconciling = launch { backup.reconcile() }
+        blockStore.retrieving.await()
+        blockStore.retrieveGate = null
+        val turningOff = launch { v.disableCloudBackup(backup) }
+        repeat(5) { yield() }
+        assertFalse(turningOff.isCompleted)
+        val unlocking = async { v.unlock(auth) }
+        repeat(5) { yield() }
+        assertTrue("unlock queued behind the stuck reconcile", unlocking.isCompleted)
+        assertTrue(v.state.value is Vault.State.Unlocked)
+        v.markBackedUp()
+        gate.complete(Unit)
+        reconciling.join()
+        turningOff.join()
+        assertNull(blockStore.entry())
+        assertFalse(info(v)!!.cloudBackup)
+    }
+
+    @Test
+    fun `flags written before 231 read as off and not yet offered`() {
+        val old = """{"version":1,"protection":"screen-lock","strongBox":false,"iv":"AQID","ciphertext":"BAU=","backedUp":true}"""
+        val r = VaultRecord.decode(old)!!
+        assertFalse(r.cloudBackup)
+        assertFalse(r.cloudBackupOffered)
+        assertTrue(r.backedUp)
+        val round = VaultRecord.decode(r.copy(cloudBackup = true, cloudBackupOffered = true).encode())!!
+        assertTrue(round.cloudBackup)
+        assertTrue(round.cloudBackupOffered)
+        assertTrue(round.backedUp)
+    }
+}
