@@ -25,6 +25,7 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import baby.freedom.mobile.wallet.PhraseBackup
+import baby.freedom.mobile.wallet.WalletAccountList
 
 internal const val GOOGLE_BACKUP_TITLE = "Google backup"
 
@@ -74,19 +75,88 @@ internal fun googleBackupSwitchEnabled(on: Boolean, availability: PhraseBackup.A
     on || availability == PhraseBackup.Availability.READY
 
 /**
+ * Whether Block Store's entry ([PhraseBackup.known]) is the wallet on this
+ * phone: true with Google backup [on] and an entry there (only this
+ * wallet's phrase is ever stored while it's on), else by comparing the
+ * entry's account-0 address with the wallet's own ([walletAddress]) — an
+ * entry kept after Remove wallet and the same phrase imported again is
+ * this wallet's (#244 R2-F2). False with no entry; null when that can't
+ * be told (not reconciled yet, the entry unreadable, or the wallet's
+ * address not known yet).
+ */
+internal fun backupEntryIsThisWallet(on: Boolean, known: PhraseBackup.Known?, walletAddress: String?): Boolean? = when {
+    known == null -> null
+    known.status == PhraseBackup.Status.NONE -> false
+    on -> true
+    known.address == null || walletAddress == null -> null
+    else -> known.address.equals(walletAddress, ignoreCase = true)
+}
+
+/** Where Google backup holds this wallet's phrase right now, as far as the page can tell. */
+internal enum class BackupHeld {
+    /** No copy of this wallet in Block Store (none there, or another wallet's). */
+    NONE,
+
+    /** In Block Store on this phone only: backup is paused (no end-to-end encryption now). */
+    DEVICE,
+
+    /** In the Google account's backup, end-to-end encrypted: a copy off this phone. */
+    CLOUD,
+
+    /** Google backup is on, but Block Store hasn't said where the entry stands. */
+    UNKNOWN,
+}
+
+/**
+ * What the reminder, Remove wallet and the lost-key advice go by (#244
+ * R2-F1): the reconciled entry ([known]) and whose it is, never the
+ * vault's flag alone — backup on says nothing about an entry since
+ * paused or gone.
+ */
+internal fun backupHeld(on: Boolean, known: PhraseBackup.Known?, walletAddress: String?): BackupHeld =
+    when (backupEntryIsThisWallet(on, known, walletAddress)) {
+        true -> if (known?.status == PhraseBackup.Status.CLOUD) BackupHeld.CLOUD else BackupHeld.DEVICE
+        false -> BackupHeld.NONE
+        null -> if (on) BackupHeld.UNKNOWN else BackupHeld.NONE
+    }
+
+/** Account 0 of the wallet's own seed: what a Block Store entry's phrase is compared against. */
+internal fun walletSeedAddress(list: WalletAccountList?): String? =
+    list?.accounts?.firstOrNull { it.index == 0 && it.ledger == null }?.address
+
+/**
  * Whether to show the one-time offer after create or import (#231).
- * Not while Block Store holds an entry ([entryThere] true) or that isn't
- * known yet (null): with backup off, that entry is a different wallet's
- * (kept after Remove wallet, or restored onto this phone), and Turn on
- * would replace it — the settings section says so, a one-tap offer can't.
- * The offer stays unanswered, so it shows once that entry is gone.
+ * Not while Block Store holds another wallet's entry, or one whose owner
+ * isn't known yet ([entryThere] or [thisWallet] null): with backup off,
+ * Turn on would replace it — the settings section says so, a one-tap
+ * offer can't. The offer stays unanswered, so it shows once that entry is
+ * gone. An entry that is this wallet (kept after Remove wallet, then the
+ * phrase imported again) is no reason to hold it back: Turn on rewrites
+ * the same phrase.
  */
 internal fun showGoogleBackupOffer(
     offered: Boolean,
     on: Boolean,
     availability: PhraseBackup.Availability?,
     entryThere: Boolean?,
-) = !offered && !on && availability == PhraseBackup.Availability.READY && entryThere == false
+    thisWallet: Boolean?,
+) = !offered && !on && availability == PhraseBackup.Availability.READY &&
+    (entryThere == false || thisWallet == true)
+
+/**
+ * The settings section's note on an entry Google backup (off) didn't
+ * write for this wallet's current setting: this wallet's own, kept from
+ * before, or another's that Turn on would replace. Null with no entry.
+ */
+internal fun keptBackupNote(entryThere: Boolean, thisWallet: Boolean?): String? = when {
+    !entryThere -> null
+    thisWallet == true -> "Google Play services still holds a backup of this wallet from before. Turn " +
+        "backup on to keep it up to date here, or delete it."
+    thisWallet == false -> "Google Play services already holds a backup of a different wallet from " +
+        "before. Turning backup on replaces it."
+    else -> "Google Play services already holds a wallet backup from before, which may be of a " +
+        "different wallet. Turning backup on replaces it."
+}
 
 /** The wallet page's Google backup section (#231): the switch, where the backup stands, and what it depends on. */
 @Composable
@@ -94,9 +164,11 @@ internal fun GoogleBackupSection(
     on: Boolean,
     availability: PhraseBackup.Availability?,
     status: PhraseBackup.Status?,
-    otherBackupThere: Boolean,
+    entryThere: Boolean,
+    thisWallet: Boolean?,
     busy: Boolean,
     onToggle: (Boolean) -> Unit,
+    onDeleteKept: () -> Unit,
     screenLockButton: @Composable () -> Unit,
 ) {
     val enabled = !busy && googleBackupSwitchEnabled(on, availability)
@@ -126,14 +198,22 @@ internal fun GoogleBackupSection(
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
-        if (!on && otherBackupThere) {
+        val kept = if (on) null else keptBackupNote(entryThere, thisWallet)
+        if (kept != null) {
             Spacer(Modifier.height(8.dp))
             Text(
-                "Google Play services already holds a backup of a different wallet from before. " +
-                    "Turning backup on replaces it.",
+                kept,
                 style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.error,
+                color = if (thisWallet == true) {
+                    MaterialTheme.colorScheme.onSurfaceVariant
+                } else {
+                    MaterialTheme.colorScheme.error
+                },
             )
+            // The only way to remove a kept entry while a wallet is here (#244 R2-F3).
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                TextButton(onClick = onDeleteKept, enabled = !busy) { Text("Delete that backup") }
+            }
         }
         if (availability == PhraseBackup.Availability.NOT_ENCRYPTED ||
             (on && status == PhraseBackup.Status.PAUSED)
@@ -204,14 +284,20 @@ internal fun RestoreFromBackupSection(
 
 /** Turning Google backup off, or deleting a backup no wallet here uses: both delete the Block Store entry. */
 @Composable
-internal fun DeleteGoogleBackupDialog(turningOff: Boolean, onConfirm: () -> Unit, onDismiss: () -> Unit) {
+internal fun DeleteGoogleBackupDialog(
+    turningOff: Boolean,
+    /** The entry is this wallet's (or backup is being turned off): the wallet stays here either way. */
+    walletStays: Boolean,
+    onConfirm: () -> Unit,
+    onDismiss: () -> Unit,
+) {
     AlertDialog(
         onDismissRequest = onDismiss,
         icon = { Icon(Icons.Filled.CloudUpload, contentDescription = null) },
         title = { Text(if (turningOff) "Turn off Google backup?" else "Delete Google backup?") },
         text = {
             Text(
-                if (turningOff) {
+                if (turningOff || walletStays) {
                     "The backup is deleted from this phone now, and from your Google account at its " +
                         "next sync. The wallet stays on this phone."
                 } else {

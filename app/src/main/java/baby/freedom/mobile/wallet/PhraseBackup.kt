@@ -9,10 +9,16 @@ import com.google.android.gms.tasks.Task
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import org.json.JSONObject
 
@@ -97,9 +103,33 @@ interface BlockStorePort {
  * Nothing here logs; the phrase lives in byte arrays that are zeroed
  * after use, apart from the unavoidable [String] inside [Mnemonic].
  */
-class PhraseBackup(private val blockStore: BlockStorePort) {
+class PhraseBackup(
+    private val blockStore: BlockStorePort,
+    /** Where the entry's account address is derived (PBKDF2): off the main thread. */
+    private val compute: CoroutineDispatcher = Dispatchers.Default,
+) {
     /** Serializes every change to the entry; see the class KDoc. */
     private val writes = Mutex()
+
+    /**
+     * What the entry is, as of the last [reconcile], [store] or [delete];
+     * null until one has run, or when the last [reconcile] couldn't (Block
+     * Store didn't answer, or the entry isn't readable). What the wallet
+     * page and Settings go by to say whether the phrase is held off this
+     * phone, and whether a kept entry is this wallet's.
+     */
+    data class Known(
+        val status: Status,
+        /**
+         * The checksummed address of account 0 of the entry's phrase
+         * (public, like every address the wallet shows), to tell whether
+         * the entry is the wallet on this phone; null with no entry.
+         */
+        val address: String?,
+    )
+
+    private val _known = MutableStateFlow<Known?>(null)
+    val known: StateFlow<Known?> = _known.asStateFlow()
 
     enum class Availability {
         /** No Google Play services (or Block Store didn't answer). */
@@ -138,6 +168,7 @@ class PhraseBackup(private val blockStore: BlockStorePort) {
     suspend fun store(mnemonic: Mnemonic) = writes.withLock {
         if (!blockStore.endToEndEncryptionAvailable()) throw BackupNotEncryptedException()
         write(mnemonic.phrase(), cloud = true)
+        _known.value = Known(Status.CLOUD, addressOf(mnemonic))
     }
 
     /** The backed-up phrase, or null when Block Store holds none. */
@@ -160,7 +191,10 @@ class PhraseBackup(private val blockStore: BlockStorePort) {
     }
 
     /** Deletes the entry, here and (at Block Store's next sync) from the cloud. */
-    suspend fun delete() = writes.withLock { blockStore.delete(KEY) }
+    suspend fun delete() = writes.withLock {
+        blockStore.delete(KEY)
+        _known.value = Known(Status.NONE, null)
+    }
 
     /**
      * Keeps the entry's cloud copy end-to-end encrypted: rewrites it as
@@ -169,14 +203,41 @@ class PhraseBackup(private val blockStore: BlockStorePort) {
      * entry back to the app freely); the phrase is only held for the rewrite.
      */
     suspend fun reconcile(): Status = writes.withLock {
-        val bytes = blockStore.retrieve(KEY) ?: return@withLock Status.NONE
         try {
-            val entry = decode(bytes)
-            val encrypted = blockStore.endToEndEncryptionAvailable()
-            if (entry.cloud != encrypted) write(entry.phrase, cloud = encrypted)
-            if (encrypted) Status.CLOUD else Status.PAUSED
+            val bytes = blockStore.retrieve(KEY)
+            if (bytes == null) {
+                _known.value = Known(Status.NONE, null)
+                return@withLock Status.NONE
+            }
+            try {
+                val entry = decode(bytes)
+                val encrypted = blockStore.endToEndEncryptionAvailable()
+                if (entry.cloud != encrypted) write(entry.phrase, cloud = encrypted)
+                val status = if (encrypted) Status.CLOUD else Status.PAUSED
+                val address = try {
+                    addressOf(Mnemonic.parse(entry.phrase))
+                } catch (_: Mnemonic.ParseException) {
+                    null
+                }
+                _known.value = Known(status, address)
+                status
+            } finally {
+                bytes.fill(0)
+            }
+        } catch (e: Throwable) {
+            // Not known any more: nothing may go on claiming the phrase is in Google.
+            _known.value = null
+            throw e
+        }
+    }
+
+    /** Account 0's address of [mnemonic] ([EthAccounts]); the seed is zeroed after. */
+    private suspend fun addressOf(mnemonic: Mnemonic): String = withContext(compute) {
+        val seed = mnemonic.seed()
+        try {
+            EthAccounts.address(seed, 0)
         } finally {
-            bytes.fill(0)
+            seed.fill(0)
         }
     }
 

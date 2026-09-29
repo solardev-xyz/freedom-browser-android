@@ -183,6 +183,32 @@ class PhraseBackupTest {
     }
 
     @Test
+    fun `known follows the entry, whose it is, and forgets it when Block Store can't say`() = runBlocking {
+        assertNull("nothing known before anything ran", backup.known.value)
+        val address = phrase.seed().let { seed -> EthAccounts.address(seed, 0).also { seed.fill(0) } }
+        assertEquals(PhraseBackup.Known(PhraseBackup.Status.NONE, null), backup.reconcile().let { backup.known.value })
+        backup.store(phrase)
+        assertEquals(PhraseBackup.Known(PhraseBackup.Status.CLOUD, address), backup.known.value)
+        blockStore.e2ee = false
+        backup.reconcile()
+        assertEquals(PhraseBackup.Known(PhraseBackup.Status.PAUSED, address), backup.known.value)
+        // Play services stopped answering: nothing may go on claiming the phrase is in Google.
+        blockStore.reachable = false
+        assertNull(backup.reconcileQuietly())
+        assertNull(backup.known.value)
+        blockStore.reachable = true
+        blockStore.e2ee = true
+        backup.reconcile()
+        assertEquals(PhraseBackup.Status.CLOUD, backup.known.value?.status)
+        // An unreadable entry: not known whose, or where.
+        blockStore.entries[PhraseBackup.KEY] = FakeBlockStore.Stored("junk".toByteArray(), true)
+        assertNull(backup.reconcileQuietly())
+        assertNull(backup.known.value)
+        backup.delete()
+        assertEquals(PhraseBackup.Known(PhraseBackup.Status.NONE, null), backup.known.value)
+    }
+
+    @Test
     fun `reconcileQuietly never throws for a background caller`() = runBlocking {
         backup.store(phrase)
         blockStore.reachable = false
