@@ -70,7 +70,7 @@ data class PublisherIdentity(
         /**
          * [raw] trimmed, as a label, or why it can't be one: empty, over
          * [MAX_LABEL_BYTES], or holding a control character (a line break
-         * would split the one-line rows it's shown in).
+         * would split the one-line rows it's shown in) — see [isRefusedInLabel].
          */
         fun checkLabel(raw: String): Result<String> {
             val label = raw.trim()
@@ -78,10 +78,24 @@ data class PublisherIdentity(
                 label.isEmpty() -> Result.failure(IllegalArgumentException("Enter a name for this identity."))
                 label.toByteArray(Charsets.UTF_8).size > MAX_LABEL_BYTES ->
                     Result.failure(IllegalArgumentException("Keep the name to $MAX_LABEL_BYTES bytes or fewer."))
-                label.any { it.isISOControl() } ->
+                label.codePoints().anyMatch(::isRefusedInLabel) ->
                     Result.failure(IllegalArgumentException("The name can’t contain line breaks or control characters."))
                 else -> Result.success(label)
             }
+        }
+
+        /**
+         * Whether [cp] can't be in a label: a C0/C1 control (Cc), a line or
+         * paragraph separator (U+2028/U+2029), or an invisible format
+         * character (Cf) — bidi overrides and isolates would reorder the
+         * one-line row around the name. The Cf characters emoji are built
+         * from stay allowed: the zero-width joiner/non-joiner and the tag
+         * characters of subdivision flags (U+E0020–U+E007F).
+         */
+        internal fun isRefusedInLabel(cp: Int): Boolean = when (Character.getType(cp).toByte()) {
+            Character.CONTROL, Character.LINE_SEPARATOR, Character.PARAGRAPH_SEPARATOR -> true
+            Character.FORMAT -> cp != 0x200C && cp != 0x200D && cp !in 0xE0020..0xE007F
+            else -> false
         }
     }
 }
@@ -240,29 +254,39 @@ class PublisherIdentityStore internal constructor(
      */
     private fun loadForWrite(): Data {
         val tag = vaultTag() ?: throw IllegalStateException("there is no wallet")
-        val data = read(tag) ?: Data(0, emptyMap())
+        val stored = read(tag)
+        // An unparseable floor is only safe to overlook when this vault's
+        // own file still holds a counter (the next save rewrites the floor
+        // from it). With no file — straight after Remove wallet — it's the
+        // only record of the indexes already handed out, and 0 could be one.
         val least = readFloor()
+            ?: if (stored != null) 0 else throw IOException("the publisher key index floor can't be read")
+        val data = stored ?: Data(0, emptyMap())
         return if (data.nextIndex >= least) data else Data(least, data.sites)
     }
 
     /**
-     * The highest next index ever written on this device, 0 if none.
-     * Throws [IOException] if the file is there but can't be read; one
-     * that doesn't hold a number (it never should) counts as 0, and the
-     * main file's own counter still applies.
+     * The highest next index ever written on this device, 0 if none, or
+     * null if the file doesn't hold a number (it never should). Throws
+     * [IOException] if the file is there but can't be read.
      */
-    private fun readFloor(): Int {
+    private fun readFloor(): Int? {
         if (!floor.exists()) return 0
         val text = floor.readText().trim()
         return text.toIntOrNull()?.takeIf { it >= 0 } ?: run {
             Log.w(TAG, "publisher key index floor can't be parsed")
-            0
+            null
         }
     }
 
-    /** Raises [floor] to [next], written before the file that uses it. */
+    /**
+     * Raises [floor] to [next], written before the file that uses it; an
+     * unparseable floor is replaced ([loadForWrite] only gets here then
+     * with [next] from this vault's own counter).
+     */
     private fun raiseFloor(next: Int) {
-        if (next <= readFloor()) return
+        val current = readFloor()
+        if (current != null && next <= current) return
         val tmp = File(floor.parentFile, "${floor.name}.tmp")
         tmp.writeText(next.toString())
         if (!tmp.renameTo(floor)) {

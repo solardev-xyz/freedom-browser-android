@@ -137,6 +137,43 @@ class PublisherIdentitiesTest {
     }
 
     @Test
+    fun `labels refuse separators and bidi controls but keep emoji joiners`() {
+        for (bad in listOf("a\u2028b", "a\u2029b", "evil\u202Etxt", "a\u2066b\u2069", "a\u200Fb", "a\uFEFFb", "a\u0085b")) {
+            assertTrue(bad, PublisherIdentity.checkLabel(bad).isFailure)
+        }
+        val family = "\uD83D\uDC68\u200D\uD83D\uDC69\u200D\uD83D\uDC67"
+        val scotland = String(Character.toChars(0x1F3F4)) +
+            listOf(0xE0067, 0xE0062, 0xE0073, 0xE0063, 0xE0074, 0xE007F).joinToString("") { String(Character.toChars(it)) }
+        for (ok in listOf("Blog $family", "Blog $scotland", "مدونة", "Blog\u200Cx")) {
+            assertEquals(ok, PublisherIdentity.checkLabel(ok).getOrThrow())
+        }
+    }
+
+    @Test
+    fun `an unparseable floor with no file to go on refuses to allocate`() {
+        store.ensureSite(siteA)
+        store.createAppScoped(siteA, "Two")
+        store.wipe()
+        val floor = File(file.parentFile, "publisher-key-index-floor")
+        floor.writeText("garbage")
+        tag = "vault-a-again"
+        // Starting again at 0 would hand out a key an earlier site used.
+        assertThrows(IOException::class.java) { store.ensureSite(siteB) }
+        assertTrue(store.sites().isEmpty())
+        assertEquals("garbage", floor.readText())
+    }
+
+    @Test
+    fun `an unparseable floor is rewritten from this wallet's own counter`() {
+        store.ensureSite(siteA)
+        store.createAppScoped(siteA, "Two")
+        val floor = File(file.parentFile, "publisher-key-index-floor")
+        floor.writeText("garbage")
+        assertEquals("app-scoped:2", store.ensureSite(siteB).activeId)
+        assertEquals("3", floor.readText())
+    }
+
+    @Test
     fun `a file set aside as corrupt doesn't restart allocation`() {
         store.ensureSite(siteA)
         file.writeText("{")
