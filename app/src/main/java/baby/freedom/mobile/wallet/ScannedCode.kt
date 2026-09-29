@@ -7,7 +7,8 @@ import java.net.URLDecoder
 /**
  * What a scanned (or pasted) QR code holds, as far as the wallet is
  * concerned (#106): a bare address, an EIP-681 payment request, a
- * pairing code for desktop Freedom (OpenLV, #113), or none of these.
+ * pairing code for desktop Freedom (OpenLV, #113), a Safe owner's request
+ * to co-sign (#141), or none of these.
  *
  * Addresses always come out EIP-55 checksummed. A mixed-case address
  * whose checksum doesn't hold is refused rather than "fixed": the case
@@ -37,19 +38,33 @@ sealed class ScannedCode {
         override fun toString() = "Pairing(…)"
     }
 
+    /**
+     * Another Safe owner's request to co-sign (#141): the typed data
+     * [SafeProtocol.parseRequest] takes, checked to be one as it was read.
+     */
+    data class SafeRequest(val json: String) : ScannedCode()
+
     /** Nothing the wallet can use; [reason] says why, in a sentence for the user. */
     data class Unrecognized(val reason: String) : ScannedCode()
 
     companion object {
         private val HEX_ADDRESS = Regex("^0x[0-9a-fA-F]{40}$")
         private const val NOT_A_WALLET_CODE =
-            "This code isn’t an address, a payment request or a pairing code."
+            "This code isn’t an address, a payment request, a pairing code or a Safe request."
 
         /** Reads [raw], the text a QR code decoded to or the user pasted. */
         fun parse(raw: String): ScannedCode {
             val text = raw.trim()
             if (text.isEmpty()) return Unrecognized(NOT_A_WALLET_CODE)
             openLvUri(text)?.let { return Pairing(it) }
+            if (text.startsWith("{")) {
+                return try {
+                    SafeProtocol.parseRequest(text)
+                    SafeRequest(text)
+                } catch (e: Eip712.Invalid) {
+                    Unrecognized(e.message ?: NOT_A_WALLET_CODE)
+                }
+            }
             if (text.startsWith("ethereum:", ignoreCase = true)) return parseEip681(text.substring("ethereum:".length))
             if (HEX_ADDRESS.matches(text)) {
                 return checkedAddress(text)?.let { Address(it) } ?: badChecksum()

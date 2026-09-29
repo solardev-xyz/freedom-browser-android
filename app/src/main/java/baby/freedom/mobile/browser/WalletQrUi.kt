@@ -268,7 +268,7 @@ internal fun scannedLines(code: ScannedCode, chains: List<Chain>, accounts: List
             } ?: ScannedLine("Amount", "Not given")
             listOfNotNull(ScannedLine("Pay to", code.recipient, own(code.recipient)), network, asset, amount)
         }
-        is ScannedCode.Pairing, is ScannedCode.Unrecognized -> emptyList()
+        is ScannedCode.Pairing, is ScannedCode.SafeRequest, is ScannedCode.Unrecognized -> emptyList()
     }
 }
 
@@ -288,7 +288,7 @@ internal fun exactAmount(raw: BigInteger, decimals: Int): String =
  * saved-instance-state bundle.
  */
 @Composable
-internal fun ScanPage(chains: List<Chain>, accounts: List<WalletAccount>, onBack: () -> Unit) {
+internal fun ScanPage(chains: List<Chain>, accounts: List<WalletAccount>, onSafeRequest: (String) -> Unit, onBack: () -> Unit) {
     val context = LocalContext.current
     val session = remember(context) { OpenLvSession.get(context) }
     var result by remember { mutableStateOf<ScannedCode?>(null) }
@@ -297,6 +297,8 @@ internal fun ScanPage(chains: List<Chain>, accounts: List<WalletAccount>, onBack
     fun show(code: ScannedCode) {
         result = code
         if (code is ScannedCode.Pairing) session.start(code.uri)
+        // Another Safe owner's request (#141) opens its own review: nothing is signed before the user asks.
+        if (code is ScannedCode.SafeRequest) onSafeRequest(code.json)
     }
     // The same code seen frame after frame reads once while it stays in view (iOS's lastCode).
     val dedup = remember { ScanDedup() }
@@ -327,7 +329,7 @@ internal fun ScanPage(chains: List<Chain>, accounts: List<WalletAccount>, onBack
                     )
                     Spacer(Modifier.height(8.dp))
                     Text(
-                        "Point the camera at an address, a payment request or a pairing code. " +
+                        "Point the camera at an address, a payment request, a pairing code or a Safe request. " +
                             "Codes are read on this phone; nothing the camera sees is saved or sent.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -382,6 +384,7 @@ private fun ScannedCodeSection(code: ScannedCode, lines: List<ScannedLine>, onCo
         is ScannedCode.Address -> "Address"
         is ScannedCode.Payment -> "Payment request"
         is ScannedCode.Pairing -> "Pairing code"
+        is ScannedCode.SafeRequest -> "Safe request"
         is ScannedCode.Unrecognized -> "Can’t use this code"
     }
     SectionCard(title = title) {
@@ -432,7 +435,7 @@ private fun ScannedCodeSection(code: ScannedCode, lines: List<ScannedLine>, onCo
                     }
                 }
             }
-            is ScannedCode.Pairing -> Unit
+            is ScannedCode.Pairing, is ScannedCode.SafeRequest -> Unit
             is ScannedCode.Unrecognized -> Text(code.reason, style = MaterialTheme.typography.bodyMedium)
         }
     }

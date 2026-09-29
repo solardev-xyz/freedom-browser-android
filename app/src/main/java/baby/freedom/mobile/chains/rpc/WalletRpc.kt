@@ -63,6 +63,12 @@ class WalletRpc(private val router: ChainDataRouter) {
             (it as? String)?.takeIf { s -> HEX.matches(s) } ?: throw invalid("eth_call", it)
         }
 
+    /** The contract code at [address] (`0x` for none: an account, or a contract not deployed yet). */
+    suspend fun code(chainId: Long, address: String, block: String = "latest"): Reading<String> =
+        read(chainId, "eth_getCode", JSONArray().put(address).put(block)) {
+            (it as? String)?.takeIf { s -> HEX.matches(s) } ?: throw invalid("eth_getCode", it)
+        }
+
     /** The receipt, or `null` while the transaction is pending (or unknown). */
     suspend fun receipt(chainId: Long, txHash: String): Reading<JSONObject?> =
         read(chainId, "eth_getTransactionReceipt", JSONArray().put(txHash)) {

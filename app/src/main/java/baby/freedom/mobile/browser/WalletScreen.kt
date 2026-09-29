@@ -81,6 +81,7 @@ import baby.freedom.mobile.ui.isLight
 import baby.freedom.mobile.wallet.BiometricVaultAuthenticator
 import baby.freedom.mobile.wallet.Mnemonic
 import baby.freedom.mobile.wallet.PublisherIdentityStore
+import baby.freedom.mobile.wallet.SafeAccounts
 import baby.freedom.mobile.wallet.Vault
 import baby.freedom.mobile.wallet.VaultAuthCancelledException
 import baby.freedom.mobile.wallet.VaultAuthFailedException
@@ -302,6 +303,12 @@ fun WalletScreen(
     val txRecords by history.records.collectAsState()
     var historyOpen by remember { mutableStateOf(false) }
     var openTx by remember { mutableStateOf<String?>(null) }
+    // Safe accounts (#141): one open by address, the create page, and a request scanned to co-sign.
+    val safeAccounts = remember(context) { SafeAccounts.get(context) }
+    val safeState by safeAccounts.state.collectAsState()
+    var openSafe by remember { mutableStateOf<String?>(null) }
+    var creatingSafe by remember { mutableStateOf(false) }
+    var coSigning by remember { mutableStateOf<String?>(null) }
     // The receive and scan pages (#106).
     var receiving by remember { mutableStateOf(false) }
     var scanning by remember { mutableStateOf(false) }
@@ -417,6 +424,9 @@ fun WalletScreen(
             scanning = false
             historyOpen = false
             openTx = null
+            openSafe = null
+            creatingSafe = false
+            coSigning = null
         }
         // A send goes with the wallet it came from, settled or not (one that may
         // still land leaves its nonce to be replaced, should that account come back),
@@ -465,10 +475,52 @@ fun WalletScreen(
         ReceivePage(account = receivingAccount, onBack = { receiving = false })
         return
     }
+    if (state is Vault.State.Locked || state is Vault.State.Unlocked) {
+        coSigning?.let { raw ->
+            SafeCoSignPage(
+                raw = raw,
+                accounts = accountList?.accounts.orEmpty(),
+                chains = allChains.orEmpty(),
+                vault = vault,
+                auth = auth,
+                phraseBackedUp = phraseBackedUp,
+                onBack = { coSigning = null },
+            )
+            return
+        }
+        if (creatingSafe) {
+            SafeCreatePage(
+                accounts = accountList?.accounts.orEmpty(),
+                onCreated = {
+                    creatingSafe = false
+                    openSafe = it.address
+                },
+                onBack = { creatingSafe = false },
+            )
+            return
+        }
+        openSafe?.let { address ->
+            SafePage(
+                address = address,
+                accounts = accountList?.accounts.orEmpty(),
+                chains = allChains.orEmpty(),
+                vault = vault,
+                auth = auth,
+                phraseBackedUp = phraseBackedUp,
+                onOpenUrl = onOpenUrl,
+                onBack = { openSafe = null },
+            )
+            return
+        }
+    }
     if (scanning && (state is Vault.State.Locked || state is Vault.State.Unlocked)) {
         ScanPage(
             chains = allChains.orEmpty(),
             accounts = accountList?.accounts.orEmpty(),
+            onSafeRequest = {
+                scanning = false
+                coSigning = it
+            },
             onBack = { scanning = false },
         )
         return
@@ -627,6 +679,20 @@ fun WalletScreen(
                             },
                         )
                     }
+                    item("safes") {
+                        SafeAccountsSection(
+                            state = safeState,
+                            enabled = !busy,
+                            onOpen = {
+                                error = null
+                                openSafe = it
+                            },
+                            onCreate = {
+                                error = null
+                                creatingSafe = true
+                            },
+                        )
+                    }
                     item("balances") {
                         BalancesSection(
                             chains = walletChains.orEmpty(),
@@ -641,7 +707,7 @@ fun WalletScreen(
                 SectionCard(title = "Scan") {
                     PageRow(
                         title = SCAN_TITLE,
-                        subtitle = "An address, a payment request or a pairing code",
+                        subtitle = "An address, a payment request, a pairing code or a Safe request",
                         style = PageRowStyle.Inset,
                         leadingIcon = Icons.Filled.QrCodeScanner,
                         enabled = !busy,

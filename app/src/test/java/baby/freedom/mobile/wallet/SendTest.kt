@@ -31,6 +31,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Test
@@ -681,6 +682,26 @@ class SendTest {
         assertTrue(restored.dapp!!.data.contentEquals(data))
         assertEquals(BigInteger.valueOf(90_000), restored.dapp!!.gasLimit)
         assertEquals(pending.hash, again.status.value!!.hash)
+    }
+
+    @Test
+    fun `a Safe's own call keeps its label across a restart, and names the Safe as who asked`() = runBlocking<Unit> {
+        val chain = FakeChain()
+        chain.estimate = 250_000
+        val s = sender(chain, journal = FileSendJournal(journalFile()))
+        val data = byteArrayOf(0x16, 0x88.toByte(), 0xf0.toByte(), 0xb9.toByte())
+        val label = SafeCallLabel("0x6d21181D5e0F3a4a438F0CC65FACFd418443b096", "Team", activates = true)
+        val quote = s.prepare(SendRequest(gnosis, xdai, from, SafeProtocol.FACTORY, BigInteger.ZERO, DappCall(null, data, null, label)))
+        // Code is involved: the estimate plus desktop's 20%.
+        assertEquals(BigInteger.valueOf(300_000), quote.tx.gasLimit)
+        chain.on["eth_getTransactionReceipt"] = { throw IOException("timed out") }
+        s.submit(quote, signer())
+        s.awaitStage { it == SendStatus.Stage.Pending }
+        val restored = sender(chain, journal = FileSendJournal(journalFile())).status.value!!.quote.request.dapp!!
+        assertEquals(label, restored.safe)
+        assertNull(restored.origin)
+        assertEquals("Safe “Team” (activation)", baby.freedom.mobile.browser.dappRequester(restored))
+        assertThrows(IllegalArgumentException::class.java) { DappCall("https://app.example", data, null, label) }
     }
 
     @Test
