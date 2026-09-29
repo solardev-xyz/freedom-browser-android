@@ -486,13 +486,20 @@ class WalletSender internal constructor(
                 state.send?.let { send ->
                     signed = send.signed
                     val status = send.status
-                    when (status.stage) {
-                        SendStatus.Stage.Broadcasting -> show(status.copy(stage = SendStatus.Stage.Failed(INTERRUPTED, true)))
-                        SendStatus.Stage.Pending -> {
-                            show(status)
-                            job = scope.launch { follow(status.quote, send.signed.hash) }
-                        }
-                        else -> show(status)
+                    val shown = if (status.stage == SendStatus.Stage.Broadcasting) {
+                        status.copy(stage = SendStatus.Stage.Failed(INTERRUPTED, true))
+                    } else {
+                        status
+                    }
+                    if (discardOnRestore) {
+                        // The wallet it came from was removed before this was read back, and
+                        // its history wiped with it: the discard below gives the send up
+                        // (abandoning its nonce) without recording it in the emptied history
+                        // or following it.
+                        _status.value = shown
+                    } else {
+                        show(shown)
+                        if (status.stage == SendStatus.Stage.Pending) job = scope.launch { follow(status.quote, send.signed.hash) }
                     }
                     Log.i(TAG, "restored ${send.signed.hash} chain=${send.signed.tx.chainId} nonce=${send.signed.tx.nonce}")
                 }

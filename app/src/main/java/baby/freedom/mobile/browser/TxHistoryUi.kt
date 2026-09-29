@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.HelpOutline
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.History
@@ -64,6 +65,9 @@ internal fun txStatusText(r: TxRecord): Pair<String, String> {
             ", but the transfer itself failed, so nothing arrived. The network fee" + (fee?.let { " ($it)" } ?: "") + " was still paid."
         TxRecord.Status.REPLACED -> "Replaced" to "Never mined: another transaction from this account used its nonce (${r.nonce}), " +
             "so this one can’t go through any more."
+        TxRecord.Status.UNKNOWN -> "Outcome unknown" to "No receipt found, and this account’s nonce (${r.nonce}) has been used " +
+            "since, by this transaction or another. It was sent too long ago for the network to still say which; " +
+            "the explorer shows what happened."
     }
 }
 
@@ -90,6 +94,7 @@ private fun statusIcon(r: TxRecord): Pair<ImageVector, Color> {
         TxRecord.Status.CONFIRMED -> Icons.Filled.CheckCircle to green
         TxRecord.Status.FAILED -> Icons.Filled.ErrorOutline to MaterialTheme.colorScheme.error
         TxRecord.Status.REPLACED -> Icons.Filled.SwapHoriz to MaterialTheme.colorScheme.onSurfaceVariant
+        TxRecord.Status.UNKNOWN -> Icons.AutoMirrored.Filled.HelpOutline to MaterialTheme.colorScheme.onSurfaceVariant
     }
 }
 

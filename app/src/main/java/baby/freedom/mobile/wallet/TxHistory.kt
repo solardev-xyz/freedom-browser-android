@@ -55,6 +55,13 @@ data class TxRecord(
         /** No receipt, and the account's nonce went past it: another transaction took its place. */
         REPLACED(1),
 
+        /**
+         * No receipt, and the account's nonce went past it, but it was sent
+         * too long ago to tell: a node may have pruned the receipt of one
+         * mined back then, so it was either mined or replaced.
+         */
+        UNKNOWN(1),
+
         /** Mined, and it did what it was sent to do. */
         CONFIRMED(2),
 
@@ -319,7 +326,11 @@ class TxHistory internal constructor(
         // more after that answer, so a receipt that just landed isn't read as replaced.
         if (rpc.transactionCount(r.chainId, r.from, "latest").value <= r.nonce) return null
         rpc.receipt(r.chainId, r.hash).value?.let { receipt -> return outcome(r, receipt) }
-        return r.copy(status = TxRecord.Status.REPLACED)
+        // A node that prunes its transaction index (geth's txlookuplimit and the like)
+        // answers "no receipt" for a transaction mined long ago, too: past that age a
+        // missing receipt doesn't tell this one from its replacement.
+        val age = clock() - r.sentAt
+        return r.copy(status = if (age in 0 until REPLACED_JUDGE_MAX_AGE_MS) TxRecord.Status.REPLACED else TxRecord.Status.UNKNOWN)
     }
 
     private fun outcome(r: TxRecord, receipt: JSONObject): TxRecord? = when (val s = WalletSender.outcomeOf(receipt)) {
@@ -328,14 +339,35 @@ class TxHistory internal constructor(
         else -> null
     }
 
-    /** Forgets every record, on disk too: the wallet they came from was removed. */
+    /**
+     * Forgets every record, on disk too: the wallet they came from was
+     * removed. Doesn't block: the file is rewritten by a write launched
+     * off the calling thread. [wipeNow] is the one that has the file gone
+     * before it returns.
+     */
     fun wipe() {
-        synchronized(this) {
-            generation++
-            if (!loaded) wipedBeforeLoad = true
-            _records.value = emptyList()
-        }
+        forget()
         persistLater()
+    }
+
+    /**
+     * [wipe], with the file written (emptied: deleted) before this
+     * returns, so a process death right after can't leave the removed
+     * wallet's records on disk to come back with its phrase. Blocks on
+     * storage: never call it on the main thread. False if the file
+     * couldn't be written.
+     */
+    fun wipeNow(): Boolean = synchronized(writing) {
+        forget()
+        // Written even before the file has been read back: what it had is dropped
+        // anyway (wipedBeforeLoad), and whatever was noted since goes with it.
+        store.save(synchronized(this) { _records.value })
+    }
+
+    private fun forget() = synchronized(this) {
+        generation++
+        if (!loaded) wipedBeforeLoad = true
+        _records.value = emptyList()
     }
 
     /**
@@ -406,6 +438,15 @@ class TxHistory internal constructor(
 
         /** How long after it's judged replaced a record's receipt is still looked for. */
         const val RECHECK_REPLACED_MS = 10 * 60_000L
+
+        /**
+         * How long after it was sent a missing receipt (with its nonce used)
+         * still reads as [TxRecord.Status.REPLACED]. Well inside any node's
+         * transaction index; the history is refreshed each time the wallet
+         * page opens, so a send is normally settled long before this. Past
+         * it, [TxRecord.Status.UNKNOWN].
+         */
+        const val REPLACED_JUDGE_MAX_AGE_MS = 7 * 24 * 60 * 60_000L
 
         @Volatile
         private var instance: TxHistory? = null

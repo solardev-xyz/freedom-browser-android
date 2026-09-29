@@ -313,6 +313,37 @@ class TxHistoryTest {
     }
 
     @Test
+    fun `a record sent too long ago for its missing receipt to mean anything reads unknown, not replaced`() = runBlocking<Unit> {
+        val chain = FakeChain(gnosis)
+        chain.mined = 8
+        val young = "0x" + "11".repeat(32)
+        val old = "0x" + "22".repeat(32)
+        val h = history(
+            chain,
+            MemoryStore(
+                listOf(
+                    record(young, sentAt = now.get() - TxHistory.REPLACED_JUDGE_MAX_AGE_MS + 1),
+                    // A node with a pruned transaction index says "no receipt" for one mined months ago.
+                    record(old, sentAt = now.get() - TxHistory.REPLACED_JUDGE_MAX_AGE_MS),
+                ),
+            ),
+        )
+        withTimeout(5_000) { h.records.first { it.size == 2 } }
+        h.refresh()
+        assertEquals(TxRecord.Status.REPLACED, h.records.value.first { it.hash == young }.status)
+        val unknown = h.records.value.first { it.hash == old }
+        assertEquals(TxRecord.Status.UNKNOWN, unknown.status)
+        assertEquals("Outcome unknown", txStatusText(unknown).first)
+        // Settled for good: a receipt the node has pruned isn't asked for again.
+        val later = history(chain, MemoryStore(listOf(unknown)))
+        withTimeout(5_000) { later.records.first { it.isNotEmpty() } }
+        chain.methods.clear()
+        later.refresh()
+        assertTrue(chain.methods.isEmpty())
+        assertEquals(TxRecord.Status.UNKNOWN, later.records.value.single().status)
+    }
+
+    @Test
     fun `a status only moves forward`() = runBlocking<Unit> {
         val chain = FakeChain(gnosis)
         val h = history(chain)
@@ -446,6 +477,85 @@ class TxHistoryTest {
         gate.countDown()
         withTimeout(5_000) { while (store.saved.isNotEmpty()) delay(10) }
         assertTrue(h.records.value.isEmpty())
+    }
+
+    @Test
+    fun `wipeNow has the file gone before it returns, even before the file has been read`() = runBlocking<Unit> {
+        val file = File(tmp.root, "wallet/history.json")
+        FileTxHistoryStore(file).save(listOf(record()))
+        val h = TxHistory(FakeChain(gnosis).rpc(), scope, FileTxHistoryStore(file), clock = { now.get() })
+        withTimeout(5_000) { h.records.first { it.isNotEmpty() } }
+        assertTrue(h.wipeNow())
+        // No write left to a launched job that a process death could get ahead of.
+        assertFalse(file.exists())
+        assertTrue(h.records.value.isEmpty())
+
+        val gate = java.util.concurrent.CountDownLatch(1)
+        val store = object : TxHistoryStore {
+            @Volatile var saved: List<TxRecord> = listOf(record())
+            override fun save(records: List<TxRecord>): Boolean {
+                saved = records
+                return true
+            }
+            override fun load(): List<TxRecord> {
+                gate.await()
+                return saved
+            }
+        }
+        val unread = history(FakeChain(gnosis), store)
+        assertTrue(unread.wipeNow())
+        assertTrue(store.saved.isEmpty())
+        gate.countDown()
+        delay(100)
+        assertTrue(unread.records.value.isEmpty())
+        assertTrue(store.saved.isEmpty())
+    }
+
+    @Test
+    fun `a send read back from the journal after its wallet was removed is not recorded in the wiped history`() = runBlocking<Unit> {
+        val chain = FakeChain(gnosis)
+        // A first process leaves a pending send in its journal.
+        val kept = java.util.concurrent.atomic.AtomicReference<SendJournal.State?>()
+        val journal = object : SendJournal {
+            override fun save(state: SendJournal.State): Boolean {
+                kept.set(state)
+                return true
+            }
+            override fun load() = kept.get()
+        }
+        val earlier = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val first = WalletSender(chain.rpc(), earlier, pollMs = 10, confirmTimeoutMs = 60_000, journal = journal)
+        first.awaitRestored()
+        first.submit(first.prepare(request()), signer())
+        val hash = first.awaitStage { it == SendStatus.Stage.Pending }.hash!!
+        withTimeout(5_000) { while (kept.get()?.send?.status?.stage != SendStatus.Stage.Pending) delay(10) }
+        earlier.cancel()
+
+        // The next launch: Remove wallet lands before the journal has been read back.
+        val gate = java.util.concurrent.CountDownLatch(1)
+        val slow = object : SendJournal {
+            override fun save(state: SendJournal.State) = true
+            override fun load(): SendJournal.State? {
+                gate.await()
+                return kept.get()
+            }
+        }
+        val h = history(chain)
+        val s = WalletSender(chain.rpc(), scope, pollMs = 10, confirmTimeoutMs = 300, journal = slow, history = h)
+        s.discard()
+        h.wipeNow()
+        gate.countDown()
+        s.awaitRestored()
+        assertNull(s.status.value)
+        delay(200)
+        assertTrue(h.records.value.isEmpty())
+        // Given up on, not forgotten: the next send from that account replaces it.
+        assertEquals(hash, s.prepare(request()).replaces)
+
+        // Without the removal, the same journal is recorded as pending.
+        val h2 = history(chain)
+        WalletSender(chain.rpc(), scope, pollMs = 10, confirmTimeoutMs = 300, journal = journal, history = h2).awaitRestored()
+        assertEquals(TxRecord.Status.PENDING, h2.awaitRecord(hash).status)
     }
 
     @Test

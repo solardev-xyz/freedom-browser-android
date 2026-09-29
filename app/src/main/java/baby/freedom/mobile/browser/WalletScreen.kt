@@ -712,12 +712,14 @@ fun WalletScreen(
             onConfirm = {
                 confirmRemove = false
                 run("remove the wallet") {
-                    // Its publisher identities go with it (maintainer decision 9),
-                    // inside remove()'s own non-cancellable wipe.
+                    // Its publisher identities (maintainer decision 9) and its history go
+                    // with it, inside remove()'s own non-cancellable wipe: the history file
+                    // is deleted there and then (wipeNow), not by a write launched later
+                    // that a process death could get ahead of.
                     vault.remove(
                         alsoWipe = {
                             publishers.wipe()
-                            history.wipe()
+                            history.wipeNow()
                         },
                     )
                 }
