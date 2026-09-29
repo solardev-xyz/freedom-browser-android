@@ -502,6 +502,14 @@ class PublishTest {
     }
 
     @Test
+    fun `a refused Publish says why it waits`() {
+        assertNull(publishWaitNote(running = false, stampWork = false))
+        assertEquals(STAMP_WORK_RUNNING_NOTE, publishWaitNote(running = false, stampWork = true))
+        assertEquals(ANOTHER_PUBLISH_NOTE, publishWaitNote(running = true, stampWork = false))
+        assertEquals(ANOTHER_PUBLISH_NOTE, publishWaitNote(running = true, stampWork = true))
+    }
+
+    @Test
     fun `a history row's status`() {
         val r = PublishRecord("1", PublishKind.File, "a", PublishStatus.Failed, 1, error = "no room")
         assertEquals("Failed: no room", publishStatusText(r))

@@ -259,7 +259,39 @@ internal object StampClient {
             a.json.optJSONArray("registered")?.let { ids -> (0 until ids.length()).mapNotNull { normalizeBatchId(ids.optString(it)) } }
                 .orEmpty(),
         )
-        is Answer.Failed -> Result.failure(IllegalStateException(a.message))
+        is Answer.Failed -> {
+            if (a.message == TIMED_OUT) {
+                // The page stopped waiting, but `:node` is most likely
+                // still scanning — and may yet adopt a chequebook and
+                // restart the gateway. The search stays Running (so no
+                // publish starts under it) until `:node` says it ended.
+                awaitDiscoverEnd(ask = { call("discovering", timeoutMs = DISCOVERING_TIMEOUT_MS) }) {
+                    Thread.sleep(DISCOVER_POLL_MS)
+                }
+                Result.failure(IllegalStateException(DISCOVER_OVERRAN))
+            } else {
+                Result.failure(IllegalStateException(a.message))
+            }
+        }
+    }
+
+    /**
+     * Waits, [pause] between asks, until [ask] (`:node`'s "discovering")
+     * says no search runs any more ([discoverStillRunning]).
+     */
+    internal fun awaitDiscoverEnd(ask: () -> Answer, pause: () -> Unit) {
+        do pause() while (discoverStillRunning(ask()))
+    }
+
+    /**
+     * Is `:node`'s search still running, by its answer to "discovering"?
+     * Yes when it says so, and when it didn't answer in time (busy, not
+     * gone); no once it says not, or once it's unbound — the `:node`
+     * process or the node went away, and the search with it.
+     */
+    internal fun discoverStillRunning(a: Answer): Boolean = when (a) {
+        is Answer.Ok -> a.json.optBoolean("running", false)
+        is Answer.Failed -> a.message == TIMED_OUT
     }
 
     /**
@@ -424,7 +456,13 @@ internal object StampClient {
     }
 
     private const val NOT_BOUND = "The Swarm node isn't running"
-    private const val TIMED_OUT = "The Swarm node didn't answer in time"
+    internal const val TIMED_OUT = "The Swarm node didn't answer in time"
+    internal const val DISCOVER_OVERRAN =
+        "The search took longer than expected. The list shows any stamps it found."
+
+    /** How often a search that outlived [DISCOVER_TIMEOUT_MS] is asked after, and how long each ask waits. */
+    private const val DISCOVER_POLL_MS = 5_000L
+    private const val DISCOVERING_TIMEOUT_MS = 15_000L
     const val READ_TIMEOUT_MS = 60_000L
 
     /** A discover scans the account's xBZZ transfers since the token's deploy, then reads each batch found. */

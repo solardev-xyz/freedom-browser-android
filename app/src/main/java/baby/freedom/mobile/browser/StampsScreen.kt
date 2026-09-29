@@ -95,7 +95,8 @@ internal fun discoverStatusText(discovery: StampClient.Discovery): String? = whe
     StampClient.Discovery.Running -> "Searching Gnosis Chain for stamps this account bought…"
     is StampClient.Discovery.Finished -> discovery.found.fold(
         onSuccess = { ids -> discoverOutcomeText(ids.size) },
-        onFailure = { "Couldn't look: ${it.message}" },
+        // It ran on after the page stopped waiting: it did look, just slowly.
+        onFailure = { if (it.message == StampClient.DISCOVER_OVERRAN) it.message else "Couldn't look: ${it.message}" },
     )
 }
 

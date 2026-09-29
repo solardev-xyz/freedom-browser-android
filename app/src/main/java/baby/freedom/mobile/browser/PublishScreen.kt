@@ -310,20 +310,21 @@ internal fun PublishScreen(
             },
             title = { Text("Publish ${p.name}?") },
             text = {
-                Text(confirmText(p, batch, batches.orEmpty()) + if (stampWork) "\n\n$STAMP_WORK_RUNNING_NOTE" else "")
+                Text(confirmText(p, batch, batches.orEmpty()) + (publishWaitNote(running, stampWork)?.let { "\n\n$it" } ?: ""))
             },
             confirmButton = {
                 TextButton(
                     enabled = batch != null && !running && !stampWork,
                     onClick = {
-                        plan = null
+                        // Refused (a publish, or a stamp buy or search, started
+                        // since this was drawn): the dialog stays, now saying
+                        // why ([publishWaitNote]), rather than closing on nothing.
                         if (batch != null && Publisher.start(context, p, batch)) {
+                            plan = null
                             if (p.kind == PublishKind.Text) {
                                 writingText = false
                                 text = ""
                             }
-                        } else {
-                            releaseGrant(context, p.source)
                         }
                     },
                 ) { Text("Publish") }
@@ -358,11 +359,25 @@ internal fun PublishScreen(
     }
 }
 
-/** The confirmation's body: what goes out, with which stamp, and that it's public. */
 /** Why Publish waits: a stamp buy or search may restart the gateway the upload goes through. */
 internal const val STAMP_WORK_RUNNING_NOTE =
     "The node is buying or searching for stamps, which can restart it. Publish once that has finished."
 
+/** Why Publish waits: there's one upload at a time. */
+internal const val ANOTHER_PUBLISH_NOTE = "Another publish is uploading. Publish this once it's done."
+
+/**
+ * Why the confirmation's Publish is off, or null when it isn't for either
+ * reason: a publish uploading ([running]), or stamp work that may restart
+ * the gateway ([stampWork]).
+ */
+internal fun publishWaitNote(running: Boolean, stampWork: Boolean): String? = when {
+    running -> ANOTHER_PUBLISH_NOTE
+    stampWork -> STAMP_WORK_RUNNING_NOTE
+    else -> null
+}
+
+/** The confirmation's body: what goes out, with which stamp, and that it's public. */
 internal fun confirmText(p: PublishPlan, batch: PostageBatch?, batches: List<PostageBatch>): String {
     val what = when (p.kind) {
         PublishKind.Folder -> "${p.files.size} ${if (p.files.size == 1) "file" else "files"}, " +

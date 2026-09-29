@@ -120,6 +120,30 @@ class StampsTest {
     }
 
     @Test
+    fun `a search the page stopped waiting for stays running until the node says it ended`() {
+        fun ok(running: Boolean) = StampClient.Answer.Ok(JSONObject().put("running", running))
+        val timedOut = StampClient.Answer.Failed(StampClient.TIMED_OUT)
+        assertTrue(StampClient.discoverStillRunning(ok(true)))
+        // Busy, not gone: keep holding a publish back.
+        assertTrue(StampClient.discoverStillRunning(timedOut))
+        assertFalse(StampClient.discoverStillRunning(ok(false)))
+        // Unbound: the node, and its search, went away.
+        assertFalse(StampClient.discoverStillRunning(StampClient.Answer.Failed("The Swarm node isn't running")))
+
+        val answers = ArrayDeque(listOf(ok(true), timedOut, ok(true), ok(false), ok(true)))
+        var asks = 0
+        var pauses = 0
+        StampClient.awaitDiscoverEnd(ask = { asks++; answers.removeFirst() }) { pauses++ }
+        assertEquals(4, asks)
+        assertEquals(4, pauses)
+
+        val overran = StampClient.Discovery.Finished(
+            ACCOUNT_A, Result.failure(IllegalStateException(StampClient.DISCOVER_OVERRAN)),
+        )
+        assertEquals(StampClient.DISCOVER_OVERRAN, discoverStatusText(overran))
+    }
+
+    @Test
     fun `a search's outcome shows only while the node runs as the account it searched for`() {
         val found = StampClient.Discovery.Finished(ACCOUNT_A, Result.success(listOf(id)))
         assertEquals(found, found.forAccount(ACCOUNT_A))

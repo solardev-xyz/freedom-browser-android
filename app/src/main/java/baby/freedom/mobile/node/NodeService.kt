@@ -362,6 +362,10 @@ class NodeService : Service() {
                     stopGate.endDiscover()
                 }
             }
+            // Whether a discover still runs: the app asks once it has
+            // stopped waiting for one, so it holds a publish back until
+            // the search (and any gateway reload it ends with) is over.
+            "discovering" -> JSONObject().put("running", stopGate.discoverRunning).toString()
             "buy" -> spending {
                 spendable()
                 val depth = args.getInt("depth").also { require(it in MIN_STAMP_DEPTH..MAX_STAMP_DEPTH) { "bad depth" } }
