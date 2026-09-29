@@ -2,6 +2,7 @@ package baby.freedom.mobile.browser
 
 import android.content.ContentResolver
 import android.content.Context
+import android.content.Intent
 import android.net.Uri
 import android.provider.DocumentsContract
 import android.provider.OpenableColumns
@@ -237,14 +238,20 @@ internal class PublishHistory(
         list.map { if (it.id == id) it.copy(status = PublishStatus.Failed, error = message, completedAt = clock()) else it }
     }
 
+    /** Forgets a finished record. One still uploading stays: its outcome and link are still to come. */
     fun remove(id: String) = change { list ->
+        if (list.any { it.id == id && it.status == PublishStatus.Uploading }) return@change list
         if (!loaded) removedBeforeLoad += id
         list.filterNot { it.id == id }
     }
 
-    fun clear() = change {
+    /**
+     * Forgets every finished record. An upload in flight stays, or its
+     * reference would have nowhere to land when ant answers.
+     */
+    fun clear() = change { list ->
         if (!loaded) clearedBeforeLoad = true
-        emptyList()
+        list.filter { it.status == PublishStatus.Uploading }
     }
 
     private fun change(f: (List<PublishRecord>) -> List<PublishRecord>) {
@@ -303,8 +310,71 @@ private const val CHUNK = 4096L
  */
 internal fun selectPublishBatch(batches: List<PostageBatch>, stampBytes: Long): PostageBatch? =
     batches
-        .filter { it.usable && (it.ttlSeconds ?: 1) > 0 && batchRemainingBytes(it) >= stampBytes * PUBLISH_SIZE_MARGIN }
+        .filter { it.usable && (it.ttlSeconds ?: 1) > 0 && batchHasRoom(it, stampBytes) }
         .maxByOrNull { it.ttlSeconds ?: 0 }
+
+/** Whether [batch] has room for [stampBytes], with [PUBLISH_SIZE_MARGIN]. */
+internal fun batchHasRoom(batch: PostageBatch, stampBytes: Long): Boolean =
+    batchRemainingBytes(batch) >= stampBytes * PUBLISH_SIZE_MARGIN
+
+/**
+ * How many bytes [input] holds, read to its end; throws
+ * [PublishException] past [max]. For a document whose provider doesn't
+ * give its size, so the stamp is chosen for what will really go out.
+ */
+internal fun measureCapped(input: InputStream, max: Long = MAX_PUBLISH_BYTES, tooBig: String): Long {
+    val buf = ByteArray(64 * 1024)
+    var total = 0L
+    while (true) {
+        val n = input.read(buf)
+        if (n < 0) return total
+        total += n
+        if (total > max) throw PublishException(tooBig)
+    }
+}
+
+/**
+ * The persistable read grants on picked files and folders, held only
+ * while a publish needs them (#118). A count per URI, so one pick
+ * releasing can't take away another's; and what no one here holds —
+ * a grant left by a run that ended mid-upload or with the confirmation
+ * up — is given back by [sweep] at the next launch.
+ */
+internal object PublishGrants {
+    private val held = mutableMapOf<String, Int>()
+
+    fun hold(context: Context, uri: Uri) = synchronized(this) {
+        held[uri.toString()] = (held[uri.toString()] ?: 0) + 1
+        runCatching { context.contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION) }
+        Unit
+    }
+
+    fun release(context: Context, uri: Uri) = synchronized(this) {
+        val left = (held[uri.toString()] ?: 1) - 1
+        if (left > 0) {
+            held[uri.toString()] = left
+        } else {
+            held -= uri.toString()
+            runCatching { context.contentResolver.releasePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION) }
+        }
+        Unit
+    }
+
+    /** Gives back every persisted grant no publish in this process holds. Freedom keeps none otherwise. */
+    fun sweep(context: Context) = synchronized(this) {
+        val persisted = runCatching { context.contentResolver.persistedUriPermissions }.getOrDefault(emptyList())
+        val stale = staleGrants(persisted.map { it.uri.toString() }, held.keys)
+        persisted.filter { it.uri.toString() in stale }.forEach { p ->
+            val flags = (if (p.isReadPermission) Intent.FLAG_GRANT_READ_URI_PERMISSION else 0) or
+                (if (p.isWritePermission) Intent.FLAG_GRANT_WRITE_URI_PERMISSION else 0)
+            runCatching { context.contentResolver.releasePersistableUriPermission(p.uri, flags) }
+        }
+    }
+}
+
+/** Of the [persisted] grants, the ones not [held] by a publish in this process. */
+internal fun staleGrants(persisted: List<String>, held: Set<String>): Set<String> =
+    persisted.filterNot { it in held }.toSet()
 
 /**
  * The most a publish can upload: ant's gateway refuses a body over
@@ -360,12 +430,18 @@ internal fun listFolder(resolver: ContentResolver, treeUri: Uri): List<FolderFil
                 if (c.getString(2) == DocumentsContract.Document.MIME_TYPE_DIR) {
                     dirs += id to "$prefix$name/"
                 } else {
-                    val size = if (c.isNull(3)) 0L else c.getLong(3)
+                    val size = if (c.isNull(3)) {
+                        // The provider doesn't say: read it, so the stamp is picked for its real size.
+                        val doc = DocumentsContract.buildDocumentUriUsingTree(treeUri, id)
+                        resolver.openInputStream(doc)?.use {
+                            measureCapped(it, MAX_PUBLISH_BYTES - total, folderTooBig())
+                        } ?: throw PublishException("$prefix$name couldn't be read")
+                    } else {
+                        c.getLong(3)
+                    }
                     total += size
                     if (out.size >= MAX_PUBLISH_FILES) throw PublishException("The folder has more than $MAX_PUBLISH_FILES files")
-                    if (total > MAX_PUBLISH_BYTES) {
-                        throw PublishException("The folder is bigger than ${formatStampBytes(MAX_PUBLISH_BYTES)}, the most one publish can upload")
-                    }
+                    if (total > MAX_PUBLISH_BYTES) throw PublishException(folderTooBig())
                     out += FolderFile("$prefix$name", id, size)
                 }
             }
@@ -376,6 +452,12 @@ internal fun listFolder(resolver: ContentResolver, treeUri: Uri): List<FolderFil
     if (out.isEmpty()) throw PublishException("The folder has no files")
     return out.sortedBy { it.path }
 }
+
+private fun folderTooBig() =
+    "The folder is bigger than ${formatStampBytes(MAX_PUBLISH_BYTES)}, the most one publish can upload"
+
+private fun fileTooBig() =
+    "The file is bigger than ${formatStampBytes(MAX_PUBLISH_BYTES)}, the most one publish can upload"
 
 /** The folder's own name, for the history. */
 internal fun folderName(resolver: ContentResolver, treeUri: Uri): String {
@@ -644,11 +726,15 @@ internal fun planPublish(resolver: ContentResolver, source: PublishSource): Publ
         PublishPlan(source, PublishKind.Text, "Text", size, publishStampEstimate(listOf(size)))
     }
     is PublishSource.OneFile -> {
-        val (name, size) = fileInfo(resolver, source.uri)
-        if (size != null && size > MAX_PUBLISH_BYTES) {
-            throw PublishException("The file is bigger than ${formatStampBytes(MAX_PUBLISH_BYTES)}, the most one publish can upload")
-        }
-        PublishPlan(source, PublishKind.File, name, size, publishStampEstimate(listOf(size ?: 0L)))
+        val (name, provided) = fileInfo(resolver, source.uri)
+        if (provided != null && provided > MAX_PUBLISH_BYTES) throw PublishException(fileTooBig())
+        // A provider that doesn't say how big it is: read it through, so
+        // the stamp is picked (and confirmed) for its real size.
+        val size = provided ?: (
+            resolver.openInputStream(source.uri)?.use { measureCapped(it, tooBig = fileTooBig()) }
+                ?: throw PublishException("The file couldn't be read")
+            )
+        PublishPlan(source, PublishKind.File, name, size, publishStampEstimate(listOf(size)))
     }
     is PublishSource.Folder -> {
         val files = listFolder(resolver, source.treeUri)
@@ -676,10 +762,11 @@ internal object Publisher {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     /**
-     * Publishes [plan] with [batchId], as the user confirmed; false if a
+     * Publishes [plan] with [batch], as the user confirmed; false if a
      * publish is already running. The history gets the record at once.
      */
-    fun start(context: Context, plan: PublishPlan, batchId: String): Boolean {
+    fun start(context: Context, plan: PublishPlan, batch: PostageBatch): Boolean {
+        val batchId = batch.id
         val app = context.applicationContext
         val history = PublishHistory.get(app)
         val record: PublishRecord
@@ -690,7 +777,7 @@ internal object Publisher {
         }
         scope.launch {
             try {
-                val (reference, bytes) = run(app, plan, batchId)
+                val (reference, bytes) = run(app, plan, batch)
                 history.completed(record.id, reference, batchId, bytes)
             } catch (e: PublishException) {
                 history.failed(record.id, e.message ?: "The upload failed")
@@ -699,7 +786,9 @@ internal object Publisher {
                 history.failed(record.id, "The upload failed")
             } finally {
                 releaseGrant(app, plan.source)
-                _state.value = State.Finished(record.id)
+                // Its record removed from the history meanwhile (Remove or
+                // Clear all): there's no outcome left to show.
+                synchronized(this@Publisher) { _state.value = finishedState(record.id, history.records.value) }
             }
         }
         return true
@@ -711,27 +800,44 @@ internal object Publisher {
     }
 
     /**
+     * After records were removed from the history: a finished publish
+     * whose record went with them has no outcome to show, so it's
+     * forgotten as if acknowledged.
+     */
+    fun forgetRemoved(records: List<PublishRecord>) = synchronized(this) {
+        _state.value.let { if (it is State.Finished) _state.value = finishedState(it.recordId, records) }
+    }
+
+    /** What a finished publish of [recordId] leaves: its outcome to show, or nothing once its record is gone. */
+    internal fun finishedState(recordId: String, records: List<PublishRecord>): State =
+        if (records.any { it.id == recordId }) State.Finished(recordId) else State.Idle
+
+    /**
      * Stages [plan] in a file (a tar for a folder), so its exact length is
      * known up front and capped, and uploads it. Returns the reference and
      * the bytes published.
      */
-    private fun run(app: Context, plan: PublishPlan, batchId: String): Pair<String, Long> {
+    private fun run(app: Context, plan: PublishPlan, batch: PostageBatch): Pair<String, Long> {
+        val batchId = batch.id
         val resolver = app.contentResolver
         val dir = stagingDir(app)
         dir.mkdirs()
         val staged = File(dir, UUID.randomUUID().toString())
         try {
             var published = 0L
+            val sizes = mutableListOf<Long>()
             val request = when (val s = plan.source) {
                 is PublishSource.Text -> {
                     staged.writeBytes(s.text.toByteArray(Charsets.UTF_8))
                     published = staged.length()
+                    sizes += published
                     PublishRequest(PublishKind.Text, batchId, TEXT_FILE_NAME, "text/plain; charset=utf-8", null)
                 }
                 is PublishSource.OneFile -> {
                     val input = resolver.openInputStream(s.uri) ?: throw PublishException("The file couldn't be read")
                     input.use { copyCapped(it, staged) }
                     published = staged.length()
+                    sizes += published
                     PublishRequest(PublishKind.File, batchId, plan.name, contentTypeFor(plan.name, resolver.getType(s.uri)), null)
                 }
                 is PublishSource.Folder -> {
@@ -740,11 +846,24 @@ internal object Publisher {
                         plan.files.forEach { f ->
                             val uri = DocumentsContract.buildDocumentUriUsingTree(s.treeUri, f.documentId)
                             val input = resolver.openInputStream(uri) ?: throw PublishException("${f.path} couldn't be read")
-                            published += input.use { tar.add(f.path, it) }
+                            val n = input.use { tar.add(f.path, it) }
+                            sizes += n
+                            published += n
                         }
                         tar.finish()
                     }
                     PublishRequest(PublishKind.Folder, batchId, null, null, indexDocumentFor(plan.files.map { it.path }))
+                }
+            }
+            // What was read may differ from what was listed (a provider
+            // that gave no or a wrong size, a file changed since): check
+            // the exact bytes against the stamp before anything goes out.
+            publishStampEstimate(sizes).let { need ->
+                if (!batchHasRoom(batch, need)) {
+                    throw PublishException(
+                        "It turned out bigger than the stamp ${shortBatchId(batchId)} has room for " +
+                            "(${formatStampBytes(need)}, with a margin). Buy a bigger one under Postage stamps.",
+                    )
                 }
             }
             val reference = uploadToGateway(SwarmNode.GATEWAY_URL, request, { staged.inputStream() }, staged.length())
@@ -768,9 +887,7 @@ internal object Publisher {
                 val n = input.read(buf)
                 if (n < 0) break
                 total += n
-                if (total > MAX_PUBLISH_BYTES) {
-                    throw PublishException("The file is bigger than ${formatStampBytes(MAX_PUBLISH_BYTES)}, the most one publish can upload")
-                }
+                if (total > MAX_PUBLISH_BYTES) throw PublishException(fileTooBig())
                 out.write(buf, 0, n)
             }
         }
@@ -784,6 +901,7 @@ internal object Publisher {
 
     /** Clears what an earlier run left in [stagingDir]; nothing is staged while no publish runs. */
     fun sweepStaging(context: Context) {
+        PublishGrants.sweep(context)
         if (_state.value is State.Running) return
         stagingDir(context).listFiles()?.forEach { it.delete() }
     }

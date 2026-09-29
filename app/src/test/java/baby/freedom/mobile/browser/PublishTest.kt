@@ -151,6 +151,62 @@ class PublishTest {
         scope.cancel()
     }
 
+    @Test
+    fun `clear all and remove keep an upload in flight, so its reference still lands`() {
+        val store = MemoryStore().apply { gate.countDown() }
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        var now = 100L
+        val history = PublishHistory(store, scope) { now }
+        eventually { store.saved.isEmpty() }
+        val earlier = history.start(PublishKind.File, "a", 1)
+        history.completed(earlier.id, ref, batchA, 1)
+        now = 200
+        val running = history.start(PublishKind.Folder, "site", 10)
+        history.clear()
+        history.remove(running.id)
+        assertEquals(listOf(running.id), history.records.value.map { it.id })
+        history.completed(running.id, ref, batchA, 10)
+        val done = history.records.value.single()
+        assertEquals(PublishStatus.Completed, done.status)
+        assertEquals("bzz://$ref", done.bzzUrl)
+        eventually { store.saved == history.records.value }
+        history.remove(running.id)
+        assertEquals(emptyList<PublishRecord>(), history.records.value)
+        scope.cancel()
+    }
+
+    @Test
+    fun `a finished publish whose record was removed has no outcome left to show`() {
+        val r = PublishRecord("1", PublishKind.File, "a", PublishStatus.Completed, 1, ref)
+        assertEquals(Publisher.State.Finished("1"), Publisher.finishedState("1", listOf(r)))
+        assertEquals(Publisher.State.Idle, Publisher.finishedState("1", emptyList()))
+        assertEquals(Publisher.State.Idle, Publisher.finishedState("1", listOf(r.copy(id = "2"))))
+    }
+
+    @Test
+    fun `a persisted grant no publish holds is stale`() {
+        val a = "content://tree/a"
+        val b = "content://doc/b"
+        assertEquals(setOf(a, b), staleGrants(listOf(a, b), emptySet()))
+        assertEquals(setOf(b), staleGrants(listOf(a, b), setOf(a)))
+        assertEquals(emptySet<String>(), staleGrants(emptyList(), setOf(a)))
+    }
+
+    @Test
+    fun `a document of unknown size is measured, and refused past the cap`() {
+        assertEquals(70_000L, measureCapped(ByteArrayInputStream(ByteArray(70_000)), tooBig = "big"))
+        assertEquals(0L, measureCapped(ByteArrayInputStream(ByteArray(0)), tooBig = "big"))
+        val e = assertThrows(PublishException::class.java) {
+            measureCapped(ByteArrayInputStream(ByteArray(70_000)), max = 65_536, tooBig = "big")
+        }
+        assertEquals("big", e.message)
+        // Its real size decides the stamp: 60 MB doesn't fit where the
+        // 8 KiB a missing size used to count as would.
+        val nearlyFull = batch(batchA, depth = 17, utilization = 0)
+        assertTrue(batchHasRoom(nearlyFull, publishStampEstimate(listOf(0))))
+        assertFalse(batchHasRoom(nearlyFull, publishStampEstimate(listOf(60_000_000))))
+    }
+
     // Stamps
 
     @Test

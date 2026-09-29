@@ -1,7 +1,6 @@
 package baby.freedom.mobile.browser
 
 import android.content.Context
-import android.content.Intent
 import android.net.Uri
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -38,6 +37,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -156,6 +156,12 @@ internal fun PublishScreen(
         if (uri != null) prepare(PublishSource.Folder(uri).also { holdGrant(context, uri) })
     }
 
+    // A picked source waiting for the go-ahead when the page goes (the
+    // activity recreated, the page closed): nothing will publish it.
+    DisposableEffect(Unit) {
+        onDispose { plan?.let { releaseGrant(context, it.source) } }
+    }
+
     val back: () -> Unit = { if (writingText) writingText = false else onDismiss() }
     BackHandler(onBack = back)
 
@@ -257,7 +263,10 @@ internal fun PublishScreen(
                 item("history-empty") { Muted("Nothing published yet.") }
             } else {
                 items(records, key = { it.id }) { r ->
-                    HistoryCard(r, onOpenUrl = onOpenUrl, onRemove = { history.remove(r.id) })
+                    HistoryCard(r, onOpenUrl = onOpenUrl, onRemove = {
+                        history.remove(r.id)
+                        Publisher.forgetRemoved(history.records.value)
+                    })
                 }
             }
         }
@@ -277,7 +286,7 @@ internal fun PublishScreen(
                     enabled = batch != null && !running,
                     onClick = {
                         plan = null
-                        if (batch != null && Publisher.start(context, p, batch.id)) {
+                        if (batch != null && Publisher.start(context, p, batch)) {
                             if (p.kind == PublishKind.Text) {
                                 writingText = false
                                 text = ""
@@ -310,6 +319,7 @@ internal fun PublishScreen(
                 TextButton(onClick = {
                     clearing = false
                     history.clear()
+                    Publisher.forgetRemoved(history.records.value)
                 }) { Text("Clear") }
             },
             dismissButton = { TextButton(onClick = { clearing = false }) { Text("Cancel") } },
@@ -448,9 +458,7 @@ private fun Muted(text: String) {
  * Keeps read access to what was picked until the publish is done with it
  * (a picker's grant otherwise ends with the activity that asked).
  */
-private fun holdGrant(context: Context, uri: Uri) {
-    runCatching { context.contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION) }
-}
+private fun holdGrant(context: Context, uri: Uri) = PublishGrants.hold(context, uri)
 
 /** Gives back what [holdGrant] kept: nothing stays readable once a publish no longer needs it. */
 internal fun releaseGrant(context: Context, source: PublishSource) {
@@ -459,7 +467,7 @@ internal fun releaseGrant(context: Context, source: PublishSource) {
         is PublishSource.Folder -> source.treeUri
         is PublishSource.Text -> return
     }
-    runCatching { context.contentResolver.releasePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION) }
+    PublishGrants.release(context, uri)
 }
 
 private const val STAMPS_POLL_MS = 15_000L
