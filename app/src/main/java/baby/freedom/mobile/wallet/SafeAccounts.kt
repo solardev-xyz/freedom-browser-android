@@ -673,9 +673,30 @@ class SafeChain(private val rpc: WalletRpc) {
 
     suspend fun balance(chainId: Long, address: String): BigInteger = rpc.balance(chainId, address).value
 
-    /** [safe]'s enabled modules, in its list order; null when the list is longer than one page or unreadable in shape. */
-    suspend fun modules(chainId: Long, safe: String): List<String>? =
-        SafeProtocol.decodeModules(call(chainId, safe, SafeProtocol.MODULES_CALL))
+    /**
+     * [safe]'s state at one block: its nonce, owners and modules (null when
+     * the list is longer than one page or unreadable in shape), and with
+     * [withBalance] its native balance. What a self-call is checked against
+     * has to come from one block: the router sends each read to whichever
+     * node it picks, so separate "latest" reads can pair a stale owner list
+     * with a current nonce (#255 R2-F1). Every read here names the block
+     * [eth_blockNumber] gave; a node that doesn't have it fails the read,
+     * and the caller shows no check at all.
+     */
+    suspend fun snapshot(chainId: Long, safe: String, withBalance: Boolean = false): Snapshot {
+        val block = rpc.blockNumber(chainId).value
+        val tag = "0x" + block.toString(16)
+        return Snapshot(
+            block = block,
+            nonce = SafeProtocol.decodeUint(call(chainId, safe, SafeProtocol.NONCE_CALL, tag)) ?: throw SafeException("The Safe gave no nonce."),
+            owners = SafeProtocol.decodeAddresses(call(chainId, safe, SafeProtocol.OWNERS_CALL, tag)) ?: throw SafeException("The Safe gave no owner list."),
+            modules = SafeProtocol.decodeModules(call(chainId, safe, SafeProtocol.MODULES_CALL, tag)),
+            balance = if (withBalance) rpc.balance(chainId, safe, tag).value else null,
+        )
+    }
+
+    /** A Safe as it stood at [block] ([snapshot]). */
+    data class Snapshot(val block: Long, val nonce: BigInteger, val owners: List<String>, val modules: List<String>?, val balance: BigInteger?)
 
     /**
      * Whether [guard] passes a v1.4.1 Safe's `setGuard` check (GS300):
@@ -723,8 +744,8 @@ class SafeChain(private val rpc: WalletRpc) {
         }
     }
 
-    private suspend fun call(chainId: Long, to: String, data: String): String =
-        rpc.call(chainId, JSONObject().put("to", to).put("data", data)).value
+    private suspend fun call(chainId: Long, to: String, data: String, block: String = "latest"): String =
+        rpc.call(chainId, JSONObject().put("to", to).put("data", data), block).value
 
     companion object {
         fun get(context: Context) = SafeChain(WalletRpc(ChainDataRouter.get(context.applicationContext)))

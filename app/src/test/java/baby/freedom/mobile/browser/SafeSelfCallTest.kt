@@ -2,6 +2,7 @@ package baby.freedom.mobile.browser
 
 import baby.freedom.mobile.ens.toHex
 import baby.freedom.mobile.wallet.Erc20
+import baby.freedom.mobile.wallet.SafeChain
 import baby.freedom.mobile.wallet.SafeProtocol
 import baby.freedom.mobile.wallet.WalletAccount
 import java.math.BigInteger
@@ -296,34 +297,62 @@ class SafeSelfCallTest {
         val next = n + BigInteger.ONE
         val readdX = SafeSelfCall.AddOwner(attacker, BigInteger.ONE)
         val owners = listOf(owner, safe.replace('6', '7'), attacker)
+        fun at(nonce: BigInteger, modules: List<String>? = emptyList()) = SafeChain.Snapshot(1, nonce, owners, modules, null)
         assertTrue(safeSelfCallFailure(readdX, owners, safe)!!.contains("would fail"))
-        // The page only counts against what it read when this is the next transaction.
-        assertTrue(safeStateApplies(n, n))
-        assertFalse(safeStateApplies(n, next))
-        assertFalse(safeStateApplies(null, n))
-        assertFalse(safeStateApplies(next, n))
+        // The page only counts against what it read when this is the next transaction at that block.
+        assertTrue(safeStateApplies(readdX, at(n), n))
+        assertFalse(safeStateApplies(readdX, at(n), next))
+        assertFalse(safeStateApplies(readdX, null, n))
+        assertFalse(safeStateApplies(readdX, at(next), n))
         // …so a queued one gets no "would fail" and no owner count, and says why.
-        val queuedOwners = owners.takeIf { safeStateApplies(n, next) }
+        val queuedOwners = at(n).takeIf { safeStateApplies(readdX, it, next) }?.owners
         assertNull(safeSelfCallFailure(readdX, queuedOwners, safe))
         assertNull(safeSelfCallThreshold(readdX, queuedOwners, safe))
-        val note = safeSelfCallQueuedNote(readdX, n, next)!!
+        val note = safeSelfCallQueuedNote(readdX, at(n), next)!!
+        assertTrue(note.contains("its next nonce was 7"))
         assertTrue(note.contains("before Safe nonce 8"))
         assertTrue(note.contains("don’t count on it failing"))
         assertTrue(note.contains("owners"))
         // Modules too: "already enabled" read now says nothing about nonce N+1.
-        assertTrue(safeSelfCallQueuedNote(SafeSelfCall.EnableModule(attacker), n, next)!!.contains("modules"))
-        assertTrue(safeSelfCallQueuedNote(SafeSelfCall.DisableModule(sentinel, attacker), n, next)!!.contains("modules"))
+        assertTrue(safeSelfCallQueuedNote(SafeSelfCall.EnableModule(attacker), at(n), next)!!.contains("modules"))
+        assertTrue(safeSelfCallQueuedNote(SafeSelfCall.DisableModule(sentinel, attacker), at(n), next)!!.contains("modules"))
         for (c in listOf(
             SafeSelfCall.RemoveOwner(sentinel, attacker, BigInteger.ONE),
             SafeSelfCall.SwapOwner(sentinel, owner, attacker),
             SafeSelfCall.ChangeThreshold(BigInteger.ONE),
-        )) assertTrue(safeSelfCallQueuedNote(c, n, next)!!.contains("owners"))
-        // No note for the next transaction, before the nonce is read, or for calls that don't depend on owners or modules.
-        assertNull(safeSelfCallQueuedNote(readdX, n, n))
+        )) assertTrue(safeSelfCallQueuedNote(c, at(n), next)!!.contains("owners"))
+        // No note for the next transaction, before the Safe is read, once it's past the nonce, or for calls that don't depend on owners or modules.
+        assertNull(safeSelfCallQueuedNote(readdX, at(n), n))
         assertNull(safeSelfCallQueuedNote(readdX, null, next))
-        assertNull(safeSelfCallQueuedNote(SafeSelfCall.SetGuard(attacker), n, next))
-        assertNull(safeSelfCallQueuedNote(SafeSelfCall.SetFallbackHandler(attacker), n, next))
-        assertNull(safeSelfCallQueuedNote(SafeSelfCall.Cancel, n, next))
-        assertNull(safeSelfCallQueuedNote(SafeSelfCall.Unknown, n, next))
+        assertNull(safeSelfCallQueuedNote(readdX, at(next), n))
+        assertNull(safeSelfCallQueuedNote(SafeSelfCall.SetGuard(attacker), at(n), next))
+        assertNull(safeSelfCallQueuedNote(SafeSelfCall.SetFallbackHandler(attacker), at(n), next))
+        assertNull(safeSelfCallQueuedNote(SafeSelfCall.Cancel, at(n), next))
+        assertNull(safeSelfCallQueuedNote(SafeSelfCall.Unknown, at(n), next))
+    }
+
+    @Test
+    fun `a Safe with modules isn't checked against its owners or modules, since a module can change them without a nonce`() {
+        // R2-M1: a module's execTransactionFromModule can add or remove owners and modules with no Safe nonce.
+        val n = BigInteger.valueOf(7)
+        val readdX = SafeSelfCall.AddOwner(attacker, BigInteger.ONE)
+        val module = "0x1111111111111111111111111111111111111111"
+        val owners = listOf(owner, attacker)
+        fun at(modules: List<String>?) = SafeChain.Snapshot(1, n, owners, modules, BigInteger.TEN)
+        assertTrue(safeStateApplies(readdX, at(emptyList()), n))
+        assertFalse(safeStateApplies(readdX, at(listOf(module)), n))
+        // A list that couldn't be read (more than a page) is no better than one with modules.
+        assertFalse(safeStateApplies(readdX, at(null), n))
+        val note = safeSelfCallQueuedNote(readdX, at(listOf(module)), n)!!
+        assertTrue(note.contains("a module enabled"))
+        assertTrue(note.contains("no Safe nonce"))
+        assertTrue(note.contains("don’t count on it failing, or on how many owners it leaves"))
+        assertTrue(safeSelfCallQueuedNote(readdX, at(listOf(module, sentinel.replace('1', '2'))), n)!!.contains("2 modules enabled"))
+        assertTrue(safeSelfCallQueuedNote(readdX, at(null), n)!!.contains("couldn’t all be read"))
+        assertTrue(safeSelfCallQueuedNote(SafeSelfCall.EnableModule(attacker), at(listOf(module)), n)!!.contains("change the Safe’s modules"))
+        assertNull(safeSelfCallQueuedNote(readdX, at(emptyList()), n))
+        // Calls whose checks don't read owners or modules still go by the snapshot: a cancellation's balance.
+        assertTrue(safeStateApplies(SafeSelfCall.Cancel, at(listOf(module)), n))
+        assertNull(safeSelfCallQueuedNote(SafeSelfCall.Cancel, at(listOf(module)), n))
     }
 }

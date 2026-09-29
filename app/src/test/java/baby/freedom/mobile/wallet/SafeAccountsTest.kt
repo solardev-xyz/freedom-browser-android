@@ -554,6 +554,44 @@ class SafeAccountsTest {
     }
 
     @Test
+    fun `a snapshot reads the Safe's nonce, owners, modules and balance at one block`() = runBlocking<Unit> {
+        // R2-F1: separate "latest" reads can land on nodes at different heights; every snapshot read names one block.
+        val owners = listOf(account1.address, other)
+        val blocks = mutableListOf<String>()
+        val rpc = fakeRpc { method, params ->
+            when (method) {
+                "eth_blockNumber" -> "\"0x2a\""
+                "eth_call" -> {
+                    blocks += params.getString(1)
+                    when (params.getJSONObject(0).getString("data")) {
+                        SafeProtocol.NONCE_CALL -> "\"0x" + "5".padStart(64, '0') + "\""
+                        SafeProtocol.OWNERS_CALL -> "\"0x" + listOf(32, 2).joinToString("") { it.toString(16).padStart(64, '0') } +
+                            owners.joinToString("") { "0".repeat(24) + it.substring(2).lowercase() } + "\""
+                        SafeProtocol.MODULES_CALL -> "\"0x" + listOf(64, 1, 0).joinToString("") { it.toString(16).padStart(64, '0') } + "\""
+                        else -> "\"0x\""
+                    }
+                }
+                "eth_getBalance" -> {
+                    blocks += params.getString(1)
+                    "\"0x10\""
+                }
+                else -> "null"
+            }
+        }
+        val safe = SafeProtocol.predictAddress(owners, 1, "7")
+        val s = SafeChain(rpc).snapshot(100, safe, withBalance = true)
+        assertEquals(42L, s.block)
+        assertEquals(BigInteger.valueOf(5), s.nonce)
+        assertEquals(owners, s.owners)
+        assertEquals(emptyList<String>(), s.modules)
+        assertEquals(BigInteger.valueOf(16), s.balance)
+        assertEquals(List(4) { "0x2a" }, blocks)
+        blocks.clear()
+        assertNull(SafeChain(rpc).snapshot(100, safe).balance)
+        assertEquals(List(3) { "0x2a" }, blocks)
+    }
+
+    @Test
     fun `a co-sign request is a scanned code of its own`() {
         val safe = SafeProtocol.predictAddress(listOf(account1.address, other), 1, "7")
         val td = SafeProtocol.safeTxTypedData(safe, 100, SafeProtocol.SafeTx(other, BigInteger.ONE, Erc20.transferData(other, BigInteger.TEN), BigInteger.ZERO))

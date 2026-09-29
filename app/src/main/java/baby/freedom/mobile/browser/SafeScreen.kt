@@ -1454,10 +1454,9 @@ internal fun SafeCoSignPage(
     val chain = request?.let { r -> chains.firstOrNull { it.id == r.chainId } }
     var owners by remember { mutableStateOf<List<String>?>(null) }
     var nonce by remember { mutableStateOf<BigInteger?>(null) }
-    // The Safe's own native balance, read only for a cancellation that sends some: whether it can execute at all.
-    var safeBalance by remember { mutableStateOf<BigInteger?>(null) }
-    // For a module or guard self-call: the Safe's modules, and whether the new guard is one (null: not read).
-    var modules by remember { mutableStateOf<List<String>?>(null) }
+    // For a self-call: the Safe's nonce, owners, modules (and, for a cancellation that sends some, its balance)
+    // all read at one block, which is what its checks go by (null: not read). For a guard: whether it is one.
+    var snapshot by remember { mutableStateOf<SafeChain.Snapshot?>(null) }
     var guardSupported by remember { mutableStateOf<Boolean?>(null) }
     var readError by remember { mutableStateOf<String?>(null) }
     var busy by remember { mutableStateOf(false) }
@@ -1497,14 +1496,20 @@ internal fun SafeCoSignPage(
         val call = safeSelfCall(r)
         try {
             when {
-                call == SafeSelfCall.Cancel && r is SafeProtocol.Request.Tx && r.tx.value.signum() != 0 -> safeBalance = chainReads.balance(c.id, r.safe)
-                call is SafeSelfCall.EnableModule || call is SafeSelfCall.DisableModule -> modules = chainReads.modules(c.id, r.safe)
                 call is SafeSelfCall.SetGuard && !call.guard.equals(SafeProtocol.ZERO_ADDRESS, ignoreCase = true) ->
                     guardSupported = chainReads.guardSupported(c.id, call.guard)
             }
         } catch (e: CancellationException) {
             throw e
         } catch (_: Exception) {
+        }
+        if (call != null && r is SafeProtocol.Request.Tx) {
+            try {
+                snapshot = chainReads.snapshot(c.id, r.safe, withBalance = call == SafeSelfCall.Cancel && r.tx.value.signum() != 0)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+            }
         }
     }
 
@@ -1534,19 +1539,19 @@ internal fun SafeCoSignPage(
                             val token = TokenRegistry.builtins.firstOrNull { it.chainId == request.chainId && it.address.equals(tx.to, ignoreCase = true) }
                             val transfer = token?.let { erc20Transfer(tx.data) }
                             if (selfCall != null) {
-                                // Owners, modules and balance are the Safe as it is now: they only say what this
-                                // call does if it is the Safe's next transaction, since earlier ones can change them.
-                                val current = safeStateApplies(nonce, tx.nonce)
+                                // Owners, modules and balance are the Safe at one block: they only say what this call
+                                // does if it is the Safe's next transaction there, and no module can change them first.
+                                val s = snapshot?.takeIf { safeStateApplies(selfCall, it, tx.nonce) }
                                 SafeSelfCallRows(
                                     selfCall,
                                     tx,
                                     chain,
-                                    owners.takeIf { current },
+                                    s?.owners,
                                     accounts,
-                                    safeBalance.takeIf { current },
-                                    modules.takeIf { current },
+                                    s?.balance,
+                                    s?.modules,
                                     guardSupported,
-                                    queuedNote = safeSelfCallQueuedNote(selfCall, nonce, tx.nonce),
+                                    queuedNote = safeSelfCallQueuedNote(selfCall, snapshot, tx.nonce),
                                 )
                             } else if (transfer != null) {
                                 ReviewRow("Sends", "${SendAmounts.exact(transfer.second, token.decimals)} ${token.symbol}", mono = true, address = token.address)
@@ -1820,29 +1825,51 @@ internal fun safeCancelDetail(nonce: BigInteger, value: BigInteger, balance: Big
 }
 
 /**
- * Whether what the page read from the Safe now (owners, modules, balance)
- * is what a SafeTx at [txNonce] runs against: only when it is the Safe's
- * next transaction ([safeNonce], null until read). One queued behind earlier
- * nonces runs after them, and they can add or remove owners and modules or
- * move funds first — so a "would fail" or an owner count read now could
- * pass off a transaction that does its harm once those have executed.
+ * Whether [snapshot] (the Safe's nonce, owners, modules and balance, all at
+ * one block) is what a SafeTx at [txNonce] runs against. Only if it was the
+ * Safe's next transaction at that block: one queued behind earlier nonces
+ * runs after them, and they can add or remove owners and modules or move
+ * funds first. And, for a [call] checked against owners or modules, only if
+ * the Safe had no modules then: an enabled module can change owners and
+ * modules through `execTransactionFromModule` with no nonce at all. With
+ * neither, nothing can change them before this nonce executes except
+ * another transaction at the same nonce, which leaves this one unable to.
+ * Reads from separate blocks — the router picks a node per read — could
+ * pair an old owner list with a current nonce, hence the one block.
  */
-internal fun safeStateApplies(safeNonce: BigInteger?, txNonce: BigInteger): Boolean = safeNonce != null && safeNonce == txNonce
+internal fun safeStateApplies(call: SafeSelfCall, snapshot: SafeChain.Snapshot?, txNonce: BigInteger): Boolean =
+    snapshot != null && snapshot.nonce == txNonce && (!call.readsOwnersOrModules || snapshot.modules?.isEmpty() == true)
+
+/** Whether the Safe's checks on this call go by its owners or its modules: owner, threshold and module calls. */
+private val SafeSelfCall.readsOwnersOrModules: Boolean
+    get() = this is SafeSelfCall.AddOwner || this is SafeSelfCall.RemoveOwner || this is SafeSelfCall.SwapOwner ||
+        this is SafeSelfCall.ChangeThreshold || this is SafeSelfCall.EnableModule || this is SafeSelfCall.DisableModule
 
 /**
- * For an owner, threshold or module self-call queued behind the Safe's next
- * nonce ([safeNonce]; null until read): why it isn't checked against the
- * Safe's owners or modules now ([safeStateApplies]). Null otherwise.
+ * For an owner, threshold or module self-call that [snapshot] doesn't say
+ * what it runs against ([safeStateApplies]): why. It's queued behind the
+ * Safe's next nonce, or the Safe has modules (or they couldn't all be
+ * read). Null otherwise, and until the Safe is read.
  */
-internal fun safeSelfCallQueuedNote(call: SafeSelfCall, safeNonce: BigInteger?, txNonce: BigInteger): String? {
-    if (safeNonce == null || safeNonce >= txNonce) return null
+internal fun safeSelfCallQueuedNote(call: SafeSelfCall, snapshot: SafeChain.Snapshot?, txNonce: BigInteger): String? {
+    if (snapshot == null || snapshot.nonce > txNonce) return null
     val (what, count) = when (call) {
         is SafeSelfCall.AddOwner, is SafeSelfCall.RemoveOwner, is SafeSelfCall.SwapOwner, is SafeSelfCall.ChangeThreshold ->
             "owners" to "failing, or on how many owners it leaves"
         is SafeSelfCall.EnableModule, is SafeSelfCall.DisableModule -> "modules" to "failing"
         else -> return null
     }
-    return "Transactions before Safe nonce $txNonce execute first and can change the Safe’s $what, so this isn’t checked against the $what it has now: don’t count on it $count. Judge what it does once those have executed."
+    val why = when {
+        snapshot.nonce < txNonce ->
+            "When the Safe was read its next nonce was ${snapshot.nonce}. Transactions before Safe nonce $txNonce execute first and can change the Safe’s $what"
+        snapshot.modules == null ->
+            "This Safe’s modules couldn’t all be read, and an enabled module can change the Safe’s $what at any time, with no owner signatures and no Safe nonce"
+        snapshot.modules.isNotEmpty() ->
+            "This Safe has ${if (snapshot.modules.size == 1) "a module" else "${snapshot.modules.size} modules"} enabled, and a module can change the Safe’s $what at any time, with no owner signatures and no Safe nonce"
+        else -> return null
+    }
+    val judge = if (snapshot.nonce < txNonce) " Judge what it does once those have executed." else ""
+    return "$why, so this isn’t checked against the $what it has now: don’t count on it $count.$judge"
 }
 
 /** The head of a Safe's owner (and module) linked list: the `prevOwner` of its first owner, the `prevModule` of its first module. */
