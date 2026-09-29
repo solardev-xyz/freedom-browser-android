@@ -1053,6 +1053,8 @@ private fun SafeRequestPage(
     var pasted by remember { mutableStateOf("") }
     var scanning by remember { mutableStateOf(false) }
     var confirmDiscard by remember { mutableStateOf(false) }
+    // The abandoned executions Discard warns about: those whose account nonce another send hasn't used yet.
+    var liveAbandoned by remember(p.abandonedExecs) { mutableStateOf(p.abandonedExecs) }
     val cameraPermission = rememberCameraPermissionState()
     val share = remember(p.id) { p.shareText() }
 
@@ -1079,23 +1081,11 @@ private fun SafeRequestPage(
         val onChain = chainReads.nonce(c.id, safe.address)
         val mine = p.safeTx().nonce
         if (onChain > mine) {
-            val exec = p.execHash
-            // An execution given up on (Stop tracking) that landed anyway: this transaction is done, not superseded.
-            if (exec == null && p.abandonedExec?.let { chainReads.succeeded(c.id, it) } == true) {
-                safes.discard(p.id)
-                return false
-            }
-            when (exec?.let { chainReads.succeeded(c.id, it) }) {
-                true -> safes.discard(p.id)
-                // Our execution's receipt isn't known yet (a node a block behind the one that gave
-                // the nonce): not "executed elsewhere" until it's known to have failed, or it's
-                // no longer going out (the sender's outcome, or Stop tracking, settles that).
-                null -> if (exec != null) {
+            when (safeMovedOn(p) { chainReads.succeeded(c.id, it) }) {
+                SafeMovedOn.EXECUTED -> safes.discard(p.id)
+                SafeMovedOn.SUPERSEDED -> safes.markSuperseded(p.id)
+                SafeMovedOn.UNKNOWN ->
                     throw SafeException("The Safe has moved on; this transaction’s execution isn’t confirmed yet. Try again in a moment.")
-                } else {
-                    safes.markSuperseded(p.id)
-                }
-                false -> safes.markSuperseded(p.id)
             }
             return false
         }
@@ -1330,12 +1320,24 @@ private fun SafeRequestPage(
             }
         }
     }
+    LaunchedEffect(confirmDiscard, p.abandonedExecs) {
+        if (!confirmDiscard || p.kind != SafePending.Kind.TX) return@LaunchedEffect
+        val c = chain ?: return@LaunchedEffect
+        val mined = HashMap<String, BigInteger?>()
+        liveAbandoned = p.abandonedExecs.filter { a ->
+            val from = a.from ?: return@filter true
+            val nonce = a.nonce ?: return@filter true
+            val count = mined.getOrPut(from.lowercase()) { runCatching { chainReads.minedCount(c.id, from) }.getOrNull() }
+            // Unknown (the read failed): keep warning.
+            !safeAbandonedSpent(nonce, count)
+        }
+    }
     if (confirmDiscard) {
         AlertDialog(
             onDismissRequest = { confirmDiscard = false },
             title = { Text("Discard this ${if (p.kind == SafePending.Kind.TX) "transaction" else "message"}?") },
             text = {
-                Text(safeDiscardText(p))
+                Text(safeDiscardText(p, liveAbandoned))
             },
             confirmButton = {
                 TextButton(onClick = {
@@ -1351,14 +1353,53 @@ private fun SafeRequestPage(
     }
 }
 
-/** What Discard throws away, and what it can't stop. */
-internal fun safeDiscardText(p: SafePending): String = buildString {
+internal enum class SafeMovedOn { EXECUTED, SUPERSEDED, UNKNOWN }
+
+/**
+ * The Safe's nonce is past pending [p]'s: did one of this wallet's own
+ * executions of it do that ([succeeded]: an execution's receipt status,
+ * null while unknown)?
+ */
+internal suspend fun safeMovedOn(p: SafePending, succeeded: suspend (String) -> Boolean?): SafeMovedOn {
+    val exec = p.execHash
+    // An execution given up on (Stop tracking) that landed anyway — any of them, not just the
+    // latest: a later one reusing the account nonce can lose to an earlier one. Done, not superseded.
+    if (exec == null && p.abandonedExecs.any { succeeded(it.hash) == true }) return SafeMovedOn.EXECUTED
+    return when (exec?.let { succeeded(it) }) {
+        true -> SafeMovedOn.EXECUTED
+        // Our execution's receipt isn't known yet (a node a block behind the one that gave
+        // the nonce): not "executed elsewhere" until it's known to have failed, or it's
+        // no longer going out (the sender's outcome, or Stop tracking, settles that).
+        null -> if (exec != null) SafeMovedOn.UNKNOWN else SafeMovedOn.SUPERSEDED
+        false -> SafeMovedOn.SUPERSEDED
+    }
+}
+
+/**
+ * An abandoned execution sent with account nonce [nonce] can no longer be
+ * mined once [minedCount] of its account's transactions are (another send
+ * used that nonce — or it did, and the nonce guard settles the entry).
+ * Null [minedCount] (not known): it still can.
+ */
+internal fun safeAbandonedSpent(nonce: BigInteger, minedCount: BigInteger?): Boolean = minedCount != null && minedCount > nonce
+
+/**
+ * What Discard throws away, and what it can't stop. [live]: the abandoned
+ * executions that can still be mined (all of them unless told otherwise).
+ */
+internal fun safeDiscardText(p: SafePending, live: List<SafePending.AbandonedExec> = p.abandonedExecs): String = buildString {
     append("The signatures collected here are thrown away. A signature already given to another device stays valid there ")
     append(if (p.kind == SafePending.Kind.TX) "until the Safe executes another transaction with this nonce." else "for this exact message.")
-    if (p.kind == SafePending.Kind.TX && p.abandonedExec != null) {
+    if (p.kind == SafePending.Kind.TX && live.isNotEmpty()) {
+        val hashes = live.joinToString(", ") { "${it.hash.take(10)}…" }
         append(
-            "\n\nThe execution you stopped tracking (${p.abandonedExec.take(10)}…) can still be mined and make this payment: " +
-                "discarding doesn’t stop it. The next send from the account that paid for it reuses its nonce and replaces it.",
+            if (live.size == 1) {
+                "\n\nThe execution you stopped tracking ($hashes) can still be mined and make this payment: " +
+                    "discarding doesn’t stop it. The next send from the account that paid for it reuses its nonce and replaces it."
+            } else {
+                "\n\nThe executions you stopped tracking ($hashes) can still be mined, and any one of them makes this payment: " +
+                    "discarding doesn’t stop them. Sends from the account that paid for them reuse their nonces and replace them."
+            },
         )
     }
 }

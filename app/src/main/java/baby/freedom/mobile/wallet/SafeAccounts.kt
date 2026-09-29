@@ -72,16 +72,24 @@ data class SafePending(
     val text: String? = null,
     /** The last `execTransaction` sent for it, while it's waiting to be mined. */
     val execHash: String? = null,
+    /** The account that sent [execHash] and the account nonce it used, when known. */
+    val execFrom: String? = null,
+    val execNonce: BigInteger? = null,
     /** The Safe's nonce moved past this transaction without it: it can never execute. */
     val superseded: Boolean = false,
     /**
-     * The last `execTransaction` the sender stopped following (Stop
-     * tracking) before it was mined: until its nonce is reused it can
-     * still land and pay out, whatever happens to this entry.
+     * Every `execTransaction` the sender stopped following (Stop tracking)
+     * before it was mined, oldest first: until its account nonce is used
+     * by another send, any of them can still land and pay out, whatever
+     * happens to this entry. All are kept, not just the latest — an
+     * earlier one can be the one mined ([MAX_ABANDONED] at most).
      */
-    val abandonedExec: String? = null,
+    val abandonedExecs: List<AbandonedExec> = emptyList(),
 ) {
     enum class Kind { TX, MESSAGE }
+
+    /** An abandoned execution: its hash, and the account and account nonce that sent it (null when not known). */
+    data class AbandonedExec(val hash: String, val from: String? = null, val nonce: BigInteger? = null)
 
     /** [amount] base units of [symbol] ([decimals]) to [recipient]; [token] is null for the native currency. */
     data class Payment(val recipient: String, val amount: BigInteger, val symbol: String, val decimals: Int, val token: String?)
@@ -99,6 +107,11 @@ data class SafePending(
 
     /** A message's EIP-1271 signature once [ready]: the owners' signatures, sorted and packed. */
     fun combinedSignature(): String = "0x" + SafeProtocol.signatureBytes(signatures).toHex()
+
+    companion object {
+        /** Abandoned executions kept per entry (the oldest go first); each needs a fresh Execute and Stop tracking. */
+        const val MAX_ABANDONED = 16
+    }
 }
 
 /** Everything about the wallet's Safes on this phone. */
@@ -163,7 +176,17 @@ class SafeStore internal constructor(private val file: File) {
                 text = p.optString("text").takeIf { p.has("text") && !p.isNull("text") },
                 execHash = p.optString("execHash").takeIf { p.has("execHash") && !p.isNull("execHash") },
                 superseded = p.optBoolean("superseded"),
-                abandonedExec = p.optString("abandonedExec").takeIf { p.has("abandonedExec") && !p.isNull("abandonedExec") },
+                execFrom = p.optString("execFrom").takeIf { p.has("execFrom") && !p.isNull("execFrom") },
+                execNonce = p.optString("execNonce").takeIf { p.has("execNonce") && !p.isNull("execNonce") }?.let(::BigInteger),
+                abandonedExecs = p.optJSONArray("abandonedExecs")?.objects()?.map { a ->
+                    SafePending.AbandonedExec(
+                        a.getString("hash"),
+                        a.optString("from").takeIf { a.has("from") && !a.isNull("from") },
+                        a.optString("nonce").takeIf { a.has("nonce") && !a.isNull("nonce") }?.let(::BigInteger),
+                    )
+                }
+                    // A record from before the list: its one abandoned execution, sender unknown.
+                    ?: listOfNotNull(p.optString("abandonedExec").takeIf { p.has("abandonedExec") && !p.isNull("abandonedExec") }?.let { SafePending.AbandonedExec(it) }),
             )
         }
         SafeState(safes, pending)
@@ -205,7 +228,19 @@ class SafeStore internal constructor(private val file: File) {
                                 .put("text", p.text ?: JSONObject.NULL)
                                 .put("execHash", p.execHash ?: JSONObject.NULL)
                                 .put("superseded", p.superseded)
-                                .put("abandonedExec", p.abandonedExec ?: JSONObject.NULL),
+                                .put("execFrom", p.execFrom ?: JSONObject.NULL)
+                                .put("execNonce", p.execNonce?.toString() ?: JSONObject.NULL)
+                                .put(
+                                    "abandonedExecs",
+                                    JSONArray().apply {
+                                        p.abandonedExecs.forEach {
+                                            put(
+                                                JSONObject().put("hash", it.hash).put("from", it.from ?: JSONObject.NULL)
+                                                    .put("nonce", it.nonce?.toString() ?: JSONObject.NULL),
+                                            )
+                                        }
+                                    },
+                                ),
                         )
                     }
                 },
@@ -485,25 +520,41 @@ class SafeAccounts internal constructor(
 
     /** The Safe's nonce is past pending [id]'s: it can never execute now. */
     suspend fun markSuperseded(id: String) = update { s ->
-        s.copy(pending = s.pending.map { if (it.id == id) it.copy(superseded = true, execHash = null) else it }) to Unit
+        s.copy(pending = s.pending.map { if (it.id == id) it.copy(superseded = true, execHash = null, execFrom = null, execNonce = null) else it }) to Unit
     }
 
     /**
      * The `execTransaction` [hash] for pending [id] is no longer being followed (a later one's
      * hash is kept). [abandoned]: it wasn't settled, only given up on (Stop tracking), so it
-     * may still be mined — kept as [SafePending.abandonedExec] for Discard to warn about.
+     * may still be mined — added to [SafePending.abandonedExecs] for Discard to warn about and
+     * the nonce guard to check. [from] / [nonce]: who sent it with which account nonce, when
+     * known better than the entry's own record of it.
      */
-    suspend fun clearExecution(id: String, hash: String, abandoned: Boolean = false) = update { s ->
+    suspend fun clearExecution(id: String, hash: String, abandoned: Boolean = false, from: String? = null, nonce: BigInteger? = null) = update { s ->
         s.copy(
             pending = s.pending.map {
-                if (it.id == id && it.execHash == hash) it.copy(execHash = null, abandonedExec = if (abandoned) hash else it.abandonedExec) else it
+                if (it.id == id && it.execHash == hash) {
+                    val kept = if (abandoned) {
+                        val a = SafePending.AbandonedExec(hash, from ?: it.execFrom, nonce ?: it.execNonce)
+                        (it.abandonedExecs.filterNot { e -> e.hash == hash } + a).takeLast(SafePending.MAX_ABANDONED)
+                    } else {
+                        it.abandonedExecs
+                    }
+                    it.copy(execHash = null, execFrom = null, execNonce = null, abandonedExecs = kept)
+                } else {
+                    it
+                }
             },
         ) to Unit
     }
 
-    /** [hash] is the `execTransaction` now going out for pending [id] (null: none is). */
-    suspend fun noteExecution(id: String, hash: String?) = update { s ->
-        s.copy(pending = s.pending.map { if (it.id == id) it.copy(execHash = hash) else it }) to Unit
+    /** [hash] is the `execTransaction` now going out for pending [id] (null: none is), sent by [from] with account nonce [nonce]. */
+    suspend fun noteExecution(id: String, hash: String?, from: String? = null, nonce: BigInteger? = null) = update { s ->
+        s.copy(
+            pending = s.pending.map {
+                if (it.id == id) it.copy(execHash = hash, execFrom = from.takeIf { hash != null }, execNonce = nonce.takeIf { hash != null }) else it
+            },
+        ) to Unit
     }
 
     /**
@@ -530,7 +581,7 @@ class SafeAccounts internal constructor(
             is SendStatus.Stage.Confirmed -> discard(entry.id)
             is SendStatus.Stage.Reverted -> clearExecution(entry.id, hash)
             is SendStatus.Stage.Failed -> if (!status.mayHaveGone) clearExecution(entry.id, hash)
-            else -> if (entry.execHash != hash) noteExecution(entry.id, hash)
+            else -> if (entry.execHash != hash) noteExecution(entry.id, hash, status.quote.request.from.address, status.quote.tx.nonce)
         }
     }
 
@@ -548,7 +599,7 @@ class SafeAccounts internal constructor(
         val hash = status.hash ?: return
         val state = _state.value ?: return
         val entry = state.pendingFor(label.address).firstOrNull { it.kind == SafePending.Kind.TX && it.execHash == hash } ?: return
-        clearExecution(entry.id, hash, abandoned = true)
+        clearExecution(entry.id, hash, abandoned = true, from = status.quote.request.from.address, nonce = status.quote.tx.nonce)
     }
 
     companion object {
@@ -604,6 +655,9 @@ class SafeChain(private val rpc: WalletRpc) {
         SafeProtocol.decodeAddresses(call(chainId, safe, SafeProtocol.OWNERS_CALL)) ?: throw SafeException("The Safe gave no owner list.")
 
     suspend fun balance(chainId: Long, address: String): BigInteger = rpc.balance(chainId, address).value
+
+    /** How many of [address]'s transactions are mined: an account nonce below it can't be mined any more. */
+    suspend fun minedCount(chainId: Long, address: String): BigInteger = rpc.transactionCount(chainId, address, "latest").value
 
     suspend fun tokenBalance(chainId: Long, token: String, holder: String): BigInteger =
         Erc20.decodeUint256(call(chainId, token, Erc20.balanceOfData(holder))) ?: throw SafeException("The token gave no balance.")

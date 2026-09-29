@@ -1,7 +1,10 @@
 package baby.freedom.mobile.wallet
 
 import baby.freedom.mobile.browser.erc20Transfer
+import baby.freedom.mobile.browser.SafeMovedOn
+import baby.freedom.mobile.browser.safeAbandonedSpent
 import baby.freedom.mobile.browser.safeDiscardText
+import baby.freedom.mobile.browser.safeMovedOn
 import baby.freedom.mobile.browser.safePendingState
 import baby.freedom.mobile.browser.safePendingTitle
 import baby.freedom.mobile.browser.safeRowSubtitle
@@ -311,11 +314,11 @@ class SafeAccountsTest {
             // but the abandoned execution can still land, and Discard says so.
             publish(null)
             assertNull(s.state.value!!.pending.single().execHash)
-            assertEquals(first, s.state.value!!.pending.single().abandonedExec)
+            assertEquals(listOf(SafePending.AbandonedExec(first, account1.address, BigInteger.ONE)), s.state.value!!.pending.single().abandonedExecs)
             assertTrue(safeDiscardText(s.state.value!!.pending.single()).contains("can still be mined and make this payment"))
         }
         // It's on disk: a fresh process reads the warning back.
-        assertEquals(first, SafeStore(file).read(vault.identityTag()!!)!!.pending.single().abandonedExec)
+        assertEquals(s.state.value!!.pending.single(), SafeStore(file).read(vault.identityTag()!!)!!.pending.single())
         // A different send replacing it (the abandoned nonce reused) frees it just the same.
         publish(execStatus(safe, exec, false, SendStatus.Stage.Pending, first))
         publish(execStatus(safe, byteArrayOf(9), false, SendStatus.Stage.Pending, "0x" + "d2".repeat(32)))
@@ -326,6 +329,87 @@ class SafeAccountsTest {
         assertEquals("0x" + "d3".repeat(32), s.state.value!!.pending.single().execHash)
         s.discard(p.id)
         assertTrue(s.state.value!!.pending.isEmpty())
+    }
+
+    @Test
+    fun `every abandoned execution is kept, so an earlier one that got mined still counts as executed`() = runBlocking<Unit> {
+        vault.create(abandon12, auth, imported = true)
+        val sends = MutableStateFlow<SendStatus?>(null)
+        suspend fun publish(v: SendStatus?) {
+            sends.value = v
+            yield()
+        }
+        val s = safes().also { it.start(sends) }
+        val safe = s.create("", listOf(account1.address, other), 1, local)
+        s.markDeployed(safe.address)
+        val tx = SafeProtocol.SafeTx(other, BigInteger.ONE, ByteArray(0), BigInteger.ZERO)
+        val p = s.proposeTx(safe, tx, SafePending.Payment(other, BigInteger.ONE, "xDAI", 18, null))
+        vault.unlock(auth)
+        val exec = SafeProtocol.execTransactionData(tx, s.signWith(p.id, account1).signatures)
+        val h1 = "0x" + "a1".repeat(32)
+        val h2 = "0x" + "a2".repeat(32)
+        // Execute → Stop tracking → Execute again (the same account nonce) → Stop tracking.
+        publish(execStatus(safe, exec, false, SendStatus.Stage.Pending, h1))
+        publish(null)
+        publish(execStatus(safe, exec, false, SendStatus.Stage.Pending, h2))
+        publish(null)
+        val entry = s.state.value!!.pending.single()
+        assertEquals(listOf(h1, h2), entry.abandonedExecs.map { it.hash })
+        assertEquals(entry, SafeStore(file).read(vault.identityTag()!!)!!.pending.single())
+        // h1 is the one mined; h2 never will be: the transaction executed, it wasn't superseded.
+        assertEquals(SafeMovedOn.EXECUTED, safeMovedOn(entry) { if (it == h1) true else null })
+        assertEquals(SafeMovedOn.EXECUTED, safeMovedOn(entry) { if (it == h2) true else null })
+        assertEquals(SafeMovedOn.SUPERSEDED, safeMovedOn(entry) { null })
+        assertEquals(SafeMovedOn.SUPERSEDED, safeMovedOn(entry) { false })
+        // One still going out whose receipt isn't known yet: not settled either way.
+        assertEquals(SafeMovedOn.UNKNOWN, safeMovedOn(entry.copy(execHash = "0x" + "a3".repeat(32))) { null })
+        // The list is bounded; the newest are the ones kept.
+        repeat(SafePending.MAX_ABANDONED + 3) { i ->
+            val h = "0x" + "%064x".format(i + 16)
+            s.noteExecution(p.id, h, account1.address, BigInteger.valueOf(i.toLong()))
+            s.clearExecution(p.id, h, abandoned = true)
+        }
+        val many = s.state.value!!.pending.single().abandonedExecs
+        assertEquals(SafePending.MAX_ABANDONED, many.size)
+        assertEquals(BigInteger.valueOf(SafePending.MAX_ABANDONED + 2L), many.last().nonce)
+        assertEquals(account1.address, many.last().from)
+    }
+
+    @Test
+    fun `Discard stops warning about an abandoned execution once its account nonce is used`() {
+        val a = SafePending.AbandonedExec("0x" + "b1".repeat(32), "0x" + "11".repeat(20), BigInteger.valueOf(5))
+        val p = SafePending(
+            "0x" + "00".repeat(32), "0x" + "22".repeat(20), SafePending.Kind.TX, 100, "{}", 1, emptyList(), 0L,
+            abandonedExecs = listOf(a),
+        )
+        assertTrue(safeDiscardText(p).contains("can still be mined"))
+        // Five mined: nonce 5 is still free, so it can still land.
+        assertFalse(safeAbandonedSpent(a.nonce!!, BigInteger.valueOf(5)))
+        // Not known (the read failed): still warn.
+        assertFalse(safeAbandonedSpent(a.nonce!!, null))
+        // Six mined: another send took nonce 5, so it can't.
+        assertTrue(safeAbandonedSpent(a.nonce!!, BigInteger.valueOf(6)))
+        assertFalse(safeDiscardText(p, live = emptyList()).contains("still be mined"))
+        // Two still live: both named.
+        val b = a.copy(hash = "0x" + "b2".repeat(32))
+        assertTrue(safeDiscardText(p.copy(abandonedExecs = listOf(a, b))).let { it.contains("0xb1b1b1b1") && it.contains("0xb2b2b2b2") && it.contains("any one of them") })
+    }
+
+    @Test
+    fun `a record from before the list reads its one abandoned execution back`() = runBlocking<Unit> {
+        val s = opened()
+        val safe = s.create("", listOf(account1.address, other), 1, local)
+        s.markDeployed(safe.address)
+        s.proposeTx(safe, SafeProtocol.SafeTx(other, BigInteger.ONE, ByteArray(0), BigInteger.ZERO), SafePending.Payment(other, BigInteger.ONE, "xDAI", 18, null))
+        val tag = vault.identityTag()!!
+        val o = JSONObject(file.readText())
+        val entry = o.getJSONArray("pending").getJSONObject(0)
+        entry.remove("abandonedExecs")
+        entry.remove("execFrom")
+        entry.remove("execNonce")
+        entry.put("abandonedExec", "0x" + "c1".repeat(32))
+        file.writeText(o.toString())
+        assertEquals(listOf(SafePending.AbandonedExec("0x" + "c1".repeat(32))), SafeStore(file).read(tag)!!.pending.single().abandonedExecs)
     }
 
     @Test
@@ -349,7 +433,7 @@ class SafeAccountsTest {
         publish(null)
         val entry = s.state.value!!.pending.single()
         assertNull(entry.execHash)
-        assertNull(entry.abandonedExec)
+        assertTrue(entry.abandonedExecs.isEmpty())
         assertFalse(safeDiscardText(entry).contains("still be mined"))
     }
 
