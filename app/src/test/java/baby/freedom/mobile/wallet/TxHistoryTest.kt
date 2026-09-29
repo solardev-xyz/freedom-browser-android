@@ -467,6 +467,22 @@ class TxHistoryTest {
     }
 
     @Test
+    fun `saving an empty history also deletes a temporary file a cut-short save left behind`() {
+        val file = File(tmp.root, "wallet/history.json")
+        val store = FileTxHistoryStore(file)
+        assertTrue(store.save(listOf(record())))
+        val left = File(file.parentFile, "history.json.tmp")
+        left.writeText(TxHistoryCodec.encode(listOf(record())).toString())
+        assertTrue(store.save(emptyList()))
+        assertFalse(file.exists())
+        assertFalse(left.exists())
+        // Nothing but the stray temporary file on disk: still wiped.
+        left.writeText("{}")
+        assertTrue(store.save(emptyList()))
+        assertFalse(left.exists())
+    }
+
+    @Test
     fun `a wipe before the file is read drops what the file had`() = runBlocking<Unit> {
         val gate = java.util.concurrent.CountDownLatch(1)
         val store = object : TxHistoryStore {

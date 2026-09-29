@@ -97,11 +97,14 @@ interface TxHistoryStore {
  */
 class FileTxHistoryStore(private val file: File) : TxHistoryStore {
     override fun save(records: List<TxRecord>): Boolean = try {
+        val tmp = File(file.parentFile, "${file.name}.tmp")
         if (records.isEmpty()) {
-            !file.exists() || file.delete()
+            // A save cut short (the process died before the rename) leaves
+            // the old history in the temporary file; an empty history (a
+            // removed wallet) has to take that with it too.
+            (!tmp.exists() or tmp.delete()) and (!file.exists() || file.delete())
         } else {
             file.parentFile?.mkdirs()
-            val tmp = File(file.parentFile, "${file.name}.tmp")
             FileOutputStream(tmp).use { it.write(TxHistoryCodec.encode(records).toString().toByteArray()) }
             tmp.renameTo(file) || run {
                 tmp.delete()
