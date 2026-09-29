@@ -130,6 +130,40 @@ class SafeAccountsTest {
     }
 
     @Test
+    fun `a message needs an active Safe too, whoever asks`() = runBlocking<Unit> {
+        val s = opened()
+        val safe = s.create("", listOf(account1.address, other), 1, local)
+        // Its EIP-1271 check runs in the Safe's contract, which isn't there before activation.
+        assertTrue(expectSafeError { s.proposeMessage(safe, "hello safe") }.contains("Activate"))
+        assertTrue(s.state.value!!.pending.isEmpty())
+        s.markDeployed(safe.address)
+        assertEquals(SafePending.Kind.MESSAGE, s.proposeMessage(safe, "hello safe").kind)
+    }
+
+    @Test
+    fun `another wallet never sees or inherits the last one’s Safes, even if the Empty in between was missed`() = runBlocking<Unit> {
+        val s = opened()
+        val safe = s.create("Old", listOf(account1.address, other), 1, local)
+        val oldTag = vault.identityTag()!!
+        // The wallet goes and another comes, with no reconcile(Empty) seen in between (a conflated flow skipped it).
+        vault.remove()
+        vault.create(Mnemonic.parse("legal winner thank year wave sausage worth useful legal winner thank yellow"), auth, imported = true)
+        assertFalse(vault.identityTag() == oldTag)
+        // A change before any reconcile reads the new wallet's own list, not the old one's in memory.
+        s.markDeployed(safe.address)
+        assertEquals(SafeState.EMPTY, SafeStore(file).read(vault.identityTag()!!))
+        assertTrue(s.state.value!!.safes.isEmpty())
+
+        // And a reconcile on Unlocked/Locked reloads when the tag changed, though something was loaded.
+        val t = safes().also { it.reconcile(vault.state.value) }
+        t.create("New", listOf(other, account1.address), 1, local)
+        vault.remove()
+        vault.create(abandon12, auth, imported = true)
+        t.reconcile(vault.state.value)
+        assertTrue(t.state.value!!.safes.isEmpty())
+    }
+
+    @Test
     fun `signatures count only from owners, for exactly this request, once each`() = runBlocking<Unit> {
         val s = opened()
         val safe = s.create("", listOf(account1.address, account2.address, other), 2, local)

@@ -155,7 +155,11 @@ class SafeProtocolTest {
         val m = SafeProtocol.parseRequest(shared) as SafeProtocol.Request.Message
         assertEquals("hello safe", m.text)
         assertEquals("0x66462fb0e0b6eeaa1878ab3126a5013fc889acb537eb3522bb37f02262222c99", "0x" + m.hash.toHex())
-        assertNull((SafeProtocol.parseRequest(messageTypedData) as SafeProtocol.Request.Message).text)
+        // Without the words, the 32-byte `message` could be any hash (a Permit2 permit's): refused.
+        assertThrows(Eip712.Invalid::class.java) { SafeProtocol.parseRequest(messageTypedData.toString()) }
+        assertThrows(Eip712.Invalid::class.java) {
+            SafeProtocol.parseRequest(JSONObject(messageTypedData.toString()).put("text", JSONObject.NULL).toString())
+        }
         assertThrows(Eip712.Invalid::class.java) { SafeProtocol.parseRequest(SafeProtocol.shareText(JSONObject(messageTypedData), "hello, safe")) }
     }
 

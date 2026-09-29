@@ -254,12 +254,12 @@ object SafeProtocol {
             override val hash: ByteArray,
         ) : Request()
 
-        /** [text] is null when the request came without the words (only the digest can be shown then). */
+        /** [text] is always there, and [digest] is its EIP-191 `personal_sign` digest. */
         class Message(
             override val safe: String,
             override val chainId: Long,
             val digest: ByteArray,
-            val text: String?,
+            val text: String,
             override val typedData: JSONObject,
             override val hash: ByteArray,
         ) : Request()
@@ -322,10 +322,13 @@ object SafeProtocol {
         } else {
             val digest = Eip712.hex(message.getString("message"))?.takeIf { it.size == 32 }
                 ?: throw Eip712.Invalid("This message request isn’t for a signed text")
-            val text = (o.opt("text") as? String)?.also {
-                if (!MessageSigning.personalDigest(it.toByteArray(Charsets.UTF_8)).contentEquals(digest)) {
-                    throw Eip712.Invalid("This message request’s text doesn’t match what would be signed")
-                }
+            // The words are required, and must be what the digest is of: a bare 32-byte
+            // `message` could be any hash — a Permit2 permit's, an exchange order's — and the
+            // Safe's EIP-1271 `isValidSignature(bytes32)` would then approve it for anyone.
+            val text = (o.opt("text") as? String)
+                ?: throw Eip712.Invalid("This message request doesn’t include the words to sign, only a hash. Freedom doesn’t sign those: the hash could approve anything.")
+            if (!MessageSigning.personalDigest(text.toByteArray(Charsets.UTF_8)).contentEquals(digest)) {
+                throw Eip712.Invalid("This message request’s text doesn’t match what would be signed")
             }
             val typedData = JSONObject()
                 .put("types", types(primary, SAFE_MESSAGE_FIELDS))

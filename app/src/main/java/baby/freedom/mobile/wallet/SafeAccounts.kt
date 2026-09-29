@@ -258,6 +258,9 @@ class SafeAccounts internal constructor(
     private val mutex = Mutex()
     private var started = false
 
+    /** The vault identity tag [state] was read under (guarded by [mutex]). */
+    private var loadedTag: String? = null
+
     /** Follows the vault (and, given [sends], the wallet's sends) from now on. Idempotent. */
     fun start(sends: Flow<SendStatus?>? = null) {
         synchronized(this) {
@@ -272,13 +275,24 @@ class SafeAccounts internal constructor(
         try {
             mutex.withLock {
                 when (state) {
-                    is Vault.State.Locked, is Vault.State.Unlocked ->
-                        if (_state.value == null) _state.value = withContext(io) { vault.identityTag()?.let { store.read(it) } }
+                    // The tag is checked every time, not only when nothing is loaded: a
+                    // conflated state flow can skip the Empty between one wallet and the next.
+                    is Vault.State.Locked, is Vault.State.Unlocked -> {
+                        val tag = withContext(io) { vault.identityTag() }
+                        if (_state.value == null || tag != loadedTag) {
+                            _state.value = tag?.let { withContext(io) { store.read(it) } }
+                            loadedTag = tag
+                        }
+                    }
                     Vault.State.Empty -> {
                         _state.value = null
+                        loadedTag = null
                         withContext(io) { store.wipe() }
                     }
-                    Vault.State.Unreadable -> _state.value = null
+                    Vault.State.Unreadable -> {
+                        _state.value = null
+                        loadedTag = null
+                    }
                 }
             }
         } catch (t: Throwable) {
@@ -290,11 +304,14 @@ class SafeAccounts internal constructor(
     /** Applies [change] to the state, saves it, then shows it; returns what [change] returned. */
     private suspend fun <T> update(change: (SafeState) -> Pair<SafeState, T>): T = mutex.withLock {
         val tag = withContext(io) { vault.identityTag() } ?: throw SafeException("There’s no wallet on this phone.")
-        val current = _state.value ?: withContext(io) { store.read(tag) } ?: throw SafeException("The Safe accounts on this phone can’t be read.")
+        // What's in memory is only this wallet's if it was read under this wallet's tag.
+        val current = _state.value?.takeIf { loadedTag == tag } ?: withContext(io) { store.read(tag) }
+            ?: throw SafeException("The Safe accounts on this phone can’t be read.")
         val (next, result) = change(current)
-        if (next != current) {
-            withContext(io) { store.write(tag, next) }
+        if (next != current || loadedTag != tag) {
+            if (next != current) withContext(io) { store.write(tag, next) }
             _state.value = next
+            loadedTag = tag
         }
         result
     }
@@ -372,6 +389,8 @@ class SafeAccounts internal constructor(
         val id = "0x" + SafeProtocol.hash(typedData).toHex()
         return update { s ->
             val current = s.safe(safe.address) ?: throw SafeException("This Safe is no longer on this phone.")
+            // Its EIP-1271 signature is checked by the Safe's contract, which doesn't exist until it's activated.
+            if (!current.deployed) throw SafeException("Activate this Safe before signing messages with it.")
             s.pending.firstOrNull { it.id == id }?.let { return@update s to it }
             if (s.pendingFor(safe.address).count { it.kind == SafePending.Kind.MESSAGE } >= MAX_MESSAGES) {
                 throw SafeException("This Safe has as many messages waiting as it can hold. Discard one first.")

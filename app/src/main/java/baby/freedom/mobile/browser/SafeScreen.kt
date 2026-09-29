@@ -1411,6 +1411,15 @@ internal fun SafeCoSignPage(
                             if (transfer != null) {
                                 ReviewRow("Sends", "${SendAmounts.exact(transfer.second, token.decimals)} ${token.symbol}", mono = true, address = token.address)
                                 ReviewRow("To", null, address = transfer.first)
+                                // Everything signed is shown: a token transfer that also carries native currency says so.
+                                if (tx.value.signum() != 0) {
+                                    ReviewRow(
+                                        "Also sends",
+                                        chain?.let { "${SendAmounts.exact(tx.value, it.decimals)} ${it.symbol}" } ?: "${tx.value} base units",
+                                        mono = true,
+                                        detail = "Native currency to the token contract, on top of the transfer.",
+                                    )
+                                }
                             } else {
                                 ReviewRow("To", null, address = tx.to)
                                 ReviewRow(
@@ -1432,11 +1441,7 @@ internal fun SafeCoSignPage(
                                 },
                             )
                         }
-                        is SafeProtocol.Request.Message -> ReviewRow(
-                            "Text",
-                            request.text ?: "Not included: only its digest, 0x${request.digest.toHex()}",
-                            mono = request.text == null,
-                        )
+                        is SafeProtocol.Request.Message -> ReviewRow("Text", request.text)
                     }
                     ReviewRow(if (request is SafeProtocol.Request.Tx) "SafeTx hash" else "SafeMessage hash", "0x" + request.hash.toHex(), mono = true)
                 }
