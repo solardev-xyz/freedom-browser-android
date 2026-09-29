@@ -382,11 +382,23 @@ class TxHistoryTest {
         val chain = FakeChain(gnosis)
         val h = history(chain)
         val s = sender(chain, h)
+        // What the history holds at the very moment each stage shows (Unconfined: inside the
+        // sender's show()): it has heard first, so whoever reacts to a stage finds it there.
+        val seen = java.util.concurrent.CopyOnWriteArrayList<Pair<SendStatus.Stage, TxRecord.Status?>>()
+        val watcher = async(Dispatchers.Unconfined) {
+            s.changes.first { st ->
+                if (st?.hash != null) seen += st.stage to h.records.value.singleOrNull()?.status
+                st?.stage is SendStatus.Stage.Confirmed
+            }
+        }
         val quote = s.prepare(request())
         s.submit(quote, signer())
         val hash = s.awaitStage { it == SendStatus.Stage.Pending }.hash!!
         chain.receipts[hash.lowercase()] = ok()
         val done = s.awaitStage { it is SendStatus.Stage.Confirmed }
+        withTimeout(5_000) { watcher.await() }
+        assertEquals(TxRecord.Status.PENDING, seen.first { it.first == SendStatus.Stage.Pending }.second)
+        assertEquals(TxRecord.Status.CONFIRMED, seen.first { it.first is SendStatus.Stage.Confirmed }.second)
         // A late report of an earlier stage (a restored journal, say) changes nothing.
         h.note(done.copy(stage = SendStatus.Stage.Pending))
         h.note(done.copy(stage = SendStatus.Stage.Unconfirmed))

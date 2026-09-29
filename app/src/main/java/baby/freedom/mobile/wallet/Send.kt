@@ -643,11 +643,15 @@ class WalletSender internal constructor(
     /**
      * Shows [value] and reports it to the [history] (#109), which records
      * a send once it went out or may have. Under this object's lock; the
-     * history never blocks on storage there.
+     * history never blocks on storage there. The history hears first, so
+     * whoever sees [value] in [status] finds the history already has it:
+     * shown first, a collector woken by it (the wallet page reading the
+     * history list) could run before the history had heard, and find the
+     * send there a stage behind.
      */
     private fun show(value: SendStatus?) {
-        setStatus(value)
         value?.let { history?.note(it) }
+        setStatus(value)
     }
 
     /** The signed bytes of the current send, kept so Try again resends exactly them. */
