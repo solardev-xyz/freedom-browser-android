@@ -16,7 +16,9 @@ import java.nio.file.Files
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.yield
 import org.json.JSONObject
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -266,6 +268,71 @@ class SafeAccountsTest {
         // … so the mined execution still matches the entry and clears it.
         s.noteSend(status(SendStatus.Stage.Confirmed(20, null)))
         assertTrue(s.state.value!!.pending.isEmpty())
+    }
+
+    private fun execStatus(safe: SafeAccount, data: ByteArray, activates: Boolean, stage: SendStatus.Stage, hash: String): SendStatus {
+        val gnosis = BuiltInChains.GNOSIS
+        val to = if (activates) SafeProtocol.FACTORY else safe.address
+        return SendStatus(
+            SendQuote(
+                SendRequest(gnosis, TokenRegistry.native(gnosis), account1, to, BigInteger.ZERO, DappCall(null, data, null, SafeCallLabel(safe.address, safe.name, activates))),
+                EthTransaction(100, BigInteger.ONE, BigInteger.valueOf(300_000), to, BigInteger.ZERO, data, EthTransaction.Fees.Legacy(BigInteger.ONE)),
+                BigInteger.TEN, null, 0L, ChainTrustsForTest.unverified,
+            ),
+            stage,
+            hash,
+        )
+    }
+
+    @Test
+    fun `Stop tracking an execution frees its transaction, and another send taking its place does too`() = runBlocking<Unit> {
+        vault.create(abandon12, auth, imported = true)
+        val sends = MutableStateFlow<SendStatus?>(null)
+        suspend fun publish(v: SendStatus?) {
+            sends.value = v
+            yield()
+        }
+        val s = safes().also { it.start(sends) }
+        val safe = s.create("", listOf(account1.address, other), 1, local)
+        s.markDeployed(safe.address)
+        val tx = SafeProtocol.SafeTx(other, BigInteger.ONE, ByteArray(0), BigInteger.ZERO)
+        val p = s.proposeTx(safe, tx, SafePending.Payment(other, BigInteger.ONE, "xDAI", 18, null))
+        vault.unlock(auth)
+        val signed = s.signWith(p.id, account1)
+        val exec = SafeProtocol.execTransactionData(tx, signed.signatures)
+        val first = "0x" + "d1".repeat(32)
+        for (stage in listOf(SendStatus.Stage.Pending, SendStatus.Stage.Unconfirmed, SendStatus.Stage.Failed("gone?", true))) {
+            // It went out, then was left pending, unconfirmed, or may-have-gone …
+            publish(execStatus(safe, exec, false, SendStatus.Stage.Pending, first))
+            publish(execStatus(safe, exec, false, stage, first))
+            assertEquals(first, s.state.value!!.pending.single().execHash)
+            // Stop tracking: the sender publishes null. Nothing is going out, so Discard opens up again.
+            publish(null)
+            assertNull(s.state.value!!.pending.single().execHash)
+        }
+        // A different send replacing it (the abandoned nonce reused) frees it just the same.
+        publish(execStatus(safe, exec, false, SendStatus.Stage.Pending, first))
+        publish(execStatus(safe, byteArrayOf(9), false, SendStatus.Stage.Pending, "0x" + "d2".repeat(32)))
+        assertNull(s.state.value!!.pending.single().execHash)
+        // A later execution's hash isn't cleared by the end of an earlier one.
+        s.noteExecution(p.id, "0x" + "d3".repeat(32))
+        s.noteDropped(execStatus(safe, exec, false, SendStatus.Stage.Pending, first))
+        assertEquals("0x" + "d3".repeat(32), s.state.value!!.pending.single().execHash)
+        s.discard(p.id)
+        assertTrue(s.state.value!!.pending.isEmpty())
+    }
+
+    @Test
+    fun `a mined activation or execution published before the Safes are read is applied once they are`() = runBlocking<Unit> {
+        val safe = opened().create("", listOf(account1.address, other), 1, local)
+        val deploy = SafeProtocol.deploymentData(safe.owners, 1, safe.saltNonce)
+        // A fresh process: the journal brings back the mined activation before safes.json is read.
+        val s = safes()
+        s.noteSend(execStatus(safe, deploy, true, SendStatus.Stage.Confirmed(10, null), "0x" + "e1".repeat(32)))
+        assertNull(s.state.value)
+        val sends = MutableStateFlow<SendStatus?>(execStatus(safe, deploy, true, SendStatus.Stage.Confirmed(10, null), "0x" + "e1".repeat(32)))
+        s.start(sends)
+        assertTrue(s.state.value!!.safes.single().deployed)
     }
 
     @Test

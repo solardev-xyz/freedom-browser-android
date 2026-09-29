@@ -267,13 +267,35 @@ class SafeAccounts internal constructor(
             if (started) return
             started = true
         }
+        if (sends != null) {
+            scope.launch {
+                var last: SendStatus? = null
+                sends.collect { s ->
+                    val prev = last
+                    last = s
+                    lastSend = s
+                    // The sender moved off a send (Stop tracking, or another send took its place):
+                    // an execution it was following is no longer going out.
+                    if (prev?.hash != null && prev.hash != s?.hash) runCatching { noteDropped(prev) }
+                    s?.let { runCatching { noteSend(it) } }
+                }
+            }
+        }
         scope.launch { vault.state.collect { reconcile(it) } }
-        if (sends != null) scope.launch { sends.collect { it?.let { s -> runCatching { noteSend(s) } } } }
     }
+
+    /**
+     * The sender's latest status, replayed once [state] is read: at process
+     * start the journal can bring back a mined activation or execution
+     * before safes.json is, and [noteSend] needs the state to apply it to.
+     */
+    @Volatile
+    private var lastSend: SendStatus? = null
 
     internal suspend fun reconcile(state: Vault.State) {
         try {
-            mutex.withLock {
+            val loaded = mutex.withLock {
+                var loaded = false
                 when (state) {
                     // The tag is checked every time, not only when nothing is loaded: a
                     // conflated state flow can skip the Empty between one wallet and the next.
@@ -282,6 +304,7 @@ class SafeAccounts internal constructor(
                         if (_state.value == null || tag != loadedTag) {
                             _state.value = tag?.let { withContext(io) { store.read(it) } }
                             loadedTag = tag
+                            loaded = _state.value != null
                         }
                     }
                     Vault.State.Empty -> {
@@ -294,7 +317,10 @@ class SafeAccounts internal constructor(
                         loadedTag = null
                     }
                 }
+                loaded
             }
+            // A send the sender published before this state was read (see [lastSend]).
+            if (loaded) lastSend?.let { noteSend(it) }
         } catch (t: Throwable) {
             if (t is CancellationException) throw t
             Log.w(TAG, "Safe sync failed: ${t.javaClass.simpleName}")
@@ -450,6 +476,11 @@ class SafeAccounts internal constructor(
         s.copy(pending = s.pending.map { if (it.id == id) it.copy(superseded = true, execHash = null) else it }) to Unit
     }
 
+    /** The `execTransaction` [hash] for pending [id] is no longer going out (a later one's hash is kept). */
+    suspend fun clearExecution(id: String, hash: String) = update { s ->
+        s.copy(pending = s.pending.map { if (it.id == id && it.execHash == hash) it.copy(execHash = null) else it }) to Unit
+    }
+
     /** [hash] is the `execTransaction` now going out for pending [id] (null: none is). */
     suspend fun noteExecution(id: String, hash: String?) = update { s ->
         s.copy(pending = s.pending.map { if (it.id == id) it.copy(execHash = hash) else it }) to Unit
@@ -477,10 +508,27 @@ class SafeAccounts internal constructor(
         if (!status.quote.tx.data.contentEquals(expected)) return
         when (status.stage) {
             is SendStatus.Stage.Confirmed -> discard(entry.id)
-            is SendStatus.Stage.Reverted -> if (entry.execHash == hash) noteExecution(entry.id, null)
-            is SendStatus.Stage.Failed -> if (!status.mayHaveGone && entry.execHash == hash) noteExecution(entry.id, null)
+            is SendStatus.Stage.Reverted -> clearExecution(entry.id, hash)
+            is SendStatus.Stage.Failed -> if (!status.mayHaveGone) clearExecution(entry.id, hash)
             else -> if (entry.execHash != hash) noteExecution(entry.id, hash)
         }
+    }
+
+    /**
+     * The sender stopped following [status] (Stop tracking, or a new send
+     * took its place) without seeing it mined: if it was the pending
+     * transaction's execution, none is going out any more, so the entry
+     * can be discarded or executed again. Should the abandoned one land
+     * after all, the Safe's nonce guard finds the entry can't execute.
+     */
+    internal suspend fun noteDropped(status: SendStatus) {
+        if (status.stage is SendStatus.Stage.Confirmed) return
+        val label = status.quote.request.dapp?.safe ?: return
+        if (label.activates) return
+        val hash = status.hash ?: return
+        val state = _state.value ?: return
+        val entry = state.pendingFor(label.address).firstOrNull { it.kind == SafePending.Kind.TX && it.execHash == hash } ?: return
+        clearExecution(entry.id, hash)
     }
 
     companion object {

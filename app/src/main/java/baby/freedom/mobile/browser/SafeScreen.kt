@@ -1079,8 +1079,19 @@ private fun SafeRequestPage(
         val onChain = chainReads.nonce(c.id, safe.address)
         val mine = p.safeTx().nonce
         if (onChain > mine) {
-            val ours = p.execHash?.let { chainReads.succeeded(c.id, it) } == true
-            if (ours) safes.discard(p.id) else safes.markSuperseded(p.id)
+            val exec = p.execHash
+            when (exec?.let { chainReads.succeeded(c.id, it) }) {
+                true -> safes.discard(p.id)
+                // Our execution's receipt isn't known yet (a node a block behind the one that gave
+                // the nonce): not "executed elsewhere" until it's known to have failed, or it's
+                // no longer going out (the sender's outcome, or Stop tracking, settles that).
+                null -> if (exec != null) {
+                    throw SafeException("The Safe has moved on; this transaction’s execution isn’t confirmed yet. Try again in a moment.")
+                } else {
+                    safes.markSuperseded(p.id)
+                }
+                false -> safes.markSuperseded(p.id)
+            }
             return false
         }
         if (onChain < mine) throw SafeException("An earlier transaction of this Safe (nonce $onChain) hasn’t executed yet.")
@@ -1090,6 +1101,11 @@ private fun SafeRequestPage(
     // A transaction executed elsewhere (or replaced) since it was proposed is told apart on opening.
     LaunchedEffect(p.id, p.execHash) {
         if (p.kind == SafePending.Kind.TX && !p.superseded) runCatching { stillExecutable() }
+        // An execution the sender isn't following any more (Stop tracking in an earlier process,
+        // before its end reached this record) isn't going out: Discard and Execute open up again.
+        val exec = p.execHash ?: return@LaunchedEffect
+        sender.awaitRestored()
+        if (sender.status.value?.hash != exec) runCatching { safes.clearExecution(p.id, exec) }
     }
 
     fun prepareExecution() = act("price the execution") {
