@@ -260,11 +260,20 @@ internal object StampClient {
         is Answer.Failed -> Result.failure(IllegalStateException(a.message))
     }
 
-    /** A search for the account's own stamps: none asked, one running, or what the last one found. */
+    /**
+     * A search for the account's own stamps: none asked, one running, or
+     * what the last one found — for [Finished.account], the node's account
+     * when it was asked, since the node can restart as another identity
+     * (a wallet added, removed or replaced) while this outlives the page.
+     */
     sealed interface Discovery {
         data object Idle : Discovery
         data object Running : Discovery
-        data class Finished(val found: Result<List<String>>) : Discovery
+        data class Finished(val account: String, val found: Result<List<String>>) : Discovery
+
+        /** What to show while the node runs as [account]: another account's outcome is not this one's. */
+        fun forAccount(account: String): Discovery =
+            if (this is Finished && !this.account.equals(account, ignoreCase = true)) Idle else this
     }
 
     private val _discovery = MutableStateFlow<Discovery>(Discovery.Idle)
@@ -278,8 +287,11 @@ internal object StampClient {
      */
     val discovery: StateFlow<Discovery> = _discovery.asStateFlow()
 
-    /** Starts a search for the account's own stamps. False if one, or a spend, is already running. */
-    fun discover(): Boolean {
+    /**
+     * Starts a search for the stamps of [account], the node's account as
+     * the page shows it. False if one, or a spend, is already running.
+     */
+    fun discover(account: String): Boolean {
         synchronized(this) {
             if (_spend.value is Spend.Running || _discovery.value is Discovery.Running) return false
             _discovery.value = Discovery.Running
@@ -291,7 +303,7 @@ internal object StampClient {
                 Log.w(TAG, "stamp discover failed: ${t.javaClass.simpleName}")
                 Result.failure(IllegalStateException("Something went wrong"))
             }
-            _discovery.compareAndSet(Discovery.Running, Discovery.Finished(found))
+            _discovery.compareAndSet(Discovery.Running, Discovery.Finished(account, found))
         }
         return true
     }

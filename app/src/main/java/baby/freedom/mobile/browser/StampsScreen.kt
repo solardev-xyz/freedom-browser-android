@@ -128,9 +128,11 @@ internal fun StampsScreen(nodeInfo: NodeInfo, startWithBuy: Boolean = false, onD
     // "list", "buy", "detail:<id>" or "extend:<id>".
     var route by rememberSaveable { mutableStateOf(if (startWithBuy) "buy" else "list") }
     val spend by StampClient.spend.collectAsState()
-    val discovery by StampClient.discovery.collectAsState()
+    val discoveryAny by StampClient.discovery.collectAsState()
     // A buy or extend can't start while a search for owned stamps runs, nor that during one.
-    val canSpendNow = StampClient.canSpend(spend, discovery)
+    val canSpendNow = StampClient.canSpend(spend, discoveryAny)
+    // Only what was found for the account the node runs as now.
+    val discovery = discoveryAny.forAccount(nodeInfo.accountAddress)
     val blocked = stampsBlockedReason(nodeInfo)
     val light = blocked == null
 
@@ -242,7 +244,7 @@ private fun androidx.compose.foundation.lazy.LazyListScope.listPage(
             Button(onClick = onBuy, enabled = cantSpend == null && canSpendNow) {
                 Text("Buy a stamp")
             }
-            FindOwnedStamps(discovery, canStart = canSpendNow)
+            FindOwnedStamps(nodeInfo.accountAddress, discovery, canStart = canSpendNow)
         }
     }
     when {
@@ -257,12 +259,13 @@ private fun androidx.compose.foundation.lazy.LazyListScope.listPage(
  * device, or before Freedom was reinstalled. The node registers each one
  * that's still funded, and the list shows it. The search and its outcome
  * are [StampClient]'s, so scrolling this off or leaving the page neither
- * cancels nor forgets it; [canStart] is false while it or a spend runs.
+ * cancels nor forgets it — though it shows only for the [account] it
+ * ran for; [canStart] is false while it or a spend runs.
  */
 @Composable
-private fun FindOwnedStamps(discovery: StampClient.Discovery, canStart: Boolean) {
+private fun FindOwnedStamps(account: String, discovery: StampClient.Discovery, canStart: Boolean) {
     Spacer(Modifier.height(4.dp))
-    TextButton(enabled = canStart, onClick = { StampClient.discover() }) { Text("Find stamps you already own") }
+    TextButton(enabled = canStart, onClick = { StampClient.discover(account) }) { Text("Find stamps you already own") }
     discoverStatusText(discovery)?.let { SubLine(it) }
 }
 
