@@ -1,5 +1,8 @@
 package baby.freedom.mobile.wallet
 
+import android.system.ErrnoException
+import android.system.Os
+import android.system.OsConstants
 import android.util.Log
 import baby.freedom.mobile.chains.Chain
 import baby.freedom.mobile.chains.rpc.ChainSource
@@ -8,6 +11,7 @@ import baby.freedom.mobile.ens.Keccak256
 import baby.freedom.mobile.ens.hexToBytes
 import baby.freedom.mobile.ens.toHex
 import java.io.File
+import java.io.FileOutputStream
 import java.math.BigInteger
 import org.json.JSONArray
 import org.json.JSONObject
@@ -43,17 +47,34 @@ interface SendJournal {
     }
 }
 
-/** [SendJournal] in one JSON file, written whole to a temporary file and renamed over it. */
+/**
+ * [SendJournal] in one JSON file, written whole to a temporary file and
+ * renamed over it. The bytes are fsynced before the rename, and the
+ * directory after it, so a save that returned true is on flash — the
+ * signed bytes must be, before they're broadcast, or a power loss right
+ * after a send could come back to no journal and a fresh send one nonce
+ * past it. Blocks on storage: never call it on the main thread.
+ */
 class FileSendJournal(private val file: File) : SendJournal {
     override fun save(state: SendJournal.State): Boolean = try {
         if (state.send == null && state.abandoned.isEmpty()) {
             file.delete()
+            syncDirectory(file.parentFile)
             !file.exists()
         } else {
             file.parentFile?.mkdirs()
             val tmp = File(file.parentFile, "${file.name}.tmp")
-            tmp.writeText(SendJournalCodec.encode(state).toString())
-            tmp.renameTo(file).also { if (!it) tmp.delete() }
+            FileOutputStream(tmp).use { out ->
+                out.write(SendJournalCodec.encode(state).toString().toByteArray())
+                out.fd.sync()
+            }
+            if (tmp.renameTo(file)) {
+                syncDirectory(file.parentFile)
+                true
+            } else {
+                tmp.delete()
+                false
+            }
         }
     } catch (e: Exception) {
         Log.w(TAG, "couldn't save the send journal: ${e.javaClass.simpleName}")
@@ -69,8 +90,30 @@ class FileSendJournal(private val file: File) : SendJournal {
         null
     }
 
-    private companion object {
-        const val TAG = "WalletSend"
+    internal companion object {
+        private const val TAG = "WalletSend"
+
+        /**
+         * fsyncs [dir] itself, so a rename (or delete) in it survives a
+         * power loss; false if it couldn't be. `java.nio` can't open a
+         * directory on Android (`IoBridge` refuses one), so this goes
+         * through [Os].
+         */
+        internal fun syncDirectory(dir: File?): Boolean {
+            if (dir == null) return false
+            return try {
+                val fd = Os.open(dir.path, OsConstants.O_RDONLY, 0)
+                try {
+                    Os.fsync(fd)
+                } finally {
+                    Os.close(fd)
+                }
+                true
+            } catch (e: ErrnoException) {
+                Log.w(TAG, "couldn't sync the send journal's directory: ${e.errno}")
+                false
+            }
+        }
     }
 }
 
@@ -94,8 +137,11 @@ internal object SendJournalCodec {
         val abandoned = HashMap<String, NonceTracker.Abandoned>()
         o.optJSONObject("abandoned")?.let { a ->
             for (k in a.keys()) {
-                val e = a.getJSONObject(k)
-                abandoned[k] = NonceTracker.Abandoned(BigInteger(e.getString("nonce")), fees(e.getJSONObject("fees")), e.getString("hash"))
+                // One entry that can't be read back is dropped; the others, and the send, still hold.
+                runCatching {
+                    val e = a.getJSONObject(k)
+                    NonceTracker.Abandoned(BigInteger(e.getString("nonce")), fees(e.getJSONObject("fees")), e.getString("hash"))
+                }.getOrNull()?.let { abandoned[k] = it }
             }
         }
         // A send that can't be read back is dropped, but the abandoned nonces still hold.

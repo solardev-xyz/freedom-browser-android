@@ -9,6 +9,7 @@ import baby.freedom.mobile.chains.rpc.WalletRpc
 import baby.freedom.mobile.ens.toHex
 import java.math.BigInteger
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -296,9 +297,34 @@ class NonceTracker(
     /** Every abandoned send, keyed `chainId:address` (for [SendJournal]). */
     fun abandonedSnapshot(): Map<String, Abandoned> = synchronized(sent) { HashMap(abandoned) }
 
-    /** Takes back what [abandonedSnapshot] gave before the process was restarted. */
+    /** Takes back what [abandonedSnapshot] gave before the process was restarted (a newer record for a key wins). */
     fun restoreAbandoned(records: Map<String, Abandoned>) {
-        synchronized(sent) { abandoned.putAll(records) }
+        synchronized(sent) { records.forEach { (k, a) -> abandoned.putIfAbsent(k, a) } }
+    }
+
+    /**
+     * Drops every abandoned send whose nonce the chain has mined, for
+     * any account — [next] does this only for the account it's asked
+     * about, and one no send is ever prepared from again (a deleted
+     * wallet's) would otherwise keep its address and hash on disk for
+     * good. One that can't be read (no RPC answering, the chain gone
+     * from the list) stays for the next sweep.
+     */
+    suspend fun sweepMined() {
+        var dropped = false
+        for ((k, a) in abandonedSnapshot()) {
+            val chainId = k.substringBefore(':').toLongOrNull() ?: continue
+            val address = k.substringAfter(':')
+            val mined = try {
+                rpc.transactionCount(chainId, address, "latest").value > a.nonce
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                false
+            }
+            if (mined && synchronized(sent) { abandoned[k] === a && abandoned.remove(k) != null }) dropped = true
+        }
+        if (dropped) onAbandonedChange()
     }
 
     /** The abandoned send a transaction with [nonce] would replace, if any. */
@@ -390,7 +416,7 @@ class WalletSender internal constructor(
     private val confirmTimeoutMs: Long = CONFIRM_TIMEOUT_MS,
     private val journal: SendJournal = SendJournal.None,
 ) {
-    private val nonces = NonceTracker(rpc, clock, onAbandonedChange = { persist() })
+    private val nonces = NonceTracker(rpc, clock, onAbandonedChange = { persistLater() })
     private val gas = GasOracle(rpc)
 
     private val _status = MutableStateFlow<SendStatus?>(null)
@@ -402,9 +428,35 @@ class WalletSender internal constructor(
     private var signed: EthTransaction.Signed? = null
     private var job: Job? = null
 
+    /**
+     * Held while the journal is written, and taken before this object's
+     * lock, never under it: storage is only ever touched off the main
+     * thread, and the main thread (which takes only this object's lock,
+     * for moments) never waits on a write.
+     */
+    private val writing = Any()
+
+    /** The journal has been read back (under this object's lock); until then nothing is signed. */
+    private var restoredYet = false
+    private val restored = CompletableDeferred<Unit>()
+
+    /** [discard] was asked for before the journal was read back: it applies to what that brings. */
+    private var discardOnRestore = false
+
     init {
-        restore()
+        scope.launch(Dispatchers.IO) {
+            try {
+                restore()
+            } finally {
+                restored.complete(Unit)
+            }
+            // A deleted wallet's abandoned sends are never looked at by a send again: drop the mined ones here.
+            nonces.sweepMined()
+        }
     }
+
+    /** Until the journal has been read back (off the main thread, from [init]). */
+    internal suspend fun awaitRestored() = restored.await()
 
     /**
      * Picks up where the last process left off ([SendJournal]): the
@@ -413,47 +465,87 @@ class WalletSender internal constructor(
      * sending is "may have gone out" (Try again resends the same bytes).
      */
     private fun restore() {
-        val state = journal.load() ?: return
-        nonces.restoreAbandoned(state.abandoned)
-        val send = state.send ?: return
+        val state = journal.load()
         synchronized(this) {
-            signed = send.signed
-            val status = send.status
-            when (status.stage) {
-                SendStatus.Stage.Broadcasting -> _status.value = status.copy(stage = SendStatus.Stage.Failed(INTERRUPTED, true))
-                SendStatus.Stage.Pending -> {
-                    _status.value = status
-                    job = scope.launch { follow(status.quote, send.signed.hash) }
+            restoredYet = true
+            if (state != null) {
+                nonces.restoreAbandoned(state.abandoned)
+                state.send?.let { send ->
+                    signed = send.signed
+                    val status = send.status
+                    when (status.stage) {
+                        SendStatus.Stage.Broadcasting -> _status.value = status.copy(stage = SendStatus.Stage.Failed(INTERRUPTED, true))
+                        SendStatus.Stage.Pending -> {
+                            _status.value = status
+                            job = scope.launch { follow(status.quote, send.signed.hash) }
+                        }
+                        else -> _status.value = status
+                    }
+                    Log.i(TAG, "restored ${send.signed.hash} chain=${send.signed.tx.chainId} nonce=${send.signed.tx.nonce}")
                 }
-                else -> _status.value = status
             }
-            Log.i(TAG, "restored ${send.signed.hash} chain=${send.signed.tx.chainId} nonce=${send.signed.tx.nonce}")
+            if (discardOnRestore) discard()
         }
     }
 
     /**
-     * Writes what must survive the process ([SendJournal]): the current
-     * send if it's [unresolved][SendStatus.unresolved] and signed, and the
-     * abandoned nonces. Called with every change, under this object's lock
-     * so writes land in order, and before [publish] shows the change, so
-     * nothing is on screen that a restart wouldn't bring back; false if
-     * the journal couldn't be written.
+     * What must survive the process ([SendJournal]) with [current] shown
+     * and [s] its signed bytes: the send if it's
+     * [unresolved][SendStatus.unresolved] and signed, and the abandoned
+     * nonces. Under this object's lock.
      */
-    private fun persist(current: SendStatus? = _status.value): Boolean = synchronized(this) {
-        val s = signed
+    private fun snapshot(current: SendStatus?, s: EthTransaction.Signed?): SendJournal.State {
         val send = if (current != null && s != null && current.unresolved && current.stage != SendStatus.Stage.Signing) {
             SendJournal.Send(current, s)
         } else {
             null
         }
-        journal.save(SendJournal.State(send, nonces.abandonedSnapshot()))
+        return SendJournal.State(send, nonces.abandonedSnapshot())
     }
 
-    /** [status] becomes the current one: journalled first, then shown. */
+    /**
+     * Writes the state as it is now, on the calling thread (never the
+     * main one). The snapshot is taken under [writing], so writes land
+     * in order and the last one is always the latest state; false if the
+     * journal couldn't be written.
+     */
+    internal fun persistNow(): Boolean = synchronized(writing) {
+        journal.save(synchronized(this) { snapshot(_status.value, signed) })
+    }
+
+    /** [persistNow], off the calling thread: for changes made on the main thread. */
+    private fun persistLater() {
+        scope.launch(Dispatchers.IO) { persistNow() }
+    }
+
+    /**
+     * From the main thread ([retry], [checkAgain], [discard],
+     * [acknowledge]): [status] is shown now and journalled just after,
+     * off the main thread. Safe to show first: each of these moves to a
+     * state a restart may miss without harm — the journal still holds
+     * the same signed bytes (Try again, Keep waiting), or a send given
+     * up on that a restart brings back to be given up on again.
+     */
     private fun publish(status: SendStatus?) {
-        synchronized(this) {
-            persist(status)
-            _status.value = status
+        synchronized(this) { _status.value = status }
+        persistLater()
+    }
+
+    /**
+     * From a send's own coroutine: [quote]'s status becomes what [next]
+     * makes of it — journalled first, then shown, so nothing is on screen
+     * that a restart wouldn't bring back. Nothing if another send (or a
+     * discard) took over, before or while it was written.
+     */
+    private fun journalThenShow(quote: SendQuote, next: (SendStatus) -> SendStatus) {
+        synchronized(writing) {
+            val (was, now, state) = synchronized(this) {
+                val was = _status.value?.takeIf { it.quote === quote } ?: return
+                val now = next(was)
+                Triple(was, now, snapshot(now, signed))
+            }
+            journal.save(state)
+            synchronized(this) { if (_status.value === was) _status.value = now }
         }
     }
 
@@ -466,6 +558,8 @@ class WalletSender internal constructor(
      * the fee; a transfer the chain would refuse; no RPC answering.
      */
     suspend fun prepare(request: SendRequest, all: Boolean = false): SendQuote = try {
+        // The nonces of sends given up on before the last restart decide this one's.
+        restored.await()
         coroutineScope {
             val chainId = request.chain.id
             val from = request.from.address
@@ -558,6 +652,8 @@ class WalletSender internal constructor(
      */
     fun submit(quote: SendQuote, sign: (EthTransaction) -> EthTransaction.Signed): Submit {
         synchronized(this) {
+            // The last process's send isn't read back yet: it may be one this would sign beside.
+            if (!restoredYet) return Submit.BUSY
             val current = _status.value
             if (current?.stage == SendStatus.Stage.Signing || current?.stage == SendStatus.Stage.Broadcasting) return Submit.BUSY
             // One that may have gone out is settled by Try again (or given up on with
@@ -580,23 +676,29 @@ class WalletSender internal constructor(
                     fail(quote, "Couldn’t sign the transaction. Nothing was sent.", false)
                     return@launch
                 }
-                synchronized(this@WalletSender) {
-                    // Discarded while the key was at work: nothing goes out.
-                    if (_status.value?.quote !== quote) return@launch
-                    signed = s
-                    // On disk before it goes out: a process killed mid-broadcast
-                    // must come back to these bytes, never to an empty form that
-                    // would sign a second payment next to them.
-                    val broadcasting = SendStatus(quote, SendStatus.Stage.Broadcasting, s.hash)
-                    if (persist(broadcasting)) {
+                // On disk before it goes out: a process killed mid-broadcast
+                // must come back to these bytes, never to an empty form that
+                // would sign a second payment next to them.
+                val broadcasting = SendStatus(quote, SendStatus.Stage.Broadcasting, s.hash)
+                synchronized(writing) {
+                    val state = synchronized(this@WalletSender) {
+                        // Discarded while the key was at work: nothing goes out.
+                        if (_status.value?.quote !== quote) return@launch
+                        snapshot(broadcasting, s)
+                    }
+                    val saved = journal.save(state)
+                    synchronized(this@WalletSender) {
+                        // Discarded while it was written: nothing goes out (the discard's own write follows this one).
+                        if (_status.value?.quote !== quote) return@launch
+                        if (!saved) {
+                            _status.value = SendStatus(
+                                quote,
+                                SendStatus.Stage.Failed("Couldn’t save the transaction before sending it, so nothing was sent.", false),
+                            )
+                            return@launch
+                        }
+                        signed = s
                         _status.value = broadcasting
-                    } else {
-                        signed = null
-                        _status.value = SendStatus(
-                            quote,
-                            SendStatus.Stage.Failed("Couldn’t save the transaction before sending it, so nothing was sent.", false),
-                        )
-                        return@launch
                     }
                 }
                 broadcast(quote, s)
@@ -654,6 +756,10 @@ class WalletSender internal constructor(
      */
     fun discard() {
         synchronized(this) {
+            if (!restoredYet) {
+                discardOnRestore = true
+                return
+            }
             val current = _status.value ?: return
             val s = signed
             val certainlyNotSent = (current.stage as? SendStatus.Stage.Failed)?.mayHaveGone == false
@@ -768,20 +874,12 @@ class WalletSender internal constructor(
         set(quote, SendStatus.Stage.Unconfirmed, hash)
     }
 
-    private fun set(quote: SendQuote, stage: SendStatus.Stage, hash: String?) {
-        synchronized(this) {
-            // A newer send (or an acknowledge) took over: this one's news is stale.
-            if (_status.value?.quote !== quote) return
-            publish(SendStatus(quote, stage, hash))
-        }
-    }
+    // A newer send (or an acknowledge) took over: this one's news is stale, and journalThenShow drops it.
+    private fun set(quote: SendQuote, stage: SendStatus.Stage, hash: String?) =
+        journalThenShow(quote) { SendStatus(quote, stage, hash) }
 
-    private fun fail(quote: SendQuote, message: String, mayHaveGone: Boolean) {
-        synchronized(this) {
-            if (_status.value?.quote !== quote) return
-            publish(_status.value?.copy(stage = SendStatus.Stage.Failed(message, mayHaveGone)))
-        }
-    }
+    private fun fail(quote: SendQuote, message: String, mayHaveGone: Boolean) =
+        journalThenShow(quote) { it.copy(stage = SendStatus.Stage.Failed(message, mayHaveGone)) }
 
     companion object {
         private const val TAG = "WalletSend"

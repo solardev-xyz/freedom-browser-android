@@ -112,6 +112,7 @@ class SendTest {
         journal: SendJournal = SendJournal.None,
         clock: () -> Long = System::currentTimeMillis,
     ) = WalletSender(chain.rpc(), scope, clock, pollMs = 10, confirmTimeoutMs = 300, journal = journal)
+        .also { runBlocking { it.awaitRestored() } }
 
     /** A journal file that outlives one [WalletSender], as the app's outlives its process. */
     private fun journalFile() = java.io.File(tmp.root, "wallet/send.json")
@@ -633,6 +634,7 @@ class SendTest {
         assertEquals(unconfirmed, sender(chain, journal = FileSendJournal(journalFile())).status.value)
         // Stop tracking (or the wallet deleted): the payment goes, only its nonce, fee and hash stay.
         s.discard()
+        s.persistNow()
         val onDisk = journalFile().readText()
         assertFalse(onDisk.contains(to.substring(2), ignoreCase = true))
         assertFalse(onDisk.contains("\"send\""))
@@ -647,6 +649,7 @@ class SendTest {
         // Once the chain has mined that nonce there's nothing to replace, and the record goes.
         chain.mined = 8
         assertNull(again.prepare(request()).replaces)
+        again.persistNow()
         assertFalse(journalFile().exists())
     }
 
@@ -662,6 +665,119 @@ class SendTest {
         val failed = s.awaitStage { it is SendStatus.Stage.Failed }
         assertFalse(failed.mayHaveGone)
         assertTrue(chain.sent.isEmpty())
+    }
+
+    @Test
+    fun `an abandoned send the chain has mined is dropped at launch, whichever account it came from`() = runBlocking<Unit> {
+        val chain = FakeChain()
+        val s = sender(chain, journal = FileSendJournal(journalFile()))
+        s.submit(s.prepare(request()), signer())
+        s.awaitStage { it == SendStatus.Stage.Unconfirmed }
+        // The wallet deleted: no send is ever prepared from this account again.
+        s.discard()
+        s.persistNow()
+        assertTrue(journalFile().readText().contains(from.address.substring(2), ignoreCase = true))
+
+        // Not mined yet: the next launch keeps it.
+        chain.mined = 7
+        sender(chain, journal = FileSendJournal(journalFile()))
+        Thread.sleep(300)
+        assertTrue(journalFile().exists())
+
+        // Mined: the next launch drops it, and with it the account's address and the hash.
+        chain.mined = 8
+        sender(chain, journal = FileSendJournal(journalFile()))
+        val deadline = System.currentTimeMillis() + 5_000
+        while (journalFile().exists() && System.currentTimeMillis() < deadline) Thread.sleep(20)
+        assertFalse(journalFile().exists())
+    }
+
+    @Test
+    fun `one malformed abandoned entry loses neither the others nor the send`() = runBlocking<Unit> {
+        val chain = FakeChain()
+        val s = sender(chain, journal = FileSendJournal(journalFile()))
+        s.submit(s.prepare(request()), signer())
+        val unconfirmed = s.awaitStage { it == SendStatus.Stage.Unconfirmed }
+        val o = JSONObject(journalFile().readText())
+        val fees = JSONObject().put("gasPrice", "5")
+        o.put(
+            "abandoned",
+            JSONObject()
+                .put("100:0xaa", JSONObject().put("nonce", "not a number").put("fees", fees).put("hash", "0x01"))
+                .put("100:0xbb", JSONObject().put("fees", fees).put("hash", "0x02"))
+                .put("100:0xcc", "not an object")
+                .put("100:0xdd", JSONObject().put("nonce", "3").put("fees", fees).put("hash", "0x04")),
+        )
+        journalFile().writeText(o.toString())
+        val state = FileSendJournal(journalFile()).load()!!
+        assertEquals(unconfirmed, state.send!!.status)
+        assertEquals(setOf("100:0xdd"), state.abandoned.keys)
+        assertEquals(BigInteger.valueOf(3), state.abandoned.getValue("100:0xdd").nonce)
+    }
+
+    @Test
+    fun `the journal is read and written off the calling thread, which never waits on storage`() = runBlocking<Unit> {
+        val chain = FakeChain()
+        val file = FileSendJournal(journalFile())
+        // A first process leaves a send that may have gone out.
+        val first = sender(chain, journal = file)
+        chain.on["eth_sendRawTransaction"] = { throw IOException("timed out") }
+        chain.on["eth_getTransactionReceipt"] = { throw IOException("timed out") }
+        first.submit(first.prepare(request()), signer())
+        val failed = first.awaitStage { it is SendStatus.Stage.Failed }
+        val saved = file.load()!!.send!!
+        chain.on.clear()
+        // Still in a pool, not mined: the next send replaces it.
+        chain.nonce = 8
+        chain.mined = 7
+
+        // Storage as slow as it gets: nothing is read or written until it's let go.
+        val gate = java.util.concurrent.CountDownLatch(1)
+        val slow = object : SendJournal {
+            override fun save(state: SendJournal.State): Boolean {
+                gate.await()
+                return file.save(state)
+            }
+
+            override fun load(): SendJournal.State? {
+                gate.await()
+                return file.load()
+            }
+        }
+        val t0 = System.nanoTime()
+        val s = WalletSender(chain.rpc(), scope, pollMs = 10, confirmTimeoutMs = 300, journal = slow)
+        // Not read back yet: nothing is signed meanwhile, and a discard (the wallet deleted) waits for it.
+        assertNull(s.status.value)
+        assertEquals(WalletSender.Submit.BUSY, s.submit(first.status.value!!.quote, signer()))
+        s.discard()
+        assertTrue(System.nanoTime() - t0 < 1_000_000_000L)
+        gate.countDown()
+        s.awaitRestored()
+        // The discard applied to what was read back: the send is given up on and replaced.
+        assertNull(s.status.value)
+        assertEquals(failed.hash, s.prepare(request()).replaces)
+
+        // Written off the calling thread: Try again, Keep waiting and Stop tracking return at once.
+        val stuck = java.util.concurrent.CountDownLatch(1)
+        val blocking = object : SendJournal {
+            override fun save(state: SendJournal.State): Boolean {
+                stuck.await()
+                return true
+            }
+
+            override fun load(): SendJournal.State? = file.load()
+        }
+        FileSendJournal(journalFile()).save(SendJournal.State(saved, emptyMap()))
+        val third = WalletSender(chain.rpc(), scope, pollMs = 10, confirmTimeoutMs = 300, journal = blocking)
+        third.awaitRestored()
+        assertEquals(failed, third.status.value)
+        val t1 = System.nanoTime()
+        third.retry()
+        third.discard()
+        third.acknowledge()
+        assertTrue(System.nanoTime() - t1 < 1_000_000_000L)
+        assertNull(third.status.value)
+        stuck.countDown()
     }
 
     @Test
