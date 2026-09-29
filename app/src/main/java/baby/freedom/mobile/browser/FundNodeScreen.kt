@@ -464,7 +464,8 @@ private fun FundReview(
  * call can never be mined ([SwarmFunding.superseded]) — the only case in
  * which an unmined record is certain to have bought nothing. [owed]:
  * the app is to connect it itself once the node is free
- * ([SwarmFunding.connectOwed]); otherwise a mined one waits for Connect.
+ * ([SwarmFunding.connectOwed]) — which outranks an earlier failed Connect,
+ * since it was found mined after that; otherwise a mined one waits for Connect.
  */
 internal fun pendingStampText(
     p: SwarmFunding.Pending,
@@ -490,11 +491,12 @@ internal fun pendingStampText(
         !p.mined && p.tracked -> "Your wallet's transaction is going out; the node connects the stamp once it's mined."
         connecting -> "The node is connecting it…"
         otherNode -> "It was bought for another node account (${p.node}), which has to be running to connect it."
+        // Ahead of an earlier failed Connect: a connect owed now supersedes it (found mined since).
+        owed && p.mined -> "Mined. The node connects it to publish with it as soon as the stamp work or upload " +
+            "it's busy with ends."
         failed != null && p.mined -> "Connecting it failed: ${failed.message}"
         failed != null -> "Connecting it failed: ${failed.message} $untracked"
         !p.mined -> "Your wallet stopped following its transaction. $untracked"
-        owed -> "Mined. The node connects it to publish with it as soon as the stamp work or upload " +
-            "it's busy with ends."
         else -> "Mined. Connect adds it to the node to publish with it" +
             (stampsBlockedReason(nodeInfo)?.let { " once it can: $it" } ?: ".")
     }

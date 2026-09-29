@@ -602,4 +602,19 @@ class SwarmFundingTest {
         assertEquals("The node is connecting it…", pendingStampText(p, light, StampClient.Spend.Running(StampClient.Kind.Connect, batch), false))
         assertFalse(pendingStampText(p, light, failed.copy(batchId = other), false).contains("failed"))
     }
+
+    @Test
+    fun `an owed connect is promised on the card over an earlier failed Connect`() {
+        val light = NodeInfo(status = NodeStatus.Running, accountAddress = node, walletIdentity = true, lightMode = true)
+        // Connect was tapped on the unmined, untracked record and failed; the call was found mined since, mid-upload.
+        val p = SwarmFunding.Pending(node, batch, 17, 2, hash, mined = true, tracked = false)
+        val failed = StampClient.Spend.Failed(StampClient.Kind.Connect, batch, "batch not found")
+        val owed = pendingStampText(p, light, failed, superseded = false, owed = true)
+        assertTrue(owed, owed.startsWith("Mined. The node connects it"))
+        assertFalse(owed, owed.contains("failed"))
+        // Not owed (it ran and failed again): the failure shows.
+        assertTrue(pendingStampText(p, light, failed, superseded = false, owed = false).startsWith("Connecting it failed"))
+        // Running still wins over owed.
+        assertEquals("The node is connecting it…", pendingStampText(p, light, StampClient.Spend.Running(StampClient.Kind.Connect, batch), false, owed = true))
+    }
 }
