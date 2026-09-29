@@ -124,6 +124,9 @@ internal fun spendStatusText(spend: StampClient.Spend): String? = when (spend) {
     } + spend.message
 }
 
+/** Why Buy and Find stamps wait: the gateway they may restart is carrying a publish. */
+internal const val PUBLISH_RUNNING_NOTE = "A publish is uploading. Buy or search for stamps once it has finished."
+
 /**
  * The postage stamps pages (#116), over the node page: the node's
  * batches, one batch's detail, buying one, extending one.
@@ -137,6 +140,10 @@ internal fun StampsScreen(nodeInfo: NodeInfo, startWithBuy: Boolean = false, onD
     val discoveryAny by StampClient.discovery.collectAsState()
     // A buy or extend can't start while a search for owned stamps runs, nor that during one.
     val canSpendNow = StampClient.canSpend(spend, discoveryAny)
+    // A buy or search may restart the gateway, so neither starts under a publish's upload.
+    val publishing by Publisher.state.collectAsState()
+    val canRestartNow = StampClient.canRestartGateway(spend, discoveryAny, publishing)
+    val publishingNote = PUBLISH_RUNNING_NOTE.takeIf { canSpendNow && !canRestartNow }
     // Only what was found for the account the node runs as now.
     val discovery = discoveryAny.forAccount(nodeInfo.accountAddress)
     val blocked = stampsBlockedReason(nodeInfo)
@@ -200,7 +207,7 @@ internal fun StampsScreen(nodeInfo: NodeInfo, startWithBuy: Boolean = false, onD
             }
             when {
                 route == "buy" -> item("buy") {
-                    BuyPage(nodeInfo, canSpendNow) { quote ->
+                    BuyPage(nodeInfo, canRestartNow, publishingNote) { quote ->
                         if (StampClient.buy(quote)) route = "list"
                     }
                 }
@@ -218,7 +225,7 @@ internal fun StampsScreen(nodeInfo: NodeInfo, startWithBuy: Boolean = false, onD
                     }
                 }
                 else -> listPage(
-                    nodeInfo, batches, canSpendNow, discovery,
+                    nodeInfo, batches, canRestartNow, publishingNote, discovery,
                     onBuy = { route = "buy" },
                     onOpen = { route = "detail:${it.id}" },
                 )
@@ -230,7 +237,8 @@ internal fun StampsScreen(nodeInfo: NodeInfo, startWithBuy: Boolean = false, onD
 private fun androidx.compose.foundation.lazy.LazyListScope.listPage(
     nodeInfo: NodeInfo,
     batches: List<PostageBatch>?,
-    canSpendNow: Boolean,
+    canBuyNow: Boolean,
+    publishingNote: String?,
     discovery: StampClient.Discovery,
     onBuy: () -> Unit,
     onOpen: (PostageBatch) -> Unit,
@@ -246,11 +254,15 @@ private fun androidx.compose.foundation.lazy.LazyListScope.listPage(
                 Spacer(Modifier.height(6.dp))
                 MutedText(cantSpend)
             }
+            if (cantSpend == null && publishingNote != null) {
+                Spacer(Modifier.height(6.dp))
+                MutedText(publishingNote)
+            }
             Spacer(Modifier.height(8.dp))
-            Button(onClick = onBuy, enabled = cantSpend == null && canSpendNow) {
+            Button(onClick = onBuy, enabled = cantSpend == null && canBuyNow) {
                 Text("Buy a stamp")
             }
-            FindOwnedStamps(nodeInfo.accountAddress, discovery, canStart = canSpendNow)
+            FindOwnedStamps(nodeInfo.accountAddress, discovery, canStart = canBuyNow)
         }
     }
     when {
@@ -340,7 +352,7 @@ private fun DetailPage(
 }
 
 @Composable
-private fun BuyPage(nodeInfo: NodeInfo, canSpendNow: Boolean, onConfirmed: (StampQuote) -> Unit) {
+private fun BuyPage(nodeInfo: NodeInfo, canBuyNow: Boolean, publishingNote: String?, onConfirmed: (StampQuote) -> Unit) {
     var depth by rememberSaveable { mutableIntStateOf(DEFAULT_STAMP_DEPTH) }
     var days by rememberSaveable { mutableLongStateOf(DEFAULT_STAMP_DAYS) }
     val quote = rememberQuote(depth, days) { JSONObject().put("depth", depth).put("days", days).let { "quote" to it } }
@@ -361,11 +373,11 @@ private fun BuyPage(nodeInfo: NodeInfo, canSpendNow: Boolean, onConfirmed: (Stam
             STAMP_BUY_DAYS.forEach { n -> ChoiceRow(selected = n == days, label = daysLabel(n)) { days = n } }
         }
         QuoteCard(quote, deposit = true)
-        cantSpend?.let { MutedText(it) }
+        (cantSpend ?: publishingNote)?.let { MutedText(it) }
         val q = (quote as? QuoteState.Ready)?.quote
         Button(
             onClick = { confirming = q },
-            enabled = cantSpend == null && q != null && q.sufficientFunds && canSpendNow,
+            enabled = cantSpend == null && q != null && q.sufficientFunds && canBuyNow,
         ) { Text("Buy") }
     }
     confirming?.let { q ->

@@ -138,6 +138,10 @@ internal fun PublishScreen(
     val history = remember(context) { PublishHistory.get(context) }
     val records by history.records.collectAsState()
     val publishing by Publisher.state.collectAsState()
+    val spend by StampClient.spend.collectAsState()
+    val discovery by StampClient.discovery.collectAsState()
+    // A stamp buy or search may restart the gateway as it ends, which would cut an upload off.
+    val stampWork = StampClient.mayRestartGateway(spend, discovery)
     val blocked = publishPageBlockedReason(nodeInfo)
 
     var refresh by remember { mutableIntStateOf(0) }
@@ -305,10 +309,12 @@ internal fun PublishScreen(
                 releaseGrant(context, p.source)
             },
             title = { Text("Publish ${p.name}?") },
-            text = { Text(confirmText(p, batch, batches.orEmpty())) },
+            text = {
+                Text(confirmText(p, batch, batches.orEmpty()) + if (stampWork) "\n\n$STAMP_WORK_RUNNING_NOTE" else "")
+            },
             confirmButton = {
                 TextButton(
-                    enabled = batch != null && !running,
+                    enabled = batch != null && !running && !stampWork,
                     onClick = {
                         plan = null
                         if (batch != null && Publisher.start(context, p, batch)) {
@@ -353,6 +359,10 @@ internal fun PublishScreen(
 }
 
 /** The confirmation's body: what goes out, with which stamp, and that it's public. */
+/** Why Publish waits: a stamp buy or search may restart the gateway the upload goes through. */
+internal const val STAMP_WORK_RUNNING_NOTE =
+    "The node is buying or searching for stamps, which can restart it. Publish once that has finished."
+
 internal fun confirmText(p: PublishPlan, batch: PostageBatch?, batches: List<PostageBatch>): String {
     val what = when (p.kind) {
         PublishKind.Folder -> "${p.files.size} ${if (p.files.size == 1) "file" else "files"}, " +

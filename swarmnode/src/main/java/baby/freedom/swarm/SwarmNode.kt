@@ -672,7 +672,7 @@ class SwarmNode internal constructor(
                     // doesn't init a second node on the same data dir.
                     stop()
                     _state.update {
-                        it.copy(status = NodeStatus.Error, errorMessage = "The gateway didn't come back after a postage purchase")
+                        it.copy(status = NodeStatus.Error, errorMessage = GATEWAY_RELOAD_FAILED)
                     }
                 }
             }
@@ -716,6 +716,13 @@ class SwarmNode internal constructor(
     }
 
     companion object {
+        /**
+         * The node's error when its gateway doesn't come back from a reload
+         * for a new chequebook — after a buy or a search for owned stamps
+         * alike, so it names neither.
+         */
+        const val GATEWAY_RELOAD_FAILED = "The gateway didn't come back after the node set up its chequebook"
+
         /**
          * Listen address handed to `ant_start_gateway`. ant defaults to
          * the same bee-conventional `127.0.0.1:1633`, but we pass it

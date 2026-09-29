@@ -843,13 +843,26 @@ class SwarmNodeTest {
     }
 
     @Test
+    fun aSearchWhoseGatewayReloadFailsSaysSoWithoutClaimingAPurchase() {
+        val ops = FakeOps()
+        ops.gatewayStartsLeft = 1 // the boot's start succeeds, the reload's fails
+        val node = lightNode(ops)
+        ops.onDiscover = { ops.settlementJson = """{"enabled":true,"chequebook":"0x${"cb".repeat(20)}"}""" }
+        node.discoverStamps()
+        assertEquals(NodeStatus.Error, node.state.value.status)
+        assertEquals(SwarmNode.GATEWAY_RELOAD_FAILED, node.state.value.errorMessage)
+        node.dispose()
+    }
+
+    @Test
     fun aGatewayThatDoesntComeBackTakesTheNodeDownIntoError() {
         val ops = FakeOps()
         ops.gatewayStartsLeft = 1 // the boot's start succeeds, the reload's fails
         val node = lightNode(ops)
         node.buyStamp(17, java.math.BigInteger.TEN, false, java.math.BigInteger.ONE)
         assertEquals(NodeStatus.Error, node.state.value.status)
-        assertEquals("The gateway didn't come back after a postage purchase", node.state.value.errorMessage)
+        assertEquals(SwarmNode.GATEWAY_RELOAD_FAILED, node.state.value.errorMessage)
+        assertFalse(SwarmNode.GATEWAY_RELOAD_FAILED.contains("purchase"))
         // The handle is shut down (once the buy let go of it), not left live.
         assertTrue(ops.shutDown.await(5, TimeUnit.SECONDS))
         assertTrue(ops.calls.contains("shutdown:1"))

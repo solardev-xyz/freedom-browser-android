@@ -291,11 +291,12 @@ internal object StampClient {
 
     /**
      * Starts a search for the stamps of [account], the node's account as
-     * the page shows it. False if one, or a spend, is already running.
+     * the page shows it. False if one, or a spend, is already running, or
+     * a publish is uploading.
      */
     fun discover(account: String): Boolean {
         synchronized(this) {
-            if (_spend.value is Spend.Running || _discovery.value is Discovery.Running) return false
+            if (!canRestartGateway(_spend.value, _discovery.value, Publisher.state.value)) return false
             _discovery.value = Discovery.Running
         }
         scope.launch {
@@ -314,6 +315,25 @@ internal object StampClient {
     fun canSpend(spend: Spend, discovery: Discovery): Boolean =
         spend !is Spend.Running && discovery !is Discovery.Running
 
+    /**
+     * Whether [spend] or [discovery] may restart the node's gateway: a buy
+     * (the first one sets up the chequebook) or a search (which can adopt
+     * one) ends with `:node` reloading it, which cuts every request open
+     * on it — a publish's `POST /bzz` too.
+     */
+    fun mayRestartGateway(spend: Spend, discovery: Discovery): Boolean =
+        (spend is Spend.Running && spend.kind == Kind.Buy) || discovery is Discovery.Running
+
+    /**
+     * Whether a buy or a search for owned stamps may start now: nothing
+     * else of the node's stamp work is running, and no publish is
+     * uploading through the gateway it may restart. [Publisher] checks
+     * the other way round, under this object's lock, so neither starts
+     * over the other.
+     */
+    fun canRestartGateway(spend: Spend, discovery: Discovery, publishing: Publisher.State): Boolean =
+        canSpend(spend, discovery) && publishing !is Publisher.State.Running
+
     enum class Kind { Buy, Extend, Deposit }
 
     sealed interface Spend {
@@ -327,7 +347,10 @@ internal object StampClient {
     val spend: StateFlow<Spend> = _spend.asStateFlow()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
-    /** Buys the batch [quote] priced, as the user just confirmed. False if a spend or a discover is already running. */
+    /**
+     * Buys the batch [quote] priced, as the user just confirmed. False if a
+     * spend or a discover is already running, or a publish is uploading.
+     */
     fun buy(quote: StampQuote): Boolean = start(Kind.Buy, null) {
         JSONObject()
             .put("depth", quote.depth)
@@ -360,6 +383,8 @@ internal object StampClient {
         val running = Spend.Running(kind, batchId)
         synchronized(this) {
             if (!canSpend(_spend.value, _discovery.value)) return false
+            // A buy may restart the gateway (the chequebook): not under a publish's upload.
+            if (kind == Kind.Buy && !canRestartGateway(_spend.value, _discovery.value, Publisher.state.value)) return false
             _spend.value = running
         }
         scope.launch {

@@ -775,18 +775,14 @@ internal object Publisher {
 
     /**
      * Publishes [plan] with [batch], as the user confirmed; false if a
-     * publish is already running. The history gets the record at once.
+     * publish is already running, or a stamp buy or search that may
+     * restart the gateway. The history gets the record at once.
      */
     fun start(context: Context, plan: PublishPlan, batch: PostageBatch): Boolean {
         val batchId = batch.id
         val app = context.applicationContext
         val history = PublishHistory.get(app)
-        val record: PublishRecord
-        synchronized(this) {
-            if (_state.value is State.Running) return false
-            record = history.start(plan.kind, plan.name, plan.bytes)
-            _state.value = State.Running(record.id, plan.name, plan.kind)
-        }
+        val record = claim(plan.name, plan.kind) { history.start(plan.kind, plan.name, plan.bytes) } ?: return false
         // Given back once staging has read the source, not held through the
         // upload; the finally covers every path that ends before that.
         val releaseSource = RunOnce { releaseGrant(app, plan.source) }
@@ -803,10 +799,31 @@ internal object Publisher {
                 releaseSource()
                 // Its record removed from the history meanwhile (Remove or
                 // Clear all): there's no outcome left to show.
-                synchronized(this@Publisher) { _state.value = finishedState(record.id, history.records.value) }
+                finish(record.id, history.records.value)
             }
         }
         return true
+    }
+
+    /**
+     * Takes the one publish slot for the record [newRecord] makes, or
+     * null if a publish is running already — or a stamp buy or search,
+     * which may restart the gateway as it ends and cut the upload off.
+     * Under [StampClient]'s lock, which checks [state] the other way
+     * round under it, so neither starts over the other.
+     */
+    internal fun claim(name: String, kind: PublishKind, newRecord: () -> PublishRecord): PublishRecord? =
+        synchronized(this) {
+            if (_state.value is State.Running) return null
+            synchronized(StampClient) {
+                if (StampClient.mayRestartGateway(StampClient.spend.value, StampClient.discovery.value)) return null
+                newRecord().also { _state.value = State.Running(it.id, name, kind) }
+            }
+        }
+
+    /** Ends the publish of [recordId], given the history's [records] now. */
+    internal fun finish(recordId: String, records: List<PublishRecord>) = synchronized(this) {
+        _state.value = finishedState(recordId, records)
     }
 
     /** Forget a finished publish once its outcome has been shown. */
