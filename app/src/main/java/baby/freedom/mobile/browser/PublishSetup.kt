@@ -310,8 +310,9 @@ internal fun PublishSetupScreen(
         }
     }
     val xdai = balance.wei
-    // What only a light node's gateway knows, while it runs.
-    val chequebook = rememberChequebookState(light)
+    // What only a light node's gateway knows, every 5 s while it runs, as
+    // before the deposit (#117): the checklist waits on the chequebook.
+    val chequebook = rememberChequebookState(light, pollMs = GATEWAY_POLL_MS)
     val usableStamps by produceState<Int?>(null, light) {
         value = null
         while (light) {

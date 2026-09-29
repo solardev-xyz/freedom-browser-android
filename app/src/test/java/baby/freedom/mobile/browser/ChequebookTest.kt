@@ -93,6 +93,18 @@ class ChequebookTest {
             "The deposit failed: the node holds only 0.001 xBZZ",
             spendStatusText(StampClient.Spend.Failed(StampClient.Kind.Deposit, null, "the node holds only 0.001 xBZZ")),
         )
+        // One that ended without a clear answer isn't called a failure: it may be out.
+        assertEquals(
+            "The deposit didn't report back: it may already have been sent (chain transaction timed out). " +
+                "Check the chequebook's balance before depositing again",
+            spendStatusText(
+                StampClient.Spend.Failed(
+                    StampClient.Kind.Deposit, null,
+                    "${baby.freedom.swarm.SwarmNode.DEPOSIT_MAYBE_SENT} (chain transaction timed out). " +
+                        "Check the chequebook's balance before depositing again",
+                ),
+            ),
+        )
         // Its outcome keeps the node page's entries reachable with the node off, as a stamp's does.
         assertTrue(stampsEntryShown(light.copy(status = NodeStatus.Stopped), StampClient.Spend.Done(StampClient.Kind.Deposit, null)))
     }

@@ -50,6 +50,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import baby.freedom.swarm.NodeInfo
 import baby.freedom.swarm.NodeStatus
+import baby.freedom.swarm.SwarmNode
 import java.text.DateFormat
 import java.util.Date
 import kotlinx.coroutines.CancellationException
@@ -100,7 +101,9 @@ internal fun spendStatusText(spend: StampClient.Spend): String? = when (spend) {
     is StampClient.Spend.Failed -> when (spend.kind) {
         StampClient.Kind.Buy -> "Buying the stamp failed: "
         StampClient.Kind.Extend -> "Extending the stamp failed: "
-        StampClient.Kind.Deposit -> "The deposit failed: "
+        // Ended without a clear answer (#117): not a failure, it may be out.
+        StampClient.Kind.Deposit ->
+            if (spend.message.startsWith(SwarmNode.DEPOSIT_MAYBE_SENT)) "The deposit didn't report back: " else "The deposit failed: "
     } + spend.message
 }
 

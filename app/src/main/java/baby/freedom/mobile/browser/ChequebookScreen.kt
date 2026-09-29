@@ -27,25 +27,31 @@ import kotlinx.coroutines.delay
 
 /**
  * The chequebook as the light node's gateway reports it (#117): its
- * address, what it holds and the account's own xBZZ, read every
- * [CHEQUEBOOK_POLL_MS] while [light], and again at once whenever
- * [refresh] changes (a spend just ended).
+ * address and what it holds, and with [withWallet] the account's own
+ * xBZZ, read every [pollMs] while [light], and again at once whenever
+ * [refresh] changes (a spend just ended). `/wallet` costs the gateway two
+ * chain reads, so only the page that offers a deposit asks for it.
  */
 @Composable
-internal fun rememberChequebookState(light: Boolean, refresh: Any = Unit): ChequebookState {
-    val state by produceState(ChequebookState(), light, refresh) {
+internal fun rememberChequebookState(
+    light: Boolean,
+    refresh: Any = Unit,
+    withWallet: Boolean = false,
+    pollMs: Long = CHEQUEBOOK_POLL_MS,
+): ChequebookState {
+    val state by produceState(ChequebookState(), light, refresh, withWallet, pollMs) {
         if (!light) value = ChequebookState()
         while (light) {
             val address = gatewayGet("/chequebook/address")?.let(::chequebookFrom)
             val balance = if (address.isNullOrEmpty()) null else gatewayGet("/chequebook/balance")?.let(::chequebookBalanceFrom)
-            val wallet = gatewayGet("/wallet", WALLET_TIMEOUT_MS)?.let(::walletBzzFrom)
+            val wallet = if (withWallet) gatewayGet("/wallet", WALLET_TIMEOUT_MS)?.let(::walletBzzFrom) else null
             // A failed read keeps what was last known.
             value = ChequebookState(
                 address = address ?: value.address,
                 balancePlur = if (address == "") null else balance ?: value.balancePlur,
                 walletPlur = wallet ?: value.walletPlur,
             )
-            delay(CHEQUEBOOK_POLL_MS)
+            delay(pollMs)
         }
     }
     return state
@@ -65,7 +71,7 @@ internal fun ChequebookScreen(nodeInfo: NodeInfo, onDismiss: () -> Unit) {
     LaunchedEffect(spend) {
         if (spend is StampClient.Spend.Done || spend is StampClient.Spend.Failed) refresh++
     }
-    val state = rememberChequebookState(light = blocked == null, refresh = refresh)
+    val state = rememberChequebookState(light = blocked == null, refresh = refresh, withWallet = true)
     var amount by rememberSaveable { mutableStateOf<String?>(null) }
     val amountPlur = amount?.let(::BigInteger)
     // What the confirmation shows, captured when it opens: that's what's sent.
