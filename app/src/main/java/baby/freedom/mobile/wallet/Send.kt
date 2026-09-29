@@ -271,12 +271,12 @@ class WalletSender internal constructor(
     private var job: Job? = null
 
     /**
-     * Prices [request] for the review; with [all], for the account's
-     * whole balance of the token (of the native currency: all of it
-     * less the most the fee can be, so the amount is [SendQuote.request]'s). Throws [SendException] with what
-     * to tell the user: not enough of the token, or of the native
-     * currency for the fee; a transfer the chain would refuse; no RPC
-     * answering.
+     * Prices [request] for the review. With [all], for the account's
+     * whole balance of the token — of the native currency, all of it
+     * less the most the fee can be — so the amount to show is
+     * [SendQuote.request]'s. Throws [SendException] with what to tell
+     * the user: not enough of the token, or of the native currency for
+     * the fee; a transfer the chain would refuse; no RPC answering.
      */
     suspend fun prepare(request: SendRequest, all: Boolean = false): SendQuote = try {
         coroutineScope {
@@ -296,7 +296,7 @@ class WalletSender internal constructor(
             if (held.signum() == 0) throw SendException("This account has no ${token.symbol}")
             if (!all && request.amount > held) {
                 throw SendException(
-                    "Not enough ${token.symbol}: this account has ${TokenAmounts.format(held, token.decimals)}",
+                    "Not enough ${token.symbol}: this account has ${SendAmounts.exact(held, token.decimals)} ${token.symbol}",
                 )
             }
             // Max: all of a token; all of the native currency is priced first, then less the fee.
@@ -320,8 +320,8 @@ class WalletSender internal constructor(
             )
             val nativeBalance = native.await()
             val symbol = request.chain.symbol
-            val fee = "${TokenAmounts.format(tx.maxFee, request.chain.decimals)} $symbol"
-            val has = "this account has ${TokenAmounts.format(nativeBalance, request.chain.decimals)} $symbol"
+            val fee = "${SendAmounts.exact(tx.maxFee, request.chain.decimals)} $symbol"
+            val has = "this account has ${SendAmounts.exact(nativeBalance, request.chain.decimals)} $symbol"
             if (all && token.isNative) {
                 val rest = nativeBalance - tx.maxFee
                 if (rest.signum() <= 0) throw SendException("Not enough $symbol to pay the network fee (up to $fee): $has")

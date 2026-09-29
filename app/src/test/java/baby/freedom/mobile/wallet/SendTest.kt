@@ -211,7 +211,7 @@ class SendTest {
     fun `not enough of the token, or of the native currency for the fee, is said plainly`() = runBlocking<Unit> {
         val chain = FakeChain()
         val s = sender(chain)
-        assertMessage("Not enough xBZZ") { s.prepare(request(xbzz, 5_001)) }
+        assertMessage("Not enough xBZZ: this account has 0.0000000000005 xBZZ") { s.prepare(request(xbzz, 5_001)) }
         chain.balance = BigInteger.valueOf(1_000)
         assertMessage("Not enough xDAI for the network fee") { s.prepare(request(xbzz, 10)) }
         assertMessage("Not enough xDAI for the amount and the network fee") { s.prepare(request(xdai, 10)) }
