@@ -1115,6 +1115,44 @@ class SendTest {
     }
 
     @Test
+    fun `a quote priced beside a send that went out since is priced again, not signed on the same nonce`() = runBlocking<Unit> {
+        val chain = FakeChain()
+        val s = sender(chain)
+        // A site's sheet is up with one quote while another (a covered call) is priced beside it.
+        val waiting = s.prepare(request())
+        val covered = s.prepare(request(amount = 2))
+        assertEquals(waiting.tx.nonce, covered.tx.nonce)
+        assertEquals(WalletSender.Submit.STARTED, s.submit(covered, signer()))
+        s.awaitStage { it == SendStatus.Stage.Pending }
+        chain.receipt = """{"status":"0x1","blockNumber":"0x10","gasUsed":"0x5208","effectiveGasPrice":"0x1"}"""
+        s.awaitStage { it is SendStatus.Stage.Confirmed }
+        // Still within the quote's minute, and nothing is busy: but its nonce is taken.
+        var signed = false
+        assertEquals(WalletSender.Submit.STALE, s.submit(waiting) { tx -> signed = true; tx.sign(key.copyOf(), from.address) })
+        assertFalse(signed)
+        assertEquals(1, chain.sent.size)
+        s.acknowledge()
+        chain.receipt = "null"
+        chain.nonce = 8
+        val again = s.prepare(request())
+        assertEquals(BigInteger.valueOf(8), again.tx.nonce)
+        assertEquals(WalletSender.Submit.STARTED, s.submit(again, signer()))
+        s.awaitStage { it == SendStatus.Stage.Pending }
+    }
+
+    @Test
+    fun `a quote whose own send failed before going out can be confirmed again`() = runBlocking<Unit> {
+        val chain = FakeChain()
+        val s = sender(chain)
+        val quote = s.prepare(request())
+        assertEquals(WalletSender.Submit.STARTED, s.submit(quote) { throw VaultLockedException() })
+        s.awaitStage { it is SendStatus.Stage.Failed }
+        assertEquals(WalletSender.Submit.STARTED, s.submit(quote, signer()))
+        s.awaitStage { it == SendStatus.Stage.Pending }
+        assertEquals(1, chain.sent.size)
+    }
+
+    @Test
     fun `what the pages show`() {
         assertEquals("0.00002101 xDAI", feeText(BigInteger.valueOf(21_000) * (gwei + BigInteger.valueOf(28)), gnosis))
         assertEquals("0 xDAI", feeText(BigInteger.ZERO, gnosis))

@@ -905,6 +905,41 @@ class EthereumProviderTest {
     }
 
     @Test
+    fun `a rule turned on with a send that didn't go out is not written`() {
+        connect()
+        answer = { EthAnswer.Approved(alwaysApprove = true) }
+        sends.outcomes += EthereumProvider.Submitted.Busy
+        assertEquals(-32603, code(call("eth_sendTransaction", tx("to" to token, "data" to transferData))))
+        sends.outcomes += EthereumProvider.Submitted.Failed("The wallet locked before the transaction was signed.", null)
+        assertEquals(-32603, code(call("eth_sendTransaction", tx("to" to token, "data" to transferData))))
+        repeat(3) { sends.outcomes += EthereumProvider.Submitted.Stale }
+        assertEquals(-32603, code(call("eth_sendTransaction", tx("to" to token, "data" to transferData))))
+        assertTrue(rules.rules.isEmpty())
+        // So the next one asks again.
+        asks.clear()
+        answer = { EthAnswer.Rejected }
+        assertEquals(4001, code(call("eth_sendTransaction", tx("to" to token, "data" to transferData))))
+        assertFalse((asks.single() as EthAsk.SendTransaction).ruled)
+    }
+
+    @Test
+    fun `after a reprice, the switch of the sheet confirmed last decides`() {
+        connect()
+        var n = 0
+        answer = { EthAnswer.Approved(alwaysApprove = n++ == 0) }
+        sends.outcomes += EthereumProvider.Submitted.Stale
+        sends.outcomes += sent(1)
+        ok(call("eth_sendTransaction", tx("to" to token, "data" to transferData)))
+        assertTrue(rules.rules.isEmpty())
+        n = 0
+        answer = { EthAnswer.Approved(alwaysApprove = n++ == 1) }
+        sends.outcomes += EthereumProvider.Submitted.Stale
+        sends.outcomes += sent(2)
+        ok(call("eth_sendTransaction", tx("to" to token, "data" to transferData)))
+        assertEquals(1, rules.rules.size)
+    }
+
+    @Test
     fun `a call a rule covers goes out without a sheet while the wallet is unlocked`() {
         grantTransferRule()
         sends.outcomes += sent(2)

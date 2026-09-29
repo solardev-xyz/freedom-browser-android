@@ -653,6 +653,8 @@ class EthereumProvider(
         // The one rule that could cover this call (#112): this site, this contract, this function, this chain.
         val rule = AutoApproveRule.eligible(origin, to, value, data, chain.id)
         var repriced = false
+        // Turned on in the last sheet confirmed; written only once its send has gone out (R2-M1).
+        var turnedOn = false
         repeat(MAX_REPRICES) {
             // Before the sheet, not after the user confirmed one that can't go.
             if (sends.busy()) return busy()
@@ -662,11 +664,17 @@ class EthereumProvider(
             if (!ruled || !wallet.unlocked() || quote.replaces != null) {
                 val answer = ask(EthAsk.SendTransaction(origin, quote, repriced, rule, ruled))
                 if (answer !is EthAnswer.Approved) return refused(answer)
-                // Turned on with the sheet's approval. A rule that couldn't be saved doesn't stop this send.
-                if (answer.alwaysApprove && rule != null && !ruled) grantRule(origin, account, rule)
+                // A repriced sheet opens with the switch off: what counts is the one confirmed last.
+                turnedOn = answer.alwaysApprove && rule != null && !ruled
             }
             when (val s = sends.submit(quote)) {
-                is Submitted.Sent -> return Reply.Ok(s.hash)
+                is Submitted.Sent -> {
+                    // Only together with the send it was confirmed with: one that was busy,
+                    // failed or ran out of reprices leaves no rule behind. A rule that couldn't
+                    // be saved doesn't undo the send.
+                    if (turnedOn && rule != null) grantRule(origin, account, rule)
+                    return Reply.Ok(s.hash)
+                }
                 Submitted.Busy -> return busy()
                 is Submitted.Failed -> return Reply.Err(INTERNAL, s.message, s.hash?.let { JSONObject().put("hash", it) })
                 // Priced too long ago to trust its fee: price it again and let the user look.
