@@ -779,9 +779,13 @@ class SwarmProvider(
     /**
      * desktop's `getMessagingIdentity`: the node's PSS key, which peers
      * encrypt to, and the first [DEFAULT_TARGET_DEPTH] bytes of its
-     * overlay, which they send toward. Never the whole overlay: it's the
-     * same for every site, so it would link them, and it pins the node's
-     * exact place in the network.
+     * overlay, which they send toward. Both are node-wide, so every site
+     * holding the messaging grant gets the same key and can link the user
+     * across those sites by it (the grant sheet says so); that's inherent
+     * to PSS, since peers must encrypt to the one key the node decrypts
+     * with. The overlay is cut to its prefix only because the full address
+     * pins the node's exact place in the network and a sender needs no
+     * more than the prefix; it isn't what keeps sites apart.
      */
     private suspend fun messagingIdentity(origin: String, calls: Calls): Reply {
         reachableOrFail()
@@ -911,11 +915,17 @@ class SwarmProvider(
         return Reply.Ok(JSONObject().put("unsubscribed", true))
     }
 
-    /** desktop's `validateMessagingTopic`: hashed before the wire, so only sanity limits. */
+    /**
+     * desktop's `validateMessagingTopic`: hashed before the wire, so only
+     * sanity limits. Like desktop it refuses only C0 controls (U+0000 to
+     * U+001F): DEL and C1 controls pass, so a topic a desktop page joins
+     * can be joined here too, and the sheet writes them out escaped
+     * ([swarmShownTopic]). The error names exactly that range.
+     */
     private fun messagingTopic(value: Any?): String {
         if (value !is String || value.isEmpty()) fail("topic must be a non-empty string", "invalid_topic")
         if (value.toByteArray(Charsets.UTF_8).size > MAX_TOPIC_BYTES) fail("topic exceeds $MAX_TOPIC_BYTES UTF-8 bytes", "invalid_topic")
-        if (value.any { it.code < 32 }) fail("topic must not contain control characters", "invalid_topic")
+        if (value.any { it.code < 32 }) fail("topic must not contain C0 control characters (U+0000 to U+001F)", "invalid_topic")
         return value
     }
 

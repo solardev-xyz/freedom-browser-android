@@ -1159,6 +1159,14 @@ class SwarmProviderTest {
         fun reason(p: JSONObject) = err(call("swarm_sendPss", p)).reason
         assertEquals("invalid_topic", reason(pssParams(topic = "")))
         assertEquals("invalid_topic", reason(pssParams(topic = "a\u0001b")))
+        assertEquals("invalid_topic", reason(pssParams(topic = "a\u001fb")))
+        assertEquals(
+            "topic must not contain C0 control characters (U+0000 to U+001F)",
+            err(call("swarm_sendPss", pssParams(topic = "a\u0000b"))).message,
+        )
+        // Desktop parity: DEL and C1 controls pass the topic check (and fail on the next field).
+        assertEquals("invalid_recipient", reason(pssParams(topic = "a\u007fb", recipient = "nope")))
+        assertEquals("invalid_recipient", reason(pssParams(topic = "a\u0085b", recipient = "nope")))
         assertEquals("invalid_topic", reason(pssParams(topic = "x".repeat(257))))
         assertEquals("invalid_recipient", reason(pssParams(recipient = "04" + "ab".repeat(32))))
         assertEquals("invalid_recipient", reason(pssParams(recipient = "02" + "ab".repeat(31))))

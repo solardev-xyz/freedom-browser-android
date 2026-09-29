@@ -117,7 +117,8 @@ private fun swarmMessagingCopy(ask: SwarmAsk.Message): SwarmPromptCopy = when {
     ask.grant -> SwarmPromptCopy(
         "Messaging access",
         "wants to send and receive real-time messages",
-        "Messaging discloses a stable identity key to this site. Sending uses your stamps; open subscriptions use " +
+        "Messaging discloses your node's identity key to this site. It's the same key every site with messaging " +
+            "access sees, so those sites can tell they're talking to the same person. Sending uses your stamps; open subscriptions use " +
             "bandwidth while the page is loaded. A subscription can also read any PSS traffic your node decrypts for " +
             "the topic it joins, not only this site's own messages.",
         "Allow",
