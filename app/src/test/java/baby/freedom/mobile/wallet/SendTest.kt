@@ -799,6 +799,14 @@ class SendTest {
         val failed = s.awaitStage { it is SendStatus.Stage.Failed }
         assertFalse(failed.mayHaveGone)
         assertTrue(chain.sent.isEmpty())
+        // The unsynced save did rename the Broadcasting send into place; the
+        // failure is written over it, so a restart (the process killed before
+        // anything else is written) doesn't offer to send what the page said
+        // was never sent.
+        assertNull(FileSendJournal(journalFile()).load()?.send)
+        val restarted = sender(chain, journal = FileSendJournal(journalFile()))
+        assertNull(restarted.status.value)
+        assertTrue(chain.sent.isEmpty())
     }
 
     @Test

@@ -560,7 +560,8 @@ class WalletSender internal constructor(
      * [s], about to go out for [quote], written to the journal (on the IO
      * pool) and then shown as Broadcasting; false if nothing may go out —
      * discarded meanwhile, or the journal couldn't be written (shown as
-     * a failure that certainly didn't go out).
+     * a failure that certainly didn't go out, and written over whatever
+     * part of the failed save did land, so a restart agrees).
      */
     private suspend fun journalBeforeBroadcast(quote: SendQuote, s: EthTransaction.Signed): Boolean = withContext(Dispatchers.IO) {
         val broadcasting = SendStatus(quote, SendStatus.Stage.Broadcasting, s.hash)
@@ -571,20 +572,27 @@ class WalletSender internal constructor(
                 snapshot(broadcasting, s)
             }
             val saved = journal.save(state)
-            synchronized(this@WalletSender) {
+            val unsaved = synchronized(this@WalletSender) {
                 // Discarded while it was written: nothing goes out (the discard's own write follows this one).
                 if (_status.value?.quote !== quote) return@withContext false
-                if (!saved) {
-                    _status.value = SendStatus(
-                        quote,
-                        SendStatus.Stage.Failed("Couldn’t save the transaction before sending it, so nothing was sent.", false),
-                    )
-                    return@withContext false
+                if (saved) {
+                    signed = s
+                    _status.value = broadcasting
+                    return@withContext true
                 }
-                signed = s
-                _status.value = broadcasting
-                true
+                val failed = SendStatus(
+                    quote,
+                    SendStatus.Stage.Failed("Couldn’t save the transaction before sending it, so nothing was sent.", false),
+                )
+                _status.value = failed
+                snapshot(failed, null)
             }
+            // A failed save may still have landed (renamed, just not known
+            // to be on flash): write over it, still under [writing], so a
+            // restart can't bring back as maybe-sent the bytes the user
+            // was just told were never sent.
+            journal.save(unsaved)
+            false
         }
     }
 
