@@ -297,7 +297,7 @@ private fun ConnectBody(
     Spacer(Modifier.height(8.dp))
     Note(
         "The site will see this account's address and can read its balances. It can ask you to sign " +
-            "messages and send transactions, and each one asks you here first. Disconnect it any time on the wallet page.",
+            "messages and send transactions, and each one asks you here first. Disconnect it any time on the wallet page or in Settings → Site permissions.",
     )
 }
 
