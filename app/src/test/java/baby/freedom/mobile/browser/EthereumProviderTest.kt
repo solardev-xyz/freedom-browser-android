@@ -283,7 +283,30 @@ class EthereumProviderTest {
             ok(call("personal_sign", JSONArray().put(shown.hex).put(main.address)))
             assertNull((asks.single() as EthAsk.SignMessage).text)
         }
-        assertEquals("Sign in\nNonce: 1 ✓ 🐄", EthereumProvider.readableUtf8("Sign in\nNonce: 1 ✓ 🐄".toByteArray()))
+        assertEquals("Sign in\nNonce: 1 ✓ 🐄", MessageSigning.readableText("Sign in\nNonce: 1 ✓ 🐄".toByteArray()))
+    }
+
+    @Test
+    fun `personal_sign text that hides or overprints what's around it shows hex, as desktop signing does`() {
+        // Each passed the page-signing check before #229; desktop signing already refused them all.
+        connect()
+        answer = { EthAnswer.Approved() }
+        for (text in listOf(
+            "line\u2028separator",
+            "smuggled a\uFE00\uFE01\uFE02\uFE03",
+            "blank \u2800 braille",
+            "hangul\u3164filler",
+            "Zalgo a" + "\u0301".repeat(8) + " spender",
+            "   ",
+        )) {
+            asks.clear()
+            ok(call("personal_sign", JSONArray().put(text).put(main.address)))
+            assertNull(text, (asks.single() as EthAsk.SignMessage).text)
+        }
+        // Real text with a few stacked marks (Vietnamese) still reads as text.
+        asks.clear()
+        ok(call("personal_sign", JSONArray().put("Xin chào, Việt Nam").put(main.address)))
+        assertEquals("Xin chào, Việt Nam", (asks.single() as EthAsk.SignMessage).text)
     }
 
     @Test
@@ -381,6 +404,44 @@ class EthereumProviderTest {
     }
 
     @Test
+    fun `the typed-data sheet writes out characters that hide or rearrange what's around them (#229)`() {
+        connect()
+        answer = { EthAnswer.Approved() }
+        ok(call("wallet_switchEthereumChain", JSONArray().put(JSONObject().put("chainId", "0x1"))))
+        asks.clear()
+        val zalgo = "Bob" + "\u0301".repeat(12)
+        val data = JSONObject(mail)
+        data.getJSONObject("domain").put("name", "Uni\u202Eswap")
+        data.getJSONObject("message").getJSONObject("to").put("name", zalgo)
+        data.getJSONObject("message").put("contents", "tag\uDB40\uDC41\uDB40\uDC42 a\uFE00\uFE01")
+        ok(call("eth_signTypedData_v4", JSONArray().put(main.address).put(data)))
+        val shown = asks.single() as EthAsk.SignTypedData
+        assertEquals("Uni\\u202Eswap", shown.domainName)
+        assertFalse(shown.messageJson, MessageSigning.anyHides(shown.messageJson.replace("\n", " ")))
+        assertTrue(shown.messageJson, shown.messageJson.contains("\\u{E0041}"))
+        // Android's org.json leaves U+2028 and bidi controls as they are when it prints: sheetJson
+        // must catch them in the printed text itself, keys included.
+        val printed = "{\n  \"to\u202E\": \"a\u2028b\",\n  \"x\": \"\u2066y\u2069\"\n}"
+        val sheet = EthereumProvider.sheetJson(printed)
+        assertEquals("{\n  \"to\\u202E\": \"a\\u2028b\",\n  \"x\": \"\\u2066y\\u2069\"\n}", sheet)
+    }
+
+    @Test
+    fun `typed data too long for the sheet to show whole is refused before any sheet (#229)`() {
+        connect()
+        answer = { EthAnswer.Approved() }
+        ok(call("wallet_switchEthereumChain", JSONArray().put(JSONObject().put("chainId", "0x1"))))
+        asks.clear()
+        // Padding before the fields that matter: the sheet would show only its start.
+        val data = JSONObject(mail)
+        data.getJSONObject("message").getJSONObject("from").put("name", "x".repeat(SHEET_MAX_CHARS))
+        val r = call("eth_signTypedData_v4", JSONArray().put(main.address).put(data))
+        assertEquals(-32602, code(r))
+        assertTrue(message(r), message(r).contains("too long"))
+        assertTrue(asks.isEmpty())
+    }
+
+    @Test
     fun `an approval sheet lays out at most the first part of a huge text, never splitting a character`() {
         assertEquals("short" to 0, sheetText("short"))
         val (shown, cut) = sheetText("a".repeat(SHEET_MAX_CHARS + 500))
@@ -417,7 +478,12 @@ class EthereumProviderTest {
         // The bound only has to catch the old minutes-long hashing; shared CI runners are several
         // times slower than a dev machine (1.4 s locally for the whole test), so keep it generous.
         var start = System.nanoTime()
-        ok(call("eth_signTypedData_v4", JSONArray().put(main.address).put(payload(2000))))
+        // Hashed in full, then refused as too long to show whole (#229): 2000 items print past the sheet's limit.
+        val long = call("eth_signTypedData_v4", JSONArray().put(main.address).put(payload(2000))) as EthereumProvider.Reply.Err
+        assertTrue("took ${(System.nanoTime() - start) / 1_000_000} ms", System.nanoTime() - start < 15_000_000_000L)
+        assertTrue(long.message, long.message.contains("too long to show"))
+        start = System.nanoTime()
+        ok(call("eth_signTypedData_v4", JSONArray().put(main.address).put(payload(500))))
         assertTrue("took ${(System.nanoTime() - start) / 1_000_000} ms", System.nanoTime() - start < 15_000_000_000L)
         asks.clear()
         start = System.nanoTime()

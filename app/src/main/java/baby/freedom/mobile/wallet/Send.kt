@@ -345,13 +345,21 @@ class NonceTracker(
         return if (local != null && local > fromChain.value) fromChain.copy(value = local) else fromChain
     }
 
-    fun markSent(address: String, chainId: Long, nonce: BigInteger) {
+    /**
+     * The send with [nonce] went out. [hash] is that transaction's own, when
+     * it's known to be in a pool rather than mined: if a Stop tracking
+     * filed that very transaction as abandoned between its broadcast and
+     * this call, the record stays — it's still the one a next send must
+     * replace, not a later send that makes it unable to land (#229).
+     */
+    fun markSent(address: String, chainId: Long, nonce: BigInteger, hash: String? = null) {
         val dropped = synchronized(sent) {
             val k = key(address, chainId)
             val next = nonce + BigInteger.ONE
             if (sent[k]?.let { it.next >= next } != true) sent[k] = Sent(next, clock())
             // Its replacement (or a later one) went out: the abandoned one can't land any more.
-            abandoned[k]?.let { nonce >= it.nonce } == true && abandoned.remove(k) != null
+            abandoned[k]?.let { nonce >= it.nonce && !it.hash.equals(hash, ignoreCase = true) } == true &&
+                abandoned.remove(k) != null
         }
         if (dropped) onAbandonedChange()
     }
@@ -1150,7 +1158,7 @@ class WalletSender internal constructor(
             fail(quote, message, uncertain)
             return
         }
-        nonces.markSent(from, chainId, quote.tx.nonce)
+        nonces.markSent(from, chainId, quote.tx.nonce, s.hash)
         settle(start)
         Log.i(TAG, "sent ${s.hash} chain=$chainId nonce=${quote.tx.nonce}")
         set(quote, SendStatus.Stage.Pending, s.hash)

@@ -9,12 +9,19 @@ import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 import kotlinx.coroutines.suspendCancellableCoroutine
 
-/** What the user is being asked to authenticate for; the prompt's wording. */
-enum class VaultAuthPurpose(val title: String, val subtitle: String) {
-    CREATE("Create your wallet", "Confirm it’s you to encrypt your new recovery phrase"),
-    IMPORT("Import your wallet", "Confirm it’s you to encrypt your recovery phrase"),
-    UNLOCK("Unlock your wallet", "Confirm it’s you to open your wallet"),
-    REVEAL("Show recovery phrase", "Confirm it’s you to see your recovery phrase"),
+/**
+ * What the user is being asked to authenticate for; the prompt's wording.
+ *
+ * [confirmationRequired]: whether a passive biometric (a face) must also be
+ * confirmed with a tap. Opening the wallet or showing the phrase must not
+ * happen just because the phone was pointed at its owner's face by someone
+ * else holding it (#229); sealing a new phrase gives nobody anything.
+ */
+enum class VaultAuthPurpose(val title: String, val subtitle: String, val confirmationRequired: Boolean) {
+    CREATE("Create your wallet", "Confirm it’s you to encrypt your new recovery phrase", false),
+    IMPORT("Import your wallet", "Confirm it’s you to encrypt your recovery phrase", false),
+    UNLOCK("Unlock your wallet", "Confirm it’s you to open your wallet", true),
+    REVEAL("Show recovery phrase", "Confirm it’s you to see your recovery phrase", true),
 }
 
 /** The user backed out of the prompt (or the system dismissed it); not an error to show. */
@@ -51,7 +58,7 @@ class BiometricVaultAuthenticator(private val context: Context) : VaultAuthentic
                 .setTitle(purpose.title)
                 .setSubtitle(purpose.subtitle)
                 .setAllowedAuthenticators(Authenticators.BIOMETRIC_STRONG or Authenticators.DEVICE_CREDENTIAL)
-                .setConfirmationRequired(false)
+                .setConfirmationRequired(purpose.confirmationRequired)
                 .build()
             prompt.authenticate(
                 BiometricPrompt.CryptoObject(cipher),

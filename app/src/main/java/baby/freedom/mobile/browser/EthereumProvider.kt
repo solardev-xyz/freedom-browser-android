@@ -621,8 +621,9 @@ class EthereumProvider(
         }
         requireSameAccount(address, account)
         val bytes = Eip712.hex(message) ?: message.toByteArray(Charsets.UTF_8)
-        // Plain text too: one with a bidi override or an invisible character is shown as hex.
-        val text = readableUtf8(bytes)
+        // Plain text too: one with a bidi override, an invisible character or a
+        // stack of combining marks is shown as hex — the same check desktop signing uses (#229).
+        val text = MessageSigning.readableText(bytes)
         val answer = ask(EthAsk.SignMessage(origin, account, text, "0x" + bytes.hexString()))
         if (answer !is EthAnswer.Approved) return refused(answer)
         return signed { wallet.signMessage(account, bytes) }
@@ -636,12 +637,15 @@ class EthereumProvider(
             try {
                 val data = Eip712.parse(params.opt(1))
                 val digest = Eip712.digest(data)
-                val shown = Eip712.signedMessage(data).let { m -> runCatching { m.toString(2) }.getOrElse { m.toString() } }
-                Triple(data, digest, shown)
+                val json = Eip712.signedMessage(data).let { m -> runCatching { m.toString(2) }.getOrElse { m.toString() } }
+                Triple(data, digest, sheetJson(json))
             } catch (e: Eip712.Invalid) {
                 throw BadParams("Invalid typed data: ${e.message}")
             }
         }
+        // Too much to show is too much to sign, as desktop signing has it: the sheet
+        // lays out only the start, and a page could pad a spender past it (#229).
+        if (shown.length > SHEET_MAX_CHARS) throw BadParams("The typed data is too long to show on the phone")
         val chain = chainFor(origin)
         // Only a chainId the domain separator covers says which chain this is for; an undeclared one isn't signed.
         val chainBound = Eip712.chainBound(data)
@@ -654,8 +658,8 @@ class EthereumProvider(
             chain = chain,
             chainBound = chainBound,
             // Only what the domain separator covers: an undeclared key isn't signed.
-            domainName = Eip712.signedDomainString(data, "name"),
-            verifyingContract = Eip712.signedDomainString(data, "verifyingContract"),
+            domainName = Eip712.signedDomainString(data, "name")?.let(Eip712::visible),
+            verifyingContract = Eip712.signedDomainString(data, "verifyingContract")?.let(Eip712::visible),
             primaryType = data.primaryType,
             // Only what the signature covers: a key the types don't declare isn't signed.
             messageJson = shown,
@@ -882,30 +886,16 @@ class EthereumProvider(
         }
 
         /**
-         * [bytes] as text if it's UTF-8 with no control characters but tab
-         * and newlines and no format characters (Unicode `Cf`: bidi
-         * overrides and isolates, zero-width spaces and joiners, the BOM),
-         * which would make the sheet show something other than, or in
-         * another order than, what's signed; else null (shown as hex).
+         * The typed-data sheet's text for [json] (the signed message, printed
+         * one field per line): every character that could hide or rearrange
+         * what's around it — a bidi override, a zero-width or tag character,
+         * a line separator, a stack of combining marks painting over the next
+         * row — in a key or a string written as a visible escape
+         * ([Eip712.visible]), line by line. Android's `org.json` escapes only
+         * U+0000–U+001F when printing, so the page's strings would otherwise
+         * reach the sheet as they are (#229).
          */
-        internal fun readableUtf8(bytes: ByteArray): String? {
-            val decoder = Charsets.UTF_8.newDecoder()
-                .onMalformedInput(java.nio.charset.CodingErrorAction.REPORT)
-                .onUnmappableCharacter(java.nio.charset.CodingErrorAction.REPORT)
-            val s = try {
-                decoder.decode(java.nio.ByteBuffer.wrap(bytes)).toString()
-            } catch (e: java.nio.charset.CharacterCodingException) {
-                return null
-            }
-            var i = 0
-            while (i < s.length) {
-                val cp = s.codePointAt(i)
-                val control = Character.isISOControl(cp) && cp != '\n'.code && cp != '\t'.code && cp != '\r'.code
-                if (control || Character.getType(cp) == Character.FORMAT.toInt()) return null
-                i += Character.charCount(cp)
-            }
-            return s
-        }
+        internal fun sheetJson(json: String): String = json.lines().joinToString("\n") { Eip712.visible(it) }
 
         private fun ByteArray.hexString(): String = hexOf(this)
     }

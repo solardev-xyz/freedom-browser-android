@@ -106,7 +106,7 @@ class SendTest {
                 chains = { listOf<Chain>(gnosis) },
                 transport = RpcTransport { _, body, _ ->
                     if (down) throw IOException("down")
-                    """{"jsonrpc":"2.0","id":1,${answer(JSONObject(body))}}"""
+                    withReceiptHash(JSONObject(body), """{"jsonrpc":"2.0","id":1,${answer(JSONObject(body))}}""")
                 },
             ),
         )
@@ -206,6 +206,25 @@ class SendTest {
         chain.nonce = 7
         tracker.forget(from.address, 100)
         assertEquals(BigInteger.valueOf(7), tracker.next(from.address, 100).value)
+    }
+
+    @Test
+    fun `a send abandoned between its broadcast and its markSent stays abandoned (#229)`() = runBlocking<Unit> {
+        val chain = FakeChain()
+        val tracker = NonceTracker(chain.rpc())
+        val fees = EthTransaction.Fees.Legacy(BigInteger.TEN)
+        val hash = "0x" + "ab".repeat(32)
+        // Stop tracking lands after the node took it, before the sender marks it sent.
+        tracker.abandon(from.address, 100, BigInteger.valueOf(7), fees, hash)
+        tracker.markSent(from.address, 100, BigInteger.valueOf(7), hash.uppercase().replace("0X", "0x"))
+        assertEquals(hash, tracker.replacing(from.address, 100, BigInteger.valueOf(7))?.hash)
+        // Still waiting in a pool: the next send takes its place rather than going out beside it.
+        chain.nonce = 8
+        chain.mined = 7
+        assertEquals(BigInteger.valueOf(7), tracker.next(from.address, 100).value)
+        // Its replacement going out (another hash) is what drops it.
+        tracker.markSent(from.address, 100, BigInteger.valueOf(7), "0x" + "cd".repeat(32))
+        assertNull(tracker.replacing(from.address, 100, BigInteger.valueOf(7)))
     }
 
     @Test
@@ -1411,4 +1430,13 @@ internal object ChainTrustsForTest {
         baby.freedom.mobile.chains.rpc.ChainSource.DIRECT,
         listOf("a.example"), emptyList(), listOf("a.example"), 1, 1, null,
     )
+}
+
+/** A receipt answer names its own transaction, as a node's does (#229): the fakes' receipts leave it out. */
+internal fun withReceiptHash(req: JSONObject, reply: String): String {
+    if (req.getString("method") != "eth_getTransactionReceipt") return reply
+    val o = JSONObject(reply)
+    val r = o.opt("result") as? JSONObject ?: return reply
+    if (!r.has("transactionHash")) r.put("transactionHash", req.getJSONArray("params").getString(0))
+    return o.toString()
 }
