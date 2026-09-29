@@ -2297,6 +2297,9 @@ private fun buildRefreshableWebView(
             // load (#185 R2-F1).
             state.restoreLoadSuperseded()
             if (url != null && userNamed) userNamedChain.started(url) else userNamedChain.ended()
+            // …nor is what answers it a paid request's answer, or a 402
+            // noted before it (#218 R2-M2, R2-M3).
+            X402Payments.onNavigationSuperseded(state)
         }
         // Stop (or a new load's stop first) ends the navigation in flight
         // without a commit: neither its gesture nor the user's naming of
@@ -2309,6 +2312,8 @@ private fun buildRefreshableWebView(
             // (#185 R2-F1).
             state.restoreLoadSuperseded()
             userNamedChain.ended()
+            // A 402 whose page never commits isn't paid for later (#218 R2-M2).
+            X402Payments.onNavigationSuperseded(state)
         }
 
         // Whether this WebView has started a document yet. A popup
@@ -2360,6 +2365,8 @@ private fun buildRefreshableWebView(
                 // load's, whatever the answer's headers suggested.
                 state.mainFrameKeptPage()
                 adblockPage.kept()
+                // A 402 that became a file never commits (#218 R2-M2).
+                X402Payments.onNavigationSuperseded(state)
             }
             // A main-frame navigation that turned out to be a file never
             // commits: no onPageStarted, no final progress callback. Left
@@ -2709,6 +2716,8 @@ private fun buildRefreshableWebView(
                 // end (a 204, a cancelled hop), has no more hops (R2-F1).
                 userNamedChain.loadFinished(url, committedPageUrl)
                 (view as? PageWebView)?.usersNavigation?.loadFinished(url, committedPageUrl)
+                // A 402 whose load ended without committing (#218 R2-M2).
+                X402Payments.onLoadFinished(state, url)
                 // Re-probe: a page's own stylesheet (or its first
                 // script) can be what sets `touch-action: none`, and
                 // that is not necessarily in place at first paint (#56).
@@ -3140,6 +3149,13 @@ private fun buildRefreshableWebView(
                 // A hop of the user's named load the WebView now follows:
                 // its answer is the next one that may be an app link.
                 if (request.isForMainFrame && request.isRedirect) userNamedChain.redirected(target)
+                // x402 (#140): a paid request's redirect hop may be where
+                // its answer comes from; the page's own navigation is not
+                // its answer, nor a 402's commit (#218 R2).
+                if (request.isForMainFrame) {
+                    if (request.isRedirect) X402Payments.onRedirect(state, target)
+                    else X402Payments.onNavigationSuperseded(state)
+                }
                 return false
             }
 

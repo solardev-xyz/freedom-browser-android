@@ -92,9 +92,10 @@ data class X402Grant(val cap: BigInteger, val windowMs: Long)
  * Never in a private tab, and never automatically while the wallet is
  * locked: an allowance only pays when the wallet is open already; a
  * locked wallet gets the sheet, which asks for the screen lock. A paid
- * request the site answers with another 402 is not paid again (desktop's
- * loop guard): the history says it was refused, and the user can reload
- * to be asked. A rejected sheet pauses the tab's sheets (the provider's
+ * request the site answers with another 402 — at its URL or one it was
+ * redirected to — is not paid again (desktop's loop guard): the history
+ * says it was refused, and the user can reload to be asked. Which
+ * navigation a 402 or an answer belongs to is [X402Flow]'s. A rejected sheet pauses the tab's sheets (the provider's
  * anti-loop rule) until the user navigates the tab themselves — an
  * address, Reload or pull-to-refresh — so reloading the page asks again.
  *
@@ -111,11 +112,8 @@ object X402Payments {
     /** A 402 with terms, waiting for its page to commit on [tab]. */
     private class Detection(val url: String, val origin: String, val required: X402.Required)
 
-    /** A paid request in flight on a tab: [recordId] in the history, for [url]. */
-    private class Retry(val url: String, val recordId: String)
-
-    private val detections = HashMap<Long, Detection>()
-    private val retries = HashMap<Long, Retry>()
+    /** Which navigation a 402 or a paid request's answer is (#218 R2). */
+    private val flow = X402Flow<Detection> { id, status, httpStatus -> settle(id, status, httpStatus) }
     private val random = SecureRandom()
 
     fun init(context: Context) {
@@ -129,19 +127,16 @@ object X402Payments {
     /**
      * `onReceivedHttpError` for a main-frame request on [tab]: a 402 with
      * terms is noted for when its page commits; the answer to a paid
-     * request settles its payment as refused.
+     * request (at its URL, or one it was redirected to) settles its
+     * payment as refused, and isn't paid again.
      */
     fun onHttpError(tab: BrowserState, request: WebResourceRequest, response: WebResourceResponse?) {
         if (tab.private || !request.isForMainFrame) return
         val url = request.url?.toString() ?: return
         val status = response?.statusCode ?: return
-        val retry = retries[tab.id]
-        if (retry != null && retry.url == url) {
-            retries.remove(tab.id)
-            Log.i(TAG, "paid request answered HTTP $status")
-            settle(retry.recordId, X402Store.Status.REFUSED, status)
+        if (flow.httpError(tab.id, url, request.method, status)) {
             // Not paid again: the loop guard.
-            detections.remove(tab.id)
+            Log.i(TAG, "paid request answered HTTP $status")
             return
         }
         if (status != 402) return
@@ -151,15 +146,26 @@ object X402Payments {
         if (!url.startsWith("https://") && !url.startsWith("http://")) return
         val required = X402.requiredFrom(response.responseHeaders) ?: return
         Log.i(TAG, "402 with x402 v${required.version} terms: ${required.offers.size} payable offer(s)")
-        detections[tab.id] = Detection(url, origin, required)
+        flow.detected(tab.id, url, Detection(url, origin, required))
     }
+
+    /** A main-frame server redirect on [tab] to [target]: a paid request's answer may be its. */
+    fun onRedirect(tab: BrowserState, target: String) = flow.redirected(tab.id, target)
+
+    /**
+     * [tab] began a navigation of its own (the browser's load, the page's
+     * link or script) or ended one without a commit (Stop, a download):
+     * a 402 noted earlier won't commit, and a paid request in flight
+     * won't be answered — whatever answers next is judged on its own.
+     */
+    fun onNavigationSuperseded(tab: BrowserState) = flow.superseded(tab.id)
+
+    /** `onPageFinished` for [url] on [tab]. */
+    fun onLoadFinished(tab: BrowserState, url: String?) = flow.loadFinished(tab.id, url)
 
     /** `onReceivedError` for [tab]'s main frame: a paid request got no answer. */
     fun onMainFrameFailed(tab: BrowserState, url: String?) {
-        val retry = retries[tab.id] ?: return
-        if (url != null && url != retry.url) return
-        retries.remove(tab.id)
-        settle(retry.recordId, X402Store.Status.UNCONFIRMED)
+        flow.failed(tab.id, url)
     }
 
     /**
@@ -168,12 +174,8 @@ object X402Payments {
      * document number is the new page's.
      */
     fun onDocumentStarted(tab: BrowserState, view: WebView?, url: String?) {
-        retries.remove(tab.id)?.let { retry ->
-            val status = if (url == retry.url) X402Store.Status.PAID else X402Store.Status.UNCONFIRMED
-            settle(retry.recordId, status)
-        }
-        val detection = detections.remove(tab.id) ?: return
-        if (url == null || url != detection.url || view == null || tab.private) return
+        val detection = flow.committed(tab.id, url) ?: return
+        if (url == null || view == null || tab.private) return
         val doc = EthereumProviders.currentDocument(tab.id)
         val webView = WeakReference(view)
         scope.launch {
@@ -188,8 +190,7 @@ object X402Payments {
     }
 
     fun onTabClosed(tabId: Long) {
-        detections.remove(tabId)
-        retries.remove(tabId)?.let { settle(it.recordId, X402Store.Status.UNCONFIRMED) }
+        flow.closed(tabId)
     }
 
     private fun settle(id: String, status: X402Store.Status, httpStatus: Int? = null) {
@@ -325,8 +326,10 @@ object X402Payments {
         }
         // No suspension from the check above to here: the request goes out on the page it was for.
         vault.noteActivity()
-        retries[tab.id] = Retry(d.url, payment.id)
+        // The load first: it's a browser load, which ends any earlier
+        // navigation's bookkeeping ([onNavigationSuperseded]) — not this one's.
         view.loadUrl(d.url, mapOf(header to value))
+        flow.paid(tab.id, d.url, payment.id)
         return Paid.SENT
     }
 
