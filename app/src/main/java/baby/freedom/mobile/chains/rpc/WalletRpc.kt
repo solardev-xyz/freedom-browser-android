@@ -50,6 +50,21 @@ class WalletRpc(private val router: ChainDataRouter) {
             if (fee == null || fee == JSONObject.NULL) null else quantity(fee)
         }
 
+    /**
+     * The base fee block [block] paid, from `eth_feeHistory` — a small
+     * answer that RPCs a block apart, and on different clients, still
+     * give the same way for one pinned block, where a whole block
+     * object rarely matches byte for byte (#233). Null on a chain
+     * without EIP-1559.
+     */
+    suspend fun baseFeeAt(chainId: Long, block: Long): Reading<BigInteger?> =
+        read(chainId, "eth_feeHistory", JSONArray().put("0x1").put("0x" + block.toString(16)).put(JSONArray())) {
+            val history = it as? JSONObject ?: throw invalid("eth_feeHistory", it)
+            val fees = history.optJSONArray("baseFeePerGas") ?: throw invalid("eth_feeHistory", it)
+            val fee = fees.opt(0)
+            if (fee == null || fee == JSONObject.NULL) null else quantity(fee).takeIf { f -> f.signum() > 0 }
+        }
+
     /** Gas for the call object [tx] (`from`, `to`, `value`, `data`, …). */
     suspend fun estimateGas(chainId: Long, tx: JSONObject): Reading<BigInteger> =
         read(chainId, "eth_estimateGas", JSONArray().put(tx), ::quantity)

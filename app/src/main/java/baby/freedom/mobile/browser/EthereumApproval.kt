@@ -209,7 +209,13 @@ fun EthereumApprovalSheet(request: EthereumPromptRequest) {
                     )
                     is EthAsk.SignMessage -> SignMessageBody(ask)
                     is EthAsk.SignTypedData -> SignTypedDataBody(ask)
-                    is EthAsk.SendTransaction -> SendBody(ask, always, enabled = armed && !busy, onAlways = { always = it })
+                    is EthAsk.SendTransaction -> SendBody(
+                        ask,
+                        always,
+                        enabled = armed && !busy,
+                        locked = vaultState is Vault.State.Locked,
+                        onAlways = { always = it },
+                    )
                     is EthAsk.SwitchChain -> SwitchBody(ask)
                     is EthAsk.AddChain -> AddChainBody(ask)
                     is EthAsk.Payment -> X402PaymentBody(
@@ -374,7 +380,7 @@ private fun SignTypedDataBody(ask: EthAsk.SignTypedData) {
 }
 
 @Composable
-private fun SendBody(ask: EthAsk.SendTransaction, always: Boolean, enabled: Boolean, onAlways: (Boolean) -> Unit) {
+private fun SendBody(ask: EthAsk.SendTransaction, always: Boolean, enabled: Boolean, locked: Boolean, onAlways: (Boolean) -> Unit) {
     val quote = ask.quote
     val request = quote.request
     val chain = request.chain
@@ -411,7 +417,7 @@ private fun SendBody(ask: EthAsk.SendTransaction, always: Boolean, enabled: Bool
     ask.autoApprove?.let { rule ->
         Spacer(Modifier.height(8.dp))
         if (ask.ruled) {
-            Note(autoApproveRuledNote(quote.replaces != null, highFee = !GasOracle.quiet(quote.tx.fees, chain.id)))
+            Note(autoApproveRuledNote(quote.replaces != null, highFee = !GasOracle.quiet(quote.tx.fees, chain.id), locked = locked))
         } else {
             AutoApproveSwitch(rule, chain.name, always, enabled, onAlways)
         }
@@ -457,10 +463,16 @@ private fun AutoApproveSwitch(rule: AutoApproveRule, chain: String, checked: Boo
     }
 }
 
-/** Why a send a rule covers still has a sheet. */
-internal fun autoApproveRuledNote(replaces: Boolean, highFee: Boolean = false): String =
+/**
+ * Why a send a rule covers still has a sheet. A high fee and a locked
+ * wallet are both named when both hold, so the unlock prompt on confirm
+ * isn't a surprise (R1-M1).
+ */
+internal fun autoApproveRuledNote(replaces: Boolean, highFee: Boolean = false, locked: Boolean = !highFee): String =
     "An auto-approve rule you turned on covers this call. " + when {
         replaces -> "It's asked here because it takes the place of a send you stopped tracking."
+        highFee && locked -> "It's asked here because its network fee is higher than a rule sends without asking, " +
+            "and because the wallet is locked; it goes out once you confirm."
         highFee -> "It's asked here because its network fee is higher than a rule sends without asking."
         else -> "It's asked here because the wallet is locked; it goes out once you confirm."
     }

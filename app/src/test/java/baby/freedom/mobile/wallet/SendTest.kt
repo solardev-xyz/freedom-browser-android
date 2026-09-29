@@ -10,6 +10,8 @@ import baby.freedom.mobile.chains.BuiltInChains
 import baby.freedom.mobile.chains.Chain
 import baby.freedom.mobile.chains.rpc.ChainDataRouter
 import baby.freedom.mobile.chains.rpc.ChainRpcException
+import baby.freedom.mobile.chains.rpc.ChainSource
+import baby.freedom.mobile.chains.rpc.ChainTrust
 import baby.freedom.mobile.chains.rpc.RpcTransport
 import baby.freedom.mobile.chains.rpc.WalletRpc
 import baby.freedom.mobile.ens.hexToBytes
@@ -72,6 +74,7 @@ class SendTest {
         var down = false
         val sent = mutableListOf<String>()
         val methods = mutableListOf<String>()
+        val requests = mutableListOf<JSONObject>()
         val on = HashMap<String, (JSONObject) -> String>()
 
         /** One RPC's own answer to a method (by URL), over [on]: an RPC the others disagree with. */
@@ -79,7 +82,7 @@ class SendTest {
 
         fun answer(req: JSONObject, url: String = ""): String {
             val method = req.getString("method")
-            synchronized(methods) { methods += method }
+            synchronized(methods) { methods += method; requests += req }
             onUrl[method]?.invoke(url)?.let { return it }
             on[method]?.let { return it(req) }
             fun q(v: BigInteger) = "\"result\":\"0x${v.toString(16)}\""
@@ -94,6 +97,11 @@ class SendTest {
                     baseFee?.let { put("baseFeePerGas", "0x" + it.toString(16)) }
                 }
                 "eth_maxPriorityFeePerGas" -> q(tip)
+                "eth_blockNumber" -> q(BigInteger.valueOf(0x10))
+                "eth_feeHistory" -> "\"result\":" + JSONObject()
+                    .put("oldestBlock", req.getJSONArray("params").getString(1))
+                    .put("baseFeePerGas", org.json.JSONArray().put("0x" + (baseFee ?: BigInteger.ZERO).toString(16)).put("0x1"))
+                    .put("gasUsedRatio", org.json.JSONArray().put(0.5))
                 "eth_gasPrice" -> q(BigInteger.valueOf(3) * gwei)
                 "eth_estimateGas" -> q(BigInteger.valueOf(estimate))
                 "eth_sendRawTransaction" -> {
@@ -180,7 +188,7 @@ class SendTest {
         assertEquals(BigInteger.valueOf(42) * gwei, high.maxFeePerGas)
         assertEquals(gwei, GasOracle.eip1559(BigInteger.TEN, null, 100).maxPriorityFeePerGas)
         try {
-            GasOracle.legacy(BigInteger.ZERO, 100, verified = true)
+            GasOracle.legacy(BigInteger.ZERO)
             fail("a zero gas price must be refused")
         } catch (_: SendException) {
         }
@@ -204,51 +212,84 @@ class SendTest {
     }
 
     @Test
-    fun `a tip above the cap goes only as high as a verified base fee, never one RPC's word for it (#233)`() = runBlocking {
+    fun `a tip above the cap goes only as high as a trusted base fee, never one RPC's word for it (#233)`() = runBlocking {
         val base = BigInteger.valueOf(80) * gwei
         val chain = FakeChain().apply { baseFee = base; tip = BigInteger.valueOf(60) * gwei }
-        // Every RPC reports the 80 gwei base fee: a congested chain, where a 60 gwei tip is real.
+        // Every RPC reports the 80 gwei base fee for the pinned block: a congested chain, where a 60 gwei tip is real.
         val verified = sender(chain).prepare(request()).tx.fees as EthTransaction.Fees.Eip1559
         assertEquals(BigInteger.valueOf(60) * gwei, verified.maxPriorityFeePerGas)
         // Above what one RPC's word may set: an auto-approve rule doesn't send it silently.
         assertFalse(GasOracle.quiet(verified, gnosis.id))
-        // Only the first RPC says so (the others: 14 and 15 wei, so no two agree), and as the first
-        // it's the answer used: the cap holds.
+        // The base fee is agreed on for a block pinned two behind the head, from eth_feeHistory (R1-M3):
+        // RPCs a block apart still give the same answer there, where `latest` blocks rarely match.
+        val pinned = chain.requests.last { it.getString("method") == "eth_feeHistory" }.getJSONArray("params")
+        assertEquals("0xe", pinned.getString(1))
+        // The latest block can disagree across RPCs without costing the tip its trusted ceiling.
         chain.onUrl["eth_getBlockByNumber"] = { url ->
-            val fee = listOf(base, BigInteger.valueOf(14), BigInteger.valueOf(15))[gnosis.rpcUrls.indexOf(url)]
+            val fee = listOf(base, base + BigInteger.ONE, base + BigInteger.TWO)[gnosis.rpcUrls.indexOf(url)]
             "\"result\":" + JSONObject().put("number", "0x10").put("baseFeePerGas", "0x" + fee.toString(16))
+        }
+        assertEquals(BigInteger.valueOf(60) * gwei, (sender(chain).prepare(request()).tx.fees as EthTransaction.Fees.Eip1559).maxPriorityFeePerGas)
+        // Only the first RPC reports the high base fee (the others: 14 and 15 wei, so no two agree), and
+        // as the first it's the answer used: the cap holds.
+        chain.onUrl["eth_feeHistory"] = { url ->
+            val fee = listOf(base, BigInteger.valueOf(14), BigInteger.valueOf(15))[gnosis.rpcUrls.indexOf(url)]
+            "\"result\":" + JSONObject().put("oldestBlock", "0xe")
+                .put("baseFeePerGas", org.json.JSONArray().put("0x" + fee.toString(16)).put("0x1"))
+                .put("gasUsedRatio", org.json.JSONArray().put(0.5))
         }
         val unverified = sender(chain).prepare(request()).tx.fees as EthTransaction.Fees.Eip1559
         assertEquals(BigInteger.valueOf(5) * gwei, unverified.maxPriorityFeePerGas)
         assertEquals(BigInteger.valueOf(165) * gwei, unverified.maxFeePerGas)
+        // An RPC without eth_feeHistory: no trusted base fee, so the cap holds too.
+        chain.onUrl.remove("eth_feeHistory")
+        chain.on["eth_feeHistory"] = { "\"error\":{\"code\":-32601,\"message\":\"no such method\"}" }
+        assertEquals(BigInteger.valueOf(5) * gwei, (sender(chain).prepare(request()).tx.fees as EthTransaction.Fees.Eip1559).maxPriorityFeePerGas)
+        // The user's own RPC's word is trusted, as everywhere else in the app.
+        assertEquals(BigInteger.valueOf(60) * gwei, GasOracle.eip1559(base, BigInteger.valueOf(60) * gwei, gnosis.id, trustedBaseFee = base).maxPriorityFeePerGas)
+        assertTrue(GasOracle.trusted(ChainTrust(ChainTrust.Level.USER_CONFIGURED, ChainSource.DIRECT, listOf("a"), emptyList(), listOf("a"), 1, 1, null)))
+        assertFalse(GasOracle.trusted(ChainTrust(ChainTrust.Level.UNVERIFIED, ChainSource.DIRECT, listOf("a"), emptyList(), listOf("a"), 1, 1, null)))
     }
 
     @Test
-    fun `an RPC's inflated legacy gas price is refused unless verified (#233)`() = runBlocking {
+    fun `the usual tip needs no extra read (#233)`() = runBlocking {
+        val chain = FakeChain().apply { tip = BigInteger.valueOf(2) * gwei }
+        sender(chain).prepare(request())
+        assertFalse(chain.methods.contains("eth_feeHistory"))
+    }
+
+    @Test
+    fun `a high legacy gas price is priced, never refused, and never sent silently (#233 R1-F1)`() = runBlocking {
         val chain = FakeChain().apply { baseFee = null }
         // The usual price goes through.
         assertEquals(EthTransaction.Fees.Legacy(BigInteger.valueOf(3) * gwei), sender(chain).prepare(request()).tx.fees)
-        // One RPC asks for 5000 gwei and the others don't agree: nothing is priced at it.
-        // (The other two disagree with each other too, so no two agree and the first RPC's answer is the one used.)
+        // A chain priced high on its own RPC's word (IoTeX's fixed 1000 gwei, Theta's 4000): a manual
+        // send isn't a dead end — its review shows the price and says it's unusually high.
         chain.onUrl["eth_gasPrice"] = { url ->
-            q(BigInteger.valueOf(listOf(5_000L, 4L, 3L)[gnosis.rpcUrls.indexOf(url)]) * gwei)
+            q(BigInteger.valueOf(listOf(4_000L, 1_000L, 3L)[gnosis.rpcUrls.indexOf(url)]) * gwei)
         }
-        val e = assertThrows(SendException::class.java) { runBlocking { sender(chain).prepare(request()) } }
-        assertTrue(e.message!!, e.message!!.contains("unusually high gas price"))
-        // Every RPC agreeing is a real price: priced, but never sent without a sheet.
-        chain.onUrl.clear()
-        chain.on["eth_gasPrice"] = { q(BigInteger.valueOf(5_000) * gwei) }
-        val fees = sender(chain).prepare(request()).tx.fees
-        assertEquals(EthTransaction.Fees.Legacy(BigInteger.valueOf(5_000) * gwei), fees)
-        assertFalse(GasOracle.quiet(fees, gnosis.id))
+        val quote = sender(chain).prepare(request())
+        assertEquals(EthTransaction.Fees.Legacy(BigInteger.valueOf(4_000) * gwei), quote.tx.fees)
+        // …but never out under an auto-approve rule without a sheet.
+        assertFalse(GasOracle.quiet(quote.tx.fees, gnosis.id))
+        assertTrue(feeFootnote(quote.tx).startsWith("This network fee is unusually high"))
         assertTrue(GasOracle.quiet(EthTransaction.Fees.Legacy(BigInteger.valueOf(3) * gwei), gnosis.id))
+        assertTrue(GasOracle.quiet(EthTransaction.Fees.Legacy(BigInteger.valueOf(500) * gwei), 4689))
+        assertFalse(GasOracle.quiet(EthTransaction.Fees.Legacy(BigInteger.valueOf(1_000) * gwei), 4689))
     }
 
     @Test
-    fun `the review's footnote says the tip, or a legacy price, is paid in full (#233)`() {
+    fun `the review's footnote says what of the fee is paid (#233)`() {
         fun tx(fees: EthTransaction.Fees) = EthTransaction(100, BigInteger.ZERO, BigInteger.valueOf(21_000), to, BigInteger.ONE, ByteArray(0), fees)
-        assertTrue(feeFootnote(tx(GasOracle.eip1559(BigInteger.TEN, gwei, 100))).contains("The tip is paid in full"))
+        // The tip is paid less when the base fee rises into the headroom (R1-M2): not "in full".
+        val eip1559 = feeFootnote(tx(GasOracle.eip1559(BigInteger.TEN, gwei, 100)))
+        assertTrue(eip1559, eip1559.contains("less only if the base fee rises into that room"))
+        assertFalse(eip1559.contains("in full"))
+        assertFalse(eip1559.contains("unusually high"))
         assertTrue(feeFootnote(tx(EthTransaction.Fees.Legacy(gwei))).contains("paid at the price above in full"))
+        // A tip past the cap (a trusted high base fee let it through) is called out too.
+        val high = feeFootnote(tx(EthTransaction.Fees.Eip1559(BigInteger.valueOf(200) * gwei, BigInteger.valueOf(60) * gwei)))
+        assertTrue(high.startsWith("This network fee is unusually high"))
     }
 
     @Test
