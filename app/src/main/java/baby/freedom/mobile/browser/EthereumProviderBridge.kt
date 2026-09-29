@@ -308,7 +308,11 @@ object EthereumProviders {
         val lock = promptLocks.getOrPut(tab.id) { Mutex() }
         return lock.withLock {
             if (!live()) return@withLock EthAnswer.Rejected
-            val reason = "${permissionOriginDisplay(ask.origin)} wants to connect to your wallet"
+            val reason = if (ask is EthAsk.Payment) {
+                "${permissionOriginDisplay(ask.origin)} asks to be paid"
+            } else {
+                "${permissionOriginDisplay(ask.origin)} wants to connect to your wallet"
+            }
             val request = EthereumPromptRequest(ask) { setUpWallet(reason) }
             pending.getOrPut(tab.id) { mutableSetOf() }.add(request)
             tab.ethereumPrompt = request
@@ -322,6 +326,17 @@ object EthereumProviders {
             if (live()) answer else EthAnswer.Rejected
         }
     }
+
+    /** Which of [tabId]'s documents is its current one (bumped by [onDocumentStarted]). */
+    internal fun currentDocument(tabId: Long): Int = documents[tabId] ?: 0
+
+    /**
+     * Put [ask] up on [tab] for its document [doc] (from [currentDocument])
+     * and wait for the answer, in turn with the provider's own sheets:
+     * the x402 payment sheet (#140). Rejected at once if [doc] isn't the
+     * tab's any more or the tab's sheets are paused.
+     */
+    internal suspend fun askOnDocument(tab: BrowserState, doc: Int, ask: EthAsk): EthAnswer = askOnTab(tab, doc, ask)
 
     /** The tab started (committed) a new document on [url] — null when it's being torn down: what the old one asked is rejected. */
     fun onDocumentStarted(tab: BrowserState, url: String?) {

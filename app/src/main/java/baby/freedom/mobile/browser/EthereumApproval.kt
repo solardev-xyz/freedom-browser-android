@@ -25,6 +25,7 @@ import androidx.compose.material.icons.filled.AccountBalanceWallet
 import androidx.compose.material.icons.filled.Draw
 import androidx.compose.material.icons.filled.Hub
 import androidx.compose.material.icons.filled.Link
+import androidx.compose.material.icons.filled.Payments
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -75,6 +76,7 @@ internal fun ethApprovalCopy(ask: EthAsk): EthApprovalCopy = when (ask) {
     is EthAsk.SendTransaction -> EthApprovalCopy("Send transaction", "wants to send a transaction", "Confirm and send")
     is EthAsk.SwitchChain -> EthApprovalCopy("Switch network", "wants to switch networks", "Switch")
     is EthAsk.AddChain -> EthApprovalCopy("Add network", "wants to add a network and switch to it", "Add and switch")
+    is EthAsk.Payment -> EthApprovalCopy("Pay for this page", "asks to be paid to show this page", "Pay")
 }
 
 /**
@@ -109,6 +111,7 @@ fun EthereumApprovalSheet(request: EthereumPromptRequest) {
     var busy by remember(request) { mutableStateOf(false) }
     var error by remember(request) { mutableStateOf<String?>(null) }
     var picked by remember(request) { mutableStateOf<String?>(null) }
+    val payment = remember(request) { (ask as? EthAsk.Payment)?.let { X402SheetState(it.payment) } }
     val scope = rememberCoroutineScope()
     val sheetState = rememberModalBottomSheetState(
         skipPartiallyExpanded = true,
@@ -125,9 +128,11 @@ fun EthereumApprovalSheet(request: EthereumPromptRequest) {
     val connectAccount = accounts?.let { list ->
         list.firstOrNull { it.address == picked } ?: accountList?.active
     }
-    val needsUnlock = ask is EthAsk.SignMessage || ask is EthAsk.SignTypedData || ask is EthAsk.SendTransaction
+    val needsUnlock = ask is EthAsk.SignMessage || ask is EthAsk.SignTypedData || ask is EthAsk.SendTransaction ||
+        ask is EthAsk.Payment
     val canApprove = when (ask) {
         is EthAsk.Connect -> connectAccount != null
+        is EthAsk.Payment -> accountList?.active != null && payment?.choice() != null
         else -> true
     }
 
@@ -137,12 +142,15 @@ fun EthereumApprovalSheet(request: EthereumPromptRequest) {
             request.respond(EthAnswer.Approved(if (ask is EthAsk.Connect) connectAccount else null))
             return
         }
+        // Fixed now: what the user saw when they tapped is what's paid.
+        val choice = payment?.choice()
+        if (ask is EthAsk.Payment && choice == null) return
         busy = true
         error = null
         scope.launch {
             try {
                 if (!vault.unlockedNow()) vault.unlock(BiometricVaultAuthenticator(context))
-                request.respond(EthAnswer.Approved())
+                request.respond(EthAnswer.Approved(payment = choice))
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Throwable) {
@@ -192,6 +200,14 @@ fun EthereumApprovalSheet(request: EthereumPromptRequest) {
                     is EthAsk.SendTransaction -> SendBody(ask)
                     is EthAsk.SwitchChain -> SwitchBody(ask)
                     is EthAsk.AddChain -> AddChainBody(ask)
+                    is EthAsk.Payment -> X402PaymentBody(
+                        ask = ask.payment,
+                        state = payment!!,
+                        account = accountList?.active,
+                        noWallet = vaultState == Vault.State.Empty || accounts == null,
+                        locked = vaultState is Vault.State.Locked,
+                        onSetUp = request.setUpWallet,
+                    )
                 }
             }
             error?.let {
@@ -227,6 +243,7 @@ private fun iconFor(ask: EthAsk) = when (ask) {
     is EthAsk.SendTransaction -> Icons.AutoMirrored.Filled.Send
     is EthAsk.SwitchChain -> Icons.Filled.Link
     is EthAsk.AddChain -> Icons.Filled.Hub
+    is EthAsk.Payment -> Icons.Filled.Payments
 }
 
 /** The site asking, in full, and what it asks — the first thing on every sheet. */
@@ -398,7 +415,7 @@ private fun AddChainBody(ask: EthAsk.AddChain) {
 private fun hostOf(url: String): String = runCatching { URI(url).rawAuthority }.getOrNull() ?: url
 
 @Composable
-private fun Label(text: String) {
+internal fun Label(text: String) {
     Text(
         text,
         style = MaterialTheme.typography.labelMedium,
@@ -408,7 +425,7 @@ private fun Label(text: String) {
 }
 
 @Composable
-private fun Row0(label: String, value: String, mono: Boolean = false, detail: String? = null) {
+internal fun Row0(label: String, value: String, mono: Boolean = false, detail: String? = null) {
     Column(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
         Text(label, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
         SelectionContainer {
@@ -420,7 +437,7 @@ private fun Row0(label: String, value: String, mono: Boolean = false, detail: St
 }
 
 @Composable
-private fun AccountRow(account: WalletAccount, label: String = "Account") {
+internal fun AccountRow(account: WalletAccount, label: String = "Account") {
     Column(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
         Text(label, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
         Text(account.name)
@@ -430,7 +447,7 @@ private fun AccountRow(account: WalletAccount, label: String = "Account") {
 }
 
 @Composable
-private fun AddressRow(label: String, address: String) {
+internal fun AddressRow(label: String, address: String) {
     Column(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
         Text(label, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
         SelectionContainer {
@@ -503,7 +520,7 @@ internal fun hexOf(bytes: ByteArray, limit: Int = bytes.size): String {
 }
 
 @Composable
-private fun Note(text: String, warn: Boolean = false) {
+internal fun Note(text: String, warn: Boolean = false) {
     Text(
         text,
         style = MaterialTheme.typography.bodySmall,

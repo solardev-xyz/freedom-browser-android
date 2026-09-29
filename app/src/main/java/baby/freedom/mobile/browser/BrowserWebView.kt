@@ -993,6 +993,7 @@ fun BrowserWebViewHost(
             sitePermissions.onTabClosed(id)
             RadicleProviders.onTabClosed(id)
             EthereumProviders.onTabClosed(id)
+            X402Payments.onTabClosed(id)
             UnverifiedOrigins.release(wv)
             (wv as? PageWebView)?.sweptReload?.committed()
             wv.stopLoading()
@@ -1245,6 +1246,7 @@ fun BrowserWebViewHost(
                     sitePermissions.onDocumentStarted(tab)
                     RadicleProviders.onDocumentStarted(tab, url = null)
                     EthereumProviders.onDocumentStarted(tab, url = null)
+                    X402Payments.onDocumentStarted(tab, view = null, url = null)
                 }
             } else {
                 // As when the last private tab closes (#86): the private
@@ -2532,6 +2534,9 @@ private fun buildRefreshableWebView(
                 sitePermissions.onDocumentStarted(state)
                 RadicleProviders.onDocumentStarted(state, url)
                 EthereumProviders.onDocumentStarted(state, url)
+                // After it: an x402 payment the page asks for is put to
+                // the user against this document's number (#140).
+                X402Payments.onDocumentStarted(state, view, url)
                 // …and with the progress latch open again: whatever the
                 // last Stop aborted, this document is a load of its own
                 // and its percentages are worth drawing (#41).
@@ -3251,6 +3256,8 @@ private fun buildRefreshableWebView(
                 val req = request ?: return
                 if (!req.isForMainFrame) return
                 val failed = req.url?.toString() ?: return
+                // A paid request (#140) that got no answer.
+                X402Payments.onMainFrameFailed(state, failed)
                 // Already on the error page? Don't loop.
                 if (ErrorPage.isErrorPage(failed)) return
                 // An onion page whose Tor went away mid-load (#143): the
@@ -3298,6 +3305,8 @@ private fun buildRefreshableWebView(
             ) {
                 val req = request ?: return
                 if (!req.isForMainFrame) return
+                // A 402 with x402 terms, or the answer to a paid request (#140).
+                X402Payments.onHttpError(state, req, errorResponse)
                 val failed = req.url?.toString() ?: return
                 if (ErrorPage.isErrorPage(failed)) return
                 if (!isDwebPageUrl(failed)) return

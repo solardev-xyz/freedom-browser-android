@@ -1,0 +1,90 @@
+package baby.freedom.mobile.browser
+
+import baby.freedom.mobile.chains.BuiltInChains
+import baby.freedom.mobile.wallet.X402
+import java.math.BigInteger
+import java.util.Base64
+import org.json.JSONArray
+import org.json.JSONObject
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
+import org.junit.Test
+
+/** The x402 sheet's answer (#140) and the token facts it shows. */
+class X402SheetTest {
+    private val usdc = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+
+    private fun offers(vararg amounts: String): List<X402.Offer> {
+        val accepts = JSONArray()
+        amounts.forEach { a ->
+            accepts.put(
+                JSONObject().put("scheme", "exact").put("network", "eip155:8453").put("amount", a).put("asset", usdc)
+                    .put("payTo", "0x209693Bc6afc0C5328bA36FaF03C514EF312287C").put("maxTimeoutSeconds", 60)
+                    .put("extra", JSONObject().put("name", "USD Coin").put("version", "2")),
+            )
+        }
+        val json = JSONObject().put("x402Version", 2).put("accepts", accepts)
+        return X402.parseRequired(Base64.getEncoder().encodeToString(json.toString().toByteArray()))!!.offers
+    }
+
+    private fun ask(balance: Long?, vararg amounts: String) = X402Ask(
+        url = "https://api.example/paid",
+        description = null,
+        options = offers(*amounts).map { X402Option(it, BuiltInChains.BASE, "USDC", 6, listed = true, balance = balance?.let(BigInteger::valueOf)) },
+        unusable = emptyList(),
+        allowanceWaitingOnUnlock = false,
+    )
+
+    @Test
+    fun `the first offer the balance covers is picked, and Pay answers it`() {
+        val s = X402SheetState(ask(balance = 5_000, "10000", "5000"))
+        assertEquals(1, s.selected)
+        assertEquals(X402Choice(1, null), s.choice())
+        s.select(0)
+        assertNull("not enough for this one", s.choice())
+    }
+
+    @Test
+    fun `an unknown balance doesn't stop the payment`() {
+        assertEquals(X402Choice(0, null), X402SheetState(ask(balance = null, "10000")).choice())
+    }
+
+    @Test
+    fun `an allowance starts at ten payments, must cover this one, and goes with the answer`() {
+        val s = X402SheetState(ask(balance = 1_000_000, "10000"))
+        s.auto = true
+        assertEquals("0.1", s.capText)
+        assertEquals(X402Choice(0, X402Grant(BigInteger.valueOf(100_000), X402Window.DAY.ms)), s.choice())
+        s.window = X402Window.HOUR
+        s.capText = "0.009"
+        assertEquals("At least this payment: 0.01 USDC", s.capProblem())
+        assertNull(s.choice())
+        s.capText = "abc"
+        assertEquals("Enter an amount of USDC", s.capProblem())
+        s.capText = "0.01"
+        assertEquals(X402Choice(0, X402Grant(BigInteger.valueOf(10_000), X402Window.HOUR.ms)), s.choice())
+        s.auto = false
+        assertEquals(X402Choice(0, null), s.choice())
+    }
+
+    @Test
+    fun `a token's symbol is read as an ABI string or bytes32, and only shown if it's plain`() {
+        fun word(n: Int) = n.toString(16).padStart(64, '0')
+        fun padded(s: String) = s.toByteArray().joinToString("") { "%02x".format(it) }.padEnd(64, '0')
+        assertEquals("USDC", X402Payments.abiSymbol("0x" + word(32) + word(4) + padded("USDC")))
+        assertEquals("MKR", X402Payments.abiSymbol("0x" + padded("MKR")))
+        assertEquals("USDC.e", X402Payments.abiSymbol("0x" + word(32) + word(6) + padded("USDC.e")))
+        assertNull(X402Payments.abiSymbol("0x" + word(32) + word(9) + padded("USD‮COIN")))
+        assertNull(X402Payments.abiSymbol("0x" + word(32) + word(40) + padded("X")))
+        assertNull(X402Payments.abiSymbol("0x" + word(64) + word(4) + padded("USDC")))
+        assertNull(X402Payments.abiSymbol("0x"))
+        assertNull(X402Payments.abiSymbol("0xzz"))
+    }
+
+    @Test
+    fun `the wallet's own tokens and x402's USDCs are known without reading the chain`() {
+        assertEquals("USDC" to 6, X402Payments.knownToken(8453, usdc.lowercase()))
+        assertEquals("USDC" to 6, X402Payments.knownToken(1, "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"))
+        assertNull(X402Payments.knownToken(1, usdc))
+    }
+}
