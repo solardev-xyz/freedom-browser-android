@@ -4,7 +4,10 @@ import android.app.Activity
 import android.app.AlertDialog
 import android.content.Context
 import android.content.ContextWrapper
+import android.content.DialogInterface
+import android.os.SystemClock
 import android.text.InputType
+import android.view.ViewTreeObserver
 import android.view.WindowManager
 import android.view.inputmethod.EditorInfo
 import android.webkit.JsPromptResult
@@ -128,7 +131,14 @@ internal fun answerJsResult(result: JsResult, confirmed: Boolean, text: String?)
  * 30–32, which lack `setRecentsScreenshotEnabled` — the Recents
  * snapshot. Same buttons and results as WebView's: OK/Cancel, the
  * prompt's text field (learning off, as in the tab's other fields), and
- * back/outside tap = Cancel. Returns the dialog so the caller can take
+ * back/outside tap = Cancel. Like the app's other prompts, its buttons
+ * (and an outside tap) ignore taps for the first
+ * [PromptTapGuard.PROTECTION_MS] it's on screen, counted from its first
+ * drawn frame, showing disabled meanwhile: a dialog queued behind
+ * another prompt comes up the instant that one is answered, so the
+ * second tap of a double-tap on that prompt's button would otherwise
+ * land on this one's OK/Leave. Back, a deliberate key, stays live.
+ * Returns the dialog so the caller can take
  * it down when it loses its turn — which by itself leaves the request
  * unanswered; whatever took the turn [JsDialogRequest.withdraw]s it — or
  * null, with the request withdrawn, when there's no Activity to show it
@@ -168,13 +178,10 @@ internal fun showJsDialog(context: Context, request: JsDialogRequest): AlertDial
             addView(input)
         })
     }
-    builder.setPositiveButton(if (kind == JsDialogKind.BEFORE_UNLOAD) "Leave" else "OK") { _, _ ->
-        request.confirm(input?.text?.toString())
-    }
+    val guard = PromptTapGuard(SystemClock::uptimeMillis)
+    builder.setPositiveButton(if (kind == JsDialogKind.BEFORE_UNLOAD) "Leave" else "OK", null)
     if (kind != JsDialogKind.ALERT) {
-        builder.setNegativeButton(if (kind == JsDialogKind.BEFORE_UNLOAD) "Stay" else "Cancel") { _, _ ->
-            request.cancel()
-        }
+        builder.setNegativeButton(if (kind == JsDialogKind.BEFORE_UNLOAD) "Stay" else "Cancel", null)
     }
     val dialog = builder.create()
     dialog.window?.apply {
@@ -182,8 +189,48 @@ internal fun showJsDialog(context: Context, request: JsDialogRequest): AlertDial
         if (request.secure) addFlags(WindowManager.LayoutParams.FLAG_SECURE)
         if (input != null) setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_VISIBLE)
     }
+    dialog.setCanceledOnTouchOutside(false)
     dialog.show()
     request.seen = true
+    // Listeners set on the buttons themselves, not the builder's: the
+    // builder's always take the dialog down, even for a tap the guard
+    // ignores.
+    val buttons = listOfNotNull(
+        dialog.getButton(DialogInterface.BUTTON_POSITIVE)?.apply {
+            setOnClickListener {
+                if (!guard.accepts()) return@setOnClickListener
+                request.confirm(input?.text?.toString())
+                dialog.dismiss()
+            }
+        },
+        dialog.getButton(DialogInterface.BUTTON_NEGATIVE)?.takeIf { kind != JsDialogKind.ALERT }?.apply {
+            setOnClickListener {
+                if (!guard.accepts()) return@setOnClickListener
+                request.cancel()
+                dialog.dismiss()
+            }
+        },
+    )
+    buttons.forEach { it.isEnabled = false }
+    dialog.window?.decorView?.let { decor ->
+        val arm = Runnable {
+            if (!dialog.isShowing) return@Runnable
+            buttons.forEach { it.isEnabled = true }
+            dialog.setCanceledOnTouchOutside(true)
+        }
+        // Count from the first frame the dialog is actually drawn in.
+        decor.viewTreeObserver.addOnDrawListener(object : ViewTreeObserver.OnDrawListener {
+            private var drawn = false
+            override fun onDraw() {
+                if (drawn) return
+                drawn = true
+                guard.onShown()
+                decor.postDelayed(arm, guard.remainingMs())
+                // Not from inside onDraw: the observer is being iterated.
+                decor.post { decor.viewTreeObserver.removeOnDrawListener(this) }
+            }
+        })
+    }
     return dialog
 }
 
