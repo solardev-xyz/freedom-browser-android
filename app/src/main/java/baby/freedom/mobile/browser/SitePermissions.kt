@@ -435,9 +435,15 @@ enum class PromptTurn { None, SitePermission, DownloadOffer, Radicle, Ethereum, 
  *
  * - The page's JavaScript dialog (#246, [jsDialogWaiting]: `alert`,
  *   `confirm`, `prompt`, `beforeunload`) keeps the turn once it has it
- *   ([jsDialogHasTurn]); waiting, it comes after the `window.swarm`
- *   sheet and before the offer. The page is frozen until it's answered,
- *   so nothing it asks for can arrive behind it.
+ *   ([jsDialogHasTurn]) — even if a full-screen panel then opens under
+ *   it (an intent can open one; the user can't reach the chrome past a
+ *   modal dialog): it is up, naming its page, and taking it down would
+ *   answer the page for the user. Waiting, it comes after the
+ *   `window.swarm` sheet and before the offer. The page is frozen until
+ *   it's answered, so nothing it asks for can arrive behind it. A
+ *   waiting one doesn't wait out a panel like the other prompts:
+ *   `BrowserScreen` answers it ([JsDialogRequest.withdraw]), since
+ *   while it waits the renderer every tab shares is blocked.
  * - The long-press link/image menu (#84, [contextMenuWaiting]) is the
  *   user's own gesture, not the page's, but it's modal too. It goes
  *   before every prompt that doesn't already have the turn — the user
@@ -462,13 +468,13 @@ fun modalPromptTurn(
     jsDialogHasTurn: Boolean = false,
     contextMenuWaiting: Boolean = false,
 ): PromptTurn = when {
+    jsDialogWaiting && jsDialogHasTurn -> PromptTurn.JsDialog
     !pageUncovered -> PromptTurn.None
     androidDialogUp -> PromptTurn.None
     offerWaiting && offerHasTurn -> PromptTurn.DownloadOffer
     radicleWaiting && radicleHasTurn -> PromptTurn.Radicle
     ethereumWaiting && ethereumHasTurn -> PromptTurn.Ethereum
     swarmWaiting && swarmHasTurn -> PromptTurn.Swarm
-    jsDialogWaiting && jsDialogHasTurn -> PromptTurn.JsDialog
     contextMenuWaiting -> PromptTurn.ContextMenu
     permissionWaiting -> PromptTurn.SitePermission
     radicleWaiting -> PromptTurn.Radicle

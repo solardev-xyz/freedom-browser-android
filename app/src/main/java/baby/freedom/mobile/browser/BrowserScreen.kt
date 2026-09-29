@@ -2126,16 +2126,24 @@ fun BrowserScreen(
         lastPromptTurn = promptTurn
     }
     // A page waiting on a JavaScript dialog blocks the renderer every
-    // tab shares (the tab in view freezes too), so only the tab in view
-    // gets to wait for its turn: another tab's dialog is cancelled
-    // straight away — `alert` returns, `confirm` is false — as Chrome
-    // does for a background tab, and so is the one a tab had when the
-    // user switches away from it.
+    // tab shares (the tab in view freezes too), so a dialog only waits
+    // for its turn while its page is on screen: another tab's is
+    // answered straight away ([JsDialogRequest.withdraw]: `alert`
+    // returns, `confirm` is false, a `beforeunload` nobody saw lets the
+    // navigation go), as Chrome does for a background tab — and so is
+    // one waiting in the tab in view while a full-screen panel covers
+    // it, and the one a tab had when the user switches away from it.
+    // A dialog already up keeps its turn over a panel ([modalPromptTurn]).
+    val pageCovered by rememberUpdatedState(overlayShown)
+    val jsDialogUp by rememberUpdatedState(jsDialogHasTurn)
     LaunchedEffect(tabs) {
         snapshotFlow {
             val activeId = tabs.active.id
-            tabs.tabs.mapNotNull { tab -> tab.jsDialog?.takeIf { tab.id != activeId } }
-        }.collect { stale -> stale.forEach { it.cancel() } }
+            val activeUnseen = pageCovered && !jsDialogUp
+            tabs.tabs.mapNotNull { tab ->
+                tab.jsDialog?.takeIf { tab.id != activeId || activeUnseen }
+            }
+        }.collect { stale -> stale.forEach { it.withdraw() } }
     }
     // Long-press menu for a link / image on the page (#84). Dropped the
     // moment it stops describing what is on screen: the tab navigated,
@@ -2316,8 +2324,12 @@ fun BrowserScreen(
         androidx.compose.runtime.key(prompt) { SwarmPromptSheet(prompt) }
     }
     state.jsDialog?.takeIf { promptTurn == PromptTurn.JsDialog }?.let { request ->
-        // Taken down — and so cancelled — if it loses its turn, e.g.
-        // the tab it belongs to is closed.
+        // Taken down if it loses its turn — its tab closed or left the
+        // screen, this screen leaving composition. That alone doesn't
+        // answer the page: whatever took the turn answers it
+        // ([JsDialogRequest.withdraw] for a tab closed, switched away
+        // from or losing its WebView), and a dialog still waiting when
+        // it gets the turn back is shown again.
         DisposableEffect(request) {
             val dialog = showJsDialog(context, request)
             onDispose { dialog?.dismiss() }

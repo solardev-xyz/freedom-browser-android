@@ -1235,6 +1235,10 @@ fun BrowserWebViewHost(
 
     DisposableEffect(Unit) {
         onDispose {
+            // Every WebView goes with this host, so a dialog a page is
+            // blocked on is answered now: it would otherwise be shown
+            // again, by the next host, for a page that's gone (#246).
+            for (tab in tabs.tabs) tab.jsDialog?.withdraw()
             // The Activity is being relaunched (#183) and the tabs live
             // on in [TabsSession] — the ViewModel store is kept on
             // exactly this condition. Each tab keeps its WebView's state

@@ -368,9 +368,9 @@ class TabsState(
         // Let the WebView wind its fullscreen session down before the
         // host destroys it (see [BrowserWebViewHost]).
         if (fullscreen?.tabId == tabs[index].id) exitFullscreen()
-        // A dialog its page is blocked on is answered (cancelled), not
-        // left for a WebView about to be destroyed (#246).
-        tabs[index].jsDialog?.cancel()
+        // A dialog its page is blocked on is answered, not left for a
+        // WebView about to be destroyed (#246).
+        tabs[index].jsDialog?.withdraw()
         val closingActive = index == activeIndex
         // The list is never empty: the last tab is replaced by a blank one.
         val placeholder = if (tabs.size == 1) newBlankTab() else null

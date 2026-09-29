@@ -46,10 +46,10 @@ class PrivateJsDialogsTest {
         val settled = mutableListOf<JsDialogRequest>()
         val ok = request(JsDialogKind.CONFIRM, answers, settled)
         ok.confirm()
-        // The dialog's dismiss listener, then losing its turn, cancel
-        // too: the page has its answer already.
+        // Back, then being withdrawn, come too late: the page has its
+        // answer already.
         ok.cancel()
-        ok.cancel()
+        ok.withdraw()
         assertEquals(listOf(true), answers)
         assertEquals(listOf(ok), settled)
 
@@ -60,5 +60,30 @@ class PrivateJsDialogsTest {
         assertEquals(listOf(true, false), answers)
         assertEquals(listOf(ok, stay), settled)
         assertTrue(stay.answered)
+    }
+
+    @Test
+    fun aDialogNobodySawIsAnsweredForThePage() {
+        val answers = mutableListOf<Boolean>()
+        val settled = mutableListOf<JsDialogRequest>()
+        // A background tab's `alert`/`confirm`/`prompt`: Cancel.
+        for (kind in listOf(JsDialogKind.ALERT, JsDialogKind.CONFIRM, JsDialogKind.PROMPT)) {
+            request(kind, answers, settled).withdraw()
+        }
+        assertEquals(listOf(false, false, false), answers)
+
+        // A background tab's `beforeunload` nobody saw: Leave, so an app
+        // reload (#125's sweep) isn't refused by a page out of view.
+        answers.clear()
+        request(JsDialogKind.BEFORE_UNLOAD, answers, settled).withdraw()
+        assertEquals(listOf(true), answers)
+
+        // One the user was shown and left: Stay, their edits kept.
+        answers.clear()
+        val shown = request(JsDialogKind.BEFORE_UNLOAD, answers, settled)
+        shown.seen = true
+        shown.withdraw()
+        assertEquals(listOf(false), answers)
+        assertEquals(5, settled.size)
     }
 }

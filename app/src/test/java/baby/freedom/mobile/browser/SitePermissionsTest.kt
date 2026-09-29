@@ -387,9 +387,25 @@ class SitePermissionsTest {
             PromptTurn.JsDialog,
             modalPromptTurn(true, true, false, false, jsDialogWaiting = true, jsDialogHasTurn = true),
         )
-        // Not over a full-screen panel, nor over Android's permission dialog.
+        // A waiting one isn't shown over a full-screen panel (BrowserScreen
+        // answers it instead), nor over Android's permission dialog.
         assertEquals(PromptTurn.None, modalPromptTurn(false, false, false, false, pageUncovered = false, jsDialogWaiting = true))
         assertEquals(PromptTurn.None, modalPromptTurn(false, false, false, true, jsDialogWaiting = true))
+    }
+
+    @Test
+    fun `a JavaScript dialog that is up keeps its turn when a panel opens under it`() {
+        // An intent opening Settings while a `confirm()` is up: the dialog
+        // stays, for the user to answer, rather than being taken down.
+        assertEquals(
+            PromptTurn.JsDialog,
+            modalPromptTurn(false, false, false, false, pageUncovered = false, jsDialogWaiting = true, jsDialogHasTurn = true),
+        )
+        // Once answered, nothing shows over the panel.
+        assertEquals(
+            PromptTurn.None,
+            modalPromptTurn(true, true, false, false, pageUncovered = false, jsDialogHasTurn = true),
+        )
     }
 
     @Test

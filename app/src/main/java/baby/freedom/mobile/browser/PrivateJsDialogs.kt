@@ -43,12 +43,16 @@ internal fun jsDialogTitle(kind: JsDialogKind, url: String?): String {
  * stacks on a dApp approval sheet or the long-press menu, and never
  * pops over another tab.
  *
- * Answered exactly once, by whichever of [confirm]/[cancel] comes
- * first; later calls do nothing. [answer] hands it to the page
+ * Answered exactly once, by whichever of [confirm]/[cancel]/[withdraw]
+ * comes first; later calls do nothing. [answer] hands it to the page
  * ([answerJsResult]): true for OK/Leave, with a prompt's text; for a
  * tab's `beforeunload` it's also how the tab hears that Stay ended its
  * navigation without a commit (#180, R2-F2). [onSettled] lets the tab
  * forget the request. Main thread only.
+ *
+ * Taking the dialog's window down is not an answer: a dialog that
+ * loses its turn for a moment (the host Activity going away and coming
+ * back) is shown again when it gets the turn back, still waiting.
  */
 internal class JsDialogRequest(
     val kind: JsDialogKind,
@@ -63,6 +67,10 @@ internal class JsDialogRequest(
     var answered = false
         private set
 
+    /** Whether the user has been shown it ([showJsDialog]). */
+    var seen = false
+        internal set
+
     /** OK / Leave; [text] is a prompt's answer. */
     fun confirm(text: String? = null) {
         if (answered) return
@@ -71,20 +79,32 @@ internal class JsDialogRequest(
         onSettled(this)
     }
 
-    /**
-     * Cancel / Stay / Back — and what the page gets when the dialog
-     * can't be shown to the user: its tab left the screen or closed.
-     * A page's pending dialog blocks the renderer every tab shares, so
-     * a tab out of view can't be left waiting on one (see
-     * [BrowserScreen]): `alert` returns, `confirm` is false, `prompt`
-     * is null and `beforeunload` stays, as in Chrome for a background
-     * tab.
-     */
+    /** Cancel / Stay / Back: the user's no. */
     fun cancel() {
         if (answered) return
         answered = true
         answer(false, null)
         onSettled(this)
+    }
+
+    /**
+     * Answers it without the user, when it can't be left waiting for
+     * them: its page isn't on screen (a background tab, a tab under a
+     * full-screen panel), its tab is closing, or its WebView is going
+     * away. A page's pending dialog blocks the renderer every tab
+     * shares, so a page out of view can't be left waiting on one (see
+     * [BrowserScreen]). As in Chrome for a hidden tab: `alert` returns,
+     * `confirm` is false and `prompt` is null. A `beforeunload` the
+     * user never saw lets the navigation go ahead (Leave), as Chrome
+     * does for a background tab: a page out of view can't hold a
+     * navigation hostage — least of all the app's own reload that takes
+     * a document an unverified gateway served off its tab (#125,
+     * [SweptReload]), which Stay would refuse over and over. One the
+     * user was shown and left unanswered keeps the page (Stay): their
+     * edits aren't thrown away on a guess.
+     */
+    fun withdraw() {
+        if (kind == JsDialogKind.BEFORE_UNLOAD && !seen) confirm() else cancel()
     }
 }
 
@@ -106,14 +126,15 @@ internal fun answerJsResult(result: JsResult, confirmed: Boolean, text: String?)
  * snapshot. Same buttons and results as WebView's: OK/Cancel, the
  * prompt's text field (learning off, as in the tab's other fields), and
  * back/outside tap = Cancel. Returns the dialog so the caller can take
- * it down (which cancels the request) when it loses its turn, or null
- * — with the request cancelled — when there's no Activity to show it in.
+ * it down when it loses its turn — which leaves the request waiting, to
+ * be shown again or [JsDialogRequest.withdraw]n — or null, with the
+ * request withdrawn, when there's no Activity to show it in.
  */
 internal fun showJsDialog(context: Context, request: JsDialogRequest): AlertDialog? {
     val kind = request.kind
     val activity = context.findHostActivity()
     if (activity == null || activity.isFinishing || activity.isDestroyed) {
-        request.cancel()
+        request.withdraw()
         return null
     }
     val input = if (kind == JsDialogKind.PROMPT) {
@@ -128,7 +149,9 @@ internal fun showJsDialog(context: Context, request: JsDialogRequest): AlertDial
     } else null
     val builder = AlertDialog.Builder(activity)
         .setTitle(jsDialogTitle(kind, request.url))
-        .setOnDismissListener { request.cancel() }
+        // Back / outside tap only: dismiss() taking the window down when
+        // the dialog loses its turn doesn't answer the page.
+        .setOnCancelListener { request.cancel() }
     if (kind == JsDialogKind.BEFORE_UNLOAD) {
         builder.setMessage("Changes you made may not be saved.")
     } else if (!request.message.isNullOrEmpty()) {
@@ -156,6 +179,7 @@ internal fun showJsDialog(context: Context, request: JsDialogRequest): AlertDial
         if (input != null) setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_VISIBLE)
     }
     dialog.show()
+    request.seen = true
     return dialog
 }
 
