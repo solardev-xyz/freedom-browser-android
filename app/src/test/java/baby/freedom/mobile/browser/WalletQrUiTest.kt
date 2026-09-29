@@ -5,7 +5,9 @@ import baby.freedom.mobile.wallet.ScannedCode
 import baby.freedom.mobile.wallet.WalletAccount
 import java.math.BigInteger
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /** The receive QR and what the scan page shows for a code (#106). */
@@ -96,7 +98,26 @@ class WalletQrUiTest {
 
         val unknownChain = scannedLines(ScannedCode.Payment(other, 137, null, BigInteger.TEN), chains, emptyList())
         assertEquals(ScannedLine("Network", "Chain ID 137", "Not one of your networks."), unknownChain[1])
-        assertEquals("10 base units", unknownChain[2].value)
+        assertEquals(
+            ScannedLine(
+                "Amount",
+                "10 base units",
+                "The network isn’t known, so this is in its currency’s smallest unit (like wei for ETH).",
+            ),
+            unknownChain[2],
+        )
+        // Native currency with no chain: native wording, and one unit is singular.
+        val oneNoChain = scannedLines(ScannedCode.Payment(other, null, null, BigInteger.ONE), chains, emptyList())
+        assertEquals(
+            ScannedLine(
+                "Amount",
+                "1 base unit",
+                "The network isn’t known, so this is in its currency’s smallest unit (like wei for ETH).",
+            ),
+            oneNoChain[2],
+        )
+        val oneToken = scannedLines(ScannedCode.Payment(other, null, xbzz, BigInteger.ONE), chains, emptyList())
+        assertEquals("1 base unit", oneToken[3].value)
 
         val noAmount = scannedLines(ScannedCode.Payment(mine.address, 1, null, null), chains, listOf(mine))
         assertEquals(ScannedLine("Pay to", mine.address, "This is your Account 1"), noAmount[0])
@@ -107,5 +128,25 @@ class WalletQrUiTest {
     fun `amounts are never rounded`() {
         assertEquals("0.000000000000000001", exactAmount(BigInteger.ONE, 18))
         assertEquals("1,000", exactAmount(BigInteger("1000"), 0))
+    }
+
+    @Test
+    fun `a code reads once while it stays in view, and again once it has left`() {
+        var now = 0L
+        val dedup = ScanDedup(clock = { now }, goneAfterMs = 2_000)
+        assertTrue(dedup.isNew("A"))
+        // Decoded frame after frame: the window keeps renewing.
+        repeat(10) { now += 500; assertFalse(dedup.isNew("A")) }
+        // Out of view for longer than the window: pointing at it again reads it.
+        now += 2_000
+        assertTrue(dedup.isNew("A"))
+        // A different code reads at once, and then A again (scan A, scan B, back to A).
+        now += 100
+        assertTrue(dedup.isNew("B"))
+        now += 100
+        assertTrue(dedup.isNew("A"))
+        // A clock that went backwards doesn't hold a code back forever.
+        now -= 10_000
+        assertTrue(dedup.isNew("A"))
     }
 }

@@ -12,6 +12,7 @@ import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.provider.Settings
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
@@ -252,7 +253,16 @@ internal fun scannedLines(code: ScannedCode, chains: List<Chain>, accounts: List
                     val (decimals, symbol) = decimalsAndSymbol
                     ScannedLine("Amount", "${exactAmount(raw, decimals)} $symbol")
                 } else {
-                    ScannedLine("Amount", "$raw base units", "The token’s decimals aren’t known, so this is its smallest unit.")
+                    val units = if (raw == BigInteger.ONE) "base unit" else "base units"
+                    ScannedLine(
+                        "Amount",
+                        "$raw $units",
+                        if (code.token == null) {
+                            "The network isn’t known, so this is in its currency’s smallest unit (like wei for ETH)."
+                        } else {
+                            "The token’s decimals aren’t known, so this is its smallest unit."
+                        },
+                    )
                 }
             } ?: ScannedLine("Amount", "Not given")
             listOfNotNull(ScannedLine("Pay to", code.recipient, own(code.recipient)), network, asset, amount)
@@ -281,8 +291,11 @@ internal fun ScanPage(chains: List<Chain>, accounts: List<WalletAccount>, onBack
     val context = LocalContext.current
     var result by remember { mutableStateOf<ScannedCode?>(null) }
     var pasted by remember { mutableStateOf("") }
-    // What the camera read last: the same code seen frame after frame reads once (iOS's lastCode).
-    val lastScanned = remember { arrayOfNulls<String>(1) }
+    // The same code seen frame after frame reads once while it stays in view (iOS's lastCode).
+    val dedup = remember { ScanDedup() }
+    // Held here, not in the scanner: the scanner sits in a LazyColumn item,
+    // whose plain remember is lost when it scrolls off screen.
+    val cameraPermission = rememberCameraPermissionState()
     BackHandler(onBack = onBack)
     FullScreenScaffold(title = SCAN_TITLE, onDismiss = onBack) {
         LazyColumn(
@@ -293,12 +306,8 @@ internal fun ScanPage(chains: List<Chain>, accounts: List<WalletAccount>, onBack
             item("camera") {
                 SectionCard(title = "Camera") {
                     QrScanner(
-                        onCode = { text ->
-                            if (text != lastScanned[0]) {
-                                lastScanned[0] = text
-                                result = ScannedCode.parse(text)
-                            }
-                        },
+                        permission = cameraPermission,
+                        onCode = { text -> if (dedup.isNew(text)) result = ScannedCode.parse(text) },
                         modifier = Modifier.fillMaxWidth().aspectRatio(1f).clip(RoundedCornerShape(12.dp)),
                     )
                     Spacer(Modifier.height(8.dp))
@@ -335,8 +344,8 @@ internal fun ScanPage(chains: List<Chain>, accounts: List<WalletAccount>, onBack
                     }
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
                         TextButton(
-                            // lastScanned stays: a code still in front of the camera
-                            // must not replace what was just pasted on its next frame.
+                            // The dedup stays: a code still in front of the camera must
+                            // not replace what was just pasted on its next frame.
                             onClick = { result = ScannedCode.parse(pasted) },
                             enabled = pasted.isNotBlank(),
                         ) { Text("Read") }
@@ -449,19 +458,82 @@ private fun ImageProxy.luminance(): Pair<ByteArray, Int> {
 }
 
 /**
+ * iOS's `lastCode`, bounded in time: [isNew] is false for a code the
+ * camera already reported less than [goneAfterMs] ago, true otherwise.
+ * A code in view is decoded several times a second, so the window keeps
+ * renewing while it stays there; once it has been out of view for
+ * [goneAfterMs], pointing the camera at it again reads it again.
+ */
+internal class ScanDedup(
+    private val clock: () -> Long = SystemClock::elapsedRealtime,
+    private val goneAfterMs: Long = 2_000,
+) {
+    private var last: String? = null
+    private var lastSeen = 0L
+
+    fun isNew(text: String): Boolean {
+        val now = clock()
+        val seen = text == last && now - lastSeen in 0 until goneAfterMs
+        last = text
+        lastSeen = now
+        return !seen
+    }
+}
+
+/**
+ * The scan page's camera-permission state, held by the page rather than
+ * by [QrScanner]: whether it has asked yet (so the automatic ask happens
+ * once per visit, not again each time the scanner scrolls back into
+ * view — a second automatic dialog the user dismisses would count as
+ * Android's permanent denial), and whether a system dialog is up now.
+ */
+internal class CameraPermissionState {
+    var asked by mutableStateOf(false)
+        private set
+    /** A system permission dialog is on screen: nothing about the answer is known yet. */
+    var requesting by mutableStateOf(false)
+        internal set
+    var refusedTick by mutableStateOf(0)
+        internal set
+    internal var launcher: (() -> Unit)? = null
+
+    fun request() {
+        val launch = launcher ?: return
+        asked = true
+        requesting = true
+        launch()
+    }
+}
+
+@Composable
+internal fun rememberCameraPermissionState(): CameraPermissionState {
+    val context = LocalContext.current
+    val state = remember { CameraPermissionState() }
+    val launcher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { ok ->
+        state.requesting = false
+        if (!ok) {
+            context.findHostActivity()?.let { noteAndroidRefusal(it, Manifest.permission.CAMERA) }
+            state.refusedTick++
+        }
+    }
+    state.launcher = { launcher.launch(Manifest.permission.CAMERA) }
+    return state
+}
+
+/**
  * The camera viewfinder, reporting every QR code it decodes to
  * [onCode] on the main thread (the same code over and over while it's
  * in view — the caller dedupes). Decoding is ZXing on-device; frames
  * are never kept.
  *
- * Camera permission: asked for as the scanner first appears (the user
- * just chose to scan), through the same refusal bookkeeping as a
+ * Camera permission ([permission], held by the page): asked for once,
+ * as the scanner first appears (the user just chose to scan), through the same refusal bookkeeping as a
  * site's camera ([noteAndroidRefusal]), so a refusal here still lets a
  * site's later camera request point the user at Android settings. Once
  * Android won't ask again, the button opens the app's settings instead.
  */
 @Composable
-internal fun QrScanner(onCode: (String) -> Unit, modifier: Modifier = Modifier) {
+internal fun QrScanner(permission: CameraPermissionState, onCode: (String) -> Unit, modifier: Modifier = Modifier) {
     val context = LocalContext.current
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     val lifecycleState by lifecycle.currentStateFlow.collectAsState()
@@ -469,27 +541,22 @@ internal fun QrScanner(onCode: (String) -> Unit, modifier: Modifier = Modifier) 
     val granted = remember(lifecycleState) {
         ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
     }
-    var asked by remember { mutableStateOf(false) }
-    var refusedTick by remember { mutableStateOf(0) }
-    val launcher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { ok ->
-        if (!ok) {
-            context.findHostActivity()?.let { noteAndroidRefusal(it, Manifest.permission.CAMERA) }
-            refusedTick++
-        }
-    }
     // Only while the activity is in front: a system dialog must never pop over another app.
     LaunchedEffect(granted, lifecycleState) {
-        if (!granted && !asked && lifecycleState.isAtLeast(Lifecycle.State.RESUMED)) {
-            asked = true
-            launcher.launch(Manifest.permission.CAMERA)
+        if (!granted && !permission.asked && lifecycleState.isAtLeast(Lifecycle.State.RESUMED)) {
+            permission.request()
         }
     }
     if (granted) {
         CameraPreview(onCode, modifier)
         return
     }
-    val blocked = remember(lifecycleState, refusedTick) {
-        context.findHostActivity()?.let { androidPermissionBlocked(it, Manifest.permission.CAMERA) } ?: false
+    // Not before the first answer, nor while a dialog is up: the refusal
+    // record can be stale (permissions reset in settings), and "isn't
+    // allowed" must not sit behind a dialog that is asking right now.
+    val blocked = remember(lifecycleState, permission.refusedTick, permission.asked, permission.requesting) {
+        permission.asked && !permission.requesting &&
+            (context.findHostActivity()?.let { androidPermissionBlocked(it, Manifest.permission.CAMERA) } ?: false)
     }
     Column(
         modifier.background(MaterialTheme.colorScheme.surface).padding(16.dp),
@@ -509,8 +576,8 @@ internal fun QrScanner(onCode: (String) -> Unit, modifier: Modifier = Modifier) 
         Spacer(Modifier.height(12.dp))
         if (blocked) {
             OutlinedButton(onClick = { openAppSettings(context) }) { Text("Open Android settings") }
-        } else if (asked) {
-            Button(onClick = { launcher.launch(Manifest.permission.CAMERA) }) { Text("Allow camera") }
+        } else if (permission.asked && !permission.requesting) {
+            Button(onClick = { permission.request() }) { Text("Allow camera") }
         }
     }
 }

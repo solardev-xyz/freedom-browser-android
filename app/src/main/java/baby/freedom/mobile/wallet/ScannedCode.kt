@@ -173,8 +173,32 @@ sealed class ScannedCode {
             }
         }
 
-        /** [text] cut to a length a message can quote. */
-        private fun shortened(text: String) = if (text.length <= 40) text else text.take(39) + "…"
+        /**
+         * Untrusted [text] made safe to quote inside a message: every
+         * control, format (bidi overrides and isolates, zero-width
+         * characters) or line/paragraph separator shown as U+FFFD, so the
+         * scanned code can't reorder or hide part of the app's own
+         * sentence; then cut to 40 characters without splitting a
+         * surrogate pair.
+         */
+        internal fun shortened(text: String): String {
+            val out = StringBuilder()
+            var count = 0
+            var i = 0
+            while (i < text.length) {
+                val cp = text.codePointAt(i)
+                i += Character.charCount(cp)
+                if (count == 39 && i < text.length) return out.append('…').toString()
+                when (Character.getType(cp).toByte()) {
+                    Character.CONTROL, Character.FORMAT, Character.LINE_SEPARATOR,
+                    Character.PARAGRAPH_SEPARATOR, Character.SURROGATE,
+                    -> out.append('�')
+                    else -> out.appendCodePoint(cp)
+                }
+                count++
+            }
+            return out.toString()
+        }
 
         private fun badAmount() = Unrecognized("This payment request’s amount isn’t a valid whole number of base units.")
 

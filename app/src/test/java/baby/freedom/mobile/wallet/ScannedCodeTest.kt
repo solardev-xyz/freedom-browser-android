@@ -94,6 +94,23 @@ class ScannedCodeTest {
     }
 
     @Test
+    fun `quoted scanned text can't reorder or hide part of the message`() {
+        // U+202E (right-to-left override) in a function name, U+2066/U+200B in a name, a newline in a key.
+        val rlo = unrecognized("ethereum:$xbzz/tra\u202Efsnart?address=$other")
+        assertTrue(rlo.contains("tra\uFFFDfsnart"))
+        assertTrue(rlo.none { Character.getType(it) == Character.FORMAT.toInt() })
+        val name = unrecognized("ethereum:\u2066vit\u200Balik.eth@1")
+        assertTrue(name.contains("\uFFFDvit\uFFFDalik.eth"))
+        assertTrue(unrecognized("ethereum:$checksummed?va\nlue=1&va\nlue=2").contains("va\uFFFDlue"))
+
+        assertEquals("a".repeat(40), ScannedCode.shortened("a".repeat(40)))
+        assertEquals("a".repeat(39) + "…", ScannedCode.shortened("a".repeat(41)))
+        // A cut never splits a surrogate pair.
+        val emoji = "\uD83D\uDE00"
+        assertEquals(emoji.repeat(39) + "…", ScannedCode.shortened(emoji.repeat(41)))
+    }
+
+    @Test
     fun `an amount given twice is ambiguous and refused`() {
         assertTrue(unrecognized("ethereum:$checksummed?value=1&value=1000").contains("twice"))
         assertTrue(
