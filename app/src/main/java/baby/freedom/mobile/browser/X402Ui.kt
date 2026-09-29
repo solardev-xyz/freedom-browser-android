@@ -65,10 +65,10 @@ internal fun x402Subtitle(p: X402Store.Payment, chainName: String, format: DateF
         format.format(Date(p.at)),
     ).joinToString(" · ")
 
-/** "0.2 of 1 USDC used · until 3 Oct 2026, 14:00": an allowance's state. */
+/** "0.2 of 1 USDC used · Base · from 0x6fac…b9c0 · until 3 Oct 2026, 14:00": an allowance's state, and the account it pays from. */
 internal fun x402AllowanceLine(a: X402Store.Allowance, chainName: String, format: DateFormat = x402DateFormat()): String =
     "${SendAmounts.exact(a.spent, a.decimals)} of ${SendAmounts.exact(a.cap, a.decimals)} ${a.symbol} used · " +
-        "$chainName · until ${format.format(Date(a.expires))}"
+        "$chainName · from ${shortAddress(a.account)} · until ${format.format(Date(a.expires))}"
 
 private fun x402DateFormat(): DateFormat = DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT)
 

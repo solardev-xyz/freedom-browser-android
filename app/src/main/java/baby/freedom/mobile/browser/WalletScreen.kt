@@ -742,7 +742,7 @@ fun WalletScreen(
                         allowances = x402Allowances,
                         payments = x402Payments.size,
                         chains = allChains.orEmpty(),
-                        onRevoke = { a -> scope.launch { x402.revoke(a.origin, a.chainId, a.asset) } },
+                        onRevoke = { a -> scope.launch { x402.revoke(a.origin, a.chainId, a.asset, a.account) } },
                         onOpenHistory = {
                             error = null
                             x402HistoryOpen = true

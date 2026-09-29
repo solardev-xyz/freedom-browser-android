@@ -253,9 +253,12 @@ object X402Payments {
         val allowances = store.allowances.first()
 
         // An allowance pays silently — only with the wallet open, never unlocking it for a site,
-        // and only for a navigation the user or the site itself started (#218 R4-M3).
-        val covered = if (!allowanceMayPay) null else options.firstOrNull { o ->
-            store.covering(allowances, d.origin, o.offer.chainId, o.offer.asset, o.offer.amount) != null
+        // only for a navigation the user or the site itself started (#218 R4-M3), only from
+        // the account it was granted for (#218 R2-F1), and only when the balance isn't known
+        // to be short: otherwise the sheet says why (#218 R2-M1).
+        val payer = account?.address
+        val covered = if (!allowanceMayPay || payer == null) null else autoPayOption(options) { o ->
+            store.covering(allowances, d.origin, o.chainId, o.asset, payer, o.amount) != null
         }
         if (covered != null && account != null && vault.unlockedNow()) {
             if (!stillOn(tab, doc, webView, d.url)) return
@@ -276,10 +279,20 @@ object X402Payments {
         val answer = EthereumProviders.askOnDocument(tab, doc, ask)
         val choice = (answer as? EthAnswer.Approved)?.payment ?: return
         val option = options.getOrNull(choice.option) ?: return
-        val payer = activeAccount(vault, walletAccounts) ?: return
+        val chosen = activeAccount(vault, walletAccounts) ?: return
         if (!stillOn(tab, doc, webView, d.url)) return
-        pay(tab, doc, webView, d, option, payer, auto = false, grant = choice.allowance)
+        pay(tab, doc, webView, d, option, chosen, auto = false, grant = choice.allowance)
     }
+
+    /**
+     * The offer an allowance pays without asking: the first one [covered]
+     * by an allowance whose balance isn't known to be short — a transfer
+     * that can't settle would only be refused and still count against the
+     * allowance, so a short balance goes to the sheet, which says why
+     * (#218 R2-M1).
+     */
+    internal fun autoPayOption(options: List<X402Option>, covered: (X402.Offer) -> Boolean): X402Option? =
+        options.firstOrNull { it.fundable && covered(it.offer) }
 
     private suspend fun activeAccount(vault: Vault, accounts: WalletAccounts): WalletAccount? {
         accounts.accounts.value?.let { return it.active }

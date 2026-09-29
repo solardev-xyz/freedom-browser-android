@@ -50,6 +50,18 @@ class X402SheetTest {
     }
 
     @Test
+    fun `an allowance pays only an offer the balance isn't known to be short of (R2-M1)`() {
+        val short = ask(balance = 5_000, "10000", "5000").options
+        // Both covered: the first is short, so the second is paid.
+        assertEquals(1, X402Payments.autoPayOption(short) { true }?.offer?.index)
+        // Only the short one covered: none is paid silently, the sheet explains.
+        assertNull(X402Payments.autoPayOption(short) { it.index == 0 })
+        // An unknown balance doesn't stop it.
+        assertEquals(0, X402Payments.autoPayOption(ask(balance = null, "10000").options) { true }?.offer?.index)
+        assertNull(X402Payments.autoPayOption(ask(balance = null, "10000").options) { false })
+    }
+
+    @Test
     fun `an unknown balance doesn't stop the payment`() {
         assertEquals(X402Choice(0, null), X402SheetState(ask(balance = null, "10000")).choice())
     }

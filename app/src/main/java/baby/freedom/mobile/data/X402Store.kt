@@ -12,9 +12,12 @@ import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import java.io.IOException
 import java.math.BigInteger
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.transformLatest
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -23,13 +26,17 @@ import org.json.JSONObject
  * paying without being asked, and the history of every payment signed —
  * desktop's `x402/permissions.js` and the x402 rows of `payment-history.js`.
  *
- *     "allow:<origin> <chainId> <asset>" → {"cap": "…", "spent": "…", "created": ms, "expires": ms,
+ *     "allow:<origin> <chainId> <asset> <account>" → {"cap": "…", "spent": "…", "created": ms, "expires": ms,
  *                                           "symbol": "USDC", "decimals": 6}
  *     "history" → [{…}, …] newest first, at most [MAX_HISTORY]
  *
  * An allowance is keyed by the site's origin (the provider origin key),
- * the chain and the token: "1 USDC for example.com" never lets the site
- * spend another token or the same token on another chain. It is a total
+ * the chain, the token and the paying account: "1 USDC for example.com
+ * from Account 1" never lets the site spend another token, the same token
+ * on another chain, or another account's funds — after an account switch
+ * the site asks again, from the account now active (#218 R2-F1). An
+ * allowance written before the account was part of its key doesn't decode,
+ * so it pays nothing. It is a total
  * over one window, never renewed by itself: when [Allowance.expires]
  * passes or [Allowance.spent] reaches [Allowance.cap], the site asks again.
  * Amounts are base-unit integers in text.
@@ -49,6 +56,8 @@ class X402Store internal constructor(
         val chainId: Long,
         /** The token contract, lower case. */
         val asset: String,
+        /** The account it pays from, lower case (#218 R2-F1). */
+        val account: String,
         val symbol: String,
         val decimals: Int,
         val cap: BigInteger,
@@ -93,13 +102,28 @@ class X402Store internal constructor(
         val httpStatus: Int? = null,
     )
 
-    /** Every allowance still in its window with something left, by site. */
-    val allowances: Flow<List<Allowance>> = data().map { prefs ->
-        val now = clock()
-        prefs?.asMap()?.mapNotNull { (k, v) ->
+    /**
+     * Every allowance still in its window with something left, by site.
+     * Emitted again whenever one's window opens or closes, not only when
+     * the store changes: an allowance that runs out with nothing else
+     * written leaves the list on its own (#218 R2-M2).
+     */
+    @OptIn(ExperimentalCoroutinesApi::class)
+    val allowances: Flow<List<Allowance>> = data().transformLatest { prefs ->
+        val all = prefs?.asMap()?.mapNotNull { (k, v) ->
             if (!k.name.startsWith(ALLOW)) return@mapNotNull null
             decodeAllowance(k.name.removePrefix(ALLOW), v as? String ?: return@mapNotNull null)
-        }?.filter { live(it, now) }?.sortedWith(compareBy({ it.origin }, { it.chainId }, { it.asset })).orEmpty()
+        }.orEmpty().sortedWith(compareBy({ it.origin }, { it.chainId }, { it.asset }, { it.account }))
+        while (true) {
+            val now = clock()
+            emit(all.filter { live(it, now) })
+            // The next moment the list changes by the clock alone.
+            val next = all.filter { it.spent < it.cap }
+                .flatMap { listOf(it.created - CLOCK_SLACK_MS, it.expires) }
+                .filter { it > now }
+                .minOrNull() ?: break
+            delay((next - now).coerceIn(1, MAX_WAKE_MS))
+        }
     }
 
     /** Every payment, newest first. */
@@ -119,7 +143,7 @@ class X402Store internal constructor(
         now < a.expires && now >= a.created - CLOCK_SLACK_MS && a.spent < a.cap
 
     /**
-     * Let [origin] pay up to [cap] of [asset] on [chainId] without asking,
+     * Let [origin] pay up to [cap] of [asset] on [chainId] from [account] without asking,
      * for [windowMs] from now, with [spentNow] (the payment the user just
      * approved) already counted. Replaces any allowance it had for that
      * token. `false` if it couldn't be written, or [spentNow] is over [cap].
@@ -128,6 +152,7 @@ class X402Store internal constructor(
         origin: String,
         chainId: Long,
         asset: String,
+        account: String,
         symbol: String,
         decimals: Int,
         cap: BigInteger,
@@ -136,37 +161,37 @@ class X402Store internal constructor(
     ): Boolean {
         if (cap.signum() <= 0 || spentNow.signum() < 0 || spentNow > cap || windowMs <= 0) return false
         val now = clock()
-        val a = Allowance(origin, chainId, asset.lowercase(), symbol, decimals, cap, spentNow, now, now + windowMs)
+        val a = Allowance(origin, chainId, asset.lowercase(), account.lowercase(), symbol, decimals, cap, spentNow, now, now + windowMs)
         return write { prefs ->
             dropDead(prefs, now)
-            prefs[allowKey(origin, chainId, asset)] = encodeAllowance(a)
+            prefs[allowKey(origin, chainId, asset, account)] = encodeAllowance(a)
         }
     }
 
     /**
-     * The allowance [origin] has for [asset] on [chainId] if it covers
-     * [amount] right now, else null. Nothing is counted: see [consume].
+     * The allowance [origin] has for [asset] on [chainId] from [account]
+     * if it covers [amount] right now, else null. Nothing is counted: see [consume].
      */
-    fun covering(all: List<Allowance>, origin: String, chainId: Long, asset: String, amount: BigInteger): Allowance? {
+    fun covering(all: List<Allowance>, origin: String, chainId: Long, asset: String, account: String, amount: BigInteger): Allowance? {
         val now = clock()
         return all.firstOrNull {
             it.origin == origin && it.chainId == chainId && it.asset == asset.lowercase() &&
-                live(it, now) && amount <= it.remaining
+                it.account == account.lowercase() && live(it, now) && amount <= it.remaining
         }
     }
 
     /**
-     * Count [amount] against [origin]'s allowance for [asset] on [chainId],
-     * in one write: `true` only if the allowance is live, covers it, and
+     * Count [amount] against [origin]'s allowance for [asset] on [chainId]
+     * from [account], in one write: `true` only if the allowance is live, covers it, and
      * the new total was saved. Two payments racing for the last of an
      * allowance can't both get `true`.
      */
-    suspend fun consume(origin: String, chainId: Long, asset: String, amount: BigInteger): Boolean {
+    suspend fun consume(origin: String, chainId: Long, asset: String, account: String, amount: BigInteger): Boolean {
         if (amount.signum() <= 0) return false
         var ok = false
         val written = write { prefs ->
             ok = false
-            val key = allowKey(origin, chainId, asset)
+            val key = allowKey(origin, chainId, asset, account)
             val a = prefs[key]?.let { decodeAllowance(key.name.removePrefix(ALLOW), it) } ?: return@write
             if (!live(a, clock()) || amount > a.remaining) return@write
             prefs[key] = encodeAllowance(a.copy(spent = a.spent + amount))
@@ -196,9 +221,10 @@ class X402Store internal constructor(
 
     /**
      * Record [payment] as [Status.PENDING] and, in the same write, count
-     * it against [Payment.origin]'s allowance ([Payment.auto]) or grant
-     * the allowance the user asked for with it ([grant], this payment
-     * counted). All of it is written or none of it (#218 R1-M2, R1-M4):
+     * it against [Payment.origin]'s allowance from the paying account
+     * ([Payment.from]) ([Payment.auto]) or grant the allowance the user
+     * asked for with it ([grant], this payment counted), for that account
+     * only (#218 R2-F1). All of it is written or none of it (#218 R1-M2, R1-M4):
      * an allowance is never spent or granted for a payment the history
      * doesn't show. Undo with [withdraw] if the payment isn't sent after all.
      */
@@ -212,7 +238,7 @@ class X402Store internal constructor(
         val written = write { prefs ->
             result = Commit.Failed
             val now = clock()
-            val key = allowKey(payment.origin, payment.chainId, payment.asset)
+            val key = allowKey(payment.origin, payment.chainId, payment.asset, payment.from)
             var created: Long? = null
             if (payment.auto) {
                 val a = prefs[key]?.let { decodeAllowance(key.name.removePrefix(ALLOW), it) }
@@ -225,7 +251,8 @@ class X402Store internal constructor(
             } else if (grant != null) {
                 dropDead(prefs, now)
                 val a = Allowance(
-                    payment.origin, payment.chainId, payment.asset.lowercase(), grant.symbol, grant.decimals,
+                    payment.origin, payment.chainId, payment.asset.lowercase(), payment.from.lowercase(),
+                    grant.symbol, grant.decimals,
                     grant.cap, amount, now, now + grant.windowMs,
                 )
                 prefs[key] = encodeAllowance(a)
@@ -250,7 +277,7 @@ class X402Store internal constructor(
             prefs[HISTORY] = encodeHistory(list.filter { it.id != payment.id })
         }
         if (allowanceCreated == null) return@write
-        val key = allowKey(payment.origin, payment.chainId, payment.asset)
+        val key = allowKey(payment.origin, payment.chainId, payment.asset, payment.from)
         val a = prefs[key]?.let { decodeAllowance(key.name.removePrefix(ALLOW), it) } ?: return@write
         if (a.created != allowanceCreated) return@write
         if (payment.auto) {
@@ -260,9 +287,9 @@ class X402Store internal constructor(
         }
     }
 
-    /** Take away [origin]'s allowance for [asset] on [chainId]; `false` if it couldn't be written. */
-    suspend fun revoke(origin: String, chainId: Long, asset: String): Boolean =
-        write { it.remove(allowKey(origin, chainId, asset)) }
+    /** Take away [origin]'s allowance for [asset] on [chainId] from [account]; `false` if it couldn't be written. */
+    suspend fun revoke(origin: String, chainId: Long, asset: String, account: String): Boolean =
+        write { it.remove(allowKey(origin, chainId, asset, account)) }
 
     /** Record [payment] at the top of the history; `false` if it couldn't be written. */
     suspend fun record(payment: Payment): Boolean = write { prefs ->
@@ -321,11 +348,14 @@ class X402Store internal constructor(
         /** How far behind an allowance's creation the clock may read before the allowance stops counting. */
         private const val CLOCK_SLACK_MS = 5 * 60 * 1000L
 
+        /** The longest the allowance list waits before looking at the clock again (a wall clock can jump). */
+        private const val MAX_WAKE_MS = 60 * 60 * 1000L
+
         private val ADDRESS = Regex("^0x[0-9a-fA-F]{40}$")
         private val DIGITS = Regex("^[0-9]{1,78}$")
 
-        private fun allowKey(origin: String, chainId: Long, asset: String) =
-            stringPreferencesKey("$ALLOW$origin $chainId ${asset.lowercase()}")
+        private fun allowKey(origin: String, chainId: Long, asset: String, account: String) =
+            stringPreferencesKey("$ALLOW$origin $chainId ${asset.lowercase()} ${account.lowercase()}")
 
         internal fun encodeAllowance(a: Allowance): String = JSONObject()
             .put("cap", a.cap.toString()).put("spent", a.spent.toString())
@@ -335,14 +365,18 @@ class X402Store internal constructor(
 
         internal fun decodeAllowance(key: String, json: String): Allowance? = try {
             val parts = key.split(' ')
-            require(parts.size == 3)
+            // Four parts: one keyed without its account (before #218 R2-F1) pays nothing.
+            require(parts.size == 4)
             val o = JSONObject(json)
             val asset = parts[2]
             require(ADDRESS.matches(asset))
+            val account = parts[3]
+            require(ADDRESS.matches(account))
             Allowance(
                 origin = parts[0],
                 chainId = parts[1].toLong(),
                 asset = asset,
+                account = account,
                 symbol = o.getString("symbol"),
                 decimals = o.getInt("decimals").also { require(it in 0..36) },
                 cap = o.getString("cap").also { require(DIGITS.matches(it)) }.toBigInteger(),
