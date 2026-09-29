@@ -2246,7 +2246,7 @@ private fun buildRefreshableWebView(
         EthereumProviders.install(this, state)
 
         // `window.swarm` (#120): publishing, chunks and feeds.
-        SwarmProviders.install(this, state)
+        SwarmProviders.install(this, state, ensPins)
 
         // Force an initial paint so the WebView's compositor surface
         // is valid even before the user submits a URL. Not for a popup:
