@@ -58,12 +58,14 @@ The parity plan ([#128](https://github.com/solardev-xyz/freedom-browser-android/
 What the Desktop and iOS columns mean:
 
 - **yes**: that platform has the feature. **yes (X)**: it has only part X of it (MIDI of #267, ENS of #277).
-- **no**: that platform doesn't have it either. A **no** in one column still leaves a parity gap with the other platform if that one says yes. Only when both columns say **no** ([#268](https://github.com/solardev-xyz/freedom-browser-android/issues/268), [#280](https://github.com/solardev-xyz/freedom-browser-android/issues/280)) is the row Android polish or a mobile expectation rather than parity, and the issue says so.
+- **no**: that platform doesn't have it either. A **no** in one column still leaves a parity gap with the other platform if that one says yes.
 - **partial**: it has part of it; the issue's *Reference implementations* says which part (for [#259](https://github.com/solardev-xyz/freedom-browser-android/issues/259), iOS has error pages for dweb loads only).
 - **minimal**: it has a little of it (iOS has about 13 accessibility labels in the whole app).
 - **n/a**: the gap doesn't apply to that platform, so there's nothing to compare ([#260](https://github.com/solardev-xyz/freedom-browser-android/issues/260)'s renderer-crash handling on iOS).
 - **not checked**: not audited in this pass, so it says nothing about whether that platform has it. For [#283](https://github.com/solardev-xyz/freedom-browser-android/issues/283), iOS's node API wasn't probed from a web page; for [#279](https://github.com/solardev-xyz/freedom-browser-android/issues/279), desktop's screen-reader and large-font support wasn't tested (TalkBack itself is Android-only).
 - Anything else names that platform's nearest equivalent: **App Store** (updates come through the store, so there's nothing to build), **log file** (desktop writes node logs to a file but has no viewer), **welcome page** (desktop's home page explains the dweb, with no separate first-run flow), **Explore only** (an Explore entry with no first-run introduction).
+
+A row is Android polish or a mobile expectation rather than parity when no platform is known to have what its issue asks for, and the issue says so. That happens two ways: both columns say **no** ([#268](https://github.com/solardev-xyz/freedom-browser-android/issues/268), [#280](https://github.com/solardev-xyz/freedom-browser-android/issues/280)), or the columns name something short of it. [#278](https://github.com/solardev-xyz/freedom-browser-android/issues/278) asks for a first-run introduction, which neither desktop's welcome page nor iOS's Explore entry is. [#279](https://github.com/solardev-xyz/freedom-browser-android/issues/279) asks for full TalkBack and large-font support; iOS has only a minimal version, and desktop wasn't checked, so the row rests on iOS alone.
 
 ## Checked and not filed
 
