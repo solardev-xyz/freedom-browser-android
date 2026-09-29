@@ -63,8 +63,8 @@ source .envrc   # if you haven't: cp .envrc.example .envrc && edit to taste
 #    Needs cargo-ndk and ANDROID_NDK_HOME; rustup picks the toolchain from
 #    the repo's rust-toolchain.toml.
 #    Use the FFI_REF pinned in release.yml, with ant's `chain` feature,
-#    the embedded Radicle node and the Tor client on (see "Building
-#    libfreedom_mobile_ffi.so" below). Chained with && so a failed step
+#    the embedded Radicle node and the Tor client on, and fat LTO (see
+#    "Building libfreedom_mobile_ffi.so" below). Chained with && so a failed step
 #    (e.g. enable-ffi-chain.sh rejecting a reshaped cargo call) stops
 #    before a chain-less .so is built or copied.
 git clone https://github.com/solardev-xyz/freedom-mobile-ffi.git /tmp/freedom-mobile-ffi &&
@@ -72,6 +72,7 @@ git clone https://github.com/solardev-xyz/freedom-mobile-ffi.git /tmp/freedom-mo
   scripts/enable-ffi-chain.sh /tmp/freedom-mobile-ffi &&
   scripts/enable-ffi-radicle.sh /tmp/freedom-mobile-ffi &&
   scripts/enable-ffi-tor.sh /tmp/freedom-mobile-ffi &&
+  scripts/enable-ffi-fat-lto.sh /tmp/freedom-mobile-ffi &&
   ( cd /tmp/freedom-mobile-ffi && ./scripts/build-android.sh ) &&
   mkdir -p swarmnode/src/main/jniLibs &&
   cp -r /tmp/freedom-mobile-ffi/target/android/jniLibs/. swarmnode/src/main/jniLibs/
@@ -269,10 +270,13 @@ git clone https://github.com/solardev-xyz/freedom-mobile-ffi.git /tmp/freedom-mo
 #    scripts/enable-ffi-radicle.sh then extends that to `chain,radicle`,
 #    the embedded Radicle node, and scripts/enable-ffi-tor.sh to
 #    `chain,radicle,tor`, the Arti client for .onion (see below).
+#    scripts/enable-ffi-fat-lto.sh switches the release-android profile
+#    from thin to fat LTO (see "Library size" below).
 #    Chained with && so a failed helper stops before a chain-less build.
 "$FREEDOM_ANDROID/scripts/enable-ffi-chain.sh" /tmp/freedom-mobile-ffi &&
   "$FREEDOM_ANDROID/scripts/enable-ffi-radicle.sh" /tmp/freedom-mobile-ffi &&
   "$FREEDOM_ANDROID/scripts/enable-ffi-tor.sh" /tmp/freedom-mobile-ffi &&
+  "$FREEDOM_ANDROID/scripts/enable-ffi-fat-lto.sh" /tmp/freedom-mobile-ffi &&
   cd /tmp/freedom-mobile-ffi &&
   ./scripts/build-android.sh
 
@@ -294,6 +298,10 @@ scripts/generate-radicle-bindings.sh /tmp/freedom-mobile-ffi --check   # what re
 ```
 
 The `tor` feature adds the Arti Tor client for `.onion` sites (#143; see [Tor](#tor-onion-sites)): freedom-mobile-ffi's own `freedom_tor_*` C surface, driven through `swarmnode/src/main/cpp/tor_jni.c` (header `freedom_tor.h`, vendored from `include/` at `FFI_REF`; refresh it with the `.so`). It adds about 7 MiB per ABI to the library. release.yml checks all five `freedom_tor_*` exports after the build, since `libfreedom_jni.so` links against them. A library built without `tor` fails that link.
+
+### Library size
+
+`libfreedom_mobile_ffi.so` is nearly all of the APK (#230). freedom-mobile-ffi's `release-android` profile already strips symbols, aborts on panic and builds one codegen unit; `scripts/enable-ffi-fat-lto.sh` swaps its thin LTO for fat, about 10% smaller per ABI at the same speed, for a longer link. `opt-level` stays 3: `"s"` would take off another third, but it makes AES-CTR (Tor) about 8× slower, ChaCha20-Poly1305 (libp2p) 2.5× and SHA-256 (IPFS) 2.8×. The APK stores native libraries compressed (`jniLibs.useLegacyPackaging` in `app/build.gradle.kts`), which roughly halves the download and costs about 19 MB more once installed, since the installer extracts them; and it leaves out the 32-bit and MIPS copies of third-party native libraries, which can't run the app anyway.
 
 ## Colibri: proven name resolution
 
