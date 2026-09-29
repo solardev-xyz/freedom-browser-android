@@ -204,6 +204,31 @@ class OpenLvSession internal constructor(
         _approval.value = null
     }
 
+    /**
+     * The Ledger account [address] was taken off the wallet (#220 R1-M2):
+     * if desktop was given it, it isn't any more — `eth_accounts` answers
+     * none, and adding the account again later doesn't hand it back
+     * without a new Connect sheet, as for a site
+     * ([baby.freedom.mobile.browser.EthereumProvider.accountRemoved]).
+     * Main thread.
+     */
+    fun accountRemoved(address: String) {
+        if (sharedAccount?.address.equals(address, ignoreCase = true)) {
+            sharedAccount = null
+            Log.i(TAG, "shared account removed from the wallet")
+        }
+    }
+
+    /**
+     * Drops [sharedAccount] if the wallet's list no longer has it — a
+     * backstop for [accountRemoved]. A list not read yet (null) says nothing.
+     */
+    private fun forgetRemovedAccount() {
+        val shared = sharedAccount ?: return
+        val list = keys.accounts() ?: return
+        if (list.accounts.none { it.address.equals(shared.address, ignoreCase = true) }) accountRemoved(shared.address)
+    }
+
     override fun onLink(sid: Int, link: OpenLvLink) {
         scope.launch {
             if (sid != this@OpenLvSession.sid) return@launch
@@ -239,6 +264,7 @@ class OpenLvSession internal constructor(
     /** One request's answer. Internal so tests drive it without an engine. */
     internal suspend fun handle(sid: Int, method: String, params: JSONArray): OpenLvResponse {
         keys.noteActivity()
+        forgetRemovedAccount()
         return when (method) {
             "eth_chainId" -> OpenLvResponse.Result("0x" + chainId.toString(16))
             "eth_accounts" -> OpenLvResponse.Result(JSONArray().apply { sharedAccount?.let { put(it.address) } })
@@ -379,8 +405,14 @@ class OpenLvSession internal constructor(
                     "Another send from the phone’s wallet isn’t settled yet. Settle it in the wallet on the phone, then try again.",
                 )
                 WalletSender.Broadcast.Rejected -> REJECTED_ON_LEDGER
-                WalletSender.Broadcast.Stale -> {
-                    notice = "The fees were over a minute old, so they’ve been priced again. Check them and confirm again."
+                is WalletSender.Broadcast.Stale -> {
+                    notice = if (b.droppedSigned) {
+                        // Approved on the Ledger, but its review there outlasted SIGNED_TTL_MS (#220 R1-M1).
+                        "The Ledger approval came over three minutes after the fees were worked out, so it wasn’t " +
+                            "sent and they’ve been priced again. Check them and confirm again."
+                    } else {
+                        "The fees were over a minute old, so they’ve been priced again. Check them and confirm again."
+                    }
                     continue
                 }
             }
@@ -465,6 +497,14 @@ class OpenLvSession internal constructor(
 
         fun get(context: Context): OpenLvSession = instance ?: synchronized(this) {
             instance ?: create(context.applicationContext).also { instance = it }
+        }
+
+        /**
+         * [accountRemoved] on the session, if one was ever made (no
+         * session, nothing shared: none is made just for this). Main thread.
+         */
+        fun accountRemovedFromWallet(address: String) {
+            instance?.accountRemoved(address)
         }
 
         private fun create(app: Context): OpenLvSession {

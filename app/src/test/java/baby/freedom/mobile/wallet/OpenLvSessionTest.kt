@@ -25,6 +25,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -109,6 +110,8 @@ class OpenLvSessionTest {
         var ledgerFails: LedgerException? = null
         var ledgerSigned = 0
         var freshAsked: Boolean? = null
+        /** Runs on "the Ledger" as it signs: the time the user takes reviewing there. */
+        var onReview: (() -> Unit)? = null
         override fun accounts() = soft.accounts()
         override fun <T> withKey(account: WalletAccount, block: (ByteArray) -> T): T {
             check(!account.isLedger) { "a Ledger account's key was asked of the seed" }
@@ -132,7 +135,7 @@ class OpenLvSessionTest {
 
         override fun transactionSigner(account: WalletAccount, fresh: () -> Boolean): suspend (EthTransaction) -> EthTransaction.Signed =
             if (!account.isLedger) super.transactionSigner(account, fresh)
-            else { t -> freshAsked = fresh(); onLedger { t.sign(it, account.address) } }
+            else { t -> freshAsked = fresh(); onReview?.invoke(); onLedger { t.sign(it, account.address) } }
     }
 
     private val sent = mutableListOf<String>()
@@ -161,8 +164,12 @@ class OpenLvSessionTest {
         ),
     )
 
-    private fun <K : OpenLvSession.Keys> session(engine: FakeEngine, keys: K): Triple<OpenLvSession, FakeEngine, K> {
-        val sender = WalletSender(rpc(), senderScope, pollMs = 10, confirmTimeoutMs = 200)
+    private fun <K : OpenLvSession.Keys> session(
+        engine: FakeEngine,
+        keys: K,
+        clock: () -> Long = System::currentTimeMillis,
+    ): Triple<OpenLvSession, FakeEngine, K> {
+        val sender = WalletSender(rpc(), senderScope, clock = clock, pollMs = 10, confirmTimeoutMs = 200)
         runBlocking { sender.awaitRestored() }
         val s = OpenLvSession(engine, keys, { listOf(BuiltInChains.ETHEREUM, gnosis) }, sender, scope)
         return Triple(s, engine, keys)
@@ -437,5 +444,89 @@ class OpenLvSessionTest {
         s.onRequest(1, 2, "eth_sendTransaction", JSONArray().put(JSONObject(tx.toString()).put("data", "0x" + "ab".repeat(OpenLvSession.MAX_CALL_DATA))))
         val quote = (s.awaitSheet().request as OpenLvSession.Request.SendTransaction).quote
         assertEquals(OpenLvSession.MAX_CALL_DATA, quote.tx.data.size)
+    }
+
+    @Test
+    fun `a transaction approved on the Ledger too late is priced again, and the sheet says why`() {
+        val now = java.util.concurrent.atomic.AtomicLong(1_000_000L)
+        val (s, engine, keys) = session(FakeEngine(), LedgerKeys()) { now.get() }
+        s.startOnScope()
+        s.onRequest(1, 1, "wallet_switchEthereumChain", JSONArray().put(JSONObject().put("chainId", "0x64")))
+        engine.next()
+        val tx = JSONObject().put("from", ledgerAccount.address).put("to", account1.address).put("value", "0x1").put("chainId", "0x64")
+        // Fresh as the Ledger showed it; the review there outlasted SIGNED_TTL_MS.
+        keys.onReview = { now.addAndGet(WalletSender.SIGNED_TTL_MS) }
+        s.onRequest(1, 2, "eth_sendTransaction", JSONArray().put(tx))
+        val first = s.awaitSheet()
+        assertNull((first.request as OpenLvSession.Request.SendTransaction).notice)
+        first.decide(OpenLvSession.Decision.Approve())
+        val again = runBlocking { withTimeout(5_000) { s.approval.first { it != null && it !== first }!! } }
+        val notice = (again.request as OpenLvSession.Request.SendTransaction).notice!!
+        assertTrue(notice, notice.contains("Ledger approval came over three minutes"))
+        assertFalse(notice, notice.contains("over a minute old"))
+        assertTrue(synchronized(sent) { sent.isEmpty() })
+        again.decide(OpenLvSession.Decision.Reject)
+        assertEquals(OpenLvSession.REJECTED_CODE, error(engine.next()))
+    }
+
+    @Test
+    fun `a transaction whose fees aged before signing says they were over a minute old`() {
+        val now = java.util.concurrent.atomic.AtomicLong(1_000_000L)
+        val (s, engine) = session(FakeEngine(), FakeKeys()) { now.get() }
+        s.startOnScope()
+        s.onRequest(1, 1, "wallet_switchEthereumChain", JSONArray().put(JSONObject().put("chainId", "0x64")))
+        engine.next()
+        val tx = JSONObject().put("from", account0.address).put("to", account1.address).put("value", "0x1").put("chainId", "0x64")
+        s.onRequest(1, 2, "eth_sendTransaction", JSONArray().put(tx))
+        val first = s.awaitSheet()
+        now.addAndGet(WalletSender.QUOTE_TTL_MS) // the sheet stood for a minute
+        first.decide(OpenLvSession.Decision.Approve())
+        val again = runBlocking { withTimeout(5_000) { s.approval.first { it != null && it !== first }!! } }
+        val notice = (again.request as OpenLvSession.Request.SendTransaction).notice!!
+        assertTrue(notice, notice.contains("over a minute old"))
+        again.decide(OpenLvSession.Decision.Reject)
+        assertEquals(OpenLvSession.REJECTED_CODE, error(engine.next()))
+    }
+
+    @Test
+    fun `removing the shared Ledger account takes it back from desktop, and re-adding it needs a new Connect`() {
+        val keys = LedgerKeys()
+        val (s, engine) = session(FakeEngine(), keys)
+        s.startOnScope()
+        s.onRequest(1, 1, "eth_requestAccounts", JSONArray())
+        s.awaitSheet().decide(OpenLvSession.Decision.Approve(ledgerAccount))
+        assertEquals(ledgerAccount.address, (result(engine.next()) as JSONArray).getString(0))
+
+        runBlocking { withContext(thread) { s.accountRemoved(ledgerAccount.address.lowercase()) } }
+        s.onRequest(1, 2, "eth_accounts", JSONArray())
+        assertEquals(0, (result(engine.next()) as JSONArray).length())
+        // Added again: still not desktop's until a Connect sheet says so.
+        s.onRequest(1, 3, "eth_requestAccounts", JSONArray())
+        assertTrue(s.awaitSheet().request is OpenLvSession.Request.Connect)
+    }
+
+    @Test
+    fun `an account gone from the wallet's list stops being desktop's even without the hook`() {
+        val keys = LedgerKeys()
+        val (s, engine) = session(FakeEngine(), keys)
+        s.startOnScope()
+        s.onRequest(1, 1, "eth_requestAccounts", JSONArray())
+        s.awaitSheet().decide(OpenLvSession.Decision.Approve(ledgerAccount))
+        engine.next()
+        val full = keys.soft.list
+        keys.soft.list = WalletAccountList(listOf(account0), 0)
+        s.onRequest(1, 2, "eth_accounts", JSONArray())
+        assertEquals(0, (result(engine.next()) as JSONArray).length())
+        keys.soft.list = full
+        s.onRequest(1, 3, "eth_accounts", JSONArray())
+        assertEquals(0, (result(engine.next()) as JSONArray).length())
+        // A list not read yet says nothing about the shared account.
+        s.onRequest(1, 4, "eth_requestAccounts", JSONArray())
+        s.awaitSheet().decide(OpenLvSession.Decision.Approve(ledgerAccount))
+        engine.next()
+        keys.soft.list = null
+        s.onRequest(1, 5, "eth_accounts", JSONArray())
+        assertEquals(ledgerAccount.address, (result(engine.next()) as JSONArray).getString(0))
+        keys.soft.list = full
     }
 }

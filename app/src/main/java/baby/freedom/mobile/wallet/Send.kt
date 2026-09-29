@@ -409,6 +409,10 @@ data class SendStatus(val quote: SendQuote, val stage: Stage, val hash: String? 
          * [stale]: it wasn't sent because its quote got older than
          * [WalletSender.SIGNED_TTL_MS] while it was being signed (a Ledger
          * waited on): priced again, it can be confirmed again.
+         * [droppedSigned]: of those, it was signed — approved on the
+         * Ledger — and only then found older than
+         * [WalletSender.SIGNED_TTL_MS]; otherwise the Ledger found it
+         * over [WalletSender.QUOTE_TTL_MS] old before showing it.
          * [rejected]: the user refused it on their Ledger, or cancelled
          * waiting for it — a site that asked for it hears a rejection (4001).
          */
@@ -417,6 +421,7 @@ data class SendStatus(val quote: SendQuote, val stage: Stage, val hash: String? 
             val mayHaveGone: Boolean,
             val stale: Boolean = false,
             val rejected: Boolean = false,
+            val droppedSigned: Boolean = false,
         ) : Stage
 
         data object Pending : Stage
@@ -860,7 +865,7 @@ class WalletSender internal constructor(
         } catch (e: CancellationException) {
             throw e
         } catch (e: QuoteStaleException) {
-            failStale(quote)
+            failStale(quote, droppedSigned = false)
             return
         } catch (e: VaultLockedException) {
             fail(quote, "The wallet locked before the transaction was signed. Nothing was sent; confirm again to unlock it.", false)
@@ -879,7 +884,7 @@ class WalletSender internal constructor(
         // Signing may have taken minutes (a Ledger unlocked, opened, reviewed on):
         // bytes whose fee cap was priced too long ago are dropped, never sent.
         if (tooOldToSend(quote)) {
-            failStale(quote)
+            failStale(quote, droppedSigned = true)
             return
         }
         // On disk before it goes out: a process killed mid-broadcast
@@ -902,8 +907,12 @@ class WalletSender internal constructor(
         /**
          * [Submit.STALE], or it went stale while a Ledger signed it
          * ([SendStatus.Stage.Failed.stale]): nothing sent, price it again.
+         * [droppedSigned]: it was approved on the Ledger and dropped
+         * only then, priced over [SIGNED_TTL_MS] ago
+         * ([SendStatus.Stage.Failed.droppedSigned]); otherwise it was
+         * over [QUOTE_TTL_MS] old (or overtaken) before anything was signed.
          */
-        data object Stale : Broadcast
+        data class Stale(val droppedSigned: Boolean) : Broadcast
 
         /** Refused on the Ledger, or its wait cancelled ([SendStatus.Stage.Failed.rejected]): nothing sent. */
         data object Rejected : Broadcast
@@ -918,7 +927,7 @@ class WalletSender internal constructor(
     suspend fun submitAndAwaitBroadcast(quote: SendQuote, sign: suspend (EthTransaction) -> EthTransaction.Signed): Broadcast {
         when (submit(quote, sign)) {
             Submit.BUSY -> return Broadcast.Busy
-            Submit.STALE -> return Broadcast.Stale
+            Submit.STALE -> return Broadcast.Stale(droppedSigned = false)
             Submit.STARTED -> Unit
         }
         val s = status.first { it?.quote !== quote || (it.stage != SendStatus.Stage.Signing && it.stage != SendStatus.Stage.Broadcasting) }
@@ -928,7 +937,7 @@ class WalletSender internal constructor(
         }
         return when (val stage = s.stage) {
             is SendStatus.Stage.Failed -> when {
-                stage.stale -> Broadcast.Stale
+                stage.stale -> Broadcast.Stale(stage.droppedSigned)
                 stage.rejected -> Broadcast.Rejected
                 else -> Broadcast.Failed(stage.message, stage.mayHaveGone)
             }
@@ -1133,8 +1142,9 @@ class WalletSender internal constructor(
     private suspend fun fail(quote: SendQuote, message: String, mayHaveGone: Boolean, rejected: Boolean = false) =
         journalThenShow(quote) { it.copy(stage = SendStatus.Stage.Failed(message, mayHaveGone, rejected = rejected)) }
 
-    private suspend fun failStale(quote: SendQuote) = journalThenShow(quote) {
-        it.copy(stage = SendStatus.Stage.Failed(STALE_WHILE_SIGNING, mayHaveGone = false, stale = true))
+    private suspend fun failStale(quote: SendQuote, droppedSigned: Boolean) = journalThenShow(quote) {
+        val message = if (droppedSigned) STALE_WHILE_SIGNING else STALE_BEFORE_SIGNING
+        it.copy(stage = SendStatus.Stage.Failed(message, mayHaveGone = false, stale = true, droppedSigned = droppedSigned))
     }
 
     companion object {
@@ -1166,6 +1176,10 @@ class WalletSender internal constructor(
         /** Why a send was dropped unsent: its quote aged past [SIGNED_TTL_MS] while it was signed. */
         internal const val STALE_WHILE_SIGNING = "The network fee was worked out over three minutes ago, before this was signed, " +
             "so it may no longer get the transaction in. Nothing was sent; review the new fee and confirm again."
+
+        /** Why a send was dropped unsigned: the Ledger found its quote over [QUOTE_TTL_MS] old before showing it. */
+        internal const val STALE_BEFORE_SIGNING = "The network fee was worked out over a minute ago, so it may no longer " +
+            "get the transaction in. Nothing was signed or sent; review the new fee and confirm again."
 
         /** A quote older than this is priced again before it's signed (or shown on a Ledger). */
         const val QUOTE_TTL_MS = 60_000L

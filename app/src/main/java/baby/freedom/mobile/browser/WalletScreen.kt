@@ -81,6 +81,7 @@ import baby.freedom.mobile.ui.isLight
 import baby.freedom.mobile.wallet.BiometricVaultAuthenticator
 import baby.freedom.mobile.wallet.DuplicateAccountException
 import baby.freedom.mobile.wallet.Mnemonic
+import baby.freedom.mobile.wallet.OpenLvSession
 import baby.freedom.mobile.wallet.PublisherIdentityStore
 import baby.freedom.mobile.wallet.Vault
 import baby.freedom.mobile.wallet.VaultAuthCancelledException
@@ -649,6 +650,8 @@ fun WalletScreen(
                                             "couldn’t be disconnected. Try again."
                                         return@run
                                     }
+                                    // And desktop's OpenLV session, if it was given it (#220 R1-M2).
+                                    OpenLvSession.accountRemovedFromWallet(account.address)
                                     walletAccounts.removeLedger(account.index)
                                 }
                             },

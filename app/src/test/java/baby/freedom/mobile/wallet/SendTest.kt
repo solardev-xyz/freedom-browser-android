@@ -608,7 +608,7 @@ class SendTest {
 
         val old = WalletSender(chain.rpc(), scope, clock = { System.currentTimeMillis() + WalletSender.QUOTE_TTL_MS }, pollMs = 10, confirmTimeoutMs = 300)
         old.awaitRestored()
-        assertEquals(WalletSender.Broadcast.Stale, old.submitAndAwaitBroadcast(quote, signer()))
+        assertEquals(WalletSender.Broadcast.Stale(droppedSigned = false), old.submitAndAwaitBroadcast(quote, signer()))
     }
 
     @Test
@@ -628,7 +628,7 @@ class SendTest {
             now += WalletSender.SIGNED_TTL_MS
             tx.sign(key.copyOf(), from.address)
         }
-        assertEquals(WalletSender.Broadcast.Stale, aged)
+        assertEquals(WalletSender.Broadcast.Stale(droppedSigned = true), aged)
         assertTrue(chain.sent.isEmpty())
     }
 
@@ -1155,6 +1155,7 @@ class SendTest {
         assertTrue(failed.stale)
         assertFalse(failed.mayHaveGone)
         assertEquals(WalletSender.STALE_WHILE_SIGNING, failed.message)
+        assertTrue(failed.droppedSigned)
         assertTrue(chain.sent.isEmpty())
         // Nothing holds the next send back: priced again, it goes.
         now += 1
@@ -1276,6 +1277,9 @@ class SendTest {
         assertEquals(WalletSender.Submit.STARTED, s.submit(s.prepare(request())) { throw QuoteStaleException() })
         val failed = s.awaitStage { it is SendStatus.Stage.Failed }.stage as SendStatus.Stage.Failed
         assertTrue(failed.stale)
+        // Found stale before the Ledger showed it: nothing was signed, and the message says a minute, not three.
+        assertFalse(failed.droppedSigned)
+        assertEquals(WalletSender.STALE_BEFORE_SIGNING, failed.message)
         assertTrue(chain.sent.isEmpty())
     }
 
