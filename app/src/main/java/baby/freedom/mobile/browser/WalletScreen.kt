@@ -305,6 +305,8 @@ fun WalletScreen(
     // The receive and scan pages (#106).
     var receiving by remember { mutableStateOf(false) }
     var scanning by remember { mutableStateOf(false) }
+    // Connect a Ledger (#142).
+    var connectingLedger by remember { mutableStateOf(false) }
     val publishers = remember(context) { PublisherIdentityStore.get(context) }
     var publisherSites by remember { mutableStateOf(0) }
     // The site the user opened Wallet from, fixed at that moment: the tab
@@ -415,6 +417,7 @@ fun WalletScreen(
             sending = false
             receiving = false
             scanning = false
+            connectingLedger = false
             historyOpen = false
             openTx = null
         }
@@ -463,6 +466,14 @@ fun WalletScreen(
     val receivingAccount = accountList?.active
     if (receiving && receivingAccount != null && (state is Vault.State.Locked || state is Vault.State.Unlocked)) {
         ReceivePage(account = receivingAccount, onBack = { receiving = false })
+        return
+    }
+    if (connectingLedger && accountList != null && (state is Vault.State.Locked || state is Vault.State.Unlocked)) {
+        LedgerConnectPage(
+            accounts = accountList?.accounts.orEmpty(),
+            onAdded = { connectingLedger = false },
+            onBack = { connectingLedger = false },
+        )
         return
     }
     if (scanning && (state is Vault.State.Locked || state is Vault.State.Unlocked)) {
@@ -601,6 +612,13 @@ fun WalletScreen(
                             onReceive = {
                                 error = null
                                 receiving = true
+                            },
+                            onConnectLedger = {
+                                error = null
+                                connectingLedger = true
+                            },
+                            onRemoveLedger = { account ->
+                                run("remove the Ledger account") { walletAccounts.removeLedger(account.index) }
                             },
                         )
                     }

@@ -2262,6 +2262,8 @@ fun BrowserScreen(
     state.ethereumPrompt?.takeIf { promptTurn == PromptTurn.Ethereum }?.let { prompt ->
         androidx.compose.runtime.key(prompt) { EthereumApprovalSheet(prompt) }
     }
+    // A Ledger conversation (#142) — a site's signature, a send, reading accounts — over whatever is up.
+    LedgerActivityDialog()
     // The same gate for Android's own runtime-permission dialog, which
     // the broker raises only over the tab named here — plus the app
     // itself being in the foreground: WebViews aren't paused in the

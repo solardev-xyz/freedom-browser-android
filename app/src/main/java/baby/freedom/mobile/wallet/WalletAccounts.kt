@@ -6,6 +6,7 @@ import androidx.annotation.VisibleForTesting
 import baby.freedom.mobile.chains.rpc.ChainDataRouter
 import baby.freedom.mobile.chains.rpc.WalletRpc
 import baby.freedom.mobile.ens.Keccak256
+import baby.freedom.mobile.wallet.ledger.LedgerKey
 import java.io.File
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
@@ -29,9 +30,15 @@ import org.json.JSONObject
  * order, on desktop. Account 0 is desktop's main wallet; the Swarm
  * node's key (`m/44'/60'/0'/0/1`, [NodeIdentity.SWARM_PATH]) is never
  * one of them. Public data only: [address] is EIP-55 checksummed.
+ *
+ * Or a Ledger's (#142, [ledger] set): the key is on the device, which
+ * signs everything from this account; [index] is only the account's
+ * place in the list (negative, so it never names a key of the seed's).
  */
-data class WalletAccount(val index: Int, val name: String, val address: String) {
-    val path: String get() = pathFor(index)
+data class WalletAccount(val index: Int, val name: String, val address: String, val ledger: LedgerKey? = null) {
+    val path: String get() = ledger?.let { "m/" + it.path } ?: pathFor(index)
+
+    val isLedger: Boolean get() = ledger != null
 
     companion object {
         fun pathFor(index: Int) = "m/44'/60'/$index'/0/0"
@@ -89,10 +96,15 @@ class WalletAccountStore internal constructor(private val file: File) {
             val a = arr.getJSONObject(i)
             val index = a.getInt("index")
             val address = a.getString("address")
-            require(index in 0 until EthAccounts.MAX_INDEX && ADDRESS.matches(address))
-            WalletAccount(index, a.optString("name").take(MAX_NAME).ifBlank { WalletAccount.defaultName(index) }, address)
+            val ledger = a.optJSONObject("ledger")?.let { l ->
+                LedgerKey(l.getString("path"), l.getString("device"), l.optString("deviceName").take(MAX_NAME).ifBlank { "Ledger" })
+                    .also { require(index < 0 && LEDGER_PATH.matches(it.path) && it.device.isNotBlank()) }
+            }
+            require(ADDRESS.matches(address) && (ledger != null || index in 0 until EthAccounts.MAX_INDEX))
+            WalletAccount(index, a.optString("name").take(MAX_NAME).ifBlank { WalletAccount.defaultName(index) }, address, ledger)
         }
         if (accounts.map { it.index }.toSet().size != accounts.size) return null
+        if (accounts.none { it.ledger == null }) return null
         WalletAccountList(accounts, o.optInt("active", accounts.first().index))
     }.getOrNull()
 
@@ -104,7 +116,9 @@ class WalletAccountStore internal constructor(private val file: File) {
                 "accounts",
                 JSONArray().apply {
                     list.accounts.forEach {
-                        put(JSONObject().put("index", it.index).put("name", it.name).put("address", it.address))
+                        val o = JSONObject().put("index", it.index).put("name", it.name).put("address", it.address)
+                        it.ledger?.let { l -> o.put("ledger", JSONObject().put("path", l.path).put("device", l.device).put("deviceName", l.deviceName)) }
+                        put(o)
                     }
                 },
             )
@@ -127,9 +141,15 @@ class WalletAccountStore internal constructor(private val file: File) {
         const val MAX_NAME = 64
         private val ADDRESS = Regex("^0x[0-9a-fA-F]{40}$")
 
+        /** A Ledger account's path, in the device's format: `44'/60'/…`, at most ten levels. */
+        internal val LEDGER_PATH = Regex("^44'/60'(/\\d{1,10}'?){1,8}$")
+
         fun get(context: Context) = WalletAccountStore(File(context.applicationContext.noBackupFilesDir, "wallet/accounts.json"))
     }
 }
+
+/** The account is in the list already (a Ledger account added twice, or one the seed also holds). */
+class DuplicateAccountException : IllegalStateException("this account is already in the wallet")
 
 /** No more accounts can be added ([WalletAccountStore.MAX_ACCOUNTS]). */
 class TooManyAccountsException : IllegalStateException("this wallet has as many accounts as it can hold")
@@ -216,7 +236,8 @@ class WalletAccounts internal constructor(
     private suspend fun verify() {
         val tag = withContext(io) { vault.identityTag() } ?: return
         val saved = withContext(io) { store.read(tag) }
-        val indices = saved?.accounts?.map { it.index } ?: listOf(0)
+        // A Ledger's accounts aren't the seed's: they're kept as they are, in their place.
+        val indices = saved?.accounts?.filter { it.ledger == null }?.map { it.index } ?: listOf(0)
         val addresses = try {
             withContext(compute) { vault.withSeed { seed -> indices.map { EthAccounts.address(seed, it) } } }
         } catch (_: VaultLockedException) {
@@ -224,9 +245,10 @@ class WalletAccounts internal constructor(
             if (_accounts.value == null) _accounts.value = saved
             return
         }
-        val accounts = indices.mapIndexed { i, index ->
-            WalletAccount(index, saved?.accounts?.get(i)?.name ?: WalletAccount.defaultName(index), addresses[i])
-        }
+        val derived = indices.zip(addresses).toMap()
+        val accounts = saved?.accounts?.map { a ->
+            if (a.ledger != null) a else WalletAccount(a.index, a.name, derived.getValue(a.index))
+        } ?: listOf(WalletAccount(0, WalletAccount.defaultName(0), addresses[0]))
         val list = WalletAccountList(accounts, saved?.activeIndex ?: 0)
         if (list != saved) withContext(io) { store.write(tag, list) }
         _accounts.value = list
@@ -241,7 +263,7 @@ class WalletAccounts internal constructor(
         val tag = withContext(io) { vault.identityTag() } ?: throw VaultLockedException()
         val current = _accounts.value ?: withContext(io) { store.read(tag) }
         if (current != null && current.accounts.size >= WalletAccountStore.MAX_ACCOUNTS) throw TooManyAccountsException()
-        val index = (current?.accounts?.maxOf { it.index } ?: -1) + 1
+        val index = (current?.accounts?.filter { it.ledger == null }?.maxOfOrNull { it.index } ?: -1) + 1
         val indices = if (current == null) listOf(0, 1) else listOf(index)
         val addresses = withContext(compute) { vault.withSeed { seed -> indices.map { EthAccounts.address(seed, it) } } }
         val added = indices.mapIndexed { i, n -> WalletAccount(n, WalletAccount.defaultName(n), addresses[i]) }
@@ -249,6 +271,44 @@ class WalletAccounts internal constructor(
         withContext(io) { store.write(tag, list) }
         _accounts.value = list
         added.last()
+    }
+
+    /**
+     * Adds the Ledger account at [key]'s path, whose address the device
+     * gave as [address] (#142), and makes it the active one. Needs a
+     * wallet (the list belongs to it) but not an open one: no key of the
+     * seed's is involved. An address already in the list is refused
+     * ([DuplicateAccountException]).
+     */
+    suspend fun addLedger(key: LedgerKey, address: String, name: String): WalletAccount = mutex.withLock {
+        require(WalletAccountStore.LEDGER_PATH.matches(key.path) && EthTransaction.ADDRESS.matches(address)) { "not a Ledger account" }
+        val tag = withContext(io) { vault.identityTag() } ?: throw VaultLockedException()
+        val current = _accounts.value ?: withContext(io) { store.read(tag) } ?: throw VaultLockedException()
+        if (current.accounts.size >= WalletAccountStore.MAX_ACCOUNTS) throw TooManyAccountsException()
+        if (current.accounts.any { it.address.equals(address, ignoreCase = true) }) throw DuplicateAccountException()
+        val index = minOf(0, current.accounts.minOf { it.index }) - 1
+        val shown = name.trim().take(WalletAccountStore.MAX_NAME).ifBlank { "Ledger ${current.accounts.count { it.ledger != null } + 1}" }
+        val added = WalletAccount(index, shown, address, key)
+        val list = WalletAccountList(current.accounts + added, index)
+        withContext(io) { store.write(tag, list) }
+        _accounts.value = list
+        added
+    }
+
+    /**
+     * Takes the Ledger account [index] off the list (#142); the device
+     * keeps its key, and it can be added again. The first software
+     * account becomes active if it was. A software account can't be removed.
+     */
+    suspend fun removeLedger(index: Int) = mutex.withLock {
+        val current = _accounts.value ?: return@withLock
+        if (current.accounts.none { it.index == index && it.ledger != null }) return@withLock
+        val tag = withContext(io) { vault.identityTag() } ?: return@withLock
+        val rest = current.accounts.filter { it.index != index }
+        val active = if (current.activeIndex == index) rest.first { it.ledger == null }.index else current.activeIndex
+        val list = WalletAccountList(rest, active)
+        withContext(io) { store.write(tag, list) }
+        _accounts.value = list
     }
 
     /**

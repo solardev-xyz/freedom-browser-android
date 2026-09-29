@@ -11,7 +11,9 @@ import baby.freedom.mobile.wallet.MessageSigning
 import baby.freedom.mobile.wallet.SendException
 import baby.freedom.mobile.wallet.SendQuote
 import baby.freedom.mobile.wallet.SendRequest
+import baby.freedom.mobile.wallet.Eip712
 import baby.freedom.mobile.wallet.WalletAccount
+import baby.freedom.mobile.wallet.ledger.LedgerException
 import java.math.BigInteger
 import kotlinx.coroutines.runBlocking
 import org.json.JSONArray
@@ -66,7 +68,13 @@ class EthereumProviderTest {
         override fun noteActivity() {
             activity++
         }
-        override fun sign(account: WalletAccount, digest: ByteArray): String {
+        /** What a Ledger answers instead of signing (#142), when set. */
+        var ledgerFailure: LedgerException? = null
+        override suspend fun signMessage(account: WalletAccount, message: ByteArray) =
+            sign(account, MessageSigning.personalDigest(message))
+        override suspend fun signTypedData(account: WalletAccount, data: Eip712.TypedData, digest: ByteArray) = sign(account, digest)
+        private fun sign(account: WalletAccount, digest: ByteArray): String {
+            ledgerFailure?.let { throw it }
             check(account == main) { "only the cow key here" }
             return MessageSigning.sign(cow, account.address, digest)
         }
@@ -135,6 +143,7 @@ class EthereumProviderTest {
 
     private fun ok(r: EthereumProvider.Reply): Any = (r as? EthereumProvider.Reply.Ok)?.value ?: error("not ok: $r")
     private fun code(r: EthereumProvider.Reply): Int = (r as? EthereumProvider.Reply.Err)?.code ?: error("not an error: $r")
+    private fun message(r: EthereumProvider.Reply): String = (r as? EthereumProvider.Reply.Err)?.message ?: error("not an error: $r")
 
     private fun connect(account: WalletAccount = main) {
         answer = { EthAnswer.Approved(account) }
@@ -201,6 +210,28 @@ class EthereumProviderTest {
         assertEquals(EthAsk.SignMessage(site, main, "hello", "0x68656c6c6f"), asks.single())
         // [address, message] works too; plain text is signed as its UTF-8 bytes.
         assertEquals(sig, ok(call("personal_sign", JSONArray().put(main.address).put("hello"))))
+    }
+
+    @Test
+    fun `a Ledger that refuses or fails is a clear error for the page, never a hang`() {
+        connect()
+        answer = { EthAnswer.Approved() }
+        val typed = JSONObject()
+            .put("types", JSONObject().put("EIP712Domain", JSONArray()).put("M", JSONArray().put(JSONObject().put("name", "a").put("type", "uint8"))))
+            .put("primaryType", "M").put("domain", JSONObject()).put("message", JSONObject().put("a", 1))
+        for ((failure, code) in listOf(
+            LedgerException(LedgerException.Kind.REJECTED) to 4001,
+            LedgerException(LedgerException.Kind.CANCELLED) to 4001,
+            LedgerException(LedgerException.Kind.DISCONNECTED) to -32603,
+            LedgerException(LedgerException.Kind.TIMEOUT) to -32603,
+        )) {
+            wallet.ledgerFailure = failure
+            val personal = call("personal_sign", JSONArray().put("0x68656c6c6f").put(main.address))
+            assertEquals(failure.kind.name, code, code(personal))
+            val data = call("eth_signTypedData_v4", JSONArray().put(main.address).put(typed.toString()))
+            assertEquals(failure.kind.name, code, code(data))
+            if (code != 4001) assertTrue(message(personal).contains(failure.kind.message))
+        }
     }
 
     @Test

@@ -7,6 +7,8 @@ import baby.freedom.mobile.chains.rpc.ChainRpcException
 import baby.freedom.mobile.chains.rpc.ChainTrust
 import baby.freedom.mobile.chains.rpc.WalletRpc
 import baby.freedom.mobile.ens.toHex
+import baby.freedom.mobile.wallet.ledger.Ledger
+import baby.freedom.mobile.wallet.ledger.LedgerException
 import java.math.BigInteger
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
@@ -739,7 +741,7 @@ class WalletSender internal constructor(
      * quote has gone [stale][isStale] (checked here, at the moment of
      * signing, however long an unlock prompt kept the user before it).
      */
-    fun submit(quote: SendQuote, sign: (EthTransaction) -> EthTransaction.Signed): Submit {
+    fun submit(quote: SendQuote, sign: suspend (EthTransaction) -> EthTransaction.Signed): Submit {
         synchronized(this) {
             if (busyLocked()) return Submit.BUSY
             if (isStale(quote)) return Submit.STALE
@@ -753,6 +755,11 @@ class WalletSender internal constructor(
                     throw e
                 } catch (e: VaultLockedException) {
                     fail(quote, "The wallet locked before the transaction was signed. Nothing was sent; confirm again to unlock it.", false)
+                    return@launch
+                } catch (e: LedgerException) {
+                    // The Ledger's own words: rejected, locked, disconnected, timed out… (#142)
+                    val nothing = if (e.message.orEmpty().contains("Nothing was")) "" else " Nothing was sent."
+                    fail(quote, e.message + nothing, false)
                     return@launch
                 } catch (e: Exception) {
                     Log.w(TAG, "signing failed: ${e.javaClass.simpleName}")
@@ -957,6 +964,21 @@ class WalletSender internal constructor(
         journalThenShow(quote) { it.copy(stage = SendStatus.Stage.Failed(message, mayHaveGone)) }
 
     companion object {
+        /**
+         * Signs as [account]: on its Ledger if it's a Ledger's (#142),
+         * which the user confirms there; else [vaultSigner].
+         */
+        fun signerFor(
+            context: android.content.Context,
+            vault: Vault,
+            account: WalletAccount,
+        ): suspend (EthTransaction) -> EthTransaction.Signed = if (account.ledger != null) {
+            val ledger = Ledger.get(context);
+            { tx -> ledger.signTransaction(account, tx) }
+        } else {
+            vaultSigner(vault, account)
+        }
+
         private const val TAG = "WalletSend"
 
         /** A send the last process died broadcasting, as the next one finds it. */
@@ -1156,7 +1178,7 @@ class WalletSender internal constructor(
          * one signature and zeroed after. Throws [VaultLockedException] if
          * the wallet isn't open.
          */
-        fun vaultSigner(vault: Vault, account: WalletAccount): (EthTransaction) -> EthTransaction.Signed = { tx ->
+        fun vaultSigner(vault: Vault, account: WalletAccount): suspend (EthTransaction) -> EthTransaction.Signed = { tx ->
             val key = vault.withSeed { seed -> HdKeys.secp256k1(seed, account.path) }
             try {
                 tx.sign(key, account.address)

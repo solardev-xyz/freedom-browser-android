@@ -20,6 +20,8 @@ import baby.freedom.mobile.wallet.SendRequest
 import baby.freedom.mobile.wallet.SendStatus
 import baby.freedom.mobile.wallet.Vault
 import baby.freedom.mobile.wallet.WalletAccount
+import baby.freedom.mobile.wallet.Eip712
+import baby.freedom.mobile.wallet.ledger.Ledger
 import baby.freedom.mobile.wallet.WalletAccounts
 import baby.freedom.mobile.wallet.WalletSender
 import java.io.IOException
@@ -127,6 +129,7 @@ object EthereumProviders {
         val vault = Vault.get(app)
         val accounts = WalletAccounts.get(app)
         val sender = WalletSender.get(app)
+        val ledger = Ledger.get(app)
         setUpWallet = { reason -> scope.launch { vault.requireUnlocked(reason) } }
         val p = EthereumProvider(
             grants = object : EthereumProvider.Grants {
@@ -152,7 +155,12 @@ object EthereumProviders {
                     return withTimeoutOrNull(ACCOUNTS_WAIT_MS) { accounts.accounts.first { it != null } }?.accounts
                 }
                 override fun noteActivity() = vault.noteActivity()
-                override fun sign(account: WalletAccount, digest: ByteArray) = MessageSigning.sign(vault, account, digest)
+                override suspend fun signMessage(account: WalletAccount, message: ByteArray) =
+                    if (account.isLedger) ledger.signPersonal(account, message)
+                    else MessageSigning.sign(vault, account, MessageSigning.personalDigest(message))
+                override suspend fun signTypedData(account: WalletAccount, data: Eip712.TypedData, digest: ByteArray) =
+                    if (account.isLedger) ledger.signTypedData(account, data, digest)
+                    else MessageSigning.sign(vault, account, digest)
             },
             chains = { chainStore.chainsOrUnreadable.first() ?: throw IOException("chain list unreadable") },
             reads = { chainId, method, params, origin ->
@@ -160,7 +168,7 @@ object EthereumProviders {
             },
             sends = object : EthereumProvider.Sends {
                 override suspend fun prepare(request: SendRequest) = sender.prepare(request)
-                override suspend fun submit(quote: SendQuote) = submitAndWait(sender, vault, quote)
+                override suspend fun submit(quote: SendQuote) = submitAndWait(app, sender, vault, quote)
                 override fun busy() = sender.busy()
             },
         )
@@ -176,8 +184,8 @@ object EthereumProviders {
      * waits until it's out: its hash once a node took it (or it's on
      * chain), or why not.
      */
-    private suspend fun submitAndWait(sender: WalletSender, vault: Vault, quote: SendQuote): EthereumProvider.Submitted {
-        when (sender.submit(quote, WalletSender.vaultSigner(vault, quote.request.from))) {
+    private suspend fun submitAndWait(app: Context, sender: WalletSender, vault: Vault, quote: SendQuote): EthereumProvider.Submitted {
+        when (sender.submit(quote, WalletSender.signerFor(app, vault, quote.request.from))) {
             WalletSender.Submit.BUSY -> return EthereumProvider.Submitted.Busy
             WalletSender.Submit.STALE -> return EthereumProvider.Submitted.Stale
             WalletSender.Submit.STARTED -> Unit

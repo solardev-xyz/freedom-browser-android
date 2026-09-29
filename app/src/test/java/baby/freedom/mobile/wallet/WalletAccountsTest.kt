@@ -220,4 +220,85 @@ class WalletAccountsTest {
         val list = store.read(tag)!!
         assertEquals("Account 1", list.active.name) // blank name → default; unknown active → first
     }
+
+    // ---- Ledger accounts (#142) ----
+
+    private val ledgerKey = baby.freedom.mobile.wallet.ledger.LedgerKey("44'/60'/0'/0/0", "AA:BB:CC:DD:EE:FF", "Nano X 1A2B")
+    private val ledgerAddress = legalAddresses[2]
+
+    @Test
+    fun `a Ledger account is added without the seed, listed with the others and saved with its device`() = runBlocking {
+        val a = accounts()
+        vault.create(abandon12, auth, imported = true)
+        a.reconcile(vault.state.value)
+        vault.lock()
+        val added = a.addLedger(ledgerKey, ledgerAddress, "  ")
+        assertEquals(WalletAccount(-1, "Ledger 1", ledgerAddress, ledgerKey), added)
+        assertEquals("m/44'/60'/0'/0/0", added.path)
+        assertEquals(-1, a.accounts.value!!.activeIndex)
+        assertEquals(listOf(abandonAddresses[0], ledgerAddress), a.accounts.value!!.accounts.map { it.address })
+        // Read back from disk as it was written: path, device and its name.
+        assertEquals(a.accounts.value, store.read(vault.identityTag()!!))
+        // A second one gets the next place; the same address twice is refused.
+        val key2 = ledgerKey.copy(path = "44'/60'/1'/0/0")
+        assertEquals(-2, a.addLedger(key2, legalAddresses[1], "Cold").index)
+        try {
+            a.addLedger(key2, legalAddresses[1].lowercase(), "")
+            fail("added twice")
+        } catch (_: DuplicateAccountException) {
+        }
+        try {
+            a.addLedger(ledgerKey, abandonAddresses[0], "")
+            fail("one of the seed's accounts added as a Ledger's")
+        } catch (_: DuplicateAccountException) {
+        }
+    }
+
+    @Test
+    fun `an unlock checks the seed's accounts and keeps the Ledger's as they are`() = runBlocking {
+        val a = accounts()
+        vault.create(abandon12, auth, imported = true)
+        a.reconcile(vault.state.value)
+        a.addLedger(ledgerKey, ledgerAddress, "Cold")
+        a.add() // a software account after it: index 1, not -1 + 1
+        assertEquals(listOf(0, -1, 1), a.accounts.value!!.accounts.map { it.index })
+        vault.lock()
+        val b = accounts()
+        b.reconcile(vault.state.value)
+        vault.unlock(auth)
+        b.reconcile(vault.state.value)
+        val list = b.accounts.value!!
+        assertEquals(listOf(abandonAddresses[0], ledgerAddress, abandonAddresses[1]), list.accounts.map { it.address })
+        assertEquals(WalletAccount(-1, "Cold", ledgerAddress, ledgerKey), list.accounts[1])
+    }
+
+    @Test
+    fun `removing a Ledger account leaves the seed's, which can't be removed`() = runBlocking {
+        val a = accounts()
+        vault.create(abandon12, auth, imported = true)
+        a.reconcile(vault.state.value)
+        a.addLedger(ledgerKey, ledgerAddress, "")
+        a.removeLedger(0) // a software account: nothing happens
+        assertEquals(2, a.accounts.value!!.accounts.size)
+        a.removeLedger(-1)
+        assertEquals(listOf(abandonAddresses[0]), a.accounts.value!!.accounts.map { it.address })
+        assertEquals(0, a.accounts.value!!.activeIndex)
+        assertEquals(a.accounts.value, store.read(vault.identityTag()!!))
+    }
+
+    @Test
+    fun `a saved Ledger entry that isn't one is not read`() {
+        val tag = "t"
+        store.write(tag, WalletAccountList(listOf(WalletAccount(0, "A", abandonAddresses[0]), WalletAccount(-1, "L", ledgerAddress, ledgerKey)), 0))
+        assertEquals(2, store.read(tag)!!.accounts.size)
+        val text = file.readText()
+        // A Ledger entry at a seed index, and one with a path outside 44'/60'.
+        file.writeText(text.replace("\"index\":-1", "\"index\":3"))
+        assertNull(store.read(tag))
+        file.writeText(text.replace("44'/60'/0'/0/0", "44'/0'/0'/0/0"))
+        assertNull(store.read(tag))
+        // A list of nothing but Ledger accounts isn't one this wallet wrote.
+        store.write(tag, WalletAccountList(listOf(WalletAccount(-1, "L", ledgerAddress, ledgerKey)), -1))
+        assertNull(store.read(tag))
+    }
 }

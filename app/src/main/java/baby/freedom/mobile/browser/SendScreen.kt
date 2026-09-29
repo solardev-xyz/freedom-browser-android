@@ -102,7 +102,9 @@ internal fun feeDetail(tx: EthTransaction): String {
 internal fun sendStatusText(status: SendStatus): Pair<String, String> {
     val chain = status.quote.request.chain
     return when (val s = status.stage) {
-        SendStatus.Stage.Signing -> "Signing…" to "With this account’s key, on this phone."
+        SendStatus.Stage.Signing -> status.quote.request.from.ledger?.let {
+            "Confirm on your Ledger…" to "Check the transaction on ${it.deviceName}’s screen and approve it there."
+        } ?: ("Signing…" to "With this account’s key, on this phone.")
         SendStatus.Stage.Broadcasting -> "Sending…" to "Handing the signed transaction to ${chain.name}’s RPCs."
         SendStatus.Stage.Pending -> "Waiting to be mined" to "Sent. It usually takes a block or two."
         is SendStatus.Stage.Confirmed -> "Sent" to "Mined in block ${"%,d".format(java.util.Locale.ROOT, s.block)}" +
@@ -252,9 +254,10 @@ internal fun SendPage(
                                 scope.launch {
                                     var stale = false
                                     try {
-                                        if (!vault.unlockedNow()) vault.unlock(auth)
+                                        // A Ledger account's key is on the Ledger: nothing to unlock here (#142).
+                                        if (!q.request.from.isLedger && !vault.unlockedNow()) vault.unlock(auth)
                                         // submit checks the age again: the unlock prompt can have stood for minutes.
-                                        when (sender.submit(q, WalletSender.vaultSigner(vault, q.request.from))) {
+                                        when (sender.submit(q, WalletSender.signerFor(context, vault, q.request.from))) {
                                             WalletSender.Submit.STARTED -> {
                                                 quote = null
                                                 notice = null
@@ -514,7 +517,7 @@ private fun SendReviewSection(
             if (busy) {
                 CircularProgressIndicator(strokeWidth = 2.dp, modifier = Modifier.size(18.dp))
             } else {
-                Text("Confirm and send")
+                Text(if (request.from.isLedger) "Confirm on Ledger" else "Confirm and send")
             }
         }
     }

@@ -16,6 +16,7 @@ import baby.freedom.mobile.wallet.SendRequest
 import baby.freedom.mobile.wallet.TokenRegistry
 import baby.freedom.mobile.wallet.VaultLockedException
 import baby.freedom.mobile.wallet.WalletAccount
+import baby.freedom.mobile.wallet.ledger.LedgerException
 import java.math.BigInteger
 import kotlin.coroutines.CoroutineContext
 import kotlinx.coroutines.CancellationException
@@ -148,8 +149,17 @@ class EthereumProvider(
         /** A connected site is using the wallet: the idle lock waits (maintainer decision 7). */
         fun noteActivity()
 
-        /** [MessageSigning.sign]; throws [VaultLockedException] if the wallet isn't open. */
-        fun sign(account: WalletAccount, digest: ByteArray): String
+        /**
+         * `personal_sign` of [message] as [account]: with its key on the
+         * phone ([MessageSigning.sign] over [MessageSigning.personalDigest];
+         * throws [VaultLockedException] if the wallet isn't open), or on its
+         * Ledger (#142), which shows the message and throws
+         * [LedgerException] for a rejection, a disconnect, a timeout…
+         */
+        suspend fun signMessage(account: WalletAccount, message: ByteArray): String
+
+        /** `eth_signTypedData_v4` of [data], whose EIP-712 digest is [digest]: as [signMessage], on the phone or the Ledger. */
+        suspend fun signTypedData(account: WalletAccount, data: Eip712.TypedData, digest: ByteArray): String
     }
 
     /** The send flow ([baby.freedom.mobile.wallet.WalletSender]). */
@@ -483,7 +493,7 @@ class EthereumProvider(
         val text = readableUtf8(bytes)
         val answer = ask(EthAsk.SignMessage(origin, account, text, "0x" + bytes.hexString()))
         if (answer !is EthAnswer.Approved) return refused(answer)
-        return signed { wallet.sign(account, MessageSigning.personalDigest(bytes)) }
+        return signed { wallet.signMessage(account, bytes) }
     }
 
     private suspend fun signTypedData(origin: String, account: WalletAccount, params: JSONArray, ask: suspend (EthAsk) -> EthAnswer): Reply {
@@ -519,13 +529,22 @@ class EthereumProvider(
             messageJson = shown,
         )
         ask(ask0).let { if (it !is EthAnswer.Approved) return refused(it) }
-        return signed { wallet.sign(account, digest) }
+        return signed { wallet.signTypedData(account, data, digest) }
     }
 
-    private fun signed(sign: () -> String): Reply = try {
+    private suspend fun signed(sign: suspend () -> String): Reply = try {
         Reply.Ok(sign())
+    } catch (e: CancellationException) {
+        throw e
     } catch (e: VaultLockedException) {
         Reply.Err(UNAUTHORIZED, "The wallet locked before signing. Nothing was signed.")
+    } catch (e: LedgerException) {
+        when (e.kind) {
+            // Refused on the device, or the user cancelled waiting for it: a rejection, as EIP-1193 says it.
+            LedgerException.Kind.REJECTED, LedgerException.Kind.CANCELLED ->
+                Reply.Err(USER_REJECTED, "User rejected the request on the Ledger.")
+            else -> Reply.Err(INTERNAL, "Ledger: ${e.message}")
+        }
     } catch (e: Exception) {
         Reply.Err(INTERNAL, "Couldn't sign. Nothing was signed.")
     }

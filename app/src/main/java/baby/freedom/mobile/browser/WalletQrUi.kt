@@ -767,7 +767,7 @@ private fun CameraPreview(onCode: (String) -> Unit, modifier: Modifier) {
     }
 }
 
-private fun openAppSettings(context: Context) {
+internal fun openAppSettings(context: Context) {
     try {
         context.startActivity(
             Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.fromParts("package", context.packageName, null))
