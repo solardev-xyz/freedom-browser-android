@@ -225,7 +225,7 @@ class OpenLvSessionTest {
         val sheet = s.awaitSheet()
         val req = sheet.request as OpenLvSession.Request.TypedData
         assertEquals("Hello", req.primaryType)
-        assertEquals(100L, req.chainId)
+        assertEquals(100L.toBigInteger(), req.chainId)
         assertEquals(gnosis.id, req.chain?.id)
         assertEquals(listOf(Eip712.Line("to", "desktop", 0)), req.message)
         sheet.decide(OpenLvSession.Decision.Approve())
@@ -235,6 +235,17 @@ class OpenLvSessionTest {
 
         s.onRequest(1, 2, "eth_signTypedData_v4", JSONArray().put(account0.address).put("{\"types\":{}}"))
         assertEquals(OpenLvSession.INVALID_PARAMS, error(engine.next()))
+
+        // R1-M2: a bound chain ID past Long's range still names that chain (no phone chain has it), never "any network".
+        val big = BigInteger.ONE.shiftLeft(64)
+        payload.getJSONObject("domain").put("chainId", big.toString())
+        s.onRequest(1, 3, "eth_signTypedData_v4", JSONArray().put(account0.address).put(payload.toString()))
+        val bigSheet = s.awaitSheet()
+        val bigReq = bigSheet.request as OpenLvSession.Request.TypedData
+        assertEquals(big, bigReq.chainId)
+        assertNull(bigReq.chain)
+        bigSheet.decide(OpenLvSession.Decision.Reject)
+        assertEquals(OpenLvSession.REJECTED_CODE, error(engine.next()))
     }
 
     @Test

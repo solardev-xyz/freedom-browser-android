@@ -46,11 +46,14 @@ object Eip712 {
          * The domain's `chainId`, only if the signature is bound to it
          * ([chainBound]) and it's a number: a `chainId` key the domain type
          * doesn't declare as a `uint` isn't signed as one, so it names no
-         * chain the signature is for (#216 R6-F1).
+         * chain the signature is for (#216 R6-F1). Whole, however large (a
+         * `uint256` can hold more than a [Long]): a bound chain ID too big
+         * for any real network still binds the signature to it, so it must
+         * never read as "no chain" (#216 R1-M2).
          */
-        val chainId: Long?
+        val chainId: BigInteger?
             get() = if (!chainBound(this)) null else domain.opt("chainId")?.takeIf { it != JSONObject.NULL }?.let {
-                runCatching { integer(it, "chainId") }.getOrNull()?.takeIf { v -> v.bitLength() < 63 }?.toLong()
+                runCatching { integer(it, "chainId") }.getOrNull()
             }
     }
 

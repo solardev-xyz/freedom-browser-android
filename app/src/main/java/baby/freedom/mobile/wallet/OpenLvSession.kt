@@ -98,13 +98,16 @@ class OpenLvSession internal constructor(
         /** `personal_sign`: [text] when [message] reads as text ([MessageSigning.readableText]), else show its hex. */
         class PersonalSign(val account: WalletAccount, val message: ByteArray, val text: String?) : Request
 
-        /** `eth_signTypedData_v4`. [chain] is the chain its domain names, if the phone knows it. */
+        /**
+         * `eth_signTypedData_v4`. [chainId] is the chain its signature is
+         * bound to (null: none), [chain] that chain if the phone knows it.
+         */
         class TypedData(
             val account: WalletAccount,
             val primaryType: String,
             val domain: List<Eip712.Line>,
             val message: List<Eip712.Line>,
-            val chainId: Long?,
+            val chainId: BigInteger?,
             val chain: Chain?,
         ) : Request
 
@@ -294,7 +297,7 @@ class OpenLvSession internal constructor(
             return invalid(e.message ?: "The typed data can’t be read.")
         }
         val domainChain = typed.chainId
-        val chain = domainChain?.let { id -> chains().firstOrNull { it.id == id } }
+        val chain = domainChain?.takeIf { it.bitLength() < 63 }?.toLong()?.let { id -> chains().firstOrNull { it.id == id } }
         val request = Request.TypedData(account, typed.primaryType, lines.first, lines.second, domainChain, chain)
         return when (ask(sid, request)) {
             Decision.Reject -> REJECTED

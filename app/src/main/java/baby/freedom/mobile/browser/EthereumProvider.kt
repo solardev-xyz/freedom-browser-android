@@ -503,7 +503,7 @@ class EthereumProvider(
         val chain = chainFor(origin)
         // Only a chainId the domain separator covers says which chain this is for; an undeclared one isn't signed.
         val chainBound = Eip712.chainBound(data)
-        if (chainBound && data.chainId != chain.id) {
+        if (chainBound && data.chainId != BigInteger.valueOf(chain.id)) {
             throw BadParams("The typed data is for chain ${data.domain.opt("chainId")}, but this site is on ${chain.name} (chain ${chain.id})")
         }
         val ask0 = EthAsk.SignTypedData(

@@ -3,6 +3,7 @@ package baby.freedom.mobile.wallet
 import baby.freedom.mobile.ens.Secp256k1
 import baby.freedom.mobile.ens.hexToBytes
 import baby.freedom.mobile.ens.toHex
+import java.math.BigInteger
 import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
@@ -62,7 +63,7 @@ class Eip712Test {
         assertEquals("0xbe609aee343fb3c4b28e1df9e632fca64fcfaede20f02e86244efddf30957bd2", digest(o.toString()))
         o.getJSONObject("domain").put("chainId", "1")
         assertEquals("0xbe609aee343fb3c4b28e1df9e632fca64fcfaede20f02e86244efddf30957bd2", digest(o.toString()))
-        assertEquals(1L, Eip712.parseStrict(o.toString()).chainId)
+        assertEquals(1L.toBigInteger(), Eip712.parseStrict(o.toString()).chainId)
         // The object itself (not its JSON string) works too.
         assertEquals("0xbe609aee343fb3c4b28e1df9e632fca64fcfaede20f02e86244efddf30957bd2", "0x" + Eip712.digest(Eip712.parseStrict(o)).toHex())
     }
@@ -90,8 +91,30 @@ class Eip712Test {
         assertFalse(Eip712.chainBound(s))
         // Declared as a uint: bound, and named.
         val asUint = JSONArray(nameOnly.toString()).put(JSONObject().put("name", "chainId").put("type", "uint256"))
-        assertEquals(100L, Eip712.parseStrict(payload(100, asUint)).chainId)
+        assertEquals(100L.toBigInteger(), Eip712.parseStrict(payload(100, asUint)).chainId)
         assertTrue(Eip712.chainBound(Eip712.parse(payload(100, asUint))))
+    }
+
+    @Test
+    fun `a bound chainId too big for a Long still names that chain, never none`() {
+        // R1-M2: uint256 holds 2^64; the signature is bound to it, so it must not read as "any network".
+        val big = BigInteger.ONE.shiftLeft(64)
+        val maxUint = BigInteger.ONE.shiftLeft(256).subtract(BigInteger.ONE)
+        for (id in listOf(BigInteger.ONE.shiftLeft(63), big, maxUint)) {
+            val payload = JSONObject()
+                .put("types", JSONObject()
+                    .put("EIP712Domain", JSONArray().put(JSONObject().put("name", "chainId").put("type", "uint256")))
+                    .put("Permit", JSONArray().put(JSONObject().put("name", "v").put("type", "uint256"))))
+                .put("primaryType", "Permit")
+                .put("domain", JSONObject().put("chainId", id.toString()))
+                .put("message", JSONObject().put("v", "1"))
+                .toString()
+            val strict = Eip712.parseStrict(payload)
+            Eip712.digest(strict) // a valid uint256, so it signs
+            assertTrue(Eip712.chainBound(strict))
+            assertEquals(id, strict.chainId)
+            assertEquals(id, Eip712.parse(payload).chainId)
+        }
     }
 
     @Test
