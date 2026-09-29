@@ -89,10 +89,13 @@ class SwarmProviderTest {
                 .put("utilization", 0).put("immutableFlag", true).put("batchTTL", 86_400),
         )
         var up = true
+        /** Uploads run past the gateway's whole-call deadline (a slow, working node). */
+        var slowUploads = false
         var tag = 7L
 
         override fun request(method: String, path: String, headers: Map<String, String>, body: ByteArray?, timeoutMs: Int): SwarmProvider.Http.Answer {
             if (!up) throw java.io.IOException("connection refused")
+            if (slowUploads && method == "POST") throw java.net.SocketTimeoutException("the node didn't answer in $timeoutMs ms")
             requests += Triple(method, path, headers)
             if (body != null) bodies["$method $path"] = body
             val bare = path.substringBefore('?')
@@ -767,6 +770,56 @@ class SwarmProviderTest {
         feeds.failWrites = null
         node.up = false
         assertEquals("node-stopped", err(call("swarm_createFeed", JSONObject().put("name", "notes"))).reason)
+    }
+
+    @Test
+    fun `an upload over the gateway's deadline is a timeout, not the node being stopped`() {
+        connect()
+        grants.auto += site to SwarmProvider.AutoApprove.Publish
+        node.slowUploads = true
+        val e = err(call("swarm_publishData", JSONObject().put("data", "hi").put("contentType", "text/plain")))
+        assertEquals(-32603, e.code)
+        assertEquals("node-timeout", e.reason)
+        // A node that can't be reached at all still says so.
+        node.slowUploads = false
+        node.up = false
+        assertEquals("node-stopped", err(call("swarm_publishData", JSONObject().put("data", "hi").put("contentType", "text/plain"))).reason)
+    }
+
+    @Test
+    fun `a queued feed ask whose identity went away is feed_owner_unavailable, not a user rejection`() {
+        connect()
+        feeds.grant(site)
+        grants.auto += site to SwarmProvider.AutoApprove.Feeds
+        ok(call("swarm_createFeed", JSONObject().put("name", "log")))
+        grants.auto.clear()
+        val before = commits
+        // What askOnTab answers when SwarmProvider.current finds the feed's identity gone once the lock is ours.
+        answer = SwarmProvider.Answer.OWNER_GONE
+        val update = JSONObject().put("feedId", "log").put("reference", "cd".repeat(32))
+        assertEquals("feed_owner_unavailable", err(call("swarm_updateFeed", update)).reason)
+        assertEquals("feed_owner_unavailable", err(call("swarm_writeFeedEntry", JSONObject().put("name", "log").put("data", "x"))).reason)
+        assertEquals("nothing committed", before, commits)
+        // A plain refusal is still one.
+        answer = SwarmProvider.Answer.REJECTED
+        assertEquals(4001, err(call("swarm_updateFeed", update)).code)
+    }
+
+    @Test
+    fun `createFeed on a feed whose key no longer derives its owner is refused like updateFeed`() {
+        connect()
+        feeds.grant(site)
+        grants.auto += site to SwarmProvider.AutoApprove.Feeds
+        ok(call("swarm_createFeed", JSONObject().put("name", "notes")))
+        // The identity id is still listed, but its key derives a different address (a different wallet).
+        feeds.put(site, feeds.feed(site, "notes")!!.copy(owner = PublisherKeys.address(ByteArray(32) { 0x7f })))
+        assertEquals("feed_owner_unavailable", err(call("swarm_createFeed", JSONObject().put("name", "notes"))).reason)
+        assertEquals("feed_owner_unavailable", err(call("swarm_updateFeed", JSONObject().put("feedId", "notes").put("reference", "cd".repeat(32)))).reason)
+        assertTrue("its key was zeroed", publishers.keysHandedOut.last().all { it == 0.toByte() })
+        // A healthy existing feed is still answered from its record.
+        feeds.feeds.clear()
+        val created = okJson(call("swarm_createFeed", JSONObject().put("name", "notes")))
+        assertEquals(created.toString(), okJson(call("swarm_createFeed", JSONObject().put("name", "notes"))).toString())
     }
 
     @Test

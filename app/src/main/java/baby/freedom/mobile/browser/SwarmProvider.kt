@@ -6,6 +6,7 @@ import baby.freedom.mobile.wallet.SitePublisher
 import baby.freedom.mobile.wallet.VaultLockedException
 import java.io.ByteArrayOutputStream
 import java.io.IOException
+import java.net.SocketTimeoutException
 import java.util.Base64
 import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.CancellationException
@@ -155,9 +156,12 @@ class SwarmProvider(
     }
 
     /** What the user said on an approval sheet. */
-    data class Answer(val allowed: Boolean, val always: Boolean = false) {
+    data class Answer(val allowed: Boolean, val always: Boolean = false, val ownerGone: Boolean = false) {
         companion object {
             val REJECTED = Answer(false)
+
+            /** No sheet: by the time it could go up, the feed it signs for had lost its own identity ([current]). */
+            val OWNER_GONE = Answer(false, ownerGone = true)
         }
     }
 
@@ -206,6 +210,10 @@ class SwarmProvider(
         throw e
     } catch (e: VaultLockedException) {
         Reply.Err(INTERNAL, VAULT_LOCKED)
+    } catch (e: SocketTimeoutException) {
+        // The node is up but slow (a big upload over the whole-call
+        // deadline): not "stopped" — it may even have stored the data.
+        Reply.Err(INTERNAL, "The Swarm node didn't finish in time", reason("node-timeout"))
     } catch (e: IOException) {
         // Only the node's calls get here: the stores' writes are [saving].
         Reply.Err(UNAVAILABLE, "Swarm node is not available", reason("node-stopped"))
@@ -439,6 +447,8 @@ class SwarmProvider(
             // A feed whose own identity is gone can't be signed for: no sheet for it.
             if (signed.feed != null && identity == null) return feedOwnerGone(signed.feed)
             val answer = calls.ask(SwarmAsk.Sign(origin, method, kind, !granted, signed.feedName, signed.detail, identity, needsWallet))
+            // Lost while queued behind another sheet: the same answer as above, not a refusal nobody made.
+            if (answer.ownerGone && signed.feed != null) return feedOwnerGone(signed.feed)
             if (!answer.allowed) return rejected()
             if (needsWallet && !publishers.walletExists()) return rejected()
             if (!feeds.granted(origin)) saving("the site's feed access") { feeds.grant(origin) }
@@ -598,12 +608,10 @@ class SwarmProvider(
     private suspend fun createFeed(origin: String, name: String): Reply {
         if (!feeds.granted(origin)) return notAuthorized("feed_not_granted")
         feeds.feed(origin, name)?.let { existing ->
-            // The same answer the sheet path gives ([signing]): a feed
-            // whose own identity is gone is refused, whether or not a
-            // sheet was needed to get here.
-            val identity = withContext(io) { publishers.site(origin) }?.let { signerOf(it, existing) }
-                ?: return feedOwnerGone(existing)
-            return Reply.Ok(feedResult(existing, identity.mode.wire))
+            // The same answer updateFeed/writeFeedEntry give ([withKey]):
+            // a feed whose own identity is gone, or whose key no longer
+            // derives its owner, is refused — sheet or no sheet.
+            return withKey(origin, existing) { r -> Reply.Ok(feedResult(existing, r.identity.mode.wire)) }
         }
         return withKey(origin, null) { r ->
             val owner = PublisherKeys.address(r.key)

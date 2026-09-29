@@ -283,7 +283,9 @@ object SwarmProviders {
      * other asks wait until setup is over, and after a backed-out one are
      * refused without a sheet. The sheet shows [current]'s view of [ask]
      * once the lock is ours ([SwarmProvider.current]), not the one built
-     * before an earlier ask's setup; null refuses without a sheet.
+     * before an earlier ask's setup; null (the feed it signs for lost its
+     * identity meanwhile) answers [SwarmProvider.Answer.OWNER_GONE]
+     * without a sheet or a block.
      */
     internal suspend fun askOnTab(
         tab: BrowserState,
@@ -312,7 +314,7 @@ object SwarmProviders {
                 if (!live()) return@withTimeoutOrNull SwarmProvider.Answer.REJECTED
                 // Built before the lock was ours: an earlier ask may have
                 // set up the wallet or created the identity since.
-                shown = current(ask) ?: return@withTimeoutOrNull SwarmProvider.Answer.REJECTED
+                shown = current(ask) ?: return@withTimeoutOrNull SwarmProvider.Answer.OWNER_GONE
                 if (!live()) return@withTimeoutOrNull SwarmProvider.Answer.REJECTED
                 val request = SwarmPromptRequest(shown)
                 pending.getOrPut(tab.id) { mutableSetOf() }.add(request)
@@ -381,8 +383,9 @@ object SwarmProviders {
  * `timeoutMs` bounds the whole request, not just each read: a watchdog
  * on its own thread disconnects the connection once it runs out, so a
  * node that stops draining an upload body (whose write no read timeout
- * covers) or trickles its answer fails the call with an [IOException]
- * instead of holding it — and any feed lock around it — forever. The
+ * covers) or trickles its answer fails the call with a
+ * [SocketTimeoutException] — which the page gets as a timeout
+ * (`node-timeout`), not as the node being stopped — instead of holding it — and any feed lock around it — forever. The
  * page stops its own timer once a request is approved, so this is what
  * settles it.
  */

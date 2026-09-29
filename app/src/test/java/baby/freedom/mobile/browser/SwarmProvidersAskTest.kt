@@ -165,6 +165,7 @@ class SwarmProvidersAskTest {
         val tab = tab()
         val result = runBlocking { SwarmProviders.askOnTab(tab, 0, sign(needsWallet = false), current = { null }) }
         assertFalse(result.allowed)
+        assertTrue("told apart from a refusal", result.ownerGone)
         assertNull(tab.swarmPrompt)
         assertTrue(ask(tab, sign(needsWallet = false), SwarmProvider.Answer(true)).allowed)
     }
