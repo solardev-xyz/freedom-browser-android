@@ -5,6 +5,8 @@ import android.util.Log
 import baby.freedom.mobile.chains.Chain
 import baby.freedom.mobile.data.ChainStore
 import baby.freedom.mobile.ens.hexToBytes
+import baby.freedom.mobile.wallet.ledger.Ledger
+import baby.freedom.mobile.wallet.ledger.LedgerException
 import java.math.BigInteger
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
@@ -77,6 +79,26 @@ class OpenLvSession internal constructor(
 
         /** Runs [block] with [account]'s private key, zeroed after. Throws [VaultLockedException] if the wallet is locked. */
         fun <T> withKey(account: WalletAccount, block: (ByteArray) -> T): T
+
+        /**
+         * `personal_sign` of [message] as [account]: with its key
+         * ([withKey]), or on its Ledger (#142), which shows the message
+         * and throws [LedgerException] for a rejection, a disconnect…
+         */
+        suspend fun signPersonal(account: WalletAccount, message: ByteArray): String =
+            withContext(Dispatchers.Default) { withKey(account) { key -> MessageSigning.sign(key, account.address, MessageSigning.personalDigest(message)) } }
+
+        /** `eth_signTypedData_v4` of [data], whose EIP-712 digest is [digest]: as [signPersonal]. */
+        suspend fun signTypedData(account: WalletAccount, data: Eip712.TypedData, digest: ByteArray): String =
+            withContext(Dispatchers.Default) { withKey(account) { key -> MessageSigning.sign(key, account.address, digest) } }
+
+        /**
+         * Signs [account]'s transactions: with its key ([withKey]), or on
+         * its Ledger, which asks [fresh] once it's ready to show the
+         * transaction ([WalletSender.signerFor]).
+         */
+        fun transactionSigner(account: WalletAccount, fresh: () -> Boolean): suspend (EthTransaction) -> EthTransaction.Signed =
+            { t -> withKey(account) { key -> t.sign(key, account.address) } }
 
         /** Wallet activity: keeps an open wallet from idling out, as dApp use does on desktop. */
         fun noteActivity()
@@ -182,6 +204,31 @@ class OpenLvSession internal constructor(
         _approval.value = null
     }
 
+    /**
+     * The Ledger account [address] was taken off the wallet (#220 R1-M2):
+     * if desktop was given it, it isn't any more — `eth_accounts` answers
+     * none, and adding the account again later doesn't hand it back
+     * without a new Connect sheet, as for a site
+     * ([baby.freedom.mobile.browser.EthereumProvider.accountRemoved]).
+     * Main thread.
+     */
+    fun accountRemoved(address: String) {
+        if (sharedAccount?.address.equals(address, ignoreCase = true)) {
+            sharedAccount = null
+            Log.i(TAG, "shared account removed from the wallet")
+        }
+    }
+
+    /**
+     * Drops [sharedAccount] if the wallet's list no longer has it — a
+     * backstop for [accountRemoved]. A list not read yet (null) says nothing.
+     */
+    private fun forgetRemovedAccount() {
+        val shared = sharedAccount ?: return
+        val list = keys.accounts() ?: return
+        if (list.accounts.none { it.address.equals(shared.address, ignoreCase = true) }) accountRemoved(shared.address)
+    }
+
     override fun onLink(sid: Int, link: OpenLvLink) {
         scope.launch {
             if (sid != this@OpenLvSession.sid) return@launch
@@ -217,6 +264,7 @@ class OpenLvSession internal constructor(
     /** One request's answer. Internal so tests drive it without an engine. */
     internal suspend fun handle(sid: Int, method: String, params: JSONArray): OpenLvResponse {
         keys.noteActivity()
+        forgetRemovedAccount()
         return when (method) {
             "eth_chainId" -> OpenLvResponse.Result("0x" + chainId.toString(16))
             "eth_accounts" -> OpenLvResponse.Result(JSONArray().apply { sharedAccount?.let { put(it.address) } })
@@ -281,7 +329,7 @@ class OpenLvSession internal constructor(
         if (message.size > MAX_MESSAGE) return invalid("The message is too long.")
         return when (ask(sid, Request.PersonalSign(account, message, MessageSigning.readableText(message)))) {
             Decision.Reject -> REJECTED
-            is Decision.Approve -> sign(account, MessageSigning.personalDigest(message))
+            is Decision.Approve -> signed { keys.signPersonal(account, message) }
         }
     }
 
@@ -301,7 +349,7 @@ class OpenLvSession internal constructor(
         val request = Request.TypedData(account, typed.primaryType, lines.first, lines.second, domainChain, chain)
         return when (ask(sid, request)) {
             Decision.Reject -> REJECTED
-            is Decision.Approve -> sign(account, digest)
+            is Decision.Approve -> signed { keys.signTypedData(account, typed, digest) }
         }
     }
 
@@ -345,7 +393,7 @@ class OpenLvSession internal constructor(
                 Decision.Reject -> return REJECTED
                 is Decision.Approve -> Unit
             }
-            val sign: (EthTransaction) -> EthTransaction.Signed = { t -> keys.withKey(account) { key -> t.sign(key, account.address) } }
+            val sign = keys.transactionSigner(account) { !sender.isStale(quote) }
             return when (val b = sender.submitAndAwaitBroadcast(quote, sign)) {
                 is WalletSender.Broadcast.Sent -> OpenLvResponse.Result(b.hash)
                 is WalletSender.Broadcast.Failed -> OpenLvResponse.Error(
@@ -356,8 +404,15 @@ class OpenLvSession internal constructor(
                     BUSY,
                     "Another send from the phone’s wallet isn’t settled yet. Settle it in the wallet on the phone, then try again.",
                 )
-                WalletSender.Broadcast.Stale -> {
-                    notice = "The fees were over a minute old, so they’ve been priced again. Check them and confirm again."
+                WalletSender.Broadcast.Rejected -> REJECTED_ON_LEDGER
+                is WalletSender.Broadcast.Stale -> {
+                    notice = if (b.droppedSigned) {
+                        // Approved on the Ledger, but its review there outlasted SIGNED_TTL_MS (#220 R1-M1).
+                        "The Ledger approval came over three minutes after the fees were worked out, so it wasn’t " +
+                            "sent and they’ve been priced again. Check them and confirm again."
+                    } else {
+                        "The fees were over a minute old, so they’ve been priced again. Check them and confirm again."
+                    }
                     continue
                 }
             }
@@ -374,11 +429,16 @@ class OpenLvSession internal constructor(
         return OpenLvResponse.Result(JSONObject.NULL)
     }
 
-    private suspend fun sign(account: WalletAccount, digest: ByteArray): OpenLvResponse = try {
-        val signature = withContext(Dispatchers.Default) { keys.withKey(account) { key -> MessageSigning.sign(key, account.address, digest) } }
-        OpenLvResponse.Result(signature)
+    private suspend fun signed(sign: suspend () -> String): OpenLvResponse = try {
+        OpenLvResponse.Result(sign())
     } catch (e: VaultLockedException) {
         OpenLvResponse.Error(UNAUTHORIZED, "The wallet on the phone locked before it signed. Try again.")
+    } catch (e: LedgerException) {
+        when (e.kind) {
+            // Refused on the device, or the user cancelled waiting for it: a rejection, as for a site.
+            LedgerException.Kind.REJECTED, LedgerException.Kind.CANCELLED -> REJECTED_ON_LEDGER
+            else -> OpenLvResponse.Error(INTERNAL, "Ledger: ${e.message}")
+        }
     }
 
     /** The wallet's account at [address] (any case), or null. */
@@ -416,6 +476,7 @@ class OpenLvSession internal constructor(
         const val BUSY = -32002
 
         val REJECTED = OpenLvResponse.Error(REJECTED_CODE, "Rejected on the phone.")
+        val REJECTED_ON_LEDGER = OpenLvResponse.Error(REJECTED_CODE, "Rejected on the Ledger.")
         val NO_WALLET = OpenLvResponse.Error(UNAUTHORIZED, "There’s no wallet on the phone, or it hasn’t been opened yet.")
 
         /** A `personal_sign` message longer than this isn't one a sheet can show. */
@@ -438,13 +499,21 @@ class OpenLvSession internal constructor(
             instance ?: create(context.applicationContext).also { instance = it }
         }
 
+        /**
+         * [accountRemoved] on the session, if one was ever made (no
+         * session, nothing shared: none is made just for this). Main thread.
+         */
+        fun accountRemovedFromWallet(address: String) {
+            instance?.accountRemoved(address)
+        }
+
         private fun create(app: Context): OpenLvSession {
             val vault = Vault.get(app)
             val accounts = WalletAccounts.get(app)
             val chainStore = ChainStore.get(app)
             return OpenLvSession(
                 engine = WebViewOpenLvEngine(app),
-                keys = VaultKeys(vault, accounts),
+                keys = VaultKeys(vault, accounts, Ledger.get(app)),
                 chains = { chainStore.chains.first() },
                 sender = WalletSender.get(app),
                 scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate),
@@ -453,8 +522,12 @@ class OpenLvSession internal constructor(
     }
 }
 
-/** [OpenLvSession.Keys] from the device's wallet: the accounts [WalletAccounts] lists, keys derived from the [Vault]'s seed. */
-internal class VaultKeys(private val vault: Vault, private val accounts: WalletAccounts) : OpenLvSession.Keys {
+/**
+ * [OpenLvSession.Keys] from the device's wallet: the accounts
+ * [WalletAccounts] lists, keys derived from the [Vault]'s seed — or, for
+ * a Ledger's account (#142), signed on that Ledger.
+ */
+internal class VaultKeys(private val vault: Vault, private val accounts: WalletAccounts, private val ledger: Ledger) : OpenLvSession.Keys {
     override fun accounts(): WalletAccountList? = accounts.accounts.value
 
     override fun <T> withKey(account: WalletAccount, block: (ByteArray) -> T): T {
@@ -465,6 +538,16 @@ internal class VaultKeys(private val vault: Vault, private val accounts: WalletA
             key.fill(0)
         }
     }
+
+    // A Ledger's account (#142) signs on its Ledger, never with a key from the seed.
+    override suspend fun signPersonal(account: WalletAccount, message: ByteArray): String =
+        if (account.isLedger) ledger.signPersonal(account, message) else super.signPersonal(account, message)
+
+    override suspend fun signTypedData(account: WalletAccount, data: Eip712.TypedData, digest: ByteArray): String =
+        if (account.isLedger) ledger.signTypedData(account, data, digest) else super.signTypedData(account, data, digest)
+
+    override fun transactionSigner(account: WalletAccount, fresh: () -> Boolean): suspend (EthTransaction) -> EthTransaction.Signed =
+        if (account.isLedger) { t -> ledger.signTransaction(account, t, fresh) } else super.transactionSigner(account, fresh)
 
     override fun noteActivity() = vault.noteActivity()
 }

@@ -13,6 +13,7 @@ import baby.freedom.mobile.chains.rpc.RpcTransport
 import baby.freedom.mobile.chains.rpc.WalletRpc
 import baby.freedom.mobile.ens.hexToBytes
 import baby.freedom.mobile.ens.toHex
+import baby.freedom.mobile.wallet.ledger.LedgerException
 import java.io.IOException
 import java.math.BigInteger
 import kotlinx.coroutines.CoroutineScope
@@ -607,7 +608,28 @@ class SendTest {
 
         val old = WalletSender(chain.rpc(), scope, clock = { System.currentTimeMillis() + WalletSender.QUOTE_TTL_MS }, pollMs = 10, confirmTimeoutMs = 300)
         old.awaitRestored()
-        assertEquals(WalletSender.Broadcast.Stale, old.submitAndAwaitBroadcast(quote, signer()))
+        assertEquals(WalletSender.Broadcast.Stale(droppedSigned = false), old.submitAndAwaitBroadcast(quote, signer()))
+    }
+
+    @Test
+    fun `submitAndAwaitBroadcast answers a Ledger refusal as a rejection and a quote that aged on it as stale`() = runBlocking<Unit> {
+        val chain = FakeChain()
+        var now = 1_000L
+        val s = sender(chain) { now }
+        for (kind in listOf(LedgerException.Kind.REJECTED, LedgerException.Kind.CANCELLED)) {
+            assertEquals(WalletSender.Broadcast.Rejected, s.submitAndAwaitBroadcast(s.prepare(call())) { throw LedgerException(kind) })
+            s.acknowledge()
+        }
+        val timedOut = s.submitAndAwaitBroadcast(s.prepare(call())) { throw LedgerException(LedgerException.Kind.TIMEOUT) }
+        assertTrue(timedOut is WalletSender.Broadcast.Failed)
+        s.acknowledge()
+        // Reviewed on the device past the allowance: dropped unsent, to be priced again.
+        val aged = s.submitAndAwaitBroadcast(s.prepare(call())) { tx ->
+            now += WalletSender.SIGNED_TTL_MS
+            tx.sign(key.copyOf(), from.address)
+        }
+        assertEquals(WalletSender.Broadcast.Stale(droppedSigned = true), aged)
+        assertTrue(chain.sent.isEmpty())
     }
 
     @Test
@@ -1115,6 +1137,34 @@ class SendTest {
     }
 
     @Test
+    fun `a quote that went stale while a Ledger signed it is dropped, not broadcast`() = runBlocking<Unit> {
+        val chain = FakeChain()
+        var now = 1_000L
+        val s = sender(chain) { now }
+        val quote = s.prepare(request())
+        now += WalletSender.QUOTE_TTL_MS - 1
+        // Fresh when confirmed; the unlock and the review on the device took minutes.
+        assertEquals(
+            WalletSender.Submit.STARTED,
+            s.submit(quote) { tx ->
+                now += 150_000
+                tx.sign(key.copyOf(), from.address)
+            },
+        )
+        val failed = s.awaitStage { it is SendStatus.Stage.Failed }.stage as SendStatus.Stage.Failed
+        assertTrue(failed.stale)
+        assertFalse(failed.mayHaveGone)
+        assertEquals(WalletSender.STALE_WHILE_SIGNING, failed.message)
+        assertTrue(failed.droppedSigned)
+        assertTrue(chain.sent.isEmpty())
+        // Nothing holds the next send back: priced again, it goes.
+        now += 1
+        assertEquals(WalletSender.Submit.STARTED, s.submit(s.prepare(request()), signer()))
+        s.awaitStage { it == SendStatus.Stage.Pending }
+        assertEquals(1, chain.sent.size)
+    }
+
+    @Test
     fun `a quote priced beside a send that went out since is priced again, not signed on the same nonce`() = runBlocking<Unit> {
         val chain = FakeChain()
         val s = sender(chain)
@@ -1184,6 +1234,53 @@ class SendTest {
         assertEquals(WalletSender.Submit.STARTED, s.submit(quote, signer()))
         s.awaitStage { it == SendStatus.Stage.Pending }
         assertEquals(1, chain.sent.size)
+    }
+
+    @Test
+    fun `a transaction approved on the Ledger within the review allowance is sent, not dropped`() = runBlocking<Unit> {
+        val chain = FakeChain()
+        var now = 1_000L
+        val s = sender(chain) { now }
+        val quote = s.prepare(request())
+        // Confirmed after 35 s (the pre-sign check passes); approved on the device 30 s later.
+        now += 35_000
+        assertEquals(
+            WalletSender.Submit.STARTED,
+            s.submit(quote) { tx ->
+                now += 30_000
+                tx.sign(key.copyOf(), from.address)
+            },
+        )
+        s.awaitStage { it == SendStatus.Stage.Pending }
+        assertEquals(1, chain.sent.size)
+    }
+
+    @Test
+    fun `a transaction refused or cancelled on the Ledger fails as a rejection`() = runBlocking<Unit> {
+        for (kind in LedgerException.Kind.entries) {
+            val chain = FakeChain()
+            val s = sender(chain) { 1_000L }
+            assertEquals(WalletSender.Submit.STARTED, s.submit(s.prepare(request())) { throw LedgerException(kind) })
+            val failed = s.awaitStage { it is SendStatus.Stage.Failed }.stage as SendStatus.Stage.Failed
+            val rejection = kind == LedgerException.Kind.REJECTED || kind == LedgerException.Kind.CANCELLED
+            assertEquals(kind.name, rejection, failed.rejected)
+            assertFalse(failed.mayHaveGone)
+            assertFalse(failed.stale)
+            assertTrue(chain.sent.isEmpty())
+        }
+    }
+
+    @Test
+    fun `a signer that finds its quote stale before signing ends the send the same way`() = runBlocking<Unit> {
+        val chain = FakeChain()
+        val s = sender(chain) { 1_000L }
+        assertEquals(WalletSender.Submit.STARTED, s.submit(s.prepare(request())) { throw QuoteStaleException() })
+        val failed = s.awaitStage { it is SendStatus.Stage.Failed }.stage as SendStatus.Stage.Failed
+        assertTrue(failed.stale)
+        // Found stale before the Ledger showed it: nothing was signed, and the message says a minute, not three.
+        assertFalse(failed.droppedSigned)
+        assertEquals(WalletSender.STALE_BEFORE_SIGNING, failed.message)
+        assertTrue(chain.sent.isEmpty())
     }
 
     @Test

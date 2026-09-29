@@ -79,7 +79,9 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import baby.freedom.mobile.ui.isLight
 import baby.freedom.mobile.wallet.BiometricVaultAuthenticator
+import baby.freedom.mobile.wallet.DuplicateAccountException
 import baby.freedom.mobile.wallet.Mnemonic
+import baby.freedom.mobile.wallet.OpenLvSession
 import baby.freedom.mobile.wallet.PublisherIdentityStore
 import baby.freedom.mobile.wallet.Vault
 import baby.freedom.mobile.wallet.VaultAuthCancelledException
@@ -253,6 +255,8 @@ internal fun walletErrorMessage(e: Throwable, action: String, phraseBackedUp: Bo
     is VaultAuthFailedException -> "Couldn’t $action: ${e.message}"
     is VaultLockedException -> "Couldn’t $action: the wallet locked. Unlock it and try again."
     is TooManyAccountsException -> "Couldn’t $action: ${e.message}."
+    is DuplicateAccountException -> "Couldn’t $action: the next account of this wallet is already on the list, added from a " +
+        "Ledger that holds the same recovery phrase. Remove that Ledger account to add it here."
     is VaultKeyLostException -> "Android has erased this wallet’s key. That happens when the screen lock is removed. " +
         lostWalletAdvice(phraseBackedUp)
     is VaultUnreadableException -> "This wallet can’t be read. " + lostWalletAdvice(phraseBackedUp)
@@ -306,6 +310,8 @@ fun WalletScreen(
     // The receive and scan pages (#106).
     var receiving by remember { mutableStateOf(false) }
     var scanning by remember { mutableStateOf(false) }
+    // Connect a Ledger (#142).
+    var connectingLedger by remember { mutableStateOf(false) }
     val publishers = remember(context) { PublisherIdentityStore.get(context) }
     var publisherSites by remember { mutableStateOf(0) }
     // The site the user opened Wallet from, fixed at that moment: the tab
@@ -425,6 +431,7 @@ fun WalletScreen(
             sending = false
             receiving = false
             scanning = false
+            connectingLedger = false
             historyOpen = false
             openTx = null
         }
@@ -473,6 +480,14 @@ fun WalletScreen(
     val receivingAccount = accountList?.active
     if (receiving && receivingAccount != null && (state is Vault.State.Locked || state is Vault.State.Unlocked)) {
         ReceivePage(account = receivingAccount, onBack = { receiving = false })
+        return
+    }
+    if (connectingLedger && accountList != null && (state is Vault.State.Locked || state is Vault.State.Unlocked)) {
+        LedgerConnectPage(
+            accounts = accountList?.accounts.orEmpty(),
+            onAdded = { connectingLedger = false },
+            onBack = { connectingLedger = false },
+        )
         return
     }
     if (scanning && (state is Vault.State.Locked || state is Vault.State.Unlocked)) {
@@ -632,6 +647,24 @@ fun WalletScreen(
                             onReceive = {
                                 error = null
                                 receiving = true
+                            },
+                            onConnectLedger = {
+                                error = null
+                                connectingLedger = true
+                            },
+                            onRemoveLedger = { account ->
+                                run("remove the Ledger account") {
+                                    // Its sites first (#220 R2-M2): told they lost it now, and not
+                                    // quietly reconnected if the same Ledger account is added again.
+                                    if (!EthereumProviders.accountRemoved(context, account.address)) {
+                                        error = "Couldn’t remove the Ledger account: the sites connected to it " +
+                                            "couldn’t be disconnected. Try again."
+                                        return@run
+                                    }
+                                    // And desktop's OpenLV session, if it was given it (#220 R1-M2).
+                                    OpenLvSession.accountRemovedFromWallet(account.address)
+                                    walletAccounts.removeLedger(account.index)
+                                }
                             },
                         )
                     }

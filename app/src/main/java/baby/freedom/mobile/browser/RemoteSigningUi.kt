@@ -185,7 +185,8 @@ private fun successGreen() = if (MaterialTheme.colorScheme.isLight) Color(0xFF15
 /**
  * Desktop Freedom's requests over OpenLV (#113), one sheet at a time,
  * over whatever the app is showing. Signing asks for the wallet to be
- * unlocked (biometric or screen lock) as part of the approval; Back
+ * unlocked (biometric or screen lock) as part of the approval — a
+ * Ledger's account (#142) signs on the Ledger instead; Back
  * rejects. Like the send review, the approve button ignores taps for
  * the first [PromptTapGuard.PROTECTION_MS] the sheet is on screen, so a
  * tap meant for what was there before can't approve it.
@@ -226,8 +227,9 @@ private fun RemoteSigningSheet(approval: OpenLvSession.Approval) {
     val reject = { if (!busy) approval.decide(OpenLvSession.Decision.Reject) }
     val approve = approve@{
         if (busy || !guard.accepts()) return@approve
-        // Sharing an address needs no key; signing does, so the wallet opens first.
-        val needsKey = request !is OpenLvSession.Request.Connect
+        // Sharing an address needs no key; signing does, so the wallet opens first —
+        // unless a Ledger signs it (#142): nothing on the phone to unlock.
+        val needsKey = request !is OpenLvSession.Request.Connect && ledgerOf(request) == null
         busy = true
         error = null
         scope.launch {
@@ -275,6 +277,10 @@ private fun RemoteSigningSheet(approval: OpenLvSession.Approval) {
                         is OpenLvSession.Request.TypedData -> TypedDataBody(request)
                         is OpenLvSession.Request.SendTransaction -> SendTransactionBody(request)
                     }
+                    ledgerOf(request)?.let {
+                        Spacer(Modifier.height(8.dp))
+                        Text("You’ll check and confirm this on your Ledger (${it.deviceName}) next.", style = MaterialTheme.typography.bodySmall)
+                    }
                     error?.let {
                         Spacer(Modifier.height(8.dp))
                         Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
@@ -294,6 +300,14 @@ private fun RemoteSigningSheet(approval: OpenLvSession.Approval) {
             }
         }
     }
+}
+
+/** The Ledger that signs what [request] asks for, if its account is a Ledger's (#142). */
+internal fun ledgerOf(request: OpenLvSession.Request): baby.freedom.mobile.wallet.ledger.LedgerKey? = when (request) {
+    is OpenLvSession.Request.PersonalSign -> request.account.ledger
+    is OpenLvSession.Request.TypedData -> request.account.ledger
+    is OpenLvSession.Request.SendTransaction -> request.quote.request.from.ledger
+    is OpenLvSession.Request.Connect -> null
 }
 
 @Composable

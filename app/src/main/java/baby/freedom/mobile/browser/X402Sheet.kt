@@ -57,6 +57,9 @@ internal class X402SheetState(val ask: X402Ask) {
 
     val option: X402Option? get() = ask.options.getOrNull(selected)
 
+    /** The paying account's key is on a Ledger (#142): no allowance is offered. */
+    val ledger: Boolean get() = ask.account?.isLedger == true
+
     fun select(index: Int) {
         if (index == selected) return
         selected = index
@@ -68,7 +71,7 @@ internal class X402SheetState(val ask: X402Ask) {
 
     /** Why the allowance can't be granted as typed, or null if it can (or none is asked for). */
     fun capProblem(): String? {
-        if (!auto) return null
+        if (!auto || ledger) return null
         val o = option ?: return null
         val cap = cap() ?: return "Enter an amount of ${o.symbol}"
         if (cap < o.offer.amount) return "At least this payment: ${SendAmounts.exact(o.offer.amount, o.decimals)} ${o.symbol}"
@@ -79,7 +82,8 @@ internal class X402SheetState(val ask: X402Ask) {
     fun choice(): X402Choice? {
         val o = option ?: return null
         if (!o.fundable || capProblem() != null) return null
-        val grant = if (auto) X402Grant(cap() ?: return null, window.ms) else null
+        // A Ledger account never pays without asking: the Ledger confirms every payment (#142).
+        val grant = if (auto && !ledger) X402Grant(cap() ?: return null, window.ms) else null
         return X402Choice(selected, grant)
     }
 
@@ -165,7 +169,9 @@ internal fun X402PaymentBody(
         ask.unusable.forEach { Note("• $it") }
     }
     Spacer(Modifier.height(8.dp))
-    Row(
+    if (state.ledger) {
+        Note("A Ledger account doesn't pay sites automatically: you confirm each payment on the Ledger.")
+    } else Row(
         verticalAlignment = Alignment.CenterVertically,
         modifier = Modifier
             .fillMaxWidth()
@@ -175,7 +181,7 @@ internal fun X402PaymentBody(
         Checkbox(checked = state.auto, onCheckedChange = null)
         Text("Pay this site automatically", modifier = Modifier.padding(start = 8.dp))
     }
-    if (state.auto) {
+    if (state.auto && !state.ledger) {
         OutlinedTextField(
             value = state.capText,
             onValueChange = { state.capText = it },
@@ -199,7 +205,7 @@ internal fun X402PaymentBody(
         }
         Note(
             "For ${state.window.label}, this site's pages are paid for in ${o.symbol} on ${o.chain.name} without asking, " +
-                "from ${account.name} only, up to that total — only while the wallet is unlocked, never in a private tab. " +
+                "from ${accountLabel(account)} only, up to that total — only while the wallet is unlocked, never in a private tab. " +
                 "With another account active, you're asked again. " +
                 "Revoke it any time on the wallet page.",
         )

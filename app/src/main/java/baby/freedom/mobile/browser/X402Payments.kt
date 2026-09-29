@@ -2,6 +2,7 @@ package baby.freedom.mobile.browser
 
 import android.content.Context
 import android.util.Log
+import android.widget.Toast
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebView
@@ -11,6 +12,7 @@ import baby.freedom.mobile.chains.rpc.ChainTrust
 import baby.freedom.mobile.chains.rpc.WalletRpc
 import baby.freedom.mobile.data.ChainStore
 import baby.freedom.mobile.data.X402Store
+import baby.freedom.mobile.wallet.Eip712
 import baby.freedom.mobile.wallet.Erc20
 import baby.freedom.mobile.wallet.MessageSigning
 import baby.freedom.mobile.wallet.TokenRegistry
@@ -18,6 +20,8 @@ import baby.freedom.mobile.wallet.Vault
 import baby.freedom.mobile.wallet.WalletAccount
 import baby.freedom.mobile.wallet.WalletAccounts
 import baby.freedom.mobile.wallet.X402
+import baby.freedom.mobile.wallet.ledger.Ledger
+import baby.freedom.mobile.wallet.ledger.LedgerException
 import java.lang.ref.WeakReference
 import java.math.BigInteger
 import java.security.SecureRandom
@@ -271,7 +275,7 @@ object X402Payments {
             // the account it was granted for (#218 R2-F1), and only when the balance isn't known
             // to be short: otherwise the sheet says why (#218 R2-M1).
             val payer = account?.address
-            val covered = silentPayOption(allowanceMayPay, switched, payer, options) { o ->
+            val covered = silentPayOption(allowanceMayPay, switched, payer, account?.isLedger == true, options) { o ->
                 store.covering(allowances, d.origin, o.chainId, o.asset, payer!!, o.amount) != null
             }
             // Switched while the figures were read: read them again for the account now active.
@@ -347,15 +351,18 @@ object X402Payments {
      * account hasn't been [switched] since — a 402 left waiting in a tab
      * is never paid silently by a later account switch, from the new
      * account's allowance and on the old navigation's terms; the sheet
-     * goes up for it instead (#218 R5-M2).
+     * goes up for it instead (#218 R5-M2). Never from a [ledger]
+     * account (#142): the Ledger confirms every payment, as it does every
+     * transaction an auto-approve rule would otherwise cover.
      */
     internal fun silentPayOption(
         allowanceMayPay: Boolean,
         switched: Boolean,
         payer: String?,
+        ledger: Boolean,
         options: List<X402Option>,
         covered: (X402.Offer) -> Boolean,
-    ): X402Option? = if (!allowanceMayPay || switched || payer == null) null else autoPayOption(options, covered)
+    ): X402Option? = if (!allowanceMayPay || switched || payer == null || ledger) null else autoPayOption(options, covered)
 
     /**
      * The offer an allowance pays without asking: the first one [covered]
@@ -412,8 +419,22 @@ object X402Payments {
         val nonce = ByteArray(32).also(random::nextBytes)
         val now = System.currentTimeMillis() / 1000
         val authorization = X402.authorize(d.required.version, offer, account.address, now, nonce)
-        val signature = withContext(Dispatchers.Default) {
-            MessageSigning.sign(vault, account, X402.digest(offer, authorization))
+        val digest = X402.digest(offer, authorization)
+        val signature = if (account.isLedger) {
+            // Signed on the Ledger (#142), which shows the transfer; its dialog carries Cancel.
+            if (auto) return Paid.NOT_SENT
+            try {
+                Ledger.get(app).signTypedData(account, Eip712.parse(X402.typedData(offer, authorization)), digest)
+            } catch (e: LedgerException) {
+                Log.i(TAG, "not signed on the Ledger: ${e.kind}")
+                // Refused or cancelled there is the user's answer; anything else they're told.
+                if (e.kind != LedgerException.Kind.REJECTED && e.kind != LedgerException.Kind.CANCELLED) {
+                    Toast.makeText(app, "Not paid: ${e.message}", Toast.LENGTH_LONG).show()
+                }
+                return Paid.NOT_SENT
+            }
+        } else {
+            withContext(Dispatchers.Default) { MessageSigning.sign(vault, account, digest) }
         }
         if (X402.runway(authorization, System.currentTimeMillis() / 1000) < X402.MIN_RUNWAY_SECONDS) {
             Log.w(TAG, "the authorization ran out while it was signed; not sending it")
@@ -438,7 +459,7 @@ object X402Payments {
             nonce = authorization.nonce,
             status = X402Store.Status.PENDING,
         )
-        val newAllowance = if (auto) null else grant?.let { X402Store.NewAllowance(option.symbol, option.decimals, it.cap, it.windowMs) }
+        val newAllowance = if (auto || account.isLedger) null else grant?.let { X402Store.NewAllowance(option.symbol, option.decimals, it.cap, it.windowMs) }
         val committed = when (val c = store.commit(payment, newAllowance)) {
             is X402Store.Commit.Done -> c
             X402Store.Commit.NotCovered -> return Paid.NOT_COVERED

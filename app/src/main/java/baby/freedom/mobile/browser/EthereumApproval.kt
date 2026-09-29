@@ -132,8 +132,12 @@ fun EthereumApprovalSheet(request: EthereumPromptRequest) {
     val connectAccount = accounts?.let { list ->
         list.firstOrNull { it.address == picked } ?: accountList?.active
     }
-    val needsUnlock = ask is EthAsk.SignMessage || ask is EthAsk.SignTypedData || ask is EthAsk.SendTransaction ||
-        ask is EthAsk.Payment
+    // A Ledger account signs on the Ledger (#142): nothing on the phone to unlock.
+    val ledger = ledgerOf(ask)
+    val needsUnlock = ledger == null && (
+        ask is EthAsk.SignMessage || ask is EthAsk.SignTypedData || ask is EthAsk.SendTransaction ||
+            ask is EthAsk.Payment
+        )
     val canApprove = when (ask) {
         is EthAsk.Connect -> connectAccount != null
         is EthAsk.Payment -> ask.payment.paysFrom(accountList?.active) && payment?.choice() != null
@@ -142,13 +146,14 @@ fun EthereumApprovalSheet(request: EthereumPromptRequest) {
 
     fun approve() {
         if (!guard.accepts() || busy) return
-        if (!needsUnlock) {
-            request.respond(EthAnswer.Approved(if (ask is EthAsk.Connect) connectAccount else null))
-            return
-        }
         // Fixed now: what the user saw when they tapped is what's paid.
         val choice = payment?.choice()
         if (ask is EthAsk.Payment && choice == null) return
+        if (!needsUnlock) {
+            // A Ledger account's payment too: it's signed on the Ledger, after the sheet.
+            request.respond(EthAnswer.Approved(if (ask is EthAsk.Connect) connectAccount else null, payment = choice))
+            return
+        }
         busy = true
         error = null
         scope.launch {
@@ -216,6 +221,14 @@ fun EthereumApprovalSheet(request: EthereumPromptRequest) {
                     )
                 }
             }
+            ledger?.let {
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    "You’ll check and confirm this on your Ledger (${it.deviceName}) next.",
+                    style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.testTag("ethereum-ledger-note"),
+                )
+            }
             error?.let {
                 Spacer(Modifier.height(8.dp))
                 Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
@@ -241,6 +254,15 @@ fun EthereumApprovalSheet(request: EthereumPromptRequest) {
             }
         }
     }
+}
+
+/** The Ledger that signs what [ask] asks for, if its account is a Ledger's (#142). */
+internal fun ledgerOf(ask: EthAsk): baby.freedom.mobile.wallet.ledger.LedgerKey? = when (ask) {
+    is EthAsk.SignMessage -> ask.account.ledger
+    is EthAsk.SignTypedData -> ask.account.ledger
+    is EthAsk.SendTransaction -> ask.quote.request.from.ledger
+    is EthAsk.Payment -> ask.payment.account?.ledger
+    else -> null
 }
 
 private fun iconFor(ask: EthAsk) = when (ask) {
@@ -312,7 +334,7 @@ private fun ConnectBody(
         ) {
             if (accounts.size > 1) RadioButton(selected = account == selected, onClick = null)
             Column(Modifier.padding(start = if (accounts.size > 1) 8.dp else 0.dp)) {
-                Text(account.name, style = MaterialTheme.typography.bodyLarge)
+                Text(accountLabel(account), style = MaterialTheme.typography.bodyLarge)
                 AddressText(account.address, MaterialTheme.typography.bodySmall, MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
@@ -496,7 +518,7 @@ internal fun Row0(label: String, value: String, mono: Boolean = false, detail: S
 internal fun AccountRow(account: WalletAccount, label: String = "Account") {
     Column(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
         Text(label, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        Text(account.name)
+        Text(accountLabel(account))
         AddressText(account.address, MaterialTheme.typography.bodySmall, MaterialTheme.colorScheme.onSurfaceVariant)
     }
     HorizontalDivider()

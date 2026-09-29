@@ -11,7 +11,9 @@ import baby.freedom.mobile.wallet.MessageSigning
 import baby.freedom.mobile.wallet.SendException
 import baby.freedom.mobile.wallet.SendQuote
 import baby.freedom.mobile.wallet.SendRequest
+import baby.freedom.mobile.wallet.Eip712
 import baby.freedom.mobile.wallet.WalletAccount
+import baby.freedom.mobile.wallet.ledger.LedgerException
 import java.math.BigInteger
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineStart
@@ -79,7 +81,13 @@ class EthereumProviderTest {
         override fun noteActivity() {
             activity++
         }
-        override fun sign(account: WalletAccount, digest: ByteArray): String {
+        /** What a Ledger answers instead of signing (#142), when set. */
+        var ledgerFailure: LedgerException? = null
+        override suspend fun signMessage(account: WalletAccount, message: ByteArray) =
+            sign(account, MessageSigning.personalDigest(message))
+        override suspend fun signTypedData(account: WalletAccount, data: Eip712.TypedData, digest: ByteArray) = sign(account, digest)
+        private fun sign(account: WalletAccount, digest: ByteArray): String {
+            ledgerFailure?.let { throw it }
             check(account == main) { "only the cow key here" }
             return MessageSigning.sign(cow, account.address, digest)
         }
@@ -161,6 +169,7 @@ class EthereumProviderTest {
 
     private fun ok(r: EthereumProvider.Reply): Any = (r as? EthereumProvider.Reply.Ok)?.value ?: error("not ok: $r")
     private fun code(r: EthereumProvider.Reply): Int = (r as? EthereumProvider.Reply.Err)?.code ?: error("not an error: $r")
+    private fun message(r: EthereumProvider.Reply): String = (r as? EthereumProvider.Reply.Err)?.message ?: error("not an error: $r")
 
     private fun connect(account: WalletAccount = main) {
         answer = { EthAnswer.Approved(account) }
@@ -227,6 +236,28 @@ class EthereumProviderTest {
         assertEquals(EthAsk.SignMessage(site, main, "hello", "0x68656c6c6f"), asks.single())
         // [address, message] works too; plain text is signed as its UTF-8 bytes.
         assertEquals(sig, ok(call("personal_sign", JSONArray().put(main.address).put("hello"))))
+    }
+
+    @Test
+    fun `a Ledger that refuses or fails is a clear error for the page, never a hang`() {
+        connect()
+        answer = { EthAnswer.Approved() }
+        val typed = JSONObject()
+            .put("types", JSONObject().put("EIP712Domain", JSONArray()).put("M", JSONArray().put(JSONObject().put("name", "a").put("type", "uint8"))))
+            .put("primaryType", "M").put("domain", JSONObject()).put("message", JSONObject().put("a", 1))
+        for ((failure, code) in listOf(
+            LedgerException(LedgerException.Kind.REJECTED) to 4001,
+            LedgerException(LedgerException.Kind.CANCELLED) to 4001,
+            LedgerException(LedgerException.Kind.DISCONNECTED) to -32603,
+            LedgerException(LedgerException.Kind.TIMEOUT) to -32603,
+        )) {
+            wallet.ledgerFailure = failure
+            val personal = call("personal_sign", JSONArray().put("0x68656c6c6f").put(main.address))
+            assertEquals(failure.kind.name, code, code(personal))
+            val data = call("eth_signTypedData_v4", JSONArray().put(main.address).put(typed.toString()))
+            assertEquals(failure.kind.name, code, code(data))
+            if (code != 4001) assertTrue(message(personal).contains(failure.kind.message))
+        }
     }
 
     @Test
@@ -762,6 +793,31 @@ class EthereumProviderTest {
     }
 
     @Test
+    fun `a transaction refused on the Ledger is a user rejection for the page, not priced again`() {
+        connect()
+        answer = { EthAnswer.Approved() }
+        sends.outcomes += EthereumProvider.Submitted.Rejected
+        assertEquals(4001, code(call("eth_sendTransaction", tx("to" to second.address))))
+        assertEquals(1, sends.prepared.size)
+        assertEquals(1, asks.size)
+    }
+
+    @Test
+    fun `removing a Ledger account disconnects the sites connected with it, and only those`() {
+        val other = "https://other.example"
+        connect(second)
+        answer = { EthAnswer.Approved(main) }
+        ok(call("eth_requestAccounts", origin = other))
+        events.clear()
+        assertTrue(runBlocking { provider.accountRemoved(second.address.lowercase()) })
+        assertNull(grants.grants[site])
+        assertEquals(main.address, grants.grants[other]?.account)
+        assertEquals(listOf(Triple(site, "accountsChanged", "[]")), events)
+        // The same account added back: the site asks again before it sees it.
+        assertEquals("[]", ok(call("eth_accounts")).toString())
+    }
+
+    @Test
     fun `reads go to the site's chain as the page's own reads, errors as the node gave them`() {
         assertEquals("0x1", ok(call("eth_blockNumber")))
         assertEquals("100 eth_blockNumber [] $site", readsSeen.single())
@@ -1044,6 +1100,43 @@ class EthereumProviderTest {
         connect()
         answer = { EthAnswer.Rejected }
         assertEquals(4001, code(call("eth_sendTransaction", tx("to" to token, "data" to transferData))))
+    }
+
+    @Test
+    fun `a Ledger account's send never offers or uses a rule - the Ledger asks for each one`() {
+        val ledger = WalletAccount(-1, "Ledger", "0xcccccccccccccccccccccccccccccccccccccccc", baby.freedom.mobile.wallet.ledger.LedgerKey("44'/60'/0'/0/0", "AA:BB:CC:DD:EE:FF", "Nano X"))
+        wallet.list = listOf(main, second, ledger)
+        connect(ledger)
+        // Even with a rule for this very call left in the store, the sheet is shown, with no switch.
+        rules.rules += "$site|${token.lowercase()}|0xa9059cbb|100"
+        answer = { EthAnswer.Approved(alwaysApprove = true) }
+        sends.outcomes += sent(1)
+        ok(call("eth_sendTransaction", tx("to" to token, "data" to transferData)))
+        val sheet = asks.single() as EthAsk.SendTransaction
+        assertNull(sheet.autoApprove)
+        assertFalse(sheet.ruled)
+        assertEquals(setOf("$site|${token.lowercase()}|0xa9059cbb|100"), rules.rules)
+    }
+
+    @Test
+    fun `removing a Ledger account drops the rules of the sites connected with it`() {
+        val ledger = WalletAccount(-1, "Ledger", "0xcccccccccccccccccccccccccccccccccccccccc", baby.freedom.mobile.wallet.ledger.LedgerKey("44'/60'/0'/0/0", "AA:BB:CC:DD:EE:FF", "Nano X"))
+        wallet.list = listOf(main, second, ledger)
+        connect(ledger)
+        answer = { EthAnswer.Approved(main) }
+        ok(call("eth_requestAccounts", origin = "https://other.example"))
+        rules.rules += "$site|${token.lowercase()}|0xa9059cbb|100"
+        rules.rules += "https://other.example|${token.lowercase()}|0xa9059cbb|100"
+        // A rule store that can't be written: the site stays connected, to try again.
+        rules.failWrites = true
+        assertFalse(runBlocking { provider.accountRemoved(ledger.address) })
+        assertEquals(ledger.address, grants.grants[site]?.account)
+        rules.failWrites = false
+        events.clear()
+        assertTrue(runBlocking { provider.accountRemoved(ledger.address) })
+        assertNull(grants.grants[site])
+        assertEquals(setOf("https://other.example|${token.lowercase()}|0xa9059cbb|100"), rules.rules)
+        assertEquals(listOf(Triple(site, "accountsChanged", "[]")), events)
     }
 
     @Test
