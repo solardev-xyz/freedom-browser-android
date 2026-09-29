@@ -1,5 +1,8 @@
 package baby.freedom.mobile.node
 
+import baby.freedom.swarm.NodeInfo
+import baby.freedom.swarm.NodeStatus
+
 /**
  * Keeps turning the node off from cutting a postage spend in half (#116).
  *
@@ -12,12 +15,20 @@ package baby.freedom.mobile.node
  * stays up and stops itself once the last one ends. From the moment a
  * stop is asked for until the user turns the node back on ([cancelStop])
  * no new spend may start, so the stop can't be overtaken by one.
+ *
+ * The wait is bounded: a stop never waits more than a fixed budget
+ * ([budgetLeftMs]), counted from the moment it was first asked for, so a
+ * spend hung inside ant can't keep a node the user turned off peering
+ * indefinitely. Each stop carries a [stopGeneration], so a deadline timer
+ * scheduled for one stop can't act on a later one ([overdue]).
  */
-internal class SpendStopGate {
+internal class SpendStopGate(private val nanoTime: () -> Long = System::nanoTime) {
     private val monitor = Object()
     private var running = 0
     private var stopping = false
     private var stopWhenIdle = false
+    private var stopAskedAt = 0L
+    private var generation = 0L
 
     /** A spend is about to start; false (don't start it) while the node is being turned off. */
     fun begin(): Boolean = synchronized(monitor) {
@@ -40,15 +51,46 @@ internal class SpendStopGate {
      * is running, stop now. Either way no spend starts from here on.
      */
     fun requestStop(): Boolean = synchronized(monitor) {
-        stopping = true
+        if (!stopping) {
+            // A repeated ask keeps the first one's clock: toggling off
+            // again doesn't extend the wait.
+            stopping = true
+            stopAskedAt = nanoTime()
+            generation++
+        }
         stopWhenIdle = running > 0
         stopWhenIdle
     }
 
     /** The user turned the node back on: forget any stop asked for. */
     fun cancelStop() = synchronized(monitor) {
+        if (stopping) generation++
         stopping = false
         stopWhenIdle = false
+    }
+
+    /** The stop asked for now, for a deadline timer to hand back to [overdue]. */
+    val stopGeneration: Long get() = synchronized(monitor) { generation }
+
+    /**
+     * How much of [budgetMs] is left for the stop asked for: all of it
+     * with none asked for, never below 0.
+     */
+    fun budgetLeftMs(budgetMs: Long): Long = synchronized(monitor) {
+        if (!stopping) return budgetMs
+        val elapsedMs = (nanoTime() - stopAskedAt) / 1_000_000
+        (budgetMs - elapsedMs).coerceIn(0, budgetMs)
+    }
+
+    /**
+     * Has stop [stopGeneration] waited out [budgetMs] with a spend still
+     * running? The service then stops anyway. False once the stop was
+     * cancelled or superseded, or once the spend ended (the ordinary
+     * deferred stop then carries it out).
+     */
+    fun overdue(stopGeneration: Long, budgetMs: Long): Boolean = synchronized(monitor) {
+        stopping && stopWhenIdle && running > 0 && stopGeneration == generation &&
+            (nanoTime() - stopAskedAt) / 1_000_000 >= budgetMs
     }
 
     /** Is a deferred stop due: one was asked for, not cancelled, and no spend runs any more? */
@@ -101,3 +143,20 @@ internal class ProcessExitLatch {
         val node = ProcessExitLatch()
     }
 }
+
+/**
+ * What a [NodeService] created in a doomed `:node` process ([ProcessExitLatch])
+ * reports instead of its idle node's Stopped: the node is on its way up —
+ * it starts once the process restarts — and why it isn't yet. Without it
+ * the node page shows the switch on beside "Stopped" with no reason.
+ */
+internal fun reportedNodeInfo(info: NodeInfo, doomed: Boolean): NodeInfo =
+    if (doomed && info.status == NodeStatus.Stopped) {
+        NodeInfo(status = NodeStatus.Starting, errorMessage = WAITING_FOR_SPEND_NOTE)
+    } else {
+        info
+    }
+
+internal const val WAITING_FOR_SPEND_NOTE =
+    "Waiting for a postage payment to finish; the node starts once it's done"
+

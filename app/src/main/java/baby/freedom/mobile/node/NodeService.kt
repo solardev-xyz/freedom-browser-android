@@ -36,6 +36,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
@@ -123,7 +124,7 @@ class NodeService : Service() {
     private val callbacks = RemoteCallbackList<INodeCallback>()
 
     private val binder = object : INodeService.Stub() {
-        override fun getState(): NodeInfo = swarmNode.state.value
+        override fun getState(): NodeInfo = reportedNodeInfo(swarmNode.state.value, doomed)
 
         override fun getIpfsState(): IpfsInfo = ipfsNode?.state?.value ?: IpfsInfo()
 
@@ -136,7 +137,7 @@ class NodeService : Service() {
         override fun registerCallback(cb: INodeCallback?) {
             cb ?: return
             callbacks.register(cb)
-            runCatching { cb.onStateChanged(swarmNode.state.value) }
+            runCatching { cb.onStateChanged(reportedNodeInfo(swarmNode.state.value, doomed)) }
             runCatching { cb.onIpfsStateChanged(ipfsNode?.state?.value ?: IpfsInfo()) }
             runCatching { cb.onRadicleStateChanged(radicleNode.state.value) }
         }
@@ -264,6 +265,7 @@ class NodeService : Service() {
             val deferred = stopGate.requestStop()
             if (deferred) {
                 Log.i(TAG, "node turned off during a postage spend; stopping once it ends")
+                stopAnywayWhenOverdue()
             }
             return deferred
         }
@@ -281,6 +283,26 @@ class NodeService : Service() {
             return block()
         } finally {
             stopGate.end()
+        }
+    }
+
+    /**
+     * Bounds a deferred stop (#116): if the spend is still running once
+     * [SPEND_STOP_WAIT_MS] has passed since the stop was asked for — ant
+     * hung — the service stops anyway, and [onDestroy] then exits without
+     * waiting further, so a node the user turned off doesn't go on
+     * peering indefinitely. Tagged with the stop's generation, so turning
+     * the node back on (and off again) meanwhile disarms it.
+     */
+    private fun stopAnywayWhenOverdue() {
+        val generation = stopGate.stopGeneration
+        val left = stopGate.budgetLeftMs(SPEND_STOP_WAIT_MS)
+        scope.launch {
+            delay(left)
+            if (stopGate.overdue(generation, SPEND_STOP_WAIT_MS)) {
+                Log.w(TAG, "postage spend still running ${SPEND_STOP_WAIT_MS / 60_000} min after the node was turned off; stopping anyway")
+                stopSelf()
+            }
         }
     }
 
@@ -461,7 +483,7 @@ class NodeService : Service() {
     private fun repromoteForegroundIfDemoted() {
         if (!foregroundDemoted) return
         runCatching {
-            startForeground(NOTIFICATION_ID, buildNotification(swarmNode.state.value), foregroundTypeCompat())
+            startForeground(NOTIFICATION_ID, buildNotification(reportedNodeInfo(swarmNode.state.value, doomed)), foregroundTypeCompat())
         }.onSuccess {
             foregroundDemoted = false
             Log.i(TAG, "re-promoted to foreground service")
@@ -499,12 +521,14 @@ class NodeService : Service() {
 
         startForeground(
             NOTIFICATION_ID,
-            buildNotification(NodeInfo()),
+            buildNotification(reportedNodeInfo(NodeInfo(), doomed)),
             foregroundTypeCompat(),
         )
 
         swarmObserver = swarmNode.state
-            .onEach { info ->
+            .onEach { raw ->
+                // In a doomed process, why the node isn't up yet (#116).
+                val info = reportedNodeInfo(raw, doomed)
                 updateNotification(info)
                 broadcastState(info)
                 Log.i(TAG, "swarm → ${info.status}  peers=${info.connectedPeers}")
@@ -650,8 +674,12 @@ class NodeService : Service() {
         Log.w(TAG, "destroyed during a postage spend; exiting once it ends")
         // A service created in this process from now on starts nothing.
         ProcessExitLatch.node.schedule()
+        // The wait counts from when the stop was first asked for: a
+        // deferred stop that already waited out its budget
+        // ([stopAnywayWhenOverdue]) exits right away.
+        val budget = stopGate.budgetLeftMs(SPEND_STOP_WAIT_MS)
         Thread({
-            stopGate.awaitIdle(DESTROY_SPEND_WAIT_MS)
+            stopGate.awaitIdle(budget)
             // A moment for the spend's answer to reach the app.
             Thread.sleep(ANSWER_GRACE_MS)
             Log.i(TAG, "exiting :node process to release state-store lock")
@@ -712,7 +740,7 @@ class NodeService : Service() {
     private fun buildNotification(info: NodeInfo): Notification {
         val text = when (info.status) {
             NodeStatus.Stopped -> "Stopped"
-            NodeStatus.Starting -> "Starting…"
+            NodeStatus.Starting -> info.errorMessage ?: "Starting…"
             NodeStatus.Running -> "Running — ${info.connectedPeers} peers"
             NodeStatus.Error -> "Error: ${info.errorMessage ?: "unknown"}"
         }
@@ -741,8 +769,12 @@ class NodeService : Service() {
 
         private const val MAX_RADICLE_CALLS = 4
 
-        /** How long a destroyed service holds its exit back for a postage spend still running (#116). */
-        private const val DESTROY_SPEND_WAIT_MS = 15 * 60_000L
+        /**
+         * The longest a stop waits for a postage spend still running
+         * (#116), counted from when it was asked for: a deferred stop
+         * ([INodeService.stopWhenIdle]) and a destroyed service's exit alike.
+         */
+        private const val SPEND_STOP_WAIT_MS = 15 * 60_000L
         private const val ANSWER_GRACE_MS = 1_000L
 
         private const val TAG = "NodeService"

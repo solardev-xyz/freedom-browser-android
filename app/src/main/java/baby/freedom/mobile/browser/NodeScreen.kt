@@ -221,7 +221,9 @@ private fun DetailsSection(nodeInfo: NodeInfo) {
         }
         val err = nodeInfo.errorMessage
         if (!err.isNullOrBlank()) {
-            DetailRow("Error", err, singleLine = false)
+            // Not always an error: a node waiting to restart after a
+            // postage spend (#116) says why here, as Starting.
+            DetailRow(if (nodeInfo.status == NodeStatus.Error) "Error" else "Status", err, singleLine = false)
         }
     }
 }

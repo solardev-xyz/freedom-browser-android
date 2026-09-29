@@ -139,6 +139,25 @@ class StampsTest {
     }
 
     @Test
+    fun `the stated swap bound is never below the one SpendGuard enforces`() {
+        // ant truncates its display to 4 decimals: 0.017899 xDAI reads "0.0178".
+        val q = stampQuoteFrom(
+            JSONObject(
+                """{"depth":17,"days":2,"amount_per_chunk":"4325218560","total_cost_plur":"1","total_cost_bzz":"0.05",
+                "capacity_bytes":536870912,"xdai_required":"17899000000000000","xdai_required_display":"0.0178",
+                "sufficient_funds":true}""",
+            ),
+        )!!
+        val text = spendCostText(q, buy = true)
+        assertTrue(text, text.contains("about 0.0178 xDAI including gas"))
+        assertTrue(text, text.contains("At most, it swaps 0.017899 xDAI and"))
+        // Past 6 decimals it rounds up, never down.
+        assertEquals("0.0179 xDAI", formatXdaiCeiling(java.math.BigInteger("17899000000000001")))
+        assertEquals("0.000001 xDAI", formatXdaiCeiling(java.math.BigInteger.ONE))
+        assertEquals("0.026 xDAI", formatXdaiCeiling(java.math.BigInteger("26000000000000000")))
+    }
+
+    @Test
     fun `a spend stays reachable with the node off`() {
         val light = NodeInfo(status = NodeStatus.Running, lightMode = true, walletIdentity = true)
         val off = NodeInfo()

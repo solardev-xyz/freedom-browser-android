@@ -1,5 +1,7 @@
 package baby.freedom.mobile.node
 
+import baby.freedom.swarm.NodeInfo
+import baby.freedom.swarm.NodeStatus
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -91,5 +93,74 @@ class SpendStopGateTest {
         assertTrue(seen)
         latch.schedule()
         assertTrue(latch.pending)
+    }
+
+    private var nowMs = 1_000L
+    private val clocked = SpendStopGate { nowMs * 1_000_000 }
+
+    @Test
+    fun `a deferred stop is overdue once its budget passes with the spend still running`() {
+        assertTrue(clocked.begin())
+        assertTrue(clocked.requestStop())
+        val gen = clocked.stopGeneration
+        assertEquals(15_000L, clocked.budgetLeftMs(15_000))
+        nowMs += 14_999
+        assertFalse(clocked.overdue(gen, 15_000))
+        assertEquals(1L, clocked.budgetLeftMs(15_000))
+        nowMs += 1
+        assertTrue(clocked.overdue(gen, 15_000))
+        // A destroy then waits no further.
+        assertEquals(0L, clocked.budgetLeftMs(15_000))
+    }
+
+    @Test
+    fun `toggling off again doesn't extend the wait`() {
+        assertTrue(clocked.begin())
+        assertTrue(clocked.requestStop())
+        val gen = clocked.stopGeneration
+        nowMs += 10_000
+        assertTrue(clocked.requestStop())
+        assertEquals(gen, clocked.stopGeneration)
+        assertEquals(5_000L, clocked.budgetLeftMs(15_000))
+        nowMs += 5_000
+        assertTrue(clocked.overdue(gen, 15_000))
+    }
+
+    @Test
+    fun `turning the node back on disarms the old stop's deadline, and a new stop gets its own`() {
+        assertTrue(clocked.begin())
+        assertTrue(clocked.requestStop())
+        val first = clocked.stopGeneration
+        nowMs += 10_000
+        clocked.cancelStop()
+        assertEquals(15_000L, clocked.budgetLeftMs(15_000))
+        assertTrue(clocked.requestStop())
+        nowMs += 5_000
+        // The first stop's timer fires now: it must not act on the second.
+        assertFalse(clocked.overdue(first, 15_000))
+        assertFalse(clocked.overdue(clocked.stopGeneration, 15_000))
+        nowMs += 10_000
+        assertTrue(clocked.overdue(clocked.stopGeneration, 15_000))
+    }
+
+    @Test
+    fun `a spend that ends before the deadline leaves nothing overdue`() {
+        assertTrue(clocked.begin())
+        assertTrue(clocked.requestStop())
+        val gen = clocked.stopGeneration
+        assertTrue(clocked.end())
+        nowMs += 60_000
+        assertFalse(clocked.overdue(gen, 15_000))
+    }
+
+    @Test
+    fun `a service in a doomed process reports why its node isn't up`() {
+        val shown = reportedNodeInfo(NodeInfo(), doomed = true)
+        assertEquals(NodeStatus.Starting, shown.status)
+        assertEquals(WAITING_FOR_SPEND_NOTE, shown.errorMessage)
+        // Otherwise, or once the node really moves, the node's own state.
+        assertEquals(NodeInfo(), reportedNodeInfo(NodeInfo(), doomed = false))
+        val err = NodeInfo(status = NodeStatus.Error, errorMessage = "x")
+        assertEquals(err, reportedNodeInfo(err, doomed = true))
     }
 }

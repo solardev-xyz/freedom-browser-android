@@ -3,7 +3,9 @@ package baby.freedom.mobile.browser
 import android.util.Log
 import baby.freedom.mobile.node.INodeService
 import baby.freedom.swarm.SpendPermit
+import java.math.BigDecimal
 import java.math.BigInteger
+import java.math.RoundingMode
 import java.util.Locale
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -189,11 +191,23 @@ internal fun stampQuoteFrom(o: JSONObject): StampQuote? = runCatching {
  * most [SpendPermit.MAX_GAS_WEI] for each of the spend's transactions.
  */
 internal fun spendCostText(q: StampQuote, buy: Boolean): String {
-    val xdai = withUnit(q.xdaiRequiredDisplay, "xDAI")
+    val estimate = withUnit(q.xdaiRequiredDisplay, "xDAI")
+    // The bound from the wei SpendGuard enforces, not ant's display
+    // string, which ant truncates to 4 decimals (0.017899 → "0.0178").
+    val bound = formatXdaiCeiling(q.xdaiRequired)
     val txs = SpendPermit.slotsFor(buy).size
-    return "The node pays from its xDAI: it swaps what it needs for xBZZ, about $xdai including gas. " +
-        "At most, it swaps $xdai and pays up to ${formatXdai(SpendPermit.maxGasWei(buy))} of gas " +
+    return "The node pays from its xDAI: it swaps what it needs for xBZZ, about $estimate including gas. " +
+        "At most, it swaps $bound and pays up to ${formatXdai(SpendPermit.maxGasWei(buy))} of gas " +
         "on top, across up to $txs transactions."
+}
+
+/**
+ * Wei as xDAI to at most 6 decimals, rounded *up*: for a stated upper
+ * bound, which must never read below the amount it bounds.
+ */
+internal fun formatXdaiCeiling(wei: BigInteger): String {
+    val xdai = BigDecimal(wei).movePointLeft(18).setScale(6, RoundingMode.UP).stripTrailingZeros()
+    return "${xdai.toPlainString()} xDAI"
 }
 
 /** ant's amounts come as "0.0283 xBZZ" or a bare number; show them with their unit once. */
