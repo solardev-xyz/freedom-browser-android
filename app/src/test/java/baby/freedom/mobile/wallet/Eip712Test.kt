@@ -274,6 +274,13 @@ class Eip712Test {
         assertTrue(MessageSigning.anyHides("a\u0363\u0364\u0365\u0366"))
         assertTrue(MessageSigning.anyHides("1\u20DD\u20DD\u20DD\u20DD"))
         assertTrue(MessageSigning.anyHides("a" + String(Character.toChars(0x1D167)).repeat(4)))
+        // R5-F1: unassigned default-ignorables (Cn, drawn as nothing) don't split a run into allowed pieces.
+        for (cp in listOf(0x2065, 0xFFF0, 0xFFF8, 0xE0002, 0xE001F, 0xE0080, 0xE00FF, 0xE01F0, 0xE0FFF)) {
+            val split = "Sign in h" + ("\u0300\u0301\u0302" + String(Character.toChars(cp))).repeat(13) + "i ok"
+            assertTrue("U+%04X".format(cp), MessageSigning.anyHides(split))
+            assertNull("U+%04X".format(cp), MessageSigning.readableText(split.toByteArray()))
+            assertTrue("U+%04X".format(cp), MessageSigning.anyHides("a${String(Character.toChars(cp))}b"))
+        }
         // The run is per letter: three on each of many letters is still text.
         val three = "a\u0300\u0301\u0302".repeat(50)
         assertEquals(three, MessageSigning.readableText(three.toByteArray()))

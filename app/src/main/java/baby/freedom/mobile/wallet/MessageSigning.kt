@@ -57,7 +57,13 @@ internal object MessageSigning {
      * each after one visible character), the Hangul fillers U+115F, U+1160,
      * U+3164 and U+FFA0, the blank Braille pattern U+2800, the combining
      * grapheme joiner U+034F, the Mongolian variation selectors
-     * U+180B–180F and the Khmer inherent vowels U+17B4/U+17B5. The one
+     * U+180B–180F and the Khmer inherent vowels U+17B4/U+17B5 — and every
+     * Default_Ignorable_Code_Point block whose unassigned slots draw nothing
+     * either: U+2060–206F, U+FFF0–FFF8 and the whole of U+E0000–E0FFF
+     * (tags and supplementary selectors included). An unassigned code point
+     * there isn't typed as format (it's Cn), but text shaping treats it as
+     * ignorable and draws no glyph, so one between two combining-mark runs
+     * would split the count while the marks still stack on one letter. The one
      * exception is an emoji's own presentation selector — U+FE0E or U+FE0F
      * straight after a visible character that isn't a selector itself — so
      * "❤️" still reads as text; a run of selectors never does.
@@ -79,7 +85,8 @@ internal object MessageSigning {
         c == 0xFE0E || c == 0xFE0F -> prev < 0 || hides(prev) || Character.isWhitespace(prev)
         else -> Character.isISOControl(c) || Character.getType(c) == Character.FORMAT.toInt() ||
             Character.getType(c) == Character.SURROGATE.toInt() || c == 0x2028 || c == 0x2029 ||
-            c in 0xFE00..0xFE0F || c in 0xE0100..0xE01EF || c in 0x180B..0x180F ||
+            c in 0xFE00..0xFE0F || c in 0x180B..0x180F ||
+            c in 0x2060..0x206F || c in 0xFFF0..0xFFF8 || c in 0xE0000..0xE0FFF ||
             c == 0x115F || c == 0x1160 || c == 0x3164 || c == 0xFFA0 || c == 0x2800 ||
             c == 0x034F || c == 0x17B4 || c == 0x17B5
     }
