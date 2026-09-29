@@ -405,12 +405,24 @@ class GasOracle(private val rpc: WalletRpc) {
  * it, beside it in a mempool. Those records outlive the process
  * ([SendJournal]): [onAbandonedChange] is told whenever they change, never
  * while this tracker's own lock is held.
+ *
+ * A record goes once the chain's mined (`latest`) count is past its
+ * nonce — on a trusted read ([GasOracle.trusted]: a quorum, or the
+ * user's own RPC) at once, on one public RPC's word only once a second
+ * read at least [confirmAfterMs] later ([now], monotonic) agrees (#238).
+ * One lying RPC, with the quorum defeated, can't then drop the guard
+ * with a single answer and have the next send go out beside the
+ * abandoned one. A chain with no trusted read at all isn't stranded:
+ * the second read settles it, so a nonce the chain really mined isn't
+ * reused for longer than that.
  */
 class NonceTracker(
     private val rpc: WalletRpc,
     private val clock: () -> Long = System::currentTimeMillis,
     private val ttlMs: Long = LOCAL_TTL_MS,
     private val onAbandonedChange: () -> Unit = {},
+    private val confirmAfterMs: Long = CONFIRM_AFTER_MS,
+    private val now: () -> Long = { System.nanoTime() / 1_000_000 },
 ) {
     private class Sent(val next: BigInteger, val at: Long)
 
@@ -421,16 +433,52 @@ class NonceTracker(
 
     private val abandoned = HashMap<String, Abandoned>()
 
+    /** An untrusted read that found [record]'s nonce mined, at [at] ([now]), not yet confirmed. */
+    private class MinedSeen(val record: Abandoned, val at: Long)
+
+    /** Under the same lock as [abandoned]; per key, only for the record it names. */
+    private val minedSeen = HashMap<String, MinedSeen>()
+
+    /**
+     * Whether a `latest` [read] of the count settles [record] (under key
+     * [k]) as mined: past its nonce, and trusted — or untrusted and agreeing
+     * with an earlier untrusted read at least [confirmAfterMs] before. A
+     * read that finds it not mined starts over. If it's settled, the
+     * record is dropped here; true if it was. False for a record no longer
+     * on file.
+     */
+    private fun settleMined(k: String, record: Abandoned, read: WalletRpc.Reading<BigInteger>): Boolean = synchronized(sent) {
+        if (abandoned[k] !== record) return@synchronized false
+        if (read.value <= record.nonce) {
+            if (minedSeen[k]?.record === record) minedSeen.remove(k)
+            return@synchronized false
+        }
+        val t = now()
+        val first = minedSeen[k]?.takeIf { it.record === record }
+        val settled = GasOracle.trusted(read.trust) || (first != null && t - first.at >= confirmAfterMs)
+        if (!settled) {
+            if (first == null) minedSeen[k] = MinedSeen(record, t)
+            return@synchronized false
+        }
+        minedSeen.remove(k)
+        abandoned.remove(k)
+        true
+    }
+
     suspend fun next(address: String, chainId: Long): WalletRpc.Reading<BigInteger> {
         val fromChain = rpc.transactionCount(chainId, address)
         val k = key(address, chainId)
         val stood = synchronized(sent) { abandoned[k] }
         if (stood != null) {
+            val latest = rpc.transactionCount(chainId, address, "latest")
             // Mined (it or another with its nonce): nothing left to replace.
-            if (rpc.transactionCount(chainId, address, "latest").value > stood.nonce) {
-                if (synchronized(sent) { abandoned[k] === stood && abandoned.remove(k) != null }) onAbandonedChange()
-            } else if (fromChain.value > stood.nonce) {
-                // Still waiting in a pool: take its place rather than queue behind it.
+            if (settleMined(k, stood, latest)) {
+                onAbandonedChange()
+            } else if (latest.value > stood.nonce || fromChain.value > stood.nonce) {
+                // Still waiting in a pool — or said mined only on one RPC's
+                // word, not yet confirmed (#238): take its place rather than
+                // queue behind it. Were it mined after all, this one is
+                // refused as a used nonce ("Not sent"), never sent beside it.
                 return fromChain.copy(value = stood.nonce)
             }
         }
@@ -457,8 +505,8 @@ class NonceTracker(
             val next = nonce + BigInteger.ONE
             if (sent[k]?.let { it.next >= next } != true) sent[k] = Sent(next, clock())
             // Its replacement (or a later one) went out: the abandoned one can't land any more.
-            abandoned[k]?.let { nonce >= it.nonce && !it.hash.equals(hash, ignoreCase = true) } == true &&
-                abandoned.remove(k) != null
+            (abandoned[k]?.let { nonce >= it.nonce && !it.hash.equals(hash, ignoreCase = true) } == true &&
+                abandoned.remove(k) != null).also { if (it) minedSeen.remove(k) }
         }
         if (dropped) onAbandonedChange()
     }
@@ -472,6 +520,7 @@ class NonceTracker(
         synchronized(sent) {
             val k = key(address, chainId)
             sent.remove(k)
+            minedSeen.remove(k)
             abandoned[k] = Abandoned(nonce, fees, hash)
         }
         onAbandonedChange()
@@ -491,23 +540,35 @@ class NonceTracker(
      * about, and one no send is ever prepared from again (a deleted
      * wallet's) would otherwise keep its address and hash on disk for
      * good. One that can't be read (no RPC answering, the chain gone
-     * from the list) stays for the next sweep.
+     * from the list) stays for the next sweep. One found mined only on
+     * one public RPC's word is read again [confirmAfterMs] later (#238),
+     * and goes if that read agrees: the first sighting isn't kept across
+     * a restart, so waiting for the next launch would never settle it.
      */
     suspend fun sweepMined() {
-        var dropped = false
-        for ((k, a) in abandonedSnapshot()) {
-            val chainId = k.substringBefore(':').toLongOrNull() ?: continue
-            val address = k.substringAfter(':')
-            val mined = try {
-                rpc.transactionCount(chainId, address, "latest").value > a.nonce
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                false
+        var pass = 0
+        while (true) {
+            var dropped = false
+            var unsettled = false
+            for ((k, a) in abandonedSnapshot()) {
+                val chainId = k.substringBefore(':').toLongOrNull() ?: continue
+                val address = k.substringAfter(':')
+                val read = try {
+                    rpc.transactionCount(chainId, address, "latest")
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    continue
+                }
+                when {
+                    settleMined(k, a, read) -> dropped = true
+                    read.value > a.nonce -> unsettled = true
+                }
             }
-            if (mined && synchronized(sent) { abandoned[k] === a && abandoned.remove(k) != null }) dropped = true
+            if (dropped) onAbandonedChange()
+            if (!unsettled || ++pass > SWEEP_RECHECKS) return
+            delay(confirmAfterMs)
         }
-        if (dropped) onAbandonedChange()
     }
 
     /** The abandoned send a transaction with [nonce] would replace, if any. */
@@ -531,6 +592,17 @@ class NonceTracker(
     companion object {
         /** As long as a page waits for a receipt: past that, a transaction not in the chain's count may be gone. */
         const val LOCAL_TTL_MS = 3 * 60_000L
+
+        /**
+         * How far apart two untrusted reads of the mined count must be to
+         * drop an abandoned send (#238): long enough for a node a block or
+         * two ahead (or one serving a block later reorged away) to be
+         * caught up with.
+         */
+        const val CONFIRM_AFTER_MS = 30_000L
+
+        /** How many times [sweepMined] reads again for untrusted sightings before leaving them to the next launch. */
+        private const val SWEEP_RECHECKS = 2
     }
 }
 

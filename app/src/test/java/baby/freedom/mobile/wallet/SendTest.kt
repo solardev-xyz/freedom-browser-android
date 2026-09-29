@@ -452,6 +452,88 @@ class SendTest {
         assertNull(tracker.replacing(from.address, 100, BigInteger.valueOf(7)))
     }
 
+    /** Only the first RPC says the abandoned nonce 7 is mined (8); the others say 7 and 6, so no two agree. */
+    private fun FakeChain.lieMined() {
+        onUrlReq["eth_getTransactionCount"] = { url, req ->
+            if (req.getJSONArray("params").optString(1) != "latest") null
+            else "\"result\":\"0x" + listOf(8L, 7L, 6L)[gnosis.rpcUrls.indexOf(url)].toString(16) + "\""
+        }
+    }
+
+    @Test
+    fun `one unverified read of the mined count doesn't drop an abandoned send's guard (#238)`() = runBlocking<Unit> {
+        val chain = FakeChain()
+        val now = AtomicLong(5_000_000L)
+        val tracker = NonceTracker(chain.rpc(), now = { now.get() })
+        val hash = "0x" + "ab".repeat(32)
+        tracker.abandon(from.address, 100, BigInteger.valueOf(7), EthTransaction.Fees.Legacy(BigInteger.TEN), hash)
+        // Still in a pool (pending 8), and one lying RPC, the quorum defeated, says it's mined.
+        chain.nonce = 8
+        chain.lieMined()
+        // The next send still takes its place, so only one of the two can go through…
+        assertEquals(BigInteger.valueOf(7), tracker.next(from.address, 100).value)
+        assertEquals(hash, tracker.replacing(from.address, 100, BigInteger.valueOf(7))?.hash)
+        // …and so for any read less than CONFIRM_AFTER_MS after the first that found it mined.
+        now.addAndGet(NonceTracker.CONFIRM_AFTER_MS - 1)
+        assertEquals(BigInteger.valueOf(7), tracker.next(from.address, 100).value)
+        assertEquals(hash, tracker.replacing(from.address, 100, BigInteger.valueOf(7))?.hash)
+        // A read that finds it not mined starts over: the next sighting is a first one again.
+        chain.onUrlReq.clear()
+        chain.mined = 7
+        assertEquals(BigInteger.valueOf(7), tracker.next(from.address, 100).value)
+        chain.lieMined()
+        now.addAndGet(1)
+        assertEquals(BigInteger.valueOf(7), tracker.next(from.address, 100).value)
+        assertEquals(hash, tracker.replacing(from.address, 100, BigInteger.valueOf(7))?.hash)
+        // A second untrusted read agreeing, CONFIRM_AFTER_MS on: mined, and no chain with only
+        // unverified reads reuses a mined nonce for longer than that.
+        now.addAndGet(NonceTracker.CONFIRM_AFTER_MS)
+        assertEquals(BigInteger.valueOf(8), tracker.next(from.address, 100).value)
+        assertNull(tracker.replacing(from.address, 100, BigInteger.valueOf(7)))
+    }
+
+    @Test
+    fun `a trusted read of the mined count drops an abandoned send at once (#238)`() = runBlocking<Unit> {
+        val chain = FakeChain()
+        val tracker = NonceTracker(chain.rpc(), now = { 0L })
+        tracker.abandon(from.address, 100, BigInteger.valueOf(7), EthTransaction.Fees.Legacy(BigInteger.TEN), "0x" + "ab".repeat(32))
+        chain.nonce = 8
+        // Every RPC agrees nonce 7 is mined.
+        assertEquals(BigInteger.valueOf(8), tracker.next(from.address, 100).value)
+        assertNull(tracker.replacing(from.address, 100, BigInteger.valueOf(7)))
+    }
+
+    @Test
+    fun `the launch sweep drops an abandoned send on one unverified read only once a later one agrees (#238)`() = runBlocking<Unit> {
+        val chain = FakeChain()
+        var changes = 0
+        val tracker = NonceTracker(chain.rpc(), onAbandonedChange = { changes++ }, confirmAfterMs = 50)
+        val hash = "0x" + "ab".repeat(32)
+        fun abandon() = tracker.abandon(from.address, 100, BigInteger.valueOf(7), EthTransaction.Fees.Legacy(BigInteger.TEN), hash)
+        chain.nonce = 8
+        // The lying RPC is caught out by the read CONFIRM_AFTER_MS later: kept.
+        abandon()
+        val reads = java.util.concurrent.atomic.AtomicInteger()
+        chain.onUrlReq["eth_getTransactionCount"] = { url, req ->
+            if (req.getJSONArray("params").optString(1) != "latest") null
+            else {
+                // The first read: 8 from the first RPC, 7 and 6 from the others. After: 7 from all.
+                val n = if (reads.getAndIncrement() < gnosis.rpcUrls.size) listOf(8L, 7L, 6L)[gnosis.rpcUrls.indexOf(url)] else 7L
+                "\"result\":\"0x" + n.toString(16) + "\""
+            }
+        }
+        changes = 0
+        tracker.sweepMined()
+        assertEquals(0, changes)
+        assertEquals(hash, tracker.replacing(from.address, 100, BigInteger.valueOf(7))?.hash)
+        // Every read says so, if only on one RPC's word: gone, within the same sweep — a first
+        // sighting doesn't outlive the process, so a later launch would never settle it.
+        chain.lieMined()
+        tracker.sweepMined()
+        assertEquals(1, changes)
+        assertNull(tracker.replacing(from.address, 100, BigInteger.valueOf(7)))
+    }
+
     @Test
     fun `a local nonce is honoured only while the chain may not have seen the send yet`() = runBlocking<Unit> {
         val chain = FakeChain()
