@@ -194,7 +194,10 @@ class EthereumProvider(
         /** Whether the wallet is open right now, so a send can be signed without asking to unlock. */
         fun unlocked(): Boolean
 
-        /** A connected site is using the wallet: the idle lock waits (maintainer decision 7). */
+        /**
+         * The user approved something a site asked (a connection, a signature, a send, a
+         * chain): the idle lock waits. Never for a site's own reads or polling (#236).
+         */
         fun noteActivity()
 
         /**
@@ -277,9 +280,12 @@ class EthereumProvider(
         Reply.Err(INTERNAL, "Couldn't read the wallet's connected sites; try again")
     }
 
-    private suspend fun dispatch(origin: String, method: String, params: JSONArray, ask: suspend (EthAsk) -> EthAnswer): Reply {
+    private suspend fun dispatch(origin: String, method: String, params: JSONArray, ask0: suspend (EthAsk) -> EthAnswer): Reply {
         val connected = connectedAccount(origin)
-        if (connected != null) wallet.noteActivity()
+        // Only the user's own yes on a sheet is wallet activity (#236): a page polling
+        // eth_chainId or eth_blockNumber mustn't hold the idle lock off for hours, and with
+        // it the "only while unlocked" gate of auto-approve rules and x402 auto-pay.
+        val ask: suspend (EthAsk) -> EthAnswer = { a -> ask0(a).also { if (it is EthAnswer.Approved) wallet.noteActivity() } }
         return when (method) {
             "eth_chainId" -> Reply.Ok(chainFor(origin).hexId)
             "net_version" -> Reply.Ok(chainFor(origin).id.toString())

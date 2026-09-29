@@ -12,11 +12,17 @@ import baby.freedom.mobile.wallet.SendException
 import baby.freedom.mobile.wallet.SendQuote
 import baby.freedom.mobile.wallet.SendRequest
 import baby.freedom.mobile.wallet.Eip712
+import baby.freedom.mobile.wallet.Mnemonic
+import baby.freedom.mobile.wallet.Vault
+import baby.freedom.mobile.wallet.VaultTest
 import baby.freedom.mobile.wallet.WalletAccount
 import baby.freedom.mobile.wallet.ledger.LedgerException
 import java.math.BigInteger
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
@@ -215,6 +221,90 @@ class EthereumProviderTest {
         assertEquals("[\"${second.address}\"]", ok(call("eth_requestAccounts")).toString())
         assertEquals("[\"${second.address}\"]", ok(call("eth_accounts")).toString())
         assertTrue(asks.isEmpty())
+        assertTrue(wallet.activity > 0)
+    }
+
+    @Test
+    fun `a connected site's polling and reads don't hold the idle lock off, nor do refusals (#236)`() {
+        connect()
+        wallet.activity = 0
+        // What a dApp polls all day, with the wallet open and the screen on.
+        repeat(100) {
+            ok(call("eth_chainId"))
+            ok(call("net_version"))
+            ok(call("eth_accounts"))
+            ok(call("eth_coinbase"))
+            ok(call("eth_blockNumber"))
+            ok(call("eth_getBalance", JSONArray().put(main.address).put("latest")))
+            ok(call("wallet_getPermissions"))
+            ok(call("eth_requestAccounts")) // already connected: no sheet
+        }
+        assertEquals(4200, code(call("eth_sign", JSONArray().put(main.address).put("0x00"))))
+        // Sheets the user said no to (or that never came up) aren't the user using the wallet either.
+        answer = { EthAnswer.Rejected }
+        assertEquals(4001, code(call("personal_sign", JSONArray().put("0x68656c6c6f").put(main.address))))
+        assertEquals(4001, code(call("eth_sendTransaction", tx("to" to second.address))))
+        answer = { EthAnswer.Paused }
+        assertEquals(4001, code(call("wallet_switchEthereumChain", JSONArray().put(JSONObject().put("chainId", "0x1")))))
+        assertTrue(asks.isNotEmpty())
+        assertEquals(0, wallet.activity)
+    }
+
+    @Test
+    fun `a real vault still locks after 15 idle minutes while a connected page polls every 10 seconds (#236)`() = runBlocking {
+        var now = 1_000_000L
+        val job = Job()
+        val vault = Vault(
+            VaultTest.FakeStore(), CoroutineScope(Dispatchers.Unconfined + job),
+            clock = { now }, io = Dispatchers.Unconfined, compute = Dispatchers.Unconfined,
+        )
+        try {
+            vault.create(
+                Mnemonic.parse(
+                    "void come effort suffer camp survey warrior heavy shoot primary clutch crush " +
+                        "open amazing screen patrol group space point ten exist slush involve unfold",
+                ),
+                VaultTest.FakeAuth(),
+                imported = false,
+            )
+            val onVault = object : EthereumProvider.Wallet by wallet {
+                override fun unlocked() = vault.unlockedNow()
+                override fun noteActivity() = vault.noteActivity()
+            }
+            val p = EthereumProvider(grants, onVault, { chainList!! }, { _, _, _, _ -> "0x1" }, sends, rules)
+            answer = { EthAnswer.Approved(main) }
+            ok(p.request(site, "eth_requestAccounts", JSONArray()) { answer(it) })
+            // 20 minutes of a dApp's usual polling, screen on, app in front.
+            repeat(20 * 6) {
+                now += 10_000L
+                ok(p.request(site, "eth_chainId", JSONArray()) { answer(it) })
+                ok(p.request(site, "eth_blockNumber", JSONArray()) { answer(it) })
+                ok(p.request(site, "eth_accounts", JSONArray()) { answer(it) })
+                vault.lockIfExpired()
+                if (now - 1_000_000L < 15 * 60_000L) assertTrue("open at ${now - 1_000_000L} ms", vault.unlockedNow())
+            }
+            assertFalse(vault.unlockedNow())
+            assertTrue(vault.state.value is Vault.State.Locked)
+        } finally {
+            job.cancel()
+        }
+    }
+
+    @Test
+    fun `what the user approves counts as wallet activity (#236)`() {
+        answer = { EthAnswer.Approved(main) }
+        ok(call("eth_requestAccounts"))
+        assertTrue(wallet.activity > 0)
+        wallet.activity = 0
+        answer = { EthAnswer.Approved() }
+        ok(call("personal_sign", JSONArray().put("0x68656c6c6f").put(main.address)))
+        assertTrue(wallet.activity > 0)
+        wallet.activity = 0
+        sends.outcomes += EthereumProvider.Submitted.Sent("0x" + "ab".repeat(32))
+        ok(call("eth_sendTransaction", tx("to" to second.address)))
+        assertTrue(wallet.activity > 0)
+        wallet.activity = 0
+        ok(call("wallet_switchEthereumChain", JSONArray().put(JSONObject().put("chainId", "0x1"))))
         assertTrue(wallet.activity > 0)
     }
 
