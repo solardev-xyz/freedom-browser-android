@@ -255,7 +255,9 @@ object X402Payments {
         // Everything on the sheet — balances, what Pay allows, the allowance note — is worked
         // out for one account, and only that account pays. If the user switches accounts
         // while the sheet waits (or is up), it's taken down and worked out again for the
-        // new one (#218 R4-F1).
+        // new one (#218 R4-F1) — but a switch never pays: after one, an allowance of the newly
+        // active account doesn't pay silently, the sheet goes up for it (#218 R5-M2).
+        var switched = false
         while (true) {
             val account = activeAccount(vault, walletAccounts)
             val chains = ChainStore.get(app).chainsOrUnreadable.first().orEmpty()
@@ -269,11 +271,14 @@ object X402Payments {
             // the account it was granted for (#218 R2-F1), and only when the balance isn't known
             // to be short: otherwise the sheet says why (#218 R2-M1).
             val payer = account?.address
-            val covered = if (!allowanceMayPay || payer == null) null else autoPayOption(options) { o ->
-                store.covering(allowances, d.origin, o.chainId, o.asset, payer, o.amount) != null
+            val covered = silentPayOption(allowanceMayPay, switched, payer, options) { o ->
+                store.covering(allowances, d.origin, o.chainId, o.asset, payer!!, o.amount) != null
             }
             // Switched while the figures were read: read them again for the account now active.
-            if (activeAccount(vault, walletAccounts)?.address != payer) continue
+            if (activeAccount(vault, walletAccounts)?.address != payer) {
+                switched = true
+                continue
+            }
             if (covered != null && account != null && vault.unlockedNow()) {
                 if (!stillOn(tab, doc, webView, d.url)) return
                 Log.i(TAG, "paying from the site's allowance")
@@ -292,10 +297,16 @@ object X402Payments {
                 ),
             )
             val answer = askWhileActive(walletAccounts, payer) { EthereumProviders.askOnDocument(tab, doc, ask) }
-                ?: continue
+            if (answer == null) {
+                switched = true
+                continue
+            }
             val choice = (answer as? EthAnswer.Approved)?.payment ?: return
             val option = options.getOrNull(choice.option) ?: return
-            if (account == null || activeAccount(vault, walletAccounts)?.address != payer) continue
+            if (account == null || activeAccount(vault, walletAccounts)?.address != payer) {
+                switched = true
+                continue
+            }
             if (!stillOn(tab, doc, webView, d.url)) return
             pay(tab, doc, webView, d, option, account, auto = false, grant = choice.allowance)
             return
@@ -329,6 +340,22 @@ object X402Payments {
             watch.cancel()
         }
     }
+
+    /**
+     * The offer an allowance pays without a sheet: none unless the
+     * navigation itself [allowanceMayPay] (#218 R4-M3) and the active
+     * account hasn't been [switched] since — a 402 left waiting in a tab
+     * is never paid silently by a later account switch, from the new
+     * account's allowance and on the old navigation's terms; the sheet
+     * goes up for it instead (#218 R5-M2).
+     */
+    internal fun silentPayOption(
+        allowanceMayPay: Boolean,
+        switched: Boolean,
+        payer: String?,
+        options: List<X402Option>,
+        covered: (X402.Offer) -> Boolean,
+    ): X402Option? = if (!allowanceMayPay || switched || payer == null) null else autoPayOption(options, covered)
 
     /**
      * The offer an allowance pays without asking: the first one [covered]

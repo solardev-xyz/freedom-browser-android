@@ -82,6 +82,17 @@ class X402SheetTest {
     }
 
     @Test
+    fun `an account switch never pays from an allowance, the sheet goes up instead (R5-M2)`() {
+        val options = ask(balance = 100_000, "10000").options
+        val payer = account2.address
+        assertEquals(0, X402Payments.silentPayOption(true, switched = false, payer, options) { true }?.offer?.index)
+        assertNull("after a switch", X402Payments.silentPayOption(true, switched = true, payer, options) { true })
+        assertNull("not the navigation's own", X402Payments.silentPayOption(false, switched = false, payer, options) { true })
+        assertNull("no account", X402Payments.silentPayOption(true, switched = false, null, options) { true })
+        assertNull("no allowance", X402Payments.silentPayOption(true, switched = false, payer, options) { false })
+    }
+
+    @Test
     fun `an allowance starts at ten payments, must cover this one, and goes with the answer`() {
         val s = X402SheetState(ask(balance = 1_000_000, "10000"))
         s.auto = true
