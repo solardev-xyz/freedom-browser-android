@@ -1454,6 +1454,8 @@ internal fun SafeCoSignPage(
     val chain = request?.let { r -> chains.firstOrNull { it.id == r.chainId } }
     var owners by remember { mutableStateOf<List<String>?>(null) }
     var nonce by remember { mutableStateOf<BigInteger?>(null) }
+    // The Safe's own native balance, read only for a cancellation that sends some: whether it can execute at all.
+    var safeBalance by remember { mutableStateOf<BigInteger?>(null) }
     var readError by remember { mutableStateOf<String?>(null) }
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
@@ -1486,6 +1488,16 @@ internal fun SafeCoSignPage(
             throw e
         } catch (e: Exception) {
             readError = safeErrorMessage(e, "read the Safe", phraseBackedUp)
+            return@LaunchedEffect
+        }
+        // Not a reason to refuse: an unread balance only leaves the cancellation's detail hedged.
+        if (r is SafeProtocol.Request.Tx && r.tx.value.signum() != 0 && safeSelfCall(r) == SafeSelfCall.Cancel) {
+            try {
+                safeBalance = chainReads.balance(c.id, r.safe)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+            }
         }
     }
 
@@ -1515,7 +1527,7 @@ internal fun SafeCoSignPage(
                             val token = TokenRegistry.builtins.firstOrNull { it.chainId == request.chainId && it.address.equals(tx.to, ignoreCase = true) }
                             val transfer = token?.let { erc20Transfer(tx.data) }
                             if (selfCall != null) {
-                                SafeSelfCallRows(selfCall, tx, chain, owners, accounts)
+                                SafeSelfCallRows(selfCall, tx, chain, owners, accounts, safeBalance)
                             } else if (transfer != null) {
                                 ReviewRow("Sends", "${SendAmounts.exact(transfer.second, token.decimals)} ${token.symbol}", mono = true, address = token.address)
                                 ReviewRow("To", null, address = transfer.first)
@@ -1679,15 +1691,17 @@ internal fun safeSelfCallCleared(call: SafeSelfCall?, acknowledged: Boolean): Bo
  * doesn't own it (GS205), and a `prevOwner` that isn't the owner right before
  * it in that list (GS205): the first owner's is the list's sentinel `0x…01`.
  */
-internal fun safeSelfCallFailure(call: SafeSelfCall, owners: List<String>?): String? {
+internal fun safeSelfCallFailure(call: SafeSelfCall, owners: List<String>?, safe: String): String? {
     if (owners == null) return null
     fun owns(address: String) = owners.any { it.equals(address, ignoreCase = true) }
-    fun invalid(address: String) = address.equals(SafeProtocol.ZERO_ADDRESS, ignoreCase = true) || address.equals(SAFE_OWNERS_SENTINEL, ignoreCase = true)
+    fun invalid(address: String) = address.equals(SafeProtocol.ZERO_ADDRESS, ignoreCase = true) ||
+        address.equals(SAFE_OWNERS_SENTINEL, ignoreCase = true) || address.equals(safe, ignoreCase = true)
     fun prevOf(address: String): String {
         val i = owners.indexOfFirst { it.equals(address, ignoreCase = true) }
         return if (i == 0) SAFE_OWNERS_SENTINEL else owners[i - 1]
     }
     fun added(address: String) = when {
+        address.equals(safe, ignoreCase = true) -> "The new owner is this Safe itself, which can’t own itself: this transaction would fail."
         invalid(address) -> "The new owner is no address: this transaction would fail."
         owns(address) -> "The new owner already owns this Safe: this transaction would fail."
         else -> null
@@ -1710,7 +1724,7 @@ internal fun safeSelfCallFailure(call: SafeSelfCall, owners: List<String>?): Str
  * [owners] (on chain, null until read) — including whether the call can
  * execute at all ([safeSelfCallFailure]); null for a call with no threshold.
  */
-internal fun safeSelfCallThreshold(call: SafeSelfCall, owners: List<String>?): String? {
+internal fun safeSelfCallThreshold(call: SafeSelfCall, owners: List<String>?, safe: String): String? {
     if (owners == null) return null
     val (t, n) = when (call) {
         is SafeSelfCall.AddOwner -> call.threshold to owners.size + 1
@@ -1718,12 +1732,30 @@ internal fun safeSelfCallThreshold(call: SafeSelfCall, owners: List<String>?): S
         is SafeSelfCall.ChangeThreshold -> call.threshold to owners.size
         else -> return null
     }
-    safeSelfCallFailure(call, owners)?.let { return it }
+    safeSelfCallFailure(call, owners, safe)?.let { return it }
     return when {
         t.signum() == 0 || t > BigInteger.valueOf(n.toLong()) -> "Not possible with $n owners: this transaction would fail."
         t == BigInteger.ONE && n > 1 -> "Any one of $n owners alone can then move everything in the Safe."
         else -> "$t of $n owners must then sign."
     }
+}
+
+/**
+ * The cancellation row's detail for a no-data self-call sending [value]
+ * ([amount], formatted) at [nonce], given the Safe's [balance] (null: not
+ * read). The Safe can't send more than it holds, and with no `safeTxGas` or
+ * `gasPrice` (all Freedom signs) a failed call reverts the whole execution
+ * (GS013), so the nonce is only used up if the balance covers [value].
+ */
+internal fun safeCancelDetail(nonce: BigInteger, value: BigInteger, balance: BigInteger?, amount: String): String = when {
+    value.signum() == 0 ->
+        "A call from the Safe to itself with no data. It only uses up Safe nonce $nonce, so no other transaction with that nonce can execute."
+    balance != null && balance < value ->
+        "A call from the Safe to itself with no data, sending $amount — more than the Safe now holds. It would fail, and Safe nonce $nonce would stay open for another transaction."
+    balance != null ->
+        "A call from the Safe to itself with no data: the $amount it sends comes straight back. It only uses up Safe nonce $nonce, so no other transaction with that nonce can execute."
+    else ->
+        "A call from the Safe to itself with no data, sending $amount straight back to it. It uses up Safe nonce $nonce only if the Safe holds that much when it executes; otherwise it fails and the nonce stays open."
 }
 
 /** The head of a Safe's owner linked list: the `prevOwner` of its first owner. */
@@ -1735,7 +1767,7 @@ internal fun safeOwnAccountLabel(address: String, accounts: List<WalletAccount>)
 
 /** The decoded rows of a SafeTx from the Safe to itself; [owners] (on chain, if read) to count the threshold against. */
 @Composable
-private fun SafeSelfCallRows(call: SafeSelfCall, tx: SafeProtocol.SafeTx, chain: Chain?, owners: List<String>?, accounts: List<WalletAccount>) {
+private fun SafeSelfCallRows(call: SafeSelfCall, tx: SafeProtocol.SafeTx, chain: Chain?, owners: List<String>?, accounts: List<WalletAccount>, safeBalance: BigInteger?) {
     val amount = chain?.let { "${SendAmounts.exact(tx.value, it.decimals)} ${it.symbol}" } ?: "${tx.value} base units"
     fun none(address: String) = if (address.equals(SafeProtocol.ZERO_ADDRESS, ignoreCase = true)) "None" else null
     // A removed owner that is this wallet's own account is named, so signing yourself out can't pass as a bare address.
@@ -1746,27 +1778,27 @@ private fun SafeSelfCallRows(call: SafeSelfCall, tx: SafeProtocol.SafeTx, chain:
     }
     when (call) {
         SafeSelfCall.Cancel -> {
-            ReviewRow("Does", "Nothing: cancels", detail = "A call from the Safe to itself with no data. It only uses up Safe nonce ${tx.nonce}, so no other transaction with that nonce can execute.")
+            ReviewRow("Does", "Nothing: cancels", detail = safeCancelDetail(tx.nonce, tx.value, safeBalance, amount))
         }
         is SafeSelfCall.AddOwner -> {
             ReviewRow("Changes", "Adds an owner")
             ReviewRow("New owner", safeOwnAccountLabel(call.owner, accounts), address = call.owner)
-            ReviewRow("Threshold", call.threshold.toString(), mono = true, detail = safeSelfCallThreshold(call, owners))
+            ReviewRow("Threshold", call.threshold.toString(), mono = true, detail = safeSelfCallThreshold(call, owners, tx.to))
         }
         is SafeSelfCall.RemoveOwner -> {
             ReviewRow("Changes", "Removes an owner")
             Removed(call.owner)
-            ReviewRow("Threshold", call.threshold.toString(), mono = true, detail = safeSelfCallThreshold(call, owners))
+            ReviewRow("Threshold", call.threshold.toString(), mono = true, detail = safeSelfCallThreshold(call, owners, tx.to))
         }
         is SafeSelfCall.SwapOwner -> {
             // No threshold row to carry it: whether the Safe would refuse it goes on this one.
-            ReviewRow("Changes", "Replaces an owner", detail = safeSelfCallFailure(call, owners))
+            ReviewRow("Changes", "Replaces an owner", detail = safeSelfCallFailure(call, owners, tx.to))
             Removed(call.old)
             ReviewRow("New owner", safeOwnAccountLabel(call.new, accounts), address = call.new)
         }
         is SafeSelfCall.ChangeThreshold -> {
             ReviewRow("Changes", "The threshold")
-            ReviewRow("Threshold", call.threshold.toString(), mono = true, detail = safeSelfCallThreshold(call, owners))
+            ReviewRow("Threshold", call.threshold.toString(), mono = true, detail = safeSelfCallThreshold(call, owners, tx.to))
         }
         is SafeSelfCall.EnableModule -> {
             ReviewRow("Changes", "Adds a module")

@@ -111,22 +111,22 @@ class SafeSelfCallTest {
         // Adding an existing owner reverts (GS204): no "any one of 4 owners" claim.
         assertEquals(
             "The new owner already owns this Safe: this transaction would fail.",
-            safeSelfCallThreshold(SafeSelfCall.AddOwner(owner.lowercase(), BigInteger.ONE), three),
+            safeSelfCallThreshold(SafeSelfCall.AddOwner(owner.lowercase(), BigInteger.ONE), three, safe),
         )
         assertEquals(
             "Any one of 4 owners alone can then move everything in the Safe.",
-            safeSelfCallThreshold(SafeSelfCall.AddOwner(attacker, BigInteger.ONE), three),
+            safeSelfCallThreshold(SafeSelfCall.AddOwner(attacker, BigInteger.ONE), three, safe),
         )
         // Removing a non-owner reverts too: no "t of 2 owners" claim.
         assertEquals(
             "The removed owner doesn’t own this Safe: this transaction would fail.",
-            safeSelfCallThreshold(SafeSelfCall.RemoveOwner(sentinel, attacker, BigInteger.ONE), three),
+            safeSelfCallThreshold(SafeSelfCall.RemoveOwner(sentinel, attacker, BigInteger.ONE), three, safe),
         )
-        assertEquals("2 of 2 owners must then sign.", safeSelfCallThreshold(SafeSelfCall.RemoveOwner(sentinel, owner, BigInteger.TWO), three))
-        assertEquals("Not possible with 3 owners: this transaction would fail.", safeSelfCallThreshold(SafeSelfCall.ChangeThreshold(BigInteger.valueOf(4)), three))
+        assertEquals("2 of 2 owners must then sign.", safeSelfCallThreshold(SafeSelfCall.RemoveOwner(sentinel, owner, BigInteger.TWO), three, safe))
+        assertEquals("Not possible with 3 owners: this transaction would fail.", safeSelfCallThreshold(SafeSelfCall.ChangeThreshold(BigInteger.valueOf(4)), three, safe))
         // Nothing to say before the owners are read, or for a call with no threshold.
-        assertNull(safeSelfCallThreshold(SafeSelfCall.AddOwner(attacker, BigInteger.ONE), null))
-        assertNull(safeSelfCallThreshold(SafeSelfCall.SwapOwner(sentinel, owner, attacker), three))
+        assertNull(safeSelfCallThreshold(SafeSelfCall.AddOwner(attacker, BigInteger.ONE), null, safe))
+        assertNull(safeSelfCallThreshold(SafeSelfCall.SwapOwner(sentinel, owner, attacker), three, safe))
     }
 
     @Test
@@ -136,31 +136,59 @@ class SafeSelfCallTest {
         val three = listOf(owner, second, third)
         val wrongPrev = "It names the wrong owner before the removed one in the Safe’s owner list: this transaction would fail."
         // removeOwner: prevOwner must be the owner right before it in getOwners() order, the sentinel for the first.
-        assertEquals("2 of 2 owners must then sign.", safeSelfCallThreshold(SafeSelfCall.RemoveOwner(owner, second, BigInteger.TWO), three))
-        assertEquals("2 of 2 owners must then sign.", safeSelfCallThreshold(SafeSelfCall.RemoveOwner(second.uppercase().replace("0X", "0x"), third, BigInteger.TWO), three))
-        assertEquals(wrongPrev, safeSelfCallThreshold(SafeSelfCall.RemoveOwner(sentinel, second, BigInteger.TWO), three))
-        assertEquals(wrongPrev, safeSelfCallThreshold(SafeSelfCall.RemoveOwner(owner, owner, BigInteger.TWO), three))
-        assertEquals(wrongPrev, safeSelfCallThreshold(SafeSelfCall.RemoveOwner(third, owner, BigInteger.TWO), three))
+        assertEquals("2 of 2 owners must then sign.", safeSelfCallThreshold(SafeSelfCall.RemoveOwner(owner, second, BigInteger.TWO), three, safe))
+        assertEquals("2 of 2 owners must then sign.", safeSelfCallThreshold(SafeSelfCall.RemoveOwner(second.uppercase().replace("0X", "0x"), third, BigInteger.TWO), three, safe))
+        assertEquals(wrongPrev, safeSelfCallThreshold(SafeSelfCall.RemoveOwner(sentinel, second, BigInteger.TWO), three, safe))
+        assertEquals(wrongPrev, safeSelfCallThreshold(SafeSelfCall.RemoveOwner(owner, owner, BigInteger.TWO), three, safe))
+        assertEquals(wrongPrev, safeSelfCallThreshold(SafeSelfCall.RemoveOwner(third, owner, BigInteger.TWO), three, safe))
         // swapOwner: the old owner must own the Safe with the right prevOwner, the new one must not already.
-        assertNull(safeSelfCallFailure(SafeSelfCall.SwapOwner(sentinel, owner, attacker), three))
-        assertNull(safeSelfCallFailure(SafeSelfCall.SwapOwner(second, third, attacker), three))
+        assertNull(safeSelfCallFailure(SafeSelfCall.SwapOwner(sentinel, owner, attacker), three, safe))
+        assertNull(safeSelfCallFailure(SafeSelfCall.SwapOwner(second, third, attacker), three, safe))
         assertEquals(
             "The replaced owner doesn’t own this Safe: this transaction would fail.",
-            safeSelfCallFailure(SafeSelfCall.SwapOwner(sentinel, attacker, second), three),
+            safeSelfCallFailure(SafeSelfCall.SwapOwner(sentinel, attacker, second), three, safe),
         )
         assertEquals(
             "It names the wrong owner before the replaced one in the Safe’s owner list: this transaction would fail.",
-            safeSelfCallFailure(SafeSelfCall.SwapOwner(sentinel, third, attacker), three),
+            safeSelfCallFailure(SafeSelfCall.SwapOwner(sentinel, third, attacker), three, safe),
         )
         assertEquals(
             "The new owner already owns this Safe: this transaction would fail.",
-            safeSelfCallFailure(SafeSelfCall.SwapOwner(sentinel, owner, third.uppercase().replace("0X", "0x")), three),
+            safeSelfCallFailure(SafeSelfCall.SwapOwner(sentinel, owner, third.uppercase().replace("0X", "0x")), three, safe),
         )
-        assertEquals("The new owner is no address: this transaction would fail.", safeSelfCallFailure(SafeSelfCall.SwapOwner(sentinel, owner, sentinel), three))
-        assertEquals("The new owner is no address: this transaction would fail.", safeSelfCallFailure(SafeSelfCall.AddOwner(SafeProtocol.ZERO_ADDRESS, BigInteger.ONE), three))
+        assertEquals("The new owner is no address: this transaction would fail.", safeSelfCallFailure(SafeSelfCall.SwapOwner(sentinel, owner, sentinel), three, safe))
+        assertEquals("The new owner is no address: this transaction would fail.", safeSelfCallFailure(SafeSelfCall.AddOwner(SafeProtocol.ZERO_ADDRESS, BigInteger.ONE), three, safe))
         // Nothing to say before the owners are read, or for a call that isn't about owners.
-        assertNull(safeSelfCallFailure(SafeSelfCall.SwapOwner(sentinel, attacker, second), null))
-        assertNull(safeSelfCallFailure(SafeSelfCall.ChangeThreshold(BigInteger.ONE), three))
+        assertNull(safeSelfCallFailure(SafeSelfCall.SwapOwner(sentinel, attacker, second), null, safe))
+        assertNull(safeSelfCallFailure(SafeSelfCall.ChangeThreshold(BigInteger.ONE), three, safe))
+    }
+
+    @Test
+    fun `adding or swapping in the Safe itself as an owner would revert`() {
+        val three = listOf(owner, "0x" + "2".repeat(40), "0x" + "3".repeat(40))
+        val self = "The new owner is this Safe itself, which can’t own itself: this transaction would fail."
+        // GS203: no "any one of 4 owners" claim for a call that always reverts, whatever the address's case.
+        assertEquals(self, safeSelfCallThreshold(SafeSelfCall.AddOwner(safe.lowercase(), BigInteger.ONE), three, safe))
+        assertEquals(self, safeSelfCallFailure(SafeSelfCall.SwapOwner(sentinel, owner, safe), three, safe))
+        assertEquals(self, safeSelfCallFailure(SafeSelfCall.AddOwner(safe, BigInteger.TWO), three, safe))
+    }
+
+    @Test
+    fun `a cancellation only claims to use up the nonce when the Safe can pay what it sends`() {
+        val n = BigInteger.valueOf(7)
+        val ten = BigInteger.TEN
+        assertEquals(
+            "A call from the Safe to itself with no data. It only uses up Safe nonce 7, so no other transaction with that nonce can execute.",
+            safeCancelDetail(n, BigInteger.ZERO, null, "0 xDAI"),
+        )
+        // More than it holds: execTransaction reverts (GS013) and the nonce stays open.
+        val short = safeCancelDetail(n, ten, BigInteger.ONE, "10 wei")
+        assertTrue(short, short.contains("more than the Safe now holds") && short.contains("nonce 7 would stay open"))
+        assertFalse(short, short.contains("only uses up"))
+        assertTrue(safeCancelDetail(n, ten, ten, "10 wei").contains("It only uses up Safe nonce 7"))
+        // Unread: hedged, not a claim either way.
+        val unread = safeCancelDetail(n, ten, null, "10 wei")
+        assertTrue(unread, unread.contains("only if the Safe holds that much") && !unread.contains("It only uses up"))
     }
 
     @Test
