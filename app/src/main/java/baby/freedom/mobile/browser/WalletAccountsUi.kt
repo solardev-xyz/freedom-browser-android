@@ -28,6 +28,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
@@ -44,6 +45,7 @@ import baby.freedom.mobile.wallet.SendQuote
 import baby.freedom.mobile.wallet.TokenAmounts
 import baby.freedom.mobile.wallet.TokenBalance
 import baby.freedom.mobile.wallet.TokenRegistry
+import baby.freedom.mobile.wallet.WalletAccount
 import baby.freedom.mobile.wallet.WalletAccountList
 import baby.freedom.mobile.wallet.WalletAccountStore
 
@@ -71,6 +73,15 @@ internal fun trustLabel(trust: ChainTrust): String = when (trust.level) {
     ChainTrust.Level.USER_CONFIGURED -> "From your RPC"
     ChainTrust.Level.UNVERIFIED -> "Unverified · one RPC’s word"
 }
+
+/** An account's name as lists show it, with where its key is when that's a Ledger and the name doesn't say so (#142). */
+internal fun accountLabel(account: WalletAccount): String =
+    if (account.ledger != null && !account.name.contains("Ledger", ignoreCase = true)) "${account.name} · Ledger" else account.name
+
+/** Where [account]'s key is and at which path — the line under its address. */
+internal fun accountPathLine(account: WalletAccount): String = account.ledger?.let {
+    "On Ledger ${it.deviceName.removePrefix("Ledger ")} · ${account.path}"
+} ?: "Derivation path ${account.path}"
 
 /**
  * What a balance row shows: the amount (null when there's none to show)
@@ -103,7 +114,9 @@ internal fun balanceText(balance: TokenBalance?, decimals: Int, refreshing: Bool
  * The active account and the switcher (#104): every account derived so
  * far, the active one selected; tapping another switches to it. Add
  * account derives the next one, which needs the wallet open ([locked]
- * makes it unlock first).
+ * makes it unlock first). Ledger accounts (#142) are listed with the
+ * others, marked as the Ledger's; Connect a Ledger adds one (no unlock:
+ * the key stays on the device), and Remove takes the active one off the list.
  */
 @Composable
 internal fun AccountsSection(
@@ -113,11 +126,13 @@ internal fun AccountsSection(
     onSelect: (Int) -> Unit,
     onAdd: () -> Unit,
     onReceive: () -> Unit,
+    onConnectLedger: () -> Unit,
+    onRemoveLedger: (WalletAccount) -> Unit,
 ) {
     val context = LocalContext.current
     val active = list.active
     SectionCard(title = "Account") {
-        Text(active.name, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Medium)
+        Text(accountLabel(active), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Medium)
         SelectionContainer {
             AddressText(
                 active.address,
@@ -127,12 +142,13 @@ internal fun AccountsSection(
             )
         }
         Text(
-            "Derivation path ${active.path}",
+            accountPathLine(active),
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         // Wraps a whole button to the next line at a large font size, never a label inside one.
         FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+            if (active.isLedger) TextButton(onClick = { onRemoveLedger(active) }, enabled = !busy) { Text("Remove") }
             TextButton(onClick = onReceive) { Text("Show QR code") }
             TextButton(onClick = { copyToClipboard(context, active.address) }) { Text("Copy address") }
         }
@@ -161,7 +177,7 @@ internal fun AccountsSection(
                     RadioButton(selected = selected, onClick = null, enabled = !busy)
                     Spacer(Modifier.width(8.dp))
                     Column(Modifier.weight(1f)) {
-                        Text(account.name, fontWeight = if (selected) FontWeight.Medium else FontWeight.Normal)
+                        Text(accountLabel(account), fontWeight = if (selected) FontWeight.Medium else FontWeight.Normal)
                         AddressText(
                             account.address,
                             style = MaterialTheme.typography.bodySmall,
@@ -182,6 +198,12 @@ internal fun AccountsSection(
                     },
                 )
             }
+            // A Ledger's accounts need no unlock: the key stays on the Ledger (#142).
+            OutlinedButton(
+                onClick = onConnectLedger,
+                enabled = !busy,
+                modifier = Modifier.fillMaxWidth().testTag("wallet-connect-ledger"),
+            ) { Text("Connect a Ledger") }
         }
     }
 }

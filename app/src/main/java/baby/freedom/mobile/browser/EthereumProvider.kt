@@ -16,6 +16,7 @@ import baby.freedom.mobile.wallet.SendRequest
 import baby.freedom.mobile.wallet.TokenRegistry
 import baby.freedom.mobile.wallet.VaultLockedException
 import baby.freedom.mobile.wallet.WalletAccount
+import baby.freedom.mobile.wallet.ledger.LedgerException
 import java.math.BigInteger
 import kotlin.coroutines.CoroutineContext
 import kotlinx.coroutines.CancellationException
@@ -187,8 +188,17 @@ class EthereumProvider(
         /** A connected site is using the wallet: the idle lock waits (maintainer decision 7). */
         fun noteActivity()
 
-        /** [MessageSigning.sign]; throws [VaultLockedException] if the wallet isn't open. */
-        fun sign(account: WalletAccount, digest: ByteArray): String
+        /**
+         * `personal_sign` of [message] as [account]: with its key on the
+         * phone ([MessageSigning.sign] over [MessageSigning.personalDigest];
+         * throws [VaultLockedException] if the wallet isn't open), or on its
+         * Ledger (#142), which shows the message and throws
+         * [LedgerException] for a rejection, a disconnect, a timeout…
+         */
+        suspend fun signMessage(account: WalletAccount, message: ByteArray): String
+
+        /** `eth_signTypedData_v4` of [data], whose EIP-712 digest is [digest]: as [signMessage], on the phone or the Ledger. */
+        suspend fun signTypedData(account: WalletAccount, data: Eip712.TypedData, digest: ByteArray): String
     }
 
     /** The send flow ([baby.freedom.mobile.wallet.WalletSender]). */
@@ -211,6 +221,9 @@ class EthereumProvider(
         data class Sent(val hash: String) : Submitted
         data object Stale : Submitted
         data object Busy : Submitted
+
+        /** Refused on the Ledger, or the user cancelled waiting for it: nothing sent. */
+        data object Rejected : Submitted
         data class Failed(val message: String, val hash: String?) : Submitted
     }
 
@@ -365,6 +378,35 @@ class EthereumProvider(
                 null
             }
             if (now != null && now.address.equals(account.address, ignoreCase = true)) autoApprove.grant(rule)
+        }
+    }
+
+    /**
+     * The Ledger account [address] was taken off the wallet: every site
+     * connected with it is disconnected, as [disconnect] (its auto-approve
+     * rules dropped first, so none is left for a later connection), so
+     * adding the account again later doesn't quietly reconnect them, and
+     * their open pages see no accounts. False if the grants couldn't be
+     * read, or a site's rules or grant couldn't be written. Not
+     * cancellable, and holds [siteLinks], as [disconnect].
+     */
+    suspend fun accountRemoved(address: String): Boolean = withContext(NonCancellable) {
+        siteLinks.withLock {
+            val all = try {
+                grants.all()
+            } catch (e: GrantsUnreadable) {
+                return@withLock false
+            }
+            var ok = true
+            all.filterValues { it.account.equals(address, ignoreCase = true) }.forEach { (origin, grant) ->
+                if (!autoApprove.revokeOrigin(origin) || !grants.revoke(origin)) {
+                    ok = false
+                    return@forEach
+                }
+                synchronized(sessionChains) { sessionChains[origin] = grant.chainId }
+                events.emit(origin, "accountsChanged", JSONArray())
+            }
+            ok
         }
     }
 
@@ -575,7 +617,7 @@ class EthereumProvider(
         val text = readableUtf8(bytes)
         val answer = ask(EthAsk.SignMessage(origin, account, text, "0x" + bytes.hexString()))
         if (answer !is EthAnswer.Approved) return refused(answer)
-        return signed { wallet.sign(account, MessageSigning.personalDigest(bytes)) }
+        return signed { wallet.signMessage(account, bytes) }
     }
 
     private suspend fun signTypedData(origin: String, account: WalletAccount, params: JSONArray, ask: suspend (EthAsk) -> EthAnswer): Reply {
@@ -611,13 +653,22 @@ class EthereumProvider(
             messageJson = shown,
         )
         ask(ask0).let { if (it !is EthAnswer.Approved) return refused(it) }
-        return signed { wallet.sign(account, digest) }
+        return signed { wallet.signTypedData(account, data, digest) }
     }
 
-    private fun signed(sign: () -> String): Reply = try {
+    private suspend fun signed(sign: suspend () -> String): Reply = try {
         Reply.Ok(sign())
+    } catch (e: CancellationException) {
+        throw e
     } catch (e: VaultLockedException) {
         Reply.Err(UNAUTHORIZED, "The wallet locked before signing. Nothing was signed.")
+    } catch (e: LedgerException) {
+        when (e.kind) {
+            // Refused on the device, or the user cancelled waiting for it: a rejection, as EIP-1193 says it.
+            LedgerException.Kind.REJECTED, LedgerException.Kind.CANCELLED ->
+                Reply.Err(USER_REJECTED, "User rejected the request on the Ledger.")
+            else -> Reply.Err(INTERNAL, "Ledger: ${e.message}")
+        }
     } catch (e: Exception) {
         Reply.Err(INTERNAL, "Couldn't sign. Nothing was signed.")
     }
@@ -651,7 +702,9 @@ class EthereumProvider(
             else -> return q as Reply
         }
         // The one rule that could cover this call (#112): this site, this contract, this function, this chain.
-        val rule = AutoApproveRule.eligible(origin, to, value, data, chain.id)
+        // None for a Ledger's account (#142): the Ledger asks for every transaction, so "goes out
+        // without asking" can't hold, and its dialog would pop up with no sheet to say what for.
+        val rule = if (account.isLedger) null else AutoApproveRule.eligible(origin, to, value, data, chain.id)
         var repriced = false
         // Turned on in the last sheet confirmed; written only once its send has gone out (R2-M1).
         var turnedOn = false
@@ -676,6 +729,8 @@ class EthereumProvider(
                     return Reply.Ok(s.hash)
                 }
                 Submitted.Busy -> return busy()
+                // As personal_sign and typed data answer the same refusal (EIP-1193 4001).
+                Submitted.Rejected -> return Reply.Err(USER_REJECTED, "User rejected the transaction on the Ledger.")
                 is Submitted.Failed -> return Reply.Err(INTERNAL, s.message, s.hash?.let { JSONObject().put("hash", it) })
                 // Priced too long ago to trust its fee: price it again and let the user look.
                 Submitted.Stale -> {

@@ -21,6 +21,8 @@ import baby.freedom.mobile.wallet.SendRequest
 import baby.freedom.mobile.wallet.SendStatus
 import baby.freedom.mobile.wallet.Vault
 import baby.freedom.mobile.wallet.WalletAccount
+import baby.freedom.mobile.wallet.Eip712
+import baby.freedom.mobile.wallet.ledger.Ledger
 import baby.freedom.mobile.wallet.WalletAccounts
 import baby.freedom.mobile.wallet.WalletSender
 import java.io.IOException
@@ -129,6 +131,7 @@ object EthereumProviders {
         val vault = Vault.get(app)
         val accounts = WalletAccounts.get(app)
         val sender = WalletSender.get(app)
+        val ledger = Ledger.get(app)
         setUpWallet = { reason -> scope.launch { vault.requireUnlocked(reason) } }
         val p = EthereumProvider(
             grants = object : EthereumProvider.Grants {
@@ -155,7 +158,12 @@ object EthereumProviders {
                 }
                 override fun unlocked() = vault.unlockedNow()
                 override fun noteActivity() = vault.noteActivity()
-                override fun sign(account: WalletAccount, digest: ByteArray) = MessageSigning.sign(vault, account, digest)
+                override suspend fun signMessage(account: WalletAccount, message: ByteArray) =
+                    if (account.isLedger) ledger.signPersonal(account, message)
+                    else MessageSigning.sign(vault, account, MessageSigning.personalDigest(message))
+                override suspend fun signTypedData(account: WalletAccount, data: Eip712.TypedData, digest: ByteArray) =
+                    if (account.isLedger) ledger.signTypedData(account, data, digest)
+                    else MessageSigning.sign(vault, account, digest)
             },
             chains = { chainStore.chainsOrUnreadable.first() ?: throw IOException("chain list unreadable") },
             reads = { chainId, method, params, origin ->
@@ -163,7 +171,7 @@ object EthereumProviders {
             },
             sends = object : EthereumProvider.Sends {
                 override suspend fun prepare(request: SendRequest) = sender.prepare(request)
-                override suspend fun submit(quote: SendQuote) = submitAndWait(sender, vault, quote)
+                override suspend fun submit(quote: SendQuote) = submitAndWait(app, sender, vault, quote)
                 override fun busy() = sender.busy()
             },
             autoApprove = object : EthereumProvider.AutoApprove {
@@ -185,8 +193,8 @@ object EthereumProviders {
      * waits until it's out: its hash once a node took it (or it's on
      * chain), or why not.
      */
-    private suspend fun submitAndWait(sender: WalletSender, vault: Vault, quote: SendQuote): EthereumProvider.Submitted {
-        when (sender.submit(quote, WalletSender.vaultSigner(vault, quote.request.from))) {
+    private suspend fun submitAndWait(app: Context, sender: WalletSender, vault: Vault, quote: SendQuote): EthereumProvider.Submitted {
+        when (sender.submit(quote, WalletSender.signerFor(app, vault, quote.request.from) { !sender.isStale(quote) })) {
             WalletSender.Submit.BUSY -> return EthereumProvider.Submitted.Busy
             WalletSender.Submit.STALE -> return EthereumProvider.Submitted.Stale
             WalletSender.Submit.STARTED -> Unit
@@ -198,7 +206,14 @@ object EthereumProviders {
             return EthereumProvider.Submitted.Failed("The transaction was discarded before it went out.", null)
         }
         return when (val stage = status.stage) {
-            is SendStatus.Stage.Failed -> EthereumProvider.Submitted.Failed(stage.message, status.hash.takeIf { stage.mayHaveGone })
+            // Aged while a Ledger was unlocked or reviewed on: nothing sent; priced again, the site's sheet asks again.
+            is SendStatus.Stage.Failed -> if (stage.stale) {
+                EthereumProvider.Submitted.Stale
+            } else if (stage.rejected) {
+                EthereumProvider.Submitted.Rejected
+            } else {
+                EthereumProvider.Submitted.Failed(stage.message, status.hash.takeIf { stage.mayHaveGone })
+            }
             else -> status.hash?.let { EthereumProvider.Submitted.Sent(it) }
                 ?: EthereumProvider.Submitted.Failed("The transaction didn't go out.", null)
         }
@@ -218,6 +233,20 @@ object EthereumProviders {
     suspend fun disconnect(context: Context, origin: String): Boolean =
         provider?.disconnect(origin)
             ?: (AutoApproveStore.get(context).revokeOrigin(origin) && DappGrantStore.get(context).revoke(origin))
+
+    /**
+     * The Ledger account [address] is being removed: the sites connected
+     * with it are disconnected, their auto-approve rules first
+     * ([EthereumProvider.accountRemoved]). False
+     * if that couldn't be read or written.
+     */
+    suspend fun accountRemoved(context: Context, address: String): Boolean =
+        provider?.accountRemoved(address) ?: DappGrantStore.get(context).let { store ->
+            val grants = store.allOrUnreadable.first() ?: return false
+            val rules = AutoApproveStore.get(context)
+            grants.filter { it.account.equals(address, ignoreCase = true) }
+                .map { rules.revokeOrigin(it.origin) && store.revoke(it.origin) }.all { it }
+        }
 
     /**
      * The wallet was removed: every connected site is disconnected

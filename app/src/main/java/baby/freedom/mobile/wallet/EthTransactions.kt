@@ -245,9 +245,14 @@ data class EthTransaction(
      * transaction that would come from any other account never leaves
      * the device.
      */
-    fun sign(privateKey: ByteArray, from: String): Signed {
+    fun sign(privateKey: ByteArray, from: String): Signed = signedWith(EthSigning.sign(privateKey, Keccak256.digest(signingPayload())), from)
+
+    /**
+     * With [sig] made elsewhere (a Ledger, #142), under the same check as
+     * [sign]: it must recover to [from] over this transaction's digest.
+     */
+    internal fun signedWith(sig: EthSigning.Signature, from: String): Signed {
         val digest = Keccak256.digest(signingPayload())
-        val sig = EthSigning.sign(privateKey, digest)
         val recovered = Secp256k1.recover(digest, sig.rsv().toHex())
         check(recovered != null && recovered.equals(from, ignoreCase = true)) { "the signature doesn't match the account" }
         val raw = encodeSigned(sig)
