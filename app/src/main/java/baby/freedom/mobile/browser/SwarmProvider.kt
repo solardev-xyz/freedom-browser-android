@@ -48,9 +48,17 @@ import org.json.JSONObject
  *    one signature and zeroed after; a locked wallet always asks, since
  *    approving is what unlocks it.
  *
- * Messaging (`swarm_getMessagingIdentity`, `swarm_subscribe`,
- * `swarm_unsubscribe`, `swarm_sendPss`, `swarm_sendGsoc`) is #121: until
- * then those answer 4200, and capabilities don't list `messaging`.
+ *  - messaging (#121; desktop's messaging extension): a sheet the first
+ *    time, which grants the site the messaging tier —
+ *    `swarm_getMessagingIdentity`, `swarm_subscribe` — and one per
+ *    message for `swarm_sendPss` / `swarm_sendGsoc` unless "always
+ *    allow" was ticked for messaging (the first send's grant sheet covers
+ *    that send). `swarm_unsubscribe` never asks. Sends spend postage
+ *    stamps; subscriptions ([SwarmSubscriptions]) hold a node receive
+ *    pipeline for as long as the document that made them is there. The
+ *    messaging identity is the node's own PSS key (desktop's and iOS's
+ *    `bee-wallet` mode: the node decrypts with it), so only the first two
+ *    bytes of the node's overlay leave with it, never the whole address.
  *
  * [origin] is always the platform's word for the requesting top-level
  * document ([providerOriginKey]), never something the page says; grants
@@ -67,6 +75,7 @@ class SwarmProvider(
     private val node: Http,
     private val clock: () -> Long = System::currentTimeMillis,
     private val io: CoroutineDispatcher = Dispatchers.IO,
+    private val subscriptions: SwarmSubscriptions = SwarmSubscriptions({ _, _, _ -> NO_SOCKET }),
 ) {
     /** Connection and auto-approve grants: [baby.freedom.mobile.data.SwarmGrantStore] in the app. */
     interface Grants {
@@ -74,6 +83,12 @@ class SwarmProvider(
         suspend fun connect(origin: String): Boolean
         suspend fun autoApprove(origin: String, kind: AutoApprove): Boolean
         suspend fun setAutoApprove(origin: String, kind: AutoApprove): Boolean
+
+        /** Whether connected [origin] holds the messaging tier (#121). */
+        suspend fun messaging(origin: String): Boolean
+
+        /** Grant connected [origin] the messaging tier; false if it couldn't be saved. */
+        suspend fun grantMessaging(origin: String): Boolean
     }
 
     /**
@@ -126,7 +141,7 @@ class SwarmProvider(
         }
     }
 
-    enum class AutoApprove(val wire: String) { Publish("publish"), Feeds("feeds"), Signing("signing") }
+    enum class AutoApprove(val wire: String) { Publish("publish"), Feeds("feeds"), Signing("signing"), Messaging("messaging") }
 
     /** One of a site's feeds, desktop's `swarm-feeds.json` record. */
     data class FeedRecord(
@@ -201,9 +216,11 @@ class SwarmProvider(
         method: String,
         params: JSONObject,
         committed: () -> Unit = {},
+        /** The asking document, where a `swarm_subscribe`'s messages go; null where there's none. */
+        subscriber: SwarmSubscriptions.Subscriber? = null,
         ask: suspend (SwarmAsk) -> Answer,
     ): Reply = try {
-        dispatch(origin, method, params, Calls(ask, committed))
+        dispatch(origin, method, params, Calls(ask, committed, subscriber))
     } catch (e: Invalid) {
         e.error
     } catch (e: CancellationException) {
@@ -219,8 +236,12 @@ class SwarmProvider(
         Reply.Err(UNAVAILABLE, "Swarm node is not available", reason("node-stopped"))
     }
 
-    /** One request's way back to its page: [ask] a sheet, and say it's [committed]. */
-    private class Calls(val ask: suspend (SwarmAsk) -> Answer, val committed: () -> Unit)
+    /** One request's way back to its page: [ask] a sheet, say it's [committed], and where its messages go. */
+    private class Calls(
+        val ask: suspend (SwarmAsk) -> Answer,
+        val committed: () -> Unit,
+        val subscriber: SwarmSubscriptions.Subscriber?,
+    )
 
     private suspend fun dispatch(
         origin: String,
@@ -230,7 +251,6 @@ class SwarmProvider(
     ): Reply {
         val ask = calls.ask
         if (method !in KNOWN_METHODS) return Reply.Err(UNSUPPORTED, "Unknown method: $method")
-        if (method in MESSAGING_METHODS) return Reply.Err(UNSUPPORTED, "Messaging is not supported yet: $method")
         return when (method) {
             "swarm_requestAccess" -> requestAccess(origin, ask)
             "swarm_getCapabilities" -> Reply.Ok(capabilities(origin))
@@ -248,6 +268,11 @@ class SwarmProvider(
                     "swarm_createFeed", "swarm_updateFeed", "swarm_writeFeedEntry",
                     "swarm_writeSingleOwnerChunk", "swarm_getSigningIdentity",
                     -> signing(origin, method, params, calls)
+                    "swarm_getMessagingIdentity" -> messagingIdentity(origin, calls)
+                    "swarm_sendPss" -> sendPss(origin, params, calls)
+                    "swarm_sendGsoc" -> sendGsoc(origin, params, calls)
+                    "swarm_subscribe" -> subscribe(origin, params, calls)
+                    "swarm_unsubscribe" -> unsubscribe(origin, params)
                     else -> Reply.Err(INTERNAL, "Internal error")
                 }
             }
@@ -280,8 +305,7 @@ class SwarmProvider(
             .put("canPublish", connected && preflight == null)
             .put("reason", if (!connected) "not-connected" else preflight ?: JSONObject.NULL)
             .put("publisherIdentityModes", JSONArray(listOf("app-scoped", "bee-wallet")))
-            // Messaging (#121) isn't here yet, so it isn't advertised.
-            .put("features", JSONArray())
+            .put("features", JSONArray(listOf("messaging")))
             .put("extensions", JSONObject().put("publisherSigning", true))
             .put(
                 "limits",
@@ -290,7 +314,10 @@ class SwarmProvider(
                     .put("maxFilesBytes", MAX_FILES_BYTES)
                     .put("maxFileCount", MAX_FILE_COUNT)
                     .put("maxPathBytes", MAX_PATH_BYTES)
-                    .put("maxChunkPayloadBytes", SwarmChunks.MAX_PAYLOAD),
+                    .put("maxChunkPayloadBytes", SwarmChunks.MAX_PAYLOAD)
+                    .put("maxMessageBytes", MAX_MESSAGE_BYTES)
+                    .put("maxTargetDepth", MAX_TARGET_DEPTH)
+                    .put("maxSubscriptions", SwarmSubscriptions.MAX_SUBSCRIPTIONS),
             )
     }
 
@@ -728,6 +755,178 @@ class SwarmProvider(
     }
 
     // ---------------------------------------------------------------
+    // Messaging (#121)
+    // ---------------------------------------------------------------
+
+    /**
+     * The messaging tier's consent for [what]: the grant sheet the first
+     * time (it covers a send that asked too), and then, for a send, a sheet
+     * per message unless the site's messaging is "always allow". Throws a
+     * refusal. The page is told the request is approved either way.
+     */
+    private suspend fun approveMessaging(origin: String, calls: Calls, what: SwarmAsk.Message) {
+        if (!grants.messaging(origin)) {
+            if (!calls.ask(what.copy(grant = true)).allowed) throw Invalid(rejected())
+            if (!grants.grantMessaging(origin)) throw Invalid(Reply.Err(INTERNAL, "Couldn't save the messaging permission"))
+        } else if (what.send != null && !grants.autoApprove(origin, AutoApprove.Messaging)) {
+            val answer = calls.ask(what)
+            if (!answer.allowed) throw Invalid(rejected())
+            if (answer.always) grants.setAutoApprove(origin, AutoApprove.Messaging)
+        }
+        calls.committed()
+    }
+
+    /**
+     * desktop's `getMessagingIdentity`: the node's PSS key, which peers
+     * encrypt to, and the first [DEFAULT_TARGET_DEPTH] bytes of its
+     * overlay, which they send toward. Never the whole overlay: it's the
+     * same for every site, so it would link them, and it pins the node's
+     * exact place in the network.
+     */
+    private suspend fun messagingIdentity(origin: String, calls: Calls): Reply {
+        reachableOrFail()
+        approveMessaging(origin, calls, SwarmAsk.Message(origin, SwarmAsk.Message.Op.Identity, null, null, 0))
+        val answer = call("GET", "/addresses", emptyMap(), null, PREFLIGHT_TIMEOUT_MS)
+        val addresses = answer.takeIf { it.ok }?.json()
+            ?: return Reply.Err(INTERNAL, "Couldn't read the node's addresses: ${answer.message()}")
+        val key = compressedKey(addresses.optString("pssPublicKey"))
+            ?: return Reply.Err(INTERNAL, "The node has no usable PSS key")
+        val overlay = addresses.optString("overlay").removePrefix("0x").lowercase()
+        if (!HEX64.matches(overlay)) return Reply.Err(INTERNAL, "The node has no usable overlay address")
+        return Reply.Ok(
+            JSONObject()
+                .put("pssPublicKey", key)
+                .put("pssTarget", overlay.substring(0, DEFAULT_TARGET_DEPTH * 2))
+                .put("identityMode", "bee-wallet"),
+        )
+    }
+
+    /** desktop's `sendPss`: an encrypted message to [recipient]'s key, mined toward `targets` by the node. */
+    private suspend fun sendPss(origin: String, params: JSONObject, calls: Calls): Reply {
+        emptyOptions(params)
+        val topic = messagingTopic(params.opt("topic"))
+        val recipient = (params.opt("recipient") as? String)?.removePrefix("0x")
+        if (recipient == null || !COMPRESSED_KEY.matches(recipient)) {
+            fail("recipient must be a 66-character hex compressed secp256k1 public key", "invalid_recipient")
+        }
+        val targets = params.opt("targets") as? String
+        if (targets == null || !EVEN_HEX.matches(targets) || targets.length / 2 !in DEFAULT_TARGET_DEPTH..MAX_TARGET_DEPTH) {
+            fail("targets must be hex encoding $DEFAULT_TARGET_DEPTH-$MAX_TARGET_DEPTH whole bytes", "invalid_target")
+        }
+        val payload = messagePayload(params.opt("data"), emptyReason = null)
+        preflightOrFail()
+        approveMessaging(origin, calls, SwarmAsk.Message(origin, SwarmAsk.Message.Op.Send, SwarmAsk.Message.Kind.Pss, topic, payload.size))
+        val batch = batchFor(SwarmChunks.MAX_PAYLOAD.toLong(), allowFullMutable = true)
+        val path = "/pss/send/${SwarmChunks.topic(topic).swarmHex()}/${targets.lowercase()}?recipient=${recipient.lowercase()}"
+        val answer = call("POST", path, mapOf("swarm-postage-batch-id" to batch), payload, UPLOAD_TIMEOUT_MS)
+        if (!answer.ok) return Reply.Err(INTERNAL, "PSS send failed: ${answer.message()}")
+        return Reply.Ok(JSONObject().put("sent", true))
+    }
+
+    /**
+     * desktop's `sendGsoc`: a message to [topic]'s room, a SOC signed with
+     * the room's mined key ([SwarmGsoc]). Not to a bare address: the key
+     * only comes out of the topic, so an address alone has nothing to sign with.
+     */
+    private suspend fun sendGsoc(origin: String, params: JSONObject, calls: Calls): Reply {
+        emptyOptions(params)
+        if (params.opt("address").let { it != null && it != JSONObject.NULL }) {
+            fail(
+                "Sending to a raw GSOC address is not supported: the signing key derives from the topic. Provide topic instead.",
+                "invalid_address",
+            )
+        }
+        val topic = messagingTopic(params.opt("topic"))
+        // A GSOC message is a SOC, and the node refuses an empty one.
+        val payload = messagePayload(params.opt("data"), emptyReason = "invalid_payload")
+        preflightOrFail()
+        approveMessaging(origin, calls, SwarmAsk.Message(origin, SwarmAsk.Message.Op.Send, SwarmAsk.Message.Kind.Gsoc, topic, payload.size))
+        val room = withContext(io) { SwarmGsoc.derive(topic) }
+        val batch = batchFor(SwarmChunks.MAX_PAYLOAD.toLong(), allowFullMutable = true)
+        uploadSoc(SwarmChunks.sign(room.identifier, SwarmChunks.cac(payload), room.privateKey), batch)
+        return Reply.Ok(JSONObject().put("sent", true).put("address", room.address))
+    }
+
+    /**
+     * desktop's `subscribe`: a room's messages (`gsoc`, by topic or its
+     * address) or the PSS messages this node receives on a topic (`pss`),
+     * pushed to the asking document as `message` events until it
+     * unsubscribes or goes away.
+     */
+    private suspend fun subscribe(origin: String, params: JSONObject, calls: Calls): Reply {
+        emptyOptions(params)
+        val kind = params.opt("kind")
+        if (kind != "gsoc" && kind != "pss") fail("kind must be \"gsoc\" or \"pss\"", "invalid_kind")
+        kind as String
+        fun given(key: String) = params.opt(key).let { it != null && it != JSONObject.NULL }
+        val hasTopic = given("topic")
+        val hasAddress = given("address")
+        var key: String? = null
+        if (kind == "gsoc") {
+            if (hasTopic == hasAddress) fail("Provide either topic or address, not both")
+            if (hasAddress) {
+                val address = params.opt("address") as? String
+                if (address == null || !HEX64.matches(address)) fail("address must be a 64-character hex string", "invalid_address")
+                key = address.lowercase()
+            }
+        } else {
+            if (hasAddress) fail("address is only valid for gsoc subscriptions")
+            if (!hasTopic) fail("topic is required", "invalid_topic")
+        }
+        val topic = if (hasTopic) messagingTopic(params.opt("topic")) else null
+        val subscriber = calls.subscriber ?: fail("subscribe requires a page to deliver to")
+        reachableOrFail()
+        approveMessaging(origin, calls, SwarmAsk.Message(origin, SwarmAsk.Message.Op.Subscribe, null, topic ?: key, 0))
+        // Topic-derived: GSOC mines the room's address, PSS hashes the topic.
+        val resolved = key ?: if (kind == "gsoc") withContext(io) { SwarmGsoc.derive(topic!!).address } else SwarmChunks.topic(topic!!).swarmHex()
+        if (!subscriber.live()) return subscriptionCancelled()
+        val id = try {
+            subscriptions.subscribe(origin, kind, resolved, subscriber)
+        } catch (e: SwarmSubscriptions.Failure) {
+            return when (e.reason) {
+                "too_many_subscriptions" -> invalid(
+                    e.message.orEmpty(), e.reason, JSONObject().put("limit", SwarmSubscriptions.MAX_SUBSCRIPTIONS),
+                )
+                "node_subscription_limit" -> Reply.Err(
+                    UNAVAILABLE, "Node subscription capacity exhausted: ${e.message}", reason(e.reason),
+                )
+                // establish_timeout, subscription_cancelled, cancelled (its page went while it came up): retryable.
+                else -> Reply.Err(UNAVAILABLE, e.message.orEmpty(), reason(e.reason))
+            }
+        }
+        return Reply.Ok(JSONObject().put("subscriptionId", id).put("kind", kind).put("key", resolved))
+    }
+
+    private fun subscriptionCancelled() = Reply.Err(
+        UNAVAILABLE, "Page navigated away before the subscription was established", reason("subscription_cancelled"),
+    )
+
+    /** desktop's `unsubscribe`: never asks, and a site can only close its own. */
+    private fun unsubscribe(origin: String, params: JSONObject): Reply {
+        val id = (params.opt("subscriptionId") as? String)?.takeIf { it.isNotEmpty() } ?: fail("subscriptionId is required")
+        if (!subscriptions.unsubscribe(origin, id)) return invalid("No active subscription: $id", "subscription_not_found")
+        return Reply.Ok(JSONObject().put("unsubscribed", true))
+    }
+
+    /** desktop's `validateMessagingTopic`: hashed before the wire, so only sanity limits. */
+    private fun messagingTopic(value: Any?): String {
+        if (value !is String || value.isEmpty()) fail("topic must be a non-empty string", "invalid_topic")
+        if (value.toByteArray(Charsets.UTF_8).size > MAX_TOPIC_BYTES) fail("topic exceeds $MAX_TOPIC_BYTES UTF-8 bytes", "invalid_topic")
+        if (value.any { it.code < 32 }) fail("topic must not contain control characters", "invalid_topic")
+        return value
+    }
+
+    /** A message's bytes, at most [MAX_MESSAGE_BYTES]; empty only where [emptyReason] is null (PSS carries its length). */
+    private fun messagePayload(data: Any?, emptyReason: String?): ByteArray {
+        val payload = payloadOf(data) ?: fail("data must be a string, Uint8Array, or ArrayBuffer")
+        if (payload.isEmpty() && emptyReason != null) fail("data must not be empty", emptyReason)
+        if (payload.size > MAX_MESSAGE_BYTES) {
+            tooLarge("Payload exceeds maximum message size of $MAX_MESSAGE_BYTES bytes", MAX_MESSAGE_BYTES, payload.size)
+        }
+        return payload
+    }
+
+    // ---------------------------------------------------------------
     // Reads (no permission)
     // ---------------------------------------------------------------
 
@@ -925,9 +1124,9 @@ class SwarmProvider(
      * desktop's `selectBestBatch`: of the usable batches with room for
      * half again [size], the one that lasts longest.
      */
-    private suspend fun batchFor(size: Long): String {
+    private suspend fun batchFor(size: Long, allowFullMutable: Boolean = false): String {
         val batches = withContext(io) { usableBatches() }
-        return selectBatch(batches, size)
+        return selectBatch(batches, size, allowFullMutable)
             ?: throw Invalid(Reply.Err(INTERNAL, "No usable postage batch available. Purchase stamps first."))
     }
 
@@ -1061,6 +1260,19 @@ class SwarmProvider(
         const val MAX_PATH_BYTES = 100
         const val BUDGET_WINDOW_MS = 60_000L
 
+        /** What a PSS or GSOC message may carry: ant's 4096 − 3×32 (`MAX_PAYLOAD_SIZE`). */
+        const val MAX_MESSAGE_BYTES = 4000
+
+        /**
+         * PSS target prefixes, in bytes: [DEFAULT_TARGET_DEPTH] is the
+         * network's convention (ant's receiver assumes senders mine 2
+         * bytes) and the floor below which no storer keeps the message;
+         * [MAX_TARGET_DEPTH] is ant's cap on the sender's mining work.
+         */
+        const val DEFAULT_TARGET_DEPTH = 2
+        const val MAX_TARGET_DEPTH = 3
+        const val MAX_TOPIC_BYTES = 256
+
         /** How an unsigned value over JS's safe-integer range crosses the channel: `{"$bigint": "…"}`. */
         const val BIGINT = "\$bigint"
 
@@ -1077,6 +1289,29 @@ class SwarmProvider(
 
         private val HEX64 = Regex("^[0-9a-fA-F]{64}$")
         private val HEX40 = Regex("^[0-9a-fA-F]{40}$")
+        private val COMPRESSED_KEY = Regex("^0[23][0-9a-fA-F]{64}$")
+        private val EVEN_HEX = Regex("^([0-9a-fA-F]{2})+$")
+
+        /** No node sockets (a provider without messaging wiring): every subscription fails to come up. */
+        private val NO_SOCKET = object : SwarmSubscriptions.Socket {
+            override val established = kotlinx.coroutines.CompletableDeferred<Unit>().apply {
+                completeExceptionally(SwarmSubscriptions.Failure("node-stopped", "Swarm node is not available"))
+            }
+            override fun cancel() = Unit
+        }
+
+        /**
+         * A secp256k1 public key as 66 lower-case hex (SEC1 compressed), from
+         * the compressed or uncompressed hex the node reports; null if it's neither.
+         */
+        internal fun compressedKey(hex: String): String? {
+            val h = hex.removePrefix("0x").lowercase()
+            if (COMPRESSED_KEY.matches(h)) return h
+            if (h.length != 130 || !h.startsWith("04")) return null
+            val y = h.substring(66).toBigIntegerOrNull(16) ?: return null
+            if (h.substring(2, 66).toBigIntegerOrNull(16) == null) return null
+            return (if (y.testBit(0)) "03" else "02") + h.substring(2, 66)
+        }
 
         val KNOWN_METHODS = setOf(
             "swarm_requestAccess",
@@ -1101,7 +1336,7 @@ class SwarmProvider(
             "swarm_sendGsoc",
         )
 
-        /** #121's. */
+        /** The messaging extension's (#121). */
         val MESSAGING_METHODS = setOf(
             "swarm_getMessagingIdentity",
             "swarm_subscribe",
@@ -1186,11 +1421,17 @@ class SwarmProvider(
         /**
          * desktop's `selectBestBatch`: the usable batch with room for half
          * again [size] that lasts longest, or null. Room is the batch's
-         * effective capacity less what its fullest bucket has used.
+         * effective capacity less what its fullest bucket has used. With
+         * [allowFullMutable], failing that, the longest-lasting usable
+         * mutable batch.
          */
-        internal fun selectBatch(batches: List<PostageBatch>, size: Long): String? =
+        internal fun selectBatch(batches: List<PostageBatch>, size: Long, allowFullMutable: Boolean = false): String? =
             batches.filter { it.usable && it.capacityBytes * (1 - it.usedFraction) >= size * 1.5 }
                 .maxByOrNull { it.ttlSeconds ?: 0L }?.id
+                // Messages only: a full mutable batch still takes stamps, by
+                // overwriting its oldest ones — fine for ephemeral traffic,
+                // never for content (desktop's `allowFullMutable`).
+                ?: batches.takeIf { allowFullMutable }?.filter { it.usable && !it.immutable }?.maxByOrNull { it.ttlSeconds ?: 0L }?.id
 
         /**
          * [entries] as an uncompressed ustar archive, what `POST /bzz` takes
@@ -1266,6 +1507,26 @@ sealed interface SwarmAsk {
         val paths: List<String>,
     ) : SwarmAsk {
         enum class Kind { Data, Files, Chunk }
+    }
+
+    /**
+     * The messaging tier (#121): see a messaging identity, subscribe
+     * ([topic]: the topic, or a room's address), or send a [kind] message
+     * of [size] bytes on [topic]. [grant] is the first time: approving
+     * gives the site the tier. [send] is the send's kind, null otherwise.
+     */
+    data class Message(
+        override val origin: String,
+        val op: Op,
+        val kind: Kind?,
+        val topic: String?,
+        val size: Int,
+        val grant: Boolean = false,
+    ) : SwarmAsk {
+        enum class Op { Identity, Subscribe, Send }
+        enum class Kind { Pss, Gsoc }
+
+        val send: Kind? get() = kind.takeIf { op == Op.Send }
     }
 
     /**

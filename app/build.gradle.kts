@@ -161,6 +161,11 @@ dependencies {
     implementation("androidx.camera:camera-lifecycle:$cameraXVersion")
     implementation("androidx.camera:camera-view:$cameraXVersion")
 
+    // window.swarm messaging (#121): the WebSocket to the node's
+    // `/gsoc/subscribe` and `/pss/subscribe` (loopback only; answers the
+    // node's pings). Its mockwebserver stands in for the node in tests.
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
+
     val roomVersion = "2.8.4"
     implementation("androidx.room:room-runtime:$roomVersion")
     implementation("androidx.room:room-ktx:$roomVersion")
@@ -176,6 +181,7 @@ dependencies {
     // UTS-46 for WhatwgHost's JVM tests: android.icu (what the app uses)
     // is a stub off-device, and icu4j is the same library unrepackaged.
     testImplementation("com.ibm.icu:icu4j:77.1")
+    testImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
 
     androidTestImplementation("androidx.test:runner:1.6.2")
     // Compose UI tests (the address-bar suggestion tap, #170).

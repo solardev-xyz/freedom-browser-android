@@ -21,7 +21,8 @@ import kotlinx.coroutines.flow.map
  * may do without asking — desktop's `swarm-permissions.js`:
  *
  *     "connect:<origin>"         → connected-at, epoch ms
- *     "auto:<kind>:<origin>"     → "1" ("always allow": publish, feeds, signing)
+ *     "messaging:<origin>"       → granted-at, epoch ms (the messaging tier, #121)
+ *     "auto:<kind>:<origin>"     → "1" ("always allow": publish, feeds, signing, messaging)
  *
  * `<origin>` is the provider's origin key (a normalized
  * `scheme://host[:port]`, the one site permissions use). A private tab
@@ -33,8 +34,13 @@ import kotlinx.coroutines.flow.map
  * corrupt file is replaced with an empty one.
  */
 class SwarmGrantStore internal constructor(private val store: DataStore<Preferences>) {
-    /** One connected site and its "always allow" kinds ([KINDS]). */
-    data class Grant(val origin: String, val connectedAt: Long, val autoApprove: Set<String>)
+    /** One connected site, whether it holds the messaging tier, and its "always allow" kinds ([KINDS]). */
+    data class Grant(
+        val origin: String,
+        val connectedAt: Long,
+        val autoApprove: Set<String>,
+        val messaging: Boolean = false,
+    )
 
     /** Every connected site, most recently connected first. */
     val all: Flow<List<Grant>> = store.data
@@ -49,7 +55,7 @@ class SwarmGrantStore internal constructor(private val store: DataStore<Preferen
                 if (!name.startsWith(CONNECT)) return@mapNotNull null
                 val origin = name.removePrefix(CONNECT)
                 val auto = KINDS.filter { map["$AUTO$it:$origin"] == ON }.toSet()
-                Grant(origin, (v as? String)?.toLongOrNull() ?: 0L, auto)
+                Grant(origin, (v as? String)?.toLongOrNull() ?: 0L, auto, map["$MESSAGING$origin"] != null)
             }.sortedByDescending { it.connectedAt }
         }
 
@@ -66,6 +72,16 @@ class SwarmGrantStore internal constructor(private val store: DataStore<Preferen
         if (it[connectKey(origin)] == null) it[connectKey(origin)] = now.toString()
     }
 
+    /** Grant connected [origin] the messaging tier; `false` if it isn't connected or the write failed. */
+    suspend fun grantMessaging(origin: String, now: Long = System.currentTimeMillis()): Boolean {
+        var connected = false
+        val written = write {
+            connected = it[connectKey(origin)] != null
+            if (connected && it[messagingKey(origin)] == null) it[messagingKey(origin)] = now.toString()
+        }
+        return written && connected
+    }
+
     /** "Always allow" [kind] for connected [origin]; `false` if it isn't connected or the write failed. */
     suspend fun setAutoApprove(origin: String, kind: String, on: Boolean): Boolean {
         require(kind in KINDS) { "unknown auto-approve kind" }
@@ -79,9 +95,10 @@ class SwarmGrantStore internal constructor(private val store: DataStore<Preferen
         return written && connected
     }
 
-    /** Disconnect [origin], dropping its "always allow"s; `false` if the store couldn't be written. */
+    /** Disconnect [origin], dropping its messaging tier and "always allow"s; `false` if the store couldn't be written. */
     suspend fun revoke(origin: String): Boolean = write {
         it.remove(connectKey(origin))
+        it.remove(messagingKey(origin))
         for (kind in KINDS) it.remove(autoKey(kind, origin))
     }
 
@@ -94,13 +111,15 @@ class SwarmGrantStore internal constructor(private val store: DataStore<Preferen
     }
 
     private fun connectKey(origin: String) = stringPreferencesKey("$CONNECT$origin")
+    private fun messagingKey(origin: String) = stringPreferencesKey("$MESSAGING$origin")
     private fun autoKey(kind: String, origin: String) = stringPreferencesKey("$AUTO$kind:$origin")
 
     companion object {
-        /** The "always allow" kinds, desktop's `autoApprove` keys (messaging is #121's). */
-        val KINDS = listOf("publish", "feeds", "signing")
+        /** The "always allow" kinds, desktop's `autoApprove` keys. */
+        val KINDS = listOf("publish", "feeds", "signing", "messaging")
 
         private const val CONNECT = "connect:"
+        private const val MESSAGING = "messaging:"
         private const val AUTO = "auto:"
         private const val ON = "1"
         private const val TAG = "SwarmGrantStore"

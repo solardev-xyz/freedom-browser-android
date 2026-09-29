@@ -78,6 +78,13 @@ class SwarmPromptRequest internal constructor(val ask: SwarmAsk) {
  * (a sheet or an "always allow") the page is told (`{"id", "approved"}`)
  * and stops its timer, since from then on its answer is the result of
  * something real — an upload, a signature — that it must not lose.
+ *
+ * A messaging subscription (#121) belongs to the document that made it:
+ * its messages go down that document's own channel as `message` events,
+ * only while it's still its tab's document, and it's closed (with its
+ * share of the node's pipelines) when the tab starts another document or
+ * closes, or the user disconnects the site. Same-document navigations
+ * (a hash or `pushState` route) keep it.
  */
 object SwarmProviders {
     @Volatile
@@ -88,14 +95,20 @@ object SwarmProviders {
     /** Live bridges, one per WebView; main thread only. */
     private val bridges = WeakHashMap<WebView, Bridge>()
 
+    /** Each tab's document number: written on the main thread, read by subscriptions from any. */
+    private val documents = java.util.concurrent.ConcurrentHashMap<Long, Int>()
+
     /** Main thread only, like everything below. */
-    private val documents = HashMap<Long, Int>()
     private val committedOrigins = HashMap<Long, String?>()
     private val promptLocks = HashMap<Long, Mutex>()
     private val pending = HashMap<Long, MutableSet<SwarmPromptRequest>>()
     private val blockedTabs = HashSet<Long>()
 
     /** Opens the wallet page to create, import or unlock a wallet ([Vault.requireUnlocked]); set by [init]. */
+    /** The pages' messaging subscriptions; set by [init]. */
+    @Volatile
+    private var subscriptions: SwarmSubscriptions? = null
+
     @Volatile
     internal var setUpWallet: suspend (reason: String) -> Boolean = { false }
 
@@ -128,6 +141,8 @@ object SwarmProviders {
                     grantStore.grantFor(origin)?.autoApprove?.contains(kind.wire) == true
                 override suspend fun setAutoApprove(origin: String, kind: SwarmProvider.AutoApprove) =
                     grantStore.setAutoApprove(origin, kind.wire, true)
+                override suspend fun messaging(origin: String) = grantStore.grantFor(origin)?.messaging == true
+                override suspend fun grantMessaging(origin: String) = grantStore.grantMessaging(origin)
             },
             feeds = object : SwarmProvider.Feeds {
                 override fun granted(origin: String) = feedStore.granted(origin)
@@ -145,6 +160,9 @@ object SwarmProviders {
                 override fun noteActivity() = vault.noteActivity()
             },
             node = GatewayHttp,
+            subscriptions = SwarmSubscriptions({ kind, key, onMessage ->
+                NodeSubscriptionSocket.open(SwarmNode.GATEWAY_URL, kind, key, onMessage)
+            }).also { subscriptions = it },
         )
         setUpWallet = { reason -> vault.requireUnlocked(reason) }
         p.events = SwarmProvider.Events { origin, event, data ->
@@ -155,9 +173,10 @@ object SwarmProviders {
 
     /**
      * The user disconnects [origin] (the wallet page's Swarm section):
-     * its connection, "always allow"s and feed access go — its feed
-     * records stay, as on desktop, for when it's connected again — and
-     * its open pages hear `disconnect`. False if that couldn't be saved.
+     * its connection, messaging, "always allow"s and feed access go — its
+     * feed records stay, as on desktop, for when it's connected again —,
+     * its subscriptions close, and its open pages hear `disconnect`.
+     * False if that couldn't be saved.
      */
     suspend fun disconnect(context: Context, origin: String): Boolean {
         val app = context.applicationContext
@@ -172,6 +191,8 @@ object SwarmProviders {
             }
         }
         if (!SwarmGrantStore.get(app).revoke(origin) || !feedsDropped) return false
+        // Live subscriptions don't outlive the grant.
+        subscriptions?.cancelByOrigin(origin)
         emit(origin, "disconnect", JSONObject().put("origin", swarmOriginKey(origin)))
         return true
     }
@@ -234,7 +255,7 @@ object SwarmProviders {
             val result = try {
                 val p = provider ?: throw IllegalStateException("provider not ready")
                 val approved = { approved(reply, request.id) }
-                p.request(origin, request.method, request.params, approved) { ask ->
+                p.request(origin, request.method, request.params, approved, Subscriber(tab.id, doc, reply)) { ask ->
                     askOnTab(tab, doc, ask, deadline - SystemClock.elapsedRealtime(), p::current, approved)
                 }
             } catch (e: CancellationException) {
@@ -260,6 +281,24 @@ object SwarmProviders {
     /** The request was approved: the page stops its timer and waits for the result. */
     private fun approved(reply: JavaScriptReplyProxy, id: Long) {
         runCatching { reply.postMessage(JSONObject().put("id", id).put("approved", true).toString()) }
+    }
+
+    /**
+     * The document that sent a request ([doc] of tab [tab], answering on
+     * [reply]): where a subscription it makes delivers. Messages reach it
+     * only while it's still the tab's document.
+     */
+    private class Subscriber(
+        override val tab: Long,
+        override val document: Int,
+        private val reply: JavaScriptReplyProxy,
+    ) : SwarmSubscriptions.Subscriber {
+        override fun live() = document != STALE_DOCUMENT && (documents[tab] ?: 0) == document
+
+        override fun deliver(message: JSONObject) {
+            val body = JSONObject().put("event", "message").put("data", message).toString()
+            scope.launch { if (live()) runCatching { reply.postMessage(body) } }
+        }
     }
 
     private fun emit(origin: String, event: String, data: Any) {
@@ -345,14 +384,18 @@ object SwarmProviders {
 
     /** The tab started (committed) a new document on [url] — null when it's being torn down. */
     fun onDocumentStarted(tab: BrowserState, url: String?) {
-        documents[tab.id] = (documents[tab.id] ?: 0) + 1
+        val doc = (documents[tab.id] ?: 0) + 1
+        documents[tab.id] = doc
         committedOrigins[tab.id] = providerOriginKey(url)
         withdraw(tab.id)
+        // The outgoing document's subscriptions go with it.
+        subscriptions?.cancelWhere { it.tab == tab.id && it.document != doc }
     }
 
     /** The tab closed. */
     fun onTabClosed(tabId: Long) {
         withdraw(tabId)
+        subscriptions?.cancelWhere { it.tab == tabId }
         documents.remove(tabId)
         committedOrigins.remove(tabId)
         promptLocks.remove(tabId)
@@ -505,7 +548,8 @@ private const val MAX_SWARM_REQUEST_CHARS = 72 * 1024 * 1024
 /**
  * The page side of [SwarmProviders]: `window.swarm` with `request()`, one
  * wrapper per method (desktop's), and `on` / `removeListener` for events
- * (`connect`, `disconnect`). The channel object the platform puts on
+ * (`connect`, `disconnect`, and `message` for a subscription's
+ * messages, desktop's `swarm_subscription` payload). The channel object the platform puts on
  * `window` is taken off it before the page's own scripts run (#69), and
  * has a random name; subframes and non-http(s) documents get no provider.
  * The natives the script relies on are saved at document start, so a
@@ -534,7 +578,7 @@ internal fun swarmProviderJs(channel: String): String {
   var fromCharCode = String.fromCharCode, BI = w.BigInt, isArray = Array.isArray;
   var apply = Function.prototype.apply, keys = Object.keys;
   var pending = new w.Map(), nextId = 0;
-  var listeners = { connect: [], disconnect: [] };
+  var listeners = { connect: [], disconnect: [], message: [] };
   function b64(bytes) {
     var parts = [], CHUNK = 0x8000;
     for (var i = 0; i < bytes.length; i += CHUNK) {
@@ -567,7 +611,8 @@ internal fun swarmProviderJs(channel: String): String {
   }
   var LONG = { swarm_publishData: 1, swarm_publishFiles: 1, swarm_publishChunk: 1, swarm_createFeed: 1,
     swarm_updateFeed: 1, swarm_writeFeedEntry: 1, swarm_writeSingleOwnerChunk: 1, swarm_getSigningIdentity: 1,
-    swarm_requestAccess: 1 };
+    swarm_requestAccess: 1, swarm_sendPss: 1, swarm_sendGsoc: 1, swarm_getMessagingIdentity: 1,
+    swarm_subscribe: 1 };
   port.addEventListener('message', function (ev) {
     var msg;
     try { msg = parse(ev.data); } catch (e) { return; }
@@ -669,7 +714,7 @@ internal fun swarmProviderJs(channel: String): String {
     },
     removeAllListeners: function (event) {
       if (event && listeners[event]) listeners[event] = [];
-      if (!event) { listeners.connect = []; listeners.disconnect = []; }
+      if (!event) { listeners.connect = []; listeners.disconnect = []; listeners.message = []; }
       return swarm;
     }
   };

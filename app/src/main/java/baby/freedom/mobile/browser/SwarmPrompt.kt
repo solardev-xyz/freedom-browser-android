@@ -20,6 +20,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CloudUpload
 import androidx.compose.material.icons.filled.Draw
 import androidx.compose.material.icons.filled.DynamicFeed
+import androidx.compose.material.icons.filled.Forum
 import androidx.compose.material.icons.filled.Hub
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
@@ -74,8 +75,8 @@ internal fun swarmPromptCopy(ask: SwarmAsk): SwarmPromptCopy = when (ask) {
     is SwarmAsk.Connect -> SwarmPromptCopy(
         "Connect to Swarm",
         "wants to connect to your Swarm node",
-        "It can ask to publish data and files to Swarm with your postage stamps, and to create and update " +
-            "feeds signed with a publisher identity of its own. Each of those asks first.",
+        "It can ask to publish data and files to Swarm with your postage stamps, to create and update " +
+            "feeds signed with a publisher identity of its own, and to send and receive messages. Each of those asks first.",
         "Connect",
         null,
     )
@@ -104,6 +105,31 @@ internal fun swarmPromptCopy(ask: SwarmAsk): SwarmPromptCopy = when (ask) {
             "Always allow this site to manage feeds without asking",
         )
     }
+    is SwarmAsk.Message -> swarmMessagingCopy(ask)
+}
+
+/**
+ * A messaging sheet (#121), desktop's `showSwarmMessagingApproval`: the
+ * grant the first time — for the tier as a whole, whatever call asked —
+ * and after that one per send, with messaging's "always allow".
+ */
+private fun swarmMessagingCopy(ask: SwarmAsk.Message): SwarmPromptCopy = when {
+    ask.grant -> SwarmPromptCopy(
+        "Messaging access",
+        "wants to send and receive real-time messages",
+        "Messaging discloses a stable identity key to this site. Sending uses your stamps; open subscriptions use " +
+            "bandwidth while the page is loaded. A subscription can also read any PSS traffic your node decrypts for " +
+            "the topic it joins, not only this site's own messages.",
+        "Allow",
+        null,
+    )
+    else -> SwarmPromptCopy(
+        "Confirm message",
+        if (ask.send == SwarmAsk.Message.Kind.Pss) "wants to send a private message (PSS)" else "wants to broadcast a message (GSOC)",
+        "Sending this message uses your stamps and is visible to the Swarm network.",
+        "Send",
+        "Always allow this site to send messages without asking",
+    )
 }
 
 /** "3 files", "text/html", "Swarm chunk": what a publish is. */
@@ -130,8 +156,9 @@ internal fun swarmSignIdentity(ask: SwarmAsk.Sign): String =
 
 /**
  * A `window.swarm` approval sheet (#120), one per tier as on desktop:
- * connect, publish (what, how big, its name or paths), and feed access /
- * publisher signing (the feed or request, and the identity that signs).
+ * connect, publish (what, how big, its name or paths), feed access /
+ * publisher signing (the feed or request, and the identity that signs),
+ * and messaging (#121: the tier, or one message — its topic and size).
  * It always starts with the site asking — in full, wrapped rather than
  * ellipsised, since the tail of a host is what a spoof hides — then the
  * request, what it means, the "always allow" switch where the tier has
@@ -217,6 +244,7 @@ fun SwarmPromptSheet(request: SwarmPromptRequest) {
                         is SwarmAsk.Connect -> Icons.Filled.Hub
                         is SwarmAsk.Publish -> Icons.Filled.CloudUpload
                         is SwarmAsk.Sign -> if (ask.kind == SwarmProvider.AutoApprove.Signing) Icons.Filled.Draw else Icons.Filled.DynamicFeed
+                        is SwarmAsk.Message -> Icons.Filled.Forum
                     },
                     contentDescription = null,
                     tint = MaterialTheme.colorScheme.primary,
@@ -262,6 +290,10 @@ fun SwarmPromptSheet(request: SwarmPromptRequest) {
                             DetailRow("Feed name", swarmSignRequest(ask))
                         }
                         DetailRow("Signs as", swarmSignIdentity(ask))
+                    }
+                    is SwarmAsk.Message -> {
+                        ask.topic?.let { DetailRow("Topic", it) }
+                        if (ask.send != null) DetailRow("Size", formatStampBytes(ask.size.toLong()))
                     }
                 }
                 Text(

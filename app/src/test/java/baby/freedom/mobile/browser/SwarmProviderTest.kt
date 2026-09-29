@@ -34,6 +34,9 @@ class SwarmProviderTest {
         override suspend fun connect(origin: String) = connected.add(origin).let { true }
         override suspend fun autoApprove(origin: String, kind: SwarmProvider.AutoApprove) = (origin to kind) in auto
         override suspend fun setAutoApprove(origin: String, kind: SwarmProvider.AutoApprove) = auto.add(origin to kind).let { true }
+        val messaging = HashSet<String>()
+        override suspend fun messaging(origin: String) = origin in messaging
+        override suspend fun grantMessaging(origin: String) = messaging.add(origin).let { true }
     }
 
     private class MemoryFeeds : SwarmProvider.Feeds {
@@ -105,6 +108,11 @@ class SwarmProviderTest {
             return when {
                 method == "GET" && bare == "/node" -> json(JSONObject().put("beeMode", beeMode))
                 method == "GET" && bare == "/readiness" -> json(JSONObject())
+                method == "GET" && bare == "/addresses" -> json(
+                    JSONObject().put("overlay", OVERLAY).put("pssPublicKey", PSS_KEY).put("publicKey", PSS_KEY)
+                        .put("ethereum", "0x" + "11".repeat(20)),
+                )
+                method == "POST" && bare.startsWith("/pss/send/") -> SwarmProvider.Http.Answer(201, emptyMap(), ByteArray(0))
                 method == "GET" && bare == "/stamps" -> json(JSONObject().put("stamps", stamps))
                 method == "POST" && bare == "/bzz" -> json(
                     JSONObject().put("reference", "b0".repeat(32)), 201,
@@ -157,12 +165,35 @@ class SwarmProviderTest {
         fun uploads() = requests.filter { it.first == "POST" }
     }
 
+    /** A node receive pipeline that is up at once; the test pushes its messages. */
+    private class FakeSocket(val kind: String, val key: String, val onMessage: (ByteArray) -> Unit) : SwarmSubscriptions.Socket {
+        override val established = kotlinx.coroutines.CompletableDeferred<Unit>().apply { complete(Unit) }
+        var cancelled = false
+        override fun cancel() {
+            cancelled = true
+        }
+    }
+
+    /** The asking document: live until the test says otherwise, collecting what it's sent. */
+    private class FakeSubscriber(override val tab: Long = 1, override val document: Int = 1) : SwarmSubscriptions.Subscriber {
+        var alive = true
+        val got = mutableListOf<JSONObject>()
+        override fun live() = alive
+        override fun deliver(message: JSONObject) {
+            got += message
+        }
+    }
+
+    private val sockets = mutableListOf<FakeSocket>()
+    private val subscriptions = SwarmSubscriptions({ kind, key, onMessage -> FakeSocket(kind, key, onMessage).also { sockets += it } }, clock = { 42 })
+    private val page = FakeSubscriber()
+
     private val grants = MemoryGrants()
     private val feeds = MemoryFeeds()
     private val publishers = FakePublishers()
     private val node = FakeNode()
     private var now = 1_000_000L
-    private val provider = SwarmProvider(grants, feeds, publishers, node, clock = { now }, io = Dispatchers.Unconfined)
+    private val provider = SwarmProvider(grants, feeds, publishers, node, clock = { now }, io = Dispatchers.Unconfined, subscriptions = subscriptions)
     private val asked = mutableListOf<SwarmAsk>()
     private var answer = SwarmProvider.Answer(true)
     /** Run when a sheet is answered allowed: stands in for what approving it does (setting up a wallet). */
@@ -174,8 +205,8 @@ class SwarmProviderTest {
         provider.events = SwarmProvider.Events { origin, event, data -> events += Triple(origin, event, data) }
     }
 
-    private fun call(method: String, params: JSONObject = JSONObject(), origin: String = site) = runBlocking {
-        provider.request(origin, method, params, { commits++ }) { ask ->
+    private fun call(method: String, params: JSONObject = JSONObject(), origin: String = site, subscriber: SwarmSubscriptions.Subscriber? = page) = runBlocking {
+        provider.request(origin, method, params, { commits++ }, subscriber) { ask ->
             asked += ask
             answer.also { if (it.allowed) onApproved() }
         }
@@ -192,9 +223,13 @@ class SwarmProviderTest {
     // -------------------------------------------------------------------
 
     @Test
-    fun `unknown and messaging methods are not supported`() {
+    fun `unknown methods are not supported, and messaging needs a connection`() {
         assertEquals(4200, err(call("swarm_nope")).code)
-        for (m in SwarmProvider.MESSAGING_METHODS) assertEquals(m, 4200, err(call(m)).code)
+        for (m in SwarmProvider.MESSAGING_METHODS) {
+            val e = err(call(m))
+            assertEquals(m, 4100, e.code)
+            assertEquals(m, "not_connected", e.reason)
+        }
         assertTrue(asked.isEmpty())
     }
 
@@ -222,7 +257,7 @@ class SwarmProviderTest {
         assertEquals("not-connected", caps.getString("reason"))
         assertEquals(10 * 1024 * 1024, caps.getJSONObject("limits").getInt("maxDataBytes"))
         assertEquals(4096, caps.getJSONObject("limits").getInt("maxChunkPayloadBytes"))
-        assertEquals("[]", caps.getJSONArray("features").toString())
+        assertEquals("[\"messaging\"]", caps.getJSONArray("features").toString())
         assertEquals("[\"app-scoped\",\"bee-wallet\"]", caps.getJSONArray("publisherIdentityModes").toString())
         connect()
         assertTrue(okJson(call("swarm_getCapabilities")).getBoolean("canPublish"))
@@ -902,6 +937,9 @@ class SwarmProviderTest {
         assertEquals("Asks before each upload and signature", swarmSiteSummary(grant()))
         assertEquals("Publishes without asking", swarmSiteSummary(grant("publish")))
         assertEquals("Publishes, manages feeds, signs without asking", swarmSiteSummary(grant("signing", "publish", "feeds")))
+        val messaging = baby.freedom.mobile.data.SwarmGrantStore.Grant(site, 1, setOf("messaging"), messaging = true)
+        assertEquals("Sends messages without asking · Can send and receive messages", swarmSiteSummary(messaging))
+        assertEquals("Asks before each upload and signature · Can send and receive messages", swarmSiteSummary(messaging.copy(autoApprove = emptySet())))
     }
 
     @Test
@@ -992,5 +1030,322 @@ class SwarmProviderTest {
         } finally {
             RhinoContext.exit()
         }
+    }
+
+    // -------------------------------------------------------------------
+    // Messaging (#121)
+    // -------------------------------------------------------------------
+
+    private fun pssParams(
+        data: Any = "hi",
+        topic: Any = "chat",
+        recipient: Any = RECIPIENT,
+        targets: Any = "a1b2",
+    ) = JSONObject().put("topic", topic).put("recipient", recipient).put("targets", targets).put("data", data)
+
+    @Test
+    fun `capabilities advertise messaging and its limits`() {
+        val caps = okJson(call("swarm_getCapabilities"))
+        assertEquals("messaging", caps.getJSONArray("features").getString(0))
+        val limits = caps.getJSONObject("limits")
+        assertEquals(4000, limits.getInt("maxMessageBytes"))
+        assertEquals(3, limits.getInt("maxTargetDepth"))
+        assertEquals(32, limits.getInt("maxSubscriptions"))
+    }
+
+    @Test
+    fun `the messaging identity asks once, then discloses the node key and only two bytes of its overlay`() {
+        connect()
+        val first = okJson(call("swarm_getMessagingIdentity"))
+        val sheet = asked.single() as SwarmAsk.Message
+        assertTrue(sheet.grant)
+        assertEquals(SwarmAsk.Message.Op.Identity, sheet.op)
+        assertEquals("Messaging access", swarmPromptCopy(sheet).title)
+        assertNull(swarmPromptCopy(sheet).always)
+        assertEquals(PSS_KEY, first.getString("pssPublicKey"))
+        assertEquals(OVERLAY.substring(0, 4), first.getString("pssTarget"))
+        assertEquals("bee-wallet", first.getString("identityMode"))
+        assertFalse(first.toString().contains(OVERLAY))
+        assertTrue(site in grants.messaging)
+        // Granted: never asks again.
+        okJson(call("swarm_getMessagingIdentity"))
+        assertEquals(1, asked.size)
+    }
+
+    @Test
+    fun `refusing the messaging sheet grants nothing`() {
+        connect()
+        answer = SwarmProvider.Answer.REJECTED
+        assertEquals(4001, err(call("swarm_getMessagingIdentity")).code)
+        assertEquals(4001, err(call("swarm_sendPss", pssParams())).code)
+        assertTrue(grants.messaging.isEmpty())
+        assertTrue(node.requests.none { it.second.startsWith("/pss") || it.second == "/addresses" })
+    }
+
+    @Test
+    fun `a node key reported uncompressed is compressed`() {
+        val x = "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+        val y = "483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8"
+        assertEquals("02$x", SwarmProvider.compressedKey("04$x$y"))
+        assertEquals("02$x", SwarmProvider.compressedKey("0x02${x.uppercase()}"))
+        assertNull(SwarmProvider.compressedKey("05$x$y"))
+        assertNull(SwarmProvider.compressedKey("nope"))
+    }
+
+    @Test
+    fun `sendPss checks its parameters before any sheet`() {
+        connect()
+        fun reason(p: JSONObject) = err(call("swarm_sendPss", p)).reason
+        assertEquals("invalid_topic", reason(pssParams(topic = "")))
+        assertEquals("invalid_topic", reason(pssParams(topic = "a\u0001b")))
+        assertEquals("invalid_topic", reason(pssParams(topic = "x".repeat(257))))
+        assertEquals("invalid_recipient", reason(pssParams(recipient = "04" + "ab".repeat(32))))
+        assertEquals("invalid_recipient", reason(pssParams(recipient = "02" + "ab".repeat(31))))
+        assertEquals("invalid_target", reason(pssParams(targets = "a1")))
+        assertEquals("invalid_target", reason(pssParams(targets = "a1b2c3d4")))
+        assertEquals("invalid_target", reason(pssParams(targets = "a1b")))
+        assertEquals("invalid_target", reason(pssParams(targets = "zzzz")))
+        assertEquals("invalid_params", reason(pssParams(data = 5)))
+        val big = err(call("swarm_sendPss", pssParams(data = b64(ByteArray(4001)))))
+        assertEquals("payload_too_large", big.reason)
+        assertEquals(4000, big.data!!.getInt("limit"))
+        assertEquals(4001, big.data!!.getInt("actual"))
+        assertEquals("unsupported_option", reason(pssParams().put("options", JSONObject().put("x", 1))))
+        assertTrue(asked.isEmpty())
+        // And the node's state before any sheet, as for publishing.
+        node.beeMode = "ultra-light"
+        assertEquals("ultra-light-mode", reason(pssParams()))
+        assertTrue(asked.isEmpty())
+    }
+
+    @Test
+    fun `sendPss posts the hashed topic, the targets and the recipient with a stamp`() {
+        connect()
+        // An empty PSS message is a valid ping: its framing carries a length.
+        assertEquals(true, okJson(call("swarm_sendPss", pssParams(data = "", recipient = "0x" + RECIPIENT.uppercase(), targets = "A1B2C3"))).getBoolean("sent"))
+        val (method, path, headers) = node.requests.last()
+        assertEquals("POST", method)
+        assertEquals("/pss/send/${SwarmChunks.topic("chat").swarmHex()}/a1b2c3?recipient=$RECIPIENT", path)
+        assertEquals("ab".repeat(32), headers["swarm-postage-batch-id"])
+        assertEquals(0, node.bodies["POST $path"]!!.size)
+        okJson(call("swarm_sendPss", pssParams(data = b64(byteArrayOf(1, 2, 3)))))
+        assertArrayEquals(byteArrayOf(1, 2, 3), node.bodies["POST ${node.requests.last().second}"])
+    }
+
+    @Test
+    fun `the first send's grant sheet covers it, then each send asks unless messaging is always allowed`() {
+        connect()
+        okJson(call("swarm_sendPss", pssParams()))
+        assertTrue((asked.single() as SwarmAsk.Message).grant)
+        assertEquals(1, commits)
+        okJson(call("swarm_sendGsoc", JSONObject().put("topic", "room").put("data", "yo")))
+        val send = asked.last() as SwarmAsk.Message
+        assertFalse(send.grant)
+        assertEquals(SwarmAsk.Message.Kind.Gsoc, send.send)
+        assertEquals("room", send.topic)
+        assertEquals(2, send.size)
+        assertEquals("Confirm message", swarmPromptCopy(send).title)
+        assertEquals("wants to broadcast a message (GSOC)", swarmPromptCopy(send).request)
+        assertEquals("Always allow this site to send messages without asking", swarmPromptCopy(send).always)
+        answer = SwarmProvider.Answer(true, always = true)
+        okJson(call("swarm_sendPss", pssParams()))
+        assertEquals("wants to send a private message (PSS)", swarmPromptCopy(asked.last()).request)
+        assertTrue((site to SwarmProvider.AutoApprove.Messaging) in grants.auto)
+        val before = asked.size
+        okJson(call("swarm_sendPss", pssParams()))
+        okJson(call("swarm_sendGsoc", JSONObject().put("topic", "room").put("data", "yo")))
+        assertEquals(before, asked.size)
+        // Subscribing never asks once granted.
+        okJson(call("swarm_subscribe", JSONObject().put("kind", "pss").put("topic", "chat")))
+        assertEquals(before, asked.size)
+    }
+
+    @Test
+    fun `a refused send sheet sends nothing`() {
+        connect()
+        grants.messaging += site
+        answer = SwarmProvider.Answer.REJECTED
+        assertEquals(4001, err(call("swarm_sendGsoc", JSONObject().put("topic", "room").put("data", "yo"))).code)
+        assertTrue(node.uploads().isEmpty())
+    }
+
+    @Test
+    fun `sendGsoc writes a SOC signed by the room's mined key at the room's address`() {
+        connect()
+        grants.messaging += site
+        grants.auto += site to SwarmProvider.AutoApprove.Messaging
+        val result = okJson(call("swarm_sendGsoc", JSONObject().put("topic", "room:doc-42").put("data", b64(byteArrayOf(9, 8, 7)))))
+        // bee-js's gsocMine for this topic (desktop's derivation).
+        assertEquals("457d444476f6de5d990d9465662d55462efd4be2ef34303bf922cedc7d89b1a9", result.getString("address"))
+        val stored = SwarmChunks.parseSoc(result.getString("address").hexToBytesOrNull()!!, node.chunks[result.getString("address")]!!)!!
+        assertArrayEquals(byteArrayOf(9, 8, 7), stored.cac.payload)
+        assertEquals(PublisherKeys.address(SwarmGsoc.derive("room:doc-42").privateKey).lowercase(), "0x" + stored.owner.swarmHex())
+        // Nothing of the site's own identities is touched.
+        assertTrue(publishers.keysHandedOut.isEmpty())
+    }
+
+    @Test
+    fun `sendGsoc refuses a bare address and an empty message before any sheet`() {
+        connect()
+        assertEquals("invalid_address", err(call("swarm_sendGsoc", JSONObject().put("address", "ab".repeat(32)).put("data", "x"))).reason)
+        assertEquals("invalid_payload", err(call("swarm_sendGsoc", JSONObject().put("topic", "t").put("data", ""))).reason)
+        assertEquals("payload_too_large", err(call("swarm_sendGsoc", JSONObject().put("topic", "t").put("data", "x".repeat(4001)))).reason)
+        assertTrue(asked.isEmpty())
+    }
+
+    @Test
+    fun `messages may use a full mutable batch, publishing never does`() {
+        connect()
+        grants.messaging += site
+        grants.auto += site to SwarmProvider.AutoApprove.Messaging
+        grants.auto += site to SwarmProvider.AutoApprove.Publish
+        node.stamps = JSONArray().put(
+            JSONObject().put("batchID", "cd".repeat(32)).put("usable", true).put("depth", 17).put("bucketDepth", 16)
+                .put("utilization", 2).put("immutableFlag", false).put("batchTTL", 86_400),
+        )
+        okJson(call("swarm_sendPss", pssParams()))
+        assertEquals("cd".repeat(32), node.requests.last().third["swarm-postage-batch-id"])
+        assertEquals(-32603, err(call("swarm_publishData", JSONObject().put("data", "x").put("contentType", "text/plain"))).code)
+    }
+
+    @Test
+    fun `subscribe checks its parameters before any sheet`() {
+        connect()
+        fun reason(p: JSONObject) = err(call("swarm_subscribe", p)).reason
+        assertEquals("invalid_kind", reason(JSONObject().put("kind", "feed").put("topic", "t")))
+        assertEquals("invalid_params", reason(JSONObject().put("kind", "gsoc")))
+        assertEquals("invalid_params", reason(JSONObject().put("kind", "gsoc").put("topic", "t").put("address", "ab".repeat(32))))
+        assertEquals("invalid_address", reason(JSONObject().put("kind", "gsoc").put("address", "ab")))
+        assertEquals("invalid_params", reason(JSONObject().put("kind", "pss").put("address", "ab".repeat(32))))
+        assertEquals("invalid_topic", reason(JSONObject().put("kind", "pss")))
+        assertEquals("invalid_topic", reason(JSONObject().put("kind", "gsoc").put("topic", "")))
+        assertEquals("invalid_params", err(call("swarm_subscribe", JSONObject().put("kind", "pss").put("topic", "t"), subscriber = null)).reason)
+        assertTrue(asked.isEmpty())
+        node.up = false
+        assertEquals("node-stopped", reason(JSONObject().put("kind", "pss").put("topic", "t")))
+        assertTrue(asked.isEmpty())
+        assertTrue(sockets.isEmpty())
+    }
+
+    @Test
+    fun `subscribe opens the node pipeline for the room or topic and delivers its messages to the page`() {
+        connect()
+        val room = okJson(call("swarm_subscribe", JSONObject().put("kind", "gsoc").put("topic", "room:doc-42")))
+        assertTrue((asked.single() as SwarmAsk.Message).grant)
+        assertEquals("gsoc", room.getString("kind"))
+        assertEquals("457d444476f6de5d990d9465662d55462efd4be2ef34303bf922cedc7d89b1a9", room.getString("key"))
+        val pss = okJson(call("swarm_subscribe", JSONObject().put("kind", "pss").put("topic", "chat")))
+        assertEquals(SwarmChunks.topic("chat").swarmHex(), pss.getString("key"))
+        val byAddress = okJson(call("swarm_subscribe", JSONObject().put("kind", "gsoc").put("address", "AB".repeat(32))))
+        assertEquals("ab".repeat(32), byAddress.getString("key"))
+        assertEquals(listOf("gsoc" to room.getString("key"), "pss" to pss.getString("key"), "gsoc" to "ab".repeat(32)), sockets.map { it.kind to it.key })
+        sockets[0].onMessage(byteArrayOf(104, 105))
+        val msg = page.got.single()
+        assertEquals("swarm_subscription", msg.getString("type"))
+        assertEquals(room.getString("subscriptionId"), msg.getString("subscription"))
+        val result = msg.getJSONObject("result")
+        assertEquals("gsoc", result.getString("kind"))
+        assertEquals(room.getString("key"), result.getString("key"))
+        assertEquals("aGk=", result.getString("data"))
+        assertEquals("base64", result.getString("encoding"))
+        assertEquals(42L, result.getLong("receivedAt"))
+    }
+
+    @Test
+    fun `a page that went away while its subscription came up gets subscription_cancelled`() {
+        connect()
+        grants.messaging += site
+        page.alive = false
+        assertEquals("subscription_cancelled", err(call("swarm_subscribe", JSONObject().put("kind", "pss").put("topic", "t"))).reason)
+        assertEquals(0, subscriptions.count(site))
+    }
+
+    @Test
+    fun `unsubscribe never asks and only closes the site's own subscription`() {
+        connect()
+        connect(other)
+        grants.messaging += site
+        val id = okJson(call("swarm_subscribe", JSONObject().put("kind", "pss").put("topic", "t"))).getString("subscriptionId")
+        assertEquals("subscription_not_found", err(call("swarm_unsubscribe", JSONObject().put("subscriptionId", id), origin = other)).reason)
+        assertEquals("invalid_params", err(call("swarm_unsubscribe", JSONObject())).reason)
+        assertEquals(true, okJson(call("swarm_unsubscribe", JSONObject().put("subscriptionId", id))).getBoolean("unsubscribed"))
+        assertTrue(sockets.single().cancelled)
+        assertEquals("subscription_not_found", err(call("swarm_unsubscribe", JSONObject().put("subscriptionId", id))).reason)
+        assertTrue(asked.isEmpty())
+    }
+
+    @Test
+    fun `a site gets at most 32 subscriptions`() {
+        connect()
+        grants.messaging += site
+        repeat(32) { okJson(call("swarm_subscribe", JSONObject().put("kind", "pss").put("topic", "t$it"))) }
+        val e = err(call("swarm_subscribe", JSONObject().put("kind", "pss").put("topic", "one more")))
+        assertEquals(-32602, e.code)
+        assertEquals("too_many_subscriptions", e.reason)
+        assertEquals(32, e.data!!.getInt("limit"))
+        connect(other)
+        grants.messaging += other
+        okJson(call("swarm_subscribe", JSONObject().put("kind", "pss").put("topic", "t0"), origin = other))
+    }
+
+    @Test
+    fun `a messaging sheet names the topic, and a send its size`() {
+        val sub = SwarmAsk.Message(site, SwarmAsk.Message.Op.Subscribe, null, "room", 0, grant = true)
+        assertEquals("wants to send and receive real-time messages", swarmPromptCopy(sub).request)
+        assertEquals("Allow", swarmPromptCopy(sub).approve)
+        val send = SwarmAsk.Message(site, SwarmAsk.Message.Op.Send, SwarmAsk.Message.Kind.Pss, "room", 12)
+        assertEquals(SwarmAsk.Message.Kind.Pss, send.send)
+        assertNull(sub.send)
+        assertEquals("Send", swarmPromptCopy(send).approve)
+    }
+
+    @Test
+    fun `the page script hands a subscription's messages to message listeners`() {
+        val cx = RhinoContext.enter()
+        try {
+            cx.languageVersion = RhinoContext.VERSION_ES6
+            val scope = cx.initStandardObjects()
+            cx.evaluateString(
+                scope,
+                """
+                var handler = null, got = [], timers = [];
+                var window = {
+                  location: { protocol: 'https:' },
+                  setTimeout: function (f, ms) { timers.push(ms); return timers.length; }, clearTimeout: function () {},
+                  Promise: Promise, Error: Error, Map: Map, Uint8Array: Uint8Array, ArrayBuffer: ArrayBuffer,
+                  BigInt: undefined, btoa: function (s) { return s; },
+                  abcdefghij: { postMessage: function (m) {}, addEventListener: function (t, h) { handler = h; } }
+                };
+                window.top = window;
+                """.trimIndent(),
+                "setup", 1, null,
+            )
+            cx.evaluateString(scope, swarmProviderJs("abcdefghij"), "swarm.js", 1, null)
+            cx.evaluateString(
+                scope,
+                """
+                function h(m) { got.push(m.subscription + ':' + m.result.data); }
+                window.swarm.on('message', h);
+                handler({ data: JSON.stringify({ event: 'message', data: { type: 'swarm_subscription', subscription: 's1', result: { data: 'aGk=' } } }) });
+                window.swarm.removeListener('message', h);
+                handler({ data: JSON.stringify({ event: 'message', data: { subscription: 's2', result: { data: 'x' } } }) });
+                window.swarm.subscribe({ kind: 'pss', topic: 't' });
+                window.swarm.sendGsoc({ topic: 't', data: 'x' });
+                window.swarm.unsubscribe({ subscriptionId: 's1' });
+                """.trimIndent(),
+                "call", 1, null,
+            )
+            assertEquals("s1:aGk=", cx.evaluateString(scope, "got.join(',')", "got", 1, null).toString())
+            // A subscribe or send can wait on a sheet: the long timer. Unsubscribe never asks.
+            assertEquals("300000,300000,60000", cx.evaluateString(scope, "timers.join(',')", "timers", 1, null).toString())
+        } finally {
+            RhinoContext.exit()
+        }
+    }
+
+    private companion object {
+        val OVERLAY = "a1b2" + "cd".repeat(30)
+        val PSS_KEY = "03" + "ef".repeat(32)
+        val RECIPIENT = "02" + "12".repeat(32)
     }
 }

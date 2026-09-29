@@ -215,24 +215,26 @@ internal const val DISCONNECT_FAILED = "Couldn't disconnect: the change couldn't
 /** One read of the auto-approve rules; [rules] null when the store couldn't be read. */
 private class RulesRead(val rules: List<AutoApproveRule>?)
 
-/** What a Swarm-connected site's line says: what it may do without asking (#120). */
+/** What a Swarm-connected site's line says: what it may do without asking (#120), and whether it may message (#121). */
 internal fun swarmSiteSummary(grant: SwarmGrantStore.Grant): String {
     val always = listOfNotNull(
         "publishes".takeIf { "publish" in grant.autoApprove },
         "manages feeds".takeIf { "feeds" in grant.autoApprove },
         "signs".takeIf { "signing" in grant.autoApprove },
+        "sends messages".takeIf { grant.messaging && "messaging" in grant.autoApprove },
     )
-    return if (always.isEmpty()) {
+    val summary = if (always.isEmpty()) {
         "Asks before each upload and signature"
     } else {
         always.joinToString(", ").replaceFirstChar { it.uppercase() } + " without asking"
     }
+    return if (grant.messaging) "$summary · Can send and receive messages" else summary
 }
 
 /**
  * Sites connected to Swarm through `window.swarm` (#120), each with what
  * it may do without asking, and Disconnect — which also drops its
- * "always allow"s and feed access. [disconnectFailed] is the site whose
+ * "always allow"s, feed access and messaging (closing its subscriptions). [disconnectFailed] is the site whose
  * Disconnect couldn't be saved; its line says so.
  */
 @Composable
