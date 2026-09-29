@@ -41,7 +41,8 @@ class SwarmNode internal constructor(
     /**
      * A monotonic clock in ms, for how long an unconfirmed deposit blocks
      * another. The hold is persisted, so outside tests it's one every
-     * process reads alike: time since boot.
+     * process reads alike: time since boot, which a reboot restarts at 0
+     * (see [holdElapsedMs]).
      */
     private val clock: () -> Long = { System.nanoTime() / 1_000_000 },
 ) {
@@ -482,7 +483,7 @@ class SwarmNode internal constructor(
                     // the chequebook shows it (or long enough that it won't).
                     val landed = u.chequebook == want && u.balanceBefore != null && before != null &&
                         before >= u.balanceBefore + u.amountPlur
-                    if (landed || u.chequebook != want || clock() - u.atMs !in 0 until UNCONFIRMED_DEPOSIT_HOLD_MS) {
+                    if (landed || u.chequebook != want || holdElapsedMs(clock(), u.atMs) >= UNCONFIRMED_DEPOSIT_HOLD_MS) {
                         setUnconfirmedDeposit(null)
                     } else {
                         throw IllegalStateException(
@@ -690,6 +691,15 @@ class SwarmNode internal constructor(
         private const val UNCONFIRMED_DEPOSIT_HOLD_MS = 15 * 60_000L
 
         /**
+         * A lower bound on the time since a hold taken at [atMs], with the
+         * [clock] now reading [now]. The clock is time since boot and the
+         * hold is persisted, so a reboot restarts it below [atMs]; the
+         * deposit then came before this boot, so at least [now] has passed.
+         * Never more than the real time: the hold is never cut short.
+         */
+        internal fun holdElapsedMs(now: Long, atMs: Long): Long = if (now >= atMs) now - atMs else now
+
+        /**
          * Whether a deposit that got [answer] (null: none, e.g. a read
          * timeout) with ant's [message] may have broadcast its transfer.
          * ant answers 504 when the receipt wait runs out and 502 for an RPC
@@ -705,8 +715,9 @@ class SwarmNode internal constructor(
             else -> false
         }
 
-        /** How a deposit that may have gone out after all ([depositMaybeSent]) starts its error. */
         private const val UNCONFIRMED_DEPOSIT_FILE = "unconfirmed-deposit.json"
+
+        /** How a deposit that may have gone out after all ([depositMaybeSent]) starts its error. */
         const val DEPOSIT_MAYBE_SENT = "it may already have been sent"
 
         /** [address] as 40 lowercase hex without `0x`, or null if it isn't an address. */

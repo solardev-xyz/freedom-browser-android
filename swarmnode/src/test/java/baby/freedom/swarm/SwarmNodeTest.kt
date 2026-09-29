@@ -604,6 +604,49 @@ class SwarmNodeTest {
     }
 
     @Test
+    fun theHoldAfterAnUnansweredDepositOutlivesAReboot() {
+        val dir = java.nio.file.Files.createTempDirectory("swarmnode-hold-reboot").toFile()
+        try {
+            fun funded(ops: FakeOps) = ops.apply {
+                chequebookHex = chequebook
+                walletPlur = milliBzz.multiply(java.math.BigInteger.TEN).toString()
+                chequebookBalancePlur = milliBzz.toString()
+            }
+            // Unanswered at 2 h of uptime.
+            val ops = funded(FakeOps())
+            val node = lightNode(ops, dir.path, clock = { 2 * 3_600_000L })
+            ops.onDeposit = { null }
+            assertThrows(RuntimeException::class.java) { node.depositChequebook(chequebook, milliBzz) }
+            node.dispose()
+
+            // The phone reboots: the clock restarts at 0. Five minutes into
+            // the new boot the transfer may still be pending: still held.
+            val ops2 = funded(FakeOps())
+            val again = lightNode(ops2, dir.path, clock = { 5 * 60_000L })
+            val held = assertThrows(IllegalStateException::class.java) { again.depositChequebook(chequebook, milliBzz) }
+            assertTrue(held.message!!, held.message!!.startsWith("an earlier deposit may still be on its way"))
+            assertEquals(0, ops2.calls.count { it.startsWith("gateway:POST") })
+            again.dispose()
+
+            // A full hold into the new boot, it lifts.
+            val ops3 = funded(FakeOps())
+            val third = lightNode(ops3, dir.path, clock = { 15 * 60_000L })
+            third.depositChequebook(chequebook, milliBzz)
+            assertEquals(1, ops3.calls.count { it.startsWith("gateway:POST") })
+            third.dispose()
+        } finally {
+            dir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun holdElapsedIsNeverMoreThanTheRealTime() {
+        assertEquals(60_000L, SwarmNode.holdElapsedMs(1_060_000L, 1_000_000L))
+        // Rebooted: only the time since this boot is sure.
+        assertEquals(30_000L, SwarmNode.holdElapsedMs(30_000L, 7_200_000L))
+    }
+
+    @Test
     fun aBuyThatFailsBeforeAntSetUpAChequebookLeavesTheGatewayAlone() {
         val ops = FakeOps()
         val node = lightNode(ops)
