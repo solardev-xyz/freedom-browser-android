@@ -43,15 +43,35 @@ internal class SwarmFunding(
         val days: Long,
         val hash: String?,
         val mined: Boolean,
+        /**
+         * False once the wallet stopped following its call before it was
+         * mined (Stop tracking, the wallet removed, or no send left after a
+         * restart): it may still land or never will, so it no longer holds
+         * up funding, and Connect (which fails harmlessly for a batch that
+         * isn't on chain) and Dismiss are offered.
+         */
+        val tracked: Boolean = true,
     )
 
     private val _pending = MutableStateFlow(load())
     val pending: StateFlow<Pending?> = _pending.asStateFlow()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
-    /** Follows [sends] (every status, none conflated away) and the node's own spends. */
-    fun start(sends: Flow<SendStatus?>) {
-        scope.launch { sends.collect { it?.let(::noteSend) } }
+    /**
+     * Follows [sends] (every status, none conflated away; null once the
+     * sender stopped following its send) and the node's own spends.
+     * [current]: the sender's send once its journal has been read back —
+     * a record left going out with no such send was given up on in an
+     * earlier process.
+     */
+    fun start(sends: Flow<SendStatus?>, current: (suspend () -> SendStatus?)? = null) {
+        scope.launch { sends.collect { if (it == null) untrack() else noteSend(it) } }
+        if (current != null) {
+            scope.launch {
+                val send = current()
+                untrack { it.batchId != send?.quote?.request?.dapp?.swarm?.batchId }
+            }
+        }
         scope.launch {
             spends.collect { s ->
                 // Connected: nothing more to do for it.
@@ -79,11 +99,12 @@ internal class SwarmFunding(
             val stage = status.stage
             when {
                 base == null -> current
-                stage is SendStatus.Stage.Confirmed -> base.copy(hash = status.hash ?: base.hash, mined = true).also { mined = !base.mined }
+                stage is SendStatus.Stage.Confirmed ->
+                    base.copy(hash = status.hash ?: base.hash, mined = true, tracked = true).also { mined = !base.mined }
                 // Mined but failed, or certainly never sent: nothing was bought.
                 stage is SendStatus.Stage.Reverted || (stage is SendStatus.Stage.Failed && !stage.mayHaveGone) ->
                     if (same != null) null else current
-                else -> base.copy(hash = status.hash ?: base.hash)
+                else -> base.copy(hash = status.hash ?: base.hash, tracked = true)
             }
         }
         if (mined) {
@@ -92,9 +113,21 @@ internal class SwarmFunding(
         }
     }
 
-    /** Asks the node to connect the mined stamp. False if there's none, or another spend is running. */
+    /**
+     * The wallet no longer follows the stamp's call (and [which] says it's
+     * this one's): unless it's mined, it's kept as [Pending.tracked] false
+     * — it may still land, so it's offered for connecting, and dismissing.
+     */
+    internal fun untrack(which: (Pending) -> Boolean = { true }) =
+        update { p -> if (p != null && !p.mined && p.tracked && which(p)) p.copy(tracked = false) else p }
+
+    /**
+     * Asks the node to connect the mined stamp (or one the wallet stopped
+     * following, which may have been mined). False if there's none, or
+     * another spend is running.
+     */
     fun connectNow(): Boolean {
-        val p = _pending.value?.takeIf { it.mined } ?: return false
+        val p = _pending.value?.takeIf { it.mined || !it.tracked } ?: return false
         return connect(p.batchId)
     }
 
@@ -118,6 +151,7 @@ internal class SwarmFunding(
             Pending(
                 o.getString("node"), o.getString("batchId"), o.getInt("depth"), o.getLong("days"),
                 o.optString("hash").takeIf { it.isNotEmpty() }, o.getBoolean("mined"),
+                tracked = !o.optBoolean("untracked", false),
             ).takeIf { normalizeBatchId(it.batchId) == it.batchId }
         }
     } catch (e: Exception) {
@@ -135,7 +169,8 @@ internal class SwarmFunding(
             val tmp = File(file.path + ".tmp")
             tmp.writeText(
                 JSONObject().put("node", p.node).put("batchId", p.batchId).put("depth", p.depth).put("days", p.days)
-                    .put("hash", p.hash ?: "").put("mined", p.mined).toString(),
+                    .put("hash", p.hash ?: "").put("mined", p.mined)
+                    .put("untracked", !p.tracked).toString(),
             )
             if (!tmp.renameTo(file)) tmp.delete()
         } catch (e: Exception) {
@@ -149,11 +184,29 @@ internal class SwarmFunding(
         @Volatile
         private var instance: SwarmFunding? = null
 
+        private fun file(context: Context) = File(context.applicationContext.noBackupFilesDir, "swarm/funding.json")
+
+        /** Touches storage and starts the wallet's sender: off the main thread, or once a page needs it. */
         fun get(context: Context): SwarmFunding = instance ?: synchronized(this) {
-            instance ?: SwarmFunding(File(context.applicationContext.noBackupFilesDir, "swarm/funding.json")).also {
+            instance ?: SwarmFunding(file(context)).also {
                 instance = it
-                it.start(WalletSender.get(context).changes)
+                val sender = WalletSender.get(context)
+                it.start(sender.changes) {
+                    sender.awaitRestored()
+                    sender.status.value
+                }
             }
+        }
+
+        /**
+         * At each app launch, off the main thread: a stamp left bought or
+         * going out by the last process is followed (and connected once
+         * mined) now rather than at the next visit to publish setup. With
+         * no record there is nothing to follow, and nothing is started — a
+         * funding send starts from a page that calls [get] itself.
+         */
+        fun resumeAtLaunch(context: Context) {
+            if (file(context).exists()) get(context)
         }
     }
 }

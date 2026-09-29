@@ -16,6 +16,7 @@ import baby.freedom.swarm.NodeStatus
 import java.io.File
 import java.math.BigInteger
 import kotlinx.coroutines.flow.emptyFlow
+import kotlinx.coroutines.flow.flowOf
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -123,5 +124,59 @@ class SwarmFundingTest {
         val pending = SwarmFunding.Pending(node, batch, 17, 2, hash, mined = false)
         assertEquals("A stamp your wallet is buying for the node is still going out.", fundNodeBlockedReason(light, pending))
         assertEquals("Connect the stamp your wallet already bought for the node first.", fundNodeBlockedReason(light, pending.copy(mined = true)))
+        assertEquals(
+            "Connect or dismiss the stamp your wallet stopped following first.",
+            fundNodeBlockedReason(light, pending.copy(tracked = false)),
+        )
+    }
+
+    /** Waits (bounded) for [f]'s background collectors to settle on [want]. */
+    private fun awaitPending(f: SwarmFunding, want: (SwarmFunding.Pending?) -> Boolean) {
+        val until = System.currentTimeMillis() + 5_000
+        while (!want(f.pending.value) && System.currentTimeMillis() < until) Thread.sleep(10)
+        assertTrue("pending was ${f.pending.value}", want(f.pending.value))
+    }
+
+    @Test
+    fun `a send the wallet stopped following leaves a record offered for Connect and Dismiss, across restarts`() {
+        val f = funding()
+        // Stop tracking (or Remove wallet): the sender publishes null.
+        f.start(flowOf(status(SendStatus.Stage.Pending), status(SendStatus.Stage.Unconfirmed), null))
+        awaitPending(f) { it?.tracked == false }
+        assertEquals(SwarmFunding.Pending(node, batch, 17, 2, hash, mined = false, tracked = false), f.pending.value)
+        // Not blocking funding for good, and connectable in case it was mined after all.
+        val light = NodeInfo(status = NodeStatus.Running, accountAddress = node, walletIdentity = true, lightMode = true)
+        assertFalse(fundNodeBlockedReason(light, f.pending.value)!!.contains("still going out"))
+        assertTrue(f.connectNow())
+        assertEquals(listOf(batch), connects)
+
+        val again = funding()
+        assertEquals(f.pending.value, again.pending.value)
+        // If the sender picks the same send up again and sees it mined, it's tracked and connected.
+        again.noteSend(status(SendStatus.Stage.Confirmed(1, null)))
+        assertEquals(true, again.pending.value?.let { it.mined && it.tracked })
+        assertEquals(listOf(batch, batch), connects)
+
+        // A mined one isn't touched by the sender moving on.
+        again.untrack()
+        assertTrue(again.pending.value!!.tracked)
+        again.forget()
+        assertNull(funding().pending.value)
+    }
+
+    @Test
+    fun `a record left going out with no send after a restart is untracked, one still being followed isn't`() {
+        funding().noteSend(status(SendStatus.Stage.Pending))
+        // The sender's journal brought nothing back.
+        val orphan = funding()
+        orphan.start(emptyFlow()) { null }
+        awaitPending(orphan) { it?.tracked == false }
+
+        funding().noteSend(status(SendStatus.Stage.Pending))
+        val followed = funding()
+        assertTrue(followed.pending.value!!.tracked)
+        followed.start(emptyFlow()) { status(SendStatus.Stage.Pending) }
+        Thread.sleep(200)
+        assertTrue(followed.pending.value!!.tracked)
     }
 }

@@ -335,14 +335,18 @@ class MainActivity : ComponentActivity() {
         // The wallet's accounts (#104) follow it the same way: verified on
         // every unlock, forgotten on Remove wallet.
         WalletAccounts.get(this).start()
-        // Connects a stamp the wallet bought for the node (#115) once its call is mined.
-        baby.freedom.mobile.browser.SwarmFunding.get(this)
-        // A send the last process left unresolved resumes, and mined abandoned sends are swept (#105).
+        // A send the last process left unresolved resumes, and mined abandoned sends are swept (#105);
+        // a stamp the wallet bought for the node (#115) is connected once its call is mined.
         lifecycleScope.launch(Dispatchers.IO) {
             try {
                 WalletSender.resumeAtLaunch(this@MainActivity)
             } catch (e: Exception) {
                 android.util.Log.w("MainActivity", "resuming the wallet's send failed (${e.javaClass.simpleName})")
+            }
+            try {
+                baby.freedom.mobile.browser.SwarmFunding.resumeAtLaunch(this@MainActivity)
+            } catch (e: Exception) {
+                android.util.Log.w("MainActivity", "resuming the node's funding failed (${e.javaClass.simpleName})")
             }
         }
 

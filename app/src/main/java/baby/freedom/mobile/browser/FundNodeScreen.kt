@@ -78,7 +78,8 @@ import org.json.JSONObject
 internal fun fundNodeBlockedReason(node: NodeInfo, pending: SwarmFunding.Pending?): String? =
     stampSpendBlockedReason(node) ?: when {
         fundingAddress(node) == null -> "The node isn't running as your wallet's identity."
-        pending != null && !pending.mined -> "A stamp your wallet is buying for the node is still going out."
+        pending != null && !pending.mined && pending.tracked -> "A stamp your wallet is buying for the node is still going out."
+        pending != null && !pending.mined -> "Connect or dismiss the stamp your wallet stopped following first."
         pending != null -> "Connect the stamp your wallet already bought for the node first."
         else -> null
     }
@@ -443,15 +444,17 @@ internal fun PendingStampCard(
         DetailRow("Batch", shortBatchId(p.batchId), mono = true)
         MutedText(
             when {
-                !p.mined -> "Your wallet's transaction is going out; the node connects the stamp once it's mined."
+                !p.mined && p.tracked -> "Your wallet's transaction is going out; the node connects the stamp once it's mined."
                 connecting -> "The node is connecting it…"
                 otherNode -> "It was bought for another node account (${p.node}), which has to be running to connect it."
-                failed != null -> "Connecting it failed: ${failed.message}"
+                failed != null -> "Connecting it failed: ${failed.message}" +
+                    (if (!p.mined) " If its transaction wasn't mined, there's no stamp: dismiss it." else "")
+                !p.mined -> "Your wallet stopped following its transaction, so it may or may not have been mined. If it was, Connect adds the stamp to the node; if not, dismiss it."
                 else -> "Mined. The node connects it to publish with it" +
                     (stampsBlockedReason(nodeInfo)?.let { " once it can: $it" } ?: ".")
             },
         )
-        if (p.mined) {
+        if (p.mined || !p.tracked) {
             Spacer(Modifier.height(8.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(
