@@ -2303,7 +2303,7 @@ private fun buildRefreshableWebView(
             // The user's own: the address they named, or Reload /
             // Back / Forward (no URL). A site's allowance may pay for
             // it; not for the app's other loads (#218 R4-M3).
-            X402Payments.onNavigationStarted(state, byUser = userNamed || url == null, pageUrl = null)
+            X402Payments.onNavigationStarted(state, byUser = userNamed || url == null, pageUrl = null, url = url)
         }
         // Stop (or a new load's stop first) ends the navigation in flight
         // without a commit: neither its gesture nor the user's naming of
@@ -3163,7 +3163,7 @@ private fun buildRefreshableWebView(
                         X402Payments.onNavigationSuperseded(state)
                         // Started by the page on screen: only that site's
                         // own allowance may pay for it (#218 R4-M3).
-                        X402Payments.onNavigationStarted(state, byUser = false, pageUrl = committedPageUrl)
+                        X402Payments.onNavigationStarted(state, byUser = false, pageUrl = committedPageUrl, url = target)
                     }
                 }
                 return false

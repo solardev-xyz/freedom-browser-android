@@ -113,7 +113,10 @@ object X402Payments {
     private class Detection(val url: String, val origin: String, val required: X402.Required)
 
     /** Which navigation a 402 or a paid request's answer is (#218 R2). */
-    private val flow = X402Flow<Detection> { id, status, httpStatus -> settle(id, status, httpStatus) }
+    private val flow = X402Flow<Detection>(
+        settle = { id, status, httpStatus -> settle(id, status, httpStatus) },
+        originOf = ::providerOriginKey,
+    )
     private val random = SecureRandom()
 
     fun init(context: Context) {
@@ -161,13 +164,15 @@ object X402Payments {
     fun onNavigationSuperseded(tab: BrowserState) = flow.superseded(tab.id)
 
     /**
-     * [tab] began a navigation (after [onNavigationSuperseded]): [byUser]
-     * — the address they named, their Reload or Back/Forward — or the
-     * page on screen's, at [pageUrl]. Only these may let a site's
-     * allowance pay without asking (#218 R4-M3).
+     * [tab] began a navigation to [url] (null: Reload or Back/Forward)
+     * (after [onNavigationSuperseded]): [byUser] — the address they
+     * named, their Reload or Back/Forward — or the page on screen's, at
+     * [pageUrl]. Only these may let a site's allowance pay without asking
+     * (#218 R4-M3), and only while its redirects stay on that site
+     * (#218 R5-M1).
      */
-    fun onNavigationStarted(tab: BrowserState, byUser: Boolean, pageUrl: String?) =
-        flow.navigationStarted(tab.id, byUser, if (byUser) null else pageUrl?.let(::providerOriginKey))
+    fun onNavigationStarted(tab: BrowserState, byUser: Boolean, pageUrl: String?, url: String?) =
+        flow.navigationStarted(tab.id, byUser, if (byUser) null else pageUrl?.let(::providerOriginKey), url)
 
     /**
      * [tab]'s payment epoch, read on the interceptor's thread as a

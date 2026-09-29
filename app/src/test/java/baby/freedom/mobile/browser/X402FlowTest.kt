@@ -10,7 +10,10 @@ import org.junit.Test
 /** Which navigation an x402 402 or a paid request's answer belongs to (#218 R2). */
 class X402FlowTest {
     private val settled = mutableListOf<Triple<String, Status, Int?>>()
-    private val flow = X402Flow<String> { id, status, http -> settled += Triple(id, status, http) }
+    private val flow = X402Flow<String>(
+        settle = { id, status, http -> settled += Triple(id, status, http) },
+        originOf = { url -> url.substringBefore("://") + "://" + url.substringAfter("://").substringBefore('/') },
+    )
     private val tab = 1L
     private val a = "https://pay.example/a"
     private val b = "https://pay.example/b"
@@ -206,14 +209,14 @@ class X402FlowTest {
     @Test
     fun `R4-M3 the user's own load lets an allowance pay`() {
         flow.superseded(tab)
-        flow.navigationStarted(tab, byUser = true, fromOrigin = null)
+        flow.navigationStarted(tab, byUser = true, fromOrigin = null, url = null)
         flow.detected(tab, a, "terms")
         assertTrue(flow.committed(tab, a)!!.allowanceMayPay(origin))
     }
 
     @Test
     fun `R4-M3 the site's own page's navigation lets its allowance pay`() {
-        flow.navigationStarted(tab, byUser = false, fromOrigin = origin)
+        flow.navigationStarted(tab, byUser = false, fromOrigin = origin, url = null)
         flow.redirected(tab, b) // before the 402: the site's own redirect
         flow.detected(tab, a, "terms")
         assertTrue(flow.committed(tab, a)!!.allowanceMayPay(origin))
@@ -221,11 +224,11 @@ class X402FlowTest {
 
     @Test
     fun `R4-M3 another site's link, script or popup can't spend the allowance`() {
-        flow.navigationStarted(tab, byUser = false, fromOrigin = "https://evil.example")
+        flow.navigationStarted(tab, byUser = false, fromOrigin = "https://evil.example", url = null)
         flow.detected(tab, a, "terms")
         assertFalse(flow.committed(tab, a)!!.allowanceMayPay(origin))
         // A popup's first navigation: no page on screen.
-        flow.navigationStarted(tab, byUser = false, fromOrigin = null)
+        flow.navigationStarted(tab, byUser = false, fromOrigin = null, url = null)
         flow.detected(tab, a, "terms")
         assertFalse(flow.committed(tab, a)!!.allowanceMayPay(origin))
     }
@@ -233,7 +236,7 @@ class X402FlowTest {
     @Test
     fun `R4-M3 a navigation nobody was seen starting can't spend it`() {
         // The site's link started one navigation, which committed...
-        flow.navigationStarted(tab, byUser = false, fromOrigin = origin)
+        flow.navigationStarted(tab, byUser = false, fromOrigin = origin, url = null)
         assertNull(flow.committed(tab, "https://evil.example/"))
         // ...then evil's history.go() lands on the 402 with no start signal.
         flow.detected(tab, a, "terms")
@@ -242,7 +245,7 @@ class X402FlowTest {
 
     @Test
     fun `R4-M3 Stop forgets who started the navigation`() {
-        flow.navigationStarted(tab, byUser = true, fromOrigin = null)
+        flow.navigationStarted(tab, byUser = true, fromOrigin = null, url = null)
         flow.superseded(tab)
         flow.detected(tab, a, "terms")
         assertFalse(flow.committed(tab, a)!!.allowanceMayPay(origin))
@@ -250,8 +253,56 @@ class X402FlowTest {
 
     @Test
     fun `R4-M3 a form POST from another site can't spend it`() {
-        flow.navigationStarted(tab, byUser = true, fromOrigin = null)
+        flow.navigationStarted(tab, byUser = true, fromOrigin = null, url = null)
         flow.mainFrameRequested(tab, a, "POST", flow.epoch(tab), "https://evil.example")
+        flow.detected(tab, a, "terms")
+        assertFalse(flow.committed(tab, a)!!.allowanceMayPay(origin))
+    }
+
+    @Test
+    fun `R5-M1 the user's address redirected by another origin to the 402 can't spend it`() {
+        flow.superseded(tab)
+        flow.navigationStarted(tab, byUser = true, fromOrigin = null, url = "https://evil.example/x")
+        flow.redirected(tab, a)
+        flow.detected(tab, a, "terms")
+        assertFalse(flow.committed(tab, a)!!.allowanceMayPay(origin))
+    }
+
+    @Test
+    fun `R5-M1 the site's link redirected back to it by another origin can't spend it`() {
+        flow.superseded(tab)
+        flow.navigationStarted(tab, byUser = false, fromOrigin = origin, url = "https://evil.example/r")
+        flow.redirected(tab, a)
+        flow.detected(tab, a, "terms")
+        assertFalse(flow.committed(tab, a)!!.allowanceMayPay(origin))
+        // Nor through another origin and back again.
+        flow.navigationStarted(tab, byUser = true, fromOrigin = null, url = b)
+        flow.redirected(tab, "https://evil.example/r")
+        flow.redirected(tab, a)
+        flow.detected(tab, a, "terms")
+        assertFalse(flow.committed(tab, a)!!.allowanceMayPay(origin))
+    }
+
+    @Test
+    fun `R5-M1 redirects that stay on the site still let its allowance pay`() {
+        flow.navigationStarted(tab, byUser = true, fromOrigin = null, url = b)
+        flow.redirected(tab, a)
+        flow.detected(tab, a, "terms")
+        assertTrue(flow.committed(tab, a)!!.allowanceMayPay(origin))
+        flow.navigationStarted(tab, byUser = false, fromOrigin = origin, url = b)
+        flow.redirected(tab, a)
+        flow.detected(tab, a, "terms")
+        assertTrue(flow.committed(tab, a)!!.allowanceMayPay(origin))
+        // Reload / Back: the entry's own URL isn't named, only its redirects.
+        flow.navigationStarted(tab, byUser = true, fromOrigin = null, url = null)
+        flow.detected(tab, a, "terms")
+        assertTrue(flow.committed(tab, a)!!.allowanceMayPay(origin))
+    }
+
+    @Test
+    fun `R5-M1 a form POST to another origin redirected to the 402 can't spend it`() {
+        flow.mainFrameRequested(tab, "https://evil.example/f", "POST", flow.epoch(tab), origin)
+        flow.redirected(tab, a)
         flow.detected(tab, a, "terms")
         assertFalse(flow.committed(tab, a)!!.allowanceMayPay(origin))
     }

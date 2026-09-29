@@ -35,13 +35,21 @@ import java.util.concurrent.ConcurrentHashMap
  * Who started the navigation a 402 commits in ([navigationStarted]) goes
  * with it: a site's allowance pays silently only for the user's own load
  * or a navigation from that site's own page, never one another site
- * started — its link or script, or a popup it opened (#218 R4-M3).
+ * started — its link or script, or a popup it opened (#218 R4-M3). Nor
+ * does it once the navigation's server redirects have taken it through
+ * another origin: whoever started it named where it went first, not
+ * where another origin's server sent it next, so a 402 at the end of a
+ * chain that ever left the paying origin — the user's address on
+ * `evil.example` redirected to `pay.example`, or `pay.example`'s link to
+ * `evil.example` redirected back — asks (#218 R5-M1).
  *
  * Main thread only, but for [epoch].
  */
 internal class X402Flow<D : Any>(
     /** Settles a paid request's history entry. */
     private val settle: (recordId: String, status: X402Store.Status, httpStatus: Int?) -> Unit,
+    /** A URL's origin key, as [Committed.allowanceMayPay] is asked for; null for one that has none. */
+    private val originOf: (String) -> String?,
 ) {
     private class Detection<D>(val url: String, val value: D)
 
@@ -53,18 +61,33 @@ internal class X402Flow<D : Any>(
         var seen = false
     }
 
-    /** Who started a navigation: the user (their address, Reload, Back/Forward), or a page of [fromOrigin]. */
-    private class Initiator(val byUser: Boolean, val fromOrigin: String?)
+    /**
+     * Who started a navigation: the user (their address, Reload,
+     * Back/Forward), or a page of [fromOrigin]; and the origin of every
+     * URL it has been at — its start's, if known, and each server
+     * redirect's (#218 R5-M1).
+     */
+    private class Initiator(val byUser: Boolean, val fromOrigin: String?) {
+        val hopOrigins = mutableListOf<String?>()
+    }
 
-    /** A 402's terms at their commit, with who started the navigation that brought them. */
-    class Committed<D>(val value: D, private val byUser: Boolean, private val fromOrigin: String?) {
+    /** A 402's terms at their commit, with who started the navigation that brought them, and where it went. */
+    class Committed<D>(
+        val value: D,
+        private val byUser: Boolean,
+        private val fromOrigin: String?,
+        private val hopOrigins: List<String?>,
+    ) {
         /**
          * An allowance of [origin]'s may pay this without asking: the user
          * named the load, or [origin]'s own page started it — not another
          * site's link, script or popup, nor a navigation nobody was seen
-         * starting (#218 R4-M3).
+         * starting (#218 R4-M3) — and it never left [origin] on the way:
+         * a redirect through another origin is that origin's say, not the
+         * starter's (#218 R5-M1).
          */
-        fun allowanceMayPay(origin: String): Boolean = byUser || fromOrigin == origin
+        fun allowanceMayPay(origin: String): Boolean =
+            (byUser || fromOrigin == origin) && hopOrigins.all { it == origin }
     }
 
     private val detections = HashMap<Long, Detection<D>>()
@@ -116,6 +139,8 @@ internal class X402Flow<D : Any>(
         // A response that redirects isn't the 402 noted before it, which will never commit now.
         detections.remove(tab)
         retries[tab]?.hops?.add(target)
+        // Where it goes next is the redirecting server's say (#218 R5-M1).
+        initiators[tab]?.hopOrigins?.add(originOf(target))
     }
 
     /**
@@ -132,12 +157,13 @@ internal class X402Flow<D : Any>(
     }
 
     /**
-     * A navigation of [tab]'s began, [byUser] (their address, Reload,
-     * Back/Forward) or from the page of [fromOrigin] on screen (its link,
-     * script or form). Called after [superseded].
+     * A navigation of [tab]'s to [url] (null: a Reload or Back/Forward,
+     * of an entry already in the tab's history) began, [byUser] (their
+     * address, Reload, Back/Forward) or from the page of [fromOrigin] on
+     * screen (its link, script or form). Called after [superseded].
      */
-    fun navigationStarted(tab: Long, byUser: Boolean, fromOrigin: String?) {
-        initiators[tab] = Initiator(byUser, fromOrigin)
+    fun navigationStarted(tab: Long, byUser: Boolean, fromOrigin: String?, url: String?) {
+        initiators[tab] = Initiator(byUser, fromOrigin).also { if (url != null) it.hopOrigins.add(originOf(url)) }
     }
 
     /**
@@ -159,7 +185,7 @@ internal class X402Flow<D : Any>(
             return
         }
         superseded(tab)
-        navigationStarted(tab, byUser = false, fromOrigin = fromOrigin)
+        navigationStarted(tab, byUser = false, fromOrigin = fromOrigin, url = url)
     }
 
     /** `onPageFinished` for [url] on [tab]: a 402 noted for it that hasn't committed never will. */
@@ -190,7 +216,12 @@ internal class X402Flow<D : Any>(
         }
         val detection = detections.remove(tab) ?: return null
         if (url == null || url != detection.url) return null
-        return Committed(detection.value, initiator?.byUser == true, initiator?.fromOrigin)
+        return Committed(
+            detection.value,
+            initiator?.byUser == true,
+            initiator?.fromOrigin,
+            initiator?.hopOrigins.orEmpty(),
+        )
     }
 
     fun closed(tab: Long) {
