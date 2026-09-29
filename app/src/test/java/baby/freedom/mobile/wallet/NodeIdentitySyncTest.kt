@@ -52,7 +52,7 @@ class NodeIdentitySyncTest {
     private val changes = mutableListOf<NodeIdentitySync.Change>()
 
     init {
-        sync.onChanged = { changes += it }
+        sync.setOnChanged { changes += it }
     }
 
     private val abandon12 = Mnemonic.parse(
@@ -191,6 +191,30 @@ class NodeIdentitySyncTest {
         val tag = vault.identityTag()
         vault.markBackedUp()
         assertEquals(tag, vault.identityTag())
+    }
+
+    @Test
+    fun `a finished activity's listener is let go, a newer one's is kept`() = runBlocking {
+        // The sync lives as long as the process; an activity's listener
+        // (which reaches the activity) must not outlive it (R1-F1).
+        val old = mutableListOf<NodeIdentitySync.Change>()
+        val new = mutableListOf<NodeIdentitySync.Change>()
+        val oldListener: (NodeIdentitySync.Change) -> Unit = { old += it }
+        val newListener: (NodeIdentitySync.Change) -> Unit = { new += it }
+        sync.setOnChanged(oldListener)
+        // A recreated activity takes over before the old one is destroyed.
+        sync.setOnChanged(newListener)
+        sync.clearOnChanged(oldListener)
+        vault.create(abandon12, auth, imported = false)
+        reconcile()
+        assertEquals(emptyList<NodeIdentitySync.Change>(), old)
+        assertEquals(1, new.size)
+        // The last activity finishing leaves nothing behind.
+        sync.clearOnChanged(newListener)
+        vault.remove()
+        assertEquals(NodeIdentitySync.Change.Dropped, reconcile())
+        assertEquals(1, new.size)
+        assertEquals(emptyList<NodeIdentitySync.Change>(), changes)
     }
 
     @Test

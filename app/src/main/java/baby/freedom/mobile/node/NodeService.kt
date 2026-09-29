@@ -60,15 +60,8 @@ class NodeService : Service() {
     private lateinit var identityStore: NodeIdentityStore
     private lateinit var vaultStore: KeystoreVaultStore
 
-    /**
-     * What the Swarm node's latest (re)start read as its identity (#77):
-     * the wallet's Swarm address, `""` for ant's own, null before the
-     * first read. Written and compared under [bootLock], so
-     * [INodeService.reloadIdentity] restarts only a node that really
-     * booted as something else than the store now says.
-     */
-    private var bootedAs: String? = null
-    private val bootLock = Any()
+    /** What the Swarm node's (re)start booted as (#77), for [INodeService.reloadIdentity]. */
+    private val bootIdentity = SwarmBootIdentity()
     private var ipfsNode: IpfsNode? = null
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
@@ -159,19 +152,19 @@ class NodeService : Service() {
 
         override fun reloadIdentity() {
             scope.launch(Dispatchers.IO) {
-                val stale = synchronized(bootLock) {
-                    val want = identityStore.boot(vaultStore)?.let { boot ->
-                        boot.antIdentity.fill(0)
-                        boot.swarmAddress
-                    }.orEmpty()
-                    // Not booted yet: the coming read already sees the change.
-                    val booted = bootedAs ?: return@synchronized false
-                    !booted.equals(want, ignoreCase = true) && swarmNode.state.value.status != NodeStatus.Stopped
-                }
-                if (stale) {
-                    Log.i(TAG, "node identity changed → restarting swarm")
-                    swarmNode.restart()
-                }
+                bootIdentity.restartIfStale(
+                    want = {
+                        identityStore.boot(vaultStore)?.let { boot ->
+                            boot.antIdentity.fill(0)
+                            boot.swarmAddress
+                        }.orEmpty()
+                    },
+                    running = { swarmNode.state.value.status != NodeStatus.Stopped },
+                    restart = {
+                        Log.i(TAG, "node identity changed → restarting swarm")
+                        swarmNode.restart()
+                    },
+                )
             }
         }
 
@@ -321,10 +314,9 @@ class NodeService : Service() {
                 // The wallet's Swarm identity (#77) when there is one,
                 // re-read at every (re)start; ant's own otherwise.
                 identity = {
-                    synchronized(bootLock) {
+                    bootIdentity.boot {
                         val boot = identityStore.boot(vaultStore)
-                        bootedAs = boot?.swarmAddress.orEmpty()
-                        boot?.antIdentity
+                        boot?.swarmAddress.orEmpty() to boot?.antIdentity
                     }
                 },
             ),

@@ -13,6 +13,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import java.util.concurrent.atomic.AtomicReference
 
 /**
  * Keeps the node identities on disk ([NodeIdentityStore]) in step with
@@ -28,8 +29,9 @@ import kotlinx.coroutines.withContext
  *    wallet made before #77 gets its identities on its first unlock.)
  *  - The wallet is removed: wipe them, [Change.Dropped].
  *
- * Each change goes to [onChanged] — the activity restarts the Swarm node
- * with it — and to [notices], which the browser shows. The `:node`
+ * Each change goes to the [setOnChanged] listener — the activity
+ * restarts the Swarm node with it — and to [notices], which the browser
+ * shows. The `:node`
  * process only ever reads the store, and only keys tagged with the
  * vault still on the device, so a crash between the vault and the store
  * being updated can't leave a node running as a removed wallet.
@@ -48,9 +50,24 @@ class NodeIdentitySync internal constructor(
         data object Dropped : Change
     }
 
-    /** Told about every [Change] once it's on disk (on a background thread). */
-    @Volatile
-    var onChanged: ((Change) -> Unit)? = null
+    /**
+     * Told about every [Change] once it's on disk (on a background
+     * thread). Owned by whoever set it last — the current activity — and
+     * cleared by it in [clearOnChanged]: this object lives as long as the
+     * process, so a listener left behind would keep a finished activity
+     * (its views, its WebViews) reachable.
+     */
+    private val onChanged = AtomicReference<((Change) -> Unit)?>(null)
+
+    /** Makes [listener] the one told about each [Change], replacing any earlier one. */
+    fun setOnChanged(listener: (Change) -> Unit) {
+        onChanged.set(listener)
+    }
+
+    /** Drops [listener] if it's still the current one (a newer owner's stays). */
+    fun clearOnChanged(listener: (Change) -> Unit) {
+        onChanged.compareAndSet(listener, null)
+    }
 
     private val _notices = Channel<Change>(Channel.BUFFERED)
 
@@ -86,7 +103,7 @@ class NodeIdentitySync internal constructor(
             Log.w(TAG, "node identity sync failed: ${t.javaClass.simpleName}")
             null
         } ?: return null
-        runCatching { onChanged?.invoke(change) }
+        runCatching { onChanged.get()?.invoke(change) }
         _notices.trySend(change)
         return change
     }

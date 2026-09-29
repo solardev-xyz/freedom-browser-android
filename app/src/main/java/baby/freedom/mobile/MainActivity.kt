@@ -271,6 +271,11 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    /** Restarts a bound `:node`'s Swarm node on an identity change (#77); see onCreate. */
+    private val identityChanged: (NodeIdentitySync.Change) -> Unit = {
+        runCatching { binder?.reloadIdentity() }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         settings = NodeSettings.get(this)
@@ -294,8 +299,10 @@ class MainActivity : ComponentActivity() {
         // The nodes follow the wallet's identity (#77): a wallet created,
         // imported or removed changes what the Swarm node boots as, and a
         // bound `:node` restarts it. (Unbound, it reads it at its next start.)
+        // The sync outlives this activity, so the listener is taken back
+        // in onDestroy rather than left holding it.
         NodeIdentitySync.get(this).apply {
-            onChanged = { runCatching { binder?.reloadIdentity() } }
+            setOnChanged(identityChanged)
             start()
         }
 
@@ -577,6 +584,7 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
+        NodeIdentitySync.get(this).clearOnChanged(identityChanged)
         unbindFromService()
         unbindMyotis()
         unbindTor()
