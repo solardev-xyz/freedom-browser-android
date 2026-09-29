@@ -58,7 +58,7 @@ The parity plan ([#128](https://github.com/solardev-xyz/freedom-browser-android/
 What the Desktop and iOS columns mean:
 
 - **yes**: that platform has the feature. **yes (X)**: it has only part X of it (MIDI of #267, ENS of #277).
-- **no**: it doesn't either; the row is then Android polish or a mobile expectation, and the issue says so.
+- **no**: that platform doesn't have it either. A **no** in one column still leaves a parity gap with the other platform if that one says yes. Only when both columns say **no** ([#268](https://github.com/solardev-xyz/freedom-browser-android/issues/268), [#280](https://github.com/solardev-xyz/freedom-browser-android/issues/280)) is the row Android polish or a mobile expectation rather than parity, and the issue says so.
 - **partial**: it has part of it; the issue's *Reference implementations* says which part (for [#259](https://github.com/solardev-xyz/freedom-browser-android/issues/259), iOS has error pages for dweb loads only).
 - **minimal**: it has a little of it (iOS has about 13 accessibility labels in the whole app).
 - **n/a**: the gap doesn't apply to that platform, so there's nothing to compare ([#260](https://github.com/solardev-xyz/freedom-browser-android/issues/260)'s renderer-crash handling on iOS).
