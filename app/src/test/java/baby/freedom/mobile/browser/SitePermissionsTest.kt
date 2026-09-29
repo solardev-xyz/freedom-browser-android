@@ -338,4 +338,28 @@ class SitePermissionsTest {
         assertEquals(PromptTurn.None, turn(perm = false, offer = true, android = true))
         assertEquals(PromptTurn.None, turn(perm = true, offer = true, offerHeld = true, android = true))
     }
+
+    @Test
+    fun `no page prompt shows over a full-screen panel, the download offer included`() {
+        // A page's download offer (or any other prompt) while Settings, the
+        // Wallet or another panel covers it waits; it used to pop up over
+        // the panel (#228).
+        fun covered(
+            perm: Boolean = false, offer: Boolean = false, offerHeld: Boolean = false,
+            radicle: Boolean = false, ethereum: Boolean = false, ethereumHeld: Boolean = false,
+            swarm: Boolean = false,
+        ) = modalPromptTurn(
+            perm, offer, offerHeld, androidDialogUp = false,
+            radicleWaiting = radicle, ethereumWaiting = ethereum, ethereumHasTurn = ethereumHeld,
+            swarmWaiting = swarm, pageUncovered = false,
+        )
+        assertEquals(PromptTurn.None, covered(offer = true))
+        assertEquals(PromptTurn.None, covered(offer = true, offerHeld = true))
+        assertEquals(PromptTurn.None, covered(perm = true, offer = true))
+        assertEquals(PromptTurn.None, covered(radicle = true))
+        assertEquals(PromptTurn.None, covered(ethereum = true, ethereumHeld = true, offer = true))
+        assertEquals(PromptTurn.None, covered(swarm = true))
+        // Once the panel closes, the offer takes its turn again.
+        assertEquals(PromptTurn.DownloadOffer, modalPromptTurn(false, true, false, false, pageUncovered = true))
+    }
 }
