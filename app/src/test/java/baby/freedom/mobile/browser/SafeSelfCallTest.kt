@@ -3,6 +3,7 @@ package baby.freedom.mobile.browser
 import baby.freedom.mobile.ens.toHex
 import baby.freedom.mobile.wallet.Erc20
 import baby.freedom.mobile.wallet.SafeProtocol
+import baby.freedom.mobile.wallet.WalletAccount
 import java.math.BigInteger
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -102,5 +103,48 @@ class SafeSelfCallTest {
         assertTrue(cancel!!.harmless)
         assertNull(safeSelfCall(request(attacker, call("addOwnerWithThreshold", word(attacker), word(1)))))
         assertNull(safeSelfCall(SafeProtocol.parseRequest(SafeProtocol.shareText(SafeProtocol.messageTypedData(safe, 100, "hi"), "hi"))))
+    }
+
+    @Test
+    fun `the threshold detail checks the named owner is, or isn't, already an owner`() {
+        val three = listOf(owner, sentinel.replace("1", "2"), "0x" + "3".repeat(40))
+        // Adding an existing owner reverts (GS204): no "any one of 4 owners" claim.
+        assertEquals(
+            "The new owner already owns this Safe: this transaction would fail.",
+            safeSelfCallThreshold(SafeSelfCall.AddOwner(owner.lowercase(), BigInteger.ONE), three),
+        )
+        assertEquals(
+            "Any one of 4 owners alone can then move everything in the Safe.",
+            safeSelfCallThreshold(SafeSelfCall.AddOwner(attacker, BigInteger.ONE), three),
+        )
+        // Removing a non-owner reverts too: no "t of 2 owners" claim.
+        assertEquals(
+            "The removed owner doesn’t own this Safe: this transaction would fail.",
+            safeSelfCallThreshold(SafeSelfCall.RemoveOwner(attacker, BigInteger.ONE), three),
+        )
+        assertEquals("2 of 2 owners must then sign.", safeSelfCallThreshold(SafeSelfCall.RemoveOwner(owner, BigInteger.TWO), three))
+        assertEquals("Not possible with 3 owners: this transaction would fail.", safeSelfCallThreshold(SafeSelfCall.ChangeThreshold(BigInteger.valueOf(4)), three))
+        // Nothing to say before the owners are read, or for a call with no threshold.
+        assertNull(safeSelfCallThreshold(SafeSelfCall.AddOwner(attacker, BigInteger.ONE), null))
+        assertNull(safeSelfCallThreshold(SafeSelfCall.SwapOwner(owner, attacker), three))
+    }
+
+    @Test
+    fun `signing is cleared by one predicate`() {
+        assertTrue(safeSelfCallCleared(null, acknowledged = false))
+        assertTrue(safeSelfCallCleared(SafeSelfCall.Cancel, acknowledged = false))
+        assertFalse(safeSelfCallCleared(SafeSelfCall.EnableModule(attacker), acknowledged = false))
+        assertTrue(safeSelfCallCleared(SafeSelfCall.EnableModule(attacker), acknowledged = true))
+        assertFalse(safeSelfCallCleared(SafeSelfCall.Unknown, acknowledged = false))
+        assertFalse(null.needsAcknowledgement)
+        assertFalse(SafeSelfCall.Cancel.needsAcknowledgement)
+        assertTrue(SafeSelfCall.Unknown.needsAcknowledgement)
+    }
+
+    @Test
+    fun `a removed owner that is this wallet's own account is named`() {
+        val accounts = listOf(WalletAccount(0, "Account 1", owner))
+        assertEquals("Account 1 (this phone)", safeOwnAccountLabel(owner.lowercase(), accounts))
+        assertNull(safeOwnAccountLabel(attacker, accounts))
     }
 }
