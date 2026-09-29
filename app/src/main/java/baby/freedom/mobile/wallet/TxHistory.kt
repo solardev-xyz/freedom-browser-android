@@ -2,6 +2,7 @@ package baby.freedom.mobile.wallet
 
 import android.util.Log
 import baby.freedom.mobile.chains.rpc.ChainDataRouter
+import baby.freedom.mobile.chains.rpc.ChainRpcException
 import baby.freedom.mobile.chains.rpc.WalletRpc
 import java.io.File
 import java.io.FileOutputStream
@@ -289,24 +290,29 @@ class TxHistory internal constructor(
      * receipt settles it; with none, an account nonce already past its
      * own marks it replaced. A record that can't be read (no RPC
      * answering, the chain gone from Settings) stays as it was.
+     *
+     * True while a later refresh could still tell something new: a record
+     * is still due (pending, or replaced within [RECHECK_REPLACED_MS]) on
+     * a chain that's still set up. A pending record whose chain was
+     * removed from Settings doesn't count — nothing can be read for it
+     * until the chain comes back and the page is refreshed.
      */
-    suspend fun refresh() = refreshing.withLock {
-        val (mine, due) = synchronized(this) {
-            val now = clock()
-            generation to _records.value.filter {
-                it.pending || (it.status == TxRecord.Status.REPLACED && now - (it.settledAt ?: 0) in 0 until RECHECK_REPLACED_MS)
-            }
-        }
+    suspend fun refresh(): Boolean = refreshing.withLock {
+        val (mine, due) = synchronized(this) { generation to _records.value.filter { due(it, clock()) } }
+        val unknownChains = mutableSetOf<Long>()
         for (r in due) {
             val found = try {
                 settle(r)
             } catch (e: CancellationException) {
                 throw e
+            } catch (e: ChainRpcException.UnknownChain) {
+                unknownChains += r.chainId
+                null
             } catch (e: Exception) {
                 null
             } ?: continue
             val changed = synchronized(this) {
-                if (generation != mine) return@withLock
+                if (generation != mine) return@withLock false
                 val existing = find(r.hash) ?: return@synchronized false
                 val updated = advance(existing, found.status, found.block, found.feePaid) ?: return@synchronized false
                 replace(existing, updated)
@@ -314,7 +320,15 @@ class TxHistory internal constructor(
             }
             if (changed) persistLater()
         }
+        synchronized(this) {
+            val now = clock()
+            generation == mine && _records.value.any { due(it, now) && it.chainId !in unknownChains }
+        }
     }
+
+    /** Whether a refresh at [now] reads [r] from the chain. */
+    private fun due(r: TxRecord, now: Long): Boolean =
+        r.pending || (r.status == TxRecord.Status.REPLACED && now - (r.settledAt ?: 0) in 0 until RECHECK_REPLACED_MS)
 
     /** What the chain says about [r] now, or null if it says nothing new. */
     private suspend fun settle(r: TxRecord): TxRecord? {

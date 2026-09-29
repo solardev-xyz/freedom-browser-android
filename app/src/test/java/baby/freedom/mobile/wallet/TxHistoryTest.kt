@@ -256,12 +256,14 @@ class TxHistoryTest {
         chain.down = true
         val h = history(chain, MemoryStore(listOf(record())))
         withTimeout(5_000) { h.records.first { it.isNotEmpty() } }
-        h.refresh()
+        // No RPC answering: worth asking again later.
+        assertTrue(h.refresh())
         assertEquals(TxRecord.Status.PENDING, h.records.value.single().status)
-        // Its chain removed from Settings: the router doesn't know it.
+        // Its chain removed from Settings: the router doesn't know it, and nothing
+        // could be read for it however often the page asked, so it isn't polled.
         val gone = history(FakeChain(BuiltInChains.ETHEREUM.copy(rpcUrls = listOf("https://x.example"))), MemoryStore(listOf(record())))
         withTimeout(5_000) { gone.records.first { it.isNotEmpty() } }
-        gone.refresh()
+        assertFalse(gone.refresh())
         assertEquals(TxRecord.Status.PENDING, gone.records.value.single().status)
     }
 
@@ -295,19 +297,25 @@ class TxHistoryTest {
         val hash = "0x" + "11".repeat(32)
         val h = history(chain, MemoryStore(listOf(record(hash))))
         withTimeout(5_000) { h.records.first { it.isNotEmpty() } }
-        h.refresh()
+        // Judged replaced, and nothing pending any more: the refresh still asks to be run
+        // again, so the page keeps re-reading the receipt through the recheck window.
+        assertTrue(h.refresh())
+        assertEquals(TxRecord.Status.REPLACED, h.records.value.single().status)
+        now.addAndGet(TxHistory.RECHECK_REPLACED_MS / 2)
+        assertTrue(h.refresh())
         assertEquals(TxRecord.Status.REPLACED, h.records.value.single().status)
         // The node that said "no receipt" was behind.
         chain.receipts[hash] = ok(20)
-        now.addAndGet(TxHistory.RECHECK_REPLACED_MS - 1)
-        h.refresh()
+        now.addAndGet(TxHistory.RECHECK_REPLACED_MS / 2 - 1)
+        // Settled for good: nothing left to poll for.
+        assertFalse(h.refresh())
         assertEquals(TxRecord.Status.CONFIRMED, h.records.value.single().status)
 
         val later = history(chain, MemoryStore(listOf(record(hash).copy(status = TxRecord.Status.REPLACED, settledAt = now.get()))))
         withTimeout(5_000) { later.records.first { it.isNotEmpty() } }
         now.addAndGet(TxHistory.RECHECK_REPLACED_MS)
         chain.methods.clear()
-        later.refresh()
+        assertFalse(later.refresh())
         assertEquals(TxRecord.Status.REPLACED, later.records.value.single().status)
         assertTrue(chain.methods.isEmpty())
     }

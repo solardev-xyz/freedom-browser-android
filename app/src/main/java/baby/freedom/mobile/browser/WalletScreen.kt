@@ -102,8 +102,9 @@ import kotlinx.coroutines.withContext
 
 internal const val WALLET_ROW_KEY = "wallet"
 
-/** Between chain reads for a pending send while the wallet page is up. */
+/** Between chain reads for a pending send while the wallet page is up: at first, doubling to [TX_HISTORY_POLL_MAX_MS]. */
 private const val TX_HISTORY_POLL_MS = 15_000L
+private const val TX_HISTORY_POLL_MAX_MS = 5 * 60_000L
 internal const val WALLET_TITLE = "Wallet"
 internal const val BACKUP_REMINDER = "Recovery phrase not backed up yet"
 internal const val SHOW_PHRASE = "Show recovery phrase"
@@ -343,14 +344,17 @@ fun WalletScreen(
     }
 
     // Pending sends the sender isn't following (stopped tracking, no receipt in time, an
-    // earlier run's) are settled from the chain: on opening, on Refresh, and every so often
-    // while one is still pending and the page is up.
-    val anyPending = txRecords.any { it.pending }
-    LaunchedEffect(refreshTick, anyPending) {
-        history.refresh()
-        while (anyPending) {
-            delay(TX_HISTORY_POLL_MS)
-            history.refresh()
+    // earlier run's) are settled from the chain: on opening, on Refresh, on a new pending
+    // send, and again while the page is up for as long as a refresh says one could still
+    // change — a pending send, or one judged replaced within the last minutes (whose receipt
+    // a node behind may not have had yet). The wait grows while nothing settles, so a send
+    // that never went out doesn't keep the page reading the chain every few seconds.
+    val pendingCount = txRecords.count { it.pending }
+    LaunchedEffect(refreshTick, pendingCount) {
+        var wait = TX_HISTORY_POLL_MS
+        while (history.refresh()) {
+            delay(wait)
+            wait = minOf(wait * 2, TX_HISTORY_POLL_MAX_MS)
         }
     }
 
