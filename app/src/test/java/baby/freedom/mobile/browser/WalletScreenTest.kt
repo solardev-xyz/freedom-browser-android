@@ -125,4 +125,68 @@ class WalletScreenTest {
         assertFalse(clipHoldsPhrase(null, words))
         assertFalse(clipHoldsPhrase("", words))
     }
+
+    @Test
+    fun `a copied phrase is recognised on the clipboard by its hash`() {
+        val words = twelve.split(" ")
+        val hash = PhraseClipboard.phraseHash(words)
+        assertTrue(PhraseClipboard.clipIsPhrase(twelve, hash))
+        // Spacing and letter forms a paste can pick up don't matter…
+        assertTrue(PhraseClipboard.clipIsPhrase("  " + twelve.replace(" ", "\u00A0") + "\n", hash))
+        assertTrue(PhraseClipboard.clipIsPhrase(twelve.uppercase(), hash))
+        // …but something else the user copied since is left alone.
+        assertFalse(PhraseClipboard.clipIsPhrase(twelve.replace("about", "abandon"), hash))
+        assertFalse(PhraseClipboard.clipIsPhrase("https://example.com", hash))
+        assertFalse(PhraseClipboard.clipIsPhrase("", hash))
+        assertFalse(PhraseClipboard.clipIsPhrase(null, hash))
+        // At the deadline: a readable clipboard is cleared only if it still
+        // holds the phrase; an unreadable one (no focus) or a process that
+        // lost the hash clears outright, so the words never outlive the minute.
+        val label = PhraseClipboard.CLIP_LABEL
+        assertTrue(PhraseClipboard.shouldClear(true, label, { listOf(twelve) }, hash))
+        assertTrue(PhraseClipboard.shouldClear(true, label, { listOf("https://example.com", twelve) }, hash))
+        assertFalse(PhraseClipboard.shouldClear(true, label, { listOf("https://example.com") }, hash))
+        assertFalse(PhraseClipboard.shouldClear(true, label, { emptyList() }, hash))
+        assertTrue(PhraseClipboard.shouldClear(false, null, { error("unreadable") }, hash))
+        assertTrue(PhraseClipboard.shouldClear(true, label, { error("no hash to compare") }, null))
+    }
+
+    @Test
+    fun `another app's clip is left alone without being read`() {
+        val hash = PhraseClipboard.phraseHash(twelve.split(" "))
+        // Reading it would show Android 12+'s paste toast and could open a
+        // content: URI on the main thread: only the description is looked at.
+        var reads = 0
+        val read = { reads++; listOf<CharSequence?>(twelve) }
+        assertFalse(PhraseClipboard.shouldClear(true, "Password", read, hash))
+        assertFalse(PhraseClipboard.shouldClear(true, null, read, hash))
+        assertFalse(PhraseClipboard.shouldClear(true, "Password", read, null))
+        assertEquals(0, reads)
+        // Our own label is read, and a lookalike that isn't the phrase stays.
+        assertTrue(PhraseClipboard.shouldClear(true, PhraseClipboard.CLIP_LABEL, read, hash))
+        assertFalse(PhraseClipboard.shouldClear(true, PhraseClipboard.CLIP_LABEL, { listOf("hi") }, hash))
+        assertEquals(1, reads)
+    }
+
+    @Test
+    fun `a deadline from an earlier boot is dropped, not acted on`() {
+        val ttl = PhraseClipboard.TTL_MS
+        val d = PhraseClipboard.Deadline.DUE
+        val p = PhraseClipboard.Deadline.PENDING
+        val s = PhraseClipboard.Deadline.STALE
+        // Same boot: pending until the minute is up, then due.
+        assertEquals(p, PhraseClipboard.deadline(10 * ttl, 7, 7, 10 * ttl - 1))
+        assertEquals(d, PhraseClipboard.deadline(10 * ttl, 7, 7, 10 * ttl))
+        assertEquals(d, PhraseClipboard.deadline(10 * ttl, 7, 7, 30 * ttl))
+        // Copied at 10 min, rebooted, opened after 11 min of the new boot:
+        // the old number has passed, but it belongs to the other boot.
+        assertEquals(s, PhraseClipboard.deadline(11 * ttl, 7, 8, 20 * ttl))
+        assertEquals(s, PhraseClipboard.deadline(11 * ttl, 7, 8, 11 * ttl - 1))
+        // Boot count unreadable: the old "too far off for a fresh copy" check.
+        assertEquals(s, PhraseClipboard.deadline(10 * ttl, -1, -1, 2 * ttl))
+        assertEquals(d, PhraseClipboard.deadline(10 * ttl, -1, -1, 10 * ttl))
+        // The note on the page matches the timer.
+        assertEquals(60_000L, PhraseClipboard.TTL_MS)
+        assertTrue(COPY_NOTE.contains("after 1 minute. If Freedom is in the background by then, usually up to a minute later"))
+    }
 }
