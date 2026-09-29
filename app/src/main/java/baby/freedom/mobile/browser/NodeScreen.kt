@@ -3,6 +3,7 @@ package baby.freedom.mobile.browser
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -58,7 +59,8 @@ import java.util.Locale
 /**
  * Full-screen node-details page: the Swarm node's live status, peer
  * count, gateway URL and run-node on/off toggle, its mode and the ways into
- * publish setup (#114, [PublishSetupScreen]) and the postage stamps (#116,
+ * publish setup (#114, [PublishSetupScreen]), the chequebook (#117,
+ * [ChequebookScreen]) and the postage stamps (#116,
  * [StampsScreen]), the Tor client (#143)
  * with its start/stop switch, status and version, then the Myotis
  * Ethereum / Gnosis light client (#72) with its own switch and per-chain
@@ -94,7 +96,14 @@ fun NodeScreen(
     var showPublishSetup by rememberSaveable { mutableStateOf(false) }
     // The stamp pages (#116): "list", "buy" (from publish setup), or null.
     var showStamps by rememberSaveable { mutableStateOf<String?>(null) }
+    // The chequebook page (#117).
+    var showChequebook by rememberSaveable { mutableStateOf(false) }
 
+    if (showChequebook) {
+        // Back lands on whichever page opened it.
+        ChequebookScreen(nodeInfo = nodeInfo, onDismiss = { showChequebook = false })
+        return
+    }
     showStamps?.let { start ->
         // Back from the stamps lands on whichever page opened them.
         StampsScreen(nodeInfo = nodeInfo, startWithBuy = start == "buy", onDismiss = { showStamps = null })
@@ -107,6 +116,7 @@ fun NodeScreen(
             onSwitchToLightMode = { setLightMode(true) },
             onOpenWallet = onOpenWallet,
             onBuyStamp = { showStamps = "buy" },
+            onOpenChequebook = { showChequebook = true },
             onDismiss = { showPublishSetup = false },
         )
         return
@@ -140,6 +150,7 @@ fun NodeScreen(
                     onSetLightMode = setLightMode,
                     onOpenSetup = { showPublishSetup = true },
                     onOpenStamps = { showStamps = "list" },
+                    onOpenChequebook = { showChequebook = true },
                 )
             }
             item("gateway") {
@@ -243,8 +254,13 @@ private fun PublishingSection(
     onSetLightMode: (Boolean) -> Unit,
     onOpenSetup: () -> Unit,
     onOpenStamps: () -> Unit,
+    onOpenChequebook: () -> Unit,
 ) {
     val spend by StampClient.spend.collectAsState()
+    val light = nodeInfo.status == NodeStatus.Running && nodeInfo.lightMode
+    // What the chequebook holds (#117): part of the node's status in light
+    // mode, and where a deposit shows up. Re-read at once when a spend ends.
+    val chequebook = rememberChequebookState(light, refresh = spend is StampClient.Spend.Running)
     SectionCard(title = "Publishing") {
         Row(
             modifier = Modifier
@@ -267,11 +283,15 @@ private fun PublishingSection(
                 enabled = lightModeWanted != null,
             )
         }
+        if (light) {
+            DetailRow("Chequebook", chequebookSummary(chequebook), singleLine = false)
+        }
         Spacer(Modifier.height(4.dp))
-        Row {
+        FlowRow {
             TextButton(onClick = onOpenSetup) { Text("Set up publishing") }
             if (stampsEntryShown(nodeInfo, spend)) {
                 TextButton(onClick = onOpenStamps) { Text("Postage stamps") }
+                TextButton(onClick = onOpenChequebook) { Text("Chequebook") }
             }
         }
     }
@@ -285,6 +305,14 @@ private fun PublishingSection(
  */
 internal fun stampsEntryShown(nodeInfo: NodeInfo, spend: StampClient.Spend): Boolean =
     (nodeInfo.status == NodeStatus.Running && nodeInfo.lightMode) || spend !is StampClient.Spend.Idle
+
+/** The chequebook line of the node's status (#117): what it holds, or that there's none yet. */
+internal fun chequebookSummary(state: ChequebookState): String = when {
+    state.address == null -> "Checking…"
+    state.address.isEmpty() -> "None yet (comes with the first postage stamp)"
+    state.balancePlur == null -> "Checking…"
+    else -> formatBzz(state.balancePlur)
+}
 
 /** The line under the light-mode switch: what the mode does, or that the node is on its way into it. */
 internal fun swarmModeSubtitle(nodeInfo: NodeInfo, lightModeWanted: Boolean?): String {
