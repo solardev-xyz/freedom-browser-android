@@ -392,7 +392,7 @@ suspend fun askAndroidPermissionOnScreen(
 }
 
 /** Which modal prompt the on-screen tab shows now; see [modalPromptTurn]. */
-enum class PromptTurn { None, SitePermission, DownloadOffer, Radicle, Ethereum, Swarm }
+enum class PromptTurn { None, SitePermission, DownloadOffer, Radicle, Ethereum, Swarm, JsDialog, ContextMenu }
 
 /**
  * Orders the prompts a page can raise on its tab: the site-permission
@@ -432,6 +432,19 @@ enum class PromptTurn { None, SitePermission, DownloadOffer, Radicle, Ethereum, 
  *   waits until the page is what's on screen, then takes its turn as
  *   above. The download offer included: it used to be the one prompt
  *   that showed over a panel (#228).
+ *
+ * - The page's JavaScript dialog (#246, [jsDialogWaiting]: `alert`,
+ *   `confirm`, `prompt`, `beforeunload`) keeps the turn once it has it
+ *   ([jsDialogHasTurn]); waiting, it comes after the `window.swarm`
+ *   sheet and before the offer. The page is frozen until it's answered,
+ *   so nothing it asks for can arrive behind it.
+ * - The long-press link/image menu (#84, [contextMenuWaiting]) is the
+ *   user's own gesture, not the page's, but it's modal too. It goes
+ *   before every prompt that doesn't already have the turn — the user
+ *   has just asked for it, while a prompt raised in the same moment (a
+ *   page's `contextmenu` handler calling the wallet) can wait — so once
+ *   up it keeps the turn. A menu that arrives while a prompt already
+ *   has the turn isn't let in at all ([contextMenuAdmitted]).
  */
 fun modalPromptTurn(
     permissionWaiting: Boolean,
@@ -445,6 +458,9 @@ fun modalPromptTurn(
     ethereumHasTurn: Boolean = false,
     swarmWaiting: Boolean = false,
     swarmHasTurn: Boolean = false,
+    jsDialogWaiting: Boolean = false,
+    jsDialogHasTurn: Boolean = false,
+    contextMenuWaiting: Boolean = false,
 ): PromptTurn = when {
     !pageUncovered -> PromptTurn.None
     androidDialogUp -> PromptTurn.None
@@ -452,13 +468,28 @@ fun modalPromptTurn(
     radicleWaiting && radicleHasTurn -> PromptTurn.Radicle
     ethereumWaiting && ethereumHasTurn -> PromptTurn.Ethereum
     swarmWaiting && swarmHasTurn -> PromptTurn.Swarm
+    jsDialogWaiting && jsDialogHasTurn -> PromptTurn.JsDialog
+    contextMenuWaiting -> PromptTurn.ContextMenu
     permissionWaiting -> PromptTurn.SitePermission
     radicleWaiting -> PromptTurn.Radicle
     ethereumWaiting -> PromptTurn.Ethereum
     swarmWaiting -> PromptTurn.Swarm
+    jsDialogWaiting -> PromptTurn.JsDialog
     offerWaiting -> PromptTurn.DownloadOffer
     else -> PromptTurn.None
 }
+
+/**
+ * Whether a long-press menu (#84) may take its turn in [modalPromptTurn],
+ * given the turn as of the last composition ([lastTurn]): only while no
+ * prompt was up, or the menu itself was. A menu that arrives while a
+ * prompt has the turn is dropped instead (#246) — it must not un-show a
+ * prompt the user is reading (the site-permission prompt has no "has
+ * the turn" flag of its own to hold it), and one shown only once that
+ * prompt is answered would open out of nowhere.
+ */
+fun contextMenuAdmitted(lastTurn: PromptTurn): Boolean =
+    lastTurn == PromptTurn.None || lastTurn == PromptTurn.ContextMenu
 
 /**
  * Tap protection for the permission prompt. A page chooses *when* its

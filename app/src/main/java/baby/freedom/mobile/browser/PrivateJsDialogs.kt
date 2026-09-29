@@ -35,61 +35,104 @@ internal fun jsDialogTitle(kind: JsDialogKind, url: String?): String {
 }
 
 /**
- * Shows a private tab's (#86) JavaScript dialog in a `FLAG_SECURE`
- * window. WebView's default dialogs are windows of their own, outside
- * the Activity window [PrivateScreenGuard] secures, so the page's text
- * and origin would show in screenshots, casts and — on API 30–32, which
- * lack `setRecentsScreenshotEnabled` — the Recents snapshot. Same
- * buttons and results as WebView's: OK/Cancel, the prompt's text field
- * (learning off, as in the tab's other fields), and back/outside tap =
- * Cancel. Always handles the dialog (returns true), so the default one
- * never appears for a private tab: with no Activity to show it in, the
- * page's call is cancelled.
+ * A JavaScript dialog a tab's page has opened and is blocked on (#246).
+ * Every tab's `alert`/`confirm`/`prompt`/`beforeunload` comes through
+ * one of these, held on [BrowserState.jsDialog] rather than shown by
+ * WebView: [BrowserScreen] shows it ([showJsDialog]) when it's the
+ * tab's turn among the page's prompts ([modalPromptTurn]), so it never
+ * stacks on a dApp approval sheet or the long-press menu, and never
+ * pops over another tab.
  *
- * A regular tab's `beforeunload` prompt comes through here too, with
- * [secure] off: [onAnswered] (true for Leave) is how the tab hears that
- * Stay ended its navigation without a commit (#180, R2-F2).
+ * Answered exactly once, by whichever of [confirm]/[cancel] comes
+ * first; later calls do nothing. [answer] hands it to the page
+ * ([answerJsResult]): true for OK/Leave, with a prompt's text; for a
+ * tab's `beforeunload` it's also how the tab hears that Stay ended its
+ * navigation without a commit (#180, R2-F2). [onSettled] lets the tab
+ * forget the request. Main thread only.
  */
-internal fun showPrivateJsDialog(
-    context: Context,
-    kind: JsDialogKind,
-    url: String?,
-    message: String?,
-    defaultValue: String?,
-    result: JsResult,
-    secure: Boolean = true,
-    onAnswered: (confirmed: Boolean) -> Unit = {},
-): Boolean {
+internal class JsDialogRequest(
+    val kind: JsDialogKind,
+    val url: String?,
+    val message: String?,
+    val defaultValue: String?,
+    /** The dialog window is `FLAG_SECURE`: the tab is private (#86). */
+    val secure: Boolean,
+    private val answer: (confirmed: Boolean, text: String?) -> Unit,
+    private val onSettled: (JsDialogRequest) -> Unit = {},
+) {
+    var answered = false
+        private set
+
+    /** OK / Leave; [text] is a prompt's answer. */
+    fun confirm(text: String? = null) {
+        if (answered) return
+        answered = true
+        answer(true, text)
+        onSettled(this)
+    }
+
+    /**
+     * Cancel / Stay / Back — and what the page gets when the dialog
+     * can't be shown to the user: its tab left the screen or closed.
+     * A page's pending dialog blocks the renderer every tab shares, so
+     * a tab out of view can't be left waiting on one (see
+     * [BrowserScreen]): `alert` returns, `confirm` is false, `prompt`
+     * is null and `beforeunload` stays, as in Chrome for a background
+     * tab.
+     */
+    fun cancel() {
+        if (answered) return
+        answered = true
+        answer(false, null)
+        onSettled(this)
+    }
+}
+
+/** Answers WebView's [result] for a dialog: OK (with a prompt's [text]) or Cancel. */
+internal fun answerJsResult(result: JsResult, confirmed: Boolean, text: String?) {
+    when {
+        !confirmed -> result.cancel()
+        result is JsPromptResult -> result.confirm(text.orEmpty())
+        else -> result.confirm()
+    }
+}
+
+/**
+ * Shows [request] in a dialog of our own — `FLAG_SECURE` for a private
+ * tab (#86): WebView's default dialogs are windows of their own,
+ * outside the Activity window [PrivateScreenGuard] secures, so the
+ * page's text and origin would show in screenshots, casts and — on API
+ * 30–32, which lack `setRecentsScreenshotEnabled` — the Recents
+ * snapshot. Same buttons and results as WebView's: OK/Cancel, the
+ * prompt's text field (learning off, as in the tab's other fields), and
+ * back/outside tap = Cancel. Returns the dialog so the caller can take
+ * it down (which cancels the request) when it loses its turn, or null
+ * — with the request cancelled — when there's no Activity to show it in.
+ */
+internal fun showJsDialog(context: Context, request: JsDialogRequest): AlertDialog? {
+    val kind = request.kind
     val activity = context.findHostActivity()
     if (activity == null || activity.isFinishing || activity.isDestroyed) {
-        result.cancel()
-        onAnswered(false)
-        return true
+        request.cancel()
+        return null
     }
-    var answered = false
     val input = if (kind == JsDialogKind.PROMPT) {
         EditText(activity).apply {
-            setText(defaultValue.orEmpty())
+            setText(request.defaultValue.orEmpty())
             setSingleLine()
             // Typing replaces the page's default, as in desktop browsers.
             setSelectAllOnFocus(true)
             inputType = InputType.TYPE_CLASS_TEXT
-            imeOptions = tabImeOptions(EditorInfo.IME_ACTION_DONE, private = true)
+            imeOptions = tabImeOptions(EditorInfo.IME_ACTION_DONE, private = request.secure)
         }
     } else null
     val builder = AlertDialog.Builder(activity)
-        .setTitle(jsDialogTitle(kind, url))
-        .setOnDismissListener {
-            if (!answered) {
-                answered = true
-                result.cancel()
-                onAnswered(false)
-            }
-        }
+        .setTitle(jsDialogTitle(kind, request.url))
+        .setOnDismissListener { request.cancel() }
     if (kind == JsDialogKind.BEFORE_UNLOAD) {
         builder.setMessage("Changes you made may not be saved.")
-    } else if (!message.isNullOrEmpty()) {
-        builder.setMessage(message)
+    } else if (!request.message.isNullOrEmpty()) {
+        builder.setMessage(request.message)
     }
     if (input != null) {
         val pad = (20 * activity.resources.displayMetrics.density).toInt()
@@ -99,26 +142,21 @@ internal fun showPrivateJsDialog(
         })
     }
     builder.setPositiveButton(if (kind == JsDialogKind.BEFORE_UNLOAD) "Leave" else "OK") { _, _ ->
-        answered = true
-        if (input != null && result is JsPromptResult) result.confirm(input.text.toString())
-        else result.confirm()
-        onAnswered(true)
+        request.confirm(input?.text?.toString())
     }
     if (kind != JsDialogKind.ALERT) {
         builder.setNegativeButton(if (kind == JsDialogKind.BEFORE_UNLOAD) "Stay" else "Cancel") { _, _ ->
-            answered = true
-            result.cancel()
-            onAnswered(false)
+            request.cancel()
         }
     }
     val dialog = builder.create()
     dialog.window?.apply {
         // Before show(): the window's first frame must already be secure.
-        if (secure) addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        if (request.secure) addFlags(WindowManager.LayoutParams.FLAG_SECURE)
         if (input != null) setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_VISIBLE)
     }
     dialog.show()
-    return true
+    return dialog
 }
 
 private tailrec fun Context.findHostActivity(): Activity? = when (this) {

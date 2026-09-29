@@ -376,6 +376,15 @@ class BrowserState(val id: Long, val private: Boolean = false) {
     var swarmPrompt: SwarmPromptRequest? by mutableStateOf<SwarmPromptRequest?>(null)
         internal set
 
+    /**
+     * The JavaScript dialog (`alert`, `confirm`, `prompt`,
+     * `beforeunload`) this tab's page is blocked on (#246), or null.
+     * Set by the tab's `WebChromeClient`; [BrowserScreen] shows it in
+     * turn with the prompts above ([modalPromptTurn]) while this is the
+     * active tab, and cancels it the moment it isn't.
+     */
+    internal var jsDialog: JsDialogRequest? by mutableStateOf<JsDialogRequest?>(null)
+
     var canGoBack by mutableStateOf(false)
         internal set
     var canGoForward by mutableStateOf(false)

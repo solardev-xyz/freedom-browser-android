@@ -362,4 +362,76 @@ class SitePermissionsTest {
         // Once the panel closes, the offer takes its turn again.
         assertEquals(PromptTurn.DownloadOffer, modalPromptTurn(false, true, false, false, pageUncovered = true))
     }
+
+    @Test
+    fun `a page's JavaScript dialog takes its turn and never stacks on a sheet`() {
+        // The #246 repro: `eth_requestAccounts`, then `alert()` 100 ms later.
+        // The Connect sheet already up keeps the screen; the alert waits…
+        assertEquals(
+            PromptTurn.Ethereum,
+            modalPromptTurn(false, false, false, false, ethereumWaiting = true, ethereumHasTurn = true, jsDialogWaiting = true),
+        )
+        // …and shows once the sheet is answered.
+        assertEquals(PromptTurn.JsDialog, modalPromptTurn(false, false, false, false, jsDialogWaiting = true))
+        // Arriving together with nothing up yet: after the page's own
+        // approval prompts, before the download offer.
+        assertEquals(
+            PromptTurn.SitePermission,
+            modalPromptTurn(true, true, false, false, jsDialogWaiting = true),
+        )
+        assertEquals(PromptTurn.Swarm, modalPromptTurn(false, false, false, false, swarmWaiting = true, jsDialogWaiting = true))
+        assertEquals(PromptTurn.JsDialog, modalPromptTurn(false, true, false, false, jsDialogWaiting = true))
+        // Once up, it keeps the screen: an offer or a permission request
+        // arriving behind it waits.
+        assertEquals(
+            PromptTurn.JsDialog,
+            modalPromptTurn(true, true, false, false, jsDialogWaiting = true, jsDialogHasTurn = true),
+        )
+        // Not over a full-screen panel, nor over Android's permission dialog.
+        assertEquals(PromptTurn.None, modalPromptTurn(false, false, false, false, pageUncovered = false, jsDialogWaiting = true))
+        assertEquals(PromptTurn.None, modalPromptTurn(false, false, false, true, jsDialogWaiting = true))
+    }
+
+    @Test
+    fun `the long-press menu takes turns with the page's prompts`() {
+        // Alone, it shows.
+        assertEquals(PromptTurn.ContextMenu, modalPromptTurn(false, false, false, false, contextMenuWaiting = true))
+        // The #246 repro: a `contextmenu` handler asks the wallet to sign as
+        // the menu opens. With neither up yet the menu goes first and the
+        // Sign sheet waits for it…
+        assertEquals(
+            PromptTurn.ContextMenu,
+            modalPromptTurn(false, false, false, false, ethereumWaiting = true, contextMenuWaiting = true),
+        )
+        // …so once up the menu keeps the screen, whatever arrives next.
+        assertEquals(
+            PromptTurn.ContextMenu,
+            modalPromptTurn(true, true, false, false, radicleWaiting = true, jsDialogWaiting = true, contextMenuWaiting = true),
+        )
+        // …and the sheet follows once the menu is gone.
+        assertEquals(PromptTurn.Ethereum, modalPromptTurn(false, false, false, false, ethereumWaiting = true))
+        // A sheet or dialog already up keeps the screen over a menu.
+        assertEquals(
+            PromptTurn.Ethereum,
+            modalPromptTurn(false, false, false, false, ethereumWaiting = true, ethereumHasTurn = true, contextMenuWaiting = true),
+        )
+        assertEquals(
+            PromptTurn.JsDialog,
+            modalPromptTurn(false, false, false, false, jsDialogWaiting = true, jsDialogHasTurn = true, contextMenuWaiting = true),
+        )
+        // Nothing over a full-screen panel or Android's dialog.
+        assertEquals(PromptTurn.None, modalPromptTurn(false, false, false, false, pageUncovered = false, contextMenuWaiting = true))
+        assertEquals(PromptTurn.None, modalPromptTurn(false, false, false, true, contextMenuWaiting = true))
+    }
+
+    @Test
+    fun `a long-press menu is only let in while no prompt is up`() {
+        assertTrue(contextMenuAdmitted(PromptTurn.None))
+        assertTrue(contextMenuAdmitted(PromptTurn.ContextMenu))
+        // The site-permission prompt has no "has the turn" flag: the menu
+        // mustn't be let in to un-show it, nor any other prompt on screen.
+        for (up in PromptTurn.entries - PromptTurn.None - PromptTurn.ContextMenu) {
+            assertFalse(up.name, contextMenuAdmitted(up))
+        }
+    }
 }
