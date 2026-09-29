@@ -82,6 +82,24 @@ internal fun stampSpendBlockedReason(node: NodeInfo): String? = stampsBlockedRea
     else -> null
 }
 
+/** What a search for the account's own stamps found. */
+internal fun discoverOutcomeText(found: Int): String = when (found) {
+    0 -> "No other stamps: this account owns none that are still paid for."
+    1 -> "Found 1 stamp this account owns; it's in the list below."
+    else -> "Found $found stamps this account owns; they're in the list below."
+}
+
+/** The line under "Find stamps you already own": the search running, or what it found. */
+internal fun discoverStatusText(discovery: StampClient.Discovery): String? = when (discovery) {
+    StampClient.Discovery.Idle -> null
+    StampClient.Discovery.Running -> "Searching Gnosis Chain for stamps this account bought…"
+    is StampClient.Discovery.Finished -> discovery.found.fold(
+        onSuccess = { ids -> discoverOutcomeText(ids.size) },
+        // It ran on after the page stopped waiting, and its outcome never reached the app.
+        onFailure = { if (it.message == StampClient.DISCOVER_OVERRAN) it.message else "Couldn't look: ${it.message}" },
+    )
+}
+
 /** One line under a spend in flight, or its outcome. */
 internal fun spendStatusText(spend: StampClient.Spend): String? = when (spend) {
     StampClient.Spend.Idle -> null
@@ -99,13 +117,18 @@ internal fun spendStatusText(spend: StampClient.Spend): String? = when (spend) {
         StampClient.Kind.Deposit -> "Deposited into the chequebook."
     }
     is StampClient.Spend.Failed -> when (spend.kind) {
-        StampClient.Kind.Buy -> "Buying the stamp failed: "
+        // Outlived the page's wait (#222 R4-F1): no answer, so not a failure either.
+        StampClient.Kind.Buy ->
+            if (spend.message == StampClient.BUY_OVERRAN) "The stamp purchase didn't report back: " else "Buying the stamp failed: "
         StampClient.Kind.Extend -> "Extending the stamp failed: "
         // Ended without a clear answer (#117): not a failure, it may be out.
         StampClient.Kind.Deposit ->
             if (spend.message.startsWith(SwarmNode.DEPOSIT_MAYBE_SENT)) "The deposit didn't report back: " else "The deposit failed: "
     } + spend.message
 }
+
+/** Why Buy and Find stamps wait: the gateway they may restart is carrying a publish. */
+internal const val PUBLISH_RUNNING_NOTE = "A publish is uploading. Buy or search for stamps once it has finished."
 
 /**
  * The postage stamps pages (#116), over the node page: the node's
@@ -117,6 +140,15 @@ internal fun StampsScreen(nodeInfo: NodeInfo, startWithBuy: Boolean = false, onD
     // "list", "buy", "detail:<id>" or "extend:<id>".
     var route by rememberSaveable { mutableStateOf(if (startWithBuy) "buy" else "list") }
     val spend by StampClient.spend.collectAsState()
+    val discoveryAny by StampClient.discovery.collectAsState()
+    // A buy or extend can't start while a search for owned stamps runs, nor that during one.
+    val canSpendNow = StampClient.canSpend(spend, discoveryAny)
+    // A buy or search may restart the gateway, so neither starts under a publish's upload.
+    val publishing by Publisher.state.collectAsState()
+    val canRestartNow = StampClient.canRestartGateway(spend, discoveryAny, publishing)
+    val publishingNote = PUBLISH_RUNNING_NOTE.takeIf { canSpendNow && !canRestartNow }
+    // Only what was found for the account the node runs as now.
+    val discovery = discoveryAny.forAccount(nodeInfo.accountAddress)
     val blocked = stampsBlockedReason(nodeInfo)
     val light = blocked == null
 
@@ -124,6 +156,9 @@ internal fun StampsScreen(nodeInfo: NodeInfo, startWithBuy: Boolean = false, onD
     var refresh by remember { mutableIntStateOf(0) }
     LaunchedEffect(spend) {
         if (spend is StampClient.Spend.Done || spend is StampClient.Spend.Failed) refresh++
+    }
+    LaunchedEffect(discovery) {
+        if (discovery is StampClient.Discovery.Finished) refresh++
     }
     val batches by produceState<List<PostageBatch>?>(null, light, refresh) {
         while (light) {
@@ -175,7 +210,7 @@ internal fun StampsScreen(nodeInfo: NodeInfo, startWithBuy: Boolean = false, onD
             }
             when {
                 route == "buy" -> item("buy") {
-                    BuyPage(nodeInfo, spend) { quote ->
+                    BuyPage(nodeInfo, canRestartNow, publishingNote) { quote ->
                         if (StampClient.buy(quote)) route = "list"
                     }
                 }
@@ -185,14 +220,18 @@ internal fun StampsScreen(nodeInfo: NodeInfo, startWithBuy: Boolean = false, onD
                     item("batch") {
                         when {
                             batch == null -> MutedText(if (batches == null) "Reading the node's stamps…" else "The node no longer lists this stamp.")
-                            route.startsWith("extend:") -> ExtendPage(nodeInfo, batch, connected, spend) { quote ->
+                            route.startsWith("extend:") -> ExtendPage(nodeInfo, batch, connected, canSpendNow) { quote ->
                                 if (StampClient.extend(batch.id, quote)) route = "detail:${batch.id}"
                             }
-                            else -> DetailPage(nodeInfo, batch, connected, spend) { route = "extend:${batch.id}" }
+                            else -> DetailPage(nodeInfo, batch, connected, canSpendNow) { route = "extend:${batch.id}" }
                         }
                     }
                 }
-                else -> listPage(nodeInfo, batches, spend, onBuy = { route = "buy" }, onOpen = { route = "detail:${it.id}" })
+                else -> listPage(
+                    nodeInfo, batches, canRestartNow, publishingNote, discovery,
+                    onBuy = { route = "buy" },
+                    onOpen = { route = "detail:${it.id}" },
+                )
             }
         }
     }
@@ -201,7 +240,9 @@ internal fun StampsScreen(nodeInfo: NodeInfo, startWithBuy: Boolean = false, onD
 private fun androidx.compose.foundation.lazy.LazyListScope.listPage(
     nodeInfo: NodeInfo,
     batches: List<PostageBatch>?,
-    spend: StampClient.Spend,
+    canBuyNow: Boolean,
+    publishingNote: String?,
+    discovery: StampClient.Discovery,
     onBuy: () -> Unit,
     onOpen: (PostageBatch) -> Unit,
 ) {
@@ -216,10 +257,15 @@ private fun androidx.compose.foundation.lazy.LazyListScope.listPage(
                 Spacer(Modifier.height(6.dp))
                 MutedText(cantSpend)
             }
+            if (cantSpend == null && publishingNote != null) {
+                Spacer(Modifier.height(6.dp))
+                MutedText(publishingNote)
+            }
             Spacer(Modifier.height(8.dp))
-            Button(onClick = onBuy, enabled = cantSpend == null && spend !is StampClient.Spend.Running) {
+            Button(onClick = onBuy, enabled = cantSpend == null && canBuyNow) {
                 Text("Buy a stamp")
             }
+            FindOwnedStamps(nodeInfo.accountAddress, discovery, canStart = canBuyNow)
         }
     }
     when {
@@ -227,6 +273,21 @@ private fun androidx.compose.foundation.lazy.LazyListScope.listPage(
         batches.isEmpty() -> item("empty") { MutedText("No stamps yet.") }
         else -> items(batches, key = { it.id }) { batch -> BatchCard(batch) { onOpen(batch) } }
     }
+}
+
+/**
+ * Finding the stamps this account already owns (#118): bought on another
+ * device, or before Freedom was reinstalled. The node registers each one
+ * that's still funded, and the list shows it. The search and its outcome
+ * are [StampClient]'s, so scrolling this off or leaving the page neither
+ * cancels nor forgets it — though it shows only for the [account] it
+ * ran for; [canStart] is false while it or a spend runs.
+ */
+@Composable
+private fun FindOwnedStamps(account: String, discovery: StampClient.Discovery, canStart: Boolean) {
+    Spacer(Modifier.height(4.dp))
+    TextButton(enabled = canStart, onClick = { StampClient.discover(account) }) { Text("Find stamps you already own") }
+    discoverStatusText(discovery)?.let { SubLine(it) }
 }
 
 @Composable
@@ -249,7 +310,7 @@ private fun DetailPage(
     nodeInfo: NodeInfo,
     batch: PostageBatch,
     connected: String?,
-    spend: StampClient.Spend,
+    canSpendNow: Boolean,
     onExtend: () -> Unit,
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -286,7 +347,7 @@ private fun DetailPage(
                 },
             )
             Spacer(Modifier.height(8.dp))
-            Button(onClick = onExtend, enabled = cantSpend == null && active && spend !is StampClient.Spend.Running) {
+            Button(onClick = onExtend, enabled = cantSpend == null && active && canSpendNow) {
                 Text("Extend")
             }
         }
@@ -294,7 +355,7 @@ private fun DetailPage(
 }
 
 @Composable
-private fun BuyPage(nodeInfo: NodeInfo, spend: StampClient.Spend, onConfirmed: (StampQuote) -> Unit) {
+private fun BuyPage(nodeInfo: NodeInfo, canBuyNow: Boolean, publishingNote: String?, onConfirmed: (StampQuote) -> Unit) {
     var depth by rememberSaveable { mutableIntStateOf(DEFAULT_STAMP_DEPTH) }
     var days by rememberSaveable { mutableLongStateOf(DEFAULT_STAMP_DAYS) }
     val quote = rememberQuote(depth, days) { JSONObject().put("depth", depth).put("days", days).let { "quote" to it } }
@@ -315,11 +376,11 @@ private fun BuyPage(nodeInfo: NodeInfo, spend: StampClient.Spend, onConfirmed: (
             STAMP_BUY_DAYS.forEach { n -> ChoiceRow(selected = n == days, label = daysLabel(n)) { days = n } }
         }
         QuoteCard(quote, deposit = true)
-        cantSpend?.let { MutedText(it) }
+        (cantSpend ?: publishingNote)?.let { MutedText(it) }
         val q = (quote as? QuoteState.Ready)?.quote
         Button(
             onClick = { confirming = q },
-            enabled = cantSpend == null && q != null && q.sufficientFunds && spend !is StampClient.Spend.Running,
+            enabled = cantSpend == null && q != null && q.sufficientFunds && canBuyNow,
         ) { Text("Buy") }
     }
     confirming?.let { q ->
@@ -345,7 +406,7 @@ private fun ExtendPage(
     nodeInfo: NodeInfo,
     batch: PostageBatch,
     connected: String?,
-    spend: StampClient.Spend,
+    canSpendNow: Boolean,
     onConfirmed: (StampQuote) -> Unit,
 ) {
     var days by rememberSaveable { mutableLongStateOf(DEFAULT_EXTEND_DAYS) }
@@ -369,7 +430,7 @@ private fun ExtendPage(
         val q = (quote as? QuoteState.Ready)?.quote
         Button(
             onClick = { confirming = q },
-            enabled = cantSpend == null && q != null && q.sufficientFunds && spend !is StampClient.Spend.Running,
+            enabled = cantSpend == null && q != null && q.sufficientFunds && canSpendNow,
         ) { Text("Extend") }
     }
     confirming?.let { q ->

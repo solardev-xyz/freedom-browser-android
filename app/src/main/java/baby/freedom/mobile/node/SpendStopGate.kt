@@ -21,6 +21,13 @@ import baby.freedom.swarm.NodeStatus
  * spend hung inside ant can't keep a node the user turned off peering
  * indefinitely. Each stop carries a [stopGeneration], so a deadline timer
  * scheduled for one stop can't act on a later one ([overdue]).
+ *
+ * It also keeps a search for the account's own stamps (#118) apart from
+ * the spends ([beginDiscover]): ant's discover can deploy the chequebook
+ * and pay its deposit as it registers a batch, and while a spend's
+ * permit is open that would go out under it, taking the spend's slots.
+ * With neither overlapping, a discover only ever runs with no permit
+ * open, so it sends nothing.
  */
 internal class SpendStopGate(private val nanoTime: () -> Long = System::nanoTime) {
     private val monitor = Object()
@@ -29,18 +36,78 @@ internal class SpendStopGate(private val nanoTime: () -> Long = System::nanoTime
     private var stopWhenIdle = false
     private var stopAskedAt = 0L
     private var generation = 0L
+    private var discovering = false
+    private var buying = 0
 
-    /** A spend is about to start; false (don't start it) while the node is being turned off. */
-    fun begin(): Boolean = synchronized(monitor) {
-        if (stopping) return false
+    /**
+     * A spend is about to start; false (don't start it) while the node is
+     * being turned off, or while a discover runs. [buy]: it's a stamp buy,
+     * which may reload the gateway as it ends ([gatewayWorkRunning]).
+     */
+    fun begin(buy: Boolean = false): Boolean = synchronized(monitor) {
+        if (stopping || discovering) return false
         running++
+        if (buy) buying++
         true
     }
 
-    /** A spend [begin] let start has ended, however. True if the service should now stop itself. */
-    fun end(): Boolean = synchronized(monitor) {
+    /**
+     * Whether stamp work that may end by reloading the gateway runs now: a
+     * buy (the first sets up the chequebook) or a discover (which can adopt
+     * one). The app asks before a publish sends its upload (#222 R4-F1),
+     * since what it remembers of its own calls doesn't cover one it
+     * stopped waiting for, nor one a UI process that was restarted since
+     * started.
+     */
+    val gatewayWorkRunning: Boolean get() = synchronized(monitor) { discovering || buying > 0 }
+
+    /** A discover is about to start; false (don't start it) while a spend or another discover runs. */
+    fun beginDiscover(): Boolean = synchronized(monitor) {
+        if (discovering || running > 0) return false
+        discovering = true
+        true
+    }
+
+    /** Whether a discover is running now (for saying why a spend didn't start). */
+    val discoverRunning: Boolean get() = synchronized(monitor) { discovering }
+
+    /**
+     * The discover [beginDiscover] let start has ended, however. [outcome]
+     * is its answer (ant's JSON, or `{"error":…}`), kept for the app under
+     * [id], the id it started the search with, or null if it gave none or
+     * the search ended without one.
+     */
+    fun endDiscover(id: String? = null, outcome: String? = null) = synchronized(monitor) {
+        check(discovering) { "endDiscover() without beginDiscover()" }
+        discovering = false
+        lastDiscover = id?.let { it to outcome }
+    }
+
+    /**
+     * Whether a discover runs now, and — once none does — the outcome of
+     * the one the app started as [id], if it was the last to end (#118).
+     * Read together, so "not running" always comes with the outcome the
+     * search ended with.
+     */
+    fun discoverStatus(id: String?): DiscoverStatus = synchronized(monitor) {
+        DiscoverStatus(
+            running = discovering,
+            outcome = if (discovering || id == null) null else lastDiscover?.takeIf { it.first == id }?.second,
+        )
+    }
+
+    data class DiscoverStatus(val running: Boolean, val outcome: String?)
+
+    private var lastDiscover: Pair<String, String?>? = null
+
+    /** A spend [begin] let start (as a [buy] or not) has ended, however. True if the service should now stop itself. */
+    fun end(buy: Boolean = false): Boolean = synchronized(monitor) {
         check(running > 0) { "end() without begin()" }
         running--
+        if (buy) {
+            check(buying > 0) { "end(buy) without begin(buy)" }
+            buying--
+        }
         if (running == 0) monitor.notifyAll()
         stopWhenIdle && running == 0
     }

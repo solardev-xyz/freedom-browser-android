@@ -8,6 +8,7 @@ import java.math.BigDecimal
 import java.math.BigInteger
 import java.math.RoundingMode
 import java.util.Locale
+import java.util.UUID
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -228,12 +229,17 @@ internal object StampClient {
 
     sealed interface Answer {
         data class Ok(val json: JSONObject) : Answer
-        data class Failed(val message: String) : Answer
+        /**
+         * [unbound]: this process holds no binder to `:node` right now —
+         * not proof `:node` is gone: the Activity that binds it may just
+         * be being recreated while `:node` runs on.
+         */
+        data class Failed(val message: String, val unbound: Boolean = false) : Answer
     }
 
     /** Runs [method] on the node and waits up to [timeoutMs]. Blocking; never throws. */
     fun call(method: String, args: JSONObject = JSONObject(), timeoutMs: Long = READ_TIMEOUT_MS): Answer {
-        val binder = service ?: return Answer.Failed(NOT_BOUND)
+        val binder = service ?: return Answer.Failed(NOT_BOUND, unbound = true)
         val pipe = try {
             binder.stampCall(method, args.toString())
         } catch (e: Exception) {
@@ -249,6 +255,203 @@ internal object StampClient {
         return o.optString("error").takeIf { it.isNotEmpty() }?.let { Answer.Failed(it) } ?: Answer.Ok(o)
     }
 
+    /**
+     * Registers the stamps this account already owns on Gnosis with the
+     * node (#118): bought on another device, or before a reinstall. No
+     * transaction. Blocking; the ids it found, or why it couldn't look.
+     */
+    private fun discoverNow(): Result<List<String>> {
+        // Names this search to `:node`, so an outcome it reports later is this one's.
+        val id = UUID.randomUUID().toString()
+        return when (val a = call("discover", JSONObject().put("id", id), timeoutMs = DISCOVER_TIMEOUT_MS)) {
+            is Answer.Ok -> Result.success(registeredIds(a.json))
+            is Answer.Failed -> {
+                if (a.message == TIMED_OUT) {
+                    // The page stopped waiting, but `:node` is most likely
+                    // still scanning — and may yet adopt a chequebook and
+                    // restart the gateway. The search stays Running (so no
+                    // publish starts under it) until `:node` says it ended,
+                    // and then shows how it ended.
+                    val end = awaitNodeWorkEnd(
+                        ask = { call("discovering", JSONObject().put("id", id), timeoutMs = DISCOVERING_TIMEOUT_MS) },
+                    ) { Thread.sleep(DISCOVER_POLL_MS) }
+                    overranOutcome(end)
+                } else {
+                    Result.failure(IllegalStateException(a.message))
+                }
+            }
+        }
+    }
+
+    private fun registeredIds(json: JSONObject): List<String> =
+        json.optJSONArray("registered")?.let { ids -> (0 until ids.length()).mapNotNull { normalizeBatchId(ids.optString(it)) } }
+            .orEmpty()
+
+    /**
+     * Waits, [pause] between asks, until [ask] (`:node`'s "discovering" or
+     * "gatewayWork") says the work it asks after runs no more
+     * ([nodeWorkStillRunning]). Its last answer: the one that said so.
+     */
+    internal fun awaitNodeWorkEnd(ask: () -> Answer, pause: () -> Unit): Answer {
+        var a: Answer
+        do {
+            pause()
+            a = ask()
+        } while (nodeWorkStillRunning(a))
+        return a
+    }
+
+    /**
+     * Is `:node`'s search (or buy) still running, by its answer to
+     * "discovering" (or "gatewayWork")? Yes when it says so; when it didn't
+     * answer in time (busy, not gone); and while this process isn't bound
+     * to it ([Answer.Failed.unbound]): the Activity that binds it may be
+     * being recreated while `:node` works on, and it answers again once
+     * it's rebound. No once it says not, or once the call to it fails —
+     * the `:node` process went away, and the work with it (a `:node`
+     * started again says not running).
+     */
+    internal fun nodeWorkStillRunning(a: Answer): Boolean = when (a) {
+        is Answer.Ok -> a.json.optBoolean("running", false)
+        is Answer.Failed -> a.message == TIMED_OUT || a.unbound
+    }
+
+    /**
+     * How a search that outlived the page's wait ended, from `:node`'s
+     * last "discovering" answer ([awaitNodeWorkEnd]): what it found, or
+     * why it failed, if `:node` kept its outcome; [DISCOVER_OVERRAN] if
+     * not (`:node` went away mid-search).
+     */
+    internal fun overranOutcome(end: Answer): Result<List<String>> {
+        val outcome = (end as? Answer.Ok)?.json?.optJSONObject("outcome")
+            ?: return Result.failure(IllegalStateException(DISCOVER_OVERRAN))
+        return outcome.optString("error").takeIf { it.isNotEmpty() }
+            ?.let { Result.failure(IllegalStateException(it)) }
+            ?: Result.success(registeredIds(outcome))
+    }
+
+    /**
+     * A search for the account's own stamps: none asked, one running, or
+     * what the last one found — for [Finished.account], the node's account
+     * when it was asked, since the node can restart as another identity
+     * (a wallet added, removed or replaced) while this outlives the page.
+     */
+    sealed interface Discovery {
+        data object Idle : Discovery
+        data object Running : Discovery
+        data class Finished(val account: String, val found: Result<List<String>>) : Discovery
+
+        /** What to show while the node runs as [account]: another account's outcome is not this one's. */
+        fun forAccount(account: String): Discovery =
+            if (this is Finished && !this.account.equals(account, ignoreCase = true)) Idle else this
+    }
+
+    private val _discovery = MutableStateFlow<Discovery>(Discovery.Idle)
+
+    /**
+     * The search, held here like [spend] so it outlives the list scrolling
+     * or the page closing, and so there's only ever one. It never runs
+     * alongside a spend (nor a spend alongside it): ant's discover can
+     * deploy the chequebook as it registers a batch, which must not go
+     * out under a buy's permit. `:node` enforces the same.
+     */
+    val discovery: StateFlow<Discovery> = _discovery.asStateFlow()
+
+    /**
+     * Starts a search for the stamps of [account], the node's account as
+     * the page shows it. False if one, or a spend, is already running, or
+     * a publish is uploading.
+     */
+    fun discover(account: String): Boolean {
+        synchronized(this) {
+            if (!canRestartGateway(_spend.value, _discovery.value, Publisher.state.value)) return false
+            _discovery.value = Discovery.Running
+        }
+        scope.launch {
+            val found = try {
+                discoverNow()
+            } catch (t: Throwable) {
+                Log.w(TAG, "stamp discover failed: ${t.javaClass.simpleName}")
+                Result.failure(IllegalStateException("Something went wrong"))
+            }
+            _discovery.compareAndSet(Discovery.Running, Discovery.Finished(account, found))
+        }
+        return true
+    }
+
+    /** Whether a buy or extend may start now: nothing else of the node's stamp work is running. */
+    fun canSpend(spend: Spend, discovery: Discovery): Boolean =
+        spend !is Spend.Running && discovery !is Discovery.Running
+
+    /**
+     * Whether [spend] or [discovery] may restart the node's gateway: a buy
+     * (the first one sets up the chequebook) or a search (which can adopt
+     * one) ends with `:node` reloading it, which cuts every request open
+     * on it — a publish's `POST /bzz` too.
+     */
+    fun mayRestartGateway(spend: Spend, discovery: Discovery): Boolean =
+        (spend is Spend.Running && spend.kind == Kind.Buy) || discovery is Discovery.Running
+
+    /**
+     * Blocks while `:node` runs a buy or a search that may end by
+     * reloading the gateway ("gatewayWork"), for a publish about to send
+     * its upload (#222 R4-F1). [Publisher.claim] already refuses a publish
+     * under stamp work this process knows is running, but that isn't all
+     * of it: a UI process started again since knows nothing of what
+     * `:node` was already doing. Nothing new can start meanwhile — this
+     * process is the only one that starts stamp work, and it refuses to
+     * while a publish runs ([canRestartGateway]) — so once this returns,
+     * the upload can't be cut off by one. [onWaiting] is called once, the
+     * first time `:node` says (or, busy, doesn't deny) that such work runs.
+     *
+     * Unlike a search's own wait ([nodeWorkStillRunning]), being unbound
+     * isn't taken as "still running" for long: it's most often the node
+     * switched off in Settings, and then there's no work to wait for and
+     * the upload should fail at once rather than hang under a false
+     * "waiting for the node" card (#222 R5-F1). A binder that's only gone
+     * while the Activity is recreated is back within a few asks, so an
+     * unbound answer is asked again at most [MAX_UNBOUND_ASKS] times in a
+     * row before the publish goes ahead (and fails on its own if `:node`
+     * is gone).
+     */
+    internal fun awaitGatewayQuiet(
+        ask: () -> Answer = ::askGatewayWork,
+        pause: () -> Unit = { Thread.sleep(DISCOVER_POLL_MS) },
+        onWaiting: () -> Unit = {},
+    ) {
+        var waited = false
+        var unboundAsks = 0
+        while (true) {
+            val a = ask()
+            if (a is Answer.Failed && a.unbound) {
+                if (++unboundAsks > MAX_UNBOUND_ASKS) return
+            } else {
+                if (!nodeWorkStillRunning(a)) return
+                unboundAsks = 0
+                if (!waited) {
+                    waited = true
+                    onWaiting()
+                }
+            }
+            pause()
+        }
+    }
+
+    /** How many unbound answers in a row [awaitGatewayQuiet] waits through (~15 s). */
+    internal const val MAX_UNBOUND_ASKS = 3
+
+    private fun askGatewayWork(): Answer = call("gatewayWork", timeoutMs = DISCOVERING_TIMEOUT_MS)
+
+    /**
+     * Whether a buy or a search for owned stamps may start now: nothing
+     * else of the node's stamp work is running, and no publish is
+     * uploading through the gateway it may restart. [Publisher] checks
+     * the other way round, under this object's lock, so neither starts
+     * over the other.
+     */
+    fun canRestartGateway(spend: Spend, discovery: Discovery, publishing: Publisher.State): Boolean =
+        canSpend(spend, discovery) && publishing !is Publisher.State.Running
+
     enum class Kind { Buy, Extend, Deposit }
 
     sealed interface Spend {
@@ -262,7 +465,10 @@ internal object StampClient {
     val spend: StateFlow<Spend> = _spend.asStateFlow()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
-    /** Buys the batch [quote] priced, as the user just confirmed. False if a spend is already running. */
+    /**
+     * Buys the batch [quote] priced, as the user just confirmed. False if a
+     * spend or a discover is already running, or a publish is uploading.
+     */
     fun buy(quote: StampQuote): Boolean = start(Kind.Buy, null) {
         JSONObject()
             .put("depth", quote.depth)
@@ -294,7 +500,9 @@ internal object StampClient {
     private fun start(kind: Kind, batchId: String?, args: () -> JSONObject): Boolean {
         val running = Spend.Running(kind, batchId)
         synchronized(this) {
-            if (_spend.value is Spend.Running) return false
+            if (!canSpend(_spend.value, _discovery.value)) return false
+            // A buy may restart the gateway (the chequebook): not under a publish's upload.
+            if (kind == Kind.Buy && !canRestartGateway(_spend.value, _discovery.value, Publisher.state.value)) return false
             _spend.value = running
         }
         scope.launch {
@@ -304,13 +512,8 @@ internal object StampClient {
                 Kind.Deposit -> "deposit"
             }
             val outcome = try {
-                when (val a = call(method, args(), SPEND_TIMEOUT_MS)) {
-                    is Answer.Ok -> Spend.Done(kind, batchId)
-                    // Past the deadline the node is most likely still on it.
-                    is Answer.Failed -> Spend.Failed(
-                        kind, batchId,
-                        if (a.message != TIMED_OUT) a.message else stillSendingMessage(kind),
-                    )
+                spendOutcome(kind, batchId, call(method, args(), SPEND_TIMEOUT_MS)) {
+                    awaitNodeWorkEnd(::askGatewayWork) { Thread.sleep(DISCOVER_POLL_MS) }
                 }
             } catch (t: Throwable) {
                 Log.w(TAG, "stamp $method failed: ${t.javaClass.simpleName}")
@@ -322,8 +525,28 @@ internal object StampClient {
     }
 
     /**
-     * The outcome of a spend that outlived [SPEND_TIMEOUT_MS]: the node is
-     * most likely still on it. A deposit's leads with
+     * What a spend of [kind] ended as, by `:node`'s answer [a]. Past the
+     * deadline the node is most likely still on it; and a buy may yet end
+     * by reloading the gateway (the chequebook), so for a buy it first
+     * [awaitBuyEnd]s — the spend stays Running meanwhile, so no publish
+     * starts under it — until `:node` says it ended (#222 R4-F1).
+     */
+    internal fun spendOutcome(kind: Kind, batchId: String?, a: Answer, awaitBuyEnd: () -> Unit): Spend = when (a) {
+        is Answer.Ok -> Spend.Done(kind, batchId)
+        is Answer.Failed -> when {
+            a.message != TIMED_OUT -> Spend.Failed(kind, batchId, a.message)
+            kind == Kind.Buy -> {
+                awaitBuyEnd()
+                Spend.Failed(kind, batchId, BUY_OVERRAN)
+            }
+            else -> Spend.Failed(kind, batchId, stillSendingMessage(kind))
+        }
+    }
+
+    /**
+     * The outcome of an extend or deposit that outlived [SPEND_TIMEOUT_MS]:
+     * the node is most likely still on it. (A buy's waits on for `:node`
+     * to end it instead: [BUY_OVERRAN].) A deposit's leads with
      * [SwarmNode.DEPOSIT_MAYBE_SENT], so it reads as "didn't report back",
      * not as a failure (#117).
      */
@@ -334,13 +557,36 @@ internal object StampClient {
     }
 
     private const val NOT_BOUND = "The Swarm node isn't running"
-    private const val TIMED_OUT = "The Swarm node didn't answer in time"
+
+    /**
+     * How a buy that outlived [SPEND_TIMEOUT_MS] ended, once `:node` said
+     * it had: `:node` doesn't keep a buy's outcome for the app to read.
+     */
+    internal const val BUY_OVERRAN =
+        "it took longer than expected, and ended without telling the app how it went. " +
+            "The list shows the stamp if it was bought."
+    internal const val TIMED_OUT = "The Swarm node didn't answer in time"
+    internal const val DISCOVER_OVERRAN =
+        "The search took longer than expected, and ended without telling the app what it found. " +
+            "The list shows any stamps it registered."
+
+    /**
+     * How often `:node` is asked after a search that outlived
+     * [DISCOVER_TIMEOUT_MS], a buy that outlived [SPEND_TIMEOUT_MS], or
+     * stamp work a publish waits for; and how long each ask waits.
+     */
+    private const val DISCOVER_POLL_MS = 5_000L
+    private const val DISCOVERING_TIMEOUT_MS = 15_000L
     const val READ_TIMEOUT_MS = 60_000L
+
+    /** A discover scans the account's xBZZ transfers since the token's deploy, then reads each batch found. */
+    const val DISCOVER_TIMEOUT_MS = 3 * 60_000L
 
     /**
      * A spend's: up to five transactions, each waited on for up to a
      * minute by ant, plus its chain reads. Past this the page stops
-     * waiting — the node goes on, and the list shows what it bought.
+     * waiting for the answer — the node goes on, and the list shows what
+     * it bought. A buy still shows as running until `:node` says it ended.
      */
     const val SPEND_TIMEOUT_MS = 10 * 60_000L
     private const val MAX_ANSWER_BYTES = 256 * 1024

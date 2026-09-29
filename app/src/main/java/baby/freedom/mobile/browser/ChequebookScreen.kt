@@ -65,6 +65,8 @@ internal fun rememberChequebookState(
 internal fun ChequebookScreen(nodeInfo: NodeInfo, onDismiss: () -> Unit) {
     BackHandler(onBack = onDismiss)
     val spend by StampClient.spend.collectAsState()
+    // A search for owned stamps (#118) excludes a deposit as it does a buy.
+    val discovery by StampClient.discovery.collectAsState()
     val blocked = chequebookBlockedReason(nodeInfo)
     // Bumped after a spend ends, so the balances show it at once.
     var refresh by remember { mutableIntStateOf(0) }
@@ -125,9 +127,11 @@ internal fun ChequebookScreen(nodeInfo: NodeInfo, onDismiss: () -> Unit) {
                     }
                     Spacer(Modifier.height(6.dp))
                     val reason = depositBlockedReason(nodeInfo, state, amountPlur)
-                    val running = spend is StampClient.Spend.Running
+                    val running = !StampClient.canSpend(spend, discovery)
                     when {
-                        running -> MutedText("Another payment is running. Deposit once it has finished.")
+                        spend is StampClient.Spend.Running ->
+                            MutedText("Another payment is running. Deposit once it has finished.")
+                        running -> MutedText("The node is searching for your stamps. Deposit once it has finished.")
                         reason != null -> MutedText(reason)
                     }
                     Spacer(Modifier.height(8.dp))

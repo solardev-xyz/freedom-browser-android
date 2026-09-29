@@ -83,6 +83,14 @@ internal object AntNative {
     /** `ant_storage_topup_xdai` on the connected batch: SPENDS, likewise only through [SpendGuard.during]. */
     external fun storageTopupXdai(handle: Long, gnosisRpc: String, amountPerChunk: String): String
 
+    /**
+     * `ant_storage_discover`: registers every still-funded batch this
+     * account owns on Gnosis (#118). Sends nothing: the shim puts the
+     * broadcast gate back first, so the chequebook deploy ant may try
+     * along the way is refused.
+     */
+    external fun storageDiscover(handle: Long, gnosisRpc: String): String
+
     /** Tear the node down and free the handle — it must not be reused. */
     external fun shutdown(handle: Long)
 

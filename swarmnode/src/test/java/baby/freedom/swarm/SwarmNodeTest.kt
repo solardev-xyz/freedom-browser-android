@@ -95,6 +95,13 @@ class SwarmNodeTest {
             calls += "topup:$handle:$amountPerChunk"
             return onSpend("topup")
         }
+        /** Run inside a discover, in place of ant's scan (and the chequebook deploy it may try). */
+        @Volatile var onDiscover: () -> Unit = {}
+        override fun storageDiscover(handle: Long, gnosisRpc: String): String {
+            calls += "discover:$handle:$gnosisRpc"
+            onDiscover()
+            return """{"registered":[]}"""
+        }
 
         /** The gateway's chequebook, 40 hex (all zeros for none), and the account's xBZZ in PLUR. */
         @Volatile var chequebookHex = "0".repeat(40)
@@ -349,6 +356,51 @@ class SwarmNodeTest {
         val light = lightNode(FakeOps())
         assertEquals("""{"depth":17}""", light.storageQuote(17, 2))
         light.dispose()
+    }
+
+    @Test
+    fun findingOwnedStampsNeedsALightNodeAndLetsNothingOut() {
+        val ultraLight = FakeOps().apply { releaseSeed.countDown(); releaseInit.countDown() }
+        val node = SwarmNode(config, ultraLight)
+        node.start()
+        awaitStatus(node, NodeStatus.Running)
+        assertThrows(IllegalStateException::class.java) { node.discoverStamps() }
+        node.dispose()
+
+        val ops = FakeOps()
+        val light = lightNode(ops)
+        // ant may try to deploy a chequebook while it registers a batch it
+        // found: no permit is open, so that broadcast is refused.
+        val deploy = TestTx.request(TestTx.createBatch(TestTx.OWNER, java.math.BigInteger.TEN, 17, false))
+        var admitted: Boolean? = null
+        ops.onDiscover = { admitted = SpendGuard.admit(deploy) }
+        assertEquals("""{"registered":[]}""", light.discoverStamps())
+        assertEquals(false, admitted)
+        assertTrue(ops.calls.any { it.startsWith("discover:1:") })
+        light.dispose()
+    }
+
+    @Test
+    fun findingOwnedStampsThatAdoptsAChequebookReloadsTheGatewayAndOtherwiseLeavesItAlone() {
+        val ops = FakeOps()
+        val node = lightNode(ops)
+        fun reloads() = ops.calls.count { it.startsWith("stopGateway:") }
+        // ant had no chequebook and the discover set none up: no reload.
+        ops.settlementJson = """{"enabled":false}"""
+        node.discoverStamps()
+        assertEquals(0, reloads())
+        // The discover adopted the account's own chequebook, which the
+        // gateway reads only when it starts: reload it, in the same mode.
+        ops.onDiscover = { ops.settlementJson = """{"enabled":true,"chequebook":"0x${"cb".repeat(20)}"}""" }
+        node.discoverStamps()
+        assertEquals(1, reloads())
+        assertEquals(listOf("light:https://rpc.example/key123", "light:https://rpc.example/key123"), ops.gatewayModes)
+        assertEquals(NodeStatus.Running, node.state.value.status)
+        // The gateway already reports it: no further reload.
+        ops.chequebookHex = chequebook
+        node.discoverStamps()
+        assertEquals(1, reloads())
+        node.dispose()
     }
 
     @Test
@@ -791,13 +843,26 @@ class SwarmNodeTest {
     }
 
     @Test
+    fun aSearchWhoseGatewayReloadFailsSaysSoWithoutClaimingAPurchase() {
+        val ops = FakeOps()
+        ops.gatewayStartsLeft = 1 // the boot's start succeeds, the reload's fails
+        val node = lightNode(ops)
+        ops.onDiscover = { ops.settlementJson = """{"enabled":true,"chequebook":"0x${"cb".repeat(20)}"}""" }
+        node.discoverStamps()
+        assertEquals(NodeStatus.Error, node.state.value.status)
+        assertEquals(SwarmNode.GATEWAY_RELOAD_FAILED, node.state.value.errorMessage)
+        node.dispose()
+    }
+
+    @Test
     fun aGatewayThatDoesntComeBackTakesTheNodeDownIntoError() {
         val ops = FakeOps()
         ops.gatewayStartsLeft = 1 // the boot's start succeeds, the reload's fails
         val node = lightNode(ops)
         node.buyStamp(17, java.math.BigInteger.TEN, false, java.math.BigInteger.ONE)
         assertEquals(NodeStatus.Error, node.state.value.status)
-        assertEquals("The gateway didn't come back after a postage purchase", node.state.value.errorMessage)
+        assertEquals(SwarmNode.GATEWAY_RELOAD_FAILED, node.state.value.errorMessage)
+        assertFalse(SwarmNode.GATEWAY_RELOAD_FAILED.contains("purchase"))
         // The handle is shut down (once the buy let go of it), not left live.
         assertTrue(ops.shutDown.await(5, TimeUnit.SECONDS))
         assertTrue(ops.calls.contains("shutdown:1"))
