@@ -140,10 +140,11 @@ class WalletQrUiTest {
         // Out of view for longer than the window: pointing at it again reads it.
         now += 2_000
         assertTrue(dedup.isNew("A"))
-        // A different code reads at once, and then A again (scan A, scan B, back to A).
+        // A different code reads at once, and then A again once A itself has
+        // been out of view for the window (scan A, scan B, back to A).
         now += 100
         assertTrue(dedup.isNew("B"))
-        now += 100
+        now += 2_000
         assertTrue(dedup.isNew("A"))
         // A clock that went backwards doesn't hold a code back forever.
         now -= 10_000
@@ -161,10 +162,13 @@ class WalletQrUiTest {
         assertFalse(dedup.isNew("A"))
         now += 5_000
         assertFalse(dedup.isNew("A"))
-        // A different code does replace the paste, and afterwards A reads again as usual.
+        // A different code does replace the paste, and afterwards A reads again
+        // as usual, once it has been out of view for the window.
         now += 100
         assertTrue(dedup.isNew("B"))
         now += 100
+        assertFalse(dedup.isNew("A"))
+        now += 2_000
         assertTrue(dedup.isNew("A"))
     }
 
@@ -213,7 +217,7 @@ class WalletQrUiTest {
         // A code that wasn't in view does replace it, and ends the hold.
         now += 100
         assertTrue(dedup.isNew("C"))
-        now += 100
+        now += 2_100
         assertTrue(dedup.isNew("A"))
 
         // A code last read well before the camera's latest one isn't held.
@@ -238,5 +242,40 @@ class WalletQrUiTest {
         assertTrue(both.isNew("B"))
         now += 100
         assertTrue(both.isNew("A"))
+    }
+
+    @Test
+    fun `two codes decoded alternately don't flip the result every frame`() {
+        var now = 1_000L
+        val dedup = ScanDedup(clock = { now }, goneAfterMs = 2_000)
+        // Two codes in frame, the decoder alternating between them: each
+        // reads once, then neither reads again while both stay in view.
+        assertTrue(dedup.isNew("A"))
+        now += 150
+        assertTrue(dedup.isNew("B"))
+        repeat(20) {
+            now += 150
+            assertFalse(dedup.isNew("A"))
+            now += 150
+            assertFalse(dedup.isNew("B"))
+        }
+        // The same right after a paste is cleared: each held code reads once
+        // on its next frame, and then no more while the decoder alternates.
+        dedup.holdRecent()
+        dedup.release()
+        now += 150
+        assertTrue(dedup.isNew("A"))
+        now += 150
+        assertTrue(dedup.isNew("B"))
+        repeat(20) {
+            now += 150
+            assertFalse(dedup.isNew("A"))
+            now += 150
+            assertFalse(dedup.isNew("B"))
+        }
+        // B leaves view: A alone keeps being held; B back after the window reads again.
+        repeat(20) { now += 150; assertFalse(dedup.isNew("A")) }
+        now += 150
+        assertTrue(dedup.isNew("B"))
     }
 }

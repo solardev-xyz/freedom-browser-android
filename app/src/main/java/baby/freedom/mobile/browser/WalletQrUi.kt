@@ -471,7 +471,12 @@ private fun ImageProxy.luminance(): Pair<ByteArray, Int> {
  * camera already reported less than [goneAfterMs] ago, true otherwise.
  * A code in view is decoded several times a second, so the window keeps
  * renewing while it stays there; once it has been out of view for
- * [goneAfterMs], pointing the camera at it again reads it again.
+ * [goneAfterMs], pointing the camera at it again reads it again. The
+ * window is kept per code, not just for the latest one: with two codes
+ * in frame the decoder can read A, B, A, B…, and a single `lastCode`
+ * would call each of them new every frame and flip the result between
+ * them. So a code only reads again once it has itself been out of view
+ * for the window, whatever else was read in between.
  *
  * A paste ([holdRecent]) is stronger than that window. The window runs on
  * the clock, which also runs while the camera is stopped (app in the
@@ -490,7 +495,6 @@ internal class ScanDedup(
     private val goneAfterMs: Long = 2_000,
 ) {
     private var last: String? = null
-    private var lastSeen = 0L
     /** Every code reported within [goneAfterMs] of the latest report, with when it was last seen. */
     private val recent = HashMap<String, Long>()
     private var held: Set<String> = emptySet()
@@ -504,14 +508,13 @@ internal class ScanDedup(
             }
             held = emptySet()
         }
-        val seen = text == last && now - lastSeen in 0 until goneAfterMs
+        val seen = recent[text]?.let { now - it in 0 until goneAfterMs } == true
         note(text, now)
         return !seen
     }
 
     private fun note(text: String, now: Long) {
         last = text
-        lastSeen = now
         recent[text] = now
         recent.values.removeAll { now - it !in 0 until goneAfterMs }
     }
@@ -525,6 +528,7 @@ internal class ScanDedup(
     /** The paste was cleared: the held codes read again at once, even while still in view. */
     fun release() {
         if (last in held) last = null
+        recent.keys.removeAll(held)
         held = emptySet()
     }
 }
