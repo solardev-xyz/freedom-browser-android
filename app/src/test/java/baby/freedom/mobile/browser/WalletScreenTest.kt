@@ -125,4 +125,22 @@ class WalletScreenTest {
         assertFalse(clipHoldsPhrase(null, words))
         assertFalse(clipHoldsPhrase("", words))
     }
+
+    @Test
+    fun `a copied phrase is recognised on the clipboard by its hash`() {
+        val words = twelve.split(" ")
+        val hash = PhraseClipboard.phraseHash(words)
+        assertTrue(PhraseClipboard.clipIsPhrase(twelve, hash))
+        // Spacing and letter forms a paste can pick up don't matter…
+        assertTrue(PhraseClipboard.clipIsPhrase("  " + twelve.replace(" ", "\u00A0") + "\n", hash))
+        assertTrue(PhraseClipboard.clipIsPhrase(twelve.uppercase(), hash))
+        // …but something else the user copied since is left alone.
+        assertFalse(PhraseClipboard.clipIsPhrase(twelve.replace("about", "abandon"), hash))
+        assertFalse(PhraseClipboard.clipIsPhrase("https://example.com", hash))
+        assertFalse(PhraseClipboard.clipIsPhrase("", hash))
+        assertFalse(PhraseClipboard.clipIsPhrase(null, hash))
+        // The note on the page matches the timer.
+        assertEquals(60_000L, PhraseClipboard.TTL_MS)
+        assertTrue(COPY_NOTE.endsWith("after 1 minute."))
+    }
 }

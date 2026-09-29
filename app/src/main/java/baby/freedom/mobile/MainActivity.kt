@@ -31,6 +31,7 @@ import baby.freedom.mobile.browser.HOME_URL
 import baby.freedom.mobile.browser.Adblock
 import baby.freedom.mobile.browser.PublicSuffixList
 import baby.freedom.mobile.browser.OnchainApps
+import baby.freedom.mobile.browser.PhraseClipboard
 import baby.freedom.mobile.browser.RadApi
 import baby.freedom.mobile.browser.RadicleClient
 import baby.freedom.mobile.browser.RadicleProviders
@@ -546,6 +547,13 @@ class MainActivity : ComponentActivity() {
         Vault.get(this).onAppForeground()
         runCatching { binder?.onAppForeground() }
         runCatching { myotisBinder?.onAppForeground() }
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        // A copied recovery phrase (#78) whose minute ran out while the
+        // app was away: the clipboard is only readable with focus.
+        if (hasFocus) PhraseClipboard.clearIfDue(this)
     }
 
     override fun onStop() {

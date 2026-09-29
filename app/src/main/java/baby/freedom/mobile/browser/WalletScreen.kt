@@ -6,7 +6,9 @@ import android.content.Context
 import android.content.Intent
 import android.provider.Settings
 import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -18,6 +20,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.text.KeyboardActions
@@ -25,7 +28,10 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AccountBalanceWallet
 import androidx.compose.material.icons.filled.DeleteForever
+import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.ErrorOutline
+import androidx.compose.material.icons.filled.Key
+import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.LockOpen
 import androidx.compose.material.icons.filled.Warning
@@ -40,6 +46,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -49,18 +56,24 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import baby.freedom.mobile.ui.isLight
 import baby.freedom.mobile.wallet.BiometricVaultAuthenticator
@@ -77,6 +90,7 @@ import kotlinx.coroutines.launch
 internal const val WALLET_ROW_KEY = "wallet"
 internal const val WALLET_TITLE = "Wallet"
 internal const val BACKUP_REMINDER = "Recovery phrase not backed up yet"
+internal const val SHOW_PHRASE = "Show recovery phrase"
 private const val NO_SCREEN_LOCK_LINE = "No screen lock protects this wallet"
 
 /** The Wallet row's one-line state, for Settings and its search. */
@@ -236,11 +250,13 @@ private fun lostWalletAdvice(phraseBackedUp: Boolean) = if (phraseBackedUp) {
  * as [request]). With no wallet it offers Create (one tap, then the
  * screen-lock prompt: 24 new words, no write-down quiz) and Import (12
  * to 24 words, checksum checked); with one, Unlock or Lock, how it's
- * protected, the backup reminder, and Remove wallet.
+ * protected, the backup reminder, Show recovery phrase (#78) and
+ * Remove wallet.
  *
- * The phrase is only ever on screen on the import page, which is
- * `FLAG_SECURE` ([SecureWindow]) and keeps the keyboard from learning
- * what's typed. The typed phrase lives in plain `remember` state, never
+ * The phrase is only ever on screen on the import page and the
+ * recovery-phrase page, both `FLAG_SECURE` ([SecureWindow]); the import
+ * page also keeps the keyboard from learning what's typed. The phrase
+ * lives in plain `remember` state on either page, never
  * `rememberSaveable`, so it can't end up in the saved-instance-state
  * bundle.
  */
@@ -255,6 +271,7 @@ fun WalletScreen(
     val state by vault.state.collectAsState()
     val scope = rememberCoroutineScope()
     var importing by remember { mutableStateOf(false) }
+    var showingPhrase by remember { mutableStateOf(false) }
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     var confirmRemove by remember { mutableStateOf(false) }
@@ -295,6 +312,20 @@ fun WalletScreen(
             }
         }
     }
+
+    val stored = (state as? Vault.State.Locked)?.info ?: (state as? Vault.State.Unlocked)?.info
+    if (showingPhrase && stored != null) {
+        RecoveryPhrasePage(
+            protection = stored.protection,
+            reveal = { vault.revealMnemonic(auth) },
+            onSeen = { vault.markBackedUp() },
+            errorMessage = { e -> walletErrorMessage(e, "show the recovery phrase", phraseBackedUp) },
+            onBack = { showingPhrase = false },
+        )
+        return
+    }
+    // The wallet went away (removed, or unreadable) with the page up: nothing to show.
+    LaunchedEffect(stored == null) { if (stored == null) showingPhrase = false }
 
     if (importing) {
         ImportPhrasePage(
@@ -380,21 +411,37 @@ fun WalletScreen(
             error?.let { message ->
                 item("error") { ErrorText(message) }
             }
-            val info = (state as? Vault.State.Locked)?.info ?: (state as? Vault.State.Unlocked)?.info
-            if (info != null && !info.backedUp) item("backup") { BackupReminder(info.protection) }
+            val info = stored
+            val openPhrase = {
+                error = null
+                showingPhrase = true
+            }
+            if (info != null && !info.backedUp) item("backup") {
+                BackupReminder(info.protection, busy = busy, onShow = openPhrase)
+            }
+            if (info != null) item("phrase") {
+                SectionCard(title = "Recovery phrase") {
+                    PageRow(
+                        title = SHOW_PHRASE,
+                        subtitle = if (info.protection == VaultProtection.SCREEN_LOCK) {
+                            "Asks for your fingerprint, face or PIN each time"
+                        } else {
+                            "Opens without asking: no screen lock"
+                        },
+                        style = PageRowStyle.Inset,
+                        leadingIcon = Icons.Filled.Key,
+                        enabled = !busy,
+                        onClick = openPhrase,
+                    )
+                }
+            }
             if (info?.protection == VaultProtection.DEVICE_ONLY) item("no-lock") {
                 SectionCard(title = "No screen lock") {
                     NoScreenLockWarning(
                         text = "This wallet was made when the phone had no screen lock, so nothing " +
                             "asks who you are before it opens: anyone holding the phone can use it. " +
-                            if (info.backedUp) {
-                                "To protect it, set a screen lock, then remove the wallet and import " +
-                                    "your recovery phrase again."
-                            } else {
-                                "Its recovery phrase can’t be shown yet, so it can’t be moved to a " +
-                                    "protected wallet: set a screen lock and set up a new wallet if " +
-                                    "you need that protection."
-                            },
+                            "To protect it, write down its recovery phrase and set a screen lock, " +
+                            "then remove the wallet and import the phrase again.",
                     )
                     ScreenLockSettingsButton()
                 }
@@ -440,10 +487,9 @@ private fun SetupSection(
         )
         Spacer(Modifier.height(8.dp))
         Text(
-            "It stays on this phone only — nothing is backed up to the cloud. This version can’t " +
-                "show a new wallet’s recovery phrase yet, so a wallet created here can’t be " +
-                "restored if the phone is lost, broken or reset. Import a phrase you already " +
-                "have if you need to be able to restore it.",
+            "It stays on this phone only — nothing is backed up to the cloud. Once it’s made, " +
+                "write down its recovery phrase ($SHOW_PHRASE): without it, the wallet can’t be " +
+                "restored if the phone is lost, broken or reset.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -539,19 +585,20 @@ private fun StatusLine(
 
 /**
  * The persistent backup-reminder card (maintainer decision 3), until the
- * phrase is seen (#78). This version can't show the phrase yet, so the
- * card says what's at stake rather than asking the user to write down
- * words no screen shows.
+ * phrase has been shown once on [RecoveryPhrasePage] (#78).
  */
 @Composable
-private fun BackupReminder(protection: VaultProtection) {
+private fun BackupReminder(protection: VaultProtection, busy: Boolean, onShow: () -> Unit) {
     SectionCard(title = BACKUP_REMINDER) {
         NoScreenLockWarning(
-            text = "This wallet exists only on this phone, and this version can’t show its " +
-                "recovery phrase yet. Until you’ve written the phrase down, the wallet is gone " +
-                "for good if the phone is lost, broken or reset" +
+            text = "This wallet exists only on this phone. Until you’ve written its recovery " +
+                "phrase down, the wallet is gone for good if the phone is lost, broken or reset" +
                 (if (protection == VaultProtection.SCREEN_LOCK) ", or its screen lock is removed." else "."),
         )
+        Spacer(Modifier.height(12.dp))
+        Button(onClick = onShow, enabled = !busy, modifier = Modifier.fillMaxWidth()) {
+            Text("Back up now")
+        }
     }
 }
 
@@ -768,4 +815,223 @@ private fun RemoveWalletDialog(onConfirm: () -> Unit, onDismiss: () -> Unit) {
             TextButton(onClick = onDismiss) { Text("Cancel") }
         },
     )
+}
+
+/**
+ * What "Copy" leaves on the clipboard, and for how long, in words the
+ * page can show; also used by the unit test so the copy and
+ * [PhraseClipboard.TTL_MS] can't drift apart.
+ */
+internal val COPY_NOTE = "Copying puts the words on the clipboard, where other apps can read them. " +
+    "They’re taken off again after ${PhraseClipboard.TTL_MS / 1000 / 60} minute."
+
+/**
+ * Show recovery phrase (#78): the words behind a fresh authentication,
+ * with the usual warnings, as on iOS (`RecoveryPhraseView`) and desktop
+ * (`export-mnemonic.js`). Every reveal asks again ([Vault.revealMnemonic]
+ * never keeps the words), whether or not the wallet is unlocked; a
+ * wallet made on a phone with no screen lock is the one exception, and
+ * says so.
+ *
+ * The page is `FLAG_SECURE` ([SecureWindow]): no screenshot, screen
+ * recording, casting or Recents thumbnail. The words live in plain
+ * `remember` state only — never `rememberSaveable` — and are dropped on
+ * Hide, on Back, and as soon as the app goes to the background, so
+ * coming back to it asks again. Showing them once clears the backup
+ * reminder ([Vault.markBackedUp]).
+ */
+@Composable
+private fun RecoveryPhrasePage(
+    protection: VaultProtection,
+    reveal: suspend () -> Mnemonic,
+    onSeen: suspend () -> Unit,
+    errorMessage: (Throwable) -> String?,
+    onBack: () -> Unit,
+) {
+    SecureWindow()
+    ReleaseCoveredFocus()
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var words by remember { mutableStateOf<List<String>?>(null) }
+    var busy by remember { mutableStateOf(false) }
+    var error by remember { mutableStateOf<String?>(null) }
+    var copied by remember { mutableStateOf(false) }
+    val hide = {
+        words = null
+        copied = false
+    }
+
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_STOP) hide()
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
+    val back = {
+        hide()
+        onBack()
+    }
+    BackHandler(onBack = back)
+
+    fun show() {
+        if (busy) return
+        busy = true
+        error = null
+        scope.launch {
+            try {
+                words = reveal().words
+                try {
+                    onSeen()
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (_: Exception) {
+                    // The reminder stays up; the words are on screen all the same.
+                }
+            } catch (e: Throwable) {
+                error = errorMessage(e)
+                if (e is CancellationException) throw e
+            } finally {
+                busy = false
+            }
+        }
+    }
+
+    FullScreenScaffold(title = "Recovery phrase", onDismiss = back) {
+        LazyColumn(
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
+            modifier = Modifier.fillMaxSize(),
+        ) {
+            item("warning") {
+                SectionCard(title = "Keep it secret") {
+                    NoScreenLockWarning(
+                        text = "Anyone with these words can take everything in this wallet, from any " +
+                            "device. Never share them or type them into a website or app — no one " +
+                            "legitimate will ask. Write them down on paper, in order, and keep it " +
+                            "somewhere safe. Don’t photograph them.",
+                    )
+                }
+            }
+            item("words") {
+                val shown = words
+                SectionCard(title = if (shown != null) "Your ${shown.size} words" else "Hidden") {
+                    if (shown == null) {
+                        Text(
+                            "Make sure no one can see your screen. " + if (protection == VaultProtection.SCREEN_LOCK) {
+                                "You’ll be asked for your fingerprint, face or screen lock."
+                            } else {
+                                "This phone has no screen lock, so they show without asking."
+                            },
+                            style = MaterialTheme.typography.bodyMedium,
+                        )
+                        Spacer(Modifier.height(12.dp))
+                        Button(onClick = { show() }, enabled = !busy, modifier = Modifier.fillMaxWidth()) {
+                            Text(if (busy) "Waiting…" else SHOW_PHRASE)
+                        }
+                    } else {
+                        PhraseGrid(shown)
+                        Spacer(Modifier.height(12.dp))
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                            OutlinedButton(
+                                onClick = {
+                                    PhraseClipboard.copy(context, shown)
+                                    copied = true
+                                },
+                                modifier = Modifier.weight(1f),
+                            ) {
+                                Icon(Icons.Filled.ContentCopy, contentDescription = null, modifier = Modifier.size(18.dp))
+                                Spacer(Modifier.width(8.dp))
+                                Text(if (copied) "Copied" else "Copy")
+                            }
+                            OutlinedButton(onClick = hide, modifier = Modifier.weight(1f)) {
+                                Icon(Icons.Filled.VisibilityOff, contentDescription = null, modifier = Modifier.size(18.dp))
+                                Spacer(Modifier.width(8.dp))
+                                Text("Hide")
+                            }
+                        }
+                        Spacer(Modifier.height(8.dp))
+                        Text(
+                            COPY_NOTE,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+            }
+            error?.let { message -> item("error") { ErrorText(message) } }
+        }
+    }
+}
+
+/**
+ * The words numbered in two columns, read across (1 2 / 3 4 …) like
+ * iOS's grid, so the numbers keep them in order when copied by hand.
+ * Nothing is cut, ellipsised or broken mid-word: when the longest word
+ * wouldn't fit half the width (a large font size), it's one column.
+ */
+@Composable
+private fun PhraseGrid(words: List<String>) {
+    val measurer = rememberTextMeasurer()
+    val density = LocalDensity.current
+    val numberStyle = MaterialTheme.typography.bodySmall
+    val wordStyle = MaterialTheme.typography.bodyLarge.copy(fontFamily = FontFamily.Monospace)
+    BoxWithConstraints {
+        val gap = 8.dp
+        // The widest a cell's content gets: "24." and the longest word shown.
+        val needed = with(density) {
+            val number = measurer.measure("${words.size}.", numberStyle).size.width.toDp()
+            val word = words.maxOf { measurer.measure(it, wordStyle, softWrap = false).size.width }.toDp()
+            maxOf(number, PHRASE_NUMBER_MIN) + PHRASE_NUMBER_GAP + word + PHRASE_CELL_PAD * 2
+        }
+        val columns = if (needed * 2 + gap <= maxWidth) 2 else 1
+        Column(verticalArrangement = Arrangement.spacedBy(gap)) {
+            words.chunked(columns).forEachIndexed { row, group ->
+                Row(horizontalArrangement = Arrangement.spacedBy(gap), modifier = Modifier.fillMaxWidth()) {
+                    group.forEachIndexed { col, word ->
+                        PhraseWord(
+                            number = row * columns + col + 1,
+                            word = word,
+                            numberStyle = numberStyle,
+                            wordStyle = wordStyle,
+                            modifier = Modifier.weight(1f),
+                        )
+                    }
+                    repeat(columns - group.size) { Spacer(Modifier.weight(1f)) }
+                }
+            }
+        }
+    }
+}
+
+private val PHRASE_NUMBER_MIN = 24.dp
+private val PHRASE_NUMBER_GAP = 6.dp
+private val PHRASE_CELL_PAD = 10.dp
+
+@Composable
+private fun PhraseWord(
+    number: Int,
+    word: String,
+    numberStyle: TextStyle,
+    wordStyle: TextStyle,
+    modifier: Modifier,
+) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = modifier
+            .clip(MaterialTheme.shapes.small)
+            .background(MaterialTheme.colorScheme.surface)
+            .padding(horizontal = PHRASE_CELL_PAD, vertical = 10.dp),
+    ) {
+        Text(
+            "$number.",
+            style = numberStyle,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.widthIn(min = PHRASE_NUMBER_MIN),
+        )
+        Spacer(Modifier.width(PHRASE_NUMBER_GAP))
+        Text(word, style = wordStyle)
+    }
 }
