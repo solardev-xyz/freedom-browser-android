@@ -35,6 +35,21 @@ class WalletRpc(private val router: ChainDataRouter) {
     suspend fun gasPrice(chainId: Long): Reading<BigInteger> =
         read(chainId, "eth_gasPrice", JSONArray(), ::quantity)
 
+    /** The tip a node suggests for a type-2 transaction (`eth_maxPriorityFeePerGas`). */
+    suspend fun maxPriorityFeePerGas(chainId: Long): Reading<BigInteger> =
+        read(chainId, "eth_maxPriorityFeePerGas", JSONArray(), ::quantity)
+
+    /**
+     * The latest block's `baseFeePerGas`, or null on a chain without
+     * EIP-1559 (the block has none).
+     */
+    suspend fun latestBaseFee(chainId: Long): Reading<BigInteger?> =
+        read(chainId, "eth_getBlockByNumber", JSONArray().put("latest").put(false)) {
+            val block = it as? JSONObject ?: throw invalid("eth_getBlockByNumber", it)
+            val fee = block.opt("baseFeePerGas")
+            if (fee == null || fee == JSONObject.NULL) null else quantity(fee)
+        }
+
     /** Gas for the call object [tx] (`from`, `to`, `value`, `data`, …). */
     suspend fun estimateGas(chainId: Long, tx: JSONObject): Reading<BigInteger> =
         read(chainId, "eth_estimateGas", JSONArray().put(tx), ::quantity)
