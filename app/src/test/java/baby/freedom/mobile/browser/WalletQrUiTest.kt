@@ -1,6 +1,7 @@
 package baby.freedom.mobile.browser
 
 import baby.freedom.mobile.chains.BuiltInChains
+import baby.freedom.mobile.wallet.SafeProtocol
 import baby.freedom.mobile.wallet.ScannedCode
 import baby.freedom.mobile.wallet.WalletAccount
 import java.math.BigInteger
@@ -50,6 +51,41 @@ class WalletQrUiTest {
         val (inverted, istride, iside) = frame(uri, inverted = true)
         assertEquals(uri, QrFrameDecoder().decode(inverted, istride, iside, iside))
         assertNull(QrFrameDecoder().decode(ByteArray(200 * 200) { 128.toByte() }, 200, 200, 200))
+    }
+
+    @Test
+    fun `a Safe message request in any script scans back to one the co-signer accepts`() {
+        val safe = "0x6d21181D5e0F3a4a438F0CC65FACFd418443b096"
+        for (words in listOf("We don’t pay — €5", "Привет, сейф", "署名してください", "gm 🚀🌕", "café")) {
+            val share = SafeProtocol.shareText(SafeProtocol.messageTypedData(safe, 100, words), words)
+            val (bytes, stride, side) = frame(share, scale = 3)
+            val scanned = QrFrameDecoder().decode(bytes, stride, side, side)
+            assertEquals(words, share, scanned)
+            val request = SafeProtocol.parseRequest(scanned!!) as SafeProtocol.Request.Message
+            assertEquals(words, request.text)
+        }
+    }
+
+    @Test
+    fun `a request up to the QR limit fits a code however many bytes its characters take`() {
+        // 3-byte CJK characters: far fewer than SAFE_QR_MAX characters already
+        // overflow a version-40 code, so the limit counts bytes.
+        val cjk = "署".repeat(SAFE_QR_MAX / 3)
+        assertEquals(SAFE_QR_MAX, qrBytes(cjk))
+        assertTrue(qrMatrix(cjk).width > 0)
+        assertTrue(qrBytes("署".repeat(SAFE_QR_MAX / 3 + 1)) > SAFE_QR_MAX)
+        // Plain ASCII codes are unchanged: no ECI header, the same modules as before.
+        val plain = com.google.zxing.qrcode.QRCodeWriter().encode(
+            mine.address,
+            com.google.zxing.BarcodeFormat.QR_CODE,
+            0,
+            0,
+            mapOf(
+                com.google.zxing.EncodeHintType.ERROR_CORRECTION to com.google.zxing.qrcode.decoder.ErrorCorrectionLevel.M,
+                com.google.zxing.EncodeHintType.MARGIN to 0,
+            ),
+        )
+        assertEquals(plain, qrMatrix(mine.address))
     }
 
     @Test

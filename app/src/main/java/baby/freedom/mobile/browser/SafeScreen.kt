@@ -97,7 +97,11 @@ import org.json.JSONObject
 
 internal const val SAFE_ACCOUNTS_TITLE = "Safe accounts"
 
-/** A shared request longer than this makes a QR code too dense for a phone camera: Copy only. */
+/**
+ * A shared request longer than this many bytes ([qrBytes], UTF-8) makes a
+ * QR code too dense for a phone camera: Copy only. Bytes, not characters,
+ * so a long message in CJK or emoji can't overflow the code's capacity.
+ */
 internal const val SAFE_QR_MAX = 1_800
 
 /** Who [address] is, among a Safe's owners: one of this wallet's accounts by name, or another device's. */
@@ -1269,7 +1273,7 @@ private fun SafeRequestPage(
             if (!p.ready && !p.superseded) {
                 item("share") {
                     SectionCard(title = "Ask another owner to sign") {
-                        if (share.length <= SAFE_QR_MAX) {
+                        if (qrBytes(share) <= SAFE_QR_MAX) {
                             Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
                                 QrCodeImage(share, "QR code of the signing request", Modifier.widthIn(max = 320.dp).fillMaxWidth())
                             }
@@ -1278,7 +1282,7 @@ private fun SafeRequestPage(
                         Text(
                             "On another phone with Freedom: Wallet → Scan QR code, then sign with its owner account. " +
                                 "It’s the typed data desktop Freedom signs for its Safes (eth_signTypedData_v4), so any wallet that signs typed data can sign it." +
-                                (if (share.length > SAFE_QR_MAX) " It’s too long for a QR code: copy it instead." else ""),
+                                (if (qrBytes(share) > SAFE_QR_MAX) " It’s too long for a QR code: copy it instead." else ""),
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )

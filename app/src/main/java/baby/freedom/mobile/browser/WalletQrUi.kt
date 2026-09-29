@@ -102,14 +102,33 @@ internal const val SCAN_TITLE = "Scan QR code"
  * [content] as a QR code's modules: iOS's `ReceiveView` settings — error
  * correction M, and no margin here, since [QrCodeImage] draws the quiet
  * zone itself.
+ *
+ * Text beyond ASCII (a Safe message request's own words: curly quotes,
+ * `€`, Cyrillic, CJK, emoji) is encoded as UTF-8 and marked so with an
+ * ECI header, which ZXing's reader (and every current scanner) honours.
+ * Without the hint ZXing writes ISO-8859-1 and turns everything outside
+ * Latin-1 into `?`, so the text scanned on the other phone no longer
+ * matches what it's asked to sign. Plain ASCII (addresses, payment URIs,
+ * signatures) stays exactly as before, with no ECI header an older
+ * scanner might stumble on.
  */
 internal fun qrMatrix(content: String): BitMatrix = QRCodeWriter().encode(
     content,
     BarcodeFormat.QR_CODE,
     0,
     0,
-    mapOf(EncodeHintType.ERROR_CORRECTION to ErrorCorrectionLevel.M, EncodeHintType.MARGIN to 0),
+    buildMap {
+        put(EncodeHintType.ERROR_CORRECTION, ErrorCorrectionLevel.M)
+        put(EncodeHintType.MARGIN, 0)
+        if (content.any { it.code > 0x7F }) put(EncodeHintType.CHARACTER_SET, Charsets.UTF_8.name())
+    },
 )
+
+/**
+ * How many bytes [content] takes in a QR code: what a code's capacity
+ * limits, not its character count — a CJK character is 3 bytes, an emoji 4.
+ */
+internal fun qrBytes(content: String): Int = content.toByteArray(Charsets.UTF_8).size
 
 /** The quiet zone around a QR code, in modules: the spec's minimum. */
 private const val QUIET_ZONE = 4
