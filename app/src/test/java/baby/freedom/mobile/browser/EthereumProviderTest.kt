@@ -98,6 +98,8 @@ class EthereumProviderTest {
         val outcomes = ArrayDeque<EthereumProvider.Submitted>()
         var prepareError: String? = null
         var busy = false
+        /** What the send is priced at. */
+        var fees: EthTransaction.Fees = EthTransaction.Fees.Eip1559(BigInteger.valueOf(2_000_000_000), BigInteger.ONE)
         override fun busy() = busy
         override suspend fun prepare(request: SendRequest): SendQuote {
             prepareError?.let { throw SendException(it) }
@@ -110,7 +112,7 @@ class EthereumProviderTest {
                 to = to,
                 value = value,
                 data = data,
-                fees = EthTransaction.Fees.Eip1559(BigInteger.valueOf(2_000_000_000), BigInteger.ONE),
+                fees = fees,
             )
             val trust = ChainTrust(ChainTrust.Level.VERIFIED, ChainSource.QUORUM, emptyList(), emptyList(), emptyList(), 3, 2, null)
             return SendQuote(request, tx, BigInteger.TEN.pow(18), null, 0, trust)
@@ -1099,6 +1101,32 @@ class EthereumProviderTest {
         assertEquals(1L, (asks.last() as EthAsk.SendTransaction).autoApprove!!.chainId)
         assertEquals(6, asks.count { it is EthAsk.SendTransaction })
         assertTrue(sends.outcomes.isEmpty())
+    }
+
+    @Test
+    fun `a covered call at a fee above what one RPC's word may set asks, and says why (#233)`() {
+        grantTransferRule()
+        val gwei = BigInteger.valueOf(1_000_000_000)
+        // A tip past the cap (only a verified base fee lets one through), or a verified high legacy price.
+        for (high in listOf(
+            EthTransaction.Fees.Eip1559(BigInteger.valueOf(200) * gwei, BigInteger.valueOf(60) * gwei),
+            EthTransaction.Fees.Legacy(BigInteger.valueOf(5_000) * gwei),
+        )) {
+            sends.fees = high
+            asks.clear()
+            answer = { EthAnswer.Rejected }
+            assertEquals(4001, code(call("eth_sendTransaction", tx("to" to token, "data" to transferData))))
+            val sheet = asks.single() as EthAsk.SendTransaction
+            assertTrue(sheet.ruled)
+        }
+        assertTrue(autoApproveRuledNote(replaces = false, highFee = true).contains("network fee is higher"))
+        // At the cap it still goes out silently.
+        sends.fees = EthTransaction.Fees.Eip1559(BigInteger.valueOf(10) * gwei, BigInteger.valueOf(5) * gwei)
+        asks.clear()
+        answer = { error("no sheet expected") }
+        sends.outcomes += sent(3)
+        assertEquals(sent(3).hash, ok(call("eth_sendTransaction", tx("to" to token, "data" to transferData))))
+        assertTrue(asks.isEmpty())
     }
 
     @Test

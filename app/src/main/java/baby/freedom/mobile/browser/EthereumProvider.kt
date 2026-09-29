@@ -8,6 +8,7 @@ import baby.freedom.mobile.chains.rpc.ChainDataRouter
 import baby.freedom.mobile.chains.rpc.ChainRpcException
 import baby.freedom.mobile.wallet.DappCall
 import baby.freedom.mobile.wallet.Eip712
+import baby.freedom.mobile.wallet.GasOracle
 import baby.freedom.mobile.wallet.MessageSigning
 import baby.freedom.mobile.wallet.NodeIdentity
 import baby.freedom.mobile.wallet.SendException
@@ -724,9 +725,10 @@ class EthereumProvider(
             // Before the sheet, not after the user confirmed one that can't go.
             if (sends.busy()) return busy()
             val ruled = rule != null && autoApprove.matches(rule)
-            // No sheet only with the wallet open (else the sheet's button asks to unlock), and never
-            // for a send that takes the place of one the user stopped tracking: that warning is theirs to read.
-            if (!ruled || !wallet.unlocked() || quote.replaces != null) {
+            // No sheet only with the wallet open (else the sheet's button asks to unlock), never
+            // for a send that takes the place of one the user stopped tracking: that warning is theirs
+            // to read, and never at a fee above what one RPC's word may set (#233).
+            if (!ruled || !wallet.unlocked() || quote.replaces != null || !GasOracle.quiet(quote.tx.fees, chain.id)) {
                 val answer = ask(EthAsk.SendTransaction(origin, quote, repriced, rule, ruled))
                 if (answer !is EthAnswer.Approved) return refused(answer)
                 // A repriced sheet opens with the switch off: what counts is the one confirmed last.

@@ -59,6 +59,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import baby.freedom.mobile.wallet.BiometricVaultAuthenticator
+import baby.freedom.mobile.wallet.GasOracle
 import baby.freedom.mobile.wallet.SendAmounts
 import baby.freedom.mobile.wallet.Vault
 import baby.freedom.mobile.wallet.WalletAccount
@@ -410,14 +411,14 @@ private fun SendBody(ask: EthAsk.SendTransaction, always: Boolean, enabled: Bool
     ask.autoApprove?.let { rule ->
         Spacer(Modifier.height(8.dp))
         if (ask.ruled) {
-            Note(autoApproveRuledNote(quote.replaces != null))
+            Note(autoApproveRuledNote(quote.replaces != null, highFee = !GasOracle.quiet(quote.tx.fees, chain.id)))
         } else {
             AutoApproveSwitch(rule, chain.name, always, enabled, onAlways)
         }
     }
     Spacer(Modifier.height(8.dp))
     Note(
-        "Only the fee the network actually charges is paid. A transaction can't be undone once it's sent: " +
+        feeFootnote(quote.tx) + " A transaction can't be undone once it's sent: " +
             "only confirm if you trust the site and expect it.",
     )
 }
@@ -457,11 +458,11 @@ private fun AutoApproveSwitch(rule: AutoApproveRule, chain: String, checked: Boo
 }
 
 /** Why a send a rule covers still has a sheet. */
-internal fun autoApproveRuledNote(replaces: Boolean): String =
-    "An auto-approve rule you turned on covers this call. " + if (replaces) {
-        "It's asked here because it takes the place of a send you stopped tracking."
-    } else {
-        "It's asked here because the wallet is locked; it goes out once you confirm."
+internal fun autoApproveRuledNote(replaces: Boolean, highFee: Boolean = false): String =
+    "An auto-approve rule you turned on covers this call. " + when {
+        replaces -> "It's asked here because it takes the place of a send you stopped tracking."
+        highFee -> "It's asked here because its network fee is higher than a rule sends without asking."
+        else -> "It's asked here because the wallet is locked; it goes out once you confirm."
     }
 
 @Composable

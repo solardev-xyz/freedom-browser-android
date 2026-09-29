@@ -100,6 +100,19 @@ internal fun feeDetail(tx: EthTransaction): String {
     }
 }
 
+/**
+ * What of the review's "up to" fee is actually paid (#233): gas the
+ * transaction doesn't use and, with a base fee, headroom the base fee
+ * doesn't rise into stay in the account — but all of the tip, or of a
+ * legacy gas price, is paid for each unit of gas used.
+ */
+internal fun feeFootnote(tx: EthTransaction): String = when (tx.fees) {
+    is EthTransaction.Fees.Eip1559 ->
+        "The “up to” leaves room for unused gas and for the base fee to rise; what isn't used stays in the account. The tip is paid in full."
+    is EthTransaction.Fees.Legacy ->
+        "The “up to” leaves room for unused gas, which stays in the account; the gas used is paid at the price above in full."
+}
+
 /** The line a [SendStatus] shows under its heading. */
 internal fun sendStatusText(status: SendStatus): Pair<String, String> {
     val chain = status.quote.request.chain
@@ -495,7 +508,7 @@ private fun SendReviewSection(
         )
         Spacer(Modifier.height(4.dp))
         Text(
-            "Only the fee the network actually charges is paid; the rest of the “up to” stays in the account.",
+            feeFootnote(quote.tx),
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )

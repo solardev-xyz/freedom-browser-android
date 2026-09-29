@@ -1,6 +1,7 @@
 package baby.freedom.mobile.wallet
 
 import android.util.Log
+import baby.freedom.mobile.chains.BuiltInChains
 import baby.freedom.mobile.chains.Chain
 import baby.freedom.mobile.chains.rpc.ChainDataRouter
 import baby.freedom.mobile.chains.rpc.ChainRpcException
@@ -225,32 +226,82 @@ data class SendQuote(
  * Fees for the next transaction (#105). With a base fee (EIP-1559):
  * the node's suggested tip, but at least [MIN_TIP_WEI] — iOS's
  * `GasOracle` floor; one lowballing RPC must not leave the send, and
- * every one queued behind its nonce, stuck — and a cap of twice the
- * latest base fee plus the tip, desktop's market preset: headroom for
- * the base fee to keep rising for a few blocks between quote and
- * inclusion. Unused headroom is never charged. Without a base fee:
- * legacy, at the node's gas price.
+ * every one queued behind its nonce, stuck — and at most [tipCeiling]
+ * (#233): all of a tip is paid, so an RPC that reports 5000 gwei would
+ * otherwise burn the balance to the block proposer. The fee cap is
+ * twice the latest base fee plus the tip, desktop's market preset:
+ * headroom for the base fee to keep rising for a few blocks between
+ * quote and inclusion. Unused headroom is never charged. Without a
+ * base fee: legacy, at the node's gas price — all of which is paid, so
+ * one above [legacyCap] is refused unless it was verified.
  */
 class GasOracle(private val rpc: WalletRpc) {
     suspend fun fees(chainId: Long): EthTransaction.Fees {
-        val baseFee = rpc.latestBaseFee(chainId).value
-        if (baseFee == null) return legacy(rpc.gasPrice(chainId).value)
+        val base = rpc.latestBaseFee(chainId)
+        val baseFee = base.value
+        if (baseFee == null) {
+            val price = rpc.gasPrice(chainId)
+            return legacy(price.value, chainId, price.trust.level == ChainTrust.Level.VERIFIED)
+        }
         val tip = try {
             rpc.maxPriorityFeePerGas(chainId).value
         } catch (e: ChainRpcException) {
             // An RPC without the method (it's not standard JSON-RPC): the floor is a fine tip.
             null
         }
-        return eip1559(baseFee, tip)
+        return eip1559(baseFee, tip, chainId, baseFeeVerified = base.trust.level == ChainTrust.Level.VERIFIED)
     }
 
     companion object {
         /** 1 gwei, the tip most wallets bid by default. */
         val MIN_TIP_WEI: BigInteger = BigInteger.valueOf(1_000_000_000L)
 
-        internal fun eip1559(baseFee: BigInteger, suggestedTip: BigInteger?): EthTransaction.Fees.Eip1559 {
-            val tip = (suggestedTip ?: MIN_TIP_WEI).max(MIN_TIP_WEI)
+        private fun gwei(n: Long): BigInteger = BigInteger.valueOf(n) * BigInteger.valueOf(1_000_000_000L)
+
+        /**
+         * The most tip per gas bid on no other evidence (#233): 5 gwei on
+         * the built-in chains (Ethereum, Gnosis, Base), where wallets bid
+         * 0.01–2; 50 gwei elsewhere, where a chain may ask for more
+         * (Polygon won't take under 25–30).
+         */
+        internal fun tipCap(chainId: Long): BigInteger = if (BuiltInChains.isBuiltIn(chainId)) gwei(5) else gwei(50)
+
+        /**
+         * The most legacy gas price taken on one RPC's word (#233): 100
+         * gwei on the built-in chains (all EIP-1559, so a legacy read
+         * there is itself odd), 500 elsewhere.
+         */
+        internal fun legacyCap(chainId: Long): BigInteger = if (BuiltInChains.isBuiltIn(chainId)) gwei(100) else gwei(500)
+
+        /**
+         * The highest tip [eip1559] bids: [tipCap], or the base fee when
+         * that was verified and is higher — a tip as high as the base fee
+         * is what a congested chain can call for, but an RPC's own word
+         * for the base fee mustn't be what lets its tip through.
+         */
+        internal fun tipCeiling(chainId: Long, baseFee: BigInteger, baseFeeVerified: Boolean): BigInteger =
+            if (baseFeeVerified) tipCap(chainId).max(baseFee) else tipCap(chainId)
+
+        internal fun eip1559(
+            baseFee: BigInteger,
+            suggestedTip: BigInteger?,
+            chainId: Long,
+            baseFeeVerified: Boolean = false,
+        ): EthTransaction.Fees.Eip1559 {
+            val tip = (suggestedTip ?: MIN_TIP_WEI).max(MIN_TIP_WEI).min(tipCeiling(chainId, baseFee, baseFeeVerified))
             return EthTransaction.Fees.Eip1559(maxFeePerGas = baseFee.shiftLeft(1) + tip, maxPriorityFeePerGas = tip)
+        }
+
+        /**
+         * Whether [fees] may go out with no sheet under an auto-approve
+         * rule (#112, #233): a tip, or a legacy gas price, no higher than
+         * one RPC's word may set it. Anything above — a verified high base
+         * fee letting the tip past [tipCap], a verified legacy price past
+         * [legacyCap], a replacement's bump — is the user's to see.
+         */
+        fun quiet(fees: EthTransaction.Fees, chainId: Long): Boolean = when (fees) {
+            is EthTransaction.Fees.Eip1559 -> fees.maxPriorityFeePerGas <= tipCap(chainId)
+            is EthTransaction.Fees.Legacy -> fees.gasPrice <= legacyCap(chainId)
         }
 
         /**
@@ -277,9 +328,16 @@ class GasOracle(private val rpc: WalletRpc) {
             }
         }
 
-        internal fun legacy(gasPrice: BigInteger): EthTransaction.Fees.Legacy {
+        internal fun legacy(gasPrice: BigInteger, chainId: Long, verified: Boolean): EthTransaction.Fees.Legacy {
             // A zero price would sit in the mempool forever and hold every later nonce behind it.
             if (gasPrice.signum() <= 0) throw SendException("The network gave no usable gas price. Try again.")
+            // Unlike a tip, a legacy price can't be clamped: too low and the send never mines.
+            if (gasPrice > legacyCap(chainId) && !verified) {
+                throw SendException(
+                    "The network's RPC asked for an unusually high gas price, and no other RPC confirmed it. " +
+                        "Nothing was sent. Try again later, or add another RPC for this chain in Settings → Chains.",
+                )
+            }
             return EthTransaction.Fees.Legacy(gasPrice)
         }
     }
