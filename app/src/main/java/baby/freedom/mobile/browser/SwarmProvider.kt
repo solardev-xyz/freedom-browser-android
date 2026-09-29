@@ -129,10 +129,11 @@ class SwarmProvider(
         fun signingKey(identity: PublisherIdentity): ByteArray
 
         /**
-         * The user approved a sheet, or a write they allowed went out
-         * (postage spent): keeps the wallet from idling into its lock
-         * (desktop's `resetVaultAutoLockTimer`). Never for a request the
-         * page gets answered for free (#236).
+         * The user approved a sheet, or a write they allowed went out to
+         * the node: keeps the wallet from idling into its lock (desktop's
+         * `resetVaultAutoLockTimer`). Never for a read answered with no
+         * sheet and no write (#236). A write needn't spend new postage:
+         * rewriting the same SOC can reuse its stamp slot.
          */
         fun noteActivity()
     }
@@ -496,10 +497,14 @@ class SwarmProvider(
         }
         calls.committed()
         val reply = signed.work()
-        // So does a write that went out, sheet or no sheet: it spent postage,
-        // like a publish. A read "always allow" answers with no sheet and
-        // nothing spent (the signing identity, an existing feed) doesn't, or
-        // a page could keep the wallet open by polling it (#236).
+        // So does a write that went out, sheet or no sheet: a Swarm write the
+        // user allowed, like a publish (#236's scope). It need not spend new
+        // postage — rewriting the same SOC identifier can reuse the chunk's
+        // stamp slot — so a page with Signing on "always allow" can still hold
+        // the lock off by rewriting one SOC; that rule is the user's to revoke.
+        // A read "always allow" answers with no sheet and no write (the signing
+        // identity, an existing feed) doesn't count, or a page could keep the
+        // wallet open just by polling it.
         if (signed.writes && reply is Reply.Ok) publishers.noteActivity()
         return reply
     }

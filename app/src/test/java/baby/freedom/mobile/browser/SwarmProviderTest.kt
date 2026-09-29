@@ -729,7 +729,7 @@ class SwarmProviderTest {
         assertEquals(4001, err(call("swarm_createFeed", JSONObject().put("name", "posts"))).code)
         assertEquals(1, publishers.activity)
 
-        // A write "always allow" lets through spends postage, like a publish: it counts.
+        // A write "always allow" lets through goes out to the node, like a publish: it counts.
         ok(call("swarm_writeSingleOwnerChunk", JSONObject().put("identifier", "01".repeat(32)).put("data", "payload")))
         assertEquals(1, asked.size)
         assertEquals(2, publishers.activity)
