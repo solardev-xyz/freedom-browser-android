@@ -100,7 +100,7 @@ class OpenLvSession internal constructor(
         fun transactionSigner(account: WalletAccount, fresh: () -> Boolean): suspend (EthTransaction) -> EthTransaction.Signed =
             { t -> withKey(account) { key -> t.sign(key, account.address) } }
 
-        /** Wallet activity: keeps an open wallet from idling out, as dApp use does on desktop. */
+        /** The user approved a sheet: keeps an open wallet from idling out. Never for a peer's reads (#236). */
         fun noteActivity()
     }
 
@@ -263,7 +263,6 @@ class OpenLvSession internal constructor(
 
     /** One request's answer. Internal so tests drive it without an engine. */
     internal suspend fun handle(sid: Int, method: String, params: JSONArray): OpenLvResponse {
-        keys.noteActivity()
         forgetRemovedAccount()
         return when (method) {
             "eth_chainId" -> OpenLvResponse.Result("0x" + chainId.toString(16))
@@ -303,7 +302,8 @@ class OpenLvSession internal constructor(
         val approval = Approval(request, CompletableDeferred())
         _approval.value = approval
         return try {
-            approval.answer.await()
+            // Only the user's own yes is wallet activity, never the peer's reads or polling (#236).
+            approval.answer.await().also { if (it is Decision.Approve) keys.noteActivity() }
         } finally {
             if (_approval.value === approval) _approval.value = null
         }

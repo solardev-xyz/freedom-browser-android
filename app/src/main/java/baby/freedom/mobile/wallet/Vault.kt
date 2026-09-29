@@ -30,7 +30,9 @@ class VaultUnreadableException(cause: Throwable? = null) :
 /**
  * When an unlocked vault locks itself again (#76), as the maintainer
  * decided: after [IDLE_MS] (15 min) with no wallet activity — desktop's
- * auto-lock, kept alive by dApp use through [Vault.noteActivity] — or
+ * auto-lock, kept alive by what the user does with the wallet (approving
+ * a site's request, [Vault.noteActivity]; a key being used, [Vault.withSeed]),
+ * never by a site's own reads or polling (#236) — or
  * [BACKGROUND_GRACE_MS] (1 min) after the app left the foreground, so a
  * quick app switch doesn't cost a re-authentication but a phone left
  * behind does. Times are `elapsedRealtime`, which keeps counting through
@@ -344,17 +346,23 @@ class Vault internal constructor(
     }
 
     /**
-     * Runs [block] with the 64-byte BIP-39 seed (a copy, zeroed after) and
-     * counts it as wallet activity. Throws [VaultLockedException] if the
-     * vault isn't unlocked — or has just run out its auto-lock time. Keep
-     * whatever [block] derives scoped to the one operation.
+     * Runs [block] with the 64-byte BIP-39 seed (a copy, zeroed after) and,
+     * unless [activity] is false, counts it as wallet activity. Throws
+     * [VaultLockedException] if the vault isn't unlocked — or has just run
+     * out its auto-lock time. Keep whatever [block] derives scoped to the
+     * one operation. [activity] false is for a key a site's request uses
+     * with no sheet and no write (a Swarm signing identity read under
+     * "always allow"), which mustn't hold the idle lock off (#236); the
+     * caller counts it itself when the user approved or a write went out.
      */
-    fun <T> withSeed(block: (ByteArray) -> T): T {
+    fun <T> withSeed(activity: Boolean = true, block: (ByteArray) -> T): T {
         val copy = synchronized(lock) {
             lockIfExpiredLocked()
             val s = seed ?: throw VaultLockedException()
-            policy.activity(clock())
-            reschedule()
+            if (activity) {
+                policy.activity(clock())
+                reschedule()
+            }
             s.copyOf()
         }
         return try {
@@ -364,7 +372,7 @@ class Vault internal constructor(
         }
     }
 
-    /** dApp or wallet activity: keeps an unlocked vault from idling out, as on desktop. */
+    /** The user approved something (a site's connect, signature, send…): keeps an unlocked vault from idling out. */
     fun noteActivity() {
         synchronized(lock) {
             if (seed == null) return

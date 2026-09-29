@@ -205,7 +205,7 @@ class OpenLvSessionTest {
         s.onRequest(1, 7, "eth_sign", JSONArray())
         assertEquals(OpenLvSession.UNSUPPORTED, error(engine.next()))
         assertNull(s.approval.value)
-        assertEquals(7, keys.activity) // every request keeps an open wallet from idling out
+        assertEquals(0, keys.activity) // a peer's reads don't keep an open wallet from idling out (#236)
     }
 
     @Test
@@ -229,6 +229,31 @@ class OpenLvSessionTest {
         s.onRequest(2, 4, "eth_requestAccounts", JSONArray())
         s.awaitSheet().decide(OpenLvSession.Decision.Reject)
         assertEquals(OpenLvSession.REJECTED_CODE, error(engine.next()))
+    }
+
+    @Test
+    fun `only what the user approves on the phone counts as wallet activity, not a peer's reads or refused asks (#236)`() {
+        val (s, engine, keys) = session()
+        s.startOnScope()
+        repeat(50) { i ->
+            s.onRequest(1, i, "eth_chainId", JSONArray())
+            engine.next()
+        }
+        s.onRequest(1, 100, "eth_requestAccounts", JSONArray())
+        s.awaitSheet().decide(OpenLvSession.Decision.Reject)
+        assertEquals(OpenLvSession.REJECTED_CODE, error(engine.next()))
+        assertEquals(0, keys.activity)
+        s.onRequest(1, 101, "eth_requestAccounts", JSONArray())
+        s.awaitSheet().decide(OpenLvSession.Decision.Approve(account0))
+        engine.next()
+        assertEquals(1, keys.activity)
+        s.onRequest(1, 102, "personal_sign", JSONArray().put("0x6869").put(account0.address))
+        s.awaitSheet().decide(OpenLvSession.Decision.Approve())
+        result(engine.next())
+        assertEquals(2, keys.activity)
+        s.onRequest(1, 103, "eth_accounts", JSONArray())
+        engine.next()
+        assertEquals(2, keys.activity)
     }
 
     @Test

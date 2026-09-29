@@ -490,9 +490,11 @@ object PublisherKeys {
     /**
      * The 32-byte secp256k1 key [identity] signs with. Secret: the caller
      * zeroes it after the one signature, and never logs or stores it.
+     * Deriving it doesn't count as wallet activity: the Swarm provider
+     * counts that itself, for an approved sheet or a write (#236).
      */
     fun signingKey(vault: Vault, identity: PublisherIdentity): ByteArray =
-        vault.withSeed { seed -> HdKeys.secp256k1(seed, identity.derivationPath) }
+        vault.withSeed(activity = false) { seed -> HdKeys.secp256k1(seed, identity.derivationPath) }
 
     internal fun address(privateKey: ByteArray): String {
         val pub = Secp256k1Keys.publicKeyUncompressed(privateKey)
