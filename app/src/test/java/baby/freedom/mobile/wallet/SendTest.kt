@@ -18,6 +18,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
@@ -778,6 +779,26 @@ class SendTest {
         assertTrue(System.nanoTime() - t1 < 1_000_000_000L)
         assertNull(third.status.value)
         stuck.countDown()
+        // The Stop tracking landed while Try again's write was held up: those bytes never go out.
+        delay(300)
+        assertTrue(chain.sent.isEmpty())
+        assertNull(third.status.value)
+    }
+
+    @Test
+    fun `a save whose directory fsync fails is not a save, and nothing is broadcast`() = runBlocking<Unit> {
+        val chain = FakeChain()
+        val unsynced = FileSendJournal(journalFile()) { false }
+        // The file itself is written; its rename just isn't known to be on flash.
+        assertFalse(unsynced.save(SendJournal.State(null, mapOf("100:0xabc" to NonceTracker.Abandoned(BigInteger.ONE, EthTransaction.Fees.Legacy(BigInteger.TEN), "0x01")))))
+        // Deleting a file that isn't there needs no sync.
+        journalFile().delete()
+        assertTrue(unsynced.save(SendJournal.State(null, emptyMap())))
+        val s = sender(chain, journal = unsynced)
+        s.submit(s.prepare(request()), signer())
+        val failed = s.awaitStage { it is SendStatus.Stage.Failed }
+        assertFalse(failed.mayHaveGone)
+        assertTrue(chain.sent.isEmpty())
     }
 
     @Test

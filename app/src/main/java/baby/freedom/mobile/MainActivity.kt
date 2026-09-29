@@ -62,6 +62,7 @@ import baby.freedom.mobile.ui.FreedomTheme
 import baby.freedom.mobile.ui.isLight
 import baby.freedom.mobile.wallet.NodeIdentitySync
 import baby.freedom.mobile.wallet.WalletAccounts
+import baby.freedom.mobile.wallet.WalletSender
 import baby.freedom.mobile.wallet.Vault
 import baby.freedom.swarm.IpfsInfo
 import baby.freedom.swarm.MyotisInfo
@@ -332,6 +333,14 @@ class MainActivity : ComponentActivity() {
         // The wallet's accounts (#104) follow it the same way: verified on
         // every unlock, forgotten on Remove wallet.
         WalletAccounts.get(this).start()
+        // A send the last process left unresolved resumes, and mined abandoned sends are swept (#105).
+        lifecycleScope.launch(Dispatchers.IO) {
+            try {
+                WalletSender.resumeAtLaunch(this@MainActivity)
+            } catch (e: Exception) {
+                android.util.Log.w("MainActivity", "resuming the wallet's send failed (${e.javaClass.simpleName})")
+            }
+        }
 
         // Honor the persisted preference on cold start. If the user had
         // the node enabled, start + bind right away; otherwise leave

@@ -50,17 +50,27 @@ interface SendJournal {
 /**
  * [SendJournal] in one JSON file, written whole to a temporary file and
  * renamed over it. The bytes are fsynced before the rename, and the
- * directory after it, so a save that returned true is on flash — the
+ * directory after it, and a save returns true only once both fsyncs
+ * succeeded, so a save that returned true is on flash — the
  * signed bytes must be, before they're broadcast, or a power loss right
  * after a send could come back to no journal and a fresh send one nonce
  * past it. Blocks on storage: never call it on the main thread.
  */
-class FileSendJournal(private val file: File) : SendJournal {
+class FileSendJournal internal constructor(
+    private val file: File,
+    private val dirSync: (File?) -> Boolean,
+) : SendJournal {
+    constructor(file: File) : this(file, { FileSendJournal.syncDirectory(it) })
+
     override fun save(state: SendJournal.State): Boolean = try {
         if (state.send == null && state.abandoned.isEmpty()) {
-            file.delete()
-            syncDirectory(file.parentFile)
-            !file.exists()
+            // Nothing there: nothing to delete, nor to sync.
+            if (!file.exists()) {
+                true
+            } else {
+                file.delete()
+                !file.exists() && dirSync(file.parentFile)
+            }
         } else {
             file.parentFile?.mkdirs()
             val tmp = File(file.parentFile, "${file.name}.tmp")
@@ -69,8 +79,8 @@ class FileSendJournal(private val file: File) : SendJournal {
                 out.fd.sync()
             }
             if (tmp.renameTo(file)) {
-                syncDirectory(file.parentFile)
-                true
+                // Renamed but maybe not on flash: not saved as far as a broadcast is concerned.
+                dirSync(file.parentFile)
             } else {
                 tmp.delete()
                 false

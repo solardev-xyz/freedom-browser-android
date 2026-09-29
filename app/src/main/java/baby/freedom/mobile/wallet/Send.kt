@@ -21,6 +21,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import org.json.JSONObject
 
 /** A send the user can't make as asked, with what to tell them. */
@@ -450,7 +451,8 @@ class WalletSender internal constructor(
             } finally {
                 restored.complete(Unit)
             }
-            // A deleted wallet's abandoned sends are never looked at by a send again: drop the mined ones here.
+            // A deleted wallet's abandoned sends are never looked at by a send again: drop the mined ones
+            // here (at each launch that left a journal: MainActivity calls resumeAtLaunch).
             nonces.sweepMined()
         }
     }
@@ -533,19 +535,56 @@ class WalletSender internal constructor(
 
     /**
      * From a send's own coroutine: [quote]'s status becomes what [next]
-     * makes of it — journalled first, then shown, so nothing is on screen
-     * that a restart wouldn't bring back. Nothing if another send (or a
-     * discard) took over, before or while it was written.
+     * makes of it — journalled first (on the IO pool: the save fsyncs),
+     * then shown, so nothing is on screen that a restart wouldn't bring
+     * back. Nothing if another send (or a discard) took over, before or
+     * while it was written; true if it was shown.
      */
-    private fun journalThenShow(quote: SendQuote, next: (SendStatus) -> SendStatus) {
+    private suspend fun journalThenShow(quote: SendQuote, next: (SendStatus) -> SendStatus): Boolean = withContext(Dispatchers.IO) {
         synchronized(writing) {
-            val (was, now, state) = synchronized(this) {
-                val was = _status.value?.takeIf { it.quote === quote } ?: return
+            val (was, now, state) = synchronized(this@WalletSender) {
+                val was = _status.value?.takeIf { it.quote === quote } ?: return@withContext false
                 val now = next(was)
                 Triple(was, now, snapshot(now, signed))
             }
             journal.save(state)
-            synchronized(this) { if (_status.value === was) _status.value = now }
+            synchronized(this@WalletSender) {
+                if (_status.value !== was) return@withContext false
+                _status.value = now
+                true
+            }
+        }
+    }
+
+    /**
+     * [s], about to go out for [quote], written to the journal (on the IO
+     * pool) and then shown as Broadcasting; false if nothing may go out —
+     * discarded meanwhile, or the journal couldn't be written (shown as
+     * a failure that certainly didn't go out).
+     */
+    private suspend fun journalBeforeBroadcast(quote: SendQuote, s: EthTransaction.Signed): Boolean = withContext(Dispatchers.IO) {
+        val broadcasting = SendStatus(quote, SendStatus.Stage.Broadcasting, s.hash)
+        synchronized(writing) {
+            val state = synchronized(this@WalletSender) {
+                // Discarded while the key was at work: nothing goes out.
+                if (_status.value?.quote !== quote) return@withContext false
+                snapshot(broadcasting, s)
+            }
+            val saved = journal.save(state)
+            synchronized(this@WalletSender) {
+                // Discarded while it was written: nothing goes out (the discard's own write follows this one).
+                if (_status.value?.quote !== quote) return@withContext false
+                if (!saved) {
+                    _status.value = SendStatus(
+                        quote,
+                        SendStatus.Stage.Failed("Couldn’t save the transaction before sending it, so nothing was sent.", false),
+                    )
+                    return@withContext false
+                }
+                signed = s
+                _status.value = broadcasting
+                true
+            }
         }
     }
 
@@ -679,29 +718,7 @@ class WalletSender internal constructor(
                 // On disk before it goes out: a process killed mid-broadcast
                 // must come back to these bytes, never to an empty form that
                 // would sign a second payment next to them.
-                val broadcasting = SendStatus(quote, SendStatus.Stage.Broadcasting, s.hash)
-                synchronized(writing) {
-                    val state = synchronized(this@WalletSender) {
-                        // Discarded while the key was at work: nothing goes out.
-                        if (_status.value?.quote !== quote) return@launch
-                        snapshot(broadcasting, s)
-                    }
-                    val saved = journal.save(state)
-                    synchronized(this@WalletSender) {
-                        // Discarded while it was written: nothing goes out (the discard's own write follows this one).
-                        if (_status.value?.quote !== quote) return@launch
-                        if (!saved) {
-                            _status.value = SendStatus(
-                                quote,
-                                SendStatus.Stage.Failed("Couldn’t save the transaction before sending it, so nothing was sent.", false),
-                            )
-                            return@launch
-                        }
-                        signed = s
-                        _status.value = broadcasting
-                    }
-                }
-                broadcast(quote, s)
+                if (journalBeforeBroadcast(quote, s)) broadcast(quote, s)
             }
         }
         return Submit.STARTED
@@ -791,7 +808,8 @@ class WalletSender internal constructor(
         val chainId = quote.tx.chainId
         // Discarded meanwhile (signing isn't a suspension point, so cancelling alone can't stop this).
         if (!current(quote)) return
-        set(quote, SendStatus.Stage.Broadcasting, s.hash)
+        // The write blocks (lock, fsync): a discard landing during it wins, and nothing goes out.
+        if (!set(quote, SendStatus.Stage.Broadcasting, s.hash)) return
         try {
             rpc.sendRawTransaction(chainId, s.raw)
             // Discarded while it went out: discard filed it as abandoned; don't undo that.
@@ -875,10 +893,10 @@ class WalletSender internal constructor(
     }
 
     // A newer send (or an acknowledge) took over: this one's news is stale, and journalThenShow drops it.
-    private fun set(quote: SendQuote, stage: SendStatus.Stage, hash: String?) =
+    private suspend fun set(quote: SendQuote, stage: SendStatus.Stage, hash: String?): Boolean =
         journalThenShow(quote) { SendStatus(quote, stage, hash) }
 
-    private fun fail(quote: SendQuote, message: String, mayHaveGone: Boolean) =
+    private suspend fun fail(quote: SendQuote, message: String, mayHaveGone: Boolean) =
         journalThenShow(quote) { it.copy(stage = SendStatus.Stage.Failed(message, mayHaveGone)) }
 
     companion object {
@@ -1036,8 +1054,24 @@ class WalletSender internal constructor(
             instance ?: WalletSender(
                 rpc = WalletRpc(ChainDataRouter.get(context.applicationContext)),
                 scope = CoroutineScope(SupervisorJob() + Dispatchers.Default),
-                journal = FileSendJournal(java.io.File(context.applicationContext.noBackupFilesDir, "wallet/send.json")),
+                journal = FileSendJournal(journalFile(context)),
             ).also { instance = it }
+        }
+
+        private fun journalFile(context: android.content.Context) =
+            java.io.File(context.applicationContext.noBackupFilesDir, "wallet/send.json")
+
+        /**
+         * At each app launch, off the main thread (it touches storage):
+         * if the last process left a journal, the sender comes up now
+         * rather than at the first visit to the wallet — a send still
+         * waiting for its receipt goes on being followed, and abandoned
+         * sends whose nonce is mined are swept, a deleted wallet's among
+         * them. With no journal there is nothing to resume or sweep, and
+         * nothing is started.
+         */
+        fun resumeAtLaunch(context: android.content.Context) {
+            if (journalFile(context).exists()) get(context)
         }
 
         /**
