@@ -88,6 +88,14 @@ internal fun swarmPromptCopy(ask: SwarmAsk): SwarmPromptCopy = when (ask) {
         "Publish",
         "Always allow this site to publish without asking",
     )
+    // Its own sheet (SwarmManifestSheet); this is only what it's called.
+    is SwarmAsk.Manifest -> SwarmPromptCopy(
+        "App permissions",
+        "asks for Swarm permissions",
+        "",
+        "Allow all",
+        null,
+    )
     is SwarmAsk.Sign -> if (ask.kind == SwarmProvider.AutoApprove.Signing) {
         SwarmPromptCopy(
             "Publisher signing",
@@ -194,6 +202,10 @@ internal fun swarmSignIdentity(ask: SwarmAsk.Sign): String =
 @Composable
 fun SwarmPromptSheet(request: SwarmPromptRequest) {
     val ask = request.ask
+    if (ask is SwarmAsk.Manifest) {
+        SwarmManifestSheet(request, ask)
+        return
+    }
     val copy = swarmPromptCopy(ask)
     val context = LocalContext.current
     val vault = remember(context) { Vault.get(context) }
@@ -260,7 +272,7 @@ fun SwarmPromptSheet(request: SwarmPromptRequest) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Icon(
                     when (ask) {
-                        is SwarmAsk.Connect -> Icons.Filled.Hub
+                        is SwarmAsk.Connect, is SwarmAsk.Manifest -> Icons.Filled.Hub
                         is SwarmAsk.Publish -> Icons.Filled.CloudUpload
                         is SwarmAsk.Sign -> if (ask.kind == SwarmProvider.AutoApprove.Signing) Icons.Filled.Draw else Icons.Filled.DynamicFeed
                         is SwarmAsk.Message -> Icons.Filled.Forum
@@ -295,7 +307,7 @@ fun SwarmPromptSheet(request: SwarmPromptRequest) {
                     .verticalScroll(rememberScrollState()),
             ) {
                 when (ask) {
-                    is SwarmAsk.Connect -> Unit
+                    is SwarmAsk.Connect, is SwarmAsk.Manifest -> Unit
                     is SwarmAsk.Publish -> {
                         DetailRow("What", swarmPublishWhat(ask))
                         DetailRow("Size", formatStampBytes(ask.size))

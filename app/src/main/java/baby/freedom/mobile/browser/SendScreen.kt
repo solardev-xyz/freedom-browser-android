@@ -587,7 +587,7 @@ internal fun SendStatusSection(
         ReviewRow("Amount", "${SendAmounts.exact(request.amount, request.token.decimals)} ${request.token.symbol} on ${request.chain.name}", mono = true)
         ReviewRow(if (request.dapp != null) "Contract" else "To", null, address = request.to)
         // One desktop Freedom composed (#113): what it calls is part of what was sent.
-        request.dapp?.takeIf { it.origin == null && it.safe == null }?.let { HexRow("Data", "0x" + it.data.toHex(), selector = true, detail = "Asked for over a scanned pairing code") }
+        request.dapp?.takeIf { it.origin == null && it.safe == null && it.swarm == null }?.let { HexRow("Data", "0x" + it.data.toHex(), selector = true, detail = "Asked for over a scanned pairing code") }
         status.hash?.let { hash ->
             Column(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
                 Text("Transaction", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -693,9 +693,10 @@ internal fun SendEntrySection(status: SendStatus?, enabled: Boolean, onOpen: () 
 
 /**
  * Who asked for a composed transaction: the site, the wallet's own Safe
- * account (#141) it activates or executes for, or — for desktop Freedom's
- * (#113) — the code that was scanned.
+ * account (#141) it activates or executes for, the Swarm node it funds
+ * (#115), or — for desktop Freedom's (#113) — the code that was scanned.
  */
 internal fun dappRequester(d: DappCall): String = d.origin?.let(::permissionOriginDisplay)
     ?: d.safe?.let { if (it.activates) "Safe “${it.name}” (activation)" else "Safe “${it.name}” (its owners’ transaction)" }
+    ?: d.swarm?.let { "your Swarm node (funding and a postage stamp)" }
     ?: "a scanned pairing code"

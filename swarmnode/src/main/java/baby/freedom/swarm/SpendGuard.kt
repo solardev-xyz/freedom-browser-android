@@ -51,6 +51,16 @@ sealed interface SpendPlan {
         val chequebook: String,
         val amountPlur: BigInteger,
     ) : SpendPlan
+
+    /**
+     * Connecting a batch the wallet bought for the node (#115,
+     * `ant_storage_connect_batch`): it buys nothing, but on a first
+     * connect ant sets up the chequebook — deploys it (issuer = the node)
+     * and moves at most [SpendPermit.MAX_SETTLEMENT_DEPOSIT_PLUR] of the
+     * node's xBZZ into it, as a first buy does. Nothing else: no swap, no
+     * approval, no batch.
+     */
+    data class ConnectBatch(override val owner: String) : SpendPlan
 }
 
 /**
@@ -69,15 +79,15 @@ sealed interface SpendPlan {
  * request racing the app's own spend can at worst use up one of its
  * slots, which makes the app's spend fail rather than spend twice.
  *
- * One slot doesn't pin its recipient: a buy's chequebook settlement
- * deposit ([SpendPermit.Slot.SettlementDeposit], at most
+ * One slot doesn't pin its recipient: a buy's (or a batch connect's,
+ * #115) chequebook settlement deposit ([SpendPermit.Slot.SettlementDeposit], at most
  * [SpendPermit.MAX_SETTLEMENT_DEPOSIT_PLUR] = 0.001 xBZZ) may be a `transfer` to any
  * address, because the chequebook it funds is created in the same flow
  * and its address can't be known before ant sends the deposit. That is
  * safe only because no ant gateway route transfers xBZZ to an address the
  * caller chooses: the one gateway route that transfers xBZZ at all, `POST
  * /chequebook/deposit` (#117), pays only the chequebook the gateway
- * loaded at start, the node's own. So during a buy the only `transfer`s
+ * loaded at start, the node's own. So during a buy or connect the only `transfer`s
  * ant can sign go to the node's chequebooks. If ant ever gains a route
  * that pays a caller-chosen address (a withdraw, a cash-out), pin this
  * slot to the deployed chequebook first — until then a request racing a
@@ -179,20 +189,23 @@ class SpendPermit(val plan: SpendPlan) {
             val maxSwap = when (plan) {
                 is SpendPlan.BuyStamp -> plan.maxSwapWei
                 is SpendPlan.ExtendStamp -> plan.maxSwapWei
-                is SpendPlan.DepositChequebook -> return null
+                is SpendPlan.DepositChequebook, is SpendPlan.ConnectBatch -> return null
             }
             return Slot.Swap.takeIf {
                 to == SWAP_HELPER && selector == SEL_SWAP && words == 64 &&
                     address(0) == owner && tx.value <= maxSwap
             }
         }
+        // What sets up the chequebook: a first buy's last two, or all a connect may send.
+        val setsUpChequebook = plan is SpendPlan.BuyStamp || plan is SpendPlan.ConnectBatch
         val (depth, amount) = when (plan) {
             is SpendPlan.BuyStamp -> plan.depth to plan.amountPerChunk
             is SpendPlan.ExtendStamp -> plan.depth to plan.amountPerChunk
             is SpendPlan.DepositChequebook -> return null
+            is SpendPlan.ConnectBatch -> null to null
         }
         return when {
-            to == BZZ_TOKEN && selector == SEL_APPROVE && words == 64 ->
+            depth != null && amount != null && to == BZZ_TOKEN && selector == SEL_APPROVE && words == 64 ->
                 Slot.Approve.takeIf { address(0) == POSTAGE_STAMP && uint(1) == amount.shiftLeft(depth) }
             plan is SpendPlan.BuyStamp && to == POSTAGE_STAMP && selector == SEL_CREATE_BATCH && words == 192 ->
                 Slot.CreateBatch.takeIf {
@@ -203,9 +216,9 @@ class SpendPermit(val plan: SpendPlan) {
                 }
             plan is SpendPlan.ExtendStamp && to == POSTAGE_STAMP && selector == SEL_TOP_UP && words == 64 ->
                 Slot.TopUp.takeIf { hex(word(0)) == plan.batchId && uint(1) == plan.amountPerChunk }
-            plan is SpendPlan.BuyStamp && to == CHEQUEBOOK_FACTORY && selector == SEL_DEPLOY_CHEQUEBOOK && words == 96 ->
+            setsUpChequebook && to == CHEQUEBOOK_FACTORY && selector == SEL_DEPLOY_CHEQUEBOOK && words == 96 ->
                 Slot.DeployChequebook.takeIf { address(0) == owner }
-            plan is SpendPlan.BuyStamp && to == BZZ_TOKEN && selector == SEL_TRANSFER && words == 64 ->
+            setsUpChequebook && to == BZZ_TOKEN && selector == SEL_TRANSFER && words == 64 ->
                 // The chequebook's settlement deposit: ant's 0.001 xBZZ target at most.
                 // The recipient (the chequebook ant just deployed) isn't known here, so
                 // any address passes — safe only while no ant gateway route transfers
@@ -245,6 +258,12 @@ class SpendPermit(val plan: SpendPlan) {
         } else {
             setOf(Slot.Swap, Slot.Approve, Slot.TopUp)
         }
+
+        /** What connecting a batch (#115) may broadcast: the chequebook's setup, as on a first buy. */
+        val CONNECT_SLOTS: Set<Slot> = setOf(Slot.DeployChequebook, Slot.SettlementDeposit)
+
+        /** The most gas connecting a batch can cost: [MAX_GAS_WEI] for each of [CONNECT_SLOTS]. */
+        val CONNECT_MAX_GAS_WEI: BigInteger = MAX_GAS_WEI.multiply(BigInteger.valueOf(CONNECT_SLOTS.size.toLong()))
 
         /** What a chequebook deposit (#117) may broadcast: its one transfer. */
         val DEPOSIT_SLOTS: Set<Slot> = setOf(Slot.Deposit)

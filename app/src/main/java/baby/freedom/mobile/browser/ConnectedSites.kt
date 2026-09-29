@@ -17,6 +17,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.ui.platform.testTag
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -211,6 +212,7 @@ internal const val DISCONNECT_EXPLAINER =
     "The site's open pages lose the account at once, and its auto-approve rules are removed. It can ask to connect " +
         "again; nothing is shared until you approve."
 internal const val DISCONNECT_FAILED = "Couldn't disconnect: the change couldn't be saved. Try again."
+internal const val ASK_EACH_TIME_FAILED = "Couldn't switch to asking each time: the change couldn't be saved. Try again."
 
 /** One read of the auto-approve rules; [rules] null when the store couldn't be read. */
 private class RulesRead(val rules: List<AutoApproveRule>?)
@@ -231,17 +233,30 @@ internal fun swarmSiteSummary(grant: SwarmGrantStore.Grant): String {
     return if (grant.messaging) "$summary · Can send and receive messages" else summary
 }
 
+/** What a site's line says about its permission manifest (#122): the rows it allowed through it, or null. */
+internal fun swarmManifestSummary(rows: List<ManifestCapability>?): String? =
+    rows?.takeIf { it.isNotEmpty() }?.let { r ->
+        "Allowed by the app's permission manifest: " + r.joinToString(", ") { manifestRowLabel(it).first.lowercase() }
+    }
+
 /**
  * Sites connected to Swarm through `window.swarm` (#120), each with what
  * it may do without asking, and Disconnect — which also drops its
- * "always allow"s, feed access and messaging (closing its subscriptions). [disconnectFailed] is the site whose
- * Disconnect couldn't be saved; its line says so.
+ * "always allow"s, feed access and messaging (closing its subscriptions).
+ * [disconnectFailed] is the site whose Disconnect couldn't be saved; its
+ * line says so. A site whose permission manifest (#122) manages some rows
+ * says which ([manifestRows]), with Ask each time to go back to a sheet
+ * per upload and signature ([onAskEachTime]); [askEachTimeFailed] is the
+ * site where that couldn't be saved.
  */
 @Composable
 internal fun SwarmSitesSection(
     grants: List<SwarmGrantStore.Grant>,
     onRevoke: (String) -> Unit,
     disconnectFailed: String? = null,
+    manifestRows: Map<String, List<ManifestCapability>> = emptyMap(),
+    onAskEachTime: (String) -> Unit = {},
+    askEachTimeFailed: String? = null,
 ) {
     SectionCard(title = "Connected to Swarm") {
         grants.forEach { grant ->
@@ -253,6 +268,25 @@ internal fun SwarmSitesSection(
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
+                    swarmManifestSummary(manifestRows[grant.origin])?.let { summary ->
+                        Text(
+                            summary,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.testTag("swarm-manifest-summary"),
+                        )
+                        TextButton(
+                            onClick = { onAskEachTime(grant.origin) },
+                            modifier = Modifier.testTag("swarm-ask-each-time"),
+                        ) { Text("Ask each time") }
+                    }
+                    if (askEachTimeFailed == grant.origin) {
+                        Text(
+                            ASK_EACH_TIME_FAILED,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error,
+                        )
+                    }
                     if (disconnectFailed == grant.origin) {
                         Text(
                             DISCONNECT_FAILED,

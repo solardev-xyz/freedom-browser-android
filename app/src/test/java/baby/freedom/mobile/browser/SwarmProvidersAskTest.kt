@@ -194,4 +194,53 @@ class SwarmProvidersAskTest {
     fun `the sheet waits well short of the page's five-minute timer`() {
         assertTrue(SwarmProviders.SHEET_WAIT_MS <= 300_000 - 20_000)
     }
+
+    @Test
+    fun `only the user's own answer reaches the manifest decision (#226 R1-F2)`() {
+        val consent = SwarmManifests.Consent(site, "App", "", emptyList(), emptyList(), false, false, false, false)
+        val manifest = SwarmAsk.Manifest(site, consent)
+        val tab = tab()
+        var heard: SwarmProvider.Answer? = null
+        // A stale document: refused without a sheet, and nobody answered.
+        val stale = runBlocking { SwarmProviders.askOnTab(tab, 1, manifest, answered = { heard = it }) }
+        assertFalse(stale.allowed)
+        assertNull(heard)
+        assertNull(SwarmProviders.manifestOutcome(manifest, stale, heard))
+        // A sheet left to time out: no answer either.
+        val timedOut = runBlocking { SwarmProviders.askOnTab(tab, 0, manifest, waitMs = 50, answered = { heard = it }) }
+        assertFalse(timedOut.allowed)
+        assertNull(heard)
+        assertNull(SwarmProviders.manifestOutcome(manifest, timedOut, heard))
+        // A sheet taken down because the tab reloaded/navigated, or closed:
+        // a refusal for the request, not the user's Don't allow (#226 R2-F1).
+        for (takeDown in listOf<(BrowserState) -> Unit>(
+            { SwarmProviders.onDocumentStarted(it, site) },
+            { SwarmProviders.onTabClosed(it.id) },
+        )) {
+            val t = tab()
+            val withdrawn = runBlocking {
+                val r = async { SwarmProviders.askOnTab(t, 0, manifest, answered = { heard = it }) }
+                while (t.swarmPrompt == null && !r.isCompleted) yield()
+                takeDown(t)
+                r.await()
+            }
+            assertFalse(withdrawn.allowed)
+            assertNull(heard)
+            assertNull(SwarmProviders.manifestOutcome(manifest, withdrawn, heard))
+        }
+        // The user's own Don't allow is a decision.
+        val refused = runBlocking {
+            val r = async { SwarmProviders.askOnTab(tab, 0, manifest, answered = { heard = it }) }
+            while (tab.swarmPrompt == null && !r.isCompleted) yield()
+            tab.swarmPrompt?.respond(SwarmProvider.Answer.REJECTED)
+            r.await()
+        }
+        assertEquals(SwarmManifests.Outcome.Deny, SwarmProviders.manifestOutcome(manifest, refused, heard))
+        assertEquals(
+            SwarmManifests.Outcome.AllowAll,
+            SwarmProviders.manifestOutcome(manifest, SwarmProvider.Answer(true, always = true), SwarmProvider.Answer(true, always = true)),
+        )
+        // Approved by the user but the tab moved on meanwhile: nothing is decided.
+        assertNull(SwarmProviders.manifestOutcome(manifest, SwarmProvider.Answer.REJECTED, SwarmProvider.Answer(true, always = true)))
+    }
 }

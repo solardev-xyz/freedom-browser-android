@@ -31,6 +31,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
@@ -68,8 +69,9 @@ import org.json.JSONObject
  * differs: identity, light mode, xDAI, chequebook, postage stamp. The
  * stamp step opens the stamp pages (#116, [StampsScreen]); buying the
  * first stamp also deploys the chequebook, whose step then shows what it
- * holds and opens the deposit page (#117, [ChequebookScreen]). Funding in
- * one transaction (#115) comes in its own issue.
+ * holds and opens the deposit page (#117, [ChequebookScreen]). The fund
+ * step also offers funding the node and buying its first stamp in one
+ * wallet transaction (#115, [FundNodeScreen]).
  */
 
 /** A checklist step's state, as on iOS: ○ pending, ▶ active (yours to do), ⏳ waiting, ✓ done. */
@@ -193,7 +195,8 @@ internal fun publishSteps(r: PublishReadiness): List<PublishStep> {
                 r.xdaiWei != null && r.xdaiWei.signum() > 0 -> "Funded with ${formatXdai(r.xdaiWei)}."
                 chequebookDeployed -> "Funded: the node has deployed its chequebook."
                 else -> "Send xDAI on Gnosis Chain to the node's address below. It pays the gas for the " +
-                    "chequebook and the postage stamps." +
+                    "chequebook and the postage stamps. Or pay from your wallet in one transaction that " +
+                    "funds the node and buys its first stamp." +
                     if (r.xdaiUnavailable) " Its balance can't be read right now; this updates once it can." else ""
             },
             // The balance still being read: wait for it before asking for funds.
@@ -271,7 +274,8 @@ internal suspend fun gatewayGet(path: String, timeoutMs: Int = GATEWAY_TIMEOUT_M
 /**
  * The publish setup page, over the node page. [lightModeWanted] is the
  * setting; [onSwitchToLightMode] turns it on, [onOpenWallet] opens the
- * wallet page for the identity step, [onBuyStamp] the stamp buy page.
+ * wallet page for the identity step, [onBuyStamp] the stamp buy page,
+ * [onFundAndBuy] the one-transaction fund-and-buy page (#115).
  */
 @Composable
 internal fun PublishSetupScreen(
@@ -282,6 +286,7 @@ internal fun PublishSetupScreen(
     onBuyStamp: () -> Unit,
     onOpenChequebook: () -> Unit,
     onDismiss: () -> Unit,
+    onFundAndBuy: () -> Unit = {},
 ) {
     BackHandler(onBack = onDismiss)
     val context = LocalContext.current
@@ -327,6 +332,13 @@ internal fun PublishSetupScreen(
         ),
     )
     val blocked = publishBlockedReason(nodeInfo)
+    // A stamp the wallet bought for the node (#115), until the node has connected it.
+    // Read off the main thread: the first one in a process reads its file and starts the sender.
+    val funding by produceState(SwarmFunding.loaded(), context) { value = SwarmFunding.load(context) }
+    val pendingStamp = funding?.pending?.collectAsState()?.value
+    val superseded = funding?.superseded?.collectAsState()?.value
+    val connectOwed = funding?.connectOwed?.collectAsState()?.value
+    val spend by StampClient.spend.collectAsState()
 
     FullScreenScaffold(title = "Set up publishing", onDismiss = onDismiss) {
         LazyColumn(
@@ -334,12 +346,24 @@ internal fun PublishSetupScreen(
             contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
             modifier = Modifier.fillMaxSize(),
         ) {
+            // Nothing until the record's been read (once per process, briefly): a card added above
+            // the list's first item later would land out of sight, the list keeping that item in place.
+            if (funding == null) return@LazyColumn
             if (blocked != null) {
                 item("blocked") {
                     Text(
                         blocked,
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+            val f = funding
+            if (pendingStamp != null && f != null) {
+                item("pendingStamp") {
+                    PendingStampCard(
+                        pendingStamp, nodeInfo, spend, superseded == pendingStamp.batchId, connectOwed == pendingStamp.batchId,
+                        onConnect = { f.connectNow() }, onForget = f::forget,
                     )
                 }
             }
@@ -366,6 +390,10 @@ internal fun PublishSetupScreen(
                                     OutlinedButton(onClick = { copyNodeAddress(context, address) }) {
                                         Text("Copy address")
                                     }
+                                    // One wallet transaction instead (#115): needs light mode, for the node's price.
+                                    if (light) {
+                                        Button(onClick = onFundAndBuy) { Text("Fund and buy a stamp from your wallet") }
+                                    }
                                 }
                             }
                             PublishStepKey.Chequebook -> if (step.status == StepStatus.Done) {
@@ -373,6 +401,8 @@ internal fun PublishSetupScreen(
                             }
                             PublishStepKey.Stamp -> if (step.status == StepStatus.Active) {
                                 Button(onClick = onBuyStamp) { Text("Buy a postage stamp") }
+                                // Or have the wallet pay for it, in one transaction (#115).
+                                OutlinedButton(onClick = onFundAndBuy) { Text("Pay from your wallet instead") }
                             }
                             else -> Unit
                         }

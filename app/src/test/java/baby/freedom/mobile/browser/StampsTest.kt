@@ -101,6 +101,90 @@ class StampsTest {
     }
 
     @Test
+    fun `a search for owned stamps and a spend never start over each other`() {
+        val idle = StampClient.Discovery.Idle
+        val searching = StampClient.Discovery.Running
+        val found = StampClient.Discovery.Finished(ACCOUNT_A, Result.success(listOf(id)))
+        val buying = StampClient.Spend.Running(StampClient.Kind.Buy, null)
+        assertTrue(StampClient.canSpend(StampClient.Spend.Idle, idle))
+        assertTrue(StampClient.canSpend(StampClient.Spend.Idle, found))
+        assertFalse(StampClient.canSpend(buying, idle))
+        assertFalse(StampClient.canSpend(StampClient.Spend.Idle, searching))
+        assertNull(discoverStatusText(idle))
+        assertTrue(discoverStatusText(searching)!!.startsWith("Searching"))
+        assertEquals(discoverOutcomeText(1), discoverStatusText(found))
+        assertEquals(
+            "Couldn't look: no RPC",
+            discoverStatusText(StampClient.Discovery.Finished(ACCOUNT_A, Result.failure(IllegalStateException("no RPC")))),
+        )
+    }
+
+    @Test
+    fun `a search the page stopped waiting for stays running until the node says it ended`() {
+        fun ok(running: Boolean) = StampClient.Answer.Ok(JSONObject().put("running", running))
+        val timedOut = StampClient.Answer.Failed(StampClient.TIMED_OUT)
+        assertTrue(StampClient.nodeWorkStillRunning(ok(true)))
+        // Busy, not gone: keep holding a publish back.
+        assertTrue(StampClient.nodeWorkStillRunning(timedOut))
+        assertFalse(StampClient.nodeWorkStillRunning(ok(false)))
+        // Unbound: the Activity may be being recreated while `:node` scans on — keep holding.
+        val unbound = StampClient.Answer.Failed("The Swarm node isn't running", unbound = true)
+        assertTrue(StampClient.nodeWorkStillRunning(unbound))
+        // The call to `:node` failed: the process, and its search, went away.
+        assertFalse(StampClient.nodeWorkStillRunning(StampClient.Answer.Failed("The Swarm node isn't running")))
+
+        val answers = ArrayDeque(listOf(ok(true), timedOut, unbound, ok(true), ok(false), ok(true)))
+        var asks = 0
+        var pauses = 0
+        val end = StampClient.awaitNodeWorkEnd(ask = { asks++; answers.removeFirst() }) { pauses++ }
+        assertEquals(5, asks)
+        assertEquals(5, pauses)
+        assertEquals(ok(false).json.toString(), (end as StampClient.Answer.Ok).json.toString())
+
+        val overran = StampClient.Discovery.Finished(
+            ACCOUNT_A, Result.failure(IllegalStateException(StampClient.DISCOVER_OVERRAN)),
+        )
+        assertEquals(StampClient.DISCOVER_OVERRAN, discoverStatusText(overran))
+    }
+
+    @Test
+    fun `a search that outran the page's wait shows how it actually ended`() {
+        fun ended(outcome: JSONObject?) =
+            StampClient.Answer.Ok(JSONObject().put("running", false).apply { outcome?.let { put("outcome", it) } })
+        // It found stamps.
+        val found = StampClient.overranOutcome(ended(JSONObject().put("registered", org.json.JSONArray().put(id))))
+        assertEquals(listOf(id), found.getOrThrow())
+        assertEquals(discoverOutcomeText(1), discoverStatusText(StampClient.Discovery.Finished(ACCOUNT_A, found)))
+        // It failed in `:node`: the error, not "the list shows what it found".
+        val failed = StampClient.overranOutcome(ended(JSONObject().put("error", "RPC error: rate limited")))
+        assertEquals(
+            "Couldn't look: RPC error: rate limited",
+            discoverStatusText(StampClient.Discovery.Finished(ACCOUNT_A, failed)),
+        )
+        // `:node` kept no outcome for it (it went away mid-search), or the call failed.
+        assertEquals(StampClient.DISCOVER_OVERRAN, StampClient.overranOutcome(ended(null)).exceptionOrNull()?.message)
+        assertEquals(
+            StampClient.DISCOVER_OVERRAN,
+            StampClient.overranOutcome(StampClient.Answer.Failed("The Swarm node isn't running")).exceptionOrNull()?.message,
+        )
+    }
+
+    @Test
+    fun `a search's outcome shows only while the node runs as the account it searched for`() {
+        val found = StampClient.Discovery.Finished(ACCOUNT_A, Result.success(listOf(id)))
+        assertEquals(found, found.forAccount(ACCOUNT_A))
+        assertEquals(found, found.forAccount(ACCOUNT_A.uppercase().replace("0X", "0x")))
+        // The wallet was removed or replaced and the node restarted as another identity.
+        assertEquals(StampClient.Discovery.Idle, found.forAccount(ACCOUNT_B))
+        assertNull(discoverStatusText(found.forAccount(ACCOUNT_B)))
+        // Nor while the node isn't running at all.
+        assertEquals(StampClient.Discovery.Idle, found.forAccount(""))
+        // A search in flight still holds off a spend whoever asked it, and shows as running.
+        assertEquals(StampClient.Discovery.Running, StampClient.Discovery.Running.forAccount(ACCOUNT_B))
+        assertEquals(StampClient.Discovery.Idle, StampClient.Discovery.Idle.forAccount(ACCOUNT_A))
+    }
+
+    @Test
     fun `a spend says what it's doing and how it ended`() {
         assertNull(spendStatusText(StampClient.Spend.Idle))
         assertTrue(spendStatusText(StampClient.Spend.Running(StampClient.Kind.Buy, null))!!.startsWith("Buying"))
@@ -168,5 +252,10 @@ class StampsTest {
         assertTrue(stampsEntryShown(off, StampClient.Spend.Running(StampClient.Kind.Buy, null)))
         assertTrue(stampsEntryShown(off, StampClient.Spend.Failed(StampClient.Kind.Buy, null, "reverted")))
         assertTrue(stampsEntryShown(off, StampClient.Spend.Done(StampClient.Kind.Extend, id)))
+    }
+
+    private companion object {
+        const val ACCOUNT_A = "0x1111111111111111111111111111111111111aAa"
+        const val ACCOUNT_B = "0x2222222222222222222222222222222222222bBb"
     }
 }

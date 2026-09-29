@@ -82,6 +82,12 @@ class SwarmGrantStore internal constructor(private val store: DataStore<Preferen
         return written && connected
     }
 
+    /** Take [origin]'s messaging tier (and its "always allow" for messages) away; `false` if the write failed. */
+    suspend fun revokeMessaging(origin: String): Boolean = write {
+        it.remove(messagingKey(origin))
+        it.remove(autoKey("messaging", origin))
+    }
+
     /** "Always allow" [kind] for connected [origin]; `false` if it isn't connected or the write failed. */
     suspend fun setAutoApprove(origin: String, kind: String, on: Boolean): Boolean {
         require(kind in KINDS) { "unknown auto-approve kind" }

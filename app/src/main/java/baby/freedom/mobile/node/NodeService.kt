@@ -277,12 +277,14 @@ class NodeService : Service() {
      * soon as it (the last one) ends — never in the middle, where exiting
      * the process could leave a batch paid for but unregistered.
      */
-    private fun <T> spending(block: () -> T): T {
-        check(!doomed && stopGate.begin()) { "The Swarm node is turning off" }
+    private fun <T> spending(buy: Boolean = false, block: () -> T): T {
+        check(!doomed && stopGate.begin(buy)) {
+            if (!doomed && stopGate.discoverRunning) "The node is searching for your stamps. Try again once it's done." else "The Swarm node is turning off"
+        }
         try {
             return block()
         } finally {
-            stopGate.end()
+            stopGate.end(buy)
         }
     }
 
@@ -324,7 +326,7 @@ class NodeService : Service() {
     }
 
     /**
-     * One [INodeService.stampCall] (#116, #117), blocking. The spends are for
+     * One [INodeService.stampCall] (#115, #116, #117), blocking. The spends are for
      * the wallet identity's node only: the device-only key can't be
      * restored anywhere, so nothing bought with it could be kept.
      */
@@ -350,7 +352,39 @@ class NodeService : Service() {
                 }
                 swarmNode.storageTopupQuote(days())
             }
-            "buy" -> spending {
+            // Registers the stamps this account already owns (#118). Never
+            // alongside a spend, so no permit is open and it sends nothing.
+            "discover" -> {
+                check(stopGate.beginDiscover()) { "A stamp purchase or search is still running. Try again once it's done." }
+                // Kept under the app's id for it, for a search that runs
+                // on after the app stopped waiting ("discovering" below).
+                val id = args.optString("id").ifEmpty { null }
+                var outcome: String? = null
+                try {
+                    swarmNode.discoverStamps().also { outcome = it }
+                } catch (e: Exception) {
+                    outcome = JSONObject().put("error", e.message ?: "the Swarm node couldn't do that").toString()
+                    throw e
+                } finally {
+                    stopGate.endDiscover(id, outcome)
+                }
+            }
+            // Whether a discover still runs, and once it's over, how the
+            // app's search [id] ended: the app asks once it has stopped
+            // waiting for one, so it holds a publish back until the search
+            // (and any gateway reload it ends with) is over, and then says
+            // what it found or why it failed.
+            "discovering" -> {
+                val status = stopGate.discoverStatus(args.optString("id").ifEmpty { null })
+                JSONObject().put("running", status.running).apply {
+                    status.outcome?.let { o -> runCatching { JSONObject(o) }.getOrNull()?.let { put("outcome", it) } }
+                }.toString()
+            }
+            // Whether a buy (or connect) or a discover runs, any of which may end by
+            // reloading the gateway: a publish waits for it before sending
+            // (#222 R4-F1).
+            "gatewayWork" -> JSONObject().put("running", stopGate.gatewayWorkRunning).toString()
+            "buy" -> spending(buy = true) {
                 spendable()
                 val depth = args.getInt("depth").also { require(it in MIN_STAMP_DEPTH..MAX_STAMP_DEPTH) { "bad depth" } }
                 Log.i(TAG, "buying a postage batch (depth $depth), as the user confirmed")
@@ -360,6 +394,14 @@ class NodeService : Service() {
                 spendable()
                 Log.i(TAG, "extending a postage batch, as the user confirmed")
                 swarmNode.extendStamp(args.getString("batchId"), amount(), maxSwap())
+            }
+            // Counted as a buy: a first connect sets up the chequebook and
+            // ends by reloading the gateway, which a publish waits out.
+            "connect" -> spending(buy = true) {
+                // A batch the wallet bought for the node (#115); ant checks the node owns it.
+                spendable()
+                Log.i(TAG, "connecting a postage batch the wallet bought for the node")
+                swarmNode.connectBatch(args.getString("batchId"))
             }
             "deposit" -> spending {
                 spendable()

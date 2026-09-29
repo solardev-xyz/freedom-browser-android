@@ -1560,6 +1560,25 @@ sealed interface SwarmAsk {
         /** There's no wallet yet: approving sets one up first ([SwarmProviders]' askOnTab). */
         val needsWallet: Boolean = false,
     ) : SwarmAsk
+
+    /**
+     * The app's permission manifest (#122) has rows to decide: [consent],
+     * under the consent [token] (shared by the tabs that check the same
+     * state). Answered through [outcomeOf].
+     */
+    data class Manifest(override val origin: String, val consent: SwarmManifests.Consent, val token: String = "") : SwarmAsk
+}
+
+/**
+ * A Swarm app's permission manifest (#122) asks for [consent]'s rows
+ * together. The answer maps onto [SwarmProvider.Answer]: allowed with
+ * `always` is Allow all, allowed without it Use individual approvals,
+ * and a refusal Don't allow.
+ */
+internal fun SwarmAsk.Manifest.outcomeOf(answer: SwarmProvider.Answer): SwarmManifests.Outcome = when {
+    !answer.allowed -> SwarmManifests.Outcome.Deny
+    answer.always -> SwarmManifests.Outcome.AllowAll
+    else -> SwarmManifests.Outcome.Individual
 }
 
 /** Why the wallet page opens, for a site whose approved signing sheet needs a wallet. */

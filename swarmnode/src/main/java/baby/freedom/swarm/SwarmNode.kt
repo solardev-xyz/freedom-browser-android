@@ -79,6 +79,8 @@ class SwarmNode internal constructor(
         fun storageValidity(handle: Long, gnosisRpc: String): String
         fun storageBuyXdai(handle: Long, gnosisRpc: String, depth: Int, amountPerChunk: String, immutable: Boolean): String
         fun storageTopupXdai(handle: Long, gnosisRpc: String, amountPerChunk: String): String
+        fun storageConnectBatch(handle: Long, gnosisRpc: String, batchId: String): String
+        fun storageDiscover(handle: Long, gnosisRpc: String): String
 
         /**
          * One request to the node's own gateway ([GATEWAY_URL] + [path]),
@@ -110,6 +112,9 @@ class SwarmNode internal constructor(
                 AntNative.storageBuyXdai(handle, gnosisRpc, depth, amountPerChunk, immutable)
             override fun storageTopupXdai(handle: Long, gnosisRpc: String, amountPerChunk: String) =
                 AntNative.storageTopupXdai(handle, gnosisRpc, amountPerChunk)
+            override fun storageConnectBatch(handle: Long, gnosisRpc: String, batchId: String) =
+                AntNative.storageConnectBatch(handle, gnosisRpc, batchId)
+            override fun storageDiscover(handle: Long, gnosisRpc: String) = AntNative.storageDiscover(handle, gnosisRpc)
             override fun gateway(method: String, path: String, timeoutMs: Int): GatewayAnswer? = try {
                 val conn = java.net.URL(GATEWAY_URL + path).openConnection() as java.net.HttpURLConnection
                 try {
@@ -417,6 +422,24 @@ class SwarmNode internal constructor(
     fun storageTopupQuote(days: Long): String = withLightNode { h, rpc -> ops.storageTopupQuote(h, rpc, days) }
 
     /**
+     * Finds the batches this account already owns on Gnosis and registers
+     * the ones still funded (#118), so stamps bought earlier (on another
+     * device, or before a reinstall) can be published with again. Runs
+     * outside any [SpendGuard] permit, so nothing ant might try to send
+     * meanwhile gets out. Returns `{"registered":[ids],"status":{…}}`.
+     * ant's discover also sets up settlement, which adopts a chequebook
+     * this account already owns (no transaction); the gateway is reloaded
+     * then, as after a buy, so the chequebook page (#117) sees it now.
+     */
+    fun discoverStamps(): String = withLightNode { h, rpc ->
+        try {
+            ops.storageDiscover(h, rpc)
+        } finally {
+            reloadGatewayForNewChequebook(h)
+        }
+    }
+
+    /**
      * Buys a batch as the user confirmed it: [depth], [amountPerChunk] from
      * the quote they saw, swapping at most [maxSwapWei] of xDAI for the
      * xBZZ it needs. SPENDS: only these transactions get out ([SpendGuard]).
@@ -437,9 +460,7 @@ class SwarmNode internal constructor(
                 // (no xDAI, another payment running) leaves ant with no
                 // chequebook, and restarting the gateway for it would only
                 // interrupt browsing.
-                if (antHasChequebook(h) && gatewayChequebook() == "") {
-                    reloadGateway(h, mode = synchronized(lock) { handleMode })
-                }
+                reloadGatewayForNewChequebook(h)
             }
         }
 
@@ -462,6 +483,27 @@ class SwarmNode internal constructor(
             val plan = SpendPlan.ExtendStamp(owner(), want, depth, amountPerChunk, maxSwapWei)
             SpendGuard.during(plan) { ops.storageTopupXdai(h, rpc, amountPerChunk.toString()) }
         }
+
+    /**
+     * Connects batch [batchId] (hex, `0x` optional), which the wallet
+     * bought for this node through SwarmNodeFunder (#115): ant checks on
+     * chain that the node's account owns it and registers it, so the node
+     * stamps with it. A first connect also sets up the chequebook, as a
+     * first buy does — the only transactions the permit lets out — and
+     * the gateway is reloaded to pick it up. Returns ant's storage status.
+     */
+    fun connectBatch(batchId: String): String {
+        val id = normalizeBatchId(batchId) ?: throw IllegalArgumentException("not a batch id")
+        return withLightNode { h, rpc ->
+            try {
+                SpendGuard.during(SpendPlan.ConnectBatch(owner())) { ops.storageConnectBatch(h, rpc, "0x$id") }
+            } finally {
+                if (antHasChequebook(h) && gatewayChequebook() == "") {
+                    reloadGateway(h, mode = synchronized(lock) { handleMode })
+                }
+            }
+        }
+    }
 
     /**
      * Deposits [amountPlur] of the node's own xBZZ into its chequebook
@@ -604,6 +646,17 @@ class SwarmNode internal constructor(
     private fun antHasChequebook(h: Long): Boolean =
         runCatching { JSONObject(ops.settlementStatus(h)).getBoolean("enabled") }.getOrDefault(true)
 
+    /**
+     * Reloads the gateway of [h] when ant has a chequebook set up that the
+     * gateway, which reads it only when it starts, doesn't report yet —
+     * after a buy or a discover may have set one up.
+     */
+    private fun reloadGatewayForNewChequebook(h: Long) {
+        if (antHasChequebook(h) && gatewayChequebook() == "") {
+            reloadGateway(h, mode = synchronized(lock) { handleMode })
+        }
+    }
+
     /** What the gateway's chequebook holds, in PLUR; null when it couldn't say. */
     private fun chequebookBalance(): BigInteger? =
         ops.gateway("GET", "/chequebook/balance", GATEWAY_READ_TIMEOUT_MS)?.takeIf { it.code == 200 }
@@ -643,7 +696,7 @@ class SwarmNode internal constructor(
                     // doesn't init a second node on the same data dir.
                     stop()
                     _state.update {
-                        it.copy(status = NodeStatus.Error, errorMessage = "The gateway didn't come back after a postage purchase")
+                        it.copy(status = NodeStatus.Error, errorMessage = GATEWAY_RELOAD_FAILED)
                     }
                 }
             }
@@ -687,6 +740,13 @@ class SwarmNode internal constructor(
     }
 
     companion object {
+        /**
+         * The node's error when its gateway doesn't come back from a reload
+         * for a new chequebook — after a buy or a search for owned stamps
+         * alike, so it names neither.
+         */
+        const val GATEWAY_RELOAD_FAILED = "The gateway didn't come back after the node set up its chequebook"
+
         /**
          * Listen address handed to `ant_start_gateway`. ant defaults to
          * the same bee-conventional `127.0.0.1:1633`, but we pass it
