@@ -208,10 +208,11 @@ class WebViewOpenLvEngine(context: Context) : OpenLvEngine {
             override fun onRenderProcessGone(v: WebView, detail: RenderProcessGoneDetail): Boolean {
                 if (v === webView) {
                     Log.w(TAG, "signing page's renderer went away")
-                    teardown()
+                    teardown() // destroys v
                     listener?.onLink(currentSid, OpenLvLink.Failed("The connection stopped unexpectedly. Scan the code again."))
+                } else {
+                    v.destroy()
                 }
-                v.destroy()
                 return true
             }
         }

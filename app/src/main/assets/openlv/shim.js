@@ -57,6 +57,17 @@ function requestHandler(state) {
   };
 }
 
+function signalingAllowed(url) {
+  let u;
+  try {
+    u = new URL(url);
+  } catch {
+    return false;
+  }
+  if (u.protocol === 'wss:') return true;
+  return u.protocol === 'ws:' && (u.hostname === '127.0.0.1' || u.hostname === 'localhost');
+}
+
 function stop() {
   const state = current;
   current = null;
@@ -85,6 +96,10 @@ async function start(sid, uri) {
       throw new Error('That pairing code can’t be read. Scan the code on the computer again.');
     }
     if (params.p !== 'mqtt') throw new Error(`Unsupported signaling protocol "${params.p}"`);
+    // As the page's CSP: wss:, or cleartext only to the phone itself.
+    if (params.s != null && !signalingAllowed(String(params.s))) {
+      throw new Error('That pairing code points at an unencrypted server. Scan the code on the computer again.');
+    }
     report('connecting');
     const session = await createSession(params, [webrtc()], requestHandler(state));
     if (current !== state) {

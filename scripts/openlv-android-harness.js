@@ -123,7 +123,7 @@ async function main() {
         return undefined;
       }
       case '/host':
-        res.writeHead(200, { 'content-type': 'text/html' });
+        res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
         return res.end(hostPage(current.mode, current.account, current.extra));
       case '/openlv.esm.js':
         res.writeHead(200, { 'content-type': 'text/javascript' });

@@ -50,6 +50,13 @@ object Eip712 {
     /** A typed-data payload bigger than this isn't one any sheet could show. */
     const val MAX_JSON = 256 * 1024
 
+    /**
+     * More lines than this isn't something a person reads before signing
+     * (a permit is ~10, a marketplace order a few dozen): refused rather
+     * than laid out, so a payload built to fan out can't flood the sheet.
+     */
+    const val MAX_LINES = 1000
+
     private val IDENTIFIER = Regex("^[A-Za-z_$][A-Za-z0-9_$]*$")
     private val ARRAY = Regex("^(.+)\\[(\\d*)]$")
     private val UINT = Regex("^uint(\\d{1,3})$")
@@ -100,8 +107,9 @@ object Eip712 {
 
     /** `keccak256(0x1901 ‖ domainSeparator ‖ hashStruct(message))`: what's signed. */
     fun digest(td: TypedData): ByteArray = guarded {
-        val domainSeparator = hashStruct(DOMAIN, td.domain, td.types)
-        val body = if (td.primaryType == DOMAIN) ByteArray(0) else hashStruct(td.primaryType, td.message, td.types)
+        val typeHashes = HashMap<String, ByteArray>()
+        val domainSeparator = hashStruct(DOMAIN, td.domain, td.types, typeHashes)
+        val body = if (td.primaryType == DOMAIN) ByteArray(0) else hashStruct(td.primaryType, td.message, td.types, typeHashes)
         Keccak256.digest(byteArrayOf(0x19, 0x01) + domainSeparator + body)
     }
 
@@ -120,18 +128,33 @@ object Eip712 {
         }
     }
 
-    fun hashStruct(type: String, data: JSONObject, types: Map<String, List<Field>>): ByteArray {
-        val typeHash = Keccak256.digest(encodeType(type, types).toByteArray(Charsets.UTF_8))
+    /**
+     * [typeHashes] memoizes each type's `keccak256(encodeType)` across one
+     * digest: `encodeType` walks every type a struct reaches, so computing
+     * it afresh per instance makes many instances of a type with a long
+     * dependency chain quadratic — seconds of work from a 200 KB payload.
+     */
+    fun hashStruct(
+        type: String,
+        data: JSONObject,
+        types: Map<String, List<Field>>,
+        typeHashes: MutableMap<String, ByteArray> = HashMap(),
+    ): ByteArray {
+        val typeHash = typeHashes.getOrPut(type) { Keccak256.digest(encodeType(type, types).toByteArray(Charsets.UTF_8)) }
         val out = java.io.ByteArrayOutputStream()
         out.write(typeHash)
         for (f in types.getValue(type)) {
             if (!data.has(f.name) || data.isNull(f.name)) throw InvalidTypedData("$type.${f.name} is missing")
-            out.write(encodeValue(f.type, data.get(f.name), types, "$type.${f.name}"))
+            out.write(encodeValue(f.type, data.get(f.name), types, "$type.${f.name}", typeHashes))
         }
         return Keccak256.digest(out.toByteArray())
     }
 
-    /** What's signed, for the sheet: the domain's fields, then the message's, nested structs and arrays indented. */
+    /**
+     * What's signed, for the sheet: the domain's fields, then the message's,
+     * nested structs and arrays indented. More than [MAX_LINES] in either is
+     * [InvalidTypedData]: too much to review is too much to sign.
+     */
     fun lines(td: TypedData): Pair<List<Line>, List<Line>> = guarded {
         val domain = ArrayList<Line>()
         describe(DOMAIN, td.domain, td.types, "", 0, domain)
@@ -148,6 +171,7 @@ object Eip712 {
     }
 
     private fun describeValue(type: String, value: Any?, types: Map<String, List<Field>>, path: String, label: String, depth: Int, out: MutableList<Line>) {
+        if (out.size >= MAX_LINES) throw InvalidTypedData("The typed data has too many fields to show on the phone")
         val array = ARRAY.find(type)
         when {
             array != null -> {
@@ -169,11 +193,33 @@ object Eip712 {
     }
 
     private fun scalarText(type: String, value: Any?): String = when {
-        type == "string" -> value as String
+        type == "string" -> visible(value as String)
         type == "bool" -> value.toString()
         type == "address" -> NodeIdentity.checksum(hex(value, type))
         type == "bytes" || BYTES_N.matches(type) -> "0x" + hex(value, type).toHex()
         else -> integer(value, type).toString()
+    }
+
+    /**
+     * [s] with every character that could hide or rearrange what's around it
+     * — line breaks and other controls, bidi overrides and other format
+     * characters, line/paragraph separators — written as a visible `\n` or
+     * `\u202E` escape, the way [MessageSigning.readableText] refuses them
+     * for `personal_sign`. Everything else is shown as is.
+     */
+    internal fun visible(s: String): String {
+        if (s.none(MessageSigning::hides)) return s
+        val b = StringBuilder(s.length + 16)
+        for (c in s) {
+            when {
+                !MessageSigning.hides(c) -> b.append(c)
+                c == '\n' -> b.append("\\n")
+                c == '\r' -> b.append("\\r")
+                c == '\t' -> b.append("\\t")
+                else -> b.append("\\u").append(c.code.toString(16).uppercase(java.util.Locale.ROOT).padStart(4, '0'))
+            }
+        }
+        return b.toString()
     }
 
     private fun collect(type: String, types: Map<String, List<Field>>, into: MutableSet<String>) {
@@ -198,7 +244,13 @@ object Eip712 {
 
     private fun bits(digits: String): Int? = digits.toIntOrNull()?.takeIf { it in 8..256 && it % 8 == 0 }
 
-    private fun encodeValue(type: String, value: Any?, types: Map<String, List<Field>>, where: String): ByteArray {
+    private fun encodeValue(
+        type: String,
+        value: Any?,
+        types: Map<String, List<Field>>,
+        where: String,
+        typeHashes: MutableMap<String, ByteArray>,
+    ): ByteArray {
         val array = ARRAY.find(type)
         if (array != null) {
             val items = value as? JSONArray ?: throw InvalidTypedData("$where isn’t a list")
@@ -207,13 +259,13 @@ object Eip712 {
             val out = java.io.ByteArrayOutputStream()
             for (i in 0 until items.length()) {
                 if (items.isNull(i)) throw InvalidTypedData("$where[$i] is missing")
-                out.write(encodeValue(array.groupValues[1], items.get(i), types, "$where[$i]"))
+                out.write(encodeValue(array.groupValues[1], items.get(i), types, "$where[$i]", typeHashes))
             }
             return Keccak256.digest(out.toByteArray())
         }
         if (type in types) {
             val o = value as? JSONObject ?: throw InvalidTypedData("$where isn’t an object")
-            return hashStruct(type, o, types)
+            return hashStruct(type, o, types, typeHashes)
         }
         return when {
             type == "string" -> Keccak256.digest((value as? String ?: throw InvalidTypedData("$where isn’t a string")).toByteArray(Charsets.UTF_8))

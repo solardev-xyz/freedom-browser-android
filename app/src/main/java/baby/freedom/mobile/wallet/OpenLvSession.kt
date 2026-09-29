@@ -284,9 +284,12 @@ class OpenLvSession internal constructor(
 
     private suspend fun signTypedData(sid: Int, params: JSONArray): OpenLvResponse {
         val account = accountFor(params.opt(0)) ?: return notThisWallet(params.opt(0))
+        // Off the main thread: the payload is the peer's, up to Eip712.MAX_JSON of it.
         val (typed, digest, lines) = try {
-            val td = Eip712.parse(params.opt(1))
-            Triple(td, Eip712.digest(td), Eip712.lines(td))
+            withContext(Dispatchers.Default) {
+                val td = Eip712.parse(params.opt(1))
+                Triple(td, Eip712.digest(td), Eip712.lines(td))
+            }
         } catch (e: Eip712.InvalidTypedData) {
             return invalid(e.message ?: "The typed data can’t be read.")
         }

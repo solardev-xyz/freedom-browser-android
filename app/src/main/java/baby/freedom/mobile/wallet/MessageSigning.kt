@@ -38,11 +38,15 @@ internal object MessageSigning {
         } catch (e: java.nio.charset.CharacterCodingException) {
             return null
         }
-        val invisible = text.any { c ->
-            (c.isISOControl() && c != '\n' && c != '\t' && c != '\r') ||
-                Character.getType(c) == Character.FORMAT.toInt() ||
-                c == ' ' || c == ' '
-        }
+        val invisible = text.any { c -> hides(c) && c != '\n' && c != '\t' && c != '\r' }
         return text.takeIf { !invisible && it.isNotBlank() }
     }
+
+    /**
+     * Whether [c] can hide or rearrange the text around it on a sheet: a
+     * control character (line breaks included), a format character (bidi
+     * overrides, zero-width joiners) or a line/paragraph separator.
+     */
+    fun hides(c: Char): Boolean =
+        c.isISOControl() || Character.getType(c) == Character.FORMAT.toInt() || c == '\u2028' || c == '\u2029'
 }

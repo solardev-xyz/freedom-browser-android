@@ -69,8 +69,8 @@ internal fun callDataText(hex: String): String = if (hex == "0x" || hex.isEmpty(
 internal fun remoteStatusText(status: OpenLvSession.Status): String = when (status) {
     OpenLvSession.Status.Idle -> "Not connected."
     OpenLvSession.Status.Connecting -> "Connecting to desktop Freedom…"
-    OpenLvSession.Status.Connected -> "Connected. Requests from desktop Freedom show up here for you to approve."
-    OpenLvSession.Status.Disconnected -> "Done: desktop Freedom closed the connection. Each request on the computer shows a new code to scan."
+    OpenLvSession.Status.Connected -> "Connected. Requests over this code show up here for you to approve."
+    OpenLvSession.Status.Disconnected -> "Done: the other side closed the connection. Each request on the computer shows a new code to scan."
     is OpenLvSession.Status.Failed -> "Couldn’t connect: ${status.message}"
 }
 
@@ -98,8 +98,8 @@ internal fun PairingSection(uri: String) {
         }
         Spacer(Modifier.height(8.dp))
         Text(
-            "This code connects this phone to Freedom on your computer, so the phone can sign for it. " +
-                "Each signature or transaction it asks for is shown here first; nothing is signed without you.",
+            "This code connects this phone to whatever showed it — Freedom on your computer, if that’s where you scanned it — " +
+                "so the phone can sign for it. Each signature or transaction it asks for is shown here first; nothing is signed without you.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -177,7 +177,7 @@ private fun RemoteSigningSheet(approval: OpenLvSession.Approval) {
         }
     }
     val (title, action) = when (request) {
-        is OpenLvSession.Request.Connect -> "Connect to desktop Freedom" to "Connect"
+        is OpenLvSession.Request.Connect -> "Connect an account" to "Connect"
         is OpenLvSession.Request.PersonalSign -> "Sign a message" to "Sign"
         is OpenLvSession.Request.TypedData -> "Sign typed data" to "Sign"
         is OpenLvSession.Request.SendTransaction -> "Send a transaction" to "Confirm and send"
@@ -195,7 +195,8 @@ private fun RemoteSigningSheet(approval: OpenLvSession.Approval) {
             Column(Modifier.padding(20.dp)) {
                 Text(title, style = MaterialTheme.typography.titleLarge)
                 Text(
-                    "Asked for by desktop Freedom, over the code you scanned",
+                    // The phone can't tell who made the code: a web page can show one too.
+                    "Asked for over the code you scanned. Only approve if that code came from Freedom on your own computer.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -231,7 +232,7 @@ private fun RemoteSigningSheet(approval: OpenLvSession.Approval) {
 @Composable
 private fun ConnectBody(request: OpenLvSession.Request.Connect, picked: WalletAccount?, onPick: (WalletAccount) -> Unit) {
     Text(
-        "Desktop Freedom asks to add an account of this wallet. It learns the account’s address, nothing else; " +
+        "The code you scanned asks to add an account of this wallet. It learns the account’s address, nothing else; " +
             "every signature or transaction it asks for later is shown here first.",
         style = MaterialTheme.typography.bodyMedium,
     )
@@ -336,7 +337,7 @@ private fun SendTransactionBody(request: OpenLvSession.Request.SendTransaction) 
         "Data",
         callDataText(data),
         mono = true,
-        detail = if (data.length > 2) "${(data.length - 2) / 2} bytes: the contract call desktop Freedom composed" else "A plain transfer",
+        detail = if (data.length > 2) "${(data.length - 2) / 2} bytes: the contract call it asks to make" else "A plain transfer",
     )
     ReviewRow("Network fee", "up to ${feeText(quote.tx.maxFee, chain)}", mono = true, detail = feeDetail(quote.tx))
     quote.nativeTotal?.let { ReviewRow("Total", "up to ${feeText(it, chain)}", mono = true) }

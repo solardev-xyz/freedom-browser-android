@@ -582,7 +582,7 @@ private fun SendStatusSection(
         ReviewRow("Amount", "${SendAmounts.exact(request.amount, request.token.decimals)} ${request.token.symbol} on ${request.chain.name}", mono = true)
         ReviewRow("To", null, address = request.to)
         // One desktop Freedom composed (#113): what it calls is part of what was sent.
-        request.callData?.let { ReviewRow("Data", callDataText(it), mono = true, detail = "Asked for by desktop Freedom") }
+        request.callData?.let { ReviewRow("Data", callDataText(it), mono = true, detail = "Asked for over a scanned pairing code") }
         status.hash?.let { hash ->
             Column(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
                 Text("Transaction", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)

@@ -8,6 +8,7 @@ import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -165,5 +166,55 @@ class Eip712Test {
         assertNull(MessageSigning.readableText("a\u0000b".toByteArray())) // a NUL
         assertNull(MessageSigning.readableText("pay‮gnp.exe".toByteArray())) // a bidi override hides what's there
         assertNull(MessageSigning.readableText("   ".toByteArray()))
+    }
+
+    /**
+     * R1-F1's payload: 1000 chained types `T0(T1[] f)`, `T1(T2[] f)`…`T999(uint8 f)` and
+     * 20000 `T1` instances. With `encodeType` redone per instance this took
+     * seconds; memoized it's one hash per type. Its 40000-odd lines are
+     * refused rather than laid out.
+     */
+    private fun fanOut(): String {
+        val types = JSONObject()
+        for (i in 0 until 999) types.put("T$i", JSONArray().put(JSONObject().put("name", "f").put("type", "T${i + 1}[]")))
+        types.put("T999", JSONArray().put(JSONObject().put("name", "f").put("type", "uint8")))
+        // Each T1 is `{"f":[]}`: cheap in JSON, but its encodeType still walks T2…T999.
+        val items = JSONArray()
+        repeat(20_000) { items.put(JSONObject().put("f", JSONArray())) }
+        return JSONObject()
+            .put("types", types)
+            .put("domain", JSONObject().put("name", "x"))
+            .put("primaryType", "T0")
+            .put("message", JSONObject().put("f", items))
+            .toString()
+    }
+
+    @Test
+    fun `a payload built to fan out digests quickly and is refused for the sheet`() {
+        val json = fanOut()
+        assertTrue(json.length <= Eip712.MAX_JSON)
+        val td = Eip712.parse(json)
+        val started = System.nanoTime()
+        Eip712.digest(td)
+        val ms = (System.nanoTime() - started) / 1_000_000
+        assertTrue("digest took $ms ms", ms < 2_000)
+        assertThrows(Eip712.InvalidTypedData::class.java) { Eip712.lines(td) }
+    }
+
+    @Test
+    fun `memoized type hashes don't change a digest`() {
+        // Same type (Person) hashed twice, nested; and the EIP's own digest.
+        assertEquals("0xbe609aee343fb3c4b28e1df9e632fca64fcfaede20f02e86244efddf30957bd2", digest(mail))
+        assertEquals("0x9219795b39538994abb08c4e68cbfcd6fa5b3f49105b33cd6284ec968c66e609", digest(complex))
+    }
+
+    @Test
+    fun `a string field can't hide or reorder what's around it on the sheet`() {
+        val payload = JSONObject(mail)
+        payload.getJSONObject("message").put("contents", "pay‮gnp.exe\n\n\nend​ ")
+        val (_, message) = Eip712.lines(Eip712.parse(payload.toString()))
+        assertEquals("pay\\u202Egnp.exe\\n\\n\\nend\\u200B\\u2028", message.single { it.label == "contents" }.value)
+        // Plain text, non-ASCII included, is shown as is.
+        assertEquals("ünïcødé ✓", Eip712.visible("ünïcødé ✓"))
     }
 }
