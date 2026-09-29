@@ -18,8 +18,12 @@ import baby.freedom.mobile.wallet.Vault
 import baby.freedom.swarm.SwarmNode
 import java.io.IOException
 import java.net.HttpURLConnection
+import java.net.SocketTimeoutException
 import java.net.URL
 import java.util.WeakHashMap
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
@@ -231,7 +235,7 @@ object SwarmProviders {
                 val p = provider ?: throw IllegalStateException("provider not ready")
                 val approved = { approved(reply, request.id) }
                 p.request(origin, request.method, request.params, approved) { ask ->
-                    askOnTab(tab, doc, ask, deadline - SystemClock.elapsedRealtime(), approved)
+                    askOnTab(tab, doc, ask, deadline - SystemClock.elapsedRealtime(), p::current, approved)
                 }
             } catch (e: CancellationException) {
                 throw e
@@ -277,13 +281,16 @@ object SwarmProviders {
      * and a setup the user backs out of blocks the tab like a refused
      * sheet, so a page can't reopen the wallet page in a loop. The tab's
      * other asks wait until setup is over, and after a backed-out one are
-     * refused without a sheet.
+     * refused without a sheet. The sheet shows [current]'s view of [ask]
+     * once the lock is ours ([SwarmProvider.current]), not the one built
+     * before an earlier ask's setup; null refuses without a sheet.
      */
     internal suspend fun askOnTab(
         tab: BrowserState,
         doc: Int,
         ask: SwarmAsk,
         waitMs: Long = SHEET_WAIT_MS,
+        current: suspend (SwarmAsk) -> SwarmAsk? = { it },
         approved: () -> Unit = {},
     ): SwarmProvider.Answer {
         fun live() = (documents[tab.id] ?: 0) == doc && tab.id !in blockedTabs
@@ -294,6 +301,7 @@ object SwarmProviders {
         // one the user backs out of (blocking the tab) refuses the rest
         // without a sheet popping up behind the wallet page.
         var held = false
+        var shown = ask
         try {
             val answer = withTimeoutOrNull(waitMs) {
                 // No suspension between lock() returning and the flag:
@@ -302,7 +310,11 @@ object SwarmProviders {
                 lock.lock()
                 held = true
                 if (!live()) return@withTimeoutOrNull SwarmProvider.Answer.REJECTED
-                val request = SwarmPromptRequest(ask)
+                // Built before the lock was ours: an earlier ask may have
+                // set up the wallet or created the identity since.
+                shown = current(ask) ?: return@withTimeoutOrNull SwarmProvider.Answer.REJECTED
+                if (!live()) return@withTimeoutOrNull SwarmProvider.Answer.REJECTED
+                val request = SwarmPromptRequest(shown)
                 pending.getOrPut(tab.id) { mutableSetOf() }.add(request)
                 tab.swarmPrompt = request
                 val answer = try {
@@ -316,11 +328,12 @@ object SwarmProviders {
             } ?: return SwarmProvider.Answer.REJECTED
             if (!answer.allowed) return answer
             approved()
-            if (ask !is SwarmAsk.Sign || !ask.needsWallet) return answer
+            val sign = shown as? SwarmAsk.Sign
+            if (sign == null || !sign.needsWallet) return answer
             // Past the sheet's deadline now: setting a wallet up (and
             // writing its phrase down) takes as long as it takes, and the
             // page has stopped its timer.
-            val set = setUpWallet(swarmWalletReason(ask.origin))
+            val set = setUpWallet(swarmWalletReason(sign.origin))
             if (!set && live()) blockedTabs += tab.id
             return if (set && live()) answer else SwarmProvider.Answer.REJECTED
         } finally {
@@ -364,9 +377,21 @@ object SwarmProviders {
  * The embedded node's gateway ([SwarmNode.GATEWAY_URL]) over
  * `HttpURLConnection`: what [SwarmProvider] publishes and reads through.
  * Answers are read up to [MAX_ANSWER_BYTES].
+ *
+ * `timeoutMs` bounds the whole request, not just each read: a watchdog
+ * on its own thread disconnects the connection once it runs out, so a
+ * node that stops draining an upload body (whose write no read timeout
+ * covers) or trickles its answer fails the call with an [IOException]
+ * instead of holding it — and any feed lock around it — forever. The
+ * page stops its own timer once a request is approved, so this is what
+ * settles it.
  */
 internal object GatewayHttp : SwarmProvider.Http {
     private const val MAX_ANSWER_BYTES = 16 * 1024 * 1024
+
+    private val watchdog = Executors.newSingleThreadScheduledExecutor { r ->
+        Thread(r, "swarm-gateway-watchdog").apply { isDaemon = true }
+    }
 
     override fun request(
         method: String,
@@ -374,8 +399,25 @@ internal object GatewayHttp : SwarmProvider.Http {
         headers: Map<String, String>,
         body: ByteArray?,
         timeoutMs: Int,
+    ): SwarmProvider.Http.Answer = requestAt(SwarmNode.GATEWAY_URL, method, path, headers, body, timeoutMs)
+
+    /** [request] against [base] (tests point it at a local server). */
+    internal fun requestAt(
+        base: String,
+        method: String,
+        path: String,
+        headers: Map<String, String>,
+        body: ByteArray?,
+        timeoutMs: Int,
     ): SwarmProvider.Http.Answer {
-        val conn = URL(SwarmNode.GATEWAY_URL + path).openConnection() as HttpURLConnection
+        val conn = URL(base + path).openConnection() as HttpURLConnection
+        val expired = AtomicBoolean(false)
+        // Disconnecting from this thread would block behind the stalled
+        // write; the watchdog's thread aborts it at once.
+        val abort = watchdog.schedule(
+            { expired.set(true); runCatching { conn.disconnect() } },
+            timeoutMs.toLong(), TimeUnit.MILLISECONDS,
+        )
         try {
             conn.requestMethod = method
             conn.connectTimeout = minOf(timeoutMs, 10_000)
@@ -395,6 +437,8 @@ internal object GatewayHttp : SwarmProvider.Http {
                 val buf = ByteArray(64 * 1024)
                 while (true) {
                     val n = input.read(buf)
+                    // Between reads too: a node trickling its answer never trips the read timeout.
+                    if (expired.get()) throw SocketTimeoutException("the node didn't answer in $timeoutMs ms")
                     if (n < 0) break
                     if (out.size() + n > MAX_ANSWER_BYTES) throw IOException("the node's answer is too large")
                     out.write(buf, 0, n)
@@ -404,8 +448,13 @@ internal object GatewayHttp : SwarmProvider.Http {
             val answerHeaders = conn.headerFields.entries
                 .filter { it.key != null && it.value.isNotEmpty() }
                 .associate { it.key to it.value.first() }
+            if (expired.get()) throw SocketTimeoutException("the node didn't answer in $timeoutMs ms")
             return SwarmProvider.Http.Answer(status, answerHeaders, bytes)
+        } catch (e: IOException) {
+            if (expired.get() && e !is SocketTimeoutException) throw SocketTimeoutException("the node didn't answer in $timeoutMs ms")
+            throw e
         } finally {
+            abort.cancel(false)
             conn.disconnect()
         }
     }
@@ -449,9 +498,9 @@ private const val MAX_SWARM_REQUEST_CHARS = 72 * 1024 * 1024
  * Uploads, signing and prompts time out after five minutes, anything
  * else after one (desktop's) — until the request is approved
  * (`{"id", "approved": true}`): then its timer stops, and the page waits
- * for the result of the upload or signature it approved, which the node's
- * own timeouts bound, rather than lose the reference to something that
- * got published.
+ * for the result of the upload or signature it approved, which
+ * [GatewayHttp]'s whole-request deadline bounds, rather than lose the
+ * reference to something that got published.
  */
 internal fun swarmProviderJs(channel: String): String {
     require(Regex("[a-z]{8,64}").matches(channel)) { "channel must be lower-case letters" }

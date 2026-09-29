@@ -449,6 +449,27 @@ class SwarmProvider(
     }
 
     /**
+     * [ask] as it stands now, for a sheet that only goes up once the
+     * tab's earlier asks are over ([SwarmProviders]' askOnTab) — one of
+     * which may have set up the wallet, granted feed access or created
+     * the site's identity since [ask] was built. A [SwarmAsk.Sign]'s
+     * "Signs as", first-grant wording and wallet setup are worked out
+     * again; null when the feed it signs for has lost its own identity
+     * meanwhile, so there's nothing to show.
+     */
+    suspend fun current(ask: SwarmAsk): SwarmAsk? {
+        if (ask !is SwarmAsk.Sign) return ask
+        return withContext(io) {
+            val needsWallet = !publishers.walletExists()
+            val granted = !needsWallet && feeds.granted(ask.origin)
+            val feed = ask.feedName?.let { feeds.feed(ask.origin, it) }
+            val identity = publishers.site(ask.origin)?.let { signerOf(it, feed) }
+            if (feed != null && identity == null) return@withContext null
+            ask.copy(grant = !granted, identity = identity, needsWallet = needsWallet)
+        }
+    }
+
+    /**
      * Which of [site]'s identities signs for [feed]: the one it was
      * created with, or the site's active one for a new feed or a SOC. The
      * sheet's "Signs as" and the signature itself both come from here.
@@ -577,8 +598,12 @@ class SwarmProvider(
     private suspend fun createFeed(origin: String, name: String): Reply {
         if (!feeds.granted(origin)) return notAuthorized("feed_not_granted")
         feeds.feed(origin, name)?.let { existing ->
-            val identity = publishers.site(origin)?.identities?.firstOrNull { it.id == existing.identityId }
-            return Reply.Ok(feedResult(existing, identity?.mode?.wire))
+            // The same answer the sheet path gives ([signing]): a feed
+            // whose own identity is gone is refused, whether or not a
+            // sheet was needed to get here.
+            val identity = withContext(io) { publishers.site(origin) }?.let { signerOf(it, existing) }
+                ?: return feedOwnerGone(existing)
+            return Reply.Ok(feedResult(existing, identity.mode.wire))
         }
         return withKey(origin, null) { r ->
             val owner = PublisherKeys.address(r.key)

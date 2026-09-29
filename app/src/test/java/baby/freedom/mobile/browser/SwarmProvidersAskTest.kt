@@ -132,6 +132,44 @@ class SwarmProvidersAskTest {
     }
 
     @Test
+    fun `a sheet queued behind wallet setup shows the ask as it stands once it's up`() = runBlocking {
+        val tab = tab()
+        var walletExists = false
+        val setUp = CompletableDeferred<Boolean>()
+        SwarmProviders.setUpWallet = { reason ->
+            setUps += reason
+            setUp.await().also { walletExists = it }
+        }
+        // Stands in for SwarmProvider.current: worked out when the sheet goes up, not when it was asked.
+        val current: suspend (SwarmAsk) -> SwarmAsk? = { ask -> (ask as SwarmAsk.Sign).copy(grant = !walletExists, needsWallet = !walletExists) }
+        val first = async { SwarmProviders.askOnTab(tab, 0, sign(needsWallet = true), current = current) }
+        while (tab.swarmPrompt == null) yield()
+        val firstSheet = tab.swarmPrompt!!
+        // Built while there was no wallet: first grant, needs a wallet.
+        val second = async { SwarmProviders.askOnTab(tab, 0, sign(needsWallet = true), current = current) }
+        firstSheet.respond(SwarmProvider.Answer(true))
+        while (setUps.isEmpty()) yield()
+        setUp.complete(true)
+        assertTrue(first.await().allowed)
+        while (tab.swarmPrompt == null) yield()
+        val shown = tab.swarmPrompt!!.ask as SwarmAsk.Sign
+        assertFalse("the wallet is there now", shown.needsWallet)
+        assertFalse("and feed access was granted with it", shown.grant)
+        tab.swarmPrompt!!.respond(SwarmProvider.Answer(true))
+        assertTrue(second.await().allowed)
+        assertEquals("no second wallet setup", 1, setUps.size)
+    }
+
+    @Test
+    fun `an ask with nothing left to show is refused without a sheet or a block`() {
+        val tab = tab()
+        val result = runBlocking { SwarmProviders.askOnTab(tab, 0, sign(needsWallet = false), current = { null }) }
+        assertFalse(result.allowed)
+        assertNull(tab.swarmPrompt)
+        assertTrue(ask(tab, sign(needsWallet = false), SwarmProvider.Answer(true)).allowed)
+    }
+
+    @Test
     fun `a sheet that doesn't need a wallet never opens wallet setup`() {
         val tab = tab()
         assertTrue(ask(tab, sign(needsWallet = false), SwarmProvider.Answer(true)).allowed)

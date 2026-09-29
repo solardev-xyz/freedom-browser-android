@@ -590,6 +590,48 @@ class SwarmProviderTest {
     }
 
     @Test
+    fun `createFeed on a feed whose own identity is gone is refused, sheet or no sheet`() {
+        connect()
+        feeds.grant(site)
+        grants.auto += site to SwarmProvider.AutoApprove.Feeds
+        ok(call("swarm_createFeed", JSONObject().put("name", "notes")))
+        publishers.sites.clear()
+        // Always-allowed and unlocked: no sheet on the way.
+        assertEquals("feed_owner_unavailable", err(call("swarm_createFeed", JSONObject().put("name", "notes"))).reason)
+        // Locked, or always-allow off: the sheet path gives the same answer.
+        publishers.unlocked = false
+        assertEquals("feed_owner_unavailable", err(call("swarm_createFeed", JSONObject().put("name", "notes"))).reason)
+        publishers.unlocked = true
+        grants.auto.clear()
+        assertEquals("feed_owner_unavailable", err(call("swarm_createFeed", JSONObject().put("name", "notes"))).reason)
+        assertTrue(asked.isEmpty())
+        assertTrue("no new identity made for the site", publishers.sites.isEmpty())
+    }
+
+    @Test
+    fun `a sign sheet queued behind wallet setup is shown as things stand once it's up`() = runBlocking {
+        publishers.wallet = false
+        val stale = SwarmAsk.Sign(site, "swarm_getSigningIdentity", SwarmProvider.AutoApprove.Signing, true, null, "Signing identity", null, needsWallet = true)
+        // An earlier sheet's approval set up the wallet, granted feed access and made the site's identity.
+        publishers.wallet = true
+        feeds.grant(site)
+        val identity = publishers.ensureSite(site).active
+        val shown = provider.current(stale) as SwarmAsk.Sign
+        assertEquals(identity, shown.identity)
+        assertFalse("not a first grant any more", shown.grant)
+        assertFalse(shown.needsWallet)
+
+        // A feed's sheet signs as the feed's own identity; once that's gone there's nothing to show.
+        grants.auto += site to SwarmProvider.AutoApprove.Feeds
+        connect()
+        ok(call("swarm_createFeed", JSONObject().put("name", "log")))
+        val update = SwarmAsk.Sign(site, "swarm_updateFeed", SwarmProvider.AutoApprove.Feeds, false, "log", null, null)
+        assertEquals(identity, (provider.current(update) as SwarmAsk.Sign).identity)
+        publishers.sites.clear()
+        assertNull(provider.current(update))
+    }
+
+    @Test
     fun `feed names are desktop's`() {
         connect()
         for (bad in listOf("", "a/b", "x".repeat(65), "new\nline")) {
