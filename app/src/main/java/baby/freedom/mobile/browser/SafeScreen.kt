@@ -1672,28 +1672,62 @@ internal val SafeSelfCall?.needsAcknowledgement: Boolean get() = this != null &&
 internal fun safeSelfCallCleared(call: SafeSelfCall?, acknowledged: Boolean): Boolean = !call.needsAcknowledgement || acknowledged
 
 /**
+ * Why an owner self-call would revert, counted against [owners] (on chain, in
+ * the Safe's own linked-list order, as `getOwners()` returns them; null until
+ * read), or null if it can go through. The Safe refuses to add an address that
+ * already owns it or is no address (GS203/GS204), to remove or replace one that
+ * doesn't own it (GS205), and a `prevOwner` that isn't the owner right before
+ * it in that list (GS205): the first owner's is the list's sentinel `0x…01`.
+ */
+internal fun safeSelfCallFailure(call: SafeSelfCall, owners: List<String>?): String? {
+    if (owners == null) return null
+    fun owns(address: String) = owners.any { it.equals(address, ignoreCase = true) }
+    fun invalid(address: String) = address.equals(SafeProtocol.ZERO_ADDRESS, ignoreCase = true) || address.equals(SAFE_OWNERS_SENTINEL, ignoreCase = true)
+    fun prevOf(address: String): String {
+        val i = owners.indexOfFirst { it.equals(address, ignoreCase = true) }
+        return if (i == 0) SAFE_OWNERS_SENTINEL else owners[i - 1]
+    }
+    fun added(address: String) = when {
+        invalid(address) -> "The new owner is no address: this transaction would fail."
+        owns(address) -> "The new owner already owns this Safe: this transaction would fail."
+        else -> null
+    }
+    fun removed(prev: String, address: String, what: String) = when {
+        !owns(address) -> "The $what owner doesn’t own this Safe: this transaction would fail."
+        !prev.equals(prevOf(address), ignoreCase = true) -> "It names the wrong owner before the $what one in the Safe’s owner list: this transaction would fail."
+        else -> null
+    }
+    return when (call) {
+        is SafeSelfCall.AddOwner -> added(call.owner)
+        is SafeSelfCall.RemoveOwner -> removed(call.prev, call.owner, "removed")
+        is SafeSelfCall.SwapOwner -> removed(call.prev, call.old, "replaced") ?: added(call.new)
+        else -> null
+    }
+}
+
+/**
  * The Threshold row's detail for an owner/threshold self-call, counted against
  * [owners] (on chain, null until read) — including whether the call can
- * execute at all: adding an address that already owns the Safe, or removing
- * one that doesn't, reverts; null for a call with no threshold.
+ * execute at all ([safeSelfCallFailure]); null for a call with no threshold.
  */
 internal fun safeSelfCallThreshold(call: SafeSelfCall, owners: List<String>?): String? {
     if (owners == null) return null
-    fun owns(address: String) = owners.any { it.equals(address, ignoreCase = true) }
     val (t, n) = when (call) {
-        is SafeSelfCall.AddOwner ->
-            if (owns(call.owner)) return "The new owner already owns this Safe: this transaction would fail." else call.threshold to owners.size + 1
-        is SafeSelfCall.RemoveOwner ->
-            if (!owns(call.owner)) return "The removed owner doesn’t own this Safe: this transaction would fail." else call.threshold to owners.size - 1
+        is SafeSelfCall.AddOwner -> call.threshold to owners.size + 1
+        is SafeSelfCall.RemoveOwner -> call.threshold to owners.size - 1
         is SafeSelfCall.ChangeThreshold -> call.threshold to owners.size
         else -> return null
     }
+    safeSelfCallFailure(call, owners)?.let { return it }
     return when {
         t.signum() == 0 || t > BigInteger.valueOf(n.toLong()) -> "Not possible with $n owners: this transaction would fail."
         t == BigInteger.ONE && n > 1 -> "Any one of $n owners alone can then move everything in the Safe."
         else -> "$t of $n owners must then sign."
     }
 }
+
+/** The head of a Safe's owner linked list: the `prevOwner` of its first owner. */
+internal const val SAFE_OWNERS_SENTINEL = "0x0000000000000000000000000000000000000001"
 
 /** [address] named as one of this wallet's own [accounts] ("Account 1 (this phone)"), or null for anyone else's. */
 internal fun safeOwnAccountLabel(address: String, accounts: List<WalletAccount>): String? =
@@ -1725,7 +1759,8 @@ private fun SafeSelfCallRows(call: SafeSelfCall, tx: SafeProtocol.SafeTx, chain:
             ReviewRow("Threshold", call.threshold.toString(), mono = true, detail = safeSelfCallThreshold(call, owners))
         }
         is SafeSelfCall.SwapOwner -> {
-            ReviewRow("Changes", "Replaces an owner")
+            // No threshold row to carry it: whether the Safe would refuse it goes on this one.
+            ReviewRow("Changes", "Replaces an owner", detail = safeSelfCallFailure(call, owners))
             Removed(call.old)
             ReviewRow("New owner", safeOwnAccountLabel(call.new, accounts), address = call.new)
         }
@@ -1775,8 +1810,8 @@ internal sealed interface SafeSelfCall {
     /** No call data: does nothing but use up its nonce (how a pending transaction is cancelled). */
     data object Cancel : SafeSelfCall
     data class AddOwner(val owner: String, val threshold: BigInteger) : SafeSelfCall
-    data class RemoveOwner(val owner: String, val threshold: BigInteger) : SafeSelfCall
-    data class SwapOwner(val old: String, val new: String) : SafeSelfCall
+    data class RemoveOwner(val prev: String, val owner: String, val threshold: BigInteger) : SafeSelfCall
+    data class SwapOwner(val prev: String, val old: String, val new: String) : SafeSelfCall
     data class ChangeThreshold(val threshold: BigInteger) : SafeSelfCall
     data class EnableModule(val module: String) : SafeSelfCall
     data class DisableModule(val module: String) : SafeSelfCall
@@ -1804,11 +1839,18 @@ internal fun safeSelfCall(data: ByteArray): SafeSelfCall {
     fun args(n: Int) = words.size == n
     val call = when (hex.substring(0, 8)) {
         SAFE_SELECTORS["addOwnerWithThreshold"] -> if (args(2)) address(0)?.let { SafeSelfCall.AddOwner(it, uint(1)) } else null
-        SAFE_SELECTORS["removeOwner"] -> if (args(3) && address(0) != null) address(1)?.let { SafeSelfCall.RemoveOwner(it, uint(2)) } else null
-        SAFE_SELECTORS["swapOwner"] -> if (args(3) && address(0) != null) {
+        SAFE_SELECTORS["removeOwner"] -> if (args(3)) {
+            val prev = address(0)
+            val owner = address(1)
+            if (prev != null && owner != null) SafeSelfCall.RemoveOwner(prev, owner, uint(2)) else null
+        } else {
+            null
+        }
+        SAFE_SELECTORS["swapOwner"] -> if (args(3)) {
+            val prev = address(0)
             val old = address(1)
             val new = address(2)
-            if (old != null && new != null) SafeSelfCall.SwapOwner(old, new) else null
+            if (prev != null && old != null && new != null) SafeSelfCall.SwapOwner(prev, old, new) else null
         } else {
             null
         }
