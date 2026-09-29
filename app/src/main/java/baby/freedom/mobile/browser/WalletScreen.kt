@@ -35,6 +35,7 @@ import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.LockOpen
+import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -284,6 +285,9 @@ fun WalletScreen(
     val scope = rememberCoroutineScope()
     var importing by remember { mutableStateOf(false) }
     var publishing by remember { mutableStateOf(false) }
+    // The receive and scan pages (#106).
+    var receiving by remember { mutableStateOf(false) }
+    var scanning by remember { mutableStateOf(false) }
     val publishers = remember(context) { PublisherIdentityStore.get(context) }
     var publisherSites by remember { mutableStateOf(0) }
     // The site the user opened Wallet from, fixed at that moment: the tab
@@ -365,11 +369,28 @@ fun WalletScreen(
     }
     // The sub-page closes with the wallet, and for a feature's request, whose banner is on this page.
     LaunchedEffect(state, request) {
-        if (request != null || (state !is Vault.State.Locked && state !is Vault.State.Unlocked)) publishing = false
+        if (request != null || (state !is Vault.State.Locked && state !is Vault.State.Unlocked)) {
+            publishing = false
+            receiving = false
+            scanning = false
+        }
     }
 
     if (publishing && (state is Vault.State.Locked || state is Vault.State.Unlocked)) {
         PublisherIdentitiesPage(currentSite = cameFrom, onBack = { publishing = false })
+        return
+    }
+    val receivingAccount = accountList?.active
+    if (receiving && receivingAccount != null && (state is Vault.State.Locked || state is Vault.State.Unlocked)) {
+        ReceivePage(account = receivingAccount, onBack = { receiving = false })
+        return
+    }
+    if (scanning && (state is Vault.State.Locked || state is Vault.State.Unlocked)) {
+        ScanPage(
+            chains = allChains.orEmpty(),
+            accounts = accountList?.accounts.orEmpty(),
+            onBack = { scanning = false },
+        )
         return
     }
     val stored = (state as? Vault.State.Locked)?.info ?: (state as? Vault.State.Unlocked)?.info
@@ -497,6 +518,10 @@ fun WalletScreen(
                                     walletAccounts.add()
                                 }
                             },
+                            onReceive = {
+                                error = null
+                                receiving = true
+                            },
                         )
                     }
                     item("balances") {
@@ -507,6 +532,21 @@ fun WalletScreen(
                             onRefresh = { refreshTick++ },
                         )
                     }
+                }
+            }
+            if (info != null) item("scan") {
+                SectionCard(title = "Scan") {
+                    PageRow(
+                        title = SCAN_TITLE,
+                        subtitle = "An address, a payment request or a pairing code",
+                        style = PageRowStyle.Inset,
+                        leadingIcon = Icons.Filled.QrCodeScanner,
+                        enabled = !busy,
+                        onClick = {
+                            error = null
+                            scanning = true
+                        },
+                    )
                 }
             }
             val openPhrase = {
