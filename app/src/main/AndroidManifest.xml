@@ -150,6 +150,15 @@
             android:process=":tor" />
 
         <!--
+          Google backup (#231): keeps the Block Store entry's cloud copy
+          end-to-end encrypted while the app isn't open. See PhraseBackupJob.
+        -->
+        <service
+            android:name=".wallet.PhraseBackupJob"
+            android:exported="false"
+            android:permission="android.permission.BIND_JOB_SERVICE" />
+
+        <!--
           The recovery phrase's clipboard clear (#78) when the process
           died within its minute: see PhraseClipboard. Only our own
           AlarmManager PendingIntent reaches it.

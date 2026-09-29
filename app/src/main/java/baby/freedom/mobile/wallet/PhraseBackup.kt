@@ -11,6 +11,8 @@ import kotlin.coroutines.resumeWithException
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeout
 import org.json.JSONObject
 
@@ -72,6 +74,23 @@ interface BlockStorePort {
  * and back to cloud once it returns. The payload records which it was
  * written as, so [reconcile] only rewrites on a change.
  *
+ * [reconcile] follows the *entry*, not the wallet: an entry left behind
+ * with the wallet removed (its backup kept), or one a new phone received
+ * from the old one, is kept end-to-end encrypted the same way. It runs
+ * whenever the app comes to the foreground, when the wallet page opens,
+ * and — while an entry exists — from [PhraseBackupJob] about once an hour
+ * in the background. That narrows, but can't close, the window between
+ * the screen lock being removed and the next reconcile: Android sends no
+ * broadcast for it, so a Block Store backup landing inside that window
+ * (at most about an hour while the app isn't running, longer only if the
+ * phone restarted meanwhile and Freedom hasn't been opened since) would
+ * still go up without end-to-end encryption.
+ *
+ * Every write and delete of the entry, and [reconcile]'s read-then-write,
+ * runs under one lock, so a reconcile can't write back an entry a
+ * concurrent delete (Turn off, Remove wallet) just removed, nor restore
+ * an older phrase over one a concurrent [store] just wrote.
+ *
  * On the phone Block Store keeps the entry in Google Play services' own
  * storage, which is what lets a reinstall on the same phone restore it.
  *
@@ -79,6 +98,9 @@ interface BlockStorePort {
  * after use, apart from the unavoidable [String] inside [Mnemonic].
  */
 class PhraseBackup(private val blockStore: BlockStorePort) {
+    /** Serializes every change to the entry; see the class KDoc. */
+    private val writes = Mutex()
+
     enum class Availability {
         /** No Google Play services (or Block Store didn't answer). */
         UNSUPPORTED,
@@ -113,7 +135,7 @@ class PhraseBackup(private val blockStore: BlockStorePort) {
      * [BackupNotEncryptedException] (and stores nothing) unless Block Store
      * says that backup will be end-to-end encrypted.
      */
-    suspend fun store(mnemonic: Mnemonic) {
+    suspend fun store(mnemonic: Mnemonic) = writes.withLock {
         if (!blockStore.endToEndEncryptionAvailable()) throw BackupNotEncryptedException()
         write(mnemonic.phrase(), cloud = true)
     }
@@ -138,7 +160,7 @@ class PhraseBackup(private val blockStore: BlockStorePort) {
     }
 
     /** Deletes the entry, here and (at Block Store's next sync) from the cloud. */
-    suspend fun delete() = blockStore.delete(KEY)
+    suspend fun delete() = writes.withLock { blockStore.delete(KEY) }
 
     /**
      * Keeps the entry's cloud copy end-to-end encrypted: rewrites it as
@@ -146,13 +168,13 @@ class PhraseBackup(private val blockStore: BlockStorePort) {
      * it can again. Needs no authentication (Block Store hands its own
      * entry back to the app freely); the phrase is only held for the rewrite.
      */
-    suspend fun reconcile(): Status {
-        val bytes = blockStore.retrieve(KEY) ?: return Status.NONE
+    suspend fun reconcile(): Status = writes.withLock {
+        val bytes = blockStore.retrieve(KEY) ?: return@withLock Status.NONE
         try {
             val entry = decode(bytes)
             val encrypted = blockStore.endToEndEncryptionAvailable()
             if (entry.cloud != encrypted) write(entry.phrase, cloud = encrypted)
-            return if (encrypted) Status.CLOUD else Status.PAUSED
+            if (encrypted) Status.CLOUD else Status.PAUSED
         } finally {
             bytes.fill(0)
         }
@@ -167,6 +189,7 @@ class PhraseBackup(private val blockStore: BlockStorePort) {
         null
     }
 
+    /** Call under [writes]. */
     private suspend fun write(phrase: String, cloud: Boolean) {
         val bytes = encode(Entry(phrase, cloud))
         try {

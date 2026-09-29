@@ -1,8 +1,11 @@
 package baby.freedom.mobile.wallet
 
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.yield
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -27,6 +30,10 @@ class PhraseBackupTest {
         var stores = 0
         var failDelete = false
 
+        /** When set, [retrieve] reads the entry and then waits here, as a slow Play services answer would. */
+        var retrieveGate: CompletableDeferred<Unit>? = null
+        val retrieving = CompletableDeferred<Unit>()
+
         private fun reach() {
             if (!reachable) throw BackupUnavailableException("Google Play services isn’t available")
         }
@@ -45,7 +52,12 @@ class PhraseBackupTest {
 
         override suspend fun retrieve(key: String): ByteArray? {
             reach()
-            return entries[key]?.bytes?.copyOf()
+            val bytes = entries[key]?.bytes?.copyOf()
+            retrieveGate?.let {
+                retrieving.complete(Unit)
+                it.await()
+            }
+            return bytes
         }
 
         override suspend fun delete(key: String) {
@@ -109,6 +121,42 @@ class PhraseBackupTest {
         assertTrue(blockStore.entry()!!.cloud)
         assertEquals(phrase.words, backup.read()!!.words)
         assertEquals(true, backup.exists())
+    }
+
+    @Test
+    fun `a reconcile in flight can't write back an entry a delete just removed`() = runBlocking {
+        backup.store(phrase)
+        blockStore.e2ee = false // the screen lock went: reconcile will rewrite device-only
+        val gate = CompletableDeferred<Unit>().also { blockStore.retrieveGate = it }
+        val reconciling = launch { backup.reconcile() }
+        blockStore.retrieving.await() // it has read the entry
+        blockStore.retrieveGate = null
+        val deleting = launch { backup.delete() } // Turn off / Remove wallet meanwhile
+        repeat(5) { yield() }
+        gate.complete(Unit)
+        reconciling.join()
+        deleting.join()
+        assertNull("the deleted entry came back", blockStore.entry())
+    }
+
+    @Test
+    fun `a reconcile in flight can't put an older phrase back over a new store`() = runBlocking {
+        val other = Mnemonic.parse(
+            "legal winner thank year wave sausage worth useful legal winner thank yellow",
+        )
+        blockStore.e2ee = false
+        blockStore.store(PhraseBackup.KEY, PhraseBackup.encode(PhraseBackup.Entry(other.phrase(), cloud = false)), false)
+        blockStore.e2ee = true // reconcile will rewrite the old entry for the cloud
+        val gate = CompletableDeferred<Unit>().also { blockStore.retrieveGate = it }
+        val reconciling = launch { backup.reconcile() }
+        blockStore.retrieving.await()
+        blockStore.retrieveGate = null
+        val storing = launch { backup.store(phrase) }
+        repeat(5) { yield() }
+        gate.complete(Unit)
+        reconciling.join()
+        storing.join()
+        assertEquals(phrase.words, backup.read()!!.words)
     }
 
     @Test

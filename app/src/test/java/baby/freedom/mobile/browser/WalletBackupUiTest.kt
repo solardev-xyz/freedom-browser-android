@@ -7,6 +7,7 @@ import baby.freedom.mobile.wallet.PhraseBackup.Status
 import baby.freedom.mobile.wallet.Vault
 import baby.freedom.mobile.wallet.VaultKeyLostException
 import baby.freedom.mobile.wallet.VaultProtection
+import baby.freedom.mobile.wallet.VaultUnreadableException
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -49,12 +50,28 @@ class WalletBackupUiTest {
 
     @Test
     fun `the offer shows once, only where backup is possible`() {
-        assertTrue(showGoogleBackupOffer(offered = false, on = false, availability = Availability.READY))
-        assertFalse(showGoogleBackupOffer(offered = true, on = false, availability = Availability.READY))
-        assertFalse(showGoogleBackupOffer(offered = false, on = true, availability = Availability.READY))
-        assertFalse(showGoogleBackupOffer(offered = false, on = false, availability = Availability.NOT_ENCRYPTED))
-        assertFalse(showGoogleBackupOffer(offered = false, on = false, availability = Availability.UNSUPPORTED))
-        assertFalse(showGoogleBackupOffer(offered = false, on = false, availability = null))
+        assertTrue(showGoogleBackupOffer(offered = false, on = false, availability = Availability.READY, entryThere = false))
+        assertFalse(showGoogleBackupOffer(offered = true, on = false, availability = Availability.READY, entryThere = false))
+        assertFalse(showGoogleBackupOffer(offered = false, on = true, availability = Availability.READY, entryThere = false))
+        assertFalse(showGoogleBackupOffer(offered = false, on = false, availability = Availability.NOT_ENCRYPTED, entryThere = false))
+        assertFalse(showGoogleBackupOffer(offered = false, on = false, availability = Availability.UNSUPPORTED, entryThere = false))
+        assertFalse(showGoogleBackupOffer(offered = false, on = false, availability = null, entryThere = false))
+    }
+
+    @Test
+    fun `the offer never replaces another wallet's backup`() {
+        // An entry there with this wallet's backup off is a different wallet's: Turn on would replace it.
+        assertFalse(showGoogleBackupOffer(offered = false, on = false, availability = Availability.READY, entryThere = true))
+        // Not known yet: wait rather than offer.
+        assertFalse(showGoogleBackupOffer(offered = false, on = false, availability = Availability.READY, entryThere = null))
+    }
+
+    @Test
+    fun `an unreadable wallet with a Google backup there points at restoring it`() {
+        assertTrue(unreadableWalletDetail(googleBackupThere = true).contains("keep that backup"))
+        assertFalse(unreadableWalletDetail(googleBackupThere = false).contains("Google"))
+        val msg = walletErrorMessage(VaultUnreadableException(), "unlock the wallet", phraseBackedUp = true, googleBackup = true)!!
+        assertTrue(msg.contains("keep that backup"))
     }
 
     @Test

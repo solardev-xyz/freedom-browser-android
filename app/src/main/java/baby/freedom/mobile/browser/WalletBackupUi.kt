@@ -73,12 +73,20 @@ internal fun googleBackupStatus(
 internal fun googleBackupSwitchEnabled(on: Boolean, availability: PhraseBackup.Availability?) =
     on || availability == PhraseBackup.Availability.READY
 
-/** Whether to show the one-time offer after create or import (#231). */
+/**
+ * Whether to show the one-time offer after create or import (#231).
+ * Not while Block Store holds an entry ([entryThere] true) or that isn't
+ * known yet (null): with backup off, that entry is a different wallet's
+ * (kept after Remove wallet, or restored onto this phone), and Turn on
+ * would replace it — the settings section says so, a one-tap offer can't.
+ * The offer stays unanswered, so it shows once that entry is gone.
+ */
 internal fun showGoogleBackupOffer(
     offered: Boolean,
     on: Boolean,
     availability: PhraseBackup.Availability?,
-) = !offered && !on && availability == PhraseBackup.Availability.READY
+    entryThere: Boolean?,
+) = !offered && !on && availability == PhraseBackup.Availability.READY && entryThere == false
 
 /** The wallet page's Google backup section (#231): the switch, where the backup stands, and what it depends on. */
 @Composable
