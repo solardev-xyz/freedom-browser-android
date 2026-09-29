@@ -7,7 +7,7 @@
  * (`crates/ant-ffi/src/jni.rs`) are mangled for the upstream
  * download-smoke app's class and don't cover the gateway, so Freedom
  * carries this thin wrapper instead: init, start/stop the bee-shaped
- * HTTP gateway, peer count, shutdown. Errors surface as
+ * HTTP gateway, peer count, postage stamps (#116), shutdown. Errors surface as
  * RuntimeException with the message ant allocated (freed here).
  */
 
@@ -104,31 +104,91 @@ Java_baby_freedom_swarm_AntNative_accountInfo(JNIEnv *env, jobject thiz, jlong h
 }
 
 /*
- * The chain transport every Freedom node runs with (#114): ant may read
- * the chain, but never broadcast. In light mode the gateway signs and
- * sends a transaction for POST /stamps, PATCH /stamps/topup|dilute,
+ * The chain transport every Freedom node runs with (#114, #116): ant may
+ * read the chain freely, but a broadcast goes out only if the app's own
+ * SpendGuard (SpendGuard.kt) admits it. In light mode the gateway signs
+ * and sends a transaction for POST /stamps, PATCH /stamps/topup|dilute,
  * POST /chequebook/deposit and friends with no prompt and no auth, and
  * the gateway sits on 127.0.0.1:1633 where every app on the device (and
- * any page in any browser, via a no-cors POST) can reach it. Refusing
- * the broadcast itself is the one place that covers all of those
- * callers at once, however the request got to the gateway.
+ * any page in any browser, via a no-cors POST) can reach it. Gating the
+ * broadcast itself is the one place that covers all of those callers at
+ * once, however the request got to the gateway — and the app's own
+ * storage calls (ant_storage_buy_xdai, ant_storage_topup_xdai) go
+ * through the same transport, so they pass only while SpendGuard holds a
+ * permit for the one spend the user confirmed, and only with that
+ * spend's own transactions.
  *
  * A read returns NULL: ant falls back to the configured gnosis_rpc URL,
- * exactly as with no transport. A broadcast (`eth_send*`) gets a
- * JSON-RPC error that isn't -32000, which ant passes through to its
- * caller as a genuine answer instead of retrying it on gnosis_rpc (see
- * ant_set_chain_transport). ant builds the request body itself, so a
- * plain substring match on the method can't be dodged by a page.
- *
- * Spending from the app's own screens (#115-#117) will need to lift
- * this for the one transaction the user confirmed; until then nothing
- * in the app spends, and nothing else may.
+ * exactly as with no transport. So does an admitted broadcast, which
+ * then goes out on the RPC the call was given. A refused broadcast
+ * (`eth_send*`) gets a JSON-RPC error that isn't -32000, which ant
+ * passes through to its caller as a genuine answer instead of retrying
+ * it on gnosis_rpc (see ant_set_chain_transport). ant builds the request
+ * body itself, so a plain substring match on the method can't be dodged
+ * by a page; SpendGuard parses what it admits strictly.
  */
 static const char *const BROADCAST_METHOD = "\"eth_send";
 
-static char *refuse_broadcasts(const char *request_json, void *host_ctx) {
+/* SpendGuard.admit(String): boolean, resolved in JNI_OnLoad (ant's
+ * threads can't FindClass an app class). NULL = refuse everything. */
+static JavaVM *g_vm = NULL;
+static jclass g_guard_class = NULL;
+static jmethodID g_guard_admit = NULL;
+
+JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved) {
+    (void)reserved;
+    JNIEnv *env = NULL;
+    if ((*vm)->GetEnv(vm, (void **)&env, JNI_VERSION_1_6) != JNI_OK) return JNI_VERSION_1_6;
+    g_vm = vm;
+    jclass cls = (*env)->FindClass(env, "baby/freedom/swarm/SpendGuard");
+    if (cls == NULL) {
+        /* No gate to ask: every broadcast is refused. */
+        (*env)->ExceptionClear(env);
+        return JNI_VERSION_1_6;
+    }
+    jmethodID admit = (*env)->GetStaticMethodID(env, cls, "admit", "(Ljava/lang/String;)Z");
+    if (admit == NULL) {
+        (*env)->ExceptionClear(env);
+    } else {
+        g_guard_class = (jclass)(*env)->NewGlobalRef(env, cls);
+        g_guard_admit = admit;
+    }
+    (*env)->DeleteLocalRef(env, cls);
+    return JNI_VERSION_1_6;
+}
+
+/* Does SpendGuard let `request_json` out? Refuses on anything unexpected. */
+static int guard_admits(const char *request_json) {
+    if (g_vm == NULL || g_guard_class == NULL || g_guard_admit == NULL) return 0;
+    JNIEnv *env = NULL;
+    int attached = 0;
+    jint st = (*g_vm)->GetEnv(g_vm, (void **)&env, JNI_VERSION_1_6);
+    if (st == JNI_EDETACHED) {
+        if ((*g_vm)->AttachCurrentThread(g_vm, &env, NULL) != JNI_OK) return 0;
+        attached = 1;
+    } else if (st != JNI_OK) {
+        return 0;
+    }
+    jboolean ok = JNI_FALSE;
+    /* ant's request bodies are ASCII JSON, so modified UTF-8 is exact. */
+    jstring s = (*env)->NewStringUTF(env, request_json);
+    if (s != NULL) {
+        ok = (*env)->CallStaticBooleanMethod(env, g_guard_class, g_guard_admit, s);
+        (*env)->DeleteLocalRef(env, s);
+    }
+    if ((*env)->ExceptionCheck(env)) {
+        (*env)->ExceptionClear(env);
+        ok = JNI_FALSE;
+    }
+    /* ant's pool threads come and go; never leave one attached. */
+    if (attached) (*g_vm)->DetachCurrentThread(g_vm);
+    return ok == JNI_TRUE;
+}
+
+static char *guard_broadcasts(const char *request_json, void *host_ctx) {
     (void)host_ctx;
     if (request_json == NULL || strstr(request_json, BROADCAST_METHOD) == NULL) return NULL;
+    if (guard_admits(request_json)) return NULL;
     /* Echo the request's id when it's a plain number or string; null otherwise. */
     char id[64] = "null";
     const char *p = strstr(request_json, "\"id\"");
@@ -143,7 +203,7 @@ static char *refuse_broadcasts(const char *request_json, void *host_ctx) {
     }
     static const char *const fmt =
         "{\"jsonrpc\":\"2.0\",\"id\":%s,\"error\":{\"code\":-32003,"
-        "\"message\":\"Freedom doesn't let the Swarm node send transactions\"}}";
+        "\"message\":\"Freedom only lets the Swarm node send transactions you confirmed in the app\"}}";
     size_t len = strlen(fmt) + strlen(id) + 1;
     char *out = malloc(len);
     if (out != NULL) snprintf(out, len, fmt, id);
@@ -151,6 +211,12 @@ static char *refuse_broadcasts(const char *request_json, void *host_ctx) {
      * There's nothing to answer with, so stop here rather than spend. */
     if (out == NULL) abort();
     return out;
+}
+
+/* Install the gate on `handle`; 0 on success (or a build with no chain to broadcast on). */
+static int install_guard(jlong handle) {
+    int tr = ant_set_chain_transport((AntHandle *)(uintptr_t)handle, guard_broadcasts, NULL);
+    return tr == ANT_CHAIN_TRANSPORT_OK || tr == ANT_CHAIN_TRANSPORT_UNSUPPORTED ? 0 : -1;
 }
 
 JNIEXPORT void JNICALL
@@ -167,8 +233,7 @@ Java_baby_freedom_swarm_AntNative_startGateway(JNIEnv *env, jobject thiz, jlong 
     }
     /* Before the gateway starts: it captures its chain wiring there. A
      * build without chain support has no chain to broadcast on. */
-    int tr = ant_set_chain_transport((AntHandle *)(uintptr_t)handle, refuse_broadcasts, NULL);
-    if (tr != ANT_CHAIN_TRANSPORT_OK && tr != ANT_CHAIN_TRANSPORT_UNSUPPORTED) {
+    if (install_guard(handle) != 0) {
         (*env)->ReleaseStringUTFChars(env, api_addr, addr);
         (*env)->ReleaseStringUTFChars(env, gnosis_rpc, rpc);
         throw_runtime(env, NULL, "ant_set_chain_transport failed");
@@ -206,6 +271,117 @@ Java_baby_freedom_swarm_AntNative_agentString(JNIEnv *env, jobject thiz, jlong h
     jstring out = (*env)->NewStringUTF(env, agent);
     ant_free_string(agent);
     return out;
+}
+
+/*
+ * Postage stamps (#116): ant's storage calls, each a JSON string or a
+ * RuntimeException with ant's message. The two that spend
+ * (storageBuyXdai, storageTopupXdai) put the broadcast gate back first,
+ * so they can never run on a handle without it; SwarmNode wraps them in
+ * SpendGuard.during, which is what lets their transactions out. All of
+ * them block — the spends until their transactions confirm.
+ */
+static jstring json_or_throw(JNIEnv *env, char *json, char *err, const char *what) {
+    if (json == NULL) {
+        throw_runtime(env, err, what);
+        return NULL;
+    }
+    ant_free_string(err);
+    jstring out = (*env)->NewStringUTF(env, json);
+    ant_free_string(json);
+    return out;
+}
+
+JNIEXPORT jstring JNICALL
+Java_baby_freedom_swarm_AntNative_storageStatus(JNIEnv *env, jobject thiz, jlong handle) {
+    (void)thiz;
+    char *err = NULL;
+    char *json = ant_storage_status((const AntHandle *)(uintptr_t)handle, &err);
+    return json_or_throw(env, json, err, "ant_storage_status failed");
+}
+
+JNIEXPORT jstring JNICALL
+Java_baby_freedom_swarm_AntNative_storageQuote(JNIEnv *env, jobject thiz, jlong handle,
+                                               jstring gnosis_rpc, jint depth, jlong days) {
+    (void)thiz;
+    const char *rpc = (*env)->GetStringUTFChars(env, gnosis_rpc, NULL);
+    if (rpc == NULL) return NULL;
+    char *err = NULL;
+    char *json = ant_storage_quote((const AntHandle *)(uintptr_t)handle, rpc, (uint8_t)depth,
+                                   (uint64_t)days, &err);
+    (*env)->ReleaseStringUTFChars(env, gnosis_rpc, rpc);
+    return json_or_throw(env, json, err, "ant_storage_quote failed");
+}
+
+JNIEXPORT jstring JNICALL
+Java_baby_freedom_swarm_AntNative_storageTopupQuote(JNIEnv *env, jobject thiz, jlong handle,
+                                                    jstring gnosis_rpc, jlong days) {
+    (void)thiz;
+    const char *rpc = (*env)->GetStringUTFChars(env, gnosis_rpc, NULL);
+    if (rpc == NULL) return NULL;
+    char *err = NULL;
+    char *json = ant_storage_topup_quote((const AntHandle *)(uintptr_t)handle, rpc,
+                                         (uint64_t)days, &err);
+    (*env)->ReleaseStringUTFChars(env, gnosis_rpc, rpc);
+    return json_or_throw(env, json, err, "ant_storage_topup_quote failed");
+}
+
+JNIEXPORT jstring JNICALL
+Java_baby_freedom_swarm_AntNative_storageValidity(JNIEnv *env, jobject thiz, jlong handle,
+                                                  jstring gnosis_rpc) {
+    (void)thiz;
+    const char *rpc = (*env)->GetStringUTFChars(env, gnosis_rpc, NULL);
+    if (rpc == NULL) return NULL;
+    char *err = NULL;
+    char *json = ant_storage_validity((const AntHandle *)(uintptr_t)handle, rpc, &err);
+    (*env)->ReleaseStringUTFChars(env, gnosis_rpc, rpc);
+    return json_or_throw(env, json, err, "ant_storage_validity failed");
+}
+
+JNIEXPORT jstring JNICALL
+Java_baby_freedom_swarm_AntNative_storageBuyXdai(JNIEnv *env, jobject thiz, jlong handle,
+                                                 jstring gnosis_rpc, jint depth,
+                                                 jstring amount_per_chunk, jboolean immutable) {
+    (void)thiz;
+    if (install_guard(handle) != 0) {
+        throw_runtime(env, NULL, "ant_set_chain_transport failed");
+        return NULL;
+    }
+    const char *rpc = (*env)->GetStringUTFChars(env, gnosis_rpc, NULL);
+    if (rpc == NULL) return NULL;
+    const char *amount = (*env)->GetStringUTFChars(env, amount_per_chunk, NULL);
+    if (amount == NULL) {
+        (*env)->ReleaseStringUTFChars(env, gnosis_rpc, rpc);
+        return NULL;
+    }
+    char *err = NULL;
+    char *json = ant_storage_buy_xdai((const AntHandle *)(uintptr_t)handle, rpc, (uint8_t)depth,
+                                      amount, immutable != JNI_FALSE ? 1 : 0, &err);
+    (*env)->ReleaseStringUTFChars(env, amount_per_chunk, amount);
+    (*env)->ReleaseStringUTFChars(env, gnosis_rpc, rpc);
+    return json_or_throw(env, json, err, "ant_storage_buy_xdai failed");
+}
+
+JNIEXPORT jstring JNICALL
+Java_baby_freedom_swarm_AntNative_storageTopupXdai(JNIEnv *env, jobject thiz, jlong handle,
+                                                   jstring gnosis_rpc, jstring amount_per_chunk) {
+    (void)thiz;
+    if (install_guard(handle) != 0) {
+        throw_runtime(env, NULL, "ant_set_chain_transport failed");
+        return NULL;
+    }
+    const char *rpc = (*env)->GetStringUTFChars(env, gnosis_rpc, NULL);
+    if (rpc == NULL) return NULL;
+    const char *amount = (*env)->GetStringUTFChars(env, amount_per_chunk, NULL);
+    if (amount == NULL) {
+        (*env)->ReleaseStringUTFChars(env, gnosis_rpc, rpc);
+        return NULL;
+    }
+    char *err = NULL;
+    char *json = ant_storage_topup_xdai((const AntHandle *)(uintptr_t)handle, rpc, amount, &err);
+    (*env)->ReleaseStringUTFChars(env, amount_per_chunk, amount);
+    (*env)->ReleaseStringUTFChars(env, gnosis_rpc, rpc);
+    return json_or_throw(env, json, err, "ant_storage_topup_xdai failed");
 }
 
 /*

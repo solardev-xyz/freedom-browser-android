@@ -8,6 +8,7 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.fillMaxSize
@@ -34,6 +35,7 @@ import baby.freedom.mobile.browser.OnchainApps
 import baby.freedom.mobile.browser.PhraseClipboard
 import baby.freedom.mobile.browser.RadApi
 import baby.freedom.mobile.browser.RadicleClient
+import baby.freedom.mobile.browser.StampClient
 import baby.freedom.mobile.browser.RadicleProviders
 import baby.freedom.mobile.browser.RadicleControls
 import baby.freedom.mobile.browser.TorControls
@@ -253,6 +255,7 @@ class MainActivity : ComponentActivity() {
             val b = INodeService.Stub.asInterface(service) ?: return
             binder = b
             RadicleClient.service = b
+            StampClient.service = b
             runCatching { b.registerCallback(callback) }
             runCatching { b.state?.let { infoFlow.value = it } }
             runCatching {
@@ -284,6 +287,7 @@ class MainActivity : ComponentActivity() {
             // [setRunNodeEnabled] instead, which sets Stopped explicitly.
             binder = null
             RadicleClient.service = null
+            StampClient.service = null
             infoFlow.value = NodeInfo()
             ipfsInfoFlow.value = IpfsInfo()
             radicleInfoFlow.value = RadicleInfo()
@@ -836,8 +840,15 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun stopAndUnbindService() {
+        // A postage spend still inside ant (#116) must finish first: the
+        // service then stops itself once it has, rather than exit mid-spend.
+        val deferred = runCatching { binder?.stopWhenIdle() }.getOrNull() == true
         unbindFromService()
-        NodeService.stop(this)
+        if (deferred) {
+            Toast.makeText(this, R.string.node_stop_after_spend, Toast.LENGTH_LONG).show()
+        } else {
+            NodeService.stop(this)
+        }
         infoFlow.value = NodeInfo()
         ipfsInfoFlow.value = IpfsInfo()
         radicleInfoFlow.value = RadicleInfo()
@@ -850,6 +861,7 @@ class MainActivity : ComponentActivity() {
         runCatching { unbindService(connection) }
         binder = null
         RadicleClient.service = null
+        StampClient.service = null
         bound = false
     }
 }

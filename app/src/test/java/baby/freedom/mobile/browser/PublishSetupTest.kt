@@ -66,10 +66,14 @@ class PublishSetupTest {
     }
 
     @Test
-    fun `the chequebook and the stamp are never the user's to do here yet`() {
+    fun `once funded the stamp is the one to do, and the chequebook comes with it`() {
         val funded = PublishReadiness(light, true, oneXdai, chequebook = "", usableStamps = 0)
-        assertEquals(s('d', 'd', 'd', 'p', 'p'), statuses(funded))
-        assertEquals(s('d', 'd', 'd', 'd', 'p'), statuses(funded.copy(chequebook = "0x" + "1".repeat(40))))
+        assertEquals(s('d', 'd', 'd', 'p', 'a'), statuses(funded))
+        assertEquals(s('d', 'd', 'd', 'd', 'a'), statuses(funded.copy(chequebook = "0x" + "1".repeat(40))))
+        // A stamp whose chequebook deploy didn't happen: nothing here to tap for it.
+        assertEquals(s('d', 'd', 'd', 'p', 'd'), statuses(funded.copy(usableStamps = 1)))
+        // Not before the node is funded.
+        assertEquals(s('d', 'd', 'a', 'p', 'p'), statuses(funded.copy(xdaiWei = BigInteger.ZERO)))
         assertEquals(
             s('d', 'd', 'd', 'd', 'd'),
             statuses(funded.copy(chequebook = "0x" + "1".repeat(40), usableStamps = 2)),
@@ -83,7 +87,7 @@ class PublishSetupTest {
         assertEquals(s('d', 'a', 'd', 'p', 'p'), statuses(PublishReadiness(wallet, false, oneXdai)))
         // A deployed chequebook counts as funded even with the xDAI spent.
         assertEquals(
-            s('d', 'd', 'd', 'd', 'p'),
+            s('d', 'd', 'd', 'd', 'a'),
             statuses(PublishReadiness(light, true, BigInteger.ZERO, chequebook = "0x" + "2".repeat(40))),
         )
         // Chequebook and stamps are a light node's: stale ones from before a

@@ -26,7 +26,8 @@ import java.io.ByteArrayInputStream
  * followed inside Chromium without asking the interceptor again, and
  * other apps reach the port without a WebView at all. What keeps the
  * funds safe from all of them is the node's own chain transport
- * (`ant_jni.c`), which refuses every broadcast.
+ * (`ant_jni.c`), which refuses every broadcast but the transactions of a
+ * spend the user confirmed in the app ([baby.freedom.swarm.SpendGuard]).
  *
  * Matched by the gateway's port, not its host: any DNS name that resolves
  * to 127.0.0.1 reaches the node as well as `127.0.0.1` itself does, and
