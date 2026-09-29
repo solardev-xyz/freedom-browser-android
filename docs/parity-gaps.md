@@ -60,7 +60,7 @@ What the Desktop and iOS columns mean:
 - **yes**: that platform has the feature. **yes (X)**: it has only part X of it (MIDI of #267, ENS of #277).
 - **no**: it doesn't either; the row is then Android polish or a mobile expectation, and the issue says so.
 - **partial**: it has part of it; the issue's *Reference implementations* says which part (for [#259](https://github.com/solardev-xyz/freedom-browser-android/issues/259), iOS has error pages for dweb loads only).
-- **minimal**: it has the feature in name only (iOS has about 13 accessibility labels in the whole app).
+- **minimal**: it has a little of it (iOS has about 13 accessibility labels in the whole app).
 - **n/a**: the gap doesn't apply to that platform, so there's nothing to compare ([#260](https://github.com/solardev-xyz/freedom-browser-android/issues/260)'s renderer-crash handling on iOS).
 - **not checked**: not audited in this pass, so it says nothing about whether that platform has it. For [#283](https://github.com/solardev-xyz/freedom-browser-android/issues/283), iOS's node API wasn't probed from a web page; for [#279](https://github.com/solardev-xyz/freedom-browser-android/issues/279), desktop's screen-reader and large-font support wasn't tested (TalkBack itself is Android-only).
 - Anything else names that platform's nearest equivalent: **App Store** (updates come through the store, so there's nothing to build), **log file** (desktop writes node logs to a file but has no viewer), **welcome page** (desktop's home page explains the dweb, with no separate first-run flow), **Explore only** (an Explore entry with no first-run introduction).
