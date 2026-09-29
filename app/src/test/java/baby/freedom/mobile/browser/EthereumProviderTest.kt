@@ -414,13 +414,15 @@ class EthereumProviderTest {
             return JSONObject().put("types", types).put("primaryType", "Main")
                 .put("domain", JSONObject().put("name", "x")).put("message", JSONObject().put("items", items))
         }
+        // The bound only has to catch the old minutes-long hashing; shared CI runners are several
+        // times slower than a dev machine (1.4 s locally for the whole test), so keep it generous.
         var start = System.nanoTime()
         ok(call("eth_signTypedData_v4", JSONArray().put(main.address).put(payload(2000))))
-        assertTrue("took ${(System.nanoTime() - start) / 1_000_000} ms", System.nanoTime() - start < 3_000_000_000L)
+        assertTrue("took ${(System.nanoTime() - start) / 1_000_000} ms", System.nanoTime() - start < 15_000_000_000L)
         asks.clear()
         start = System.nanoTime()
         val err = call("eth_signTypedData_v4", JSONArray().put(main.address).put(payload(20_000))) as EthereumProvider.Reply.Err
-        assertTrue("took ${(System.nanoTime() - start) / 1_000_000} ms", System.nanoTime() - start < 3_000_000_000L)
+        assertTrue("took ${(System.nanoTime() - start) / 1_000_000} ms", System.nanoTime() - start < 15_000_000_000L)
         assertEquals(-32602, err.code)
         assertTrue(err.message, err.message.contains("too large"))
         assertTrue(asks.isEmpty())
