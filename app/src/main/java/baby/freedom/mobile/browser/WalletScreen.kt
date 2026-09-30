@@ -324,7 +324,8 @@ internal fun clipWords(text: CharSequence): List<String> =
  * does), on Back, when the page goes away, or when Freedom loses focus.
  * - Nothing [pasted]: left alone, and never read.
  * - Not [readable] (no window focus, so it can't be looked at): cleared
- *   unread only if [clipIsPaste] — a phrase-sized paste is the last thing
+ *   unread only if [clipIsPaste] — a phrase or a piece of one
+ *   ([PastedPhrases.phrasePiece]) pasted is the last thing
  *   seen happening to it — and otherwise left alone: the clip isn't ours,
  *   so unlike [PhraseClipboard] nothing else is cleared blind.
  * - Its description says no text ([hasText] false): left alone, and its
@@ -396,9 +397,12 @@ internal fun insertedText(before: TextFieldValue, after: TextFieldValue, committ
 
 /**
  * What was pasted into the Import page's field and may still be on the
- * clipboard (#241): the words of each paste, and whether a phrase-sized
- * one ([Mnemonic.IMPORT_WORD_COUNTS]' smallest or more words) is the last
- * thing seen happening to the clipboard while Freedom had focus.
+ * clipboard (#241): the words of each paste, and whether a phrase — or a
+ * piece of one ([phrasePiece]) — is the last thing seen happening to the
+ * clipboard while Freedom had focus.
+ *
+ * A phrase-sized paste, or one of BIP-39 words only (a phrase pasted in
+ * chunks, a line at a time — [phrasePiece]), sets [clipIsPaste].
  *
  * A paste is text of more than one word inserted at once ([add]). The
  * keyboard also inserts a whole word at once — a swiped word, an accepted
@@ -449,7 +453,7 @@ internal class PastedPhrases {
         val pasted = clipWords(inserted)
         if (pasted.size < 2) return
         words += pasted
-        if (pasted.size >= MIN_PHRASE_WORDS) clipIsPaste = true
+        if (phrasePiece(pasted)) clipIsPaste = true
     }
 
     /**
@@ -488,6 +492,16 @@ internal class PastedPhrases {
 
     companion object {
         val MIN_PHRASE_WORDS = Mnemonic.IMPORT_WORD_COUNTS.min()
+
+        /**
+         * Whether the [words] of one paste are a recovery phrase or a piece of
+         * one, cleared unread on focus loss ([clipIsPaste]): phrase-sized, or
+         * every word a BIP-39 word — a phrase pasted in chunks (two lines of
+         * six words from a note) leaves its last chunk on the clipboard, and
+         * that is part of the phrase just the same (R3-M1).
+         */
+        fun phrasePiece(words: List<String>): Boolean =
+            words.size >= MIN_PHRASE_WORDS || (words.size >= 2 && words.all { it in bip39Words })
     }
 }
 
@@ -1691,8 +1705,9 @@ internal fun ImportPhrasePage(
     // forgotten once the clipboard could be looked at, kept for the next
     // try while it couldn't. Freedom losing window focus with the page up
     // (Home, another app, the notification shade) is the one exit where it
-    // can't be looked at: then it's cleared unread if a phrase-sized paste
-    // is the last thing that happened to it ([PastedPhrases.clipIsPaste]).
+    // can't be looked at: then it's cleared unread if a paste of a phrase,
+    // or of a piece of one, is the last thing that happened to it
+    // ([PastedPhrases.clipIsPaste]).
     val pastes = remember { PastedPhrases() }
     val clipboard = remember(context) { context.getSystemService(ClipboardManager::class.java) }
     val clearPasted = { imported: List<String>? ->

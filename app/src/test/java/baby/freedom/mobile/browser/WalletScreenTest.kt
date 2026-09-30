@@ -195,7 +195,7 @@ class WalletScreenTest {
         assertFalse(clear(null))
         assertTrue(clear(null, twelve))
         // Focus lost with the page up (Home): unreadable, so cleared unread
-        // only while a phrase-sized paste is the last thing seen on it.
+        // only while a paste of a phrase, or a piece of one, is the last thing seen on it.
         assertTrue(shouldClearPasted(false, false, ::never, pasted, clipIsPaste = true))
         assertFalse(shouldClearPasted(false, false, ::never, emptyList(), clipIsPaste = true))
         assertFalse(read)
@@ -204,7 +204,7 @@ class WalletScreenTest {
     }
 
     @Test
-    fun `a word the keyboard puts in is no paste, and only a phrase-sized paste may be cleared unread (#241)`() {
+    fun `a word the keyboard puts in is no paste, and only a phrase or a piece of one may be cleared unread (#241)`() {
         val pastes = PastedPhrases()
         // Swipe typing and keyboard suggestions insert a word at a time:
         // no paste at all, so leaving the page never reads the clipboard.
@@ -215,9 +215,20 @@ class WalletScreenTest {
         pastes.add("…")
         assertTrue(pastes.words.isEmpty())
         assertFalse(pastes.clipIsPaste)
-        // Two words at once are a paste, but no phrase-sized one.
-        pastes.add("abandon ability")
+        // Two words at once are a paste, but, not BIP-39 words, no piece of a phrase.
+        pastes.add("meeting tomorrow")
         assertEquals(1, pastes.words.size)
+        assertFalse(pastes.clipIsPaste)
+        // R3-M1: a phrase pasted in chunks (a line of six words at a time)
+        // leaves its last chunk on the clipboard: a piece of the phrase.
+        pastes.add("abandon ability able about above absent")
+        assertTrue(pastes.clipIsPaste)
+        pastes.forget()
+        pastes.add("abandon ability")
+        assertTrue(pastes.clipIsPaste)
+        // One word not in the list: no piece of a phrase, unless phrase-sized.
+        pastes.forget()
+        pastes.add("abandon ability zzz")
         assertFalse(pastes.clipIsPaste)
         pastes.add(twelve.replace(" ", ","))
         assertTrue(pastes.clipIsPaste)

@@ -219,6 +219,23 @@ class ImportPhraseClipboardTest {
     }
 
     @Test
+    fun phrasePastedInChunksHasItsLastChunkClearedUnreadWhenFreedomGoesToTheBackground() {
+        // R3-M1: two lines of six words from a note, pasted one at a time.
+        val words = twelve.split(" ")
+        for (chunk in listOf(words.take(6), words.drop(6))) {
+            setClip(chunk.joinToString(" ") + " ")
+            rule.onNode(field).performSemanticsAction(SemanticsActions.PasteText)
+            rule.waitForIdle()
+        }
+        goHome { ownRead ->
+            assertTrue(shown)
+            assertEquals(null, ownRead)
+            // The last chunk, a piece of the phrase, is cleared unread too.
+            assertEquals(null, clipText())
+        }
+    }
+
+    @Test
     fun somethingCopiedSinceThePasteIsLeftAloneWhenFreedomGoesToTheBackground() {
         setClip(twelve)
         paste()
