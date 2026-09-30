@@ -5708,32 +5708,28 @@ internal fun sweptOrigins(
     return onScreen.intersect(swept)
 }
 
-// In-process LRU of fully-buffered media bodies keyed by bzz URL, so
-// successive Range requests for the same file don't re-fetch from the
-// gateway.
+// Fully-buffered media bodies keyed by gateway URL, so successive Range
+// requests for the same file don't re-fetch it (see [MediaBodyBuffer]).
 private data class MediaBody(val bytes: ByteArray, val mime: String)
 
-private const val MEDIA_CACHE_MAX_ENTRIES = 4
-private val mediaBodyCache: MutableMap<String, MediaBody> =
-    object : java.util.LinkedHashMap<String, MediaBody>(8, 0.75f, true) {
-        override fun removeEldestEntry(
-            eldest: MutableMap.MutableEntry<String, MediaBody>?,
-        ): Boolean = size > MEDIA_CACHE_MAX_ENTRIES
-    }
+private val mediaBodies = MediaBodyBuffer<MediaBody>()
 
 private fun loadMediaBody(
     req: WebResourceRequest,
     targetUrl: String,
     fresh: Boolean,
-): MediaBody? {
+): MediaBody? =
     // [fresh]: a Hard reload's (#262) — the buffered body may be the very
-    // stale answer being reloaded past. Dropped rather than just skipped,
-    // so the document's own next Range requests don't read it either
-    // while this fetch runs; the fetch buffers the new body in its place.
-    synchronized(mediaBodyCache) {
-        if (fresh) mediaBodyCache.remove(targetUrl)
-        mediaBodyCache[targetUrl]?.let { return it }
-    }
+    // stale answer being reloaded past. The buffer drops it, and until this
+    // fetch ends, other requests for the URL wait for it instead of
+    // fetching (possibly stale) bodies of their own.
+    mediaBodies.load(targetUrl, fresh) { noCache -> fetchMediaBody(req, targetUrl, noCache) }
+
+private fun fetchMediaBody(
+    req: WebResourceRequest,
+    targetUrl: String,
+    noCache: Boolean,
+): MediaBody? {
     // Retry transient chunk-retrieval failures the same way non-media
     // subresources do. Range is stripped on outgoing fetches because
     // we always want the full body to feed the in-memory cache.
@@ -5746,7 +5742,7 @@ private fun loadMediaBody(
                 return null
             }
         }
-        val attempt = tryLoadMediaBody(req, targetUrl, fresh)
+        val attempt = tryLoadMediaBody(req, targetUrl, noCache)
         when (attempt) {
             is MediaLoadResult.Ok -> return attempt.body
             MediaLoadResult.Fatal -> return null
@@ -5771,7 +5767,7 @@ private sealed class MediaLoadResult {
 private fun tryLoadMediaBody(
     req: WebResourceRequest,
     targetUrl: String,
-    fresh: Boolean,
+    noCache: Boolean,
 ): MediaLoadResult {
     val target = try {
         URL(targetUrl)
@@ -5789,7 +5785,7 @@ private fun tryLoadMediaBody(
                 req,
                 stripRange = true,
                 crossOrigin = !TorRouting.sameOrigin(hop, target),
-                noCache = fresh,
+                noCache = noCache,
             )
         }
         val status = conn.responseCode
@@ -5809,10 +5805,8 @@ private fun tryLoadMediaBody(
             ?.ifBlank { null }
             ?: mimeTypeFromUrl(targetUrl)
             ?: "application/octet-stream"
-        val body = MediaBody(bytes, mime)
-        synchronized(mediaBodyCache) { mediaBodyCache[targetUrl] = body }
-        Log.i(LOG_TAG, "media cached: $targetUrl bytes=${bytes.size} mime=$mime")
-        MediaLoadResult.Ok(body)
+        Log.i(LOG_TAG, "media fetched: $targetUrl bytes=${bytes.size} mime=$mime")
+        MediaLoadResult.Ok(MediaBody(bytes, mime))
     } catch (t: TorRouting.RefusedException) {
         Log.w(LOG_TAG, "media fetch open failed: $targetUrl", t)
         MediaLoadResult.Fatal
