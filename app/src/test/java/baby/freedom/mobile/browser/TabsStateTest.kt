@@ -367,4 +367,161 @@ class TabsStateTest {
         assertEquals(1, tabs.tabs.size)
         assertFalse(tabs.active.private)
     }
+
+    // Close all tabs / Close other tabs (#320).
+
+    @Test
+    fun `close all leaves one blank tab and one undo brings every tab back in order`() {
+        val tabs = threeTabs()
+        tabs.switchTo(1) // b
+        val closed = tabs.closeAllTabs()
+        assertEquals(3, closed.count)
+        assertEquals(listOf(""), tabs.titles)
+        assertFalse(tabs.active.private)
+        assertTrue(tabs.reopenClosed(closed.undo!!))
+        // The placeholder went, and the tab that was active is again.
+        assertEquals(listOf("a", "b", "c"), tabs.titles)
+        assertEquals("b", tabs.active.title)
+        // Each rebuilt from its snapshot, as a single reopen is.
+        assertTrue(tabs.tabs.all { it.pendingRestore != null })
+        assertFalse(tabs.canReopenClosedTab)
+        // Done once: a second Undo does nothing.
+        assertFalse(tabs.reopenClosed(closed.undo!!))
+        assertEquals(3, tabs.tabs.size)
+    }
+
+    @Test
+    fun `a bulk close is one entry of the reopen stack`() {
+        val tabs = threeTabs()
+        tabs.closeAllTabs()
+        assertEquals("a", tabs.reopenClosedTab()?.title)
+        assertEquals(listOf("a", "b", "c"), tabs.titles)
+        assertEquals("a", tabs.active.title)
+        assertNull(tabs.reopenClosedTab())
+    }
+
+    @Test
+    fun `undo after the placeholder was used keeps it`() {
+        val tabs = threeTabs()
+        val closed = tabs.closeAllTabs()
+        tabs.active.visit("new")
+        tabs.reopenClosed(closed.undo!!)
+        assertEquals(listOf("a", "b", "c", "new"), tabs.titles)
+        assertEquals("a", tabs.active.title)
+    }
+
+    @Test
+    fun `undo of a close that was reopened or forgotten does nothing`() {
+        val tabs = threeTabs()
+        val closed = tabs.closeAllTabs()
+        tabs.forgetClosedTabs()
+        assertFalse(tabs.reopenClosed(closed.undo!!))
+        assertEquals(listOf(""), tabs.titles)
+    }
+
+    @Test
+    fun `close others keeps that tab active and undo restores the order and the active tab`() {
+        val tabs = threeTabs()
+        tabs.newTab().visit("d")
+        tabs.switchTo(3) // d
+        val keep = tabs.tabs[1] // b
+        val closed = tabs.closeOtherTabs(keep)
+        assertEquals(3, closed.count)
+        assertEquals(listOf("b"), tabs.titles)
+        assertSame(keep, tabs.active)
+        tabs.reopenClosed(closed.undo!!)
+        assertEquals(listOf("a", "b", "c", "d"), tabs.titles)
+        assertSame(keep, tabs.tabs[1])
+        assertEquals("d", tabs.active.title)
+    }
+
+    @Test
+    fun `close others of the only tab closes nothing`() {
+        val tabs = TabsState(homepage = HOME_URL)
+        tabs.tabs[0].visit("a")
+        val closed = tabs.closeOtherTabs(tabs.active)
+        assertEquals(0, closed.count)
+        assertNull(closed.undo)
+        assertFalse(tabs.canReopenClosedTab)
+    }
+
+    @Test
+    fun `closed private tabs are not brought back by undo`() {
+        val tabs = threeTabs()
+        tabs.newTab(private = true).visit("secret")
+        tabs.moveTab(3, 1) // [a, secret, b, c]
+        tabs.newTab(private = true).visit("hidden")
+        tabs.switchTo(0)
+        val closed = tabs.closeAllTabs()
+        assertEquals(5, closed.count)
+        assertFalse(tabs.hasPrivateTabs)
+        tabs.reopenClosed(closed.undo!!)
+        assertEquals(listOf("a", "b", "c"), tabs.titles)
+        assertFalse(tabs.hasPrivateTabs)
+        assertEquals("a", tabs.active.title)
+    }
+
+    @Test
+    fun `closing every tab but a normal one ends the private group`() {
+        val tabs = threeTabs()
+        tabs.newTab(private = true).visit("secret")
+        val closed = tabs.closeOtherTabs(tabs.tabs[2]) // c
+        assertFalse(tabs.hasPrivateTabs)
+        assertEquals("c", tabs.active.title)
+        tabs.reopenClosed(closed.undo!!)
+        assertEquals(listOf("a", "b", "c"), tabs.titles)
+        // The private tab was active; it's gone, so the kept one stays.
+        assertEquals("c", tabs.active.title)
+    }
+
+    @Test
+    fun `close private tabs has no undo and keeps the normal tabs`() {
+        val tabs = threeTabs()
+        tabs.newTab(private = true).visit("p1")
+        tabs.switchTo(1) // b
+        tabs.newTab(private = true).visit("p2") // active
+        val closed = tabs.closePrivateTabs()
+        assertEquals(2, closed.count)
+        assertNull(closed.undo)
+        assertFalse(tabs.hasPrivateTabs)
+        assertFalse(tabs.canReopenClosedTab)
+        assertEquals(listOf("a", "b", "c"), tabs.titles)
+        // p2 was last: the new last tab takes over.
+        assertEquals("c", tabs.active.title)
+    }
+
+    @Test
+    fun `closing only private tabs of an all-private list leaves a normal blank tab`() {
+        val tabs = TabsState(homepage = HOME_URL)
+        tabs.newTab(private = true).visit("p")
+        tabs.closeTab(0) // the blank first tab
+        val closed = tabs.closePrivateTabs()
+        assertEquals(1, closed.count)
+        assertNull(closed.undo)
+        assertEquals(1, tabs.tabs.size)
+        assertFalse(tabs.active.private)
+    }
+
+    @Test
+    fun `a bulk close doesn't keep empty tabs`() {
+        val tabs = threeTabs()
+        tabs.newTab() // an untouched home tab
+        val closed = tabs.closeAllTabs()
+        assertEquals(4, closed.count)
+        assertEquals(3, closed.undo!!.tabs.size)
+    }
+
+    @Test
+    fun `closing active and earlier tabs moves to the tab that slid into its place`() {
+        val tabs = threeTabs()
+        tabs.newTab().visit("d")
+        tabs.newTab(private = true).visit("p0")
+        tabs.moveTab(4, 0) // [p0, a, b, c, d]
+        tabs.newTab(private = true).visit("p2")
+        tabs.moveTab(5, 2) // [p0, a, p2, b, c, d]
+        tabs.switchTo(2) // p2
+        tabs.closePrivateTabs()
+        assertEquals(listOf("a", "b", "c", "d"), tabs.titles)
+        assertEquals("b", tabs.active.title)
+    }
 }

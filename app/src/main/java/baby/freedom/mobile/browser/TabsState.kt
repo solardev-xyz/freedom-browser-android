@@ -82,6 +82,7 @@ class TabsState(
      * A tab the user closed, kept so [reopenClosedTab] can bring it
      * back where it was, with the history it had.
      *
+     * [index] is where it stood in the list when it was closed.
      * [webViewState] is the closed WebView's own
      * [android.webkit.WebView.saveState] bundle (null if the host
      * couldn't take one); the host hands it to the replacement
@@ -93,10 +94,6 @@ class TabsState(
      * it. [loadStopped] is the tab's Stop latch
      * ([BrowserState.loadAborted]): a first navigation the user stopped
      * isn't fetched again on reopen.
-     *
-     * [placeholderId] is the blank tab [closeTab] put in this one's
-     * place because it was the last tab, so undoing *this* close (and
-     * no other) can drop that tab again if it was never used.
      */
     class ClosedTab(
         val index: Int,
@@ -107,11 +104,39 @@ class TabsState(
         val thumbnail: ImageBitmap?,
         val webViewState: Bundle?,
         val loadStopped: Boolean = false,
-        val placeholderId: Long? = null,
     )
 
-    /** Most recently closed last. Capped at [MAX_CLOSED_TABS]. */
-    private val closedTabs = mutableStateListOf<ClosedTab>()
+    /**
+     * One entry of the reopen stack: the tabs one close took away — a
+     * single tab ([closeTab]), or every tab *Close all tabs* or *Close
+     * other tabs* closed (#320), which come back together, each at the
+     * position it had ([ClosedTab.index], ascending).
+     *
+     * [activeAt] is the entry of [tabs] that was the active tab when
+     * they closed, so it is active again once they're back; null when
+     * the active tab stayed open (or wasn't kept: private, or empty).
+     *
+     * [placeholderId] is the blank tab put in their place because they
+     * were the last tabs, so undoing *this* close (and no other) can
+     * drop that tab again if it was never used.
+     */
+    class ClosedGroup internal constructor(
+        val tabs: List<ClosedTab>,
+        internal val activeAt: Int?,
+        internal val placeholderId: Long?,
+    )
+
+    /**
+     * What a bulk close ([closeAllTabs], [closeOtherTabs],
+     * [closePrivateTabs]) did: [count] tabs closed, and [undo] the
+     * reopen-stack entry that brings back the ones that are kept — null
+     * when none is: private tabs are never kept (#86), nor tabs with
+     * nothing in them ([rememberClosed]).
+     */
+    class BulkClose(val count: Int, val undo: ClosedGroup?)
+
+    /** Most recently closed last. Capped at [MAX_CLOSED_TABS] entries. */
+    private val closedTabs = mutableStateListOf<ClosedGroup>()
 
     /** There is a closed tab [reopenClosedTab] can bring back. */
     val canReopenClosedTab: Boolean
@@ -375,49 +400,103 @@ class TabsState(
      */
     fun closeTab(index: Int, remember: Boolean = true) {
         if (index !in tabs.indices) return
-        // Let the WebView wind its fullscreen session down before the
-        // host destroys it (see [BrowserWebViewHost]).
-        if (fullscreen?.tabId == tabs[index].id) exitFullscreen()
-        // A dialog its page is blocked on is answered, not left for a
-        // WebView about to be destroyed (#246).
-        tabs[index].jsDialog?.withdraw()
-        val closingActive = index == activeIndex
-        // The list is never empty: the last tab is replaced by a blank one.
-        val placeholder = if (tabs.size == 1) newBlankTab() else null
-        if (remember && !tabs[index].private) rememberClosed(index, placeholder?.id)
-        tabs.removeAt(index)
-        if (placeholder != null) {
-            tabs.add(placeholder)
-            activeIndex = 0
-            return
-        }
-        // Closing the active tab moves to the one that slid into its
-        // place (or the new last one); closing any other keeps the
-        // active tab, which only shifts left if it came after.
-        activeIndex = when {
-            closingActive -> if (index >= tabs.size) tabs.lastIndex else index
-            index < activeIndex -> activeIndex - 1
-            else -> activeIndex
-        }.coerceIn(0, tabs.lastIndex)
+        val closing = tabs[index]
+        closeWhere(remember) { it === closing }
     }
 
     /**
-     * Push the tab at [index] onto the reopen stack. Only a tab with
-     * nothing in it is skipped (the same rule as desktop's Ctrl+Shift+T
-     * stack): the home overlay with no back/forward history and nothing
-     * submitted. A tab closed before its first page committed (an
-     * address submitted, `url` still blank) is kept and comes back
-     * loading that address; a tab sent Home after browsing is kept for
-     * its history.
+     * The switcher's *Close all tabs* (#320): every tab, normal and
+     * private, as closing each in turn would — a fresh blank tab is left,
+     * the private session ends with the last private tab, and the normal
+     * tabs go onto the reopen stack as one entry, so one Undo (or
+     * Reopen) brings them all back in their order.
      */
-    private fun rememberClosed(index: Int, placeholderId: Long?) {
-        val tab = tabs[index]
-        // A popup nothing has committed in yet comes back as the blank
-        // home entry (see [BrowserState.restorableAddress]).
-        val (url, address) = tab.restorableAddress()
-        if (url.isBlank() && address.isBlank() && !tab.canGoBack && !tab.canGoForward) return
-        closedTabs.add(
-            ClosedTab(
+    fun closeAllTabs(): BulkClose = closeWhere { true }
+
+    /**
+     * A tab's *Close other tabs* (#320): every tab but [keep], which is
+     * left active. The normal tabs closed come back together on Undo;
+     * the private ones don't, and closing a private [keep]'s others
+     * keeps the private session it is in.
+     */
+    fun closeOtherTabs(keep: BrowserState): BulkClose {
+        if (tabs.none { it.id == keep.id }) return BulkClose(0, null)
+        return closeWhere { it.id != keep.id }
+    }
+
+    /**
+     * The switcher's *Close private tabs* (#320): the private group
+     * only. Ends the private session as closing its last tab does; there
+     * is nothing to undo (#86).
+     */
+    fun closePrivateTabs(): BulkClose = closeWhere { it.private }
+
+    /**
+     * Close every tab [closing] picks, in one change to the list (so the
+     * host tears their WebViews down together, and the private session
+     * with the last private one). With [remember] the non-private ones
+     * with something in them go onto the reopen stack as one entry.
+     *
+     * The list is never left empty: closing every tab puts a blank one
+     * in their place. If the active tab closes, the tab that slid into
+     * its place (or the new last one) becomes active; otherwise the
+     * active tab stays.
+     */
+    private fun closeWhere(remember: Boolean = true, closing: (BrowserState) -> Boolean): BulkClose {
+        val indices = tabs.indices.filter { closing(tabs[it]) }
+        if (indices.isEmpty()) return BulkClose(0, null)
+        val oldActive = activeIndex.coerceIn(0, tabs.lastIndex)
+        val activeId = tabs[oldActive].id
+        for (i in indices) {
+            val tab = tabs[i]
+            // Let the WebView wind its fullscreen session down before the
+            // host destroys it (see [BrowserWebViewHost]).
+            if (fullscreen?.tabId == tab.id) exitFullscreen()
+            // A dialog its page is blocked on is answered, not left for a
+            // WebView about to be destroyed (#246).
+            tab.jsDialog?.withdraw()
+        }
+        // The list is never empty: the last tabs are replaced by a blank one.
+        val placeholder = if (indices.size == tabs.size) newBlankTab() else null
+        val undo = if (remember) rememberClosed(indices, oldActive, placeholder?.id) else null
+        for (i in indices.asReversed()) tabs.removeAt(i)
+        if (placeholder != null) {
+            tabs.add(placeholder)
+            activeIndex = 0
+        } else if (oldActive in indices) {
+            // The survivors before it keep their places: the one after
+            // them is the tab that slid into its place.
+            val before = oldActive - indices.count { it < oldActive }
+            activeIndex = before.coerceIn(0, tabs.lastIndex)
+        } else {
+            // Shifts left by however many closed before it.
+            activeIndex = tabs.indexOfFirst { it.id == activeId }.coerceIn(0, tabs.lastIndex)
+        }
+        return BulkClose(indices.size, undo)
+    }
+
+    /**
+     * Push the tabs at [indices] (ascending) onto the reopen stack as
+     * one entry, and return it — or null if none of them is kept.
+     * Private tabs aren't (#86), and neither is a tab with nothing in it
+     * (the same rule as desktop's Ctrl+Shift+T stack): the home overlay
+     * with no back/forward history and nothing submitted. A tab closed
+     * before its first page committed (an address submitted, `url`
+     * still blank) is kept and comes back loading that address; a tab
+     * sent Home after browsing is kept for its history.
+     */
+    private fun rememberClosed(indices: List<Int>, activeAtClose: Int, placeholderId: Long?): ClosedGroup? {
+        var activeAt: Int? = null
+        val kept = ArrayList<ClosedTab>()
+        for (index in indices) {
+            val tab = tabs[index]
+            if (tab.private) continue
+            // A popup nothing has committed in yet comes back as the blank
+            // home entry (see [BrowserState.restorableAddress]).
+            val (url, address) = tab.restorableAddress()
+            if (url.isBlank() && address.isBlank() && !tab.canGoBack && !tab.canGoForward) continue
+            if (index == activeAtClose) activeAt = kept.size
+            kept += ClosedTab(
                 index = index,
                 url = url,
                 title = tab.title,
@@ -426,53 +505,87 @@ class TabsState(
                 thumbnail = tab.thumbnail,
                 webViewState = saveWebViewState?.invoke(tab),
                 loadStopped = tab.loadAborted,
-                placeholderId = placeholderId,
-            ),
-        )
+            )
+        }
+        if (kept.isEmpty()) return null
+        val group = ClosedGroup(kept, activeAt, placeholderId)
+        closedTabs.add(group)
         while (closedTabs.size > MAX_CLOSED_TABS) closedTabs.removeAt(0)
+        return group
     }
 
     /**
-     * Bring back the most recently closed tab, at the position it was
-     * closed from (clamped to the current list), and make it active.
-     * Its WebView is rebuilt from the saved state, so it comes back on
-     * the same page with the same back/forward history.
+     * Bring back the most recently closed tab — or tabs, when the last
+     * close was a bulk one (#320) — at the position each was closed
+     * from (clamped to the current list). A single tab becomes active;
+     * a group makes the tab active that was active when it closed, if
+     * it's among them. Each WebView is rebuilt from the saved state, so
+     * it comes back on the same page with the same back/forward
+     * history.
      *
-     * Returns the reopened tab, or null if there was nothing to reopen.
+     * Returns the reopened tab (for a group, the one that is active
+     * now if it's one of them, else the last one back), or null if
+     * there was nothing to reopen.
      */
     fun reopenClosedTab(): BrowserState? {
-        val closed = closedTabs.removeLastOrNull() ?: return null
-        val tab = newBlankTab().apply {
-            url = closed.url
-            title = closed.title
-            addressBarText = closed.addressBarText
-            override = closed.override
-            thumbnail = closed.thumbnail
-            // Closed before its page committed: the saved state ends on
-            // the blank entry, so the address goes back — and is
-            // submitted again, unless the user had stopped that load
-            // (the bar then showed it with Reload).
-            pendingRestore = BrowserState.PendingRestore.of(
-                url = closed.url,
-                address = closed.addressBarText,
-                loadStopped = closed.loadStopped,
-                webViewState = closed.webViewState,
-            )
-        }
-        // Undoing the close of the last tab: the blank tab [closeTab]
-        // put in its place was only there so the list isn't empty. If
-        // it's still untouched, the reopened tab takes its place.
-        // Tied to this entry, so reopening some later-closed tab
-        // leaves it alone.
-        val placeholder = closed.placeholderId?.let { id ->
+        val group = closedTabs.removeLastOrNull() ?: return null
+        return reopen(group)
+    }
+
+    /**
+     * The Undo of a bulk close (#320): bring back [group] if it is still
+     * on the reopen stack — not if Reopen already did, or the stack was
+     * forgotten ([forgetClosedTabs]) since. Returns whether it was.
+     */
+    fun reopenClosed(group: ClosedGroup): Boolean {
+        if (!closedTabs.remove(group)) return false
+        reopen(group)
+        return true
+    }
+
+    private fun reopen(group: ClosedGroup): BrowserState {
+        val activeId = active.id
+        // Undoing the close of the last tabs: the blank tab put in their
+        // place was only there so the list isn't empty. If it's still
+        // untouched, the reopened tabs take its place. Tied to this
+        // entry, so reopening some later-closed tab leaves it alone.
+        val placeholder = group.placeholderId?.let { id ->
             tabs.indexOfFirst { it.id == id && it.isUntouched() }
         } ?: -1
         if (placeholder >= 0) tabs.removeAt(placeholder)
-        val at = closed.index.coerceIn(0, tabs.size)
         if (tabs.isNotEmpty()) captureActiveThumbnail?.invoke()
-        tabs.add(at, tab)
-        activeIndex = at
-        return tab
+        // Ascending, so each lands where it was among the tabs that
+        // stayed (when those haven't changed since).
+        val reopened = group.tabs.map { closed ->
+            val tab = restoredTab(closed)
+            tabs.add(closed.index.coerceIn(0, tabs.size), tab)
+            tab
+        }
+        val target = when {
+            group.activeAt != null -> reopened[group.activeAt]
+            reopened.size == 1 -> reopened[0]
+            else -> tabs.firstOrNull { it.id == activeId } ?: reopened[0]
+        }
+        activeIndex = tabs.indexOfFirst { it.id == target.id }
+        return if (target in reopened) target else reopened.last()
+    }
+
+    private fun restoredTab(closed: ClosedTab): BrowserState = newBlankTab().apply {
+        url = closed.url
+        title = closed.title
+        addressBarText = closed.addressBarText
+        override = closed.override
+        thumbnail = closed.thumbnail
+        // Closed before its page committed: the saved state ends on
+        // the blank entry, so the address goes back — and is
+        // submitted again, unless the user had stopped that load
+        // (the bar then showed it with Reload).
+        pendingRestore = BrowserState.PendingRestore.of(
+            url = closed.url,
+            address = closed.addressBarText,
+            loadStopped = closed.loadStopped,
+            webViewState = closed.webViewState,
+        )
     }
 
     /** Still the fresh home overlay it was created as. */
@@ -685,7 +798,10 @@ class TabsState(
         BrowserState(id = idSeq.incrementAndGet(), private = private)
 
     companion object {
-        /** How many closed tabs [reopenClosedTab] can walk back through. */
+        /**
+         * How many closes [reopenClosedTab] can walk back through — a
+         * bulk close (#320) counts once, however many tabs it took.
+         */
         const val MAX_CLOSED_TABS = 20
 
         /**
