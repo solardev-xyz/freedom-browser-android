@@ -18,7 +18,9 @@ import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.HourglassTop
 import androidx.compose.material.icons.filled.PowerSettingsNew
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.material3.Button
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -41,6 +43,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import baby.freedom.swarm.MyotisChainStatus
@@ -65,8 +70,8 @@ import java.util.Locale
  * [ChequebookScreen]), the postage stamps (#116, [StampsScreen]) and the
  * Publish page (#118, [PublishScreen]), the Tor client (#143)
  * with its start/stop switch, status and version, then the Myotis
- * Ethereum / Gnosis light client (#72) with its own switch and per-chain
- * sync state. Shares the same [FullScreenScaffold] chrome as Settings /
+ * Ethereum / Gnosis light client (#72) with a switch and a start-at-launch
+ * choice per chain (#274) and each chain's sync state. Shares the same [FullScreenScaffold] chrome as Settings /
  * History / Bookmarks.
  */
 @Composable
@@ -75,8 +80,9 @@ fun NodeScreen(
     runNodeEnabled: Boolean,
     onToggleRunNode: (Boolean) -> Unit,
     myotisInfo: MyotisInfo,
-    myotisEnabled: Boolean,
-    onToggleMyotis: (Boolean) -> Unit,
+    /** The light client's chains switched on (#274); null until the launch choice is read. */
+    myotisRunning: Set<MyotisNetwork>?,
+    onRunMyotisChain: (MyotisNetwork, Boolean) -> Unit,
     onDismiss: () -> Unit,
     tor: TorControls = TorControls(),
     /** A chain's Retry (`repair = false`) or Repair sync data (`true`) on a blocked or waiting recovery. */
@@ -102,6 +108,9 @@ fun NodeScreen(
         .collectAsState(initial = null)
     val scope = rememberCoroutineScope()
     val setLightMode: (Boolean) -> Unit = { light -> scope.launch { settings.setSwarmLightMode(light) } }
+    // The light client's chains that start at launch (#274); null until read.
+    val myotisAtLaunch by remember(settings) { settings.myotisStartOnLaunch }
+        .collectAsState(initial = null)
     var showPublishSetup by rememberSaveable { mutableStateOf(false) }
     // The stamp pages (#116): "list", "buy" (from publish setup), or null.
     var showStamps by rememberSaveable { mutableStateOf<String?>(null) }
@@ -193,8 +202,10 @@ fun NodeScreen(
             item("myotis") {
                 LightClientSection(
                     info = myotisInfo,
-                    enabled = myotisEnabled,
-                    onToggle = onToggleMyotis,
+                    running = myotisRunning,
+                    onRun = onRunMyotisChain,
+                    atLaunch = myotisAtLaunch,
+                    onAtLaunch = { network, on -> scope.launch { settings.setMyotisStartOnLaunch(network, on) } },
                     onRecovery = onMyotisRecovery,
                     onOpenLogs = { onOpenLogs(NodeLogSource.LightClient) },
                 )
@@ -413,15 +424,24 @@ internal fun nodeStatusTriple(status: NodeStatus): NodeStatusTriple = when (stat
     )
 }
 
+/**
+ * The Myotis light client (#72): its overall line, then per chain (#274)
+ * a switch that starts or stops that chain alone, whether it starts at
+ * launch, and — while it runs — its sync state.
+ */
 @Composable
 private fun LightClientSection(
     info: MyotisInfo,
-    enabled: Boolean,
-    onToggle: (Boolean) -> Unit,
+    running: Set<MyotisNetwork>?,
+    onRun: (MyotisNetwork, Boolean) -> Unit,
+    atLaunch: Set<MyotisNetwork>?,
+    onAtLaunch: (MyotisNetwork, Boolean) -> Unit,
     onRecovery: (chainId: Long, repair: Boolean) -> Unit,
     onOpenLogs: () -> Unit,
 ) {
-    val triple = lightClientStatusTriple(if (enabled) info else MyotisInfo())
+    val on = running.orEmpty()
+    val shown = lightClientInfoFor(info, on)
+    val triple = lightClientStatusTriple(shown)
     SectionCard(title = "Ethereum light client") {
         Row(
             modifier = Modifier
@@ -434,34 +454,95 @@ private fun LightClientSection(
             Column(modifier = Modifier.weight(1f)) {
                 Text(triple.label, fontWeight = FontWeight.Medium)
                 Text(
-                    "Verifies Ethereum and Gnosis peer-to-peer on this device (Myotis)",
+                    "Verifies Ethereum and Gnosis peer-to-peer on this device (Myotis). " +
+                        "Each chain runs on its own. With Ethereum off, names are checked through Colibri " +
+                        "or your RPCs instead.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
-            Switch(checked = enabled, onCheckedChange = onToggle)
         }
-        if (enabled) {
-            val err = info.errorMessage
-            if (!err.isNullOrBlank()) DetailRow("Error", err, singleLine = false)
-            for (network in MyotisNetwork.entries) {
-                ChainRows(network, info.status, info.chain(network), onRecovery)
-            }
+        val err = shown.errorMessage
+        if (!err.isNullOrBlank()) DetailRow("Error", err, singleLine = false)
+        for (network in MyotisNetwork.entries) {
+            ChainRows(
+                network = network,
+                nodeStatus = shown.status,
+                chain = shown.chain(network),
+                on = network in on,
+                onRun = running?.let { { run: Boolean -> onRun(network, run) } },
+                atLaunch = atLaunch?.let { network in it },
+                onAtLaunch = { onAtLaunch(network, it) },
+                onRecovery = onRecovery,
+            )
         }
         LogsButton(onOpenLogs)
     }
 }
+
+/**
+ * What the light client's rows show (#274): nothing while every chain is
+ * off, else the state from `:myotis` without a chain just switched off
+ * that it hasn't dropped yet.
+ */
+internal fun lightClientInfoFor(info: MyotisInfo, running: Set<MyotisNetwork>): MyotisInfo =
+    if (running.isEmpty()) {
+        MyotisInfo()
+    } else {
+        info.copy(chains = info.chains.filter { chain -> running.any { it.chainId == chain.chainId } })
+    }
 
 @Composable
 private fun ChainRows(
     network: MyotisNetwork,
     nodeStatus: MyotisStatus,
     chain: MyotisChainStatus?,
+    on: Boolean,
+    /** Null (switch disabled) until the chains switched on are known. */
+    onRun: ((Boolean) -> Unit)?,
+    /** Null until read. */
+    atLaunch: Boolean?,
+    onAtLaunch: (Boolean) -> Unit,
     onRecovery: (chainId: Long, repair: Boolean) -> Unit,
 ) {
     Spacer(Modifier.height(8.dp))
-    DetailRow(network.displayName, myotisChainLabel(nodeStatus, chain))
-    if (chain == null || nodeStatus != MyotisStatus.Running) return
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(network.displayName, fontWeight = FontWeight.Medium)
+            Text(
+                myotisChainLabel(nodeStatus, chain, on),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        Switch(
+            checked = on,
+            onCheckedChange = onRun,
+            enabled = onRun != null,
+            modifier = Modifier.semantics { contentDescription = "Run ${network.displayName}" },
+        )
+    }
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .toggleable(
+                value = atLaunch == true,
+                enabled = atLaunch != null,
+                role = Role.Checkbox,
+                onValueChange = onAtLaunch,
+            ),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Checkbox(checked = atLaunch == true, onCheckedChange = null, enabled = atLaunch != null)
+        Spacer(Modifier.width(8.dp))
+        Text("Start ${network.displayName} at launch", style = MaterialTheme.typography.bodyMedium)
+    }
+    if (!on || chain == null || nodeStatus != MyotisStatus.Running) return
     chain.error?.let {
         DetailRow("Error", it, singleLine = false)
         return
@@ -520,14 +601,18 @@ private fun RecoveryRows(
     }
 }
 
-/** One-line state for a chain row: what the light client is doing on that chain. */
-internal fun myotisChainLabel(nodeStatus: MyotisStatus, chain: MyotisChainStatus?): String =
-    when (nodeStatus) {
+/**
+ * One-line state for a chain row: what the light client is doing on that
+ * chain — "Off" while its switch is ([on] false, #274).
+ */
+internal fun myotisChainLabel(nodeStatus: MyotisStatus, chain: MyotisChainStatus?, on: Boolean): String =
+    if (!on) "Off" else when (nodeStatus) {
         MyotisStatus.Stopped -> "Off"
         MyotisStatus.Starting -> "Starting…"
         MyotisStatus.Error -> if (chain?.error != null) "Failed" else "Off"
         MyotisStatus.Running -> when {
-            chain == null -> "Off"
+            // Just switched on beside a running chain: `:myotis` is booting it.
+            chain == null -> "Starting…"
             chain.error != null -> "Failed"
             chain.recovery != null -> chain.recovery?.label.orEmpty()
             chain.paused -> "Paused"
@@ -604,6 +689,9 @@ internal fun lightClientStatusTriple(info: MyotisInfo): NodeStatusTriple = when 
             ready > 0 || parked > 0 -> NodeStatusTriple(
                 Color(0xFFF59E0B), Icons.Filled.HourglassTop, "$ready of ${live.size} chains synced",
             )
+            // A chain switched on that `:myotis` hasn't booted yet (its
+            // previous engine still stopping): no row to sync.
+            live.isEmpty() -> NodeStatusTriple(Color(0xFFF59E0B), Icons.Filled.HourglassTop, "Starting…")
             else -> NodeStatusTriple(Color(0xFFF59E0B), Icons.Filled.HourglassTop, "Syncing…")
         }
     }

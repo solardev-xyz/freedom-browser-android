@@ -91,6 +91,7 @@ import baby.freedom.mobile.ens.EnsResult
 import baby.freedom.mobile.ens.TezosDomainsResolver
 import baby.freedom.swarm.IpfsInfo
 import baby.freedom.swarm.MyotisInfo
+import baby.freedom.swarm.MyotisNetwork
 import baby.freedom.swarm.IpfsStatus
 import baby.freedom.swarm.NodeInfo
 import baby.freedom.swarm.NodeStatus
@@ -436,8 +437,9 @@ fun BrowserScreen(
     runNodeEnabled: Boolean,
     onToggleRunNode: (Boolean) -> Unit,
     myotisInfo: MyotisInfo = MyotisInfo(),
-    myotisEnabled: Boolean = false,
-    onToggleMyotis: (Boolean) -> Unit = {},
+    /** The light client's chains switched on (#274); null until the launch choice is read. */
+    myotisRunning: Set<MyotisNetwork>? = emptySet(),
+    onRunMyotisChain: (MyotisNetwork, Boolean) -> Unit = { _, _ -> },
     /** A light-client chain's Retry (`repair = false`) or Repair sync data (`true`), by chain id. */
     onMyotisRecovery: (chainId: Long, repair: Boolean) -> Unit = { _, _ -> },
     onEnsureIpfsStarted: () -> Unit,
@@ -621,6 +623,31 @@ fun BrowserScreen(
     PrivateScreenGuard(privateOnScreen || downloadNotices.privateShowing)
     val isBookmarked by remember(repo, state.url) { repo.isBookmarked(state.url) }
         .collectAsState(initial = false)
+
+    // The page's own site permissions (#266): what the site on screen —
+    // and any frame in it that asked — holds, for the menu's row and
+    // its sheet; and the camera/microphone its document is using now,
+    // for the indicator over the page.
+    val pageOrigin = state.permissionOrigin
+    val pagePermissions by remember(sitePermissions, state, pageOrigin) {
+        sitePermissions.pageEntries(state, pageOrigin)
+    }.collectAsState(initial = emptyList())
+    val pageDocument by remember(sitePermissions, state.id) {
+        sitePermissions.documentPermissions(state.id)
+    }.collectAsState(initial = null)
+    val mediaInUse by remember(sitePermissions, state.id) {
+        sitePermissions.mediaInUse(state.id)
+    }.collectAsState(initial = emptySet())
+    // The sheet, pinned to the tab and document it was opened over: it
+    // closes when either changes, so a × can't act on a page the user
+    // didn't open it for.
+    var sitePermissionsSheet by remember { mutableStateOf<PageSheetTarget?>(null) }
+    val openSitePermissions: () -> Unit = {
+        sitePermissionsSheet = PageSheetTarget(state.id, pageOrigin, pageDocument?.doc)
+    }
+    val sheetTarget = sitePermissionsSheet?.takeIf { t ->
+        t.tabId == state.id && t.origin == pageOrigin && t.doc == pageDocument?.doc
+    }
 
     // IPFS load progress (#94): while the active tab is busy on content
     // the IPFS node serves, poll the node's retrieval-progress snapshot
@@ -1792,11 +1819,17 @@ fun BrowserScreen(
                     )
                 }
             } else if (isHomeTab) {
+                val appUpdate by AppUpdates.state.collectAsState()
                 HomeScreen(
                     repo = repo,
                     onOpen = { submit(state, it) },
+                    nodeInfo = nodeInfo,
+                    runNodeEnabled = runNodeEnabled,
+                    onOpenNode = { showNode = true },
                     bottomContentPadding = capsuleOverlap,
                     modifier = Modifier.fillMaxSize(),
+                    update = appUpdate.notice,
+                    onDismissUpdate = AppUpdates::dismiss,
                 )
             }
             // The tab's renderer went away (#260) while it was on
@@ -2042,6 +2075,11 @@ fun BrowserScreen(
                         }
                     },
                     onPrint = { tabs.printPage?.invoke(state) },
+                    sitePermissionsSummary = sitePermissionsSummary(
+                        pagePermissions,
+                        pageDocument?.stillHeld(mediaInUse).orEmpty(),
+                    ),
+                    onOpenSitePermissions = openSitePermissions,
                     adblockState = adblockState,
                     onToggleAdblock = {
                         val site = adblockSiteFor(state.url) ?: return@BottomToolbar
@@ -2063,6 +2101,32 @@ fun BrowserScreen(
             }
         }
 
+        // Camera/microphone in use (#266): the lowest thing over the
+        // capsule, at its end, with everything else stacked above it.
+        // Not while the address bar is open (the editor owns the band)
+        // nor under a panel — Android's own indicator still shows then.
+        val mediaIndicatorShown = mediaInUse.isNotEmpty() && !addressFocused && !overlayShown
+        var mediaIndicatorHeightPx by remember { mutableIntStateOf(0) }
+        if (mediaIndicatorShown) {
+            MediaInUseIndicator(
+                inUse = mediaInUse,
+                onClick = openSitePermissions,
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .windowInsetsPadding(chromeInsets)
+                    .padding(
+                        end = CapsuleSideMargin,
+                        bottom = capsuleSlot + CapsuleBottomMargin + IpfsStatusGap,
+                    )
+                    .onSizeChanged { mediaIndicatorHeightPx = it.height },
+            )
+        }
+        val mediaLift = if (mediaIndicatorShown) {
+            with(density) { mediaIndicatorHeightPx.toDp() } + IpfsStatusGap
+        } else {
+            0.dp
+        }
+
         // The IPFS phase line (#94) sits where a snackbar would: above
         // the capsule's slot, clear of the page's own bottom edge. Not
         // while the address bar is open — the editor owns that band.
@@ -2080,7 +2144,7 @@ fun BrowserScreen(
                 .padding(
                     start = CapsuleSideMargin,
                     end = CapsuleSideMargin,
-                    bottom = capsuleSlot + CapsuleBottomMargin + IpfsStatusGap,
+                    bottom = capsuleSlot + CapsuleBottomMargin + IpfsStatusGap + mediaLift,
                 ),
         ) {
             // Keep drawing the last line while it fades out.
@@ -2091,7 +2155,7 @@ fun BrowserScreen(
                 modifier = Modifier.onSizeChanged { ipfsLineHeightPx = it.height },
             )
         }
-        val ipfsLift = if (ipfsLine != null) {
+        val ipfsLift = mediaLift + if (ipfsLine != null) {
             with(density) { ipfsLineHeightPx.toDp() } + IpfsStatusGap * 2
         } else {
             0.dp
@@ -2169,6 +2233,12 @@ fun BrowserScreen(
             radicle = radicle,
             onOpenRadicle = { showRadicle = true },
             onOpenWallet = { showWallet = true },
+            // A newer release's page (#272): a new tab in front, never a
+            // private one, with Settings closed so it's on screen.
+            onOpenUrl = { url ->
+                showSettings = false
+                tabs.requestOpenInNewTab?.invoke(url, false, false)
+            },
             // The reopen stack keeps closed tabs' pages, titles and
             // back/forward lists — history by any other name.
             onClearHistory = { tabs.forgetClosedTabs() },
@@ -2193,8 +2263,8 @@ fun BrowserScreen(
             runNodeEnabled = runNodeEnabled,
             onToggleRunNode = onToggleRunNode,
             myotisInfo = myotisInfo,
-            myotisEnabled = myotisEnabled,
-            onToggleMyotis = onToggleMyotis,
+            myotisRunning = myotisRunning,
+            onRunMyotisChain = onRunMyotisChain,
             tor = tor,
             onMyotisRecovery = onMyotisRecovery,
             // Publish setup's identity step (#114): the wallet page opens
@@ -2548,6 +2618,26 @@ fun BrowserScreen(
     state.permissionPrompt?.takeIf { promptTurn == PromptTurn.SitePermission }?.let { prompt ->
         androidx.compose.runtime.key(prompt) { SitePermissionPrompt(prompt) }
     }
+    // The page's Site permissions sheet (#266): the user's own doing,
+    // over the page only. A prompt the page raises meanwhile takes the
+    // screen from it rather than stacking on it — the sheet can be
+    // opened again once that's answered.
+    val sheetShown = sheetTarget?.takeIf { pageUncovered && promptTurn == PromptTurn.None }
+    LaunchedEffect(sitePermissionsSheet, sheetShown) {
+        if (sheetShown == null) sitePermissionsSheet = null
+    }
+    sheetShown?.let { target ->
+        PageSitePermissionsSheet(
+            pageOrigin = target.origin,
+            entries = pagePermissions,
+            inUse = mediaInUse,
+            document = pageDocument,
+            private = state.private,
+            onRevoke = { entry -> sitePermissions.revokeOnTab(state, entry) },
+            onReload = reloadPage,
+            onDismiss = { sitePermissionsSheet = null },
+        )
+    }
     state.radiclePrompt?.takeIf { promptTurn == PromptTurn.Radicle }?.let { prompt ->
         androidx.compose.runtime.key(prompt) { RadiclePromptDialog(prompt) }
     }
@@ -2631,3 +2721,5 @@ private fun IpfsStatusLine(text: String, modifier: Modifier = Modifier) {
     }
 }
 
+/** The tab and document a page's Site permissions sheet (#266) was opened over. */
+private data class PageSheetTarget(val tabId: Long, val origin: String?, val doc: Int?)

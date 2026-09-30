@@ -34,3 +34,11 @@
 -keep class baby.freedom.swarm.SpendGuard {
     public static boolean admit(java.lang.String);
 }
+
+# ant_jni.c's chain transport answers ant's reads through
+# AntChainTransport.serve(byte[]), resolved by name in JNI_OnLoad (#273).
+# Renamed or stripped, every read ant makes fails with an error (never a
+# fallback to one RPC) and the light node can't read the chain.
+-keep class baby.freedom.swarm.AntChainTransport {
+    public static byte[] serve(byte[]);
+}

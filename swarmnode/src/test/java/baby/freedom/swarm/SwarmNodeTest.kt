@@ -63,13 +63,20 @@ class SwarmNodeTest {
         }
         override fun agentString(handle: Long) = "ant-test"
         override fun peerCount(handle: Long) = 0
+        /** What a chain read got from [AntChainTransport] while [stopGateway]/[shutdown] ran. */
+        val readsWhileStopping: MutableList<String> = Collections.synchronizedList(mutableListOf())
+        private fun probeChainRead() {
+            readsWhileStopping += String(AntChainTransport.serve("{}".toByteArray()), Charsets.UTF_8)
+        }
         override fun stopGateway(handle: Long) {
             calls += "stopGateway:$handle"
+            probeChainRead()
             stopEntered.countDown()
             releaseStop.await(5, TimeUnit.SECONDS)
         }
         override fun shutdown(handle: Long) {
             calls += "shutdown:$handle"
+            probeChainRead()
             shutDown.countDown()
         }
 
@@ -161,6 +168,55 @@ class SwarmNodeTest {
         assertEquals(NodeStatus.Stopped, node.state.value.status)
         assertEquals(listOf("seed"), ops.calls.toList())
         node.dispose()
+    }
+
+    @Test
+    fun aStopRefusesChainReadsWhileTheGatewayStopsAndShutsDownAndAReloadDoesnt() {
+        // #300 R2-M1: a read coming in during the stop would hold ant's
+        // stopGateway/shutdown for the reader's whole deadline.
+        AntChainTransport.install({ """{"result":"0x1"}""" })
+        try {
+            val ops = FakeOps()
+            val node = lightNode(ops)
+            // A reload after a buy: other storage calls may be reading, so reads are served.
+            node.buyStamp(17, java.math.BigInteger.TEN, false, java.math.BigInteger.ONE)
+            assertEquals(listOf("""{"result":"0x1"}"""), ops.readsWhileStopping.toList())
+            ops.readsWhileStopping.clear()
+            node.stop()
+            assertTrue(ops.shutDown.await(5, TimeUnit.SECONDS))
+            assertEquals(2, ops.readsWhileStopping.size)
+            assertTrue(ops.readsWhileStopping.toString(), ops.readsWhileStopping.all { "the Swarm node is stopping" in it })
+            // Served again once the stop is over.
+            assertEquals("""{"result":"0x1"}""", String(AntChainTransport.serve("{}".toByteArray()), Charsets.UTF_8))
+            node.dispose()
+        } finally {
+            AntChainTransport.install({ """{"result":"0x0"}""" })
+        }
+    }
+
+    @Test
+    fun aFailedGatewayStartShutsTheNodeDownWithChainReadsRefused() {
+        // #300 R3-M2: the shutdown after a failed startGateway mustn't wait
+        // behind a chain read ant began, as [stop]'s doesn't.
+        AntChainTransport.install({ """{"result":"0x1"}""" })
+        try {
+            val ops = FakeOps().apply {
+                releaseSeed.countDown()
+                releaseInit.countDown()
+                gatewayStartsLeft = 0
+            }
+            val node = SwarmNode(config, ops)
+            node.start()
+            awaitStatus(node, NodeStatus.Error)
+            assertEquals(listOf("shutdown:1"), ops.calls.filter { it.startsWith("shutdown") })
+            assertEquals(1, ops.readsWhileStopping.size)
+            assertTrue(ops.readsWhileStopping.toString(), "the Swarm node is stopping" in ops.readsWhileStopping.single())
+            // Served again once the shutdown is over.
+            assertEquals("""{"result":"0x1"}""", String(AntChainTransport.serve("{}".toByteArray()), Charsets.UTF_8))
+            node.dispose()
+        } finally {
+            AntChainTransport.install({ """{"result":"0x0"}""" })
+        }
     }
 
     @Test

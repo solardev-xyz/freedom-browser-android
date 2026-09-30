@@ -518,4 +518,345 @@ class SitePermissionsTest {
             ),
         )
     }
+
+    // --- The page's own Site permissions (#266) ---
+
+    private fun entry(origin: String, p: SiteCapability, d: PermissionDecision = PermissionDecision.ALLOW, remembered: Boolean = true) =
+        SitePermissionEntry(origin, p, d, remembered)
+
+    @Test
+    fun `page sheet lists the page's own decisions first, then a frame's that asked from it`() {
+        val all = listOf(
+            entry("https://a.example", SitePermission.LOCATION),
+            entry("https://frame.example", SitePermission.CAMERA),
+            entry("https://other.example", SitePermission.MICROPHONE),
+            entry("https://page.example", SitePermission.CAMERA),
+            entry("https://page.example", SitePermission.POPUPS, PermissionDecision.ALLOW),
+        )
+        val listed = pageSitePermissionEntries("https://page.example", setOf("https://frame.example"), all)
+        assertEquals(
+            listOf(
+                "https://page.example" to SitePermission.CAMERA,
+                "https://page.example" to SitePermission.POPUPS,
+                "https://frame.example" to SitePermission.CAMERA,
+            ),
+            listed.map { it.origin to it.permission },
+        )
+    }
+
+    @Test
+    fun `page sheet lists nothing for a page with no site`() {
+        val all = listOf(entry("https://a.example", SitePermission.LOCATION))
+        assertEquals(emptyList<SitePermissionEntry>(), pageSitePermissionEntries(null, emptySet(), all))
+    }
+
+    @Test
+    fun `media is in use only while granted to the document and active in the app`() {
+        val granted = setOf(SitePermission.CAMERA, SitePermission.MICROPHONE, SitePermission.LOCATION)
+        assertEquals(setOf(SitePermission.CAMERA), mediaInUse(granted, setOf(SitePermission.CAMERA)))
+        assertEquals(emptySet<SitePermission>(), mediaInUse(setOf(SitePermission.MICROPHONE), setOf(SitePermission.CAMERA)))
+        assertEquals(emptySet<SitePermission>(), mediaInUse(granted, emptySet()))
+        // Location has no app-op "in use" here: never shown as such.
+        assertEquals(emptySet<SitePermission>(), mediaInUse(granted, setOf(SitePermission.LOCATION)))
+    }
+
+    @Test
+    fun `a camera removed while the document holds it stays noted with the document until granted again`() {
+        val page = "https://page.example"
+        val doc = SitePermissionBroker.DocumentPermissions(doc = 3)
+            .granting(page, listOf(SitePermission.CAMERA))
+        val revoked = doc.revoking(entry(page, SitePermission.CAMERA))
+        // Kept on the document, not the sheet: reading it again (a
+        // reopened sheet) still says the camera is held.
+        assertEquals(mapOf(page to setOf(SitePermission.CAMERA)), revoked.revokedHeld)
+        assertEquals(setOf(SitePermission.CAMERA), revoked.stillHeld(setOf(SitePermission.CAMERA)))
+        // Once the page stops using it, it doesn't have it any more.
+        assertEquals(emptySet<SitePermission>(), revoked.stillHeld(emptySet()))
+        // Location this document was never given; another site's camera isn't this document's.
+        assertEquals(revoked, revoked.revoking(entry(page, SitePermission.LOCATION)))
+        assertEquals(revoked, revoked.revoking(entry("https://other.example", SitePermission.CAMERA)))
+        // A microphone the document was never given isn't held either.
+        assertEquals(revoked, revoked.revoking(entry(page, SitePermission.MICROPHONE)))
+        // Asked and allowed again: no longer removed.
+        assertEquals(emptyMap<String, Set<SitePermission>>(), revoked.granting(page, listOf(SitePermission.CAMERA)).revokedHeld)
+    }
+
+    @Test
+    fun `a location removed from a document that was given it stays held until reload, used or not`() {
+        val page = "https://page.example"
+        val doc = SitePermissionBroker.DocumentPermissions(doc = 1)
+            .granting(page, listOf(SitePermission.LOCATION))
+        val revoked = doc.revoking(entry(page, SitePermission.LOCATION))
+        // WebView keeps answering this document's watch and new requests:
+        // no camera/microphone "in use" signal needed for it to count.
+        assertEquals(setOf(SitePermission.LOCATION), revoked.stillHeld(emptySet()))
+        assertEquals("This page can still get your location until it's reloaded.", stillHeldNote(revoked.stillHeld(emptySet())))
+        // With nothing listed any more, the menu row stays so the sheet's Reload can be reached.
+        assertEquals("Location kept until reload", sitePermissionsSummary(emptyList(), revoked.stillHeld(emptySet())))
+        // A new document starts with nothing held.
+        assertEquals(emptySet<SitePermission>(), SitePermissionBroker.DocumentPermissions(doc = 2).stillHeld(emptySet()))
+    }
+
+    @Test
+    fun `a removal from Settings or another tab reaches every document on that site that holds it`() {
+        val page = "https://page.example"
+        val given = SitePermissionBroker.DocumentPermissions(doc = 1).granting(page, listOf(SitePermission.LOCATION))
+        val askedOnly = SitePermissionBroker.DocumentPermissions(doc = 4).granting(page, emptyList())
+        val other = SitePermissionBroker.DocumentPermissions(doc = 2)
+            .granting("https://other.example", listOf(SitePermission.LOCATION))
+        val all = mapOf(1L to given, 2L to given, 3L to other, 4L to askedOnly, 5L to given)
+        // Tab 5 is in the other tier (private vs normal): not reached.
+        val after = SitePermissionBroker.revokingInDocuments(all, entry(page, SitePermission.LOCATION)) { it != 5L }
+        // Not only the tab whose sheet had the ×: every document given it still has it.
+        assertEquals(setOf(SitePermission.LOCATION), after.getValue(1L).stillHeld(emptySet()))
+        assertEquals(setOf(SitePermission.LOCATION), after.getValue(2L).stillHeld(emptySet()))
+        // Another site's document, one never given it, and the other tier are left alone.
+        assertEquals(other, after.getValue(3L))
+        assertEquals(askedOnly, after.getValue(4L))
+        assertEquals(given, after.getValue(5L))
+    }
+
+    @Test
+    fun `allowed again from another tab clears the kept-until-reload note in every document of that tier`() {
+        val page = "https://page.example"
+        val removed = SitePermissionBroker.DocumentPermissions(doc = 1)
+            .granting(page, listOf(SitePermission.LOCATION, SitePermission.CAMERA))
+            .revoking(entry(page, SitePermission.LOCATION))
+            .revoking(entry(page, SitePermission.CAMERA))
+        val other = SitePermissionBroker.DocumentPermissions(doc = 2)
+            .granting("https://other.example", listOf(SitePermission.LOCATION))
+            .revoking(entry("https://other.example", SitePermission.LOCATION))
+        val all = mapOf(1L to removed, 2L to removed, 3L to other, 5L to removed)
+        // Tab A (1) re-allowed location; tab 5 is in the other tier.
+        val after = SitePermissionBroker.allowingAgainInDocuments(all, page, listOf(SitePermission.LOCATION)) { it != 5L }
+        // Tab B (2), not the one that asked, no longer offers a reload for location…
+        assertEquals(setOf(SitePermission.CAMERA), after.getValue(2L).revokedHeld.getValue(page))
+        assertEquals(emptySet<SitePermission>(), after.getValue(2L).stillHeld(emptySet()))
+        assertNull(stillHeldNote(after.getValue(2L).stillHeld(emptySet())))
+        // …but keeps a camera still in use and removed, and its own grants.
+        assertEquals(setOf(SitePermission.CAMERA), after.getValue(2L).stillHeld(setOf(SitePermission.CAMERA)))
+        assertEquals(removed.grants, after.getValue(2L).grants)
+        assertEquals(removed.origins, after.getValue(2L).origins)
+        // Another site and the other tier are left alone.
+        assertEquals(other, after.getValue(3L))
+        assertEquals(removed, after.getValue(5L))
+        // Both allowed again: nothing is kept "removed" for the site.
+        val both = after.getValue(1L).allowedAgain(page, listOf(SitePermission.CAMERA))
+        assertEquals(emptyMap<String, Set<SitePermission>>(), both.revokedHeld)
+    }
+
+    @Test
+    fun `a removal is counted per site and permission, so a waiting grant can tell it lost its allow`() {
+        val tier = PermissionSession()
+        val site = "https://a.example"
+        val asked = listOf(SitePermission.LOCATION)
+        tier.record(site, SitePermission.LOCATION, PermissionDecision.ALLOW, remembered = true)
+        val before = tier.removalCount(site, asked)
+        // Unrelated removals don't touch it.
+        tier.revoke(site, SitePermission.CAMERA)
+        tier.revoke("https://b.example", SitePermission.LOCATION)
+        assertEquals(before, tier.removalCount(site, asked))
+        // A remembered Allow (not in the session tier at all) removed from Settings does.
+        tier.revoke(site, SitePermission.LOCATION)
+        assertTrue(tier.removalCount(site, asked) != before)
+        // Allowed again afterwards: still a removal since the waiting request's decision.
+        val after = tier.removalCount(site, asked)
+        tier.record(site, SitePermission.LOCATION, PermissionDecision.ALLOW, remembered = false)
+        assertEquals(after, tier.removalCount(site, asked))
+        // The other tier's removals are its own.
+        assertEquals(0, PermissionSession(embargoes = false).removalCount(site, asked))
+    }
+
+    @Test
+    fun `a remembered Allow being removed from the store isn't read from it meanwhile`() = runBlocking {
+        val tier = PermissionSession()
+        val site = "https://a.example"
+        val asked = listOf<SiteCapability>(SitePermission.CAMERA)
+        // The store still holds the Allow: its removal hasn't landed yet.
+        val store = mapOf<SiteCapability, PermissionDecision>(
+            SitePermission.CAMERA to PermissionDecision.ALLOW,
+            SitePermission.LOCATION to PermissionDecision.ALLOW,
+        )
+        tier.revoke(site, SitePermission.CAMERA)
+        tier.removingFromStore(site, SitePermission.CAMERA)
+        val stored = tier.readWithoutStoreRemovals(site) { store }
+        // A request made now is asked, not granted by the stale Allow…
+        assertTrue(planFor(site, asked, stored, tier) is PermissionPlan.Ask)
+        // …and nothing else is hidden: not another permission, not another site.
+        assertEquals(PermissionDecision.ALLOW, stored[SitePermission.LOCATION])
+        assertEquals(store, tier.readWithoutStoreRemovals("https://b.example") { store })
+
+        // A read that started before the removal landed is still masked,
+        // even though the removal is done by the time it returns.
+        val raced = tier.readWithoutStoreRemovals(site) {
+            tier.removedFromStore(site, SitePermission.CAMERA)
+            store
+        }
+        assertNull(raced[SitePermission.CAMERA])
+        // Once it's done, the store's own answer counts again (the
+        // removal failed, say: the Allow is still remembered, as Settings says).
+        assertEquals(store, tier.readWithoutStoreRemovals(site) { store })
+
+        // Allowed and remembered again meanwhile: that store write came
+        // after the removal, so the store holds the new answer.
+        tier.removingFromStore(site, SitePermission.CAMERA)
+        tier.record(site, SitePermission.CAMERA, PermissionDecision.ALLOW, remembered = true)
+        assertEquals(store, tier.readWithoutStoreRemovals(site) { store })
+        tier.removedFromStore(site, SitePermission.CAMERA)
+        assertEquals(store, tier.readWithoutStoreRemovals(site) { store })
+    }
+
+    @Test
+    fun `a frame's grant and the page's are kept apart`() {
+        val page = "https://page.example"
+        val frame = "https://frame.example"
+        // The page was given the camera; the frame only asked for location.
+        val doc = SitePermissionBroker.DocumentPermissions(doc = 1)
+            .granting(page, listOf(SitePermission.CAMERA))
+            .granting(frame, listOf(SitePermission.LOCATION))
+        val camera = setOf(SitePermission.CAMERA)
+        // The frame's remembered camera Allow isn't what's in use.
+        assertTrue(doc.inUse(entry(page, SitePermission.CAMERA), camera))
+        assertFalse(doc.inUse(entry(frame, SitePermission.CAMERA), camera))
+        // Removing the frame's camera leaves nothing held by that removal.
+        val afterFrame = doc.revoking(entry(frame, SitePermission.CAMERA))
+        assertEquals(doc, afterFrame)
+        assertEquals(emptySet<SitePermission>(), afterFrame.stillHeld(camera))
+        // Nor does a re-grant to the frame clear the page's own removal.
+        val afterPage = doc.revoking(entry(page, SitePermission.CAMERA))
+        assertEquals(camera, afterPage.granting(frame, listOf(SitePermission.CAMERA)).stillHeld(camera))
+        // The indicator still sees everything the document was given.
+        assertEquals(setOf(SitePermission.CAMERA, SitePermission.LOCATION), doc.granted)
+    }
+
+    @Test
+    fun `WebView resources map to camera, microphone and MIDI, protected media to none`() {
+        assertEquals(SitePermission.CAMERA, mediaResourcePermission(android.webkit.PermissionRequest.RESOURCE_VIDEO_CAPTURE))
+        assertEquals(SitePermission.MICROPHONE, mediaResourcePermission(android.webkit.PermissionRequest.RESOURCE_AUDIO_CAPTURE))
+        assertEquals(SitePermission.MIDI, mediaResourcePermission(android.webkit.PermissionRequest.RESOURCE_MIDI_SYSEX))
+        assertEquals(SitePermission.MIDI, mediaResourcePermission("android.webkit.resource.MIDI_SYSEX"))
+        assertNull(mediaResourcePermission(android.webkit.PermissionRequest.RESOURCE_PROTECTED_MEDIA_ID))
+        assertNull(mediaResourcePermission("android.webkit.resource.SOMETHING_NEW"))
+        assertTrue(isProtectedMediaResource("android.webkit.resource.PROTECTED_MEDIA_ID"))
+        assertFalse(isProtectedMediaResource(android.webkit.PermissionRequest.RESOURCE_MIDI_SYSEX))
+    }
+
+    @Test
+    fun `MIDI is keyed like the desktop browser and needs nothing from Android`() {
+        assertEquals("midi", SitePermission.MIDI.key)
+        assertEquals(SitePermission.MIDI, SiteCapability.forKey("midi"))
+        assertEquals("send system-exclusive messages to your MIDI devices", describePermissionRequest(listOf(SitePermission.MIDI)))
+        // Only SysEx is gated — WebView lets any page use MIDI devices
+        // without asking — so the label must not claim the devices.
+        assertEquals("MIDI SysEx", SitePermission.MIDI.label)
+        // Nothing to hold, so never "refused by Android" (which denied it and
+        // raised the Android-settings snackbar before).
+        assertTrue(androidPermissionsHeld(SitePermission.MIDI) { false })
+        assertTrue(androidPermissionsHeld(SitePermission.POPUPS) { false })
+        assertFalse(androidPermissionsHeld(SitePermission.CAMERA) { false })
+        assertTrue(androidPermissionsHeld(SitePermission.LOCATION) { it == android.Manifest.permission.ACCESS_COARSE_LOCATION })
+    }
+
+    @Test
+    fun `MIDI goes through the same tiers and embargo as the camera`() {
+        val origin = "https://synth.example"
+        val session = PermissionSession()
+        assertEquals(
+            PermissionPlan.Ask(listOf(SitePermission.MIDI)),
+            planFor(origin, listOf(SitePermission.MIDI), emptyMap(), session),
+        )
+        assertEquals(
+            PermissionPlan.Grant,
+            planFor(origin, listOf(SitePermission.MIDI), mapOf(SitePermission.MIDI to PermissionDecision.ALLOW), session),
+        )
+        repeat(PermissionSession.DISMISS_EMBARGO_THRESHOLD) { session.dismiss(origin, SitePermission.MIDI) }
+        assertEquals(PermissionPlan.Deny, planFor(origin, listOf(SitePermission.MIDI), emptyMap(), session))
+        session.revoke(origin, SitePermission.MIDI)
+        assertEquals(
+            PermissionPlan.Ask(listOf(SitePermission.MIDI)),
+            planFor(origin, listOf(SitePermission.MIDI), emptyMap(), session),
+        )
+    }
+
+    @Test
+    fun `MIDI removed from a document that was given it stays held until reload`() {
+        val page = "https://synth.example"
+        val revoked = SitePermissionBroker.DocumentPermissions(doc = 1)
+            .granting(page, listOf(SitePermission.MIDI))
+            .revoking(entry(page, SitePermission.MIDI))
+        // The page's MIDIAccess keeps working; WebView can't take it back.
+        assertEquals(setOf(SitePermission.MIDI), revoked.stillHeld(emptySet()))
+        assertEquals("This page can still send system-exclusive messages to your MIDI devices until it's reloaded.", stillHeldNote(revoked.stillHeld(emptySet())))
+        assertEquals("MIDI SysEx kept until reload", sitePermissionsSummary(emptyList(), revoked.stillHeld(emptySet())))
+        assertEquals(
+            "This page keeps your microphone until it stops using it or is reloaded, " +
+                "and can still get your location and send system-exclusive messages to your MIDI devices until it's reloaded.",
+            stillHeldNote(setOf(SitePermission.MIDI, SitePermission.MICROPHONE, SitePermission.LOCATION)),
+        )
+    }
+
+    @Test
+    fun `held note names what the page still has`() {
+        assertNull(stillHeldNote(emptySet()))
+        assertEquals(
+            "This page keeps your camera and microphone until it stops using it or is reloaded.",
+            stillHeldNote(setOf(SitePermission.MICROPHONE, SitePermission.CAMERA)),
+        )
+        assertEquals(
+            "This page keeps your camera until it stops using it or is reloaded, " +
+                "and can still get your location until it's reloaded.",
+            stillHeldNote(setOf(SitePermission.LOCATION, SitePermission.CAMERA)),
+        )
+        // Pop-ups and the like are never "held": nothing to reload for.
+        assertEquals(emptySet<SitePermission>(), stillHeldAfterRemoval(setOf(SitePermission.POPUPS), setOf(SitePermission.CAMERA)))
+    }
+
+    @Test
+    fun `in-use label names what is in use`() {
+        assertNull(mediaInUseLabel(emptySet()))
+        assertEquals("Camera in use", mediaInUseLabel(setOf(SitePermission.CAMERA)))
+        assertEquals("Microphone in use", mediaInUseLabel(setOf(SitePermission.MICROPHONE)))
+        assertEquals(
+            "Camera and microphone in use",
+            mediaInUseLabel(setOf(SitePermission.MICROPHONE, SitePermission.CAMERA)),
+        )
+    }
+
+    @Test
+    fun `a private tab's decisions read as lasting until private tabs close`() {
+        val allowed = entry("https://a.example", SitePermission.CAMERA, remembered = false)
+        assertEquals("Allowed (private tabs)", sitePermissionStateLabel(allowed, private = true))
+        assertEquals("Allowed (this session)", sitePermissionStateLabel(allowed))
+        assertEquals("Allowed", sitePermissionStateLabel(allowed.copy(remembered = true)))
+        assertEquals(
+            "Blocked (private tabs)",
+            sitePermissionStateLabel(allowed.copy(decision = PermissionDecision.DENY), private = true),
+        )
+    }
+
+    @Test
+    fun `menu sub-line names each capability once`() {
+        assertNull(sitePermissionsSummary(emptyList()))
+        assertEquals(
+            "Camera · Location",
+            sitePermissionsSummary(
+                listOf(
+                    entry("https://a.example", SitePermission.CAMERA),
+                    entry("https://a.example", SitePermission.LOCATION, PermissionDecision.DENY),
+                    entry("https://frame.example", SitePermission.CAMERA),
+                ),
+            ),
+        )
+    }
+
+    @Test
+    fun `revoking in one session tier leaves the other alone`() {
+        val normal = PermissionSession()
+        val private = PermissionSession(embargoes = false)
+        normal.record("https://a.example", SitePermission.CAMERA, PermissionDecision.ALLOW, remembered = false)
+        private.record("https://a.example", SitePermission.CAMERA, PermissionDecision.ALLOW, remembered = false)
+        private.revoke("https://a.example", SitePermission.CAMERA)
+        assertNull(private.decisionFor("https://a.example", SitePermission.CAMERA))
+        assertEquals(PermissionDecision.ALLOW, normal.decisionFor("https://a.example", SitePermission.CAMERA))
+    }
 }

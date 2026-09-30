@@ -12,6 +12,7 @@
  */
 
 #include <jni.h>
+#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -118,9 +119,15 @@ Java_baby_freedom_swarm_AntNative_accountInfo(JNIEnv *env, jobject thiz, jlong h
  * permit for the one spend the user confirmed, and only with that
  * spend's own transactions.
  *
- * A read returns NULL: ant falls back to the configured gnosis_rpc URL,
- * exactly as with no transport. So does an admitted broadcast, which
- * then goes out on the RPC the call was given. A refused broadcast
+ * A read is answered by the app (#273): AntChainTransport.serve, which
+ * the :node process backs with the chain-data router's bridge
+ * (AntChainBridge.kt), so ant reads Gnosis the way the wallet does —
+ * through the router's sources, not one RPC on its word. Its answer goes
+ * back to ant as is, and it is never NULL or a -32000 (ant's two
+ * can't-serve signals): a read the router can't answer reaches ant as an
+ * error, never as a silent fallback to the configured gnosis_rpc URL.
+ * An admitted broadcast returns NULL, as before: ant falls back to
+ * gnosis_rpc and it goes out on the RPC the call was given. A refused broadcast
  * (`eth_send*`) gets a JSON-RPC error that isn't -32000, which ant
  * passes through to its caller as a genuine answer instead of retrying
  * it on gnosis_rpc (see ant_set_chain_transport). ant builds the request
@@ -134,6 +141,11 @@ static const char *const BROADCAST_METHOD = "\"eth_send";
 static JavaVM *g_vm = NULL;
 static jclass g_guard_class = NULL;
 static jmethodID g_guard_admit = NULL;
+
+/* AntChainTransport.serve(byte[]): byte[], likewise. NULL = every read
+ * gets an error. */
+static jclass g_reads_class = NULL;
+static jmethodID g_reads_serve = NULL;
 
 JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved) {
     (void)reserved;
@@ -154,21 +166,44 @@ JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved) {
         g_guard_admit = admit;
     }
     (*env)->DeleteLocalRef(env, cls);
+
+    jclass reads = (*env)->FindClass(env, "baby/freedom/swarm/AntChainTransport");
+    if (reads == NULL) {
+        (*env)->ExceptionClear(env);
+        return JNI_VERSION_1_6;
+    }
+    jmethodID serve = (*env)->GetStaticMethodID(env, reads, "serve", "([B)[B");
+    if (serve == NULL) {
+        (*env)->ExceptionClear(env);
+    } else {
+        g_reads_class = (jclass)(*env)->NewGlobalRef(env, reads);
+        g_reads_serve = serve;
+    }
+    (*env)->DeleteLocalRef(env, reads);
     return JNI_VERSION_1_6;
+}
+
+/* A JNIEnv for this thread, attaching it if it isn't; *attached says so. */
+static JNIEnv *thread_env(int *attached) {
+    *attached = 0;
+    if (g_vm == NULL) return NULL;
+    JNIEnv *env = NULL;
+    jint st = (*g_vm)->GetEnv(g_vm, (void **)&env, JNI_VERSION_1_6);
+    if (st == JNI_EDETACHED) {
+        if ((*g_vm)->AttachCurrentThread(g_vm, &env, NULL) != JNI_OK) return NULL;
+        *attached = 1;
+    } else if (st != JNI_OK) {
+        return NULL;
+    }
+    return env;
 }
 
 /* Does SpendGuard let `request_json` out? Refuses on anything unexpected. */
 static int guard_admits(const char *request_json) {
-    if (g_vm == NULL || g_guard_class == NULL || g_guard_admit == NULL) return 0;
-    JNIEnv *env = NULL;
+    if (g_guard_class == NULL || g_guard_admit == NULL) return 0;
     int attached = 0;
-    jint st = (*g_vm)->GetEnv(g_vm, (void **)&env, JNI_VERSION_1_6);
-    if (st == JNI_EDETACHED) {
-        if ((*g_vm)->AttachCurrentThread(g_vm, &env, NULL) != JNI_OK) return 0;
-        attached = 1;
-    } else if (st != JNI_OK) {
-        return 0;
-    }
+    JNIEnv *env = thread_env(&attached);
+    if (env == NULL) return 0;
     jboolean ok = JNI_FALSE;
     /* ant's request bodies are ASCII JSON, so modified UTF-8 is exact. */
     jstring s = (*env)->NewStringUTF(env, request_json);
@@ -185,11 +220,13 @@ static int guard_admits(const char *request_json) {
     return ok == JNI_TRUE;
 }
 
-static char *guard_broadcasts(const char *request_json, void *host_ctx) {
-    (void)host_ctx;
-    if (request_json == NULL || strstr(request_json, BROADCAST_METHOD) == NULL) return NULL;
-    if (guard_admits(request_json)) return NULL;
-    /* Echo the request's id when it's a plain number or string; null otherwise. */
+/*
+ * A JSON-RPC error answering `request_json`, echoing its id when it's a
+ * plain number or string (null otherwise); `message` must need no JSON
+ * escaping. Out of memory aborts: NULL would fall back to gnosis_rpc —
+ * for a broadcast, spend — and there's nothing else to answer with.
+ */
+static char *error_reply(const char *request_json, int code, const char *message) {
     char id[64] = "null";
     const char *p = strstr(request_json, "\"id\"");
     if (p != NULL) {
@@ -202,20 +239,84 @@ static char *guard_broadcasts(const char *request_json, void *host_ctx) {
         }
     }
     static const char *const fmt =
-        "{\"jsonrpc\":\"2.0\",\"id\":%s,\"error\":{\"code\":-32003,"
-        "\"message\":\"Freedom only lets the Swarm node send transactions you confirmed in the app\"}}";
-    size_t len = strlen(fmt) + strlen(id) + 1;
+        "{\"jsonrpc\":\"2.0\",\"id\":%s,\"error\":{\"code\":%d,\"message\":\"%s\"}}";
+    size_t len = strlen(fmt) + strlen(id) + strlen(message) + 16;
     char *out = malloc(len);
-    if (out != NULL) snprintf(out, len, fmt, id);
-    /* Out of memory: NULL would fall back to gnosis_rpc and broadcast.
-     * There's nothing to answer with, so stop here rather than spend. */
     if (out == NULL) abort();
+    snprintf(out, len, fmt, id, code, message);
     return out;
 }
 
-/* Install the gate on `handle`; 0 on success (or a build with no chain to broadcast on). */
+static char *guard_broadcasts(const char *request_json) {
+    if (guard_admits(request_json)) return NULL;
+    return error_reply(request_json, -32003,
+                       "Freedom only lets the Swarm node send transactions you confirmed in the app");
+}
+
+/*
+ * A read, answered by AntChainTransport.serve: its UTF-8 answer copied
+ * into a malloc'd, NUL-terminated buffer. NULL if the JVM side couldn't
+ * be reached or threw (serve itself never does).
+ */
+static char *app_reads(const char *request_json) {
+    if (g_reads_class == NULL || g_reads_serve == NULL) return NULL;
+    int attached = 0;
+    JNIEnv *env = thread_env(&attached);
+    if (env == NULL) return NULL;
+    char *out = NULL;
+    jsize len = (jsize)strlen(request_json);
+    jbyteArray req = (*env)->NewByteArray(env, len);
+    if (req != NULL) {
+        (*env)->SetByteArrayRegion(env, req, 0, len, (const jbyte *)request_json);
+        jbyteArray res = (jbyteArray)(*env)->CallStaticObjectMethod(env, g_reads_class, g_reads_serve, req);
+        if (!(*env)->ExceptionCheck(env) && res != NULL) {
+            jsize n = (*env)->GetArrayLength(env, res);
+            out = malloc((size_t)n + 1);
+            if (out == NULL) abort();
+            (*env)->GetByteArrayRegion(env, res, 0, n, (jbyte *)out);
+            out[n] = '\0';
+        }
+        if (res != NULL) (*env)->DeleteLocalRef(env, res);
+        (*env)->DeleteLocalRef(env, req);
+    }
+    if ((*env)->ExceptionCheck(env)) {
+        (*env)->ExceptionClear(env);
+        free(out);
+        out = NULL;
+    }
+    if (attached) (*g_vm)->DetachCurrentThread(g_vm);
+    return out;
+}
+
+/* The chain transport: broadcasts through SpendGuard, reads through the app. */
+static char *chain_transport(const char *request_json, void *host_ctx) {
+    (void)host_ctx;
+    if (request_json == NULL) return error_reply("", -32600, "Empty request");
+    if (strstr(request_json, BROADCAST_METHOD) != NULL) return guard_broadcasts(request_json);
+    char *out = app_reads(request_json);
+    /* Never NULL for a read: that would send it to gnosis_rpc alone. */
+    return out != NULL ? out : error_reply(request_json, -32002, "Chain request failed");
+}
+
+/*
+ * The handle chain_transport was last installed on (0: none). Nothing
+ * but install_guard replaces a handle's transport, so once installed it
+ * stays: installing it again before every storage call would only wait
+ * on ant's write lock, i.e. for every read already inside the callback
+ * (up to AntChainBridge's 60 s deadline) — and hold every other read up
+ * behind it. Cleared before ant_shutdown, since a later handle may get
+ * the same address.
+ */
+static _Atomic uintptr_t g_installed_on = 0;
+
+/* Install the transport (the broadcast gate, the app's reads) on `handle`,
+ * unless it already is; 0 on success (or a build with no chain to
+ * broadcast on). */
 static int install_guard(jlong handle) {
-    int tr = ant_set_chain_transport((AntHandle *)(uintptr_t)handle, guard_broadcasts, NULL);
+    uintptr_t h = (uintptr_t)handle;
+    if (h != 0 && atomic_load(&g_installed_on) == h) return 0;
+    int tr = ant_set_chain_transport((AntHandle *)h, chain_transport, NULL);
+    if (tr == ANT_CHAIN_TRANSPORT_OK) atomic_store(&g_installed_on, h);
     return tr == ANT_CHAIN_TRANSPORT_OK || tr == ANT_CHAIN_TRANSPORT_UNSUPPORTED ? 0 : -1;
 }
 
@@ -488,5 +589,7 @@ JNIEXPORT void JNICALL
 Java_baby_freedom_swarm_AntNative_shutdown(JNIEnv *env, jobject thiz, jlong handle) {
     (void)env;
     (void)thiz;
+    uintptr_t h = (uintptr_t)handle;
+    atomic_compare_exchange_strong(&g_installed_on, &h, (uintptr_t)0);
     ant_shutdown((AntHandle *)(uintptr_t)handle);
 }

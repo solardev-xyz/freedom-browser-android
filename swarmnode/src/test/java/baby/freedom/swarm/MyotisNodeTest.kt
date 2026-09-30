@@ -40,8 +40,14 @@ class MyotisNodeTest {
             calls += "start $handle"
             return startAnswers[handle] ?: true
         }
+        /** A stop of a handle in here blocks until its latch opens. */
+        val stopGates = java.util.concurrent.ConcurrentHashMap<Long, java.util.concurrent.CountDownLatch>()
         override fun stop(handle: Long) {
             calls += "stop $handle"
+            stopGates[handle]?.let { gate ->
+                gate.await()
+                calls += "stopped $handle"
+            }
         }
         override fun pause(handle: Long): Boolean {
             calls += "pause $handle"
@@ -653,5 +659,312 @@ class MyotisNodeTest {
         idle(node)
         assertEquals(MyotisNode.NOT_READY_JSON, node.ethCall(MyotisNetwork.Mainnet, "0xaa", "0x01"))
         assertEquals(2, engine.calls.count { it.startsWith("ethCall") })
+    }
+
+    // ---- Per-chain switches (#274).
+
+    @Test
+    fun `only the chains switched on are started, and a stopped chain's reads aren't served`() {
+        val engine = FakeEngine()
+        engine.status[2L] = readyJson
+        val node = node(engine)
+        node.setNetworks(setOf(MyotisNetwork.Gnosis))
+        node.start()
+        idle(node)
+
+        assertEquals(listOf("init", "create gnosis", "start 2", "window 2 1"), engine.calls)
+        assertFalse(tmp.root.resolve("mainnet").exists())
+        val info = node.state.value
+        assertEquals(MyotisStatus.Running, info.status)
+        assertEquals(listOf(100L), info.chains.map { it.chainId })
+        assertNull(info.chain(MyotisNetwork.Mainnet))
+        assertEquals(MyotisNode.NOT_READY_JSON, node.ethCall(MyotisNetwork.Mainnet, "0xaa", "0x01"))
+        assertTrue(node.ethCall(MyotisNetwork.Gnosis, "0xaa", "0x01").contains("\"ok\""))
+    }
+
+    @Test
+    fun `switching one chain off stops only its engine, and switching it back on boots it again`() {
+        val engine = FakeEngine()
+        engine.status[1L] = readyJson
+        engine.status[2L] = readyJson
+        val node = node(engine)
+        node.start()
+        idle(node)
+        engine.calls.clear()
+
+        node.setNetworks(setOf(MyotisNetwork.Gnosis))
+        idle(node)
+        assertEquals(listOf("stop 1"), engine.calls)
+        assertEquals(MyotisNode.NOT_READY_JSON, node.ethCall(MyotisNetwork.Mainnet, "0xaa", "0x01"))
+        assertEquals(listOf(100L), node.state.value.chains.map { it.chainId })
+        assertEquals(MyotisStatus.Running, node.state.value.status)
+        // Gnosis kept its engine and its readiness.
+        assertTrue(node.ethCall(MyotisNetwork.Gnosis, "0xaa", "0x01").contains("\"ok\""))
+        node.pollNow()
+        idle(node)
+        assertEquals(listOf(100L), node.state.value.chains.map { it.chainId })
+
+        engine.calls.clear()
+        node.setNetworks(setOf(MyotisNetwork.Mainnet, MyotisNetwork.Gnosis))
+        idle(node)
+        assertEquals(listOf("create mainnet", "start 1", "window 1 1"), engine.calls)
+        assertEquals(listOf(1L, 100L), node.state.value.chains.map { it.chainId })
+        assertTrue(node.ethCall(MyotisNetwork.Mainnet, "0xaa", "0x01").contains("\"ok\""))
+    }
+
+    @Test
+    fun `switching every chain off stops the engines, and one switched back on starts them again`() {
+        val engine = FakeEngine()
+        val node = node(engine)
+        node.start()
+        idle(node)
+        engine.calls.clear()
+
+        node.setNetworks(emptySet())
+        idle(node)
+        assertEquals(listOf("stop 1", "stop 2"), engine.calls)
+        assertEquals(MyotisInfo(), node.state.value)
+        node.pollNow()
+        idle(node)
+        assertEquals(MyotisInfo(), node.state.value)
+
+        engine.calls.clear()
+        node.setNetworks(setOf(MyotisNetwork.Mainnet))
+        idle(node)
+        assertEquals(listOf("init", "create mainnet", "start 1", "window 1 1"), engine.calls)
+        assertEquals(MyotisStatus.Running, node.state.value.status)
+        assertEquals(listOf(1L), node.state.value.chains.map { it.chainId })
+    }
+
+    @Test
+    fun `a chain switched on before a start, or after a stop, waits for the start`() {
+        val engine = FakeEngine()
+        val node = node(engine)
+        node.setNetworks(setOf(MyotisNetwork.Mainnet))
+        idle(node)
+        assertTrue(engine.calls.isEmpty())
+        assertEquals(MyotisStatus.Stopped, node.state.value.status)
+
+        node.start()
+        node.stop()
+        idle(node)
+        engine.calls.clear()
+        node.setNetworks(setOf(MyotisNetwork.Gnosis))
+        idle(node)
+        assertTrue(engine.calls.isEmpty())
+        assertEquals(MyotisStatus.Stopped, node.state.value.status)
+    }
+
+    @Test
+    fun `a chain that failed to start is retried when switched off and on`() {
+        val engine = FakeEngine(createAnswers = mutableMapOf("mainnet" to 1L, "gnosis" to -2L))
+        val node = node(engine)
+        node.start()
+        idle(node)
+        assertEquals("Network not supported by this engine", node.state.value.chain(MyotisNetwork.Gnosis)?.error)
+
+        node.setNetworks(setOf(MyotisNetwork.Mainnet))
+        idle(node)
+        assertNull(node.state.value.chain(MyotisNetwork.Gnosis))
+
+        engine.createAnswers["gnosis"] = 2L
+        node.setNetworks(setOf(MyotisNetwork.Mainnet, MyotisNetwork.Gnosis))
+        idle(node)
+        assertNull(node.state.value.chain(MyotisNetwork.Gnosis)?.error)
+        assertTrue("start 2" in engine.calls)
+    }
+
+    @Test
+    fun `every chain failing and then one switched on again retries the start`() {
+        val engine = FakeEngine(startAnswers = mutableMapOf(1L to false, 2L to false))
+        val node = node(engine)
+        node.start()
+        idle(node)
+        assertEquals(MyotisStatus.Error, node.state.value.status)
+
+        engine.startAnswers.clear()
+        node.setNetworks(setOf(MyotisNetwork.Gnosis))
+        idle(node)
+        assertEquals(MyotisStatus.Running, node.state.value.status)
+        assertEquals(listOf(100L), node.state.value.chains.map { it.chainId })
+    }
+
+    @Test
+    fun `switching off the last running chain beside one that failed reports the error and retries both`() {
+        val engine = FakeEngine(createAnswers = mutableMapOf("mainnet" to 1L, "gnosis" to -2L))
+        engine.status[1L] = readyJson
+        val node = node(engine)
+        node.start()
+        idle(node)
+        assertEquals(MyotisStatus.Running, node.state.value.status)
+
+        node.setNetworks(setOf(MyotisNetwork.Gnosis))
+        idle(node)
+        // Nothing left that runs: not a "Running" light client with one error row.
+        assertEquals(MyotisStatus.Error, node.state.value.status)
+        assertEquals("Network not supported by this engine", node.state.value.errorMessage)
+        assertEquals("Network not supported by this engine", node.state.value.chain(MyotisNetwork.Gnosis)?.error)
+        assertEquals(MyotisNode.NOT_READY_JSON, node.ethCall(MyotisNetwork.Mainnet, "0xaa", "0x01"))
+
+        // The next switch retries the start of every chain switched on.
+        engine.calls.clear()
+        engine.createAnswers["gnosis"] = 2L
+        node.setNetworks(setOf(MyotisNetwork.Mainnet, MyotisNetwork.Gnosis))
+        idle(node)
+        assertEquals(
+            listOf("init", "create mainnet", "start 1", "window 1 1", "create gnosis", "start 2", "window 2 1"),
+            engine.calls,
+        )
+        assertEquals(MyotisStatus.Running, node.state.value.status)
+        assertEquals(listOf(1L, 100L), node.state.value.chains.map { it.chainId })
+    }
+
+    @Test
+    fun `a chain's slow stop doesn't hold up the other chain, and it boots again only once stopped`() {
+        val engine = FakeEngine()
+        engine.status[1L] = readyJson
+        engine.status[2L] = """{"running":true,"beaconState":"SYNCING","peerCount":3}"""
+        val node = node(engine)
+        node.start()
+        idle(node)
+        val gate = java.util.concurrent.CountDownLatch(1)
+        engine.stopGates[1L] = gate
+
+        node.setNetworks(setOf(MyotisNetwork.Gnosis))
+        // Gnosis's polls and background pause still run while mainnet's stop blocks.
+        engine.status[2L] = readyJson
+        node.pollNow()
+        runBlocking { withTimeout(5_000) { node.awaitIdle(stops = false) } }
+        assertTrue("stop 1" in engine.calls)
+        assertTrue("stopped 1" !in engine.calls)
+        assertEquals(true, node.state.value.chain(MyotisNetwork.Gnosis)?.ready)
+        node.enterBackground()
+        runBlocking { withTimeout(5_000) { node.awaitIdle(stops = false) } }
+        assertTrue("pause 2" in engine.calls)
+        node.enterForeground()
+
+        // Switched back on mid-stop: it waits for its engine to let go of the directory.
+        engine.calls.clear()
+        node.setNetworks(setOf(MyotisNetwork.Mainnet, MyotisNetwork.Gnosis))
+        runBlocking { withTimeout(5_000) { node.awaitIdle(stops = false) } }
+        assertTrue("create mainnet" !in engine.calls)
+        assertNull(node.state.value.chain(MyotisNetwork.Mainnet))
+        assertEquals(MyotisStatus.Running, node.state.value.status)
+
+        gate.countDown()
+        idle(node)
+        assertEquals(listOf("stopped 1", "create mainnet", "start 1", "window 1 1"), engine.calls.filter { it != "resume 2" })
+        assertEquals(listOf(1L, 100L), node.state.value.chains.map { it.chainId })
+    }
+
+    @Test
+    fun `the only chain switched on waiting out its stop reads as starting, not failed`() {
+        val engine = FakeEngine()
+        val node = node(engine)
+        node.start()
+        idle(node)
+        val gate = java.util.concurrent.CountDownLatch(1)
+        engine.stopGates[1L] = gate
+        node.setNetworks(setOf(MyotisNetwork.Gnosis))
+        node.setNetworks(setOf(MyotisNetwork.Mainnet))
+        runBlocking { withTimeout(5_000) { node.awaitIdle(stops = false) } }
+        assertEquals(MyotisStatus.Running, node.state.value.status)
+        assertTrue(node.state.value.chains.isEmpty())
+
+        gate.countDown()
+        idle(node)
+        assertEquals(listOf(1L), node.state.value.chains.map { it.chainId })
+    }
+
+    @Test
+    fun `shutdown waits for a chain still stopping`() {
+        val engine = FakeEngine()
+        val node = node(engine)
+        node.start()
+        idle(node)
+        val gate = java.util.concurrent.CountDownLatch(1)
+        engine.stopGates[1L] = gate
+        node.setNetworks(setOf(MyotisNetwork.Gnosis))
+        runBlocking { withTimeout(5_000) { node.awaitIdle(stops = false) } }
+        val shutdown = kotlin.concurrent.thread { runBlocking { node.shutdown() } }
+        shutdown.join(300)
+        assertTrue(shutdown.isAlive)
+        gate.countDown()
+        shutdown.join(5_000)
+        assertTrue(!shutdown.isAlive)
+        assertTrue("stopped 1" in engine.calls && "stop 2" in engine.calls)
+    }
+
+    @Test
+    fun `a parked chain switched off drops its park and recovery, and comes back judged afresh`() {
+        val engine = FakeEngine()
+        engine.status[1L] = readyJson
+        engine.status[2L] = """{"running":true,"beaconState":"STALE_ANCHOR","currentPeriod":3692,"targetPeriod":3701,"wsBoundPeriods":3}"""
+        val node = node(engine)
+        node.start()
+        idle(node)
+        assertTrue(engine.calls.contains("pause 2"))
+        assertEquals(MyotisRecovery.Phase.Checking, node.state.value.chain(MyotisNetwork.Gnosis)?.recovery?.phase)
+
+        engine.calls.clear()
+        node.setNetworks(setOf(MyotisNetwork.Mainnet))
+        idle(node)
+        assertEquals(listOf("stop 2"), engine.calls)
+        assertNull(node.state.value.chain(MyotisNetwork.Gnosis))
+        assertTrue(node.state.value.chain(MyotisNetwork.Mainnet)!!.ready)
+        // A Retry for the chain that's off does nothing.
+        node.retryRecovery(MyotisNetwork.Gnosis)
+        idle(node)
+        assertEquals(listOf("stop 2"), engine.calls)
+
+        engine.status[2L] = """{"running":true,"beaconState":"SYNCING"}"""
+        node.setNetworks(setOf(MyotisNetwork.Mainnet, MyotisNetwork.Gnosis))
+        idle(node)
+        val gnosis = node.state.value.chain(MyotisNetwork.Gnosis)!!
+        assertEquals("SYNCING", gnosis.beaconState)
+        assertNull(gnosis.recovery)
+    }
+
+    @Test
+    fun `run chooses the chains before the first start boots them`() {
+        val engine = FakeEngine()
+        val node = node(engine)
+        node.run(setOf(MyotisNetwork.Gnosis))
+        idle(node)
+        assertEquals(listOf("init", "create gnosis", "start 2", "window 2 1"), engine.calls)
+        assertEquals(MyotisStatus.Running, node.state.value.status)
+    }
+
+    @Test
+    fun `run switching a chain on after every chain failed retries the start once`() {
+        val engine = FakeEngine(startAnswers = mutableMapOf(1L to false, 2L to false))
+        val node = node(engine)
+        node.run(setOf(MyotisNetwork.Mainnet))
+        idle(node)
+        assertEquals(MyotisStatus.Error, node.state.value.status)
+
+        engine.calls.clear()
+        node.run(setOf(MyotisNetwork.Mainnet, MyotisNetwork.Gnosis))
+        idle(node)
+        // One retry of the whole start, not the switch's retry and then the start's.
+        assertEquals(1, engine.calls.count { it == "init" })
+        assertEquals(1, engine.calls.count { it == "create gnosis" })
+        assertEquals(MyotisStatus.Error, node.state.value.status)
+    }
+
+    @Test
+    fun `run with the same chains after a failed start retries it`() {
+        val engine = FakeEngine(startAnswers = mutableMapOf(1L to false, 2L to false))
+        val node = node(engine)
+        node.run(setOf(MyotisNetwork.Mainnet))
+        idle(node)
+        assertEquals(MyotisStatus.Error, node.state.value.status)
+
+        engine.startAnswers.clear()
+        engine.calls.clear()
+        node.run(setOf(MyotisNetwork.Mainnet))
+        idle(node)
+        assertEquals(listOf("init", "create mainnet", "start 1", "window 1 1"), engine.calls)
+        assertEquals(MyotisStatus.Running, node.state.value.status)
     }
 }

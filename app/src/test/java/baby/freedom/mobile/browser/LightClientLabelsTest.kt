@@ -2,6 +2,7 @@ package baby.freedom.mobile.browser
 
 import baby.freedom.swarm.MyotisChainStatus
 import baby.freedom.swarm.MyotisInfo
+import baby.freedom.swarm.MyotisNetwork
 import baby.freedom.swarm.MyotisRecovery
 import baby.freedom.swarm.MyotisRecoveryReason
 import baby.freedom.swarm.MyotisStatus
@@ -34,7 +35,8 @@ class LightClientLabelsTest {
             Triple(MyotisStatus.Starting, null, "Starting…"),
             Triple(MyotisStatus.Error, null, "Off"),
             Triple(MyotisStatus.Error, MyotisChainStatus(1L, error = "boom"), "Failed"),
-            Triple(running, null, "Off"),
+            // Just switched on beside a running chain.
+            Triple(running, null, "Starting…"),
             Triple(running, MyotisChainStatus(1L, error = "boom"), "Failed"),
             Triple(running, serving.copy(running = false, paused = true), "Paused"),
             Triple(running, serving.copy(beaconState = "STALE_ANCHOR"), "Checkpoint too old"),
@@ -51,8 +53,23 @@ class LightClientLabelsTest {
             Triple(running, MyotisChainStatus(1L), "Starting…"),
         )
         for ((node, chain, expected) in cases) {
-            assertEquals("$node / $chain", expected, myotisChainLabel(node, chain))
+            assertEquals("$node / $chain", expected, myotisChainLabel(node, chain, on = true))
+            // A chain switched off (#274) is off, whatever the rest is doing.
+            assertEquals("$node / $chain", "Off", myotisChainLabel(node, chain, on = false))
         }
+    }
+
+    @Test
+    fun `only the chains switched on show, and none on is off`() {
+        val gnosis = serving.copy(chainId = 100L)
+        val info = MyotisInfo(MyotisStatus.Running, listOf(serving, gnosis))
+        // Ethereum just switched off, before `:myotis` dropped its row.
+        val onlyGnosis = lightClientInfoFor(info, setOf(MyotisNetwork.Gnosis))
+        assertEquals(listOf(100L), onlyGnosis.chains.map { it.chainId })
+        assertEquals("Synced", lightClientStatusTriple(onlyGnosis).label)
+        assertEquals(info, lightClientInfoFor(info, setOf(MyotisNetwork.Mainnet, MyotisNetwork.Gnosis)))
+        assertEquals(MyotisInfo(), lightClientInfoFor(info, emptySet()))
+        assertEquals("Off", lightClientStatusTriple(lightClientInfoFor(info, emptySet())).label)
     }
 
     @Test
@@ -124,8 +141,9 @@ class LightClientLabelsTest {
         assertEquals("0 of 2 chains synced", label(serving.copy(beaconState = "SYNCING"), stale))
         // A chain that failed to start doesn't hold the other one back...
         assertEquals("Synced", label(serving, MyotisChainStatus(100L, error = "boom")))
-        // ...but nothing live at all is not "Synced".
-        assertEquals("Syncing…", label())
+        // ...but nothing live at all is not "Synced": a chain switched on
+        // that hasn't booted yet is still starting.
+        assertEquals("Starting…", label())
         assertEquals("Off", lightClientStatusTriple(MyotisInfo()).label)
         assertEquals("Error", lightClientStatusTriple(MyotisInfo(MyotisStatus.Error)).label)
     }

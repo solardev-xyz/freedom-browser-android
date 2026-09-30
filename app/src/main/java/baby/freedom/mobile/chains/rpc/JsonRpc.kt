@@ -58,6 +58,12 @@ sealed class ChainRpcException(message: String) : Exception(message) {
         val failures: List<String>,
         val nodeError: Rpc?,
         val unanswered: Boolean = false,
+        /**
+         * The most useful failure a caller's `rankError` picked out of the
+         * walk ([ChainDataRouter.request]), when it ranked one above
+         * [ChainDataRouter.ErrorRank.ENDPOINT]; null otherwise.
+         */
+        val kept: ChainFailure? = null,
     ) : ChainRpcException(
         "No chain source answered (" + failures.joinToString("; ") + ")" +
             (nodeError?.let { " — ${it.message}" } ?: ""),
@@ -73,6 +79,24 @@ sealed class ChainRpcException(message: String) : Exception(message) {
         const val EXECUTION_REVERTED = 3
 
         private val INSUFFICIENT_FUNDS = Regex("insufficient funds", RegexOption.IGNORE_CASE)
+    }
+}
+
+/**
+ * One way one source failed a read, as [ChainDataRouter.request]'s
+ * `rankError` sees it: a node's JSON-RPC error ([code] set, its [message]
+ * and revert [data]), or a failure no node answered with — a transport
+ * error, a source that isn't ready ([code] null). [timeout]: the attempt
+ * ran out of time rather than being refused.
+ */
+data class ChainFailure(
+    val code: Int?,
+    val message: String,
+    val data: String?,
+    val timeout: Boolean,
+) {
+    internal companion object {
+        fun of(e: ChainRpcException.Rpc) = ChainFailure(e.code, e.rpcMessage, e.data, timeout = false)
     }
 }
 

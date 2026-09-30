@@ -54,6 +54,7 @@ import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.StarBorder
+import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.ZoomIn
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.ColorScheme
@@ -1430,6 +1431,13 @@ internal fun BottomToolbar(
     /** The page menu's ad-blocking switch (#126), or null to leave it out. */
     adblockState: AdblockSiteState? = null,
     onToggleAdblock: () -> Unit = {},
+    /**
+     * The page menu's **Site permissions** row (#266): what the site on
+     * screen holds, as its sub-line ("Camera · Location"), or null when
+     * it holds nothing and the row is left out.
+     */
+    sitePermissionsSummary: String? = null,
+    onOpenSitePermissions: () -> Unit = {},
     /** "New private tab" (#86); null where private tabs can't run, and the menu doesn't offer it. */
     onNewPrivateTab: (() -> Unit)? = null,
     onExpandCapsule: () -> Unit,
@@ -1721,6 +1729,8 @@ internal fun BottomToolbar(
                     onPrint = onPrint,
                     adblockState = adblockState,
                     onToggleAdblock = onToggleAdblock,
+                    sitePermissionsSummary = sitePermissionsSummary,
+                    onOpenSitePermissions = onOpenSitePermissions,
                 )
             },
             modifier = Modifier
@@ -2937,6 +2947,8 @@ private fun OverflowMenuButton(
     onPrint: () -> Unit,
     adblockState: AdblockSiteState?,
     onToggleAdblock: () -> Unit,
+    sitePermissionsSummary: String?,
+    onOpenSitePermissions: () -> Unit,
 ) {
     var menuExpanded by remember { mutableStateOf(false) }
     // The trust shield's details (#97), opened from the menu's first row.
@@ -3183,6 +3195,28 @@ private fun OverflowMenuButton(
                                 modifier = Modifier.semantics {
                                     role = Role.Switch
                                     toggleableState = ToggleableState(adblockState.checked)
+                                },
+                            )
+                        }
+                        // What the site on screen is allowed or blocked
+                        // from (#266), listed and removable in a sheet;
+                        // only while it holds something.
+                        if (sitePermissionsSummary != null) {
+                            DropdownMenuItem(
+                                text = {
+                                    Column(modifier = Modifier.padding(end = 32.dp)) {
+                                        Text("Site permissions")
+                                        Text(
+                                            text = sitePermissionsSummary,
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        )
+                                    }
+                                },
+                                leadingIcon = { Icon(Icons.Filled.Tune, contentDescription = null) },
+                                onClick = {
+                                    menuExpanded = false
+                                    onOpenSitePermissions()
                                 },
                             )
                         }

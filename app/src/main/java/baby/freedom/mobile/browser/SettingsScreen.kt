@@ -33,13 +33,8 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.foundation.clickable
 import androidx.compose.ui.draw.clip
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.LocationOn
-import androidx.compose.material.icons.filled.Mic
-import androidx.compose.material.icons.filled.Videocam
-import androidx.compose.material.icons.filled.WebAsset
 import androidx.compose.material.icons.filled.AccountBalanceWallet
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Contrast
@@ -48,6 +43,7 @@ import androidx.compose.material.icons.filled.Public
 import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material.icons.filled.Update
+import androidx.compose.material.icons.filled.NewReleases
 import androidx.compose.material.icons.filled.DeleteForever
 import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.History
@@ -135,7 +131,9 @@ import kotlinx.coroutines.launch
  *     chains, added from a chainlist.org search or by hand (#107, see
  *     [ChainsSection]). Its Add chain pages and each chain's page (its own
  *     RPCs and how reads are checked, #108) replace the list while open.
- *  5. **About** — app name, version, package, and a short blurb.
+ *  5. **About** — app name, version, package, and a short blurb; and
+ *     **Check for updates** / **Check now**, with a newer release's
+ *     page one tap away (#272, [AppUpdates]).
  *  6. **Other** — a single "Show advanced options" row. Tapping it
  *     flips [NodeSettings.showIpfsUi] on, which reveals an "IPFS node
  *     (experimental)" card below (status, peers, gateway URL, and
@@ -160,6 +158,8 @@ fun SettingsScreen(
     onOpenWallet: () -> Unit = {},
     /** Open the node logs page (#276) at the IPFS node's. */
     onOpenIpfsLogs: () -> Unit = {},
+    /** A newer release's page (#272), in a new tab in front of Settings. */
+    onOpenUrl: (String) -> Unit = {},
 ) {
     BackHandler(onBack = onDismiss)
     // Settings search (#93). Registered after the dismiss handler so it
@@ -224,6 +224,8 @@ fun SettingsScreen(
 
     val scope = rememberCoroutineScope()
     val appVersion = remember(context) { appVersionLabel(context) }
+    val appUpdate by AppUpdates.state.collectAsState()
+    val checkForUpdates by settings.checkForUpdates.collectAsState(initial = true)
 
     // Each section's rows for the current query; an empty set hides the
     // section. The index is what the page shows right now (see
@@ -256,7 +258,7 @@ fun SettingsScreen(
     val torRows = visibleSettingsRows(query, SECTION_TOR, torRows(torEnabled, torStartOnLaunch))
     val chainRows = visibleSettingsRows(query, SECTION_CHAINS, chainSettingsRows(chains))
     val aboutRows = visibleSettingsRows(
-        query, SECTION_ABOUT, aboutRows(appVersion, context.packageName),
+        query, SECTION_ABOUT, aboutRows(appVersion, context.packageName, appUpdate, checkForUpdates),
     )
     val otherRows = visibleSettingsRows(query, SECTION_OTHER, otherRows())
     val ipfsRows = if (showIpfsUi) {
@@ -462,7 +464,15 @@ fun SettingsScreen(
                     )
                 }
                 if (aboutRows.isNotEmpty()) item("about") {
-                    AboutSection(visible = aboutRows, version = appVersion)
+                    AboutSection(
+                        visible = aboutRows,
+                        version = appVersion,
+                        update = appUpdate,
+                        checkForUpdates = checkForUpdates,
+                        onCheckForUpdates = { on -> scope.launch { settings.setCheckForUpdates(on) } },
+                        onCheckNow = { AppUpdates.checkForUpdates() },
+                        onOpenRelease = { onOpenUrl(it.url) },
+                    )
                 }
                 if (otherRows.isNotEmpty()) item("other") {
                     OtherSection(
@@ -1520,7 +1530,9 @@ private fun BrowsingDataSection(
  * without restarting the app.
  */
 private const val PERMISSIONS_EMPTY =
-    "Sites you allow or block from using your camera, microphone or location, or from opening links in other apps, " +
+    "Sites you allow or block from using your camera, microphone or location, " +
+        "from sending system-exclusive messages to your MIDI devices, " +
+        "or from opening links in other apps, " +
         "and sites you connect your wallet to, appear here."
 
 /** A wallet connection's row key in Site permissions: its own type, so it never equals a [SitePermissionEntry]. */
@@ -1633,13 +1645,7 @@ private fun SitePermissionsSection(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Icon(
-                    when (entry.permission) {
-                        SitePermission.CAMERA -> Icons.Filled.Videocam
-                        SitePermission.MICROPHONE -> Icons.Filled.Mic
-                        SitePermission.LOCATION -> Icons.Filled.LocationOn
-                        SitePermission.POPUPS -> Icons.Filled.WebAsset
-                        is ExternalScheme -> Icons.AutoMirrored.Filled.OpenInNew
-                    },
+                    sitePermissionIcon(entry.permission),
                     contentDescription = null,
                     tint = MaterialTheme.colorScheme.onSurface,
                 )
@@ -1667,17 +1673,6 @@ private fun SitePermissionsSection(
     }
 }
 
-/** "Allowed", "Blocked (this session)", "Blocked after 3 dismissals (this session)". */
-internal fun sitePermissionStateLabel(entry: SitePermissionEntry): String {
-    val scope = if (entry.remembered) "" else " (this session)"
-    return when {
-        entry.embargoed ->
-            "Blocked after ${PermissionSession.DISMISS_EMBARGO_THRESHOLD} dismissals$scope"
-        entry.decision == PermissionDecision.ALLOW -> "Allowed$scope"
-        else -> "Blocked$scope"
-    }
-}
-
 /** "1.2.3 (build 45)", as the About card shows it. */
 private fun appVersionLabel(context: Context): String {
     val info = runCatching {
@@ -1697,15 +1692,74 @@ private const val ABOUT_TAGLINE = "Swarm-native browser for Android"
 private const val ABOUT_BLURB =
     "Loads regular https:// sites plus decentralised content via bzz:// hashes and ENS names (vitalik.eth), served through embedded nodes."
 
-private fun aboutRows(version: String, packageName: String) = listOf(
-    settingsRow("app", ABOUT_NAME, ABOUT_TAGLINE),
-    settingsRow("version", "Version", version),
-    settingsRow("package", "Package", packageName),
-    settingsRow("blurb", ABOUT_BLURB),
-)
+private const val UPDATES_CHECK = "Check for updates"
+private const val UPDATES_CHECK_SUBTITLE = "Once a day, from GitHub Releases"
+private const val UPDATES_CHECK_NOW = "Check now"
+private const val UPDATES_CHECK_NOW_SUBTITLE = "Reads the latest release from GitHub"
+private const val UPDATES_OPEN_SUBTITLE = "Opens its release page"
+
+/**
+ * The line under **Check for updates** for a build from an app store:
+ * it doesn't check, the store updates it. `null` otherwise.
+ */
+internal fun appUpdateStoreLine(update: AppUpdateState): String? =
+    update.store?.let { "Installed from $it, which keeps Freedom up to date: no check runs" }
+
+/**
+ * The line under **Check now**: a check under way, what the last one
+ * found (the newer release, or that this is the latest), or why it
+ * failed — with when it last ran, by [formatTime].
+ */
+internal fun appUpdateLine(update: AppUpdateState, formatTime: (Long) -> String): String {
+    if (update.store != null) return "Updates come from ${update.store}"
+    if (update.checking) return "Checking…"
+    val available = update.available
+    val found = when {
+        available != null -> "Freedom ${available.version} is out; this is ${update.installedName}"
+        update.latest != null -> "Up to date: ${update.latest.version} is the latest release"
+        else -> null
+    }
+    val failed = (update.last as? UpdateCheckOutcome.Failed)?.let { "The last check failed: ${it.reason}" }
+    val checked = update.lastCheckedAt?.let { "last checked ${formatTime(it)}" }
+    val lead = failed ?: found ?: return checked?.replaceFirstChar { it.uppercase() } ?: "Not checked yet"
+    return listOfNotNull(lead, checked).joinToString(" · ")
+}
+
+/** The title of the row that opens a newer release's page: the home notice's. */
+internal fun appUpdateAvailableTitle(release: LatestRelease): String = updateNoticeTitle(release)
+
+private fun aboutRows(version: String, packageName: String, update: AppUpdateState, checkOn: Boolean) = buildList {
+    add(settingsRow("app", ABOUT_NAME, ABOUT_TAGLINE))
+    add(settingsRow("version", "Version", version))
+    add(settingsRow("package", "Package", packageName))
+    add(
+        settingsRow(
+            "update-check", UPDATES_CHECK, UPDATES_CHECK_SUBTITLE, appUpdateStoreLine(update),
+            if (checkOn) "On" else "Off", "updates", "release",
+        ),
+    )
+    add(
+        settingsRow(
+            "update-now", UPDATES_CHECK_NOW, UPDATES_CHECK_NOW_SUBTITLE, appUpdateLine(update) { txDateFormat().format(java.util.Date(it)) },
+            "check for updates", "release",
+        ),
+    )
+    update.available?.let {
+        add(settingsRow("update-open", appUpdateAvailableTitle(it), UPDATES_OPEN_SUBTITLE, "update", "release", it.url))
+    }
+    add(settingsRow("blurb", ABOUT_BLURB))
+}
 
 @Composable
-private fun AboutSection(visible: Set<Any>, version: String) {
+private fun AboutSection(
+    visible: Set<Any>,
+    version: String,
+    update: AppUpdateState,
+    checkForUpdates: Boolean,
+    onCheckForUpdates: (Boolean) -> Unit,
+    onCheckNow: () -> Unit,
+    onOpenRelease: (LatestRelease) -> Unit,
+) {
     val context = LocalContext.current
     SectionCard(title = SECTION_ABOUT) {
         if ("app" in visible) Row(
@@ -1734,6 +1788,41 @@ private fun AboutSection(visible: Set<Any>, version: String) {
         }
         if ("version" in visible) DetailRow("Version", version)
         if ("package" in visible) DetailRow("Package", context.packageName, mono = true)
+        val available = update.available
+        if ("update-open" in visible && available != null) PageRow(
+            title = appUpdateAvailableTitle(available),
+            subtitle = UPDATES_OPEN_SUBTITLE,
+            style = PageRowStyle.Inset,
+            leadingIcon = Icons.Filled.NewReleases,
+            onClick = { onOpenRelease(available) },
+        )
+        // A store install doesn't check: the switch shows why, greyed out.
+        val fromStore = update.store != null
+        if ("update-check" in visible) PageRow(
+            title = UPDATES_CHECK,
+            subtitle = UPDATES_CHECK_SUBTITLE,
+            thirdLine = appUpdateStoreLine(update),
+            style = PageRowStyle.Inset,
+            leadingIcon = Icons.Filled.Update,
+            enabled = !fromStore,
+            onClick = { if (!fromStore) onCheckForUpdates(!checkForUpdates) },
+            trailing = {
+                Switch(
+                    checked = checkForUpdates && !fromStore,
+                    onCheckedChange = onCheckForUpdates,
+                    enabled = !fromStore,
+                )
+            },
+        )
+        if ("update-now" in visible) PageRow(
+            title = UPDATES_CHECK_NOW,
+            subtitle = UPDATES_CHECK_NOW_SUBTITLE,
+            thirdLine = appUpdateLine(update) { txDateFormat().format(java.util.Date(it)) },
+            style = PageRowStyle.Inset,
+            leadingIcon = Icons.Filled.Sync,
+            enabled = !fromStore && !update.checking,
+            onClick = onCheckNow,
+        )
         if ("blurb" in visible) {
             // Spaced off only when something sits above it.
             if (visible.size > 1) Spacer(Modifier.height(8.dp))

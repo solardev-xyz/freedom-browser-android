@@ -6,14 +6,21 @@ import baby.freedom.mobile.node.IMyotisCallResult;
 
 /**
  * Cross-process interface to [MyotisService], the embedded Myotis
- * Ethereum / Gnosis light client in the `:myotis` process. The engines
- * start when the service is created (the UI binds only while the user
- * has the light client switched on) and stop when it's destroyed.
+ * Ethereum / Gnosis light client in the `:myotis` process. The UI binds
+ * while at least one chain is switched on and says which ones
+ * ([setNetworks]); the engines start with the first such call and stop
+ * when the service is destroyed.
  */
 interface IMyotisService {
     MyotisInfo getState();
     void registerCallback(IMyotisCallback cb);
     void unregisterCallback(IMyotisCallback cb);
+
+    /**
+     * Run only the chains in `chainIds` (#274): the first call starts them,
+     * later ones start and stop single chains, the others untouched.
+     */
+    void setNetworks(in long[] chainIds);
 
     /** The UI came to the foreground: warm-restart the paused engines. */
     void onAppForeground();
