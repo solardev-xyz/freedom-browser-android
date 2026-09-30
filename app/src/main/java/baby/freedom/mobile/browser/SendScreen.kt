@@ -23,6 +23,7 @@ import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -33,6 +34,7 @@ import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -51,6 +53,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import baby.freedom.mobile.chains.Chain
 import baby.freedom.mobile.ui.isLight
+import baby.freedom.mobile.ens.EnsAddressResult
 import baby.freedom.mobile.ens.toHex
 import baby.freedom.mobile.wallet.DappCall
 import baby.freedom.mobile.wallet.EthTransaction
@@ -73,6 +76,7 @@ import java.math.BigDecimal
 import java.math.BigInteger
 import java.math.RoundingMode
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 internal const val SEND_TITLE = "Send"
@@ -142,6 +146,15 @@ internal fun sendStatusText(status: SendStatus): Pair<String, String> {
     }
 }
 
+/**
+ * A name typed as the recipient (#277) and its answer for chain
+ * [chainId]; `null` [result] while it's being looked up.
+ */
+private data class NameLookup(val name: String, val chainId: Long, val result: EnsAddressResult?)
+
+/** How long the recipient field must stay still before a name in it is looked up. */
+private const val NAME_LOOKUP_DEBOUNCE_MS = 400L
+
 /** The block explorer's page for [hash], or null when the chain has no explorer. */
 internal fun explorerTxUrl(chain: Chain, hash: String): String? =
     chain.explorerUrl?.trimEnd('/')?.let { "$it/tx/$hash" }
@@ -182,6 +195,49 @@ internal fun SendPage(
     var error by remember { mutableStateOf<String?>(null) }
     var notice by remember { mutableStateOf<String?>(null) }
     var quote by remember { mutableStateOf<SendQuote?>(null) }
+    var lookup by remember { mutableStateOf<NameLookup?>(null) }
+    var lookupAttempt by remember { mutableStateOf(0) }
+    // The user's explicit OK for an answer only one server gave (#277);
+    // any change to the name, the chain or the answer takes it back.
+    var unverifiedAccepted by remember { mutableStateOf(false) }
+
+    // A name in the field is looked up for the selected asset's chain
+    // (#277). Here, at the page's top, not inside the list's item: an
+    // item scrolled away would drop the lookup and start it over. Every
+    // edit restarts it, so an answer is never shown for an older name.
+    val fieldToken = asset?.second
+    val fieldChain = asset?.first
+    val parsedRecipient = fieldToken?.let { Recipients.parse(recipient, it, names = true) }
+    val typedName = (parsedRecipient as? Recipients.Parsed.Name)?.name
+    LaunchedEffect(typedName, fieldChain?.id, lookupAttempt) {
+        unverifiedAccepted = false
+        if (typedName == null || fieldChain == null) {
+            lookup = null
+            return@LaunchedEffect
+        }
+        lookup = NameLookup(typedName, fieldChain.id, null)
+        delay(NAME_LOOKUP_DEBOUNCE_MS)
+        val result = try {
+            Gateways.ensResolver.resolveAddress(typedName, fieldChain.id)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            EnsAddressResult.Error(typedName, "RESOLUTION_ERROR", e.message ?: e.javaClass.simpleName, retryable = true)
+        }
+        lookup = NameLookup(typedName, fieldChain.id, result)
+    }
+    // Only the answer for what's in the field now: never a frame of the last name's.
+    val nameLookup = lookup?.takeIf { it.name == typedName && it.chainId == fieldChain?.id }
+    val nameAnswer = nameLookup?.result as? EnsAddressResult.Ok
+    val nameRecipient = if (nameAnswer != null && fieldToken != null) Recipients.resolved(nameAnswer.address, fieldToken) else null
+    // What the send goes to: a typed address, or a name's address — one
+    // only one server vouched for once the user has said so.
+    val recipientAddress = when (parsedRecipient) {
+        is Recipients.Parsed.Ok -> parsedRecipient.address
+        is Recipients.Parsed.Name -> (nameRecipient as? Recipients.Parsed.Ok)?.address
+            ?.takeIf { nameAnswer!!.trust.verified || unverifiedAccepted }
+        else -> null
+    }
 
     fun prepare(request: SendRequest, sendAll: Boolean, then: (SendQuote) -> Unit = { quote = it }) {
         if (busy) return
@@ -252,6 +308,10 @@ internal fun SendPage(
                 q != null -> item("review") {
                     SendReviewSection(
                         quote = q,
+                        recipientTrust = q.request.toName?.let { name ->
+                            nameAnswer?.takeIf { it.name == name && it.address.equals(q.request.to, ignoreCase = true) }
+                                ?.let { NameTrust(name, it.trust, q.request.to) }
+                        },
                         busy = busy,
                         notice = notice,
                         error = error,
@@ -279,6 +339,32 @@ internal fun SendPage(
                                     try {
                                         // A Ledger account's key is on the Ledger: nothing to unlock here (#142).
                                         if (!q.request.from.isLedger && !vault.unlockedNow()) vault.unlock(auth)
+                                        // A name is asked again, past every cache, right before
+                                        // signing (#277): the address reviewed must still be its
+                                        // answer, as well vouched for as when it was accepted.
+                                        q.request.toName?.let { name ->
+                                            val chainId = q.request.chain.id
+                                            notice = "Looking up $name again before signing…"
+                                            val after = try {
+                                                Gateways.ensResolver.resolveAddress(name, chainId, fresh = true)
+                                            } catch (e: CancellationException) {
+                                                throw e
+                                            } catch (e: Exception) {
+                                                EnsAddressResult.Error(name, "RESOLUTION_ERROR", e.message ?: e.javaClass.simpleName, retryable = true)
+                                            }
+                                            val accepted = unverifiedAccepted && nameAnswer != null && nameAnswer.name == name &&
+                                                nameAnswer.address.equals(q.request.to, ignoreCase = true)
+                                            Recipients.recheck(name, q.request.to, after, accepted)?.let { problem ->
+                                                // Back to the form, showing what the name says now.
+                                                lookup = NameLookup(name, chainId, after)
+                                                unverifiedAccepted = false
+                                                quote = null
+                                                notice = null
+                                                error = problem
+                                                return@launch
+                                            }
+                                        }
+                                        notice = null
                                         // submit checks the age again: the unlock prompt can have stood for minutes.
                                         when (sender.submit(q, WalletSender.signerFor(context, vault, q.request.from) { !sender.isStale(q) })) {
                                             WalletSender.Submit.STARTED -> {
@@ -319,10 +405,10 @@ internal fun SendPage(
                             error = null
                         }
                     }
-                    val token = asset?.second
-                    val chain = asset?.first
+                    val token = fieldToken
+                    val chain = fieldChain
                     item("to") {
-                        val parsed = token?.let { Recipients.parse(recipient, it) }
+                        val parsed = parsedRecipient
                         SectionCard(title = "To") {
                             OutlinedTextField(
                                 value = recipient,
@@ -332,7 +418,7 @@ internal fun SendPage(
                                 },
                                 enabled = !busy,
                                 singleLine = true,
-                                placeholder = { Text("0x…") },
+                                placeholder = { Text("0x… or name.eth") },
                                 textStyle = MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace),
                                 keyboardOptions = KeyboardOptions(
                                     capitalization = KeyboardCapitalization.None,
@@ -344,6 +430,17 @@ internal fun SendPage(
                             when {
                                 recipient.isEmpty() -> Unit
                                 parsed is Recipients.Parsed.Invalid -> FieldNote(parsed.reason, error = true)
+                                parsed is Recipients.Parsed.Name && chain != null -> NameRecipientNote(
+                                    name = parsed.name,
+                                    chainName = chain.name,
+                                    result = nameLookup?.result,
+                                    recipient = nameRecipient,
+                                    ownAddress = account.address,
+                                    unverifiedAccepted = unverifiedAccepted,
+                                    enabled = !busy,
+                                    onAcceptUnverified = { unverifiedAccepted = it },
+                                    onRetry = { lookupAttempt++ },
+                                )
                                 parsed is Recipients.Parsed.Ok && parsed.address.equals(account.address, ignoreCase = true) ->
                                     FieldNote("That’s this account’s own address: only the fee leaves it.", error = false)
                             }
@@ -399,7 +496,7 @@ internal fun SendPage(
                         }
                     }
                     item("review") {
-                        val to = (token?.let { Recipients.parse(recipient, it) } as? Recipients.Parsed.Ok)?.address
+                        val to = recipientAddress
                         val raw = token?.let { SendAmounts.parse(amount, it.decimals) }
                         Column {
                             error?.let {
@@ -410,7 +507,7 @@ internal fun SendPage(
                                 enabled = !busy && chain != null && token != null && to != null && raw != null,
                                 onClick = {
                                     if (chain != null && token != null && to != null && raw != null) {
-                                        prepare(SendRequest(chain, token, account, to, raw), all)
+                                        prepare(SendRequest(chain, token, account, to, raw, toName = typedName), all)
                                     }
                                 },
                                 modifier = Modifier.fillMaxWidth(),
@@ -483,6 +580,8 @@ private fun AssetPicker(
 @Composable
 private fun SendReviewSection(
     quote: SendQuote,
+    /** How the name the send goes to was checked (#277), when the form's answer is the one reviewed. */
+    recipientTrust: NameTrust?,
     busy: Boolean,
     notice: String?,
     error: String?,
@@ -499,7 +598,13 @@ private fun SendReviewSection(
         ReviewRow("Network", chain.name)
         ReviewRow("Asset", token.symbol, address = token.address)
         ReviewRow("From", request.from.name, address = request.from.address)
-        ReviewRow("To", null, address = request.to)
+        ReviewRow(
+            "To",
+            request.toName,
+            address = request.to,
+            detail = recipientTrust?.let { "${it.tier.title}. ${it.recipientSummary}" }
+                ?: request.toName?.let { "The name is looked up again just before signing; the address, not the name, is signed." },
+        )
         if (request.to.equals(request.from.address, ignoreCase = true)) {
             FieldNote("This is the sending account itself.", error = false)
         }
@@ -604,7 +709,7 @@ internal fun SendStatusSection(
         // A site's transaction (#110): who asked for it, whatever it carries.
         request.dapp?.let { ReviewRow("Requested by", dappRequester(it)) }
         ReviewRow("Amount", "${SendAmounts.exact(request.amount, request.token.decimals)} ${request.token.symbol} on ${request.chain.name}", mono = true)
-        ReviewRow(if (request.dapp != null) "Contract" else "To", null, address = request.to)
+        ReviewRow(if (request.dapp != null) "Contract" else "To", request.toName, address = request.to)
         // One desktop Freedom composed (#113): what it calls is part of what was sent.
         request.dapp?.takeIf { it.origin == null && it.safe == null && it.swarm == null }?.let { HexRow("Data", "0x" + it.data.toHex(), selector = true, detail = "Asked for over a scanned pairing code") }
         status.hash?.let { hash ->
@@ -679,6 +784,91 @@ internal fun stopTrackingText(status: SendStatus): String {
     return "It may still go through: if it does, ${SendAmounts.exact(r.amount, r.token.decimals)} ${r.token.symbol} is paid. " +
         "Until it’s mined, the next send from ${r.from.name} on ${r.chain.name} reuses its nonce " +
         "(${status.quote.tx.nonce}) at a higher fee, so it takes this one’s place: only one of the two can go through."
+}
+
+/**
+ * What a name typed as the recipient (#277) comes to: looking it up;
+ * the address, with the trust shield's tier and what it means; why
+ * there's nothing to send to; or a failure to retry. An address only one
+ * server vouched for needs the user's explicit OK ([onAcceptUnverified])
+ * before it can be reviewed; servers that disagree block the send.
+ */
+@Composable
+private fun NameRecipientNote(
+    name: String,
+    chainName: String,
+    result: EnsAddressResult?,
+    recipient: Recipients.Parsed?,
+    ownAddress: String,
+    unverifiedAccepted: Boolean,
+    enabled: Boolean,
+    onAcceptUnverified: (Boolean) -> Unit,
+    onRetry: () -> Unit,
+) {
+    Column(Modifier.fillMaxWidth().padding(top = 6.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        when {
+            result == null -> Row(verticalAlignment = Alignment.CenterVertically) {
+                CircularProgressIndicator(strokeWidth = 2.dp, modifier = Modifier.size(14.dp))
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    "Looking up $name on $chainName…",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            result is EnsAddressResult.Ok -> {
+                val trust = NameTrust(name, result.trust, result.address)
+                SelectionContainer {
+                    AddressText(
+                        (recipient as? Recipients.Parsed.Ok)?.address ?: result.address,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurface,
+                    )
+                }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(trust.tier.icon, contentDescription = null, tint = trust.tier.color, modifier = Modifier.size(16.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text(
+                        trust.tier.title,
+                        style = MaterialTheme.typography.labelLarge,
+                        color = trust.tier.color,
+                    )
+                }
+                Text(
+                    trust.recipientSummary,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                when {
+                    recipient is Recipients.Parsed.Invalid -> FieldNote(recipient.reason, error = true)
+                    !result.trust.verified -> Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.fillMaxWidth().selectable(
+                            selected = unverifiedAccepted,
+                            enabled = enabled,
+                            role = Role.Checkbox,
+                            onClick = { onAcceptUnverified(!unverifiedAccepted) },
+                        ),
+                    ) {
+                        Checkbox(checked = unverifiedAccepted, onCheckedChange = null, enabled = enabled)
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            "I’ve checked this address with the recipient. Send to it anyway.",
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
+                    result.address.equals(ownAddress, ignoreCase = true) ->
+                        FieldNote("That’s this account’s own address: only the fee leaves it.", error = false)
+                }
+            }
+            else -> {
+                FieldNote(Recipients.lookupProblem(result, chainName).orEmpty(), error = true)
+                if (result is EnsAddressResult.Error || result is EnsAddressResult.Conflict) {
+                    TextButton(onClick = onRetry, enabled = enabled) { Text("Try again") }
+                }
+            }
+        }
+    }
 }
 
 @Composable

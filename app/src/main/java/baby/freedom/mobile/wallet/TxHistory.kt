@@ -38,6 +38,8 @@ data class TxRecord(
     val from: String,
     /** The recipient: for a token transfer the person paid, not the token's contract. */
     val to: String,
+    /** The name [to] was sent to by, if the user typed one (#277): a label only. */
+    val toName: String? = null,
     val tokenAddress: String?,
     val tokenSymbol: String,
     val tokenDecimals: Int,
@@ -153,6 +155,7 @@ internal object TxHistoryCodec {
         .put("explorerUrl", r.explorerUrl ?: JSONObject.NULL)
         .put("from", r.from)
         .put("to", r.to)
+        .put("toName", r.toName ?: JSONObject.NULL)
         .put("tokenAddress", r.tokenAddress ?: JSONObject.NULL)
         .put("tokenSymbol", r.tokenSymbol)
         .put("tokenDecimals", r.tokenDecimals)
@@ -176,6 +179,7 @@ internal object TxHistoryCodec {
             explorerUrl = o.stringOrNull("explorerUrl"),
             from = o.getString("from"),
             to = o.getString("to"),
+            toName = o.stringOrNull("toName"),
             tokenAddress = o.stringOrNull("tokenAddress"),
             tokenSymbol = o.getString("tokenSymbol"),
             tokenDecimals = o.getInt("tokenDecimals"),
@@ -437,6 +441,7 @@ class TxHistory internal constructor(
             explorerUrl = r.chain.explorerUrl,
             from = r.from.address,
             to = r.to,
+            toName = r.toName,
             tokenAddress = r.token.address,
             tokenSymbol = r.token.symbol,
             tokenDecimals = r.token.decimals,

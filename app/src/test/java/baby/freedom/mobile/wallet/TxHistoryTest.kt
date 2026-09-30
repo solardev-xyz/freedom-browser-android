@@ -199,6 +199,21 @@ class TxHistoryTest {
     }
 
     @Test
+    fun `a send to a name records the name beside the address, and the file keeps it (#277)`() = runBlocking<Unit> {
+        val chain = FakeChain(gnosis)
+        val h = history(chain)
+        val s = sender(chain, h)
+        s.submit(s.prepare(request().copy(toName = "alice.eth")), signer())
+        val hash = s.awaitStage { it == SendStatus.Stage.Pending }.hash!!
+        val r = h.awaitRecord(hash)
+        assertEquals(to, r.to)
+        assertEquals("alice.eth", r.toName)
+        assertEquals(listOf(r), TxHistoryCodec.decode(TxHistoryCodec.encode(listOf(r))))
+        // A record written before names has none.
+        assertNull(TxHistoryCodec.decode(TxHistoryCodec.encode(listOf(record()))).single().toName)
+    }
+
+    @Test
     fun `a send that may have gone out is recorded pending, one certainly not sent never is`() = runBlocking<Unit> {
         val chain = FakeChain(gnosis)
         val h = history(chain)

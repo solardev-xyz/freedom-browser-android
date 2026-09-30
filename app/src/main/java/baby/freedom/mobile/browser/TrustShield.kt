@@ -129,6 +129,40 @@ internal data class NameTrust(val name: String, val trust: EnsTrust, val answer:
                     "where this page comes from."
             }
         }
+
+    /**
+     * [summary] for a send's recipient (#277): the same tiers, said of
+     * the name's address record — and of where the money goes, not
+     * where a page comes from.
+     */
+    val recipientSummary: String
+        get() = when (tier) {
+            TrustTier.Proven -> if (trust.lightClient) {
+                "The Myotis light client on this device read $name's $system address record at $block " +
+                    "and checked it against Ethereum state proofs signed off by the chain's sync committee. " +
+                    "No RPC server's word was involved."
+            } else {
+                val prover = trust.agreed.joinToString(" and ").ifEmpty { "the Colibri prover" }
+                if (trust.offchain) {
+                    "$name's address comes from an off-chain gateway (CCIP-Read). This device checked a " +
+                        "proof from $prover against Ethereum's sync committee that the name's resolver " +
+                        "contract accepted that answer at $block; the record itself isn't on chain."
+                } else {
+                    "This device checked a proof from $prover against Ethereum's sync committee: this is " +
+                        "the address $name's $system record holds at $block, not just what RPC servers agree on."
+                }
+            }
+            TrustTier.Verified -> {
+                val n = trust.agreed.size
+                val agreed = if (n >= 2) "$n independent RPC servers" else "Independent RPC servers"
+                "$agreed returned the same address for $name at $block."
+            }
+            TrustTier.Unverified -> {
+                val who = trust.agreed.singleOrNull() ?: "one RPC server"
+                "Only $who answered for $name, so its address wasn't checked against another " +
+                    "server. A single misbehaving server could have picked where this money goes."
+            }
+        }
 }
 
 /**

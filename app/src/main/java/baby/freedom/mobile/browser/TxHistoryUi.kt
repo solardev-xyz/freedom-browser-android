@@ -114,7 +114,7 @@ private fun TxRow(r: TxRecord, onOpen: (TxRecord) -> Unit) {
             Text(txTitle(r), fontWeight = FontWeight.Medium)
             Text(txSubtitle(r), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             Text(
-                "To ${shortAddress(r.to)}",
+                "To " + (r.toName?.let { "$it · " } ?: "") + shortAddress(r.to),
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
             )
@@ -196,7 +196,7 @@ internal fun TxDetailPage(r: TxRecord, onOpenUrl: (String) -> Unit, onBack: () -
                     }
                     Spacer(Modifier.height(8.dp))
                     TxField("Amount", "${SendAmounts.exact(r.amount, r.tokenDecimals)} ${r.tokenSymbol}", mono = true)
-                    TxField("To", null, address = r.to)
+                    TxField("To", r.toName, address = r.to)
                     TxField("From", null, address = r.from)
                     TxField("Network", r.chainName)
                     r.tokenAddress?.let { TxField("${r.tokenSymbol} contract", null, address = it) }

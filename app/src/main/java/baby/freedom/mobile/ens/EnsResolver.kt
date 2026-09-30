@@ -599,7 +599,7 @@ class EnsResolver internal constructor(
      * that (#51).
      */
     suspend fun resolveContenthash(rawName: String): EnsResult {
-        val result = resolve(rawName)
+        val result = resolve(rawName, Record.Contenthash, fresh = false)
         // Not every cancellation arrives as a `CancellationException`:
         // tearing down the RPC in flight can surface as an ordinary
         // `IOException`, which the retry loop maps to a PROVIDER_ERROR
@@ -609,10 +609,55 @@ class EnsResolver internal constructor(
         return result
     }
 
+    /**
+     * The address [rawName] names for a send on chain [chainId] (#277):
+     * its `addr` record for that chain's coin type (ENSIP-9 on Ethereum,
+     * ENSIP-11 elsewhere), read through the same tiers as a page's
+     * contenthash — light client, Colibri, the quorum, one server —
+     * and labelled with the same [EnsTrust]. ENS names (`.eth`, `.box`,
+     * and DNS names such as `gregskril.com`, through the Universal
+     * Resolver) work on any chain; WNS (`.wei`) and GNS (`.gwei`)
+     * registries hold only the chain-agnostic `addr(bytes32)`, so off
+     * Ethereum they're refused rather than answered with a mainnet
+     * address that may not be the owner's there ([EnsAddressResult.NoAddress]
+     * with `CHAIN_UNSUPPORTED`, desktop's stance). Tezos Domains names
+     * aren't Ethereum names and are refused too.
+     *
+     * [fresh]: skip the cache and ask again — the re-check just before
+     * signing, so a record changed since the review isn't paid to the
+     * old address. The fresh answer is cached as any other.
+     *
+     * Cancellation-honest, as [resolveContenthash].
+     */
+    suspend fun resolveAddress(rawName: String, chainId: Long, fresh: Boolean = false): EnsAddressResult {
+        require(chainId in 1 until 0x80000000L) { "chain id out of ENSIP-11's range" }
+        val coinType = if (chainId == 1L) ETH_COIN_TYPE else 0x80000000L + chainId
+        val result = resolve(rawName, Record.Address(coinType), fresh)
+        coroutineContext.ensureActive()
+        return EnsAddressResult.of(result)
+    }
+
+    /**
+     * Which record a lookup reads: a page's `contenthash`, or the
+     * `addr` for [Address.coinType] a send pays (#277). Everything but
+     * the call data and its decoding is shared.
+     */
+    private sealed class Record {
+        abstract fun cacheKey(name: String): String
+
+        data object Contenthash : Record() {
+            override fun cacheKey(name: String) = name
+        }
+
+        data class Address(val coinType: Long) : Record() {
+            override fun cacheKey(name: String) = "addr:$coinType:$name"
+        }
+    }
+
     /** An answer, and whether a quorum of servers stands behind it. */
     private class Verdict(val result: EnsResult, val verified: Boolean)
 
-    private suspend fun resolve(rawName: String): EnsResult {
+    private suspend fun resolve(rawName: String, record: Record, fresh: Boolean): EnsResult {
         val trimmed = rawName.trim()
         if (trimmed.isEmpty()) {
             return EnsResult.Error(name = "", reason = "INVALID_NAME", error = "empty name")
@@ -624,6 +669,19 @@ class EnsResolver internal constructor(
         }
 
         val system = NameSystem.forName(normalized)
+        if (record is Record.Address) {
+            if (system == NameSystem.TEZOS) {
+                return EnsResult.Error(normalized, "UNSUPPORTED_SYSTEM", "Tezos Domains names don't name Ethereum accounts")
+            }
+            // A NameNFT registry has one chain-agnostic address; see [resolveAddress].
+            if (system.contractAddress != null && record.coinType != ETH_COIN_TYPE) {
+                return EnsResult.Error(
+                    normalized,
+                    "CHAIN_UNSUPPORTED",
+                    "${system.label} names hold an Ethereum address only, not one for this network",
+                )
+            }
+        }
         // `.tez` isn't Ethereum: its own resolver, quorum and TTL cache.
         if (system == NameSystem.TEZOS) return tezos.resolve(normalized)
 
@@ -657,19 +715,22 @@ class EnsResolver internal constructor(
         val askLightClient = generation != null && !missedName &&
             (config.endpoints.isEmpty() || !lightClientBackingOff(generation, System.currentTimeMillis()))
 
-        cache[normalized]?.let {
-            // One server's word (or a disagreement) doesn't stand in the
-            // way of the light client verifying it.
-            if (System.currentTimeMillis() < it.expiresAt && (it.verified || !askLightClient)) return it.result
+        val cacheKey = record.cacheKey(normalized)
+        if (!fresh) {
+            cache[cacheKey]?.let {
+                // One server's word (or a disagreement) doesn't stand in the
+                // way of the light client verifying it.
+                if (System.currentTimeMillis() < it.expiresAt && (it.verified || !askLightClient)) return it.result
+            }
         }
 
         val contract = system.contractAddress
         val target = contract ?: UNIVERSAL_RESOLVER
         val callData = if (contract != null) {
-            CONTENTHASH_SELECTOR + namehash(normalized)
+            recordCallData(record, namehash(normalized))
         } else {
             try {
-                buildResolveCallData(normalized)
+                buildResolveCallData(normalized, record)
             } catch (e: IllegalArgumentException) {
                 // A label past the DNS encoding's 255 bytes is a valid
                 // ENSIP-15 name the Universal Resolver just can't be
@@ -694,12 +755,12 @@ class EnsResolver internal constructor(
         }
         if (askLightClient) {
             resolveByLightClient(
-                generation!!, normalized, target, callData, contract, config.ccipRead,
+                generation!!, normalized, target, callData, contract, record, config.ccipRead,
                 capped = config.endpoints.isNotEmpty(),
             )
                 ?.let { verdict ->
                     val ttl = ttlFor(verdict)
-                    if (ttl > 0) cache[normalized] = Cached(verdict.result, System.currentTimeMillis() + ttl, verdict.verified)
+                    if (ttl > 0) cache[cacheKey] = Cached(verdict.result, System.currentTimeMillis() + ttl, verdict.verified)
                     Log.i(TAG, "[$normalized] → ${verdict.result}")
                     return verdict.result
                 }
@@ -713,13 +774,13 @@ class EnsResolver internal constructor(
         // server's word otherwise, labelled as such.
         val quorumPossible = EnsQuorum.canCrossCheck(config.endpoints)
         val verdict =
-            (if (config.colibri) resolveByColibri(config, normalized, target, callData, contract) else null)
-                ?: (if (quorumPossible) resolveByQuorum(epoch, normalized, target, callData, contract) else null)
-                ?: resolveSingleSource(epoch, normalized, target, callData, contract)
+            (if (config.colibri) resolveByColibri(config, normalized, target, callData, contract, record) else null)
+                ?: (if (quorumPossible) resolveByQuorum(epoch, normalized, target, callData, contract, record) else null)
+                ?: resolveSingleSource(epoch, normalized, target, callData, contract, record)
         val ttl = ttlFor(verdict)
         if (ttl > 0) {
             val verified = verdict.verified && verdict.result !is EnsResult.Conflict
-            cache[normalized] = Cached(verdict.result, System.currentTimeMillis() + ttl, verified)
+            cache[cacheKey] = Cached(verdict.result, System.currentTimeMillis() + ttl, verified)
         }
         Log.i(TAG, "[$normalized] → ${verdict.result}")
         return verdict.result
@@ -850,13 +911,14 @@ class EnsResolver internal constructor(
         target: String,
         callData: ByteArray,
         contract: String?,
+        record: Record,
         ccipRead: Boolean,
         capped: Boolean,
     ): Verdict? {
         val client = lightClient ?: return null
         val startedAt = System.currentTimeMillis()
         val budget = LightClientBudget(startedAt + lightClientDeadlineMs)
-        val read = io.async { lightClientRead(client, generation, name, target, callData, contract, ccipRead, budget, capped) }
+        val read = io.async { lightClientRead(client, generation, name, target, callData, contract, record, ccipRead, budget, capped) }
         var engineOwnsTheTime = true
         var gaveUp = false
         val outcome = try {
@@ -1012,6 +1074,7 @@ class EnsResolver internal constructor(
         target: String,
         callData: ByteArray,
         contract: String?,
+        record: Record,
         ccipRead: Boolean,
         budget: LightClientBudget,
         capped: Boolean,
@@ -1113,12 +1176,12 @@ class EnsResolver internal constructor(
                     throw LightClientMiss("CCIP-Read: ${e.message}")
                 }
             }
-            return lightClientVerdict(name, outcome, contract, block)
+            return lightClientVerdict(name, outcome, contract, record, block)
         }
     }
 
     /** The light client's final [outcome] as a [Verdict], or [LightClientMiss] for anything but an answer. */
-    private fun lightClientVerdict(name: String, outcome: CallOutcome, contract: String?, block: Long?): Verdict {
+    private fun lightClientVerdict(name: String, outcome: CallOutcome, contract: String?, record: Record, block: Long?): Verdict {
         val trust = EnsTrust(
             verified = true,
             agreed = listOf(LIGHT_CLIENT_SOURCE),
@@ -1128,12 +1191,12 @@ class EnsResolver internal constructor(
         outcome.revertData?.let { revert ->
             // Only a revert that says "no such name" is taken as an
             // answer; anything else is left for the RPC servers to report.
-            val mapped = (if (contract == null) mapRevert(name, revert) else null)
+            val mapped = (if (contract == null) mapRevert(name, revert, record) else null)
                 ?: throw LightClientMiss("revert ${revert.take(10)}")
             return Verdict(mapped.withTrust(trust), verified = true)
         }
         if (outcome.data.isNullOrEmpty()) throw LightClientMiss("empty result")
-        val decoded = decode(name, outcome, contract)
+        val decoded = decode(name, outcome, contract, record)
         if (decoded is EnsResult.Error) throw LightClientMiss("${decoded.reason}: ${decoded.error}")
         return Verdict(decoded.withTrust(trust), verified = true)
     }
@@ -1185,6 +1248,7 @@ class EnsResolver internal constructor(
         target: String,
         callData: ByteArray,
         contract: String?,
+        record: Record,
     ): Verdict? {
         val colibri = colibri ?: return null
         colibriBackoff.remainingMs()?.let {
@@ -1299,9 +1363,9 @@ class EnsResolver internal constructor(
         val verdict = when (val r = outcome.revertData) {
             null -> {
                 if (outcome.data.isNullOrEmpty() || outcome.data == "0x") return null
-                decode(name, outcome, contract).withTrust(trust())
+                decode(name, outcome, contract, record).withTrust(trust())
             }
-            else -> (if (contract == null) mapRevert(name, r) else null)?.withTrust(trust()) ?: run {
+            else -> (if (contract == null) mapRevert(name, r, record) else null)?.withTrust(trust()) ?: run {
                 Log.i(TAG, "[$name] colibri: proven revert ${r.take(10)} proves no record; asking the RPC servers")
                 return null
             }
@@ -1424,6 +1488,7 @@ class EnsResolver internal constructor(
         target: String,
         callData: ByteArray,
         contract: String?,
+        record: Record,
     ): Verdict? {
         val round = anchorRound(epoch) ?: return null
         val ccipRead = epoch.settings.ccipRead
@@ -1459,7 +1524,7 @@ class EnsResolver internal constructor(
         Log.i(TAG, "[$name] block #${round.number}: ${scrub(vote, round.reported)}")
         return when (vote) {
             is EnsQuorum.WaveVote.Agreed -> Verdict(
-                decode(name, outcomes.getValue(vote.agreed.first()), contract).withTrust(
+                decode(name, outcomes.getValue(vote.agreed.first()), contract, record).withTrust(
                     EnsTrust(
                         verified = true,
                         agreed = vote.agreed.map(::hostOf),
@@ -1470,7 +1535,7 @@ class EnsResolver internal constructor(
                 verified = true,
             )
             is EnsQuorum.WaveVote.Unverified -> Verdict(
-                decode(name, outcomes.getValue(vote.hosts.first()), contract).withTrust(
+                decode(name, outcomes.getValue(vote.hosts.first()), contract, record).withTrust(
                     EnsTrust(verified = false, agreed = vote.hosts.map(::hostOf), block = round.number),
                 ),
                 verified = false,
@@ -1478,7 +1543,7 @@ class EnsResolver internal constructor(
             is EnsQuorum.WaveVote.Conflict -> {
                 val groups = vote.byKey.values.map { rpcs ->
                     EnsResult.Conflict.Group(
-                        describe(decode(name, outcomes.getValue(rpcs.first()), contract)),
+                        describe(decode(name, outcomes.getValue(rpcs.first()), contract, record)),
                         rpcs.map(::hostOf),
                     )
                 }
@@ -1662,7 +1727,7 @@ class EnsResolver internal constructor(
     /** What an answer says, for a warning listing the disagreeing servers. */
     private fun describe(result: EnsResult): String = when (result) {
         is EnsResult.Ok -> result.uri
-        is EnsResult.NotFound -> "no content (${result.reason})"
+        is EnsResult.NotFound -> if (result.reason == "NO_ADDRESS") "no address" else "no content (${result.reason})"
         is EnsResult.Unsupported -> "unsupported contenthash 0x${result.rawContentHash}"
         is EnsResult.Error -> result.error
         is EnsResult.Conflict -> "conflict"
@@ -1732,6 +1797,7 @@ class EnsResolver internal constructor(
         target: String,
         callData: ByteArray,
         contract: String?,
+        record: Record,
     ): Verdict {
         val config = epoch.settings
         val failedAt = epoch.failedAt
@@ -1802,7 +1868,7 @@ class EnsResolver internal constructor(
                 call = followed.getOrThrow()
             }
             if (call.revertData != null) {
-                val mapped = if (contract == null) mapRevert(normalized, call.revertData) else null
+                val mapped = if (contract == null) mapRevert(normalized, call.revertData, record) else null
                 if (mapped != null) {
                     failedAt.remove(rpc)
                     return Verdict(mapped.withTrust(trustOf(rpc)), verified = false)
@@ -1825,7 +1891,7 @@ class EnsResolver internal constructor(
             }
 
             failedAt.remove(rpc)
-            return Verdict(decode(normalized, call, contract).withTrust(trustOf(rpc)), verified = false)
+            return Verdict(decode(normalized, call, contract, record).withTrust(trustOf(rpc)), verified = false)
         }
 
         return Verdict(
@@ -1844,13 +1910,14 @@ class EnsResolver internal constructor(
      * still standing here is one [startCall] didn't follow because
      * CCIP-Read is off.
      */
-    private fun decode(name: String, call: CallOutcome, contract: String?): EnsResult {
+    private fun decode(name: String, call: CallOutcome, contract: String?, record: Record): EnsResult {
         call.revertData?.let { revert ->
             if (contract == null && isOffchainLookup(revert)) return ccipDisabled(name)
-            return (if (contract == null) mapRevert(name, revert) else null)
+            return (if (contract == null) mapRevert(name, revert, record) else null)
                 ?: EnsResult.Error(name = name, reason = "RESOLUTION_ERROR", error = "revert: $revert")
         }
         val raw = call.data.orEmpty()
+        if (record is Record.Address) return decodeAddressResponse(name, raw, viaUniversalResolver = contract == null, record)
         return if (contract != null) {
             // The registry's own `contenthash(bytes32)` return: the
             // ABI `bytes` the UR would have wrapped in its tuple.
@@ -1875,11 +1942,63 @@ class EnsResolver internal constructor(
 
     // ---- ABI / name encoding ----
 
-    private fun buildResolveCallData(normalizedName: String): ByteArray {
+    private fun buildResolveCallData(normalizedName: String, record: Record): ByteArray {
         val dnsName = dnsEncode(normalizedName)
         val node = namehash(normalizedName)
-        val innerCallData = CONTENTHASH_SELECTOR + node
-        return RESOLVE_SELECTOR + abiEncodeTwoBytes(dnsName, innerCallData)
+        return RESOLVE_SELECTOR + abiEncodeTwoBytes(dnsName, recordCallData(record, node))
+    }
+
+    /**
+     * The resolver call reading [record] for [node]: `contenthash(node)`;
+     * for an address, `addr(node)` for Ethereum's coin type (ENSIP-1/9,
+     * the one every resolver — and a NameNFT registry — has) and
+     * `addr(node, coinType)` for any other chain (ENSIP-11).
+     */
+    private fun recordCallData(record: Record, node: ByteArray): ByteArray = when (record) {
+        Record.Contenthash -> CONTENTHASH_SELECTOR + node
+        is Record.Address -> if (record.coinType == ETH_COIN_TYPE) {
+            ADDR_SELECTOR + node
+        } else {
+            ByteArray(32).also { writeUint256(record.coinType, it, 0) }.let { MULTICOIN_ADDR_SELECTOR + node + it }
+        }
+    }
+
+    /**
+     * An address record's answer, as an [EnsResult.Ok] whose [EnsResult.Ok.uri]
+     * (and `decoded`) is the lowercase `0x` address, protocol `addr` —
+     * internal to this class; [resolveAddress] hands out an
+     * [EnsAddressResult]. `addr(bytes32)` returns an ABI `address`;
+     * `addr(bytes32,uint256)` ABI `bytes`, 20 of them for an EVM chain.
+     * Through the Universal Resolver that return is wrapped in its
+     * `(bytes, address)` tuple. No record — empty bytes, or the zero
+     * address — is `NotFound` with `NO_ADDRESS`: nothing may be sent there.
+     */
+    private fun decodeAddressResponse(name: String, rawHex: String, viaUniversalResolver: Boolean, record: Record.Address): EnsResult {
+        val inner = if (viaUniversalResolver) {
+            decodeDynamicBytesAt(rawHex, pointerSlot = 0)
+                ?: return EnsResult.Error(name, "RESOLUTION_ERROR", "malformed UR outer response")
+        } else {
+            runCatching { rawHex.hexToBytes() }.getOrNull()
+                ?: return EnsResult.Error(name, "RESOLUTION_ERROR", "malformed addr response")
+        }
+        if (inner.isEmpty()) return EnsResult.NotFound(name, "NO_ADDRESS", EnsTrust.UNCHECKED)
+        val address: ByteArray = if (record.coinType == ETH_COIN_TYPE) {
+            if (inner.size != 32 || (0 until 12).any { inner[it] != 0.toByte() }) {
+                return EnsResult.Error(name, "RESOLUTION_ERROR", "addr record isn't an ABI address")
+            }
+            inner.copyOfRange(12, 32)
+        } else {
+            val bytes = decodeDynamicBytesAt(inner, pointerSlot = 0)
+                ?: return EnsResult.Error(name, "RESOLUTION_ERROR", "addr record isn't ABI bytes")
+            if (bytes.isEmpty()) return EnsResult.NotFound(name, "NO_ADDRESS", EnsTrust.UNCHECKED)
+            if (bytes.size != 20) {
+                return EnsResult.Error(name, "RESOLUTION_ERROR", "addr record is ${bytes.size} bytes, not an EVM address")
+            }
+            bytes
+        }
+        if (address.all { it == 0.toByte() }) return EnsResult.NotFound(name, "NO_ADDRESS", EnsTrust.UNCHECKED)
+        val hex = "0x" + address.toHex()
+        return EnsResult.Ok(name, protocol = ADDRESS_PROTOCOL, uri = hex, decoded = hex, trust = EnsTrust.UNCHECKED)
     }
 
     // ---- CCIP-Read (EIP-3668) ----
@@ -2190,12 +2309,16 @@ class EnsResolver internal constructor(
         return null
     }
 
-    private fun mapRevert(name: String, revertData: String): EnsResult? {
+    private fun mapRevert(name: String, revertData: String, record: Record): EnsResult? {
         val lower = revertData.lowercase()
         val selector = if (lower.length >= 10) lower.substring(0, 10) else return null
         return when (selector) {
             // ResolverNotFound(bytes), ResolverNotContract(bytes,address)
             "0x77209fe8", "0x1e9535f2" -> EnsResult.NotFound(name, "NO_RESOLVER", EnsTrust.UNCHECKED)
+            // UnsupportedResolverProfile(bytes4): the name's resolver has no
+            // multicoin `addr` (#277) — no address for this chain, from
+            // the Universal Resolver itself, not a failure.
+            "0x7b1c461b" -> if (record is Record.Address) EnsResult.NotFound(name, "NO_ADDRESS", EnsTrust.UNCHECKED) else null
             else -> null
         }
     }
@@ -2502,6 +2625,18 @@ class EnsResolver internal constructor(
 
         // bytes4(keccak256("contenthash(bytes32)"))
         private val CONTENTHASH_SELECTOR = "bc1c58d1".hexToBytes()
+
+        // bytes4(keccak256("addr(bytes32)")), ENSIP-1
+        private val ADDR_SELECTOR = "3b3b57de".hexToBytes()
+
+        // bytes4(keccak256("addr(bytes32,uint256)")), ENSIP-9
+        private val MULTICOIN_ADDR_SELECTOR = "f1cb7e06".hexToBytes()
+
+        /** SLIP-44 coin type 60: Ethereum mainnet's `addr` (ENSIP-9). */
+        internal const val ETH_COIN_TYPE = 60L
+
+        /** [EnsResult.Ok.protocol] of an address record's answer (internal; see [decodeAddressResponse]). */
+        internal const val ADDRESS_PROTOCOL = "addr"
 
         /** The server as a warning names it: host, and port if explicit. */
         private fun hostOf(rpc: String): String =
