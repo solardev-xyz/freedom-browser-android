@@ -42,8 +42,11 @@ class SwarmFundingTest {
     private val connects: MutableList<String> = java.util.Collections.synchronizedList(mutableListOf())
     private val payer = "0x9858EfFD232B4033E47d90003D41EC34EcaEda94"
 
+    /** The node's spend, idle: as the funding reads it, a [StateFlow][kotlinx.coroutines.flow.StateFlow]. */
+    private fun idle() = kotlinx.coroutines.flow.MutableStateFlow<StampClient.Spend>(StampClient.Spend.Idle)
+
     private fun funding(file: File = File(tmp.root, "funding.json")) =
-        SwarmFunding(file, connect = { connects += it; true }, spends = emptyFlow())
+        SwarmFunding(file, connect = { connects += it; true }, spends = idle())
 
     private fun status(stage: SendStatus.Stage, l: SwarmFundLabel? = label): SendStatus {
         val gnosis = BuiltInChains.GNOSIS
@@ -223,7 +226,7 @@ class SwarmFundingTest {
             untrack()
         }
         return SwarmFunding(
-            File(tmp.root, "funding.json"), connect = { connects += it; true }, spends = emptyFlow(), chain = chain,
+            File(tmp.root, "funding.json"), connect = { connects += it; true }, spends = idle(), chain = chain,
             confirmAfterMs = 30_000, now = now,
         )
     }
@@ -419,7 +422,7 @@ class SwarmFundingTest {
     fun `an untracked call is looked up less and less often, and not at all once it can never be mined`() {
         val chain = FakeChain()
         val f = SwarmFunding(
-            File(tmp.root, "funding.json"), connect = { connects += it; true }, spends = emptyFlow(), chain = chain,
+            File(tmp.root, "funding.json"), connect = { connects += it; true }, spends = idle(), chain = chain,
             checkEveryMs = 10, checkAtMostEveryMs = 60_000, confirmAfterMs = 10,
         )
         val started = System.nanoTime()
@@ -453,7 +456,7 @@ class SwarmFundingTest {
     fun `lookups stopped by a superseded verdict start again when a Connect's read withdraws it`() {
         val chain = FakeChain()
         val f = SwarmFunding(
-            File(tmp.root, "funding.json"), connect = { connects += it; false }, spends = emptyFlow(), chain = chain,
+            File(tmp.root, "funding.json"), connect = { connects += it; false }, spends = idle(), chain = chain,
             checkEveryMs = 10, checkAtMostEveryMs = 40, confirmAfterMs = 10,
         )
         chain.minedCount = BigInteger.TWO
@@ -488,7 +491,7 @@ class SwarmFundingTest {
     @Test
     fun `once the wallet stops following the call, it's looked up on chain until it's mined`() {
         val chain = FakeChain()
-        val f = SwarmFunding(File(tmp.root, "funding.json"), connect = { connects += it; true }, spends = emptyFlow(), chain = chain, checkEveryMs = 20)
+        val f = SwarmFunding(File(tmp.root, "funding.json"), connect = { connects += it; true }, spends = idle(), chain = chain, checkEveryMs = 20)
         f.start(flowOf(status(SendStatus.Stage.Pending), status(SendStatus.Stage.Unconfirmed), null))
         awaitPending(f) { it?.tracked == false }
         val until = System.currentTimeMillis() + 5_000
@@ -508,7 +511,7 @@ class SwarmFundingTest {
     private fun busyFunding(free: kotlinx.coroutines.flow.MutableStateFlow<Boolean>, chain: FakeChain? = null) =
         SwarmFunding(
             File(tmp.root, "funding.json"), connect = { if (free.value) { connects += it; true } else false },
-            spends = emptyFlow(), chain = chain, confirmAfterMs = 30_000, now = { 0L }, connectFree = free,
+            spends = idle(), chain = chain, confirmAfterMs = 30_000, now = { 0L }, connectFree = free,
         )
 
     @Test
@@ -572,7 +575,7 @@ class SwarmFundingTest {
                     false
                 }
             },
-            spends = emptyFlow(), now = { 0L }, connectFree = free,
+            spends = idle(), now = { 0L }, connectFree = free,
         )
         f.start(emptyFlow())
 
@@ -636,13 +639,49 @@ class SwarmFundingTest {
         assertEquals(listOf(batch), connects)
         assertNull(f.connectOwed.value)
 
-        // Control: with that connect seen ended, a later record of the batch mined while
+        // Control: with that connect ended, a later record of the batch mined while
         // the node is busy with other work is owed its connect as before.
         f.forget()
         free.value = false
         f.noteSend(status(SendStatus.Stage.Pending))
         f.noteSend(status(SendStatus.Stage.Confirmed(1, null)))
         assertEquals(batch, f.connectOwed.value)
+    }
+
+    @Test
+    fun `a connect that ended before the spends collector saw it doesn't stop a later refused one being owed`() {
+        val free = kotlinx.coroutines.flow.MutableStateFlow(true)
+        val spends = idle()
+        // As StampClient does when the service is unbound: Running, then Failed at once, and the
+        // UI acknowledges it to Idle — all before the funding's collector could read any of it.
+        val f = SwarmFunding(
+            File(tmp.root, "funding.json"),
+            connect = {
+                if (free.value) {
+                    connects += it
+                    spends.value = StampClient.Spend.Running(StampClient.Kind.Connect, it)
+                    spends.value = StampClient.Spend.Failed(StampClient.Kind.Connect, it, "node not bound")
+                    spends.value = StampClient.Spend.Idle
+                    true
+                } else {
+                    false
+                }
+            },
+            spends = spends, now = { 0L }, connectFree = free,
+        )
+        f.start(emptyFlow())
+        f.noteSend(status(SendStatus.Stage.Pending))
+        f.noteSend(status(SendStatus.Stage.Unconfirmed))
+        f.untrack()
+        assertTrue(f.connectNow())
+        // Mined while other work holds the node: that connect is over, so this one is owed.
+        free.value = false
+        f.noteSend(status(SendStatus.Stage.Confirmed(1, null)))
+        assertTrue(f.pending.value!!.mined)
+        assertEquals(batch, f.connectOwed.value)
+        free.value = true
+        awaitConnects(2)
+        assertEquals(listOf(batch, batch), connects)
     }
 
     @Test
