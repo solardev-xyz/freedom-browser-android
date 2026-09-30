@@ -1,6 +1,8 @@
 package baby.freedom.mobile.ens
 
 import java.util.Collections
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.runBlocking
 import org.json.JSONArray
 import org.json.JSONObject
@@ -504,11 +506,26 @@ class EnsQuorumResolveTest {
     @Test
     fun `the first wave is the first servers in the configured order, not the fastest`() {
         // The user ranked rpc1..rpc3 first, but they are the slowest to
-        // report a head; rpc4/rpc5 answer at once.
+        // report a head; rpc4/rpc5 answer at once. rpc2 and rpc3 hold their
+        // record answer until rpc1 has been asked for it: two agreeing
+        // answers are a quorum, and a wave may drop its third call before
+        // that call's thread has even run, so without the hold whether
+        // rpc1's call is seen at all would be up to the scheduler.
+        val rpc1Asked = CountDownLatch(1)
+        fun afterRpc1(server: Server) = server.apply {
+            val answer = record
+            record = { block, data ->
+                assertTrue("rpc1 was never asked", rpc1Asked.await(30, TimeUnit.SECONDS))
+                answer(block, data)
+            }
+        }
         val servers = serversOf(
-            honest(delayMs = 30),
-            honest(delayMs = 20),
-            honest(delayMs = 10),
+            honest(delayMs = 30).apply {
+                val answer = record
+                record = { block, data -> rpc1Asked.countDown(); answer(block, data) }
+            },
+            afterRpc1(honest(delayMs = 20)),
+            afterRpc1(honest(delayMs = 10)),
             honest(delayMs = 0),
             honest(delayMs = 0),
         )
