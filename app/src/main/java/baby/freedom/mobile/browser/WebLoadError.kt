@@ -27,7 +27,8 @@ import java.util.TimeZone
  *    navigation commits nothing — the previous page would stay on screen
  *    under no warning at all. The refused load is then issued again —
  *    the same history step (Back/Forward) if it was one, or a load of
- *    the URL if not ([certPageStep]) — and this time the interceptor
+ *    the URL if not, on the URL the entry holds — where a redirect onto
+ *    the bad certificate started ([certPageReissue]) — and this time the interceptor
  *    answers it itself with the "connection isn't secure" page
  *    ([CertRefusalSlot], [certErrorPageHtml]), which never reaches the
  *    network. So the page sits in the refused load's own entry: a
@@ -202,24 +203,42 @@ private fun certReason(code: String): String = when (code) {
  * The "connection isn't secure" page for a certificate error on [url]
  * (#259), served in the refused load's own entry ([CertRefusalSlot]):
  * [inPlaceErrorPageHtml], [host] and [url] escaped. Try again is a link
- * to [url] itself, which asks the site again (and so WebView asks
- * `onReceivedSslError` again — nothing is remembered).
+ * to [retryUrl] — the entry's own URL, [url] itself unless the load
+ * redirected onto it ([CertReissue]) — which asks the site again (and
+ * so WebView asks `onReceivedSslError` again — nothing is remembered).
  */
-internal fun certErrorPageHtml(url: String, host: String, facts: CertFacts, nowMs: Long): String {
+internal fun certErrorPageHtml(
+    url: String,
+    host: String,
+    facts: CertFacts,
+    nowMs: Long,
+    retryUrl: String = url,
+): String {
     val description = "Freedom didn't load <b>${escHtml(host)}</b> because its security certificate " +
         certReason(certErrorCode(facts, nowMs)) + ". Someone could be impersonating the site or " +
         "intercepting the connection, or the site is misconfigured."
     val details = escHtml(url) + "\n\n" + escHtml(certErrorDetail(facts, host, nowMs))
-    return inPlaceErrorPageHtml("Connection isn't secure", description, details, retryHref = escHtml(url))
+    return inPlaceErrorPageHtml("Connection isn't secure", description, details, retryHref = escHtml(retryUrl))
 }
 
 /**
- * How to issue a certificate-refused load of [refusedUrl] again, so the
- * page for it lands in the entry the load was for: the history step
- * from [currentIndex] to the nearest entry of [entryUrls] (the tab's
- * back/forward list) holding that URL — `0` for the entry on screen
- * (a Reload, Try again) — or `null` for a new navigation, whose page
- * gets an entry of its own.
+ * How to issue a certificate-refused load again, so the page for it
+ * lands in the entry the load was for ([certPageReissue]): the history
+ * [step] to take — `0` for the entry on screen (a Reload, Try again),
+ * `null` for a new navigation, whose page gets an entry of its own —
+ * and the [url] to issue, which the page is served on: the entry's own
+ * URL, which for a load that redirected onto the bad certificate is
+ * the URL the redirect started from, not the one refused.
+ */
+internal data class CertReissue(val step: Int?, val url: String)
+
+/**
+ * The [CertReissue] for a certificate-refused load whose redirect
+ * [chain] (the main-frame URLs from its start to the refused one,
+ * [MainFrameChain]) ended in the refusal: the step from [currentIndex]
+ * to the nearest entry of [entryUrls] (the tab's back/forward list)
+ * holding any URL of the chain, or, if none does, a new load of the
+ * chain's start.
  *
  * A refused load commits nothing, so the list still stands where it
  * did, and nothing says whether it was a Back/Forward. Taking a history
@@ -227,15 +246,77 @@ internal fun certErrorPageHtml(url: String, host: String, facts: CertFacts, nowM
  * Back or Forward read as a new navigation would push the page on top,
  * cutting off the entries ahead and leaving Back to go round the
  * refused entry again; a link to a page already in the list read as a
- * step merely shows the page in that entry. Fragments aside — a
- * request never carries one. The nearer entry wins; Back on a tie.
+ * step merely shows the page in that entry. The whole chain counts, not
+ * only the refused URL: an entry that redirects onto a bad certificate
+ * (http → a self-signed https) holds the URL it started from, and a
+ * refused Back onto it names only the redirect target (R2-F1).
+ * Fragments aside — a request never carries one. The nearer entry
+ * wins; Back on a tie; the earlier URL of the chain on a tie of both.
  */
-internal fun certPageStep(entryUrls: List<String?>, currentIndex: Int, refusedUrl: String): Int? {
-    val target = refusedUrl.substringBefore('#')
-    return entryUrls.indices
-        .filter { entryUrls[it]?.substringBefore('#') == target }
+internal fun certPageReissue(entryUrls: List<String?>, currentIndex: Int, chain: List<String>): CertReissue {
+    val keys = chain.map { it.substringBefore('#') }
+    val index = entryUrls.indices
+        .filter { entryUrls[it]?.substringBefore('#') in keys }
         .minWithOrNull(compareBy<Int>({ kotlin.math.abs(it - currentIndex) }, { it }))
-        ?.let { it - currentIndex }
+        ?: return CertReissue(null, chain.first())
+    val entry = entryUrls[index]!!.substringBefore('#')
+    return CertReissue(index - currentIndex, chain.first { it.substringBefore('#') == entry })
+}
+
+/** [certPageReissue]'s step for a load of [refusedUrl] that didn't redirect. */
+internal fun certPageStep(entryUrls: List<String?>, currentIndex: Int, refusedUrl: String): Int? =
+    certPageReissue(entryUrls, currentIndex, listOf(refusedUrl)).step
+
+/** A certificate refusal of [url] awaiting its load's finish, with the [chain] it ended ([MainFrameChain]). */
+internal data class PendingCertError(val url: String, val facts: CertFacts, val chain: List<String>)
+
+/**
+ * The main-frame URLs of the navigation in flight, from the one it
+ * started at through each redirect hop the WebView followed — so a
+ * certificate refusal on a redirect target can be issued again on the
+ * URL its history entry holds ([certPageReissue], #259 R2-F1). A
+ * request for any URL but the chain's latest starts a new one (the
+ * interceptor sees a redirect hop, if at all, as a request for the URL
+ * [redirected] just added, and a retried first request is the latest
+ * too); a commit ends it. Written from the main thread and the interceptor's
+ * IO thread alike.
+ */
+internal class MainFrameChain {
+    private val urls = ArrayList<String>()
+
+    private fun has(url: String) = urls.any { it.substringBefore('#') == url.substringBefore('#') }
+
+    /** The page's own new navigation to [url] (not a redirect). */
+    @Synchronized
+    fun started(url: String) {
+        urls.clear()
+        urls.add(url)
+    }
+
+    /** The WebView requests [url] for the main frame. */
+    @Synchronized
+    fun requested(url: String) {
+        if (urls.lastOrNull()?.substringBefore('#') != url.substringBefore('#')) started(url)
+    }
+
+    /** The WebView follows a main-frame redirect to [url]. */
+    @Synchronized
+    fun redirected(url: String) {
+        if (!has(url)) urls.add(url)
+    }
+
+    /** A document committed: no navigation in flight. */
+    @Synchronized
+    fun committed() = urls.clear()
+
+    /**
+     * The chain that ended in a refusal of [refusedUrl]: the one in
+     * flight if it reached that URL, else [refusedUrl] alone (a hop the
+     * WebView reported to neither callback, a 307 keeping a POST).
+     */
+    @Synchronized
+    fun endingAt(refusedUrl: String): List<String> =
+        if (has(refusedUrl)) urls.toList() else listOf(refusedUrl)
 }
 
 /**

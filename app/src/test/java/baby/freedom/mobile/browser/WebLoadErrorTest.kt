@@ -134,6 +134,55 @@ class WebLoadErrorTest {
     }
 
     @Test
+    fun `a refused step onto an entry that redirects to a bad certificate goes in that entry`() {
+        val a = "http://a.example/"
+        val b = "http://b.example/"
+        val bad = "https://self-signed.example/"
+        val c = "http://c.example/"
+        val chain = listOf(b, bad)
+        // A → B (302 → bad) → C, on C: Back names only the redirect
+        // target, but the entry holds B — the same Back, served on B.
+        assertEquals(CertReissue(-1, b), certPageReissue(listOf(a, b, c), 2, chain))
+        // On A: Forward, C kept ahead.
+        assertEquals(CertReissue(1, b), certPageReissue(listOf(a, b, c), 0, chain))
+        // Reload or Try again on B's page: B again, in place.
+        assertEquals(CertReissue(0, b), certPageReissue(listOf(a, b), 1, chain))
+        // A link that redirected there: a new entry, for the link's URL.
+        assertEquals(CertReissue(null, b), certPageReissue(listOf(a, c), 1, chain))
+        // A refusal with no redirect is issued on its own URL.
+        assertEquals(CertReissue(-1, bad), certPageReissue(listOf(a, bad, c), 2, listOf(bad)))
+    }
+
+    @Test
+    fun `the main-frame chain follows a navigation from its start through its redirects`() {
+        val chain = MainFrameChain()
+        val a = "http://a.example/"
+        val b = "http://b.example/"
+        val bad = "https://self-signed.example/"
+        // A Back: the interceptor sees B, the WebView follows its 302.
+        chain.requested(b)
+        chain.requested(b) // a retried first request
+        chain.redirected(bad)
+        chain.requested(bad) // the hop, if the interceptor sees it at all
+        assertEquals(listOf(b, bad), chain.endingAt(bad))
+        // A hop reported to neither callback: the refused URL alone.
+        assertEquals(listOf("https://elsewhere.example/"), chain.endingAt("https://elsewhere.example/"))
+        // A new navigation starts a new chain; so does a request for
+        // anything but the latest URL.
+        chain.started(a)
+        assertEquals(listOf(a), chain.endingAt(a))
+        chain.redirected(b)
+        chain.requested(a)
+        assertEquals(listOf(bad), chain.endingAt(bad))
+        assertEquals(listOf(a), chain.endingAt(a))
+        // A commit ends it.
+        chain.committed()
+        assertEquals(listOf(a), chain.endingAt(a))
+        chain.redirected(bad)
+        assertEquals(listOf(bad), chain.endingAt(bad))
+    }
+
+    @Test
     fun `the certificate page answers only its own re-issue, once`() {
         val bad = "https://self-signed.badssl.com/"
         val slot = CertRefusalSlot()
@@ -184,5 +233,13 @@ class WebLoadErrorTest {
         assertTrue(html.contains("Issued by: Evil &amp; Co"))
         assertTrue(html.contains("wasn't issued by an authority this device trusts"))
         assertFalse(html.contains("<script"))
+    }
+
+    @Test
+    fun `the certificate page for a redirect retries the entry's own url`() {
+        val facts = CertFacts(setOf(SSL_UNTRUSTED), null, null, null, null)
+        val html = certErrorPageHtml("https://bad.example/", "bad.example", facts, 0L, retryUrl = "http://b.example/")
+        assertTrue(html.contains("href=\"http://b.example/\""))
+        assertTrue(html.contains("https://bad.example/"))
     }
 }

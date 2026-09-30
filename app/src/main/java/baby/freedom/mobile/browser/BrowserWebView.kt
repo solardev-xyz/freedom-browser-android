@@ -1781,8 +1781,13 @@ private fun buildRefreshableWebView(
 
     // A certificate error the main frame may be about to die of: the
     // cancelled navigation's synthetic `onPageFinished` for this URL
-    // turns it into the "connection isn't secure" page (#259).
-    var pendingCertError: Pair<String, CertFacts>? = null
+    // turns it into the "connection isn't secure" page (#259), issued
+    // on the redirect chain's entry ([MainFrameChain], R2-F1).
+    var pendingCertError: PendingCertError? = null
+
+    // The main-frame navigation in flight, from its start through each
+    // redirect hop (#259 R2-F1, [certPageReissue]).
+    val mainFrameChain = MainFrameChain()
 
     // The certificate page the interceptor answers the refused load's
     // re-issue with, in that load's own entry (#259, [CertRefusalSlot]).
@@ -1803,8 +1808,9 @@ private fun buildRefreshableWebView(
     /**
      * The "connection isn't secure" page for [url] (#259), in the entry
      * the refused load was for: the load is issued again — the same
-     * Back/Forward step if the list holds [url] ([certPageStep]), a
-     * load of [url] if not — and the interceptor answers that with the
+     * Back/Forward step if the list holds [url] or the URL its
+     * redirect chain started at ([certPageReissue]), a load of that
+     * start if not — and the interceptor answers that with the
      * page ([certRefusal]). So a refused Back or Forward keeps every
      * entry on both sides, Back from the page is the one before it, and
      * Try again and Reload ask for [url] again.
@@ -1813,28 +1819,30 @@ private fun buildRefreshableWebView(
      * interceptor), the page goes up as [ErrorPage] on top instead,
      * rather than leave the previous page on screen with no warning.
      */
-    fun showCertErrorPage(view: WebView, url: String, facts: CertFacts) {
+    fun showCertErrorPage(view: WebView, cert: PendingCertError) {
+        val url = cert.url
+        val facts = cert.facts
         val host = Uri.parse(url).host.orEmpty().ifEmpty { url }
         val now = System.currentTimeMillis()
         state.clearEnsOverride()
-        if (certRefusal.arm(url, certErrorPageHtml(url, host, facts, now))) {
-            val list = view.copyBackForwardList()
-            val step = certPageStep(
-                (0 until list.size).map { list.getItemAtIndex(it)?.url },
-                list.currentIndex,
-                url,
-            )
-            Log.i(LOG_TAG, "certificate error for $url → page in place (step $step)")
-            when (step) {
-                null, 0 -> view.loadUrl(url)
-                else -> view.goBackOrForward(step)
+        val list = view.copyBackForwardList()
+        val reissue = certPageReissue(
+            (0 until list.size).map { list.getItemAtIndex(it)?.url },
+            list.currentIndex,
+            cert.chain,
+        )
+        if (certRefusal.arm(reissue.url, certErrorPageHtml(url, host, facts, now, retryUrl = reissue.url))) {
+            Log.i(LOG_TAG, "certificate error for $url → page in place on ${reissue.url} (step ${reissue.step})")
+            when (reissue.step) {
+                null, 0 -> view.loadUrl(reissue.url)
+                else -> view.goBackOrForward(reissue.step)
             }
             return
         }
         val page = ErrorPage.url(
             errorCode = certErrorCode(facts, now),
             displayUrl = url,
-            retryUrl = url,
+            retryUrl = reissue.url,
             detail = certErrorDetail(facts, host, now),
         )
         Log.i(LOG_TAG, "certificate error for $url again → error page")
@@ -2749,6 +2757,7 @@ private fun buildRefreshableWebView(
                 failedLoad = null
                 pendingCertError = null
                 certRefusal.committed(url)
+                mainFrameChain.committed()
                 // Ad blocking judges requests against it from here on
                 // (a page back from the back/forward cache made none).
                 url?.let(adblockPage::committed)
@@ -3012,13 +3021,13 @@ private fun buildRefreshableWebView(
                 // warning at all (#259). Matched by URL alone, never
                 // against `view.url` ([certErrorEndsLoad]).
                 val cert = pendingCertError
-                if (view != null && cert != null && certErrorEndsLoad(url, cert.first)) {
+                if (view != null && cert != null && certErrorEndsLoad(url, cert.url)) {
                     pendingCertError = null
                     // Posted: issued from here, the load would already
                     // be the WebView's `getUrl()` for the rest of this
                     // finish, which would record the refused address
                     // under the old page's title.
-                    view.post { showCertErrorPage(view, cert.first, cert.second) }
+                    view.post { showCertErrorPage(view, cert) }
                 }
                 // Chromium's synthetic finish for a navigation that never
                 // committed (a 204, Stop, superseded): the page on screen
@@ -3467,6 +3476,10 @@ private fun buildRefreshableWebView(
                 // A hop of the user's named load the WebView now follows:
                 // its answer is the next one that may be an app link.
                 if (request.isForMainFrame && request.isRedirect) userNamedChain.redirected(target)
+                // Where a certificate refusal's entry started (#259 R2-F1).
+                if (request.isForMainFrame) {
+                    if (request.isRedirect) mainFrameChain.redirected(target) else mainFrameChain.started(target)
+                }
                 // x402 (#140): a paid request's redirect hop may be where
                 // its answer comes from; the page's own navigation is not
                 // its answer, nor a 402's commit (#218 R2).
@@ -3501,6 +3514,7 @@ private fun buildRefreshableWebView(
                 if (mainFrame) {
                     request!!.url?.toString()?.let {
                         pendingNavigationUrls.add(it)
+                        mainFrameChain.requested(it)
                         // Not a hop of the user's named load: the page's
                         // own navigation (R1-F1). Nor of the user's
                         // navigation, for the user agent (#180, R2-F1).
@@ -3701,7 +3715,7 @@ private fun buildRefreshableWebView(
                     issuedBy = cert?.issuedBy?.let { it.cName.ifBlank { it.oName } },
                 )
                 Log.i(LOG_TAG, "SSL error ${facts.errors} for $url → refused")
-                pendingCertError = url to facts
+                pendingCertError = PendingCertError(url, facts, mainFrameChain.endingAt(url))
             }
 
             override fun onReceivedHttpError(
