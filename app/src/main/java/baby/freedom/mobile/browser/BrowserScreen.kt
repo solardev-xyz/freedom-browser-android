@@ -1810,6 +1810,7 @@ fun BrowserScreen(
                     )
                 }
             } else if (isHomeTab) {
+                val appUpdate by AppUpdates.state.collectAsState()
                 HomeScreen(
                     repo = repo,
                     onOpen = { submit(state, it) },
@@ -1818,6 +1819,8 @@ fun BrowserScreen(
                     onOpenNode = { showNode = true },
                     bottomContentPadding = capsuleOverlap,
                     modifier = Modifier.fillMaxSize(),
+                    update = appUpdate.notice,
+                    onDismissUpdate = AppUpdates::dismiss,
                 )
             }
             // The tab's renderer went away (#260) while it was on
@@ -2221,6 +2224,12 @@ fun BrowserScreen(
             radicle = radicle,
             onOpenRadicle = { showRadicle = true },
             onOpenWallet = { showWallet = true },
+            // A newer release's page (#272): a new tab in front, never a
+            // private one, with Settings closed so it's on screen.
+            onOpenUrl = { url ->
+                showSettings = false
+                tabs.requestOpenInNewTab?.invoke(url, false, false)
+            },
             // The reopen stack keeps closed tabs' pages, titles and
             // back/forward lists — history by any other name.
             onClearHistory = { tabs.forgetClosedTabs() },
