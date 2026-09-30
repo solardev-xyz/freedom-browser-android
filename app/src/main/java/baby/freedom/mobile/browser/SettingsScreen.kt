@@ -33,13 +33,8 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.foundation.clickable
 import androidx.compose.ui.draw.clip
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.LocationOn
-import androidx.compose.material.icons.filled.Mic
-import androidx.compose.material.icons.filled.Videocam
-import androidx.compose.material.icons.filled.WebAsset
 import androidx.compose.material.icons.filled.AccountBalanceWallet
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Contrast
@@ -1630,13 +1625,7 @@ private fun SitePermissionsSection(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Icon(
-                    when (entry.permission) {
-                        SitePermission.CAMERA -> Icons.Filled.Videocam
-                        SitePermission.MICROPHONE -> Icons.Filled.Mic
-                        SitePermission.LOCATION -> Icons.Filled.LocationOn
-                        SitePermission.POPUPS -> Icons.Filled.WebAsset
-                        is ExternalScheme -> Icons.AutoMirrored.Filled.OpenInNew
-                    },
+                    sitePermissionIcon(entry.permission),
                     contentDescription = null,
                     tint = MaterialTheme.colorScheme.onSurface,
                 )
@@ -1661,17 +1650,6 @@ private fun SitePermissionsSection(
                 }
             }
         }
-    }
-}
-
-/** "Allowed", "Blocked (this session)", "Blocked after 3 dismissals (this session)". */
-internal fun sitePermissionStateLabel(entry: SitePermissionEntry): String {
-    val scope = if (entry.remembered) "" else " (this session)"
-    return when {
-        entry.embargoed ->
-            "Blocked after ${PermissionSession.DISMISS_EMBARGO_THRESHOLD} dismissals$scope"
-        entry.decision == PermissionDecision.ALLOW -> "Allowed$scope"
-        else -> "Blocked$scope"
     }
 }
 

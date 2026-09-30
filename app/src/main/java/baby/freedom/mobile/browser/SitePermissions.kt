@@ -257,6 +257,8 @@ class PermissionSession(private val embargoes: Boolean = true) {
     private val decisions = LinkedHashMap<Key, PermissionDecision>()
     private val embargoed = HashSet<Key>()
     private val dismissals = HashMap<Key, Int>()
+    private val removals = HashMap<Key, Int>()
+    private val storeRemovals = HashMap<Key, Int>()
 
     /** Bumped on every change; observe it to re-read [entries]. */
     val version = kotlinx.coroutines.flow.MutableStateFlow(0)
@@ -271,7 +273,14 @@ class PermissionSession(private val embargoes: Boolean = true) {
         val k = Key(origin, permission)
         dismissals.remove(k)
         embargoed.remove(k)
-        if (remembered) decisions.remove(k) else decisions[k] = decision
+        if (remembered) {
+            decisions.remove(k)
+            // The store now holds this decision, written after any
+            // removal still being waited on: it's what counts.
+            storeRemovals.remove(k)
+        } else {
+            decisions[k] = decision
+        }
         version.value++
     }
 
@@ -302,8 +311,66 @@ class PermissionSession(private val embargoes: Boolean = true) {
         decisions.remove(k)
         embargoed.remove(k)
         dismissals.remove(k)
+        removals[k] = (removals[k] ?: 0) + 1
         version.value++
     }
+
+    /**
+     * How many times any of [permissions] has been removed for [origin]
+     * ([revoke]) this run. A request that was found allowed and is still
+     * on its way to the page (waiting for Android's own dialog, say)
+     * compares this with what it read before deciding: a removal in
+     * between means the site isn't allowed any more.
+     */
+    @Synchronized
+    fun removalCount(origin: String, permissions: Collection<SiteCapability>): Int =
+        permissions.distinct().sumOf { removals[Key(origin, it)] ?: 0 }
+
+    /**
+     * The remembered decision for the pair is being removed from the
+     * store ([revoke]'s other half, which lands later). Until
+     * [removedFromStore], [withoutStoreRemovals] hides it: a request
+     * that reads the store in between must not be allowed by what the
+     * user has just removed.
+     */
+    @Synchronized
+    fun removingFromStore(origin: String, permission: SiteCapability) {
+        val k = Key(origin, permission)
+        storeRemovals[k] = (storeRemovals[k] ?: 0) + 1
+    }
+
+    /** The store write [removingFromStore] waited on is done (or failed). */
+    @Synchronized
+    fun removedFromStore(origin: String, permission: SiteCapability) {
+        val k = Key(origin, permission)
+        val n = (storeRemovals[k] ?: return) - 1
+        if (n > 0) storeRemovals[k] = n else storeRemovals.remove(k)
+    }
+
+    /**
+     * [read] (of the store, for [origin]) minus what's being removed
+     * from it ([removingFromStore]) — as of before the read as well as
+     * after: a read that started before the removal landed can return
+     * the old value even if the removal is done by the time it returns.
+     */
+    suspend fun <V> readWithoutStoreRemovals(
+        origin: String,
+        read: suspend () -> Map<SiteCapability, V>,
+    ): Map<SiteCapability, V> {
+        val before = beingRemovedFromStore(origin)
+        val stored = read()
+        val hidden = before + beingRemovedFromStore(origin)
+        return if (hidden.isEmpty()) stored else stored.filterKeys { it !in hidden }
+    }
+
+    @Synchronized
+    private fun beingRemovedFromStore(origin: String): Set<SiteCapability> =
+        storeRemovals.keys.filter { it.origin == origin }.mapTo(HashSet()) { it.permission }
+
+    /** Whether [permission]'s remembered decision for [origin] is being removed from the store. */
+    @Synchronized
+    fun beingRemovedFromStore(origin: String, permission: SiteCapability): Boolean =
+        Key(origin, permission) in storeRemovals
 
     @Synchronized
     fun entries(): List<SitePermissionEntry> = decisions.map { (k, d) ->
@@ -594,3 +661,111 @@ class PromptTapGuard(private val protectionMs: Long, private val clock: () -> Lo
  */
 fun androidPermissionBlockedInSettings(rationale: Boolean, deniedBefore: Boolean): Boolean =
     !rationale && deniedBefore
+
+/**
+ * What the page's **Site permissions** sheet (#266) lists: every decision
+ * in [all] that belongs to the page on screen — its own origin
+ * ([pageOrigin]) or an origin that asked for something from inside this
+ * document ([documentOrigins]: an embedded frame's camera request is keyed
+ * by the frame's origin, not the page's). The page's own come first, in
+ * [all]'s order.
+ */
+fun pageSitePermissionEntries(
+    pageOrigin: String?,
+    documentOrigins: Set<String>,
+    all: List<SitePermissionEntry>,
+): List<SitePermissionEntry> {
+    val origins = documentOrigins + listOfNotNull(pageOrigin)
+    return all.filter { it.origin in origins }.sortedBy { if (it.origin == pageOrigin) 0 else 1 }
+}
+
+/**
+ * Which of [granted] (the camera/microphone this tab's document was
+ * given) is in use now: those the app itself is using at this moment
+ * ([activeInApp], Android's own app-op "active" state — what drives the
+ * system's privacy indicator). The app is one Android user of the
+ * camera, so a second tab whose document was granted it too shows it
+ * in use as well.
+ */
+fun mediaInUse(granted: Set<SitePermission>, activeInApp: Set<SitePermission>): Set<SitePermission> =
+    granted.intersect(activeInApp).filterTo(LinkedHashSet()) {
+        it == SitePermission.CAMERA || it == SitePermission.MICROPHONE
+    }
+
+/** "Camera in use", "Microphone in use", "Camera and microphone in use"; null for none. */
+fun mediaInUseLabel(inUse: Set<SitePermission>): String? {
+    val camera = SitePermission.CAMERA in inUse
+    val mic = SitePermission.MICROPHONE in inUse
+    return when {
+        camera && mic -> "Camera and microphone in use"
+        camera -> "Camera in use"
+        mic -> "Microphone in use"
+        else -> null
+    }
+}
+
+/**
+ * The decision part of a Site permissions row: "Allowed", "Blocked (this
+ * session)", "Blocked after 3 dismissals (this session)" — and, in a
+ * private tab ([private]), "Allowed (private tabs)", since its decisions
+ * last until the private tabs are closed.
+ */
+fun sitePermissionStateLabel(entry: SitePermissionEntry, private: Boolean = false): String {
+    val scope = when {
+        private -> " (private tabs)"
+        entry.remembered -> ""
+        else -> " (this session)"
+    }
+    return when {
+        entry.embargoed ->
+            "Blocked after ${PermissionSession.DISMISS_EMBARGO_THRESHOLD} dismissals$scope"
+        entry.decision == PermissionDecision.ALLOW -> "Allowed$scope"
+        else -> "Blocked$scope"
+    }
+}
+
+/**
+ * Which of [removed] — grants the user took away on the Site permissions
+ * sheet (#266) while the tab's document held them — the document still
+ * has. WebView can't take either back from a live document: the camera
+ * and microphone stay with it while it's using them ([inUse]); a
+ * location grant stays for the document's whole life, answering its
+ * running watches and any new request without asking. A reload ends both.
+ */
+fun stillHeldAfterRemoval(removed: Set<SitePermission>, inUse: Set<SitePermission>): Set<SitePermission> =
+    listOf(SitePermission.CAMERA, SitePermission.MICROPHONE, SitePermission.LOCATION).filterTo(LinkedHashSet()) {
+        it in removed && (it == SitePermission.LOCATION || it in inUse)
+    }
+
+/**
+ * The sheet's note for what the page still has after its removal
+ * ([stillHeldAfterRemoval]); null for nothing.
+ */
+fun stillHeldNote(held: Set<SitePermission>): String? {
+    val media = listOf(SitePermission.CAMERA, SitePermission.MICROPHONE).filter { it in held }
+    val location = SitePermission.LOCATION in held
+    val mediaPart = media.joinToString(" and ") { it.label.lowercase() }
+    return when {
+        media.isNotEmpty() && location ->
+            "This page keeps your $mediaPart until it stops using it or is reloaded, " +
+                "and can still get your location until it's reloaded."
+        media.isNotEmpty() -> "This page keeps your $mediaPart until it stops using it or is reloaded."
+        location -> "This page can still get your location until it's reloaded."
+        else -> null
+    }
+}
+
+/**
+ * The page menu's Site permissions sub-line (#266): the capabilities
+ * [entries] name, once each, in order ("Camera · Location"); or, when
+ * none are left but the page still has something removed from it
+ * ([stillHeld]), that ("Location kept until reload"), so the sheet —
+ * and its Reload — can still be reached. Null when there's neither and
+ * the menu leaves the row out.
+ */
+fun sitePermissionsSummary(
+    entries: List<SitePermissionEntry>,
+    stillHeld: Set<SitePermission> = emptySet(),
+): String? =
+    entries.map { it.permission.label }.distinct().joinToString(" · ").ifEmpty { null }
+        ?: stillHeld.joinToString(" · ") { it.label }.ifEmpty { null }?.let { "$it kept until reload" }

@@ -2953,6 +2953,7 @@ private fun buildRefreshableWebView(
                 val zoomSite = zoomSiteKey(url)
                 state.zoomSite = zoomSite
                 state.providerOrigin = providerOriginKey(url)
+                state.permissionOrigin = permissionOriginKey(url)
                 // …with the user agent it was fetched with (#180). One
                 // that crossed the desktop/mobile line was corrected
                 // before its request went out, where it could be (see
@@ -3173,6 +3174,7 @@ private fun buildRefreshableWebView(
                     // …and no site to zoom as (#88), for the same reason.
                     state.zoomSite = null
                     state.providerOrigin = null
+                    state.permissionOrigin = null
                     // …and no page colour behind the status bar (#92) —
                     // unless the blank document is a popup's page, whose
                     // colour is its own.
