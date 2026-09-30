@@ -4,7 +4,8 @@
 # carries the embedded Radicle node (libradicle-uniffi, with its
 # spawn-free `no-spawn` serving). Run it AFTER scripts/enable-ffi-chain.sh:
 # it extends that script's `--features chain` to `--features chain,radicle`.
-# Used by release.yml and by the README's local build steps.
+# Run by scripts/build-ffi.sh, the one build recipe release.yml and the
+# README's local build share.
 #
 # The Kotlin side calls the node through the UniFFI bindings committed in
 # swarmnode/src/main/java/uniffi/libradicle_uniffi/, which
@@ -22,6 +23,9 @@ FFI_DIR="${1:?usage: $0 <path-to-freedom-mobile-ffi>}"
 SCRIPT="$FFI_DIR/scripts/build-android.sh"
 FROM='--no-default-features --features chain --crate-type'
 TO='--no-default-features --features chain,radicle --crate-type'
+# What counts as "radicle is on": the list above, alone or already extended
+# by a later helper, so re-running build-ffi.sh in the same checkout passes.
+DONE='--no-default-features --features chain,radicle(,[A-Za-z0-9_-]+)* --crate-type'
 
 [ -f "$SCRIPT" ] || { echo "enable-ffi-radicle: $SCRIPT not found" >&2; exit 1; }
 
@@ -33,10 +37,10 @@ if [ -z "$code_lines" ]; then
   echo "enable-ffi-radicle: no --no-default-features cargo call in $SCRIPT; its shape changed, update this script" >&2
   exit 1
 fi
-if printf '%s\n' "$code_lines" | grep -v -q -F -- "$TO"; then
+if printf '%s\n' "$code_lines" | grep -v -q -E -- "$DONE"; then
   echo "enable-ffi-radicle: could not enable the radicle feature on every cargo call in $SCRIPT" >&2
   echo "(run scripts/enable-ffi-chain.sh first):" >&2
-  printf '%s\n' "$code_lines" | grep -v -F -- "$TO" >&2
+  printf '%s\n' "$code_lines" | grep -v -E -- "$DONE" >&2
   exit 1
 fi
 echo "enable-ffi-radicle: radicle feature enabled in $SCRIPT"

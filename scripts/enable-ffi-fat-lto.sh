@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Switch a freedom-mobile-ffi checkout's Android release profile from
-# thin to fat LTO, in place (#230). Used by release.yml and by the
-# README's local build steps, so there is exactly one copy of this edit.
+# thin to fat LTO, in place (#230). Run by scripts/build-ffi.sh,
+# the one build recipe release.yml and the README's local build share, so
+# there is exactly one copy of this edit.
 #
 # scripts/build-android.sh builds with `--profile release-android`, which
 # sets `lto = "thin"` in freedom-mobile-ffi's Cargo.toml. Whole-program

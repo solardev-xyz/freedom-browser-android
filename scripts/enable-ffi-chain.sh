@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Turn ant's `chain` feature on in a freedom-mobile-ffi checkout's
-# scripts/build-android.sh, in place. Used by release.yml and by the
-# README's local build steps, so there is exactly one copy of this edit.
+# scripts/build-android.sh, in place. Run by scripts/build-ffi.sh,
+# the one build recipe release.yml and the README's local build share, so
+# there is exactly one copy of this edit.
 #
 # build-android.sh passes --no-default-features to its cargo call, which
 # drops both `chain` (ant's on-chain /wallet, /stamps, /chequebook gateway

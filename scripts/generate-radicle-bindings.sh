@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 # Generate the Kotlin UniFFI bindings for the embedded Radicle node
 # (libradicle-uniffi) from a freedom-mobile-ffi checkout that has just run
-# scripts/build-android.sh with the `radicle` feature on (see
-# scripts/enable-ffi-radicle.sh).
+# scripts/build-ffi.sh (which turns the `radicle` feature on).
 #
 # The bindings are committed at swarmnode/src/main/java/uniffi/
 # libradicle_uniffi/libradicle_uniffi.kt. They must come from the same
@@ -11,9 +10,12 @@
 #
 #   scripts/generate-radicle-bindings.sh <ffi-dir>           # regenerate in place
 #   scripts/generate-radicle-bindings.sh <ffi-dir> --check   # fail if the committed copy is stale
+#   scripts/generate-radicle-bindings.sh <ffi-dir> --emit <file>   # write them to <file> instead
 #
-# release.yml runs --check after building the .so, so a FFI_REF bump that
-# changes the Radicle surface can't ship with stale bindings.
+# release.yml runs --emit after building the .so and caches the result with
+# the library (#309), then compares it with the committed copy on every run,
+# cache hit or not, so a FFI_REF bump that changes the Radicle surface can't
+# ship with stale bindings.
 #
 # The generator is freedom-mobile-ffi's own bindgen/ crate (pinned to the
 # uniffi version the scaffolding links). It runs in library mode against the
@@ -25,14 +27,20 @@ set -euo pipefail
 
 FFI_DIR="$(cd "${1:?usage: $0 <path-to-freedom-mobile-ffi> [--check]}" && pwd)"
 MODE="${2:-write}"
+EMIT="${3:-}"
+if [ "$MODE" = "--emit" ] && [ -z "$EMIT" ]; then
+  echo "usage: $0 <path-to-freedom-mobile-ffi> --emit <file>" >&2
+  exit 1
+fi
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DEST="$REPO/swarmnode/src/main/java/uniffi/libradicle_uniffi/libradicle_uniffi.kt"
 TRIPLE=aarch64-linux-android
 PROFILE=release-android
 
 # Pick the rlib of the libradicle-uniffi revision this checkout resolves to,
-# not just the newest file: a restored build cache (CI's rust-cache) can
-# leave rlibs of other revisions under other hashes, with any mtime. Each
+# not just the newest file: a target/ dir reused across FFI_REF bumps (a
+# local checkout built more than once) can hold rlibs of other revisions
+# under other hashes, with any mtime. Each
 # rlib records the source path it was compiled from, and cargo checks a git
 # dependency out into a per-revision directory, so the one built from the
 # resolved package's source directory is the one the .so links.
@@ -51,7 +59,7 @@ for candidate in $(ls -t "$DEPS"/liblibradicle_uniffi-*.rlib 2>/dev/null || true
 done
 [ -n "$RLIB" ] || {
   echo "generate-radicle-bindings: no libradicle-uniffi rlib built from $SRC_DIR under $DEPS;" >&2
-  echo "build with scripts/enable-ffi-chain.sh + scripts/enable-ffi-radicle.sh + scripts/build-android.sh first" >&2
+  echo "build it with scripts/build-ffi.sh $FFI_DIR first (arm64-v8a, or both ABIs)" >&2
   exit 1
 }
 echo "generate-radicle-bindings: using $RLIB" >&2
@@ -86,6 +94,10 @@ if [ "$MODE" = "--check" ]; then
     exit 1
   fi
   echo "generate-radicle-bindings: committed bindings match the build"
+elif [ "$MODE" = "--emit" ]; then
+  mkdir -p "$(dirname "$EMIT")"
+  cp "$GEN" "$EMIT"
+  echo "generate-radicle-bindings: wrote $EMIT"
 else
   mkdir -p "$(dirname "$DEST")"
   cp "$GEN" "$DEST"
