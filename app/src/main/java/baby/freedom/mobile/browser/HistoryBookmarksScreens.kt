@@ -289,10 +289,10 @@ private fun EntryRow(
         thirdLine = timestamp,
         onClick = onClick,
         trailing = {
+            // Material's own size: a full 48 dp target (#279).
             IconButton(
                 onClick = onRemove,
                 shapes = IconButtonDefaults.shapes(),
-                modifier = Modifier.size(32.dp),
             ) {
                 Icon(
                     Icons.Filled.Close,

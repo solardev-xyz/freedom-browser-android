@@ -355,6 +355,19 @@ jobs:
           export FREEDOM_KEYSTORE_FILE="$RUNNER_TEMP/release.keystore"
           ./gradlew --no-daemon :app:assembleRelease
 
+      # The build log has each failure's message and stack trace
+      # (app/build.gradle.kts testLogging); the reports have every test's
+      # output too (#310).
+      - name: Upload unit test reports on failure
+        if: failure()
+        uses: actions/upload-artifact@v6
+        with:
+          name: unit-test-reports
+          path: |
+            app/build/reports/tests/testDebugUnitTest/
+            app/build/test-results/testDebugUnitTest/
+          if-no-files-found: ignore
+
       - name: Every APK carries Colibri
         run: |
           for abi in arm64-v8a x86_64; do

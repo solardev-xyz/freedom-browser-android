@@ -44,8 +44,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.semantics.Role
-import androidx.compose.ui.semantics.contentDescription
-import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import baby.freedom.swarm.MyotisChainStatus
@@ -226,6 +224,7 @@ private fun StatusSection(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
+                .switchRow(checked = runNodeEnabled, onCheckedChange = onToggleRunNode, label = "Swarm node")
                 .padding(vertical = 4.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
@@ -247,7 +246,7 @@ private fun StatusSection(
             }
             Switch(
                 checked = runNodeEnabled,
-                onCheckedChange = onToggleRunNode,
+                onCheckedChange = null,
             )
         }
         LogsButton(onOpenLogs)
@@ -312,6 +311,11 @@ private fun PublishingSection(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
+                .switchRow(
+                    checked = lightModeWanted == true,
+                    onCheckedChange = onSetLightMode,
+                    enabled = lightModeWanted != null,
+                )
                 .padding(vertical = 4.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
@@ -326,7 +330,7 @@ private fun PublishingSection(
             Spacer(Modifier.width(12.dp))
             Switch(
                 checked = lightModeWanted == true,
-                onCheckedChange = onSetLightMode,
+                onCheckedChange = null,
                 enabled = lightModeWanted != null,
             )
         }
@@ -509,6 +513,7 @@ private fun ChainRows(
     Row(
         modifier = Modifier
             .fillMaxWidth()
+            .switchRow(checked = on, onCheckedChange = onRun, label = "Run ${network.displayName}")
             .padding(vertical = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -522,9 +527,8 @@ private fun ChainRows(
         }
         Switch(
             checked = on,
-            onCheckedChange = onRun,
+            onCheckedChange = null,
             enabled = onRun != null,
-            modifier = Modifier.semantics { contentDescription = "Run ${network.displayName}" },
         )
     }
     Row(
@@ -730,6 +734,12 @@ private fun TorSection(tor: TorControls, onOpenLogs: () -> Unit) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
+                .switchRow(
+                    checked = tor.enabled && tor.running,
+                    onCheckedChange = tor.onRun,
+                    enabled = tor.enabled && tor.supported,
+                    label = "Tor",
+                )
                 .padding(vertical = 4.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
@@ -745,7 +755,7 @@ private fun TorSection(tor: TorControls, onOpenLogs: () -> Unit) {
             }
             Switch(
                 checked = tor.enabled && tor.running,
-                onCheckedChange = tor.onRun,
+                onCheckedChange = null,
                 enabled = tor.enabled && tor.supported,
             )
         }

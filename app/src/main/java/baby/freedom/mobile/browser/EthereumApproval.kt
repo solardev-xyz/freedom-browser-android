@@ -250,16 +250,16 @@ fun EthereumApprovalSheet(request: EthereumPromptRequest) {
             }
             Spacer(Modifier.height(16.dp))
             ObscuredTapNotice(tap)
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+            SheetButtonRow {
                 OutlinedButton(
                     onClick = { if (guard.accepts() && !busy) request.respond(EthAnswer.Rejected) },
                     enabled = armed && !busy,
-                    modifier = Modifier.weight(1f).testTag("ethereum-reject"),
+                    modifier = Modifier.testTag("ethereum-reject"),
                 ) { Text("Reject") }
                 Button(
                     onClick = ::approve,
                     enabled = armed && !busy && canApprove,
-                    modifier = Modifier.weight(1f).protectedPress(tap).testTag("ethereum-approve"),
+                    modifier = Modifier.protectedPress(tap).testTag("ethereum-approve"),
                 ) {
                     if (busy) {
                         CircularProgressIndicator(strokeWidth = 2.dp, modifier = Modifier.size(18.dp))

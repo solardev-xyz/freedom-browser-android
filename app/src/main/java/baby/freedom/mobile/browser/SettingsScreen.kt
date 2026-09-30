@@ -1028,7 +1028,8 @@ private fun TorSettingsSection(
             style = PageRowStyle.Inset,
             leadingIcon = Icons.Filled.VpnLock,
             onClick = { onEnabled(!enabled) },
-            trailing = { Switch(checked = enabled, onCheckedChange = onEnabled) },
+            checked = enabled,
+            trailing = { Switch(checked = enabled, onCheckedChange = null) },
         )
         if ("tor-client" in visible) PageRow(
             title = TOR_CLIENT,
@@ -1046,8 +1047,9 @@ private fun TorSettingsSection(
             leadingIcon = Icons.Filled.PowerSettingsNew,
             enabled = enabled,
             onClick = { onStartOnLaunch(!startOnLaunch) },
+            checked = startOnLaunch,
             trailing = {
-                Switch(checked = startOnLaunch, onCheckedChange = onStartOnLaunch, enabled = enabled)
+                Switch(checked = startOnLaunch, onCheckedChange = null, enabled = enabled)
             },
         )
     }
@@ -1517,8 +1519,9 @@ private fun AdblockSection(
                 style = PageRowStyle.Inset,
                 leadingIcon = Icons.Filled.Shield,
                 onClick = { onToggle(category, !on) },
+                checked = on,
                 trailing = {
-                    Switch(checked = on, onCheckedChange = { onToggle(category, it) })
+                    Switch(checked = on, onCheckedChange = null)
                 },
             )
         }
@@ -1529,8 +1532,9 @@ private fun AdblockSection(
             style = PageRowStyle.Inset,
             leadingIcon = Icons.Filled.Update,
             onClick = { onAutoUpdate(!autoUpdate) },
+            checked = autoUpdate,
             trailing = {
-                Switch(checked = autoUpdate, onCheckedChange = onAutoUpdate)
+                Switch(checked = autoUpdate, onCheckedChange = null)
             },
         )
         if ("update-check" in visible) PageRow(
@@ -1974,10 +1978,11 @@ private fun AboutSection(
             leadingIcon = Icons.Filled.Update,
             enabled = !fromStore,
             onClick = { if (!fromStore) onCheckForUpdates(!checkForUpdates) },
+            checked = checkForUpdates && !fromStore,
             trailing = {
                 Switch(
                     checked = checkForUpdates && !fromStore,
-                    onCheckedChange = onCheckForUpdates,
+                    onCheckedChange = null,
                     enabled = !fromStore,
                 )
             },
@@ -2017,6 +2022,7 @@ private fun OtherSection(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
+                .switchRow(checked = showIpfsUi, onCheckedChange = onToggleShowIpfsUi)
                 .padding(vertical = 4.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
@@ -2036,7 +2042,7 @@ private fun OtherSection(
             }
             Switch(
                 checked = showIpfsUi,
-                onCheckedChange = onToggleShowIpfsUi,
+                onCheckedChange = null,
             )
         }
     }
@@ -2103,6 +2109,7 @@ private fun IpfsSection(
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
+                    .switchRow(checked = isOn, onCheckedChange = onIpfsToggle)
                     .padding(vertical = 4.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
@@ -2118,7 +2125,7 @@ private fun IpfsSection(
                 }
                 Switch(
                     checked = isOn,
-                    onCheckedChange = onIpfsToggle,
+                    onCheckedChange = null,
                 )
             }
 

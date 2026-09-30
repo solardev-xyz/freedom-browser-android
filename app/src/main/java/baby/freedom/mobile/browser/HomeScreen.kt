@@ -14,6 +14,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
@@ -516,7 +517,7 @@ private fun SectionHeader(title: String, modifier: Modifier = Modifier) {
         style = MaterialTheme.typography.titleSmall,
         fontWeight = FontWeight.SemiBold,
         color = MaterialTheme.colorScheme.onSurface,
-        modifier = modifier,
+        modifier = modifier.semantics { heading() },
     )
 }
 
@@ -602,6 +603,8 @@ private fun LetterTile(entry: BookmarkEntry) {
     val initial = initialChar(entry.title, entry.url).toString()
     Box(
         modifier = Modifier
+            // The initial is a picture of the name read just below it.
+            .clearAndSetSemantics {}
             .size(64.dp)
             .clip(MaterialTheme.shapes.large)
             .background(accent),

@@ -1,5 +1,6 @@
 package baby.freedom.mobile.browser
 
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -180,10 +181,14 @@ class AdblockSiteStateTest {
 
     @Test
     fun `a failed write is dropped`() = runBlocking {
-        val store = AllowlistStore({ error("disk full") }) {}
+        // The write fails only once the test has seen it shown: failing at
+        // once, the runner could drop it before the first check looks.
+        val failIt = CompletableDeferred<Unit>()
+        val store = AllowlistStore({ failIt.await(); error("disk full") }) {}
         val runner = launch(Dispatchers.Default) { store.run() }
         store.write(add = true, host = "a.example")
         assertEquals(setOf("a.example"), store.current)
+        failIt.complete(Unit)
         withTimeout(5_000) { while (store.current.isNotEmpty()) delay(5) }
         runner.cancel()
     }

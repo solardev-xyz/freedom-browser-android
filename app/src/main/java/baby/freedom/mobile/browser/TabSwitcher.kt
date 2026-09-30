@@ -51,6 +51,10 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.selected
+import androidx.compose.ui.semantics.stateDescription
 import baby.freedom.mobile.ui.PrivateTheme
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
@@ -465,8 +469,23 @@ private fun TabCard(
                 color = borderColor,
                 shape = MaterialTheme.shapes.large,
             )
-            .clickable { onClick() }
-            .semantics { if (moveActions.isNotEmpty()) customActions = moveActions },
+            .clickable(onClickLabel = "Switch to tab") { onClick() }
+            // Which card is the tab on screen, said rather than only
+            // drawn as the thicker border; and Close (and Mute) as
+            // actions on the card itself, so TalkBack users needn't hunt
+            // for the small buttons in its header (#279).
+            .semantics {
+                selected = isActive
+                if (isActive) stateDescription = "Current tab"
+                customActions = listOfNotNull(
+                    CustomAccessibilityAction("Close tab") { onClose(); true },
+                    onToggleMute?.takeIf { tab.playingAudio || tab.audioMuted }?.let { toggle ->
+                        CustomAccessibilityAction(if (tab.audioMuted) "Unmute tab" else "Mute tab") {
+                            toggle(); true
+                        }
+                    },
+                ) + moveActions
+            },
     ) {
         Row(
             modifier = Modifier
@@ -647,9 +666,16 @@ fun TabsCountButton(
 ) {
     val stroke = MaterialTheme.colorScheme.onSurface
     val density = LocalDensity.current
-    IconButton(onClick = onClick, shapes = IconButtonDefaults.shapes(), modifier = modifier) {
+    IconButton(
+        onClick = onClick,
+        shapes = IconButtonDefaults.shapes(),
+        // The drawn digit alone is all TalkBack had to read ("1"): name
+        // the control and say the count in words (#279).
+        modifier = modifier.semantics { contentDescription = tabsCountDescription(count) },
+    ) {
         Box(
             modifier = Modifier
+                .clearAndSetSemantics {}
                 .size(19.dp)
                 .clip(RoundedCornerShape(5.dp))
                 .border(
@@ -670,3 +696,7 @@ fun TabsCountButton(
         }
     }
 }
+
+/** Spoken label of [TabsCountButton]: what it opens and how many tabs there are. */
+internal fun tabsCountDescription(count: Int): String =
+    if (count == 1) "Tabs, 1 open" else "Tabs, $count open"
