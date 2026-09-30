@@ -945,6 +945,28 @@ fun BrowserWebViewHost(
                 attach(tabs.adoptPopup(opener = tab).also { it.beginLoad(inWebView = true) })
             },
             onCloseWindow = { tabs.closePopup(tab) },
+            popupsAllowed = { origin -> sitePermissions.popupsAllowed(tab, origin) },
+            // A window the pop-up blocker refused (#261): shown on the
+            // tab's notice at once, its address read by a throwaway probe
+            // WebView ([PopupProbe]) — at most a few at a time per tab;
+            // past that it is refused outright, its address unknown.
+            onPopupBlocked = { origin, resultMsg ->
+                val popups = tab.blockedPopups
+                val document = popups.document
+                val probing = popups.liveProbes < BlockedPopups.MAX_LIVE_PROBES
+                val id = popups.add(origin, pending = probing)
+                if (!probing) return@buildRefreshableWebView false
+                popups.liveProbes++
+                val started = PopupProbe.start(context, tab.private, resultMsg) { url ->
+                    popups.liveProbes--
+                    popups.resolve(document, id, url)
+                }
+                if (!started) {
+                    popups.liveProbes--
+                    popups.resolve(document, id, null)
+                }
+                started
+            },
             // Handed to Chromium by `onCreateWindow`, which needs it
             // never to have navigated. Not a popup rebuilt after a
             // relaunch (#183): its first navigation is the restore, not
@@ -1430,6 +1452,8 @@ private fun buildRefreshableWebView(
     fileChooser: FileChooser? = null,
     onCreateWindow: () -> WebView,
     onCloseWindow: () -> Unit,
+    popupsAllowed: (origin: String?) -> Boolean = { false },
+    onPopupBlocked: (origin: String?, resultMsg: Message) -> Boolean = { _, _ -> false },
     isPopup: Boolean = false,
     popupOpener: () -> Pair<BrowserState, WebView>? = { null },
     onContextMenuPress: () -> PageContextMenuPin? = { null },
@@ -1820,11 +1844,15 @@ private fun buildRefreshableWebView(
             // `target=_blank` links and `window.open()` get a real
             // window — a new tab, see `onCreateWindow` below — instead
             // of silently replacing the page that asked (#82).
-            // `javaScriptCanOpenWindowsAutomatically` stays at its
-            // default `false`, which is Chromium's popup blocker: a
-            // window only opens from a user gesture (a tap on the link
-            // or button), never from a script on its own.
             setSupportMultipleWindows(true)
+            // Chromium's own pop-up blocker (this at its default `false`)
+            // refuses a window opened without a user gesture silently.
+            // The app's blocker does it instead (#261, [popupOpens]):
+            // every window reaches `onCreateWindow` with Chromium's
+            // `isUserGesture`, and one without it opens only on a site
+            // the user allowed pop-ups — otherwise it is blocked and
+            // named in a notice the user can open it from.
+            javaScriptCanOpenWindowsAutomatically = true
         }
 
         this.onSearchSelection = onSearchSelection
@@ -2669,6 +2697,8 @@ private fun buildRefreshableWebView(
                     )
                 }
                 state.documentCommitted()
+                // The previous document's blocked pop-ups go with it (#261).
+                state.blockedPopups.startDocument()
                 // A load the tab had in flight over the restored page
                 // before its WebView was rebuilt (#183 R1-F2) goes back
                 // in flight over it now, at its reload's commit —
@@ -3768,6 +3798,16 @@ private fun buildRefreshableWebView(
                 resultMsg: Message?,
             ): Boolean {
                 val transport = resultMsg?.obj as? WebView.WebViewTransport ?: return false
+                // The pop-up blocker (#261): without the user's gesture a
+                // window opens only on a site allowed pop-ups. Judged by
+                // the committed page's origin — a frame's window counts
+                // as its page's, as on desktop.
+                if (!isUserGesture) {
+                    val origin = permissionOriginKey(committedPageUrl)
+                    if (!popupOpens(isUserGesture = false, siteAllowed = popupsAllowed(origin))) {
+                        return onPopupBlocked(origin, resultMsg)
+                    }
+                }
                 transport.webView = onCreateWindow()
                 resultMsg.sendToTarget()
                 return true

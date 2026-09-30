@@ -1,0 +1,98 @@
+package baby.freedom.mobile.browser
+
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
+import org.junit.Test
+
+/** The pop-up blocker's rule and its per-tab notice state (#261). */
+class PopupBlockerTest {
+    @Test
+    fun `a window opens with the user gesture or on an allowed site, and is blocked otherwise`() {
+        assertTrue(popupOpens(isUserGesture = true, siteAllowed = false))
+        assertTrue(popupOpens(isUserGesture = true, siteAllowed = true))
+        assertTrue(popupOpens(isUserGesture = false, siteAllowed = true))
+        assertFalse(popupOpens(isUserGesture = false, siteAllowed = false))
+    }
+
+    @Test
+    fun `the pop-ups allow is a site capability under the desktop storage key, needing nothing from Android`() {
+        assertEquals(SitePermission.POPUPS, SiteCapability.forKey("popups"))
+        assertTrue(SitePermission.POPUPS.androidPermissions.isEmpty())
+    }
+
+    @Test
+    fun `a blocked pop-up shows at once and gets its address when the probe reports`() {
+        val popups = BlockedPopups()
+        val doc = popups.document
+        val id = popups.add("https://a.example", pending = true)
+        assertEquals(listOf(BlockedPopup(id, url = null, pending = true)), popups.entries)
+        assertEquals("https://a.example", popups.origin)
+        popups.resolve(doc, id, "https://pay.example/checkout")
+        assertEquals(listOf(BlockedPopup(id, url = "https://pay.example/checkout")), popups.entries)
+    }
+
+    @Test
+    fun `a late probe report for a document the tab has left is dropped`() {
+        val popups = BlockedPopups()
+        val doc = popups.document
+        val id = popups.add("https://a.example", pending = true)
+        popups.startDocument()
+        assertTrue(popups.entries.isEmpty())
+        assertNull(popups.origin)
+        popups.resolve(doc, id, "https://late.example/")
+        assertTrue(popups.entries.isEmpty())
+    }
+
+    @Test
+    fun `a page blocked in a loop keeps only the newest entries but counts them all`() {
+        val popups = BlockedPopups()
+        val ids = (1..10).map { popups.add("https://a.example", pending = false) }
+        assertEquals(10, popups.count)
+        assertEquals(BlockedPopups.MAX_ENTRIES, popups.entries.size)
+        assertEquals(ids.takeLast(BlockedPopups.MAX_ENTRIES), popups.entries.map { it.id })
+        assertEquals("10 pop-ups blocked", blockedPopupsTitle(popups.count))
+        assertEquals("Pop-up blocked", blockedPopupsTitle(1))
+    }
+
+    @Test
+    fun `opening the last entry takes the notice down, and a new document resets always-allow`() {
+        val popups = BlockedPopups()
+        val first = popups.add("https://a.example", pending = false)
+        val second = popups.add("https://a.example", pending = false)
+        popups.markAllowed()
+        popups.remove(popups.entries.first { it.id == first })
+        assertEquals(listOf(second), popups.entries.map { it.id })
+        assertTrue(popups.allowed)
+        popups.remove(popups.entries.single())
+        assertTrue(popups.entries.isEmpty())
+        assertFalse(popups.allowed)
+        assertEquals(0, popups.count)
+        popups.add("https://a.example", pending = false)
+        popups.markAllowed()
+        popups.startDocument()
+        assertFalse(popups.allowed)
+    }
+
+    @Test
+    fun `the popups allow is read from the session tier, and a revoke takes it away`() {
+        val s = PermissionSession()
+        val o = "https://a.example"
+        assertNull(s.decisionFor(o, SitePermission.POPUPS))
+        s.record(o, SitePermission.POPUPS, PermissionDecision.ALLOW, remembered = false)
+        assertEquals(PermissionDecision.ALLOW, s.decisionFor(o, SitePermission.POPUPS))
+        assertEquals(listOf(SitePermission.POPUPS), s.entries().map { it.permission })
+        s.revoke(o, SitePermission.POPUPS)
+        assertNull(s.decisionFor(o, SitePermission.POPUPS))
+    }
+
+    @Test
+    fun `only web and dweb addresses are offered to open`() {
+        assertTrue(isOpenableInTab("https://a.example/x"))
+        assertTrue(isOpenableInTab("bzz://abc/"))
+        assertFalse(isOpenableInTab("javascript:alert(1)"))
+        assertFalse(isOpenableInTab("data:text/html,hi"))
+        assertFalse(isOpenableInTab("intent://x#Intent;end"))
+    }
+}

@@ -356,6 +356,14 @@ class BrowserState(val id: Long, val private: Boolean = false) {
         internal set
 
     /**
+     * The pop-ups this tab's page tried to open without the user's
+     * gesture and the app blocked (#261), for the notice [BrowserScreen]
+     * shows while this tab is the active one. Cleared by each new
+     * document.
+     */
+    val blockedPopups = BlockedPopups()
+
+    /**
      * The `window.radicle` consent prompt this tab is waiting on (#124),
      * or null. Owned by [RadicleProviders]; shown like [permissionPrompt].
      */

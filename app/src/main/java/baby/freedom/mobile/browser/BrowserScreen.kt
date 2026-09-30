@@ -2021,8 +2021,47 @@ fun BrowserScreen(
                 modifier = Modifier.onSizeChanged { ipfsLineHeightPx = it.height },
             )
         }
-        val snackbarLift = if (ipfsLine != null) {
+        val ipfsLift = if (ipfsLine != null) {
             with(density) { ipfsLineHeightPx.toDp() } + IpfsStatusGap * 2
+        } else {
+            0.dp
+        }
+
+        // The pop-up blocker's notice (#261): the active tab's blocked
+        // pop-ups, above the IPFS line when that is up. Only over the
+        // page — not while the address bar is open, nor under a panel.
+        val blockedPopups = state.blockedPopups
+        val popupNoticeShown = blockedPopups.entries.isNotEmpty() && !addressFocused && !overlayShown
+        var popupNoticeHeightPx by remember { mutableIntStateOf(0) }
+        if (popupNoticeShown) {
+            BlockedPopupNotice(
+                popups = blockedPopups,
+                private = state.private,
+                displayUrl = { displayFor(it, state) },
+                onOpen = { entry, url ->
+                    blockedPopups.remove(entry)
+                    tabs.requestOpenInNewTab?.invoke(url, false, state.private)
+                },
+                onAlwaysAllow = { origin ->
+                    sitePermissions.allowPopups(state, origin)
+                    blockedPopups.markAllowed()
+                },
+                onClose = { blockedPopups.clear() },
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .windowInsetsPadding(chromeInsets)
+                    .padding(
+                        start = CapsuleSideMargin,
+                        end = CapsuleSideMargin,
+                        bottom = capsuleSlot + CapsuleBottomMargin + IpfsStatusGap + ipfsLift,
+                    )
+                    .widthIn(max = CHROME_MAX_WIDTH)
+                    .fillMaxWidth()
+                    .onSizeChanged { popupNoticeHeightPx = it.height },
+            )
+        }
+        val snackbarLift = ipfsLift + if (popupNoticeShown) {
+            with(density) { popupNoticeHeightPx.toDp() } + IpfsStatusGap * 2
         } else {
             0.dp
         }

@@ -117,6 +117,9 @@ private fun isActionableLink(url: String): Boolean =
 internal fun isFetchableImage(url: String): Boolean =
     schemeOf(url) in OPENABLE_SCHEMES || url.startsWith("data:image/", ignoreCase = true)
 
+/** An address a tab can load: the web and the dweb schemes, not `data:`/`javascript:`/`blob:`. */
+internal fun isOpenableInTab(url: String): Boolean = schemeOf(url) in OPENABLE_SCHEMES
+
 /** An image that can also be opened on its own in a tab: not a `data:` blob of bytes. */
 internal fun isOpenableImage(url: String): Boolean = schemeOf(url) in OPENABLE_SCHEMES
 
