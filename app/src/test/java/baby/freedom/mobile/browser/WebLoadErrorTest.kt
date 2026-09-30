@@ -154,6 +154,29 @@ class WebLoadErrorTest {
     }
 
     @Test
+    fun `a refused step onto a URL held on both sides goes where the step was headed`() {
+        val x = "http://x.example/"
+        val n = "http://n.example/"
+        val o = "http://o.example/"
+        val d = "http://d.example/"
+        val bad = "https://self-signed.example/"
+        val chain = listOf(n, bad)
+        val list = listOf(x, n, o, n, d)
+        // X → N → O → N → D, on O: the chrome's Forward was refused —
+        // the same Forward again, into the entry ahead, D kept past it.
+        assertEquals(CertReissue(1, n), certPageReissue(list, 2, chain, steppedTo = 3))
+        // Its Back: the entry behind.
+        assertEquals(CertReissue(-1, n), certPageReissue(list, 2, chain, steppedTo = 1))
+        // A step the page took itself (nothing recorded): Back on a tie.
+        assertEquals(CertReissue(-1, n), certPageReissue(list, 2, chain))
+        // A recorded step whose entry holds none of the chain (a link
+        // from the page after it) is no evidence: the nearer entry.
+        assertEquals(CertReissue(-1, n), certPageReissue(list, 2, chain, steppedTo = 4))
+        // One outside the list likewise.
+        assertEquals(CertReissue(-1, n), certPageReissue(list, 2, chain, steppedTo = 7))
+    }
+
+    @Test
     fun `the main-frame chain follows a navigation from its start through its redirects`() {
         val chain = MainFrameChain()
         val a = "http://a.example/"

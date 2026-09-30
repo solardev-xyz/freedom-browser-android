@@ -1830,6 +1830,7 @@ private fun buildRefreshableWebView(
             (0 until list.size).map { list.getItemAtIndex(it)?.url },
             list.currentIndex,
             cert.chain,
+            steppedTo = (view as? PageWebView)?.historyStepTarget(list.currentIndex),
         )
         if (certRefusal.arm(reissue.url, certErrorPageHtml(url, host, facts, now, retryUrl = reissue.url))) {
             Log.i(LOG_TAG, "certificate error for $url → page in place on ${reissue.url} (step ${reissue.step})")
@@ -2758,6 +2759,7 @@ private fun buildRefreshableWebView(
                 pendingCertError = null
                 certRefusal.committed(url)
                 mainFrameChain.committed()
+                (view as? PageWebView)?.historyStepCommitted()
                 // Ad blocking judges requests against it from here on
                 // (a page back from the back/forward cache made none).
                 url?.let(adblockPage::committed)
@@ -4570,6 +4572,7 @@ internal class PageWebView(context: Context) : WebView(context) {
     // [TabDocuments.navigationStarted]); the page's own go through
     // `shouldOverrideUrlLoading`.
     override fun loadUrl(url: String) {
+        noteHistoryStep(url)
         matchUserAgentTo(url)
         // A `javascript:` URL runs in the page: no load, no entry.
         if (!url.startsWith("javascript:", ignoreCase = true)) usersNavigationIsLoad = true
@@ -4579,6 +4582,7 @@ internal class PageWebView(context: Context) : WebView(context) {
     }
 
     override fun loadUrl(url: String, additionalHttpHeaders: MutableMap<String, String>) {
+        noteHistoryStep(url)
         matchUserAgentTo(url)
         // A `javascript:` URL runs in the page: no load, no entry.
         if (!url.startsWith("javascript:", ignoreCase = true)) usersNavigationIsLoad = true
@@ -4588,6 +4592,7 @@ internal class PageWebView(context: Context) : WebView(context) {
     }
 
     override fun postUrl(url: String, postData: ByteArray) {
+        pendingHistoryStep = null
         matchUserAgentTo(url)
         // A `javascript:` URL runs in the page: no load, no entry.
         if (!url.startsWith("javascript:", ignoreCase = true)) usersNavigationIsLoad = true
@@ -4609,6 +4614,7 @@ internal class PageWebView(context: Context) : WebView(context) {
     }
 
     override fun reload() {
+        pendingHistoryStep = null
         matchUserAgentTo(url)
         url?.let(documents::navigationStarted)
         browserInitiatedLoad()
@@ -4633,7 +4639,42 @@ internal class PageWebView(context: Context) : WebView(context) {
         super.goBackOrForward(steps)
     }
 
+    /**
+     * The history step the app last asked for, as `(from, to)` indexes
+     * of the back/forward list — the chrome's Back / Forward, a
+     * [goBackOrForward] — until a document commits or the app starts a
+     * load of another kind. What tells a refused Back from a refused
+     * Forward when the entries on both sides hold the refused URL
+     * ([certPageReissue], #259 R3-F1); a step the page takes itself
+     * (`history.back()`) goes unrecorded.
+     */
+    private var pendingHistoryStep: Pair<Int, Int>? = null
+
+    /** The index [pendingHistoryStep] was headed for, if it set out from [currentIndex]. */
+    fun historyStepTarget(currentIndex: Int): Int? =
+        pendingHistoryStep?.takeIf { it.first == currentIndex }?.second
+
+    /** A document committed: no history step in flight. */
+    fun historyStepCommitted() {
+        pendingHistoryStep = null
+    }
+
+    private fun noteHistoryStep(url: String) {
+        when (url) {
+            HISTORY_BACK_JS -> recordHistoryStep(-1)
+            HISTORY_FORWARD_JS -> recordHistoryStep(1)
+            // Any other `javascript:` URL runs in the page: no load.
+            else -> if (!url.startsWith("javascript:", ignoreCase = true)) pendingHistoryStep = null
+        }
+    }
+
+    private fun recordHistoryStep(steps: Int) {
+        val from = copyBackForwardList().currentIndex
+        pendingHistoryStep = from to from + steps
+    }
+
     private fun historyStepStarting(steps: Int) {
+        recordHistoryStep(steps)
         val url = historyEntryUrl(steps) ?: return
         // The entry is fetched again with whatever user agent is in
         // place: the one its site asks for now (#180).

@@ -250,14 +250,30 @@ internal data class CertReissue(val step: Int?, val url: String)
  * only the refused URL: an entry that redirects onto a bad certificate
  * (http → a self-signed https) holds the URL it started from, and a
  * refused Back onto it names only the redirect target (R2-F1).
- * Fragments aside — a request never carries one. The nearer entry
- * wins; Back on a tie; the earlier URL of the chain on a tie of both.
+ * Fragments aside — a request never carries one.
+ *
+ * [steppedTo] is the entry the app's own history step was headed for
+ * (the chrome's Back / Forward, [PageWebView.historyStepTarget]): when
+ * it holds a URL of the chain, that step is the one refused, and it is
+ * taken again — a refused Forward onto a URL the list also holds one
+ * step behind (X → N → O → N → D, Forward from O) must land in the
+ * entry ahead, or Forward from the page goes back to O and D is out of
+ * reach (R3-F1). Otherwise (a step the page took itself, a link) the
+ * nearer entry wins; Back on a tie; the earlier URL of the chain on a
+ * tie of both.
  */
-internal fun certPageReissue(entryUrls: List<String?>, currentIndex: Int, chain: List<String>): CertReissue {
+internal fun certPageReissue(
+    entryUrls: List<String?>,
+    currentIndex: Int,
+    chain: List<String>,
+    steppedTo: Int? = null,
+): CertReissue {
     val keys = chain.map { it.substringBefore('#') }
-    val index = entryUrls.indices
-        .filter { entryUrls[it]?.substringBefore('#') in keys }
-        .minWithOrNull(compareBy<Int>({ kotlin.math.abs(it - currentIndex) }, { it }))
+    fun holdsChain(i: Int) = entryUrls[i]?.substringBefore('#') in keys
+    val index = steppedTo?.takeIf { it in entryUrls.indices && holdsChain(it) }
+        ?: entryUrls.indices
+            .filter(::holdsChain)
+            .minWithOrNull(compareBy<Int>({ kotlin.math.abs(it - currentIndex) }, { it }))
         ?: return CertReissue(null, chain.first())
     val entry = entryUrls[index]!!.substringBefore('#')
     return CertReissue(index - currentIndex, chain.first { it.substringBefore('#') == entry })
