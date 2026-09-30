@@ -1,6 +1,8 @@
 package baby.freedom.mobile.ens
 
+import baby.freedom.mobile.R
 import baby.freedom.mobile.browser.WhatwgHost
+import baby.freedom.mobile.l10n.Strings
 import io.github.adraffy.ens.ENSNormalize
 import io.github.adraffy.ens.InvalidLabelException
 
@@ -132,9 +134,9 @@ object EnsNormalize {
      * drop them — and any other bidi controls — from the text we show.
      */
     internal fun cleanMessage(message: String?): String =
-        (message ?: "invalid name")
+        (message ?: Strings.get(R.string.names_error_invalid_name))
             .replace(Regex("[\\u200E\\u200F\\u202A-\\u202E\\u2066-\\u2069]"), "")
-            .ifBlank { "invalid name" }
+            .ifBlank { Strings.get(R.string.names_error_invalid_name) }
 
     /**
      * [normalize], or `null` when ENSIP-15 rejects [name]. A `.tez` name

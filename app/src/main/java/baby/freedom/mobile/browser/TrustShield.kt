@@ -26,14 +26,18 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.annotation.StringRes
 import androidx.compose.ui.unit.dp
+import baby.freedom.mobile.R
 import baby.freedom.mobile.ens.EnsInput
 import baby.freedom.mobile.ens.EnsTrust
 import baby.freedom.mobile.ens.NameSystem
+import baby.freedom.mobile.l10n.Strings
 
 /**
  * How far the answer behind a name-addressed page was checked (#97) —
@@ -69,14 +73,26 @@ import baby.freedom.mobile.ens.NameSystem
  * record on the ordinary web) makes no name claim and gets no shield.
  */
 internal enum class TrustTier(
-    /** Short state, as the menu row and the dialog title say it. */
-    val title: String,
+    @StringRes private val titleRes: Int,
+    /** [title] as it follows the badge's own name in the mark's content description. */
+    @StringRes private val markLabelRes: Int,
     val icon: ImageVector,
     val color: Color,
 ) {
-    Proven("Proven name", Icons.Filled.Verified, Color(0xFF3FB950)),
-    Verified("Verified name", Icons.Filled.VerifiedUser, Color(0xFF3FB950)),
-    Unverified("Name not cross-checked", Icons.Filled.GppMaybe, Color(0xFFF0A020)),
+    Proven(R.string.names_tier_proven, R.string.names_tier_proven_mark, Icons.Filled.Verified, Color(0xFF3FB950)),
+    Verified(R.string.names_tier_verified, R.string.names_tier_verified_mark, Icons.Filled.VerifiedUser, Color(0xFF3FB950)),
+    Unverified(
+        R.string.names_tier_unverified,
+        R.string.names_tier_unverified_mark,
+        Icons.Filled.GppMaybe,
+        Color(0xFFF0A020),
+    ),
+    ;
+
+    /** Short state, as the menu row and the dialog title say it. */
+    val title: String get() = Strings.get(titleRes)
+
+    val markLabel: String get() = Strings.get(markLabelRes)
 }
 
 /**
@@ -96,38 +112,38 @@ internal data class NameTrust(val name: String, val trust: EnsTrust, val answer:
     /** ENS, WNS, GNS or Tezos Domains — whose records these are. */
     val system: String get() = NameSystem.forName(name).label
 
-    private val block: String get() = trust.block?.let { "block #$it" } ?: "the latest block"
+    private val block: String
+        get() = trust.block?.let { Strings.get(R.string.names_trust_at_block, it.toString()) }
+            ?: Strings.get(R.string.names_trust_at_latest_block)
+
+    /** Who gave a proof: the prover's host(s), or the prover by name. */
+    private val prover: String
+        get() = trust.agreed.joinToString(Strings.get(R.string.names_trust_prover_separator))
+            .ifEmpty { Strings.get(R.string.names_trust_colibri_prover) }
+
+    /** The one server that answered, by host when known. */
+    private val loneServer: String
+        get() = trust.agreed.singleOrNull() ?: Strings.get(R.string.names_trust_one_rpc_server)
 
     /** One sentence on what the tier means for this answer. */
     val summary: String
         get() = when (tier) {
             TrustTier.Proven -> if (trust.lightClient) {
-                "The Myotis light client on this device read the $system record for $name " +
-                    "at $block and checked it against Ethereum state proofs signed off by the " +
-                    "chain's sync committee. No RPC server's word was involved."
+                Strings.get(R.string.names_summary_light_client, system, name, block)
+            } else if (trust.offchain) {
+                Strings.get(R.string.names_summary_proven_offchain, name, system, prover, block)
             } else {
-                val prover = trust.agreed.joinToString(" and ").ifEmpty { "the Colibri prover" }
-                if (trust.offchain) {
-                    "$name's $system record comes from an off-chain gateway (CCIP-Read). This device " +
-                        "checked a proof from $prover against Ethereum's sync committee that the name's " +
-                        "resolver contract accepted that answer at $block; the record itself isn't on chain."
-                } else {
-                    "This device checked a proof from $prover against Ethereum's sync committee: " +
-                        "$name's $system record is what the chain itself holds at $block, " +
-                        "not just what RPC servers agree on."
-                }
+                Strings.get(R.string.names_summary_proven, prover, name, system, block)
             }
             TrustTier.Verified -> {
                 val n = trust.agreed.size
-                val agreed = if (n >= 2) "$n independent RPC servers" else "Independent RPC servers"
-                "$agreed returned the same $system record for $name at $block."
+                if (n >= 2) {
+                    Strings.plural(R.plurals.names_summary_verified, n, n, system, name, block)
+                } else {
+                    Strings.get(R.string.names_summary_verified_servers, system, name, block)
+                }
             }
-            TrustTier.Unverified -> {
-                val who = trust.agreed.singleOrNull() ?: "one RPC server"
-                "Only $who answered for $name, so its $system record wasn't checked " +
-                    "against another server. A single misbehaving server could have picked " +
-                    "where this page comes from."
-            }
+            TrustTier.Unverified -> Strings.get(R.string.names_summary_unverified, loneServer, name, system)
         }
 
     /**
@@ -138,30 +154,21 @@ internal data class NameTrust(val name: String, val trust: EnsTrust, val answer:
     val recipientSummary: String
         get() = when (tier) {
             TrustTier.Proven -> if (trust.lightClient) {
-                "The Myotis light client on this device read $name's $system address record at $block " +
-                    "and checked it against Ethereum state proofs signed off by the chain's sync committee. " +
-                    "No RPC server's word was involved."
+                Strings.get(R.string.names_recipient_light_client, name, system, block)
+            } else if (trust.offchain) {
+                Strings.get(R.string.names_recipient_proven_offchain, name, prover, block)
             } else {
-                val prover = trust.agreed.joinToString(" and ").ifEmpty { "the Colibri prover" }
-                if (trust.offchain) {
-                    "$name's address comes from an off-chain gateway (CCIP-Read). This device checked a " +
-                        "proof from $prover against Ethereum's sync committee that the name's resolver " +
-                        "contract accepted that answer at $block; the record itself isn't on chain."
-                } else {
-                    "This device checked a proof from $prover against Ethereum's sync committee: this is " +
-                        "the address $name's $system record holds at $block, not just what RPC servers agree on."
-                }
+                Strings.get(R.string.names_recipient_proven, prover, name, system, block)
             }
             TrustTier.Verified -> {
                 val n = trust.agreed.size
-                val agreed = if (n >= 2) "$n independent RPC servers" else "Independent RPC servers"
-                "$agreed returned the same address for $name at $block."
+                if (n >= 2) {
+                    Strings.plural(R.plurals.names_recipient_verified, n, n, name, block)
+                } else {
+                    Strings.get(R.string.names_recipient_verified_servers, name, block)
+                }
             }
-            TrustTier.Unverified -> {
-                val who = trust.agreed.singleOrNull() ?: "one RPC server"
-                "Only $who answered for $name, so its address wasn't checked against another " +
-                    "server. A single misbehaving server could have picked where this money goes."
-            }
+            TrustTier.Unverified -> Strings.get(R.string.names_recipient_unverified, loneServer, name)
         }
 }
 
@@ -209,7 +216,7 @@ internal fun ProtocolBadgeMark(
     modifier: Modifier = Modifier,
 ) {
     val description = if (trust != null) {
-        "${badge.contentDescription}, ${trust.tier.title.lowercase()}"
+        stringResource(R.string.names_badge_with_trust, badge.contentDescription, trust.tier.markLabel)
     } else {
         badge.contentDescription
     }
@@ -268,25 +275,27 @@ internal fun TrustDetailsDialog(
                     verticalArrangement = Arrangement.spacedBy(12.dp),
                 ) {
                     Text(trust.summary)
-                    TrustFact("Name", trust.name)
-                    if (answer != null) TrustFact("Resolves to", answer)
+                    TrustFact(stringResource(R.string.names_fact_name), trust.name)
+                    if (answer != null) TrustFact(stringResource(R.string.names_fact_resolves_to), answer)
                     TrustFact(
-                        "Block",
-                        trust.trust.block?.let { "#$it" } ?: "latest",
+                        stringResource(R.string.names_fact_block),
+                        trust.trust.block?.let { "#$it" } ?: stringResource(R.string.names_fact_block_latest),
                     )
                     if (trust.trust.agreed.isNotEmpty()) {
                         TrustFact(
                             when (trust.tier) {
-                                TrustTier.Proven -> if (trust.trust.lightClient) "Verified by" else "Proof from"
-                                TrustTier.Verified -> "Agreed (${trust.trust.agreed.size})"
-                                TrustTier.Unverified -> "Answered by"
+                                TrustTier.Proven -> stringResource(
+                                    if (trust.trust.lightClient) R.string.names_fact_verified_by else R.string.names_fact_proof_from,
+                                )
+                                TrustTier.Verified -> stringResource(R.string.names_fact_agreed, trust.trust.agreed.size)
+                                TrustTier.Unverified -> stringResource(R.string.names_fact_answered_by)
                             },
                             trust.trust.agreed.joinToString("\n"),
                         )
                     }
                     if (trust.trust.dissented.isNotEmpty()) {
                         TrustFact(
-                            "Outvoted (${trust.trust.dissented.size})",
+                            stringResource(R.string.names_fact_outvoted, trust.trust.dissented.size),
                             trust.trust.dissented.joinToString("\n"),
                         )
                     }
@@ -294,7 +303,7 @@ internal fun TrustDetailsDialog(
             }
         },
         confirmButton = {
-            TextButton(onClick = onDismiss) { Text("Done") }
+            TextButton(onClick = onDismiss) { Text(stringResource(R.string.common_done)) }
         },
     )
 }
