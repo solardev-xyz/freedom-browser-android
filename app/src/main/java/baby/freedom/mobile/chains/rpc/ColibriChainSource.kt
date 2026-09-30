@@ -75,8 +75,8 @@ import org.json.JSONObject
  * than cost a round trip to every prover (three on Gnosis) inside the
  * verifier name resolution shares, each answering its own 500 ("the
  * block after N can not be found"): a read at a numbered block past the
- * chain's head as last proven here ([knownHead], moved on by one
- * [SLOT_MS] per slot since), such as
+ * chain's head as last proven here ([knownHead]: the block a proven
+ * `latest` read named, moved on by one [SLOT_MS] per slot since), such as
  * [baby.freedom.mobile.wallet.Send]'s check that a block some way past
  * the head doesn't exist yet; and, for one slot after a prover refused it, the same receipt or
  * transaction by hash, which a receipt poll in the head block asks for
@@ -103,15 +103,22 @@ internal class ColibriChainSource(
     private val backoffs = ConcurrentHashMap<Long, Backoff>()
     private val canaries = ConcurrentHashMap<Long, Canary>()
 
-    /** Per chain: the highest block a proof here named, and when ([clock]) it was learned. */
+    /**
+     * Per chain: the head a proven `latest` read here named, and when
+     * ([clock]) it was learned. Only a `latest` read: a receipt, a
+     * transaction or a numbered block names a block that may be long
+     * past, and stamping it with the time it was learned would put
+     * [knownHead] behind the chain and skip blocks that exist (R4-M1).
+     */
     private val heads = ConcurrentHashMap<Long, Pair<Long, Long>>()
 
     /** `chain method hash` → until when ([clock]) a by-hash read the prover refused skips the tier. */
     private val holds = ConcurrentHashMap<String, Long>()
 
     /**
-     * The chain's head as far as this tier knows: the highest block a
-     * proof named, plus one per slot since; `null` before any proof.
+     * The chain's head as far as this tier knows: the block the last
+     * proven `latest` read named, plus one per slot since; `null` before
+     * any such proof.
      */
     internal fun knownHead(chainId: Long): Long? {
         val (block, at) = heads[chainId] ?: return null
@@ -119,7 +126,8 @@ internal class ColibriChainSource(
         return block + elapsed / (SLOT_MS[chainId] ?: MIN_SLOT_MS)
     }
 
-    private fun sawBlock(chainId: Long, block: Long?) {
+    /** Record [block] as chain [chainId]'s head: only ever the answer to a proven `latest` read. */
+    private fun sawHead(chainId: Long, block: Long?) {
         if (block == null) return
         val now = clock()
         heads.merge(chainId, block to now) { old, new -> if (new.first > old.first) new else old }
@@ -250,7 +258,8 @@ internal class ColibriChainSource(
             raw
         }
         val block = blockOf(raw)
-        sawBlock(chainId, block)
+        // Only the head itself moves the head on (see [heads]).
+        if (blockNumber || (method == "eth_getBlockByNumber" && params.opt(0) == "latest")) sawHead(chainId, block)
         val hosts = provers.ifEmpty {
             listOfNotNull(EnsColibri.CHAINS[chainId]?.provers?.firstOrNull()?.let(EnsColibri::hostOf))
         }
@@ -292,7 +301,7 @@ internal class ColibriChainSource(
                 }
                 if (proven != null) {
                     backoff.succeeded()
-                    sawBlock(chainId, blockOf(proven.first.opt("result")))
+                    sawHead(chainId, blockOf(proven.first.opt("result")))
                 } else {
                     backoff.failed()
                 }
@@ -381,9 +390,11 @@ internal class ColibriChainSource(
         /**
          * A slot, per chain: how often a head moves on (Ethereum 12 s,
          * Gnosis 5 s). [knownHead] counts one block per slot since the
-         * last proof, which can only overshoot the prover's head
-         * (a missed slot is no block), so it skips too little, never a
-         * block that exists.
+         * last proven `latest` block, which can only overshoot the
+         * prover's head (a missed slot is no block), so it skips too
+         * little, never a block that exists. That holds only because
+         * nothing but a `latest` proof feeds it: an older block a
+         * receipt or a numbered read names would start it behind.
          */
         val SLOT_MS = mapOf(1L to 12_000L, 100L to 5_000L)
         private const val MIN_SLOT_MS = 1_000L

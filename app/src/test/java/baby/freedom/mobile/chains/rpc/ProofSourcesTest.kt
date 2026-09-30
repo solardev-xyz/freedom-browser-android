@@ -306,6 +306,40 @@ class ProofSourcesTest {
     }
 
     @Test
+    fun `an old block a proof names doesn't hold the head back`() = runTest {
+        // R4-M1: the first proof on a chain is a receipt in block 0x10 (a
+        // history poll of an old send). Stamped as the head, an hour later
+        // it would read as block 0x10 + 720 and skip real blocks past it.
+        val now = AtomicLong(1_000_000)
+        val receipt = Verifier(
+            JSONObject().put("status", "success").put("result", JSONObject().put("blockNumber", "0x10")),
+        )
+        val source = ColibriChainSource(
+            EnsColibri(receipt, http = { _, _, _, _, _ -> throw IOException("no network in this test") }),
+            present = { true },
+            clock = now::get,
+        )
+        source.request(1, "eth_getTransactionReceipt", JSONArray().put("0x" + "ab".repeat(32)), emptyList())
+        source.request(1, "eth_getBlockByNumber", JSONArray().put("0x10").put(false), emptyList())
+        source.request(1, "eth_getBlockByNumber", JSONArray().put("finalized").put(false), emptyList())
+        assertNull(source.knownHead(1))
+        now.addAndGet(3_600_000)
+        // Block 0x1a0 (416) exists by now: it's still asked.
+        source.request(1, "eth_getBalance", JSONArray().put(address).put("0x1a0"), emptyList())
+        assertEquals(4, receipt.created.size)
+
+        // A proven `latest` block does set it.
+        val latest = Verifier(JSONObject().put("status", "success").put("result", JSONObject().put("number", "0x1a0")))
+        val head = ColibriChainSource(
+            EnsColibri(latest, http = { _, _, _, _, _ -> throw IOException("no network in this test") }),
+            present = { true },
+            clock = now::get,
+        )
+        head.request(1, "eth_getBlockByNumber", JSONArray().put("latest").put(false), emptyList())
+        assertEquals(0x1a0L, head.knownHead(1))
+    }
+
+    @Test
     fun `a block past the proven head skips the prover, until the head could have reached it`() = runTest {
         // Send's "block pinned + 16 doesn't exist yet" check (R3-M2): the
         // prover can't prove a block it doesn't have, and every prover
@@ -322,9 +356,11 @@ class ProofSourcesTest {
         val ahead = JSONArray().put("0x72").put(false)
         source.request(100, "eth_getBlockByNumber", ahead, emptyList())
         assertEquals(1, v.created.size)
-        assertEquals(100L, source.knownHead(100))
+        // A numbered block isn't the head: it doesn't set one (R4-M1).
+        assertNull(source.knownHead(100))
         assertEquals("0x64", source.request(100, "eth_blockNumber", JSONArray(), emptyList()).result)
         assertEquals(2, v.created.size)
+        assertEquals(100L, source.knownHead(100))
 
         // Block 114 (0x72) is past head 100: straight to the next tier.
         try {
