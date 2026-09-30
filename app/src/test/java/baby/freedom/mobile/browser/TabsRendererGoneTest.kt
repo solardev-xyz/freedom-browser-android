@@ -61,6 +61,20 @@ class TabsRendererGoneTest {
     }
 
     @Test
+    fun `the tab on screen killed for memory while the app was away reloads when shown`() {
+        val tabs = twoTabs()
+        tabs.rendererGone(tabs.active, crashed = false, appVisible = false) { null }
+        assertTrue(tabs.active.rendererGone!!.reloadWhenShown)
+    }
+
+    @Test
+    fun `the tab on screen crashed while the app was away still waits for Reload`() {
+        val tabs = twoTabs()
+        tabs.rendererGone(tabs.active, crashed = true, appVisible = false) { null }
+        assertFalse(tabs.active.rendererGone!!.reloadWhenShown)
+    }
+
+    @Test
     fun `crashed and killed for memory say different things`() {
         val crashed = BrowserState.RendererGone(crashed = true, reloadWhenShown = false)
         val killed = BrowserState.RendererGone(crashed = false, reloadWhenShown = false)

@@ -562,9 +562,10 @@ class BrowserState(val id: Long, val private: Boolean = false) {
      * Why a tab lost its renderer ([rendererGone]). [crashed]: the page
      * crashed it (`RenderProcessGoneDetail.didCrash()`), rather than the
      * system killing it to free memory. [reloadWhenShown]: the tab wasn't
-     * on screen when it happened, so it loads its page again by itself
-     * the next time it is; the tab on screen shows what happened, with
-     * Reload, instead.
+     * on screen when it happened (a background tab, or the app itself was
+     * away and the renderer was killed for memory), so it loads its page
+     * again by itself the next time it is shown; the tab on screen shows
+     * what happened, with Reload, instead.
      */
     class RendererGone(val crashed: Boolean, val reloadWhenShown: Boolean)
 

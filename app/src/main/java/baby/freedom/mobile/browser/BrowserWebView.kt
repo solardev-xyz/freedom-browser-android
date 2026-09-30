@@ -50,6 +50,7 @@ import android.webkit.WebViewClient
 import android.widget.FrameLayout
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.mutableIntStateOf
@@ -57,6 +58,8 @@ import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.snapshotFlow
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalConfiguration
@@ -765,6 +768,7 @@ fun BrowserWebViewHost(
     covered: Boolean = false,
 ) {
     val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
     val repo = remember(context) { BrowsingRepository.get(context) }
     val sitePermissions = remember(context) { SitePermissionBroker.get(context) }
     val pageZoom = remember(context) { PageZoom.get(context) }
@@ -884,7 +888,8 @@ fun BrowserWebViewHost(
     fun webViewGone(tab: BrowserState, crashed: Boolean) {
         val wv = webViews.remove(tab.id) ?: return
         tab.jsDialog?.withdraw()
-        tabs.rendererGone(tab, crashed) { saveWebViewState(wv) }
+        val appVisible = lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)
+        tabs.rendererGone(tab, crashed, appVisible) { saveWebViewState(wv) }
         sitePermissions.onDocumentStarted(tab)
         RadicleProviders.onDocumentStarted(tab, url = null)
         EthereumProviders.onDocumentStarted(tab, url = null)
@@ -1061,11 +1066,15 @@ fun BrowserWebViewHost(
     // A tab whose renderer went away while it was in the background
     // (#260) loads its page again as soon as it's shown. So does one on
     // the home surface, which has no page to explain: the home overlay
-    // covers its blank entry.
+    // covers its blank entry. "Shown" means the app is on screen too: a
+    // renderer killed for memory while the app was away isn't started
+    // again until the user comes back to it.
     val shown = tabs.active
     val shownGone = shown.rendererGone
-    LaunchedEffect(shown, shownGone) {
-        if (shownGone != null && (shownGone.reloadWhenShown || shown.isHome)) shown.recoverRenderer()
+    val appStarted = lifecycleOwner.lifecycle.currentStateFlow.collectAsState().value
+        .isAtLeast(Lifecycle.State.STARTED)
+    LaunchedEffect(shown, shownGone, appStarted) {
+        if (appStarted && shownGone != null && (shownGone.reloadWhenShown || shown.isHome)) shown.recoverRenderer()
     }
 
     // Visibility: only the active tab draws. Toggle the SwipeRefreshLayout
@@ -1268,11 +1277,16 @@ fun BrowserWebViewHost(
             // A tab whose renderer went away (#260) keeps its back/forward
             // list in the state it's to be rebuilt from: it comes back on
             // its page alone, as `clearHistory()` leaves every other tab.
-            // And a private session whose every WebView went has its HTTP
-            // cache cleared through a stand-in.
             for (tab in tabs.tabs) {
                 if (tab.rendererGone != null) tab.pendingRestore = tab.pendingRestore?.withoutHistory()
             }
+            // The HTTP cache is per profile, and a WebView is the only
+            // handle on it: a profile none of whose tabs has a live
+            // WebView (every one went with the shared renderer, #260, or
+            // none was built yet) has its cache cleared through a
+            // stand-in — or it survives the clear and serves the next
+            // load from what the user was told was gone.
+            if (webViews.keys.none { it !in privateIds }) clearDefaultCache(context)
             if (privateIds.isNotEmpty() && privateIds.none { it in webViews }) clearPrivateCache(context, null)
             // Camera captures handed to pages live in our own cache/uploads
             // (served by our FileProvider), outside Chromium's cache dir.
@@ -2572,6 +2586,11 @@ private fun buildRefreshableWebView(
             // own callback. A prompt for a load started after the sweep's
             // reload (the user's Back to a POST entry) is that load's, and
             // [SweptReload.refused] leaves it alone (R1-F1).
+            override fun onFormResubmission(view: WebView?, dontResend: Message?, resend: Message?) {
+                dontResend?.sendToTarget()
+                if (view is PageWebView) view.post { view.sweptReload.refused() }
+            }
+
             // The renderer this page ran in crashed or was killed for
             // memory (#260). WebView's default (false) kills the whole
             // app, every tab with it; the host instead destroys this
@@ -2583,11 +2602,6 @@ private fun buildRefreshableWebView(
                 Log.w(LOG_TAG, "renderer gone (${if (crashed) "crashed" else "killed"}) for tab ${state.id}")
                 if (!view.isDestroyed) onRenderProcessGone(crashed)
                 return true
-            }
-
-            override fun onFormResubmission(view: WebView?, dontResend: Message?, resend: Message?) {
-                dontResend?.sendToTarget()
-                if (view is PageWebView) view.post { view.sweptReload.refused() }
             }
 
             override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
@@ -4628,6 +4642,23 @@ private fun clearPrivateCache(context: Context, privateView: WebView?) {
             standIn.destroy()
         }
     }.onFailure { Log.w(LOG_TAG, "private cache not cleared", it) }
+}
+
+/**
+ * Clear the default profile's HTTP cache when no live tab's WebView is on
+ * it (#260: they all went with their renderer): through a stand-in
+ * WebView, as [clearPrivateCache] does for the private profile. It never
+ * loads anything, so no renderer is started for it.
+ */
+private fun clearDefaultCache(context: Context) {
+    runCatching {
+        val standIn = WebView(context)
+        try {
+            standIn.clearCache(true)
+        } finally {
+            standIn.destroy()
+        }
+    }.onFailure { Log.w(LOG_TAG, "cache not cleared", it) }
 }
 
 /** [WebView.saveState] into a fresh bundle, or null if the WebView won't give one. */

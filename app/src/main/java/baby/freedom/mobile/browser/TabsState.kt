@@ -524,18 +524,28 @@ class TabsState(
      * host is about to destroy the tab's WebView. The tab stays, parked
      * like one across a relaunch ([parkTab]), and shows why
      * ([BrowserState.rendererGone]) until it gets a new WebView — at once
-     * when it's next shown if it isn't on screen now, else when the user
-     * asks (Reload, or any navigation of theirs). Fullscreen and the page
-     * context menu go if they were this tab's — fullscreen without a word
-     * to the page, which is gone.
+     * when it's next shown if the user wasn't looking at it, else when
+     * they ask (Reload, or any navigation of theirs). They weren't when
+     * it's a background tab, or when the app itself was off screen
+     * ([appVisible] false) and the renderer was killed for memory: as in
+     * Chrome, coming back to the app brings the page back. A crash while
+     * away still waits for Reload, so a page that crashes its renderer
+     * isn't loaded again and again. Fullscreen and the page context menu
+     * go if they were this tab's — fullscreen without a word to the page,
+     * which is gone.
      */
-    fun rendererGone(tab: BrowserState, crashed: Boolean, saveState: (BrowserState) -> Bundle?) {
+    fun rendererGone(
+        tab: BrowserState,
+        crashed: Boolean,
+        appVisible: Boolean = true,
+        saveState: (BrowserState) -> Bundle?,
+    ) {
         if (fullscreen?.tabId == tab.id) fullscreen = null
         if (pageContextMenu?.tabId == tab.id) pageContextMenu = null
         parkTab(tab, saveState)
         tab.rendererGone = BrowserState.RendererGone(
             crashed = crashed,
-            reloadWhenShown = tab !== active,
+            reloadWhenShown = tab !== active || (!appVisible && !crashed),
         )
     }
 
