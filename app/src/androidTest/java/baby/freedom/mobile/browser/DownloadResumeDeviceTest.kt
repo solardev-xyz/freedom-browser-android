@@ -43,6 +43,7 @@ class DownloadResumeDeviceTest {
     fun cleanUp() {
         manager.allocatableForTest = null
         manager.afterFetchForTest = null
+        manager.afterHeadersForTest = null
         DownloadManager.sweepGateForTest = null
         rows.forEach { manager.remove(it) }
         files.forEach { runCatching { resolver.delete(it, null, null) } }
@@ -227,6 +228,45 @@ class DownloadResumeDeviceTest {
     }
 
     @Test
+    fun aPauseAsAChangedFileStartsOverKeepsNoOldBytes() {
+        MockWebServer().use { server ->
+            var current = body
+            var currentTag = etag
+            val changed = Random(2).nextBytes(900 * 1024)
+            val files = FileServer({ current }, { currentTag }, ranges = true, dropFirst = true)
+            server.dispatcher = files
+            server.start()
+            val name = "changedpause-${System.nanoTime()}.bin"
+            startAndAccept(server.url("/f.bin").toString(), name)
+            val paused = await(name) { it.status == DownloadStatus.PAUSED }
+            assertTrue(partialOf(paused.id).length() > 0)
+
+            current = changed
+            currentTag = "\"v2\""
+            // The resume's If-Range fails and v2 comes back whole: pause
+            // it just as its row takes v2's validator.
+            var once = true
+            manager.afterHeadersForTest = { id ->
+                if (id == paused.id && once) {
+                    once = false
+                    manager.pause(id)
+                    Thread.sleep(500)
+                }
+            }
+            manager.resume(paused.id)
+            val again = await(name) { it.status == DownloadStatus.PAUSED && it.validator == "\"v2\"" }
+            manager.afterHeadersForTest = null
+            // None of v1's bytes are kept under v2's validator.
+            assertEquals(0L, partialOf(again.id).takeIf { it.exists() }?.length() ?: 0L)
+            assertEquals(0L, again.receivedBytes)
+
+            manager.resume(again.id)
+            val done = await(name) { it.status == DownloadStatus.COMPLETED }
+            assertArrayEquals(changed, savedBytes(done))
+        }
+    }
+
+    @Test
     fun cancellingAPausedDownloadDeletesItsPartialFile() {
         MockWebServer().use { server ->
             server.dispatcher = FileServer({ body }, { etag }, ranges = true, dropFirst = true)
@@ -267,9 +307,14 @@ class DownloadResumeDeviceTest {
             startAndAccept(server.url("/f.bin").toString(), name)
             val paused = await(name) { it.status == DownloadStatus.PAUSED }
             val kept = partialOf(paused.id).length()
+            // Its notification swiped away while paused: the Resume ends
+            // that, though it's paused again at once.
+            DownloadNotifications.noteDismissed(context, paused.id, DownloadStatus.PAUSED)
 
             manager.resume(paused.id)
             val still = await(name) { it.status == DownloadStatus.PAUSED && it.note == "Server error 503" }
+            val key = DownloadNotifications.dismissalKey(still)
+            assertTrue(DownloadNotifications.keepDismissals(context, setOf(key)).isEmpty())
             assertEquals(kept, partialOf(still.id).length())
             assertEquals(kept, still.receivedBytes)
             assertEquals("Paused: server error 503", downloadStatusLine(still, null, "t").substringBefore(" ·"))

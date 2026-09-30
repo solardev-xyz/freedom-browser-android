@@ -69,9 +69,11 @@ class DownloadNotificationsDeviceTest {
         DownloadNotifications.keepDismissals(context, emptySet())
     }
 
+    @Volatile private var enabled = true
+
     private fun startNotifications() {
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default).also { scopes += it }
-        DownloadNotifications(context, scope, downloads, progress) { true }.start()
+        DownloadNotifications(context, scope, downloads, progress, { true }, { enabled }).start()
     }
 
     private fun posted() = mgr.activeNotifications.firstOrNull { it.tag == "download" && it.id == notificationId }
@@ -111,5 +113,36 @@ class DownloadNotificationsDeviceTest {
         downloads.value = listOf(paused.copy(receivedBytes = 700))
         runBlocking { delay(2_500) }
         assertTrue("shown once paused again", posted()?.notification?.actions?.any { it.title == "Resume" } == true)
+    }
+
+    @Test
+    fun aPauseOrResumeEndsADismissalEvenIfTheStateComesBackWithinASecond() {
+        startNotifications()
+        val shown = awaitPosted()
+        assertTrue(shown != null)
+        shown!!.notification.deleteIntent.send()
+        mgr.cancel("download", notificationId)
+        assertFalse(ticksBringItBack(2_000))
+
+        // Resumed, and paused again (a 503) before the once-a-second
+        // collector sees it running: Resume already ended the dismissal.
+        DownloadNotifications.forgetDismissals(context, id)
+        downloads.value = listOf(paused.copy(status = DownloadStatus.RUNNING))
+        downloads.value = listOf(paused.copy(note = "Server error 503"))
+        assertTrue("shown again once re-paused", awaitPosted() != null)
+    }
+
+    @Test
+    fun aPausedNotificationDroppedForLackOfPermissionIsPostedOnceAllowed() {
+        // Not allowed yet: what's posted is dropped by the system.
+        enabled = false
+        startNotifications()
+        assertTrue(awaitPosted() != null)
+        mgr.cancel("download", notificationId)
+
+        // Allowed later, with no row changing: it appears.
+        enabled = true
+        val back = runBlocking { withTimeoutOrNull(10_000) { while (posted() == null) delay(100); posted() } }
+        assertTrue("posted once notifications are allowed", back != null)
     }
 }

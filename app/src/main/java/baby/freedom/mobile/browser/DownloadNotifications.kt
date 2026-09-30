@@ -18,6 +18,8 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.conflate
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.launch
 
 private const val CHANNEL_ID = "downloads"
@@ -26,6 +28,9 @@ private const val LOG_TAG = "Downloads"
 
 /** Notification updates are rate-limited by the system; one a second per round is plenty. */
 private const val UPDATE_INTERVAL_MS = 1_000L
+
+/** How often to look whether notifications have been allowed (or blocked) since. */
+private const val ENABLED_POLL_MS = 5_000L
 
 private const val ACTION_PAUSE = "baby.freedom.mobile.download.PAUSE"
 private const val ACTION_RESUME = "baby.freedom.mobile.download.RESUME"
@@ -51,8 +56,11 @@ private const val PREF_DISMISSED = "dismissedNotifications"
  * One the user swipes away stays away while its download stays in the
  * state it was dismissed in — across restarts too (the dismissal is
  * kept by [dismissalKey]); it comes back once the download is resumed
- * or paused. And a paused one is only posted again when what it shows
- * changes, not on every progress tick of another download.
+ * or paused — a Pause or Resume ends it at once ([forgetDismissals]),
+ * however quickly the download comes back to the dismissed state. And a
+ * paused one is only posted again when what it shows changes, not on
+ * every progress tick of another download — nor counted as posted while
+ * notifications aren't allowed, so it appears once they are.
  */
 internal class DownloadNotifications(
     context: Context,
@@ -60,6 +68,8 @@ internal class DownloadNotifications(
     private val downloads: Flow<List<DownloadEntry>>,
     private val progress: StateFlow<Map<Long, DownloadProgress>>,
     private val canPause: (DownloadEntry) -> Boolean,
+    /** Whether posted notifications are shown at all (POST_NOTIFICATIONS, API 33+); a test's stand-in. */
+    private val enabledForTest: (() -> Boolean)? = null,
 ) {
     private val appContext = context.applicationContext
     private val manager = appContext.getSystemService(NotificationManager::class.java)
@@ -79,9 +89,18 @@ internal class DownloadNotifications(
             var shown = emptySet<Long>()
             // The row each paused notification was last posted from.
             val postedPaused = HashMap<Long, DownloadEntry>()
-            combine(downloads, progress) { list, live -> list to live }
+            // A notify() while they aren't allowed is dropped: looked at
+            // again now and then, so the paused ones are posted once the
+            // user allows them, with no row changing.
+            val enabled = flow {
+                while (true) {
+                    emit(enabledForTest?.invoke() ?: runCatching { mgr.areNotificationsEnabled() }.getOrDefault(true))
+                    delay(ENABLED_POLL_MS)
+                }
+            }.distinctUntilChanged()
+            combine(downloads, progress, enabled) { list, live, on -> Triple(list, live, on) }
                 .conflate()
-                .collect { (list, live) ->
+                .collect { (list, live, on) ->
                     val active = list.filter {
                         it.id > 0 && (it.status == DownloadStatus.RUNNING || it.status == DownloadStatus.PAUSED)
                     }
@@ -89,10 +108,12 @@ internal class DownloadNotifications(
                         // Dismissals of a state the download has left are over.
                         val dismissed = keepDismissals(appContext, active.mapTo(HashSet(), ::dismissalKey))
                         val want = active.filter { dismissalKey(it) !in dismissed }
+                        // Nothing posted now is shown: none counts as posted.
+                        if (!on) postedPaused.clear()
                         for (entry in want) {
                             if (entry.status == DownloadStatus.PAUSED) {
                                 if (postedPaused[entry.id] == entry) continue
-                                postedPaused[entry.id] = entry
+                                if (on) postedPaused[entry.id] = entry
                             } else {
                                 postedPaused -= entry.id
                             }
@@ -189,6 +210,18 @@ internal class DownloadNotifications(
             val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             val kept = prefs.getStringSet(PREF_DISMISSED, emptySet()).orEmpty()
             prefs.edit().putStringSet(PREF_DISMISSED, kept + dismissalKey(id, status)).apply()
+        }
+
+        /**
+         * [id] is being paused or resumed: whatever the user swiped away
+         * is over, even if the download is back in that state before the
+         * (once a second) notifications see it leave it.
+         */
+        internal fun forgetDismissals(context: Context, id: Long) = synchronized(dismissalsLock) {
+            val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            val all = prefs.getStringSet(PREF_DISMISSED, emptySet()).orEmpty()
+            val kept = all.filterTo(HashSet()) { !it.startsWith("$id:") }
+            if (kept.size != all.size) prefs.edit().putStringSet(PREF_DISMISSED, kept).apply()
         }
 
         /**

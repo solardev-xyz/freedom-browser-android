@@ -445,7 +445,10 @@ class DownloadManager private constructor(context: Context) {
             staleSweep.join()
             transitions.withLock {
                 val row = daoFor(id).get(id) ?: return@withLock
-                if (canPause(row)) cancellation.cancel(id, DownloadStop.PAUSE)
+                if (canPause(row)) {
+                    DownloadNotifications.forgetDismissals(appContext, id)
+                    cancellation.cancel(id, DownloadStop.PAUSE)
+                }
             }
         }
     }
@@ -466,6 +469,7 @@ class DownloadManager private constructor(context: Context) {
                     runCatching { CookieManager.getInstance() }.getOrNull()
                 }
                 val target = classifyDownloadUrl(row.sourceUrl, Gateways::isLocalGateway, Gateways::toDisplay)
+                DownloadNotifications.forgetDismissals(appContext, id)
                 daoFor(id).update(row.copy(status = DownloadStatus.RUNNING))
                 // A pause aimed at its last run (a second Pause tap that
                 // landed after it had paused) must not stop this one; a
@@ -724,6 +728,7 @@ class DownloadManager private constructor(context: Context) {
                 // knows whether the server can resume it.
                 fetchInto(entry, partial, kept, target, userAgent, contentDisposition, refererOrigin, cookies, track, resuming) {
                     entry = it
+                    afterHeadersForTest?.invoke(id)
                     dao.update(it)
                 }
             }
@@ -958,6 +963,15 @@ class DownloadManager private constructor(context: Context) {
                 )
             ) {
                 throw notEnoughStorage()
+            }
+            // A whole answer to a resume is a new file (or the same one,
+            // started over): the bytes kept belong to the old one. Gone
+            // before the row takes its validator — a pause (or process
+            // death) landing after that must not keep old bytes under the
+            // new file's validator, which a later resume would continue,
+            // splicing the two.
+            if (fromStart && partial.exists() && !partial.delete()) {
+                throw DownloadFailure("Couldn't write the download")
             }
             save(entry)
             val received = copyWithProgress(id, src.stream, partial, startAt, total)
@@ -1308,6 +1322,13 @@ class DownloadManager private constructor(context: Context) {
      * land on a body that came with no length.
      */
     @Volatile internal var afterFetchForTest: ((Long) -> Unit)? = null
+
+    /**
+     * Test hook: runs once a download's response headers are in and its
+     * row is about to be saved with them — where a pause can land after
+     * a resume got the whole (changed) file back.
+     */
+    @Volatile internal var afterHeadersForTest: ((Long) -> Unit)? = null
 
     /** Test hook: free space on [dir]'s volume, in place of the real answer. */
     @Volatile internal var allocatableForTest: ((dir: File) -> Long?)? = null
