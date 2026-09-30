@@ -81,11 +81,21 @@ class RadicleGrantStoreTest {
     }
 
     @Test
-    fun `a signing grant from before identities were named counts as connection only`() = runBlocking {
+    fun `a signing grant from before identities were named counts as connection, once allowed the device's`() = runBlocking {
         prefs.edit { it[stringPreferencesKey("grant:https://old.example")] = "signing" }
-        assertEquals(RadicleGrantStore.Grant("https://old.example"), store.grantFor("https://old.example"))
+        // Connection only, but it could sign as the device's own identity
+        // (DID not recorded), so a prompt for the wallet's can say so.
+        val legacy = RadicleGrantStore.Grant("https://old.example", signedAs = "")
+        assertEquals(legacy, store.grantFor("https://old.example"))
+        assertFalse(legacy.signing)
+        // An identity change keeps that, and so does connecting again.
         assertTrue(store.dropSigning())
-        assertEquals(RadicleGrantStore.Grant("https://old.example"), store.grantFor("https://old.example"))
+        assertEquals(legacy, store.grantFor("https://old.example"))
+        assertTrue(store.connect("https://old.example"))
+        assertEquals(legacy, store.grantFor("https://old.example"))
+        // Granted signing for a named DID, it's an ordinary grant.
+        assertTrue(store.grantSigning("https://old.example", WALLET))
+        assertEquals(RadicleGrantStore.Grant("https://old.example", signingAs = WALLET), store.grantFor("https://old.example"))
     }
 
     private companion object {

@@ -71,6 +71,9 @@ class NodeIdentityStore internal constructor(
     /** The vault tag the stored keys were derived from, or null if there are none (or they can't be read). */
     fun storedTag(): String? = readFile()?.optString("vault")?.takeIf { it.isNotEmpty() }
 
+    /** True when the file on disk (readable or not once opened) holds a Radicle key: a version-2 file (#328). */
+    fun storedHasRadicle(): Boolean = readFile()?.optInt("version") == VERSION
+
     /**
      * The stored identity if it was derived from the vault tagged [vaultTag];
      * null if there's none, it belongs to another vault, or it can't be

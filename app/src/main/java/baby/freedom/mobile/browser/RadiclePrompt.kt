@@ -50,7 +50,11 @@ internal fun radiclePromptCopy(ask: RadicleAsk): RadiclePromptCopy = when (ask) 
     } else {
         RadiclePromptCopy(
             Strings.get(R.string.radicle_prompt_signing_changed_request),
-            Strings.get(R.string.radicle_prompt_signing_changed_detail, shortDid(ask.previousDid)),
+            if (ask.previousDid.isEmpty()) {
+                Strings.get(R.string.radicle_prompt_signing_changed_detail_device)
+            } else {
+                Strings.get(R.string.radicle_prompt_signing_changed_detail, shortDid(ask.previousDid))
+            },
             Strings.get(R.string.common_allow),
         )
     }

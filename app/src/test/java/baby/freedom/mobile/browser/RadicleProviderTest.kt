@@ -56,6 +56,8 @@ class RadicleProviderTest {
         var writeAnswer: RadicleClient.Answer = RadicleClient.Answer.Ok(JSONObject().put("id", "abcdef1234"))
         /** The identity the node runs as; [onIdentity] runs after each identity read. */
         var did = ME
+        /** Whether [did] is the wallet's, as `:node` answers it (RadicleNode.WALLET_IDENTITY). */
+        var wallet = false
         var onIdentity: () -> Unit = {}
         override fun unavailableReason() = reason
         override fun call(method: String, args: JSONObject, timeoutMs: Long): RadicleClient.Answer {
@@ -67,7 +69,8 @@ class RadicleProviderTest {
             }
             return when (method) {
                 "identity" -> RadicleClient.Answer.Ok(
-                    JSONObject().put("did", did).put("nid", did.removePrefix("did:key:")).put("alias", "me"),
+                    JSONObject().put("did", did).put("nid", did.removePrefix("did:key:")).put("alias", "me")
+                        .put(RadicleNode.WALLET_IDENTITY, wallet),
                 ).also { onIdentity() }
                 "status" -> RadicleClient.Answer.Ok(JSONObject().put("connectedPeers", 5))
                 "listSeededRepos" -> RadicleClient.Answer.Ok(seeded)
@@ -443,7 +446,7 @@ class RadicleProviderTest {
         // dropSigning ran at the wallet import: connection tier, signed as the device's.
         grants.map[site] = ""
         grants.before[site] = "did:key:z6MkDevice"
-        node.state.value = node.state.value.copy(walletIdentity = true)
+        node.wallet = true
         answer = false
         err(req("radicle_getIdentity"))
         val ask = asked.single() as RadicleAsk.Signing
@@ -455,7 +458,7 @@ class RadicleProviderTest {
         // One that was never allowed another gets the plain prompt, still naming the identity.
         asked.clear()
         grants.before.clear()
-        node.state.value = node.state.value.copy(walletIdentity = false)
+        node.wallet = false
         err(req("radicle_getIdentity"))
         val plain = asked.single() as RadicleAsk.Signing
         assertNull(plain.previousDid)
@@ -464,6 +467,50 @@ class RadicleProviderTest {
         // Nor is the identity it was allowed before a "change".
         asked.clear()
         grants.before[site] = ME
+        err(req("radicle_getIdentity"))
+        assertNull((asked.single() as RadicleAsk.Signing).previousDid)
+    }
+
+    @Test
+    fun `the prompt labels the identity from the node's own answer, not the UI's lagging state`() {
+        // Just after a restart: `:node` runs as the wallet's, the UI still
+        // holds the previous boot's state.
+        node.state.value = node.state.value.copy(walletIdentity = false)
+        node.wallet = true
+        grants.map[site] = ""
+        answer = false
+        err(req("radicle_getIdentity"))
+        assertTrue((asked.single() as RadicleAsk.Signing).wallet)
+        // And the reverse.
+        asked.clear()
+        node.state.value = node.state.value.copy(walletIdentity = true)
+        node.wallet = false
+        err(req("radicle_getIdentity"))
+        assertFalse((asked.single() as RadicleAsk.Signing).wallet)
+        // The label is the browser's; the page's answer doesn't carry it.
+        answer = true
+        val id = ok(req("radicle_getIdentity")) as JSONObject
+        assertEquals(ME, id.getString("did"))
+        assertFalse(id.has(RadicleNode.WALLET_IDENTITY))
+    }
+
+    @Test
+    fun `a site allowed to sign before identities were named hears it can link the device's and the wallet's`() {
+        // A bare pre-#328 `signing` grant (or dropSigning's marker for one): the device's own, DID not recorded.
+        grants.map[site] = ""
+        grants.before[site] = ""
+        node.wallet = true
+        answer = false
+        err(req("radicle_getIdentity"))
+        val ask = asked.single() as RadicleAsk.Signing
+        assertEquals("", ask.previousDid)
+        val copy = radiclePromptCopy(ask)
+        assertEquals("wants to act as your new Radicle identity", copy.request)
+        assertTrue(copy.detail.contains("this device's own Radicle identity"))
+        assertTrue(copy.detail.contains("can link the two"))
+        // Asked about the device's own again: that's the one it had, no linkage.
+        asked.clear()
+        node.wallet = false
         err(req("radicle_getIdentity"))
         assertNull((asked.single() as RadicleAsk.Signing).previousDid)
     }

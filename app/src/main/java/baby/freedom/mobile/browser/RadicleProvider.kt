@@ -421,8 +421,10 @@ class RadicleProvider(
         if (did != signingAs) {
             // Name the identity asked about, and say when the site was allowed
             // another one: allowing this links the two for it.
-            val before = runCatching { grants.signedBefore(origin) }.getOrNull()?.takeIf { it.isNotEmpty() && it != did }
-            val wallet = node.state.value.walletIdentity
+            // Whether [did] is the wallet's comes with it from `:node`, not from
+            // the UI's copy of the node state, which lags a restart.
+            val wallet = identity?.optBoolean(RadicleNode.WALLET_IDENTITY) == true
+            val before = previousIdentity(runCatching { grants.signedBefore(origin) }.getOrNull(), did, wallet)
             if (!ask(RadicleAsk.Signing(origin, did, wallet, before))) return rejected()
             // The node may have restarted as another identity while the
             // prompt was up: the grant is for the one the user was asked
@@ -434,7 +436,7 @@ class RadicleProvider(
             if (identity?.optString("did").orEmpty() != did) return identityChanged()
             if (!grants.grantSigning(origin, did)) return Reply.Err(UNAUTHORIZED, "Origin not connected", "not_connected")
         }
-        if (write == null) return Reply.Ok(identity ?: JSONObject())
+        if (write == null) return Reply.Ok(JSONObject((identity ?: JSONObject()).toString()).apply { remove(RadicleNode.WALLET_IDENTITY) })
         if (!takeWriteSlot(origin)) {
             return Reply.Err(INTERNAL, "Too many writes; try again in a minute", "rate_limited")
         }
@@ -447,6 +449,20 @@ class RadicleProvider(
                 if (value?.has("id") == true) Reply.Ok(value) else Reply.Err(INTERNAL, "write failed", "native_failed")
             }
         }
+    }
+
+    /**
+     * What a signing prompt for [did] says the site was allowed before
+     * ([RadicleAsk.Signing.previousDid]), from what it could sign as
+     * ([Grants.signedBefore]): null for nothing, or for [did] itself; `""`
+     * for a grant from before #328 (the device's own identity, DID not
+     * recorded) when [did] is the wallet's — for the device's own it's the
+     * same one again.
+     */
+    private fun previousIdentity(before: String?, did: String, wallet: Boolean): String? = when {
+        before == null || before == did -> null
+        before.isEmpty() -> if (wallet) "" else null
+        else -> before
     }
 
     /** [validateWrite]'s answer: the node call and its arguments, or why the write is refused. */
@@ -657,7 +673,9 @@ sealed interface RadicleAsk {
     /**
      * The user's Radicle identity [did] (the wallet's when [wallet], else
      * the device's own), and writing as it. [previousDid] is the other
-     * identity the site was allowed to act as before (#328), if any.
+     * identity the site was allowed to act as before (#328), if any: `""`
+     * when that was the device's own identity, from before grants named
+     * one, whose DID wasn't recorded.
      */
     data class Signing(
         override val origin: String,

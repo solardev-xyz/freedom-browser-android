@@ -214,6 +214,15 @@ class RadicleNode internal constructor(
     private var runningAs = ""
 
     /**
+     * [runningAs] when that is the wallet's identity ([Config.identity]'s
+     * DID), else `""`. Set before [runningAs] and cleared with it, so a
+     * DID read back as [runningAs] is labelled from the same boot: what
+     * [call] answers `identity` with as [WALLET_IDENTITY].
+     */
+    @Volatile
+    private var runningWalletDid = ""
+
+    /**
      * Orders identity-bound [call]s (#328) against a boot: a write holds
      * the read side from its [AS_DID] check through its native call, and
      * [bootNode] takes the write side to clear [runningAs] before the
@@ -380,6 +389,7 @@ class RadicleNode internal constructor(
         }
         try {
             runningAs = ""
+            runningWalletDid = ""
         } finally {
             callGate.writeLock().unlock()
         }
@@ -395,6 +405,7 @@ class RadicleNode internal constructor(
             result == null -> SwarmStrings.get(R.string.swarmnode_radicle_unreadable_start)
             did.isNotEmpty() -> {
                 bootedAs = host?.did.orEmpty()
+                runningWalletDid = if (host != null && did == host.did) did else ""
                 runningAs = did
                 if (host != null && did != host.did) Log.w(TAG, "radicle booted as $did, not the wallet's ${host.did}")
                 null
@@ -506,6 +517,7 @@ class RadicleNode internal constructor(
                     }
                 }
                 runningAs = ""
+                runningWalletDid = ""
                 error = runCatching { json(ops.shutdown())?.optString("error").orEmpty() }
                     .getOrElse { it.message ?: it.javaClass.simpleName }
                 nodeEpoch.incrementAndGet()
@@ -755,7 +767,7 @@ class RadicleNode internal constructor(
             else -> return errorJson("Radicle node is not running", "node-stopped")
         }
         val asDid = args.optString(AS_DID)
-        if (asDid.isEmpty()) return native(method, args)
+        if (asDid.isEmpty()) return if (method == "identity") identity() else native(method, args)
         // A write a site was allowed to make as one identity (#328): refused
         // if the node now runs as another. The check and the native call
         // under one hold of [callGate]'s read side, so a restart can't boot
@@ -768,6 +780,22 @@ class RadicleNode internal constructor(
         } finally {
             gate.unlock()
         }
+    }
+
+    /**
+     * The library's `identity`, with [WALLET_IDENTITY]: whether its DID is
+     * the wallet's. Read from the boot that answered, so a label is never
+     * another boot's (a UI's pushed state can lag a restart); an answer
+     * that doesn't match the boot now up is `node-not-ready`.
+     */
+    private fun identity(): String {
+        val raw = native("identity", JSONObject())
+        val o = json(raw) ?: return raw
+        if (o.has("error")) return raw
+        val did = o.optString("did")
+        val wallet = runningWalletDid
+        if (did.isEmpty() || did != runningAs) return errorJson("Radicle node is restarting", "node-not-ready")
+        return o.put(WALLET_IDENTITY, wallet.isNotEmpty() && wallet == did).toString()
     }
 
     private fun native(method: String, args: JSONObject): String = runCatching { ops.call(method, args) }
@@ -865,6 +893,12 @@ class RadicleNode internal constructor(
          * if it runs as another. The library ignores it.
          */
         const val AS_DID = "asDid"
+
+        /**
+         * In [call]'s `identity` answer: true when the DID is the wallet's
+         * (#328), false for the device's own. Not for pages.
+         */
+        const val WALLET_IDENTITY = "walletIdentity"
 
         /** [call]'s reason when the node doesn't run as [AS_DID]. */
         const val IDENTITY_CHANGED = "identity-changed"

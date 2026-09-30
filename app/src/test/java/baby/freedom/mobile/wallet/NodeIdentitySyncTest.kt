@@ -143,15 +143,39 @@ class NodeIdentitySyncTest {
     }
 
     @Test
-    fun `a lost sealing key is re-derived on the next unlock`() = runBlocking {
+    fun `this vault's keys that can't be opened are sealed again, but that's no identity change`() = runBlocking {
+        var takenBack = 0
+        val withGrants = NodeIdentitySync(vault, store, scope, io = Dispatchers.Unconfined, beforeRadicleChange = { takenBack++ })
         vault.create(abandon12, auth, imported = false)
-        reconcile()
+        withGrants.reconcile(vault.state.value)
+        assertEquals(1, takenBack)
+        // The sealing key is gone (or the Keystore failed once): unreadable.
         keys.key = null
         assertNull(store.read(vault.identityTag()!!))
         vault.lock()
         vault.unlock(auth)
-        assertNotNull(reconcile())
-        assertNotNull(store.read(vault.identityTag()!!))
+        // Same seed, same identities: no grants taken back, no restart, no notice.
+        assertNull(withGrants.reconcile(vault.state.value))
+        assertEquals(1, takenBack)
+        // Healed: the same keys, readable again.
+        val healed = store.read(vault.identityTag()!!)!!
+        assertEquals("0x6Fac4D18c912343BF86fa7049364Dd4E424Ab9C0", healed.swarmAddress)
+        assertEquals(ABANDON_DID, healed.radicleDid)
+    }
+
+    @Test
+    fun `this vault's version-1 keys that can't be opened get the new Radicle identity, keeping Swarm`() = runBlocking {
+        var takenBack = 0
+        val withGrants = NodeIdentitySync(vault, store, scope, io = Dispatchers.Unconfined, beforeRadicleChange = { takenBack++ })
+        vault.create(abandon12, auth, imported = false)
+        writeVersion1(vault.identityTag()!!, NodeIdentity.derive(abandon12.seed()))
+        keys.key = null
+        // The Radicle identity really is new (the node ran as its own key), the Swarm one isn't.
+        assertEquals(
+            NodeIdentitySync.Change.Adopted("0x6Fac4D18c912343BF86fa7049364Dd4E424Ab9C0", ABANDON_DID, swarmChanged = false),
+            withGrants.reconcile(vault.state.value),
+        )
+        assertEquals(1, takenBack)
     }
 
     @Test

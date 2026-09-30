@@ -417,6 +417,42 @@ class RadicleNodeTest {
     }
 
     @Test
+    fun theIdentityAnswerSaysWhetherItIsTheWalletsFromTheBootThatAnswered() {
+        val fake = FakeOps()
+        val own = "did:key:z6MkTest"
+        val wallet = "did:key:z6MkWallet"
+        /** The DID the native library answers `identity` with. */
+        val answers = java.util.concurrent.atomic.AtomicReference(own)
+        val ops = object : RadicleNode.Ops by fake {
+            override fun call(method: String, args: JSONObject): String =
+                if (method == "identity") """{"did":"${answers.get()}"}""" else fake.call(method, args)
+        }
+        val host = java.util.concurrent.atomic.AtomicReference<String?>(null)
+        fake.startResult = """{"did":"$own"}"""
+        val node = RadicleNode(
+            config.copy(identity = { host.get()?.let { RadicleNode.HostIdentity(ByteArray(32) { 1 }, it) } }),
+            ops,
+        )
+        node.start()
+        await("running", node) { it.status == RadicleStatus.Running }
+        val first = JSONObject(node.call("identity", JSONObject()))
+        assertEquals(own, first.getString("did"))
+        assertFalse(first.getBoolean(RadicleNode.WALLET_IDENTITY))
+        // The library already answers as another identity than the boot up
+        // now: no label from the wrong boot, just not ready.
+        answers.set(wallet)
+        assertEquals("node-not-ready", JSONObject(node.call("identity", JSONObject())).getString("reason"))
+        host.set(wallet)
+        fake.startResult = """{"did":"$wallet"}"""
+        node.reloadIdentity()
+        await("restarted as the wallet's", node) { it.status == RadicleStatus.Running && it.walletIdentity }
+        val second = JSONObject(node.call("identity", JSONObject()))
+        assertEquals(wallet, second.getString("did"))
+        assertTrue(second.getBoolean(RadicleNode.WALLET_IDENTITY))
+        node.dispose()
+    }
+
+    @Test
     fun aSeedRacingAnIdentityReloadIsNeverCutShort() {
         // Whatever the interleaving, a seed the node accepted is either
         // waited for (no cancel, no rollback) or refused as not running.

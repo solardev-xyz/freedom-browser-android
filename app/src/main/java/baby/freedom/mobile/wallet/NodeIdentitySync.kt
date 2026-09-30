@@ -23,8 +23,10 @@ import java.util.concurrent.atomic.AtomicReference
  * Remove wallet takes them back to their own.
  *
  *  - The wallet opens (create, import, or any unlock) and the stored keys
- *    aren't this vault's — none yet, another vault's, or unreadable —
- *    derive them from the seed and store them: [Change.Adopted]. An
+ *    aren't this vault's — none yet, or another vault's —
+ *    derive them from the seed and store them: [Change.Adopted]. (This
+ *    vault's keys that can't be opened are derived and sealed again, but
+ *    they're the same identities, so that's no change.) An
  *    unlock of the same vault finds them already there and does nothing,
  *    so the nodes only restart when the identity really changes. (A
  *    wallet made before #77 gets its identities on its first unlock, and
@@ -136,7 +138,16 @@ class NodeIdentitySync internal constructor(
     private suspend fun adopt(): Change? {
         val tag = vault.identityTag() ?: return null
         val stored = store.read(tag)
-        val hadSwarm = stored != null
+        // This vault's keys are on disk but couldn't be opened (a Keystore or
+        // file hiccup, or a corrupt file): they were derived from this same
+        // seed, and derivation is deterministic, so deriving them again gives
+        // the very same identities. Sealed again below (healing a corrupt
+        // file), but it's no identity change: no grants taken back, no
+        // restart, no notice — unless the file was version 1, whose Radicle
+        // identity really is new.
+        val sameVault = stored == null && store.storedTag() == tag
+        val sameRadicle = sameVault && store.storedHasRadicle()
+        val hadSwarm = stored != null || sameVault
         if (stored != null) {
             val complete = stored.radicleKey != null
             stored.wipe()
@@ -149,9 +160,9 @@ class NodeIdentitySync internal constructor(
             return null
         }
         return try {
-            takeBackRadicleGrants()
+            if (!sameRadicle) takeBackRadicleGrants()
             store.write(tag, identity)
-            Change.Adopted(identity.swarmAddress, identity.radicleDid.orEmpty(), swarmChanged = !hadSwarm)
+            if (sameRadicle) null else Change.Adopted(identity.swarmAddress, identity.radicleDid.orEmpty(), swarmChanged = !hadSwarm)
         } finally {
             identity.wipe()
         }
