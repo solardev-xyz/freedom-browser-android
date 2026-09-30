@@ -45,6 +45,11 @@ import org.junit.runner.RunWith
  * sheets (a site's and a scanned code's): neither a tap before the sheet
  * armed nor an obscured one after changes which account is shared; a
  * clean one does.
+ *
+ * #287 R5-M1: the site-permission prompt's "Remember this decision" box,
+ * which decides whether Allow stores a standing grant: once the user has
+ * unticked it, neither an obscured tap nor one before the prompt armed
+ * ticks it again; a clean armed tap does.
  */
 @RunWith(AndroidJUnit4::class)
 class StandingGrantTapjackDeviceTest {
@@ -159,6 +164,53 @@ class StandingGrantTapjackDeviceTest {
     @Test
     fun aTapBeforeArmingDoesNotChangeTheScannedCodesConnectAccount() = pickingEarly { remotePicker(60_000) }
 
+    private val cameraPrompt get() = PermissionPrompt("https://game.example", listOf(SitePermission.CAMERA))
+
+    @Test
+    fun anObscuredTapDoesNotReTickRememberOnASitePermissionPrompt() {
+        ActivityScenario.launch(ComponentActivity::class.java).use { scenario ->
+            val prompt = cameraPrompt
+            scenario.onActivity { it.setContent { FreedomTheme { SitePermissionPrompt(prompt) } } }
+            val box = findToggle(REMEMBER)
+            SystemClock.sleep(2_000)
+            assertTrue(checked(REMEMBER))
+            tap(box)
+            assertTrue("a clean tap didn't untick Remember", waitChecked(REMEMBER, false))
+            tap(findToggle(REMEMBER), MotionEvent.FLAG_WINDOW_IS_OBSCURED)
+            SystemClock.sleep(500)
+            assertFalse("an obscured tap re-ticked Remember", checked(REMEMBER))
+            assertTrue(onScreen(OBSCURED_TAP_MESSAGE))
+            tap(findToggle(REMEMBER))
+            assertTrue("a clean tap didn't tick Remember again", waitChecked(REMEMBER))
+            assertFalse(prompt.answer.isCompleted)
+        }
+    }
+
+    @Test
+    fun aTapBeforeArmingDoesNotUntickRememberOnASitePermissionPrompt() {
+        ActivityScenario.launch(ComponentActivity::class.java).use { scenario ->
+            scenario.onActivity { it.setContent { FreedomTheme { SitePermissionPrompt(cameraPrompt) } } }
+            // Tapped as soon as the box is laid out: inside the prompt's 500 ms guard.
+            val box = firstBounds(REMEMBER)
+            tap(box)
+            SystemClock.sleep(300)
+            assertTrue("a tap before the prompt armed unticked Remember", checked(REMEMBER))
+        }
+    }
+
+    private fun firstBounds(label: String): Rect {
+        val until = SystemClock.uptimeMillis() + 5_000
+        while (SystemClock.uptimeMillis() < until) {
+            toggle(label)?.let { node ->
+                val r = Rect()
+                node.getBoundsInScreen(r)
+                if (!r.isEmpty) return r
+            }
+            SystemClock.sleep(20)
+        }
+        throw AssertionError("no \"$label\" box on screen")
+    }
+
     /** The radio row whose (merged) text starts with [name]. */
     private fun row(name: String): AccessibilityNodeInfo? =
         roots().firstNotNullOfOrNull { findRowIn(it, name) }
@@ -223,10 +275,10 @@ class StandingGrantTapjackDeviceTest {
 
     private fun checked(label: String): Boolean = toggle(label)?.isChecked == true
 
-    private fun waitChecked(label: String): Boolean {
+    private fun waitChecked(label: String, want: Boolean = true): Boolean {
         val until = SystemClock.uptimeMillis() + 2_000
         while (SystemClock.uptimeMillis() < until) {
-            if (checked(label)) return true
+            if (toggle(label) != null && checked(label) == want) return true
             SystemClock.sleep(50)
         }
         return false
@@ -267,5 +319,9 @@ class StandingGrantTapjackDeviceTest {
         } finally {
             event.recycle()
         }
+    }
+
+    private companion object {
+        const val REMEMBER = "Remember this decision"
     }
 }
