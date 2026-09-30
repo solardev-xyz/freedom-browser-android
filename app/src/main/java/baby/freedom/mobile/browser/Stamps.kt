@@ -2,6 +2,7 @@ package baby.freedom.mobile.browser
 
 import android.util.Log
 import baby.freedom.mobile.node.INodeService
+import baby.freedom.swarm.NodeInfo
 import baby.freedom.swarm.SpendPermit
 import baby.freedom.swarm.SwarmNode
 import java.math.BigDecimal
@@ -225,11 +226,19 @@ internal fun withUnit(amount: String, unit: String): String =
  * chequebook deposit, #117, or connecting a stamp the wallet bought, #115)
  * in flight
  * — held here, not by a screen, so it outlives leaving the page, and so
- * there's only ever one. [MainActivity] keeps [service] current.
+ * there's only ever one. [MainActivity] keeps [service] and [node] current.
  */
 internal object StampClient {
     @Volatile
     var service: INodeService? = null
+
+    /**
+     * The Swarm node's last published state, as `:node`'s callback reports
+     * it — kept current while the Activity is stopped too (the callback
+     * stays registered until it's destroyed), unlike a composable's
+     * parameter, which only moves on recomposition (#291 R4-M1).
+     */
+    val node = MutableStateFlow(NodeInfo())
 
     sealed interface Answer {
         data class Ok(val json: JSONObject) : Answer

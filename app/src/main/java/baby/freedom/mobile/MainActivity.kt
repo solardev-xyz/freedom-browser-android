@@ -103,7 +103,8 @@ import kotlinx.coroutines.withContext
  */
 class MainActivity : ComponentActivity() {
 
-    private val infoFlow = MutableStateFlow(NodeInfo())
+    // Shared with the Fund node page's Ledger ready check (#291 R4-M1).
+    private val infoFlow = StampClient.node
     private val ipfsInfoFlow = MutableStateFlow(IpfsInfo())
     // Shared with the `rad://` browser and `window.radicle` (#124).
     private val radicleInfoFlow = RadicleClient.state

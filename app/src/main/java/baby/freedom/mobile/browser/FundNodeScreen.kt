@@ -20,7 +20,6 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
-import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -60,6 +59,7 @@ import java.math.BigInteger
 import java.math.RoundingMode
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
@@ -136,12 +136,38 @@ internal fun fundSendHeld(node: NodeInfo?, pending: SwarmFunding.Pending?, batch
 }
 
 /**
- * The node as the Fund node page last saw it, for a send's coroutines and
- * the Ledger's ready check to read after the review that started them is
- * gone (#291 R3-F1): kept at page level, not in the review's lazy item,
- * and null once the page itself is.
+ * The node as `:node` last reported it, for a send's coroutines and the
+ * Ledger's ready check to read after the review that started them is gone
+ * (#291 R3-F1): kept at page level, not in the review's lazy item, and
+ * null once the page itself is [closed][close].
+ *
+ * Read straight from [source] ([StampClient.node], which `:node`'s
+ * callback moves while the Activity is stopped too), never from the
+ * page's `nodeInfo` parameter: that only moves on recomposition, which
+ * pauses in the background, so a payer who backgrounds the app while the
+ * Ledger connects would be checked against the node as it was when they
+ * left (#291 R4-M1).
  */
-private class LiveNode(@Volatile var info: NodeInfo?)
+internal class FundPageNode(private val source: StateFlow<NodeInfo>) {
+    @Volatile
+    private var open = true
+
+    val info: NodeInfo? get() = if (open) source.value else null
+
+    fun close() {
+        open = false
+    }
+
+    /**
+     * The hold a send of [batchId] to [reviewNode] is under right now: the
+     * live node and [records]' live pending entry, read on every call —
+     * nothing here is the review item's state, which is disposed the moment
+     * the send starts.
+     */
+    fun heldNow(records: StateFlow<SwarmFunding.Pending?>?, batchId: String, reviewNode: String): () -> String? = {
+        fundSendHeld(info, records?.value, batchId, reviewNode)
+    }
+}
 
 /**
  * The Ledger's [fresh][WalletSender.signerFor] check for a Fund node review:
@@ -222,9 +248,8 @@ internal fun FundNodeScreen(nodeInfo: NodeInfo, onOpenUrl: (String) -> Unit, onD
     val spend by StampClient.spend.collectAsState()
     val node = fundingAddress(nodeInfo)
     // Outlives the review item, which is gone as soon as a send starts.
-    val liveNode = remember { LiveNode(nodeInfo) }
-    SideEffect { liveNode.info = nodeInfo }
-    DisposableEffect(liveNode) { onDispose { liveNode.info = null } }
+    val liveNode = remember { FundPageNode(StampClient.node) }
+    DisposableEffect(liveNode) { onDispose { liveNode.close() } }
 
     var depth by rememberSaveable { mutableIntStateOf(STAMP_DEPTHS.first()) }
     var days by rememberSaveable { mutableLongStateOf(STAMP_BUY_DAYS.first()) }
@@ -361,10 +386,7 @@ internal fun FundNodeScreen(nodeInfo: NodeInfo, onOpenUrl: (String) -> Unit, onD
                     // Read live after the unlock prompt and when the Ledger is ready: from the
                     // page's own state and the record's flow, never this item's, which is
                     // disposed the moment the send starts (#291 R3-F1).
-                    val f2 = funding
-                    val heldNow: () -> String? = {
-                        fundSendHeld(liveNode.info, f2?.pending?.value, r.plan.batchId, rows.node)
-                    }
+                    val heldNow = liveNode.heldNow(funding?.pending, r.plan.batchId, rows.node)
                     FundReview(
                         quote = q,
                         summary = rows.summary,

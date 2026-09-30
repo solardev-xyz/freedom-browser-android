@@ -14,6 +14,7 @@ import baby.freedom.mobile.wallet.SwarmFunder
 import baby.freedom.mobile.wallet.TokenRegistry
 import baby.freedom.mobile.wallet.WalletAccount
 import java.math.BigInteger
+import kotlinx.coroutines.flow.MutableStateFlow
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
@@ -130,17 +131,45 @@ class FundNodeReviewTest {
     @Test
     fun `the Ledger's ready check reads the live hold, not the one at the tap`() {
         val p = plan()
-        val live = LiveNodeForTest(NodeInfo(status = NodeStatus.Running, accountAddress = node, walletIdentity = true, lightMode = true))
-        var pending: SwarmFunding.Pending? = null
-        val fresh = fundLedgerFresh({ fundSendHeld(live.info, pending, p.batchId, node) }) { false }
-        // The send's own record appears once it shows Signing: still fine.
-        pending = SwarmFunding.Pending(node, p.batchId, p.depth, days, null, mined = false)
+        val running = NodeInfo(status = NodeStatus.Running, accountAddress = node, walletIdentity = true, lightMode = true)
+        // What :node's callback moves, with no recomposition (the app in the background).
+        val reported = MutableStateFlow(running)
+        val records = MutableStateFlow<SwarmFunding.Pending?>(null)
+        val page = FundPageNode(reported)
+        // The closure the page hands the Ledger, built as the review item builds it.
+        val fresh = fundLedgerFresh(page.heldNow(records, p.batchId, node)) { false }
         assertTrue(fresh())
-        live.info = live.info!!.copy(accountAddress = otherNode)
+        // The send's own record appears once it shows Signing: still fine.
+        val own = SwarmFunding.Pending(node, p.batchId, p.depth, days, null, mined = false)
+        records.value = own
+        assertTrue(fresh())
+        // Another stamp's record lands while the Ledger connects.
+        records.value = own.copy(batchId = "0x" + "ab".repeat(32))
+        assertThrows(SigningHeldException::class.java) { fresh() }
+        records.value = own
+        // The node restarts as another account while the app is backgrounded.
+        reported.value = running.copy(accountAddress = otherNode)
         assertEquals(FUND_REVIEW_NODE_CHANGED, assertThrows(SigningHeldException::class.java) { fresh() }.message)
+        reported.value = running
+        assertTrue(fresh())
+        // The page is left: the hook ends with that, whatever the node says.
+        page.close()
+        assertEquals(FUND_PAGE_CLOSED, assertThrows(SigningHeldException::class.java) { fresh() }.message)
     }
 
-    private class LiveNodeForTest(var info: NodeInfo?)
+    @Test
+    fun `the page reads the node the node process reports, not a composable copy`() {
+        // StampClient.node is the flow MainActivity collects and :node's callback writes.
+        val before = StampClient.node.value
+        try {
+            val page = FundPageNode(StampClient.node)
+            val moved = NodeInfo(status = NodeStatus.Running, accountAddress = otherNode, walletIdentity = true, lightMode = true)
+            StampClient.node.value = moved
+            assertEquals(moved, page.info)
+        } finally {
+            StampClient.node.value = before
+        }
+    }
 
     @Test
     fun `a plan the quote wasn't built from describes nothing`() {
