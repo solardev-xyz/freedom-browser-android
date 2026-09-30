@@ -69,9 +69,36 @@ looks each one up instead of carrying English literals.
 
 ## The lint check
 
-`./gradlew :app:lintDebug` runs the `HardcodedUiText` check (the
-`:lint-checks` module), which fails on a string literal passed as user-visible
-text: Compose `Text("…")` and `contentDescription = "…"`, `Toast.makeText`,
-snackbar messages and notification text. Text that genuinely isn't
-language (a symbol, a sample address) can be suppressed with
-`@Suppress("HardcodedUiText")` and a comment saying why.
+`./gradlew :app:lintDebug` fails on user-visible text written as a
+string literal. The check is `HardcodedUiText`, in the `:lint-checks`
+module (`HardcodedUiTextDetector`); it flags a literal, or a string
+template or `+` concatenation with a literal part, that contains a letter
+and is passed as:
+
+- the `text` of Compose `Text` / `BasicText` (material3, material,
+  foundation);
+- a `contentDescription` argument of any call (`Icon(…, "Back")`,
+  `contentDescription = "…"`) or the `contentDescription` semantics
+  property;
+- the message of `Toast.makeText`, the `message` / `actionLabel` of
+  `SnackbarHostState.showSnackbar`;
+- notification text (`setContentTitle`, `setContentText`, `setSubText`,
+  `setTicker`, an `addAction` title, a `NotificationChannel` name);
+- `AlertDialog.Builder` titles, messages and button labels.
+
+`"$count tabs"` and `if (n == 1) "tab" else "tabs"` are flagged;
+`"$a · $b"`, `"—"` and `Text(label)` are not. Test sources aren't
+checked. Text handed to your own helper first (`action("Pause")`) isn't
+caught either, so keep resources at the call site.
+
+Text that genuinely isn't language (a symbol, a sample address, a
+`0x…` placeholder) can be suppressed with `@Suppress("HardcodedUiText")`
+on the declaration and a comment saying why.
+
+`lintDebug` runs only this check, Android's `HardcodedText` (XML
+layouts), `MissingTranslation` and `ExtraTranslation` (a `values-<lang>`
+file missing a string, or with one `values/` doesn't have), so it is
+fast and fails only for localisation; `-Plint.checkAll` runs full lint
+(see `lint {}` in `app/build.gradle.kts`). `./gradlew :lint-checks:test`
+runs the check's own tests. Both run in the `unit-tests` job of
+`.github/workflows/release.yml`.

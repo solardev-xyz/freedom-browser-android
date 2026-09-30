@@ -204,6 +204,7 @@ freedom-browser-android/
 │       ├── browser/              # tabs, address bar, WebView, resolver
 │       ├── ens/                  # Keccak256, ENS contenthash, Universal Resolver
 │       └── node/NodeService.kt   # foreground service owning the Swarm node
+├── lint-checks/                  # HardcodedUiText lint check (docs/localisation.md)
 ├── swarmnode/                    # Kotlin wrapper around the embedded nodes
 │   ├── src/main/jniLibs/         # libfreedom_mobile_ffi.so per ABI — combined ant + freedom-ipfs (gitignored)
 │   ├── src/main/cpp/             # vendored ant.h + freedom_ipfs.h, JNI shims over both C APIs
@@ -221,9 +222,10 @@ freedom-browser-android/
 └── .envrc.example                # JAVA_HOME / ANDROID_HOME pointers for macOS
 ```
 
-Two Gradle modules:
+Three Gradle modules:
 - `:app` — the Android application.
 - `:swarmnode` — a self-contained Android library wrapping both embedded nodes (`libfreedom_mobile_ffi.so` + the JNI shims), depended on by `:app`. Designed to be publishable on its own.
+- `:lint-checks` — the app's own lint checks (plain JVM): `HardcodedUiText`, which keeps user-visible string literals out of the code (see [docs/localisation.md](docs/localisation.md#the-lint-check)).
 
 ## Common tasks
 
@@ -232,8 +234,10 @@ Two Gradle modules:
 ./gradlew :app:installDebug            # install on device/emulator
 ./gradlew :app:assembleRelease         # release APK (unsigned)
 ./gradlew :swarmnode:assembleRelease   # build the swarmnode .aar only
+./gradlew :app:lintDebug               # localisation lint (HardcodedUiText, translations)
+./gradlew :lint-checks:test            # the lint check's own tests
 
-./gradlew clean                        # remove app/build + swarmnode/build
+./gradlew clean                        # remove every module's build/
 ./gradlew --stop                       # kill background Gradle daemons
 ```
 
