@@ -2535,12 +2535,17 @@ fun BrowserScreen(
                 if (closed.count > 0) {
                     tabsClosedNotice = scope.launch {
                         val undo = closed.undo
-                        val result = snackbarHostState.showSnackbar(
-                            message = Strings.plural(R.plurals.browser_tabs_closed, closed.count, closed.count),
-                            actionLabel = undo?.let { Strings.get(R.string.browser_tabs_undo) },
-                            duration = SnackbarDuration.Long,
-                        )
-                        if (result == SnackbarResult.ActionPerformed && undo != null) tabs.reopenClosed(undo)
+                        try {
+                            val result = snackbarHostState.showSnackbar(
+                                message = Strings.plural(R.plurals.browser_tabs_closed, closed.count, closed.count),
+                                actionLabel = undo?.let { Strings.get(R.string.browser_tabs_undo) },
+                                duration = SnackbarDuration.Long,
+                            )
+                            if (result == SnackbarResult.ActionPerformed && undo != null) tabs.reopenClosed(undo)
+                        } finally {
+                            // Held on the reopen stack only while its Undo is up.
+                            undo?.let(tabs::undoWithdrawn)
+                        }
                     }
                 }
             },

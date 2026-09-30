@@ -82,7 +82,9 @@ class TabsState(
      * A tab the user closed, kept so [reopenClosedTab] can bring it
      * back where it was, with the history it had.
      *
-     * [index] is where it stood in the list when it was closed.
+     * [index] is where it stood in the list when it was closed, not
+     * counting tabs the same close took that don't come back (private
+     * or empty ones), so it lands between the same neighbours.
      * [webViewState] is the closed WebView's own
      * [android.webkit.WebView.saveState] bundle (null if the host
      * couldn't take one); the host hands it to the replacement
@@ -119,11 +121,17 @@ class TabsState(
      * [placeholderId] is the blank tab put in their place because they
      * were the last tabs, so undoing *this* close (and no other) can
      * drop that tab again if it was never used.
+     *
+     * [bulk] is whether this was *Close all*, *other* or *private tabs*
+     * rather than one tab's own close: reopening a single closed tab
+     * makes it active, reopening a bulk close (even of one tab) leaves
+     * the active tab alone unless [activeAt] names one of [tabs].
      */
     class ClosedGroup internal constructor(
         val tabs: List<ClosedTab>,
         internal val activeAt: Int?,
         internal val placeholderId: Long?,
+        internal val bulk: Boolean = false,
     )
 
     /**
@@ -141,6 +149,25 @@ class TabsState(
      * even when it alone holds more ([rememberClosed]).
      */
     private val closedTabs = mutableStateListOf<ClosedGroup>()
+
+    /**
+     * The entry whose Undo is on screen right now ([BulkClose.undo],
+     * until [undoWithdrawn]). The stack's cap never drops it, so a
+     * single close made while the notice is up can't leave its Undo
+     * with nothing to bring back.
+     */
+    private var offeredUndo: ClosedGroup? = null
+
+    /**
+     * The Undo notice of [group] is gone (timed out, used, or replaced
+     * by a newer one): it may be dropped by the stack's cap again.
+     */
+    fun undoWithdrawn(group: ClosedGroup) {
+        if (offeredUndo === group) {
+            offeredUndo = null
+            trimClosed()
+        }
+    }
 
     /** There is a closed tab [reopenClosedTab] can bring back. */
     val canReopenClosedTab: Boolean
@@ -405,7 +432,7 @@ class TabsState(
     fun closeTab(index: Int, remember: Boolean = true) {
         if (index !in tabs.indices) return
         val closing = tabs[index]
-        closeWhere(remember) { it === closing }
+        closeWhere(remember, bulk = false) { it === closing }
     }
 
     /**
@@ -446,7 +473,11 @@ class TabsState(
      * its place (or the new last one) becomes active; otherwise the
      * active tab stays.
      */
-    private fun closeWhere(remember: Boolean = true, closing: (BrowserState) -> Boolean): BulkClose {
+    private fun closeWhere(
+        remember: Boolean = true,
+        bulk: Boolean = true,
+        closing: (BrowserState) -> Boolean,
+    ): BulkClose {
         val indices = tabs.indices.filter { closing(tabs[it]) }
         if (indices.isEmpty()) return BulkClose(0, null)
         val oldActive = activeIndex.coerceIn(0, tabs.lastIndex)
@@ -462,7 +493,7 @@ class TabsState(
         }
         // The list is never empty: the last tabs are replaced by a blank one.
         val placeholder = if (indices.size == tabs.size) newBlankTab() else null
-        val undo = if (remember) rememberClosed(indices, oldActive, placeholder?.id) else null
+        val undo = if (remember) rememberClosed(indices, oldActive, placeholder?.id, bulk) else null
         for (i in indices.asReversed()) tabs.removeAt(i)
         if (placeholder != null) {
             tabs.add(placeholder)
@@ -489,19 +520,28 @@ class TabsState(
      * still blank) is kept and comes back loading that address; a tab
      * sent Home after browsing is kept for its history.
      */
-    private fun rememberClosed(indices: List<Int>, activeAtClose: Int, placeholderId: Long?): ClosedGroup? {
+    private fun rememberClosed(
+        indices: List<Int>,
+        activeAtClose: Int,
+        placeholderId: Long?,
+        bulk: Boolean,
+    ): ClosedGroup? {
         var activeAt: Int? = null
         val kept = ArrayList<ClosedTab>()
+        // Closed tabs that won't come back (private, empty) take no
+        // place when the kept ones are reinserted: each kept tab's index
+        // counts only the tabs that stayed and the kept ones before it.
+        var dropped = 0
         for (index in indices) {
             val tab = tabs[index]
-            if (tab.private) continue
+            if (tab.private) { dropped++; continue }
             // A popup nothing has committed in yet comes back as the blank
             // home entry (see [BrowserState.restorableAddress]).
             val (url, address) = tab.restorableAddress()
-            if (url.isBlank() && address.isBlank() && !tab.canGoBack && !tab.canGoForward) continue
+            if (url.isBlank() && address.isBlank() && !tab.canGoBack && !tab.canGoForward) { dropped++; continue }
             if (index == activeAtClose) activeAt = kept.size
             kept += ClosedTab(
-                index = index,
+                index = index - dropped,
                 url = url,
                 title = tab.title,
                 addressBarText = address,
@@ -512,23 +552,34 @@ class TabsState(
             )
         }
         if (kept.isEmpty()) return null
-        val group = ClosedGroup(kept, activeAt, placeholderId)
+        val group = ClosedGroup(kept, activeAt, placeholderId, bulk)
         closedTabs.add(group)
+        // A bulk close's Undo goes on screen ([BulkClose.undo]); a
+        // single close is undone by Reopen, not by a notice.
+        if (bulk) offeredUndo = group
+        trimClosed()
+        return group
+    }
+
+    private fun trimClosed() {
         // Bounded by tabs, not entries: each carries a thumbnail and a
         // saved WebView state, so twenty bulk closes of many tabs each
         // would otherwise pile up. Oldest entries go first; the newest
         // always stays whole, so its Undo brings back every tab it
-        // closed (those were all open a moment ago anyway).
+        // closed (those were all open a moment ago anyway). So does the
+        // entry whose Undo is on screen ([offeredUndo]).
         var held = closedTabs.sumOf { it.tabs.size }
-        while (closedTabs.size > 1 && held > MAX_CLOSED_TABS) held -= closedTabs.removeAt(0).tabs.size
-        return group
+        var i = 0
+        while (i < closedTabs.size - 1 && held > MAX_CLOSED_TABS) {
+            if (closedTabs[i] === offeredUndo) i++ else held -= closedTabs.removeAt(i).tabs.size
+        }
     }
 
     /**
      * Bring back the most recently closed tab — or tabs, when the last
      * close was a bulk one (#320) — at the position each was closed
-     * from (clamped to the current list). A single tab becomes active;
-     * a group makes the tab active that was active when it closed, if
+     * from (clamped to the current list). A single closed tab becomes
+     * active; a bulk close (even one only a single tab of came back) makes the tab active that was active when it closed, if
      * it's among them. Each WebView is rebuilt from the saved state, so
      * it comes back on the same page with the same back/forward
      * history.
@@ -573,7 +624,7 @@ class TabsState(
         }
         val target = when {
             group.activeAt != null -> reopened[group.activeAt]
-            reopened.size == 1 -> reopened[0]
+            !group.bulk -> reopened[0]
             else -> tabs.firstOrNull { it.id == activeId } ?: reopened[0]
         }
         activeIndex = tabs.indexOfFirst { it.id == target.id }
@@ -778,6 +829,7 @@ class TabsState(
      */
     fun forgetClosedTabs() {
         closedTabs.clear()
+        offeredUndo = null
     }
 
     /**

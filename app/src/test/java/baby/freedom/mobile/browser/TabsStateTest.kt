@@ -551,4 +551,60 @@ class TabsStateTest {
         assertEquals(listOf("a", "b", "c", "d"), tabs.titles)
         assertEquals("b", tabs.active.title)
     }
+
+    @Test
+    fun `undo of close others puts the kept tabs back on the same side of the kept tab`() {
+        for (private in listOf(false, true)) {
+            val tabs = threeTabs() // [a, b, c]
+            val gap = tabs.newTab(private = private) // untouched, or private
+            if (private) gap.visit("secret")
+            tabs.moveTab(3, 1) // [a, gap, b, c]
+            tabs.tabs[3].visit("k") // c becomes k
+            val keep = tabs.tabs[3]
+            val closed = tabs.closeOtherTabs(keep)
+            assertEquals(listOf("k"), tabs.titles)
+            tabs.reopenClosed(closed.undo!!)
+            assertEquals(listOf("a", "b", "k"), tabs.titles)
+            assertSame(keep, tabs.active)
+        }
+    }
+
+    @Test
+    fun `undo of close others that kept one tab leaves the kept tab active`() {
+        val tabs = TabsState(homepage = HOME_URL)
+        tabs.tabs[0].visit("a")
+        tabs.newTab().visit("k")
+        val keep = tabs.tabs[1]
+        tabs.switchTo(1)
+        val closed = tabs.closeOtherTabs(keep)
+        tabs.reopenClosed(closed.undo!!)
+        assertEquals(listOf("a", "k"), tabs.titles)
+        assertSame(keep, tabs.active)
+        // A single closed tab still comes back active.
+        tabs.closeTab(0)
+        tabs.reopenClosedTab()
+        assertEquals("a", tabs.active.title)
+    }
+
+    @Test
+    fun `a close made while an undo is offered doesn't drop that undo`() {
+        val tabs = TabsState(homepage = HOME_URL)
+        tabs.tabs[0].visit("k")
+        repeat(TabsState.MAX_CLOSED_TABS + 1) { i -> tabs.newTab().visit("t$i") }
+        val keep = tabs.tabs[0]
+        val closed = tabs.closeOtherTabs(keep)
+        assertEquals(TabsState.MAX_CLOSED_TABS + 1, closed.undo!!.tabs.size)
+        tabs.newTab().visit("x")
+        tabs.closeTab(tabs.tabs.lastIndex)
+        assertTrue(tabs.reopenClosed(closed.undo!!))
+        assertEquals(TabsState.MAX_CLOSED_TABS + 2, tabs.tabs.size)
+        assertEquals("x", tabs.reopenClosedTab()?.title)
+
+        // Once its notice is gone, the cap may drop it again.
+        val again = tabs.closeOtherTabs(keep)
+        tabs.undoWithdrawn(again.undo!!)
+        tabs.newTab().visit("y")
+        tabs.closeTab(tabs.tabs.lastIndex)
+        assertFalse(tabs.reopenClosed(again.undo!!))
+    }
 }
