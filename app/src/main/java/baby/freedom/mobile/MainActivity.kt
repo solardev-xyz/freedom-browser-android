@@ -375,6 +375,24 @@ class MainActivity : ComponentActivity() {
                 .collect { Appearance.apply(this@MainActivity, it) }
         }
 
+        // The home page's first-run introduction (#278): decided once, at
+        // the first start with this build, before a page of this session
+        // can land in history — an install that already has pages or
+        // bookmarks predates the introduction and isn't on a first launch.
+        lifecycleScope.launch {
+            try {
+                val repo = baby.freedom.mobile.data.BrowsingRepository.get(this@MainActivity)
+                settings.settleIntro {
+                    repo.bookmarks.first().isNotEmpty() || repo.recentDistinct(1).first().isNotEmpty()
+                }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                // Stays undecided, so not shown; asked again next start.
+                android.util.Log.w("MainActivity", "deciding the introduction failed (${e.javaClass.simpleName})")
+            }
+        }
+
         // Honor the persisted preference on cold start. If the user had
         // the node enabled, start + bind right away; otherwise leave
         // the :node process dormant so we don't hold the state store
