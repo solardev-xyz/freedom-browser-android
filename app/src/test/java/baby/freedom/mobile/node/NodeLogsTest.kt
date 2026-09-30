@@ -479,6 +479,83 @@ class NodeLogsTest {
         for (l in lines) assertEquals(l, reference(l), LogcatLine.parse(l))
     }
 
+    // ---- A write logcat split into lines (R6-F1) ----
+
+    /** Parse [raw], join, route and scrub it the way NodeLogs.follow does. */
+    private fun joined(raw: List<String>, flushEvery: Boolean = false): List<Pair<NodeLogSource, String>> {
+        val out = mutableListOf<Pair<NodeLogSource, String>>()
+        val joiner = LogcatJoiner { l -> out += nodeProcessSource(l.tag, l.message) to LogScrub.scrub(l.format()) }
+        for (r in raw) {
+            LogcatLine.parse(r)?.let(joiner::add)
+            if (flushEvery) joiner.flush()
+        }
+        joiner.flush()
+        return out
+    }
+
+    private val esc = "\u001B"
+    private val cid = "k2jmtxt6f4hf4f8e0j7xq5d7sxkqk1n2ajr8lkq0f2pcw6qg0tmckx0ae"
+
+    /** The lines logcat printed for a visit to `ipfs://…/r6probe%0Anlsecretdiary.html` (R6-F1). */
+    private val splitRequest = listOf(
+        "09-30 09:20:11.402  5104  5190 I ant-ffi : ${esc}[2m2026-09-30T07:20:11.402113Z${esc}[0m ${esc}[32m INFO${esc}[0m " +
+            "gateway_request{request_id=11 path=/ipfs/$cid/r6probe",
+        "09-30 09:20:11.402  5104  5190 I ant-ffi : nlsecretdiary.html range=}: freedom_ipfs_gateway: " +
+            "phase=\"request_start\" request_id=11 path=/ipfs/$cid/r6probe",
+        "09-30 09:20:11.402  5104  5190 I ant-ffi : nlsecretdiary.html",
+        "09-30 09:20:11.403  5104  5190 I ant-ffi : ${esc}[2m2026-09-30T07:20:11.403001Z${esc}[0m ${esc}[32m INFO${esc}[0m " +
+            "gateway_request{request_id=11 path=/ipfs/$cid/r6probe",
+        "09-30 09:20:11.403  5104  5190 I ant-ffi : nlsecretdiary.html range=}: freedom_ipfs_gateway: " +
+            "phase=\"gateway_limiter\" request_id=11",
+    )
+
+    @Test
+    fun `a path logcat split at a decoded newline is joined and scrubbed whole`() {
+        val lines = joined(splitRequest)
+        assertEquals(2, lines.size)
+        for ((source, line) in lines) {
+            assertEquals(line, NodeLogSource.Ipfs, source)
+            assertFalse(line, "nlsecretdiary" in line)
+            assertFalse(line, "r6probe" in line)
+        }
+        assertTrue(lines[0].second, "phase=\"request_start\"" in lines[0].second)
+        assertTrue(lines[1].second, "phase=\"gateway_limiter\"" in lines[1].second)
+    }
+
+    @Test
+    fun `the rest of a split line whose start already went out isn't kept`() {
+        // The reader handed the first part over before the rest came in.
+        val lines = joined(splitRequest, flushEvery = true)
+        assertTrue(lines.none { "nlsecretdiary" in it.second })
+        assertEquals(5, lines.size)
+        assertTrue(lines[1].second, lines[1].second.endsWith(LogcatJoiner.CUT))
+        // A continuation with no event before it at all.
+        val orphan = joined(listOf("09-30 09:20:11.402  5104  5190 I ant-ffi : secret.html range=}: x"))
+        assertEquals(listOf(NodeLogSource.Swarm to "09:20:11.402 I ant-ffi: ${LogcatJoiner.CUT}"), orphan)
+    }
+
+    @Test
+    fun `separate events, and other tags' lines, aren't joined`() {
+        val event = "09-30 09:20:11.402  5104  5190 I ant-ffi : ${esc}[2m2026-09-30T07:20:11.402113Z${esc}[0m  INFO ant_p2p: one"
+        val lines = joined(
+            listOf(
+                event,
+                event.replace("one", "two"),
+                "09-30 09:20:11.402  5104  5190 W NodeService: first",
+                "09-30 09:20:11.402  5104  5190 W NodeService: second",
+            ),
+        )
+        assertEquals(
+            listOf(
+                "09:20:11.402 I ant-ffi: INFO ant_p2p: one",
+                "09:20:11.402 I ant-ffi: INFO ant_p2p: two",
+                "09:20:11.402 W NodeService: first",
+                "09:20:11.402 W NodeService: second",
+            ),
+            lines.map { it.second },
+        )
+    }
+
     @Test
     fun `logcat's own banners aren't lines`() {
         assertNull(LogcatLine.parse("--------- beginning of main"))
