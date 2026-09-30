@@ -296,9 +296,9 @@ class RadicleNode internal constructor(
         val result = json(ops.start(config.home, config.alias))
         val error = result?.optString("error").orEmpty()
         return when {
-            result == null -> "unreadable start response"
+            result == null -> SwarmStrings.get(R.string.swarmnode_radicle_unreadable_start)
             result.optString("did").isNotEmpty() -> null
-            else -> error.ifEmpty { "start failed" }
+            else -> error.ifEmpty { SwarmStrings.get(R.string.swarmnode_radicle_start_failed) }
         }
     }
 
@@ -407,7 +407,7 @@ class RadicleNode internal constructor(
         val rid = normalizeRid(input)
         if (rid == null) {
             _state.update {
-                it.copy(seed = RadicleSeed(input.trim(), PHASE_FAILED, "Not a valid repository ID", active = false))
+                it.copy(seed = RadicleSeed(input.trim(), PHASE_FAILED, SwarmStrings.get(R.string.swarmnode_radicle_invalid_rid), active = false))
             }
             return
         }
@@ -459,7 +459,7 @@ class RadicleNode internal constructor(
                 run.fetchOver = true
                 seedRun.compareAndSet(run, null)
                 val settled = when {
-                    result == null -> RadicleSeed(rid, PHASE_FAILED, "unreadable fetch response", active = false)
+                    result == null -> RadicleSeed(rid, PHASE_FAILED, SwarmStrings.get(R.string.swarmnode_radicle_unreadable_fetch), active = false)
                     result.optBoolean("ok") -> RadicleSeed(rid, PHASE_DONE, active = false)
                     result.optBoolean("cancelled") -> RadicleSeed(rid, PHASE_CANCELLED, active = false)
                     else -> RadicleSeed(rid, PHASE_FAILED, result.optString("error"), active = false)
@@ -660,8 +660,7 @@ class RadicleNode internal constructor(
         internal const val CANCEL_RETRY_MS = 50L
         internal const val PENDING_UNSEED_FILE = "pending-unseed"
         internal const val POLL_INTERVAL_MS = 5_000L
-        internal const val STALE_FETCH_DETAIL =
-            "An earlier fetch of this repository is still winding down. Try again in a moment."
+        internal val STALE_FETCH_DETAIL: String get() = SwarmStrings.get(R.string.swarmnode_radicle_stale_fetch)
 
         const val PHASE_RESOLVING = "resolving"
         const val PHASE_FETCHING = "fetching"
@@ -713,9 +712,9 @@ class RadicleNode internal constructor(
 
         /** The part of a progress event worth a line under the phase. */
         internal fun progressDetail(event: JSONObject): String = when (event.optString("phase")) {
-            "resolving" -> event.optInt("candidates").let { if (it == 1) "1 candidate seed" else "$it candidate seeds" }
+            "resolving" -> event.optInt("candidates").let { SwarmStrings.plural(R.plurals.swarmnode_radicle_candidate_seeds, it, it) }
             "connecting" -> "${event.optString("addr")} (${event.optInt("index")}/${event.optInt("total")})"
-            "fetching" -> "from ${event.optString("nid")}"
+            "fetching" -> SwarmStrings.get(R.string.swarmnode_radicle_fetching_from, event.optString("nid"))
             "peer-failed", "failed" -> event.optString("reason")
             else -> ""
         }

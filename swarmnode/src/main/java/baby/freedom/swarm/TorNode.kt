@@ -164,7 +164,7 @@ class TorNode internal constructor(
         private const val TAG = "TorNode"
         const val POLL_BOOTSTRAP_MS = 1_000L
         const val POLL_RUNNING_MS = 5_000L
-        internal const val UNAVAILABLE = "This build of Freedom has no Tor client"
+        internal val UNAVAILABLE: String get() = SwarmStrings.get(R.string.swarmnode_tor_unavailable)
 
         /**
          * [TorInfo] from `freedom_tor_status_json` (freedom_tor.h). Anything
@@ -173,16 +173,16 @@ class TorNode internal constructor(
          */
         internal fun parseStatus(json: String?, version: String): TorInfo {
             val o = runCatching { JSONObject(json ?: "") }.getOrNull()
-                ?: return TorInfo(status = TorStatus.Error, version = version, errorMessage = "No status")
+                ?: return TorInfo(status = TorStatus.Error, version = version, errorMessage = SwarmStrings.get(R.string.swarmnode_tor_no_status))
             val port = o.optInt("port", 0).takeIf { it in 1..65535 } ?: 0
             val status = when (o.optString("state")) {
                 "running" -> TorStatus.Running
                 "bootstrapping" -> TorStatus.Starting
                 "stopped" -> return TorInfo(version = version)
-                else -> return TorInfo(status = TorStatus.Error, version = version, errorMessage = "Unknown state")
+                else -> return TorInfo(status = TorStatus.Error, version = version, errorMessage = SwarmStrings.get(R.string.swarmnode_tor_unknown_state))
             }
             if (port == 0) {
-                return TorInfo(status = TorStatus.Error, version = version, errorMessage = "No SOCKS port")
+                return TorInfo(status = TorStatus.Error, version = version, errorMessage = SwarmStrings.get(R.string.swarmnode_tor_no_socks_port))
             }
             fun str(key: String) = if (o.isNull(key)) null else o.optString(key).takeIf { it.isNotBlank() }
             val progress = Math.round(o.optDouble("progress", 0.0).coerceIn(0.0, 1.0) * 100).toInt()

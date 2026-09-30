@@ -29,6 +29,16 @@ Cancel, Save, …), `strings_settings.xml`, `strings_wallet.xml`, and so on.
 Each file's names start with its area (`settings_…`, `wallet_…`), since all
 files share one namespace.
 
+The `:swarmnode` library (the Swarm, IPFS, Tor, Radicle and light-client
+nodes) can't reach the app's `R` or `Strings`, so its text — status and
+error lines its nodes report, the light client's recovery messages —
+lives in its own `swarmnode/src/main/res/values/strings_swarmnode.xml`
+(names `swarmnode_…`), read through `baby.freedom.swarm.SwarmStrings`
+(`init` from `FreedomApplication`, same shape as `Strings`). Resources
+merge into the app, so a translation adds
+`swarmnode/src/main/res/values-<lang>/strings_swarmnode.xml` next to the
+app's files.
+
 ## Writing code
 
 - **Compose**: `stringResource(R.string.x)`,
