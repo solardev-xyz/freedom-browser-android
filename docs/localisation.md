@@ -77,6 +77,16 @@ The error page (`assets/error/error.html`) and the Radicle viewer
 the page a JSON table of the strings it needs, and the page's script
 looks each one up instead of carrying English literals.
 
+- The Radicle viewer is served by `RadApi`, which also serves
+  `/_/strings.js` (`window.RAD_STRINGS`) next to it.
+- The error page is a `file:///android_asset/` URL, which WebView loads
+  without asking `shouldInterceptRequest`, so the app can't serve it.
+  Once it has committed, `BrowserWebView` runs `ErrorPage.stringsScript()`
+  in it (`onPageCommitVisible` and `onPageFinished`), handing the table to
+  the page's `window.__errorPageStrings`; the page stays hidden until then.
+  `ErrorPageStringsTest` checks that every key the page uses is in
+  `ErrorPage.PAGE_STRINGS`.
+
 ## The lint check
 
 `./gradlew :app:lintDebug` fails on user-visible text written as a
