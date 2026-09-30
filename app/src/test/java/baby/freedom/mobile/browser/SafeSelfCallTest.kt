@@ -293,11 +293,15 @@ class SafeSelfCallTest {
         assertNull(safeSelfCallFailure(SafeSelfCall.SetGuard(attacker), null, safe, guardSupported = true))
         assertNull(safeSelfCallFailure(SafeSelfCall.SetGuard(attacker), null, safe))
         assertNull(safeSelfCallFailure(SafeSelfCall.SetGuard(zero), null, safe, guardSupported = false))
-        // GS400: the Safe as its own fallback handler, in any case; anything else goes through.
-        assertEquals(
-            "The fallback handler is this Safe itself, which it refuses: this transaction would fail.",
-            safeSelfCallFailure(SafeSelfCall.SetFallbackHandler(safe.lowercase()), null, safe),
-        )
+        // GS400: the Safe as its own fallback handler, in any case, gets a hedge, never "would fail": only
+        // v1.4 refuses it, and the page accepts a v1.3.0 Safe too, which installs it and loses EIP-1271.
+        // Anything else goes through.
+        val handlerNote = safeSelfCallFailure(SafeSelfCall.SetFallbackHandler(safe.lowercase()), null, safe)!!
+        assertEquals(SAFE_SELF_HANDLER_NOTE, handlerNote)
+        assertTrue(handlerNote.contains("Don’t count on this failing"))
+        assertFalse(handlerNote.contains("would fail"))
+        // The guard note names the version too: a v1.3.0 Safe never asks the guard.
+        assertTrue(guardNote.contains("v1.4"))
         assertNull(safeSelfCallFailure(SafeSelfCall.SetFallbackHandler(zero), null, safe))
         assertNull(safeSelfCallFailure(SafeSelfCall.SetFallbackHandler(attacker), null, safe))
         // A self-call with nothing to refuse, and owner calls before owners are read.

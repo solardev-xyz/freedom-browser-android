@@ -1709,8 +1709,11 @@ internal val SafeSelfCall?.needsAcknowledgement: Boolean get() = this != null &&
 internal fun safeSelfCallCleared(call: SafeSelfCall?, acknowledged: Boolean): Boolean = !call.needsAcknowledgement || acknowledged
 
 /**
- * Why a self-call would revert on a v1.4.1 Safe, or null if it can go
- * through (or that isn't known yet). Owner calls are counted against [owners]
+ * Why a self-call would revert, or null if it can go through (or that isn't
+ * known yet). Every "would fail" here is a check every Safe version the
+ * co-sign page accepts makes (v1.1.1 on); the two only v1.4 added — GS300 and
+ * GS400 below — are hedged instead, since the page accepts any deployed Safe
+ * and doesn't read its version. Owner calls are counted against [owners]
  * (on chain, in the Safe's own linked-list order, as `getOwners()` returns
  * them; null until read): the Safe refuses to add an address that already
  * owns it or is no address (GS203/GS204), to remove or replace one that
@@ -1719,7 +1722,10 @@ internal fun safeSelfCallCleared(call: SafeSelfCall?, acknowledged: Boolean): Bo
  * Module calls are counted against [modules] (`getModulesPaginated`, the same
  * kind of list; null until read): it refuses to enable no address (GS101) or
  * an enabled module (GS102), and to disable one that isn't enabled or with the
- * wrong `prevModule` (GS103), and itself as its fallback handler (GS400).
+ * wrong `prevModule` (GS103). A Safe from v1.4 on also refuses itself as its
+ * fallback handler (GS400); v1.3.0 and older don't check and simply install
+ * it, dropping the handler that answers EIP-1271 and token-receive callbacks,
+ * so that note warns rather than promising a failure.
  * On the page, [owners] and [modules] come only from a snapshot that
  * [safeStateApplies] to, and that never holds a module (an enabled module can
  * change the list with no nonce), so of these the page only ever shows "isn't
@@ -1727,12 +1733,20 @@ internal fun safeSelfCallCleared(call: SafeSelfCall?, acknowledged: Boolean): Bo
  * here for a caller that has one it can trust.
  *
  * A guard that doesn't currently declare itself one ([guardSupported] false;
- * the Safe would refuse it, GS300) gets a note too, but never a "would fail":
- * whether it answers is up to the guard's own code, which its author can
+ * a v1.4 Safe would refuse it, GS300, while v1.3.0 doesn't ask) gets a note
+ * too, but never a "would fail": besides the Safe's version, whether it
+ * answers is up to the guard's own code, which its author can
  * deploy or change after the page reads it (a CREATE2 address with nothing
  * there yet, or a guard that answers true only to the Safe), so the note says
  * not to count on the transaction failing.
  */
+/**
+ * The note for a Safe set as its own fallback handler: a v1.4 Safe refuses it
+ * (GS400), but v1.3.0 and older install it, so it can't promise a failure.
+ */
+internal const val SAFE_SELF_HANDLER_NOTE =
+    "The fallback handler is this Safe itself. A Safe from v1.4 on refuses that, but an older one accepts it and loses its fallback handler: it can then no longer confirm signed messages (EIP-1271) or receive NFTs sent with a safe transfer. Don’t count on this failing."
+
 internal fun safeSelfCallFailure(
     call: SafeSelfCall,
     owners: List<String>?,
@@ -1777,12 +1791,12 @@ internal fun safeSelfCallFailure(
         }
         is SafeSelfCall.SetGuard ->
             if (!call.guard.equals(SafeProtocol.ZERO_ADDRESS, ignoreCase = true) && guardSupported == false) {
-                "This address doesn’t answer as a transaction guard right now, which the Safe would refuse. Its code can change before this executes, so don’t count on this failing: a guard can block every later transaction from this Safe, including one that removes it."
+                "This address doesn’t answer as a transaction guard right now, which a Safe from v1.4 on refuses; an older Safe doesn’t check. Its code can change before this executes too, so don’t count on this failing: a guard can block every later transaction from this Safe, including one that removes it."
             } else {
                 null
             }
         is SafeSelfCall.SetFallbackHandler ->
-            if (call.handler.equals(safe, ignoreCase = true)) "The fallback handler is this Safe itself, which it refuses: this transaction would fail." else null
+            if (call.handler.equals(safe, ignoreCase = true)) SAFE_SELF_HANDLER_NOTE else null
         is SafeSelfCall.ChangeThreshold, SafeSelfCall.Cancel, SafeSelfCall.Unknown -> null
     }
 }
