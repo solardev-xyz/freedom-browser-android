@@ -1498,4 +1498,68 @@ class SwarmProviderTest {
         val PSS_KEY = "03" + "ef".repeat(32)
         val RECIPIENT = "02" + "12".repeat(32)
     }
+
+    @Test
+    fun `a request whose parse would cost far more memory than its length is refused unparsed`() {
+        // Two characters a value: a 30M-number array ran the app out of memory on the main thread.
+        val numbers = """{"id":4,"method":"swarm_publishData","params":{"data":{"type":"Buffer","data":[""" +
+            List(SwarmProvider.MAX_DATA_BYTES / 8) { "0" }.joinToString(",") + "]}}}"
+        assertTrue(numbers.count { it == ',' } > MAX_SWARM_REQUEST_VALUES)
+        assertNull(parseSwarmRequest(numbers))
+        assertEquals("answered, not left to time out", 4L, unparsedRequestId(numbers))
+        // An object per three characters, costlier still.
+        assertNull(parseSwarmRequest("""{"id":5,"method":"m","params":{"a":[""" + List(MAX_SWARM_REQUEST_CONTAINERS) { "[]" }.joinToString(",") + "]}}"))
+        // Commas and brackets inside strings are text, not values: base64 bytes and paths pass.
+        val text = "[,]{".repeat(MAX_SWARM_REQUEST_VALUES)
+        assertEquals(text, parseSwarmRequest("""{"id":6,"method":"m","params":{"s":"$text"}}""")!!.params.getString("s"))
+        assertTrue(jsonShapeWithin(""""a\",[""", 1, 0))
+        // A megabyte as a Buffer array still goes through.
+        val buffer = """{"id":7,"method":"m","params":{"data":{"type":"Buffer","data":[""" + List(1 shl 20) { "255" }.joinToString(",") + "]}}}"
+        assertEquals(1 shl 20, SwarmProvider.bytesOf(parseSwarmRequest(buffer)!!.params.get("data"))!!.size)
+    }
+
+    @Test
+    fun `a content type the node's header can't carry is refused before the sheet`() {
+        connect()
+        for (bad in listOf("text/plain\r\nX-Evil: 1", "text/plän", "t/" + "x".repeat(SwarmProvider.MAX_CONTENT_TYPE_CHARS))) {
+            val e = err(call("swarm_publishData", JSONObject().put("data", "hi").put("contentType", bad)))
+            assertEquals(SwarmProvider.INVALID_PARAMS, e.code)
+            assertEquals("invalid_content_type", e.reason)
+        }
+        assertTrue(asked.isEmpty())
+        assertTrue(node.uploads().isEmpty())
+        ok(call("swarm_publishData", JSONObject().put("data", "hi").put("contentType", "text/html; charset=utf-8")))
+    }
+
+    @Test
+    fun `an Allow tapped after the user disconnected the site does nothing and gives nothing back`() {
+        connect()
+        // The wallet page's Disconnect while the sheet is up.
+        onApproved = {
+            grants.connected.remove(site)
+            grants.auto.removeAll { it.first == site }
+            feeds.granted.remove(site)
+        }
+        answer = SwarmProvider.Answer(true, always = true)
+        val feed = err(call("swarm_createFeed", JSONObject().put("name", "posts")))
+        assertEquals(4100, feed.code)
+        assertEquals("not_connected", feed.reason)
+        assertFalse("feed access stays taken away", feeds.granted(site))
+        assertTrue("no always-allow comes back", grants.auto.none { it.first == site })
+
+        connect()
+        val publish = err(call("swarm_publishData", JSONObject().put("data", "hi").put("contentType", "text/plain")))
+        assertEquals("not_connected", publish.reason)
+        assertTrue(grants.auto.none { it.first == site })
+        assertTrue(node.uploads().isEmpty())
+    }
+
+    @Test
+    fun `the sheet writes out line breaks and bidi controls in every page string`() {
+        val publish = SwarmAsk.Publish(site, SwarmAsk.Publish.Kind.Data, 5, "text/plain\u2028Cost: free", null, emptyList())
+        assertEquals("text/plain<U+2028>Cost: free", swarmPublishWhat(publish))
+        assertEquals("a<U+202E>txt.exe, b<U+000A>c", swarmPathsPreview(listOf("a\u202Etxt.exe", "b\nc")))
+        val sign = SwarmAsk.Sign(site, "swarm_createFeed", SwarmProvider.AutoApprove.Feeds, true, "prof\u202Eelif", null, null)
+        assertEquals("prof<U+202E>elif", swarmSignRequest(sign))
+    }
 }

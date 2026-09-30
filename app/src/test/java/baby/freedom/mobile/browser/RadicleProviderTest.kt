@@ -5,6 +5,7 @@ import baby.freedom.swarm.RadicleNode
 import baby.freedom.swarm.RadicleSeed
 import baby.freedom.swarm.RadicleStatus
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.runBlocking
 import org.json.JSONArray
@@ -519,5 +520,77 @@ class RadicleProviderTest {
     fun `prompt copy names what each ask means`() {
         assertEquals("Connect", radiclePromptCopy(RadicleAsk.Connect(site)).allow)
         assertTrue(radiclePromptCopy(RadicleAsk.Signing(site)).detail.contains("can't be taken back"))
+    }
+
+    @Test
+    fun `seedStatus goes only to the sites that follow that repository`() {
+        val other = "rad:z3gqcJUoA1n9HaHKufZs5FCSGazv5"
+        val b = "https://b.example"
+        grants.map[site] = ""
+        grants.map[b] = ""
+        val heard = mutableListOf<Pair<String, String>>()
+        provider.events = RadicleProvider.Events { o, e, d -> if (e == "seedStatus") heard += o to (d as JSONObject).getString("rid") }
+        runBlocking {
+            val scope = kotlinx.coroutines.CoroutineScope(Dispatchers.Unconfined)
+            provider.start(scope)
+            // b asks about another repository only: it joins no one else's fetch.
+            req("radicle_getSeedStatus", JSONObject().put("rid", other), origin = b)
+            req("radicle_seed", JSONObject().put("rid", rid))
+            node.state.value = RadicleInfo(status = RadicleStatus.Running, seed = RadicleSeed(rid, "connecting", "a (1/3)"))
+            assertEquals(listOf(site to rid), heard)
+            // Once b asks about rid itself, it hears rid's too.
+            heard.clear()
+            req("radicle_getSeedStatus", JSONObject().put("rid", rid), origin = b)
+            node.state.value = RadicleInfo(status = RadicleStatus.Running, seed = RadicleSeed(rid, "fetching", "b (2/3)"))
+            assertEquals(setOf(site to rid, b to rid), heard.toSet())
+            scope.coroutineContext[kotlinx.coroutines.Job]?.cancel()
+        }
+    }
+
+    @Test
+    fun `a fetch started while the seed prompt was up is busy, not a silent no-op`() {
+        grants.map[site] = ""
+        val other = "rad:z3gqcJUoA1n9HaHKufZs5FCSGazv5"
+        val r = runBlocking {
+            provider.request(site, "radicle_seed", JSONObject().put("rid", rid)) {
+                // Another tab (or the Radicle page) starts a fetch meanwhile.
+                node.state.value = RadicleInfo(status = RadicleStatus.Running, seed = RadicleSeed(other, "connecting", "a (1/3)"))
+                true
+            }
+        }
+        assertEquals("busy", err(r).reason)
+        assertTrue(node.seeds.isEmpty())
+    }
+
+    @Test
+    fun `a prompt left unanswered is refused before the page's own timer, without blocking the tab`() {
+        assertTrue(RadicleProviders.PROMPT_WAIT_MS + RadicleClient.READ_TIMEOUT_MS + RadicleClient.WRITE_TIMEOUT_MS < 300_000L)
+        val tab = BrowserState(9_500L)
+        try {
+            val allowed = runBlocking { RadicleProviders.askOnTab(tab, 0, RadicleAsk.Connect(site), waitMs = 200) }
+            assertFalse(allowed)
+            assertNull("the prompt is taken down", tab.radiclePrompt)
+            // Not a refusal: the next ask still gets a prompt.
+            val next = runBlocking {
+                val result = async { RadicleProviders.askOnTab(tab, 0, RadicleAsk.Connect(site), waitMs = 5_000) }
+                while (tab.radiclePrompt == null) kotlinx.coroutines.yield()
+                tab.radiclePrompt!!.respond(true)
+                result.await()
+            }
+            assertTrue(next)
+            assertFalse(runBlocking { RadicleProviders.askOnTab(tab, 0, RadicleAsk.Connect(site), waitMs = 0) })
+        } finally {
+            RadicleProviders.onTabClosed(tab.id)
+        }
+    }
+
+    @Test
+    fun `a request that doesn't parse is still answered by its id`() {
+        val bad = """{"id":7,"method":"radicle_seed","params":"rad:$bare"}"""
+        assertNull(parseRadicleRequest(bad))
+        assertEquals(7L, unparsedRequestId(bad))
+        assertNull(unparsedRequestId("""{"method":"m","id":7}"""))
+        assertNull(unparsedRequestId("""{"id":"7"}"""))
+        assertNull(unparsedRequestId(null))
     }
 }

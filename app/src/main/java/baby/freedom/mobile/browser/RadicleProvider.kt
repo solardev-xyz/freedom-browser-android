@@ -113,8 +113,16 @@ class RadicleProvider(
 
     private val lock = Any()
 
-    /** Origins that seed / sync / ask seed status: they get `seedStatus` events (desktop's broadcaster model). */
-    private val followers = HashSet<String>()
+    /**
+     * rid → the origins that seeded, synced or asked the status of that
+     * repository: they get its `seedStatus` events, and only its — desktop
+     * keeps a listener per repository (`seed-status.js`), so a site never
+     * hears what another site (or the user) seeds.
+     */
+    private val followers = object : LinkedHashMap<String, MutableSet<String>>() {
+        // A page picks the RIDs it asks about: the oldest repository asked about goes first.
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, MutableSet<String>>?) = size > MAX_FOLLOWED_REPOS
+    }
     private val tracks = HashMap<String, Track>()
     private val writes = HashMap<String, ArrayDeque<Long>>()
     private var watcher: Job? = null
@@ -193,7 +201,7 @@ class RadicleProvider(
 
     private suspend fun disconnect(origin: String): Reply {
         if (!grants.revoke(origin)) return Reply.Err(INTERNAL, "Couldn't drop the connection")
-        synchronized(lock) { followers.remove(origin) }
+        unfollowAll(origin)
         events.emit(origin, "disconnect", JSONObject().put("origin", origin))
         return Reply.Ok(JSONObject().put("connected", false))
     }
@@ -231,13 +239,17 @@ class RadicleProvider(
         }
         "radicle_getSeedStatus" -> {
             val rid = rid(params) ?: return invalidRid()
-            follow(origin)
+            follow(origin, rid)
             Reply.Ok(withContext(io) { status(rid) })
         }
         "radicle_seed" -> {
             val rid = rid(params) ?: return invalidRid()
             busy(rid)?.let { return it }
             if (!ask(RadicleAsk.Seed(origin, rid))) return rejected()
+            // Another fetch may have started while the prompt was up: the
+            // node would skip this one without a word.
+            node.unavailableReason()?.let { return Reply.Err(UNAVAILABLE, RadicleClient.unavailableMessage(it), it) }
+            busy(rid)?.let { return it }
             startFetch(origin, rid)?.let { return it }
             Reply.Ok(JSONObject().put("rid", rid).put("seeded", true).put("status", withContext(io) { status(rid) }))
         }
@@ -276,7 +288,7 @@ class RadicleProvider(
     }
 
     private fun startFetch(origin: String, rid: String): Reply? {
-        follow(origin)
+        follow(origin, rid)
         val line = node.state.value.seed
         // Already fetching this one: report on that fetch.
         if (line != null && line.active && line.rid == rid) return null
@@ -293,13 +305,19 @@ class RadicleProvider(
         return null
     }
 
-    private fun follow(origin: String) = synchronized(lock) { followers.add(origin) }
+    private fun follow(origin: String, rid: String) = synchronized(lock) { followers.getOrPut(rid) { HashSet() }.add(origin) }
+
+    /** [origin] stops hearing every repository's `seedStatus`. */
+    private fun unfollowAll(origin: String) = synchronized(lock) {
+        followers.values.forEach { it.remove(origin) }
+        followers.values.removeAll { it.isEmpty() }
+    }
 
     /**
      * [origin]'s grant is gone (the user disconnected it from the Radicle
      * page): it stops hearing `seedStatus` (#201 R1-F2).
      */
-    fun forget(origin: String) = synchronized(lock) { followers.remove(origin) }
+    fun forget(origin: String) = unfollowAll(origin)
 
     /**
      * Where [rid]'s replication stands (desktop's `getSeedStatus` shape).
@@ -373,7 +391,7 @@ class RadicleProvider(
             }
             while (track.recentAttempts.size > 5) track.recentAttempts.removeAt(0)
             if (!line.active) track.finishedAt = now
-            followers.toList()
+            followers[line.rid]?.toList().orEmpty()
         }
         if (targets.isEmpty()) return
         val status = withContext(io) { status(line.rid) }
@@ -634,6 +652,9 @@ class RadicleProvider(
 
         /** How long a seed just asked of the node reads as starting before its line shows up. */
         const val PENDING_MS = 5_000L
+
+        /** Repositories whose `seedStatus` followers are kept ([followers]). */
+        const val MAX_FOLLOWED_REPOS = 512
 
         private val COB_ID = Regex("^[0-9a-f]{6,40}$")
         private val ISSUE_STATES = setOf("open", "closed", "solved")

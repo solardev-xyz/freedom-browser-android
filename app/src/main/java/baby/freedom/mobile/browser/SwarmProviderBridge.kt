@@ -386,7 +386,13 @@ object SwarmProviders {
             if (isMainFrame && origin != null) subscriptions?.confirm(origin, id)
             return
         }
-        val request = parseSwarmRequest(message.data) ?: return
+        val request = parseSwarmRequest(message.data) ?: run {
+            // Readable enough to answer: the page learns now, not after five minutes.
+            unparsedRequestId(message.data)?.let {
+                answer(reply, it, SwarmProvider.Reply.Err(SwarmProvider.INVALID_PARAMS, "Invalid request"))
+            }
+            return
+        }
         if (!isMainFrame || origin == null) {
             val why = if (!isMainFrame) "window.swarm is only available to the top-level page" else "Origin not permitted"
             answer(reply, request.id, SwarmProvider.Reply.Err(SwarmProvider.UNAUTHORIZED, why))
@@ -1001,6 +1007,10 @@ internal data class SwarmRequest(val id: Long, val method: String, val params: J
 /** Parse `{"id": n, "method": "swarm_…", "params": {…}}`, or null if it isn't one. */
 internal fun parseSwarmRequest(data: String?): SwarmRequest? {
     if (data == null || data.length > MAX_SWARM_REQUEST_CHARS) return null
+    // Parsed on the main thread, before any origin or grant check: JSON
+    // whose parse costs far more memory than its length (a huge array of
+    // numbers, nested empty arrays) would take the whole browser down.
+    if (!jsonShapeWithin(data, MAX_SWARM_REQUEST_VALUES, MAX_SWARM_REQUEST_CONTAINERS)) return null
     val json = try {
         JSONObject(data)
     } catch (e: Exception) {
@@ -1038,6 +1048,60 @@ private val SUBSCRIPTION_ID = Regex("[0-9a-f]{32}")
 
 /** Bigger than any valid request: 50 MB of files, base64-encoded, and their paths. */
 private const val MAX_SWARM_REQUEST_CHARS = 72 * 1024 * 1024
+
+/**
+ * Values in one request, at most. A value parsed from a couple of
+ * characters costs a boxed object and a list slot, so a 72M-character
+ * array of numbers runs the app out of memory; bytes go as base64
+ * strings (the page script's encoding), and this still lets a
+ * `{"type":"Buffer"}` array carry a megabyte.
+ */
+internal const val MAX_SWARM_REQUEST_VALUES = 1_100_000
+
+/** Arrays and objects in one request, at most: a hundred files' worth, many times over. */
+internal const val MAX_SWARM_REQUEST_CONTAINERS = 10_000
+
+/**
+ * Whether [data], read as JSON, has at most [maxValues] values (its
+ * commas outside strings, plus one) and [maxContainers] arrays and
+ * objects — counted in one pass, without building anything, so a
+ * request can be refused before its parse allocates.
+ */
+internal fun jsonShapeWithin(data: String, maxValues: Int, maxContainers: Int): Boolean {
+    var values = 1
+    var containers = 0
+    var inString = false
+    var escaped = false
+    for (c in data) {
+        if (inString) {
+            when {
+                escaped -> escaped = false
+                c == '\\' -> escaped = true
+                c == '"' -> inString = false
+            }
+            continue
+        }
+        when (c) {
+            '"' -> inString = true
+            ',' -> if (++values > maxValues) return false
+            '[', '{' -> if (++containers > maxContainers) return false
+        }
+    }
+    return true
+}
+
+/**
+ * The id of a request [parseSwarmRequest] (or [parseRadicleRequest])
+ * refused — the page script writes it first, `{"id":n,…` — so it can be
+ * answered with an error instead of leaving the page waiting for its
+ * own timeout. Null if there's no id to answer.
+ */
+internal fun unparsedRequestId(data: String?): Long? {
+    if (data == null) return null
+    return UNPARSED_ID.find(data.take(40))?.groupValues?.get(1)?.toLongOrNull()
+}
+
+private val UNPARSED_ID = Regex("""^\{"id":(\d{1,15})[,}]""")
 
 /**
  * The page side of [SwarmProviders]: `window.swarm` with `request()`, one

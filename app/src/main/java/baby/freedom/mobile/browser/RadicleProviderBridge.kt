@@ -1,6 +1,7 @@
 package baby.freedom.mobile.browser
 
 import android.content.Context
+import android.os.SystemClock
 import android.util.Log
 import android.webkit.WebView
 import androidx.webkit.JavaScriptReplyProxy
@@ -16,6 +17,7 @@ import kotlinx.coroutines.MainScope
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONObject
 
 /**
@@ -222,7 +224,16 @@ object RadicleProviders {
     ) {
         val tab = bridge.tab
         if (message.type != WebMessageCompat.TYPE_STRING) return
-        val request = parseRadicleRequest(message.data) ?: return
+        // The prompt's deadline runs from the request's arrival ([PROMPT_WAIT_MS]).
+        val deadline = SystemClock.elapsedRealtime() + PROMPT_WAIT_MS
+        val request = parseRadicleRequest(message.data) ?: run {
+            // Readable enough to answer (`params` not an object, say): the
+            // page learns now, not after its five-minute timer.
+            unparsedRequestId(message.data)?.let {
+                answer(reply, it, RadicleProvider.Reply.Err(RadicleProvider.INVALID_PARAMS, "Invalid request"))
+            }
+            return
+        }
         val origin = providerOriginKey(sourceOrigin)
         if (!isMainFrame || origin == null) {
             val why = if (!isMainFrame) "window.radicle is only available to the top-level page" else "Origin not permitted"
@@ -257,7 +268,9 @@ object RadicleProviders {
         scope.launch {
             val result = try {
                 val p = provider ?: throw IllegalStateException("provider not ready")
-                p.request(origin, request.method, request.params) { ask -> askOnTab(tab, doc, ask) }
+                p.request(origin, request.method, request.params) { ask ->
+                    askOnTab(tab, doc, ask, deadline - SystemClock.elapsedRealtime())
+                }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Throwable) {
@@ -289,26 +302,34 @@ object RadicleProviders {
     /**
      * Put [ask] up on [tab] and wait for the answer — false at once if the
      * tab is blocked from prompting, the document that asked ([doc]) is no
-     * longer the tab's, or the tab moves on or closes while it waits.
+     * longer the tab's, or the tab moves on or closes while it waits; and
+     * false once [waitMs] runs out (queued behind another prompt, or up
+     * unanswered in a tab the user isn't looking at). The page's own
+     * timer rejects its request after five minutes, and it may retry: an
+     * Allow tapped after that would carry out a request the page has
+     * already given up on. Running out doesn't block the tab: the
+     * user refused nothing.
      */
-    private suspend fun askOnTab(tab: BrowserState, doc: Int, ask: RadicleAsk): Boolean {
+    internal suspend fun askOnTab(tab: BrowserState, doc: Int, ask: RadicleAsk, waitMs: Long = PROMPT_WAIT_MS): Boolean {
         fun live() = (documents[tab.id] ?: 0) == doc && tab.id !in blockedTabs
-        if (!live()) return false
+        if (!live() || waitMs <= 0) return false
         val lock = promptLocks.getOrPut(tab.id) { Mutex() }
-        return lock.withLock {
-            if (!live()) return@withLock false
-            val request = RadiclePromptRequest(ask)
-            pending.getOrPut(tab.id) { mutableSetOf() }.add(request)
-            tab.radiclePrompt = request
-            val allowed = try {
-                request.answer.await()
-            } finally {
-                pending[tab.id]?.remove(request)
-                if (tab.radiclePrompt === request) tab.radiclePrompt = null
+        return withTimeoutOrNull(waitMs) {
+            lock.withLock {
+                if (!live()) return@withLock false
+                val request = RadiclePromptRequest(ask)
+                pending.getOrPut(tab.id) { mutableSetOf() }.add(request)
+                tab.radiclePrompt = request
+                val allowed = try {
+                    request.answer.await()
+                } finally {
+                    pending[tab.id]?.remove(request)
+                    if (tab.radiclePrompt === request) tab.radiclePrompt = null
+                }
+                if (!allowed && live()) blockedTabs += tab.id
+                allowed && live()
             }
-            if (!allowed && live()) blockedTabs += tab.id
-            allowed && live()
-        }
+        } ?: false
     }
 
     /**
@@ -339,6 +360,15 @@ object RadicleProviders {
     private fun withdraw(tabId: Long) {
         pending[tabId]?.toList()?.forEach { it.respond(false) }
     }
+
+    /**
+     * How long a prompt waits, from the request's arrival: short of the
+     * page's five-minute timer by the node calls an allowed request still
+     * makes — reading the identity again ([RadicleClient.READ_TIMEOUT_MS])
+     * and the write ([RadicleClient.WRITE_TIMEOUT_MS]) — so what the user
+     * allows is answered before the page gives up on it.
+     */
+    internal const val PROMPT_WAIT_MS = 300_000L - RadicleClient.READ_TIMEOUT_MS - RadicleClient.WRITE_TIMEOUT_MS - 10_000L
 
     private const val TAG = "RadicleProvider"
 }
