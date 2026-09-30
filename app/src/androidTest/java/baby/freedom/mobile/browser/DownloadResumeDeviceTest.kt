@@ -41,6 +41,8 @@ class DownloadResumeDeviceTest {
 
     @After
     fun cleanUp() {
+        manager.allocatableForTest = null
+        DownloadManager.sweepGateForTest = null
         rows.forEach { manager.remove(it) }
         files.forEach { runCatching { resolver.delete(it, null, null) } }
     }
@@ -99,11 +101,11 @@ class DownloadResumeDeviceTest {
         }
     }
 
-    private fun startAndAccept(url: String, fileName: String) {
+    private fun startAndAccept(url: String, fileName: String, userAgent: String? = null) {
         manager.start(
             tabId = 265L,
             url = url,
-            userAgent = null,
+            userAgent = userAgent,
             contentDisposition = "attachment; filename=\"$fileName\"",
             mimeType = "application/octet-stream",
             contentLength = -1,
@@ -143,7 +145,9 @@ class DownloadResumeDeviceTest {
             server.dispatcher = files
             server.start()
             val name = "resume-${System.nanoTime()}.bin"
-            startAndAccept(server.url("/f.bin").toString(), name)
+            // A desktop-site tab's (#180): the resume must send it again.
+            val ua = "Mozilla/5.0 (X11; Linux x86_64) FreedomTest/265"
+            startAndAccept(server.url("/f.bin").toString(), name, userAgent = ua)
 
             val paused = await(name) { it.status == DownloadStatus.PAUSED }
             assertEquals(DOWNLOAD_CONNECTION_LOST_NOTE, paused.note)
@@ -158,6 +162,7 @@ class DownloadResumeDeviceTest {
             val resumed = files.requests.last()
             assertEquals("bytes=$kept-", resumed.getHeader("Range"))
             assertEquals(etag, resumed.getHeader("If-Range"))
+            assertEquals(ua, resumed.getHeader("User-Agent"))
             assertArrayEquals(body, savedBytes(done))
             assertNull(done.note)
             assertFalse(partialOf(done.id).exists())
@@ -318,5 +323,117 @@ class DownloadResumeDeviceTest {
             assertNull(files.requests.last().getHeader("Range"))
             assertArrayEquals(body, savedBytes(done))
         }
+    }
+
+    @Test
+    fun pausingWithoutAValidatorShowsNothingKept() {
+        MockWebServer().use { server ->
+            server.dispatcher = FileServer({ body }, { null }, ranges = false, slow = true)
+            server.start()
+            val name = "novalidator-${System.nanoTime()}.bin"
+            startAndAccept(server.url("/f.bin").toString(), name)
+            val running = await(name) { it.status == DownloadStatus.RUNNING }
+            awaitProgress(running.id)
+            manager.pause(running.id)
+            // A resume starts over, so the bytes went: the row mustn't
+            // claim them.
+            val paused = await(name) { it.status == DownloadStatus.PAUSED }
+            assertFalse(partialOf(paused.id).exists())
+            assertEquals(0L, paused.receivedBytes)
+        }
+    }
+
+    @Test
+    fun runningOutOfRoomPausesAResumableDownloadAndKeepsItsPartial() {
+        MockWebServer().use { server ->
+            val files = FileServer({ body }, { etag }, ranges = true, dropFirst = true)
+            server.dispatcher = files
+            server.start()
+            val name = "noroom-${System.nanoTime()}.bin"
+            startAndAccept(server.url("/f.bin").toString(), name)
+            val paused = await(name) { it.status == DownloadStatus.PAUSED }
+            val kept = partialOf(paused.id).length()
+
+            manager.allocatableForTest = { 0L }
+            manager.resume(paused.id)
+            val still = await(name) { it.status != DownloadStatus.RUNNING && it.note != DOWNLOAD_CONNECTION_LOST_NOTE }
+            assertEquals(DownloadStatus.PAUSED, still.status)
+            assertEquals("Not enough storage", still.note)
+            assertEquals(kept, partialOf(still.id).length())
+
+            manager.allocatableForTest = null
+            manager.resume(paused.id)
+            val done = await(name) { it.status == DownloadStatus.COMPLETED }
+            assertEquals("bytes=$kept-", files.requests.last().getHeader("Range"))
+            assertArrayEquals(body, savedBytes(done))
+        }
+    }
+
+    @Test
+    fun noRoomToSaveKeepsTheWholeFileForAResume() {
+        MockWebServer().use { server ->
+            // No validator, no ranges: only the finished file can be kept.
+            val files = FileServer({ body }, { null }, ranges = false)
+            server.dispatcher = files
+            server.start()
+            val shared = manager.sharedStorageDirForTest()
+            manager.allocatableForTest = { dir -> if (dir == shared) 0L else null }
+            val name = "nosave-${System.nanoTime()}.bin"
+            startAndAccept(server.url("/f.bin").toString(), name)
+            val paused = await(name) { it.status != DownloadStatus.RUNNING }
+            assertEquals(DownloadStatus.PAUSED, paused.status)
+            assertEquals("Not enough storage", paused.note)
+            assertEquals(body.size.toLong(), partialOf(paused.id).length())
+
+            manager.allocatableForTest = null
+            manager.resume(paused.id)
+            val done = await(name) { it.status == DownloadStatus.COMPLETED }
+            assertArrayEquals(body, savedBytes(done))
+            // Saved from what was kept, not fetched again.
+            assertEquals(1, files.requests.size)
+        }
+    }
+
+    /**
+     * A Cancel tapped in the notification a killed process left behind
+     * starts a new process, whose sweep hasn't yet made the dead run's
+     * row paused: the cancel must wait for it, and cancel the row.
+     */
+    @Test
+    fun aCancelFromADeadProcessesNotificationCancels() = runBlocking {
+        val dao = baby.freedom.mobile.data.AppDatabase.get(context).downloads()
+        val name = "deadcancel-${System.nanoTime()}.bin"
+        val id = dao.insert(
+            DownloadEntry(
+                fileName = name,
+                displayUrl = "https://example.com/f.bin",
+                sourceUrl = "https://example.com/f.bin",
+                mimeType = "application/octet-stream",
+                contentUri = null,
+                status = DownloadStatus.RUNNING,
+                totalBytes = body.size.toLong(),
+                receivedBytes = 0,
+                error = null,
+                startedAt = System.currentTimeMillis(),
+                finishedAt = null,
+                validator = etag,
+                resumable = true,
+            ),
+        )
+        rows += id
+        partialOf(id).apply { parentFile!!.mkdirs() }.writeBytes(body.copyOf(1000))
+
+        val gate = kotlinx.coroutines.CompletableDeferred<Unit>()
+        DownloadManager.sweepGateForTest = gate
+        val fresh = DownloadManager.newProcessForTest(context)
+        DownloadManager.sweepGateForTest = null
+        fresh.cancel(id)
+        // Long enough for a cancel that didn't wait to have read RUNNING.
+        kotlinx.coroutines.delay(500)
+        gate.complete(Unit)
+
+        val over = await(name) { it.status != DownloadStatus.RUNNING && it.note != DOWNLOAD_INTERRUPTED_NOTE }
+        assertEquals(DownloadStatus.CANCELLED, over.status)
+        assertFalse(partialOf(id).exists())
     }
 }

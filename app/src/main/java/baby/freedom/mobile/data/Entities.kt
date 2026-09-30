@@ -122,6 +122,13 @@ data class DownloadEntry(
      * go in [error].
      */
     val note: String? = null,
+    /**
+     * The User-Agent the first request sent (#265): the tab's, which is
+     * the desktop one for a site asked for as a desktop site (#180). A
+     * resume or retry sends it again, so a server that gates on it
+     * answers the same way. Null on rows from before v5: the default.
+     */
+    val userAgent: String? = null,
 )
 
 /** Values of [DownloadEntry.status]. Strings, so the column reads in `sqlite3`. */

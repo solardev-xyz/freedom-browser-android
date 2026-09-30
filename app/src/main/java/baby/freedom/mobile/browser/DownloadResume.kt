@@ -94,8 +94,9 @@ internal sealed class ResumeAnswer {
  *
  * A 206 is only taken when it runs to the end of the file: from
  * [offset] to the last byte (or to an unknown end, a `*` length) on a resume,
- * and the whole file (`bytes 0-(N-1)/N`) to a plain request — which some
- * servers answer with a 206. A range that stops short (a server capping
+ * and the whole file (`bytes 0-(N-1)/N`, or with an unknown (`*`)
+ * complete length) to a plain request — which some servers answer
+ * with a 206. A range that stops short (a server capping
  * its range answers) would end the body early and pause the download
  * again after every chunk, so it asks for the whole file instead.
  */
@@ -106,8 +107,10 @@ internal fun resumeAnswer(status: Int, offset: Long, contentRange: String?, cont
             val toTheEnd = range != null && (range.total < 0 || range.last == range.total - 1)
             when {
                 range == null || range.first != offset || !toTheEnd -> ResumeAnswer.AskWhole
-                // The whole file, as a 206: the same as a 200.
-                offset == 0L -> if (range.total >= 0) ResumeAnswer.FromStart(restarted = false) else ResumeAnswer.AskWhole
+                // The whole file, as a 206: the same as a 200. With an
+                // unknown length (`*`) too — asking again would get the
+                // same answer, and a plain request took it before (#265).
+                offset == 0L -> ResumeAnswer.FromStart(restarted = false)
                 else -> ResumeAnswer.Continue(
                     when {
                         range.total >= 0 -> range.total

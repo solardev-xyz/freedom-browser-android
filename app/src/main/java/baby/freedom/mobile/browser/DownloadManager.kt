@@ -85,8 +85,9 @@ internal fun dwebHeaderFailureRetries(e: IOException): Boolean = e !is java.net.
 private const val MAX_REDIRECTS = 8
 
 /**
- * Free space a download never takes: it fails as "Not enough storage"
- * rather than write the device full (a server can stream forever).
+ * Free space a download never takes: it stops with "Not enough storage"
+ * rather than write the device full (a server can stream forever) —
+ * failing, or paused if its partial file can be gone on from (#265).
  */
 internal const val STORAGE_FLOOR_BYTES = 256L * 1024 * 1024
 
@@ -236,9 +237,13 @@ class DownloadManager private constructor(context: Context) {
      * Partial files no paused row owns go too — every private one
      * among them, the private list having died with the process.
      * [start] and [resume] wait for this so the sweep can't catch a
-     * download of this process.
+     * download of this process; [pause], [cancel] and [remove] so they
+     * read what the sweep made of a dead process's row (a Pause or
+     * Cancel tapped in the notification it left behind cold-starts the
+     * process), never the RUNNING it was.
      */
     private val staleSweep: Job = scope.launch {
+        sweepGateForTest?.await()
         for (stale in dao.withStatus(DownloadStatus.RUNNING)) {
             stale.contentUri?.let { deleteQuietly(it) }
             val partial = partialFile(stale.id)
@@ -309,7 +314,7 @@ class DownloadManager private constructor(context: Context) {
         // A private offer belongs to the session live when it was made:
         // accepted after that session ended, it's dropped ([enqueue]).
         val session = if (private) privateSession() else null
-        val queued = offerQueue.offer(tabId, requestedBy, name, target.displayUrl, contentLength.coerceAtLeast(-1)) {
+        val queued = offerQueue.offer(tabId, requestedBy, name, target.displayUrl, contentLength.coerceAtLeast(-1), private) {
             enqueue(url, userAgent, contentDisposition, mimeType, contentLength, refererOrigin, session)
         }
         if (!queued) Log.i(LOG_TAG, "download offer from tab $tabId dropped (tab blocked or $MAX_PENDING_OFFERS waiting)")
@@ -369,6 +374,7 @@ class DownloadManager private constructor(context: Context) {
                     startedAt = System.currentTimeMillis(),
                     finishedAt = null,
                     refererOrigin = refererOrigin.takeIf { target is DownloadTarget.Web },
+                    userAgent = userAgent?.takeIf { it.isNotBlank() },
                 )
             val cookies = if (session != null) {
                 session.cookies
@@ -436,6 +442,7 @@ class DownloadManager private constructor(context: Context) {
     /** Pause a running download (#265), keeping its partial file for [resume]. */
     fun pause(id: Long) {
         scope.launch {
+            staleSweep.join()
             transitions.withLock {
                 val row = daoFor(id).get(id) ?: return@withLock
                 if (canPause(row)) cancellation.cancel(id, DownloadStop.PAUSE)
@@ -469,9 +476,7 @@ class DownloadManager private constructor(context: Context) {
                     run(
                         id = id,
                         target = target,
-                        // As [retry]: the app never overrides the WebView's
-                        // User-Agent, so the default is what was sent before.
-                        userAgent = runCatching { WebSettings.getDefaultUserAgent(appContext) }.getOrNull(),
+                        userAgent = userAgentOf(row),
                         contentDisposition = null,
                         refererOrigin = row.refererOrigin,
                         cookies = cookies,
@@ -482,6 +487,14 @@ class DownloadManager private constructor(context: Context) {
         }
     }
 
+    /**
+     * The User-Agent [entry]'s first request sent — a desktop-site tab's
+     * (#180) is not the default — or, on a row from before it was kept,
+     * the WebView's default one.
+     */
+    private fun userAgentOf(entry: DownloadEntry): String? =
+        entry.userAgent ?: runCatching { WebSettings.getDefaultUserAgent(appContext) }.getOrNull()
+
     /** Fetch a finished-unsuccessfully download again, as a new entry. */
     fun retry(entry: DownloadEntry) {
         if (entry.sourceUrl.isBlank()) return
@@ -491,9 +504,7 @@ class DownloadManager private constructor(context: Context) {
         scope.launch { daoFor(entry.id).delete(entry.id) }
         enqueue(
             url = entry.sourceUrl,
-            // The app never overrides the WebView's User-Agent, so the
-            // default one is what the first attempt sent.
-            userAgent = runCatching { WebSettings.getDefaultUserAgent(appContext) }.getOrNull(),
+            userAgent = userAgentOf(entry),
             contentDisposition = null,
             mimeType = entry.mimeType,
             contentLength = -1,
@@ -507,9 +518,12 @@ class DownloadManager private constructor(context: Context) {
 
     /** Stop a running or paused download; its partial file is deleted. */
     fun cancel(id: Long) {
-        // At once, without the lock: a blocked read must end now.
+        // At once, without the lock: a blocked read must end now. (A
+        // dead process's row has no job: this leaves a mark that the
+        // locked block below, after the sweep, cancels or forgets.)
         cancellation.cancel(id)
         scope.launch {
+            staleSweep.join()
             transitions.withLock {
                 val row = daoFor(id).get(id)
                 if (row?.status == DownloadStatus.PAUSED) {
@@ -537,6 +551,8 @@ class DownloadManager private constructor(context: Context) {
     fun remove(id: Long) {
         cancellation.cancel(id)
         scope.launch {
+            // As [cancel]: after the sweep has settled a dead process's row.
+            staleSweep.join()
             transitions.withLock {
                 daoFor(id).delete(id)
                 // A running job's own cancel deletes its partial; this
@@ -719,7 +735,7 @@ class DownloadManager private constructor(context: Context) {
             // The copy into Downloads needs room for a second copy of
             // the file until the partial one is deleted.
             if (!downloadFitsStorage(allocatableBytes(sharedStorageDir()), partial.length(), STORAGE_FLOOR_BYTES)) {
-                throw DownloadFailure("Not enough storage")
+                throw notEnoughStorage()
             }
             val uri = insertPendingDownload(resolver, "Download/$DOWNLOAD_SUBDIR", "dl$id", entry.fileName, entry.mimeType)
                 ?: throw DownloadFailure("Couldn't create the file in Downloads")
@@ -804,8 +820,13 @@ class DownloadManager private constructor(context: Context) {
         // any failure to reach the file (a stopped node, a 503) of a run
         // the user resumed: its partial file is theirs to go on with.
         val unreachable = t is DownloadFailure && t.retriable || t is IOException && t !is DownloadFailure
-        val lost = fetching && !stopped && unreachable &&
-            (entry.resumable || resuming) && entry.validator != null && partial.length() > 0
+        // Running out of room pauses it too, while there's a partial file
+        // to go on from: one a range can continue, or — past the fetch,
+        // copying into Downloads — the whole file.
+        val noSpace = t is DownloadFailure && t.noSpace
+        val canGoOn = partial.length() > 0 &&
+            (!fetching || (entry.resumable || resuming) && entry.validator != null)
+        val lost = !stopped && canGoOn && (fetching && unreachable || noSpace)
         val pause = stop == DownloadStop.PAUSE || lost
         if (!stopped) Log.w(LOG_TAG, "download $id ${if (pause) "paused" else "failed"}", t)
         val reason = when {
@@ -828,7 +849,8 @@ class DownloadManager private constructor(context: Context) {
                 entry.copy(
                     status = DownloadStatus.PAUSED,
                     contentUri = null,
-                    receivedBytes = if (partial.exists()) partial.length() else received,
+                    // What the partial file holds: nothing, once deleted.
+                    receivedBytes = if (partial.exists()) partial.length() else 0L,
                     note = when {
                         !lost -> null
                         t is DownloadFailure -> t.message
@@ -930,7 +952,7 @@ class DownloadManager private constructor(context: Context) {
                     STORAGE_FLOOR_BYTES,
                 )
             ) {
-                throw DownloadFailure("Not enough storage")
+                throw notEnoughStorage()
             }
             save(entry)
             val received = copyWithProgress(id, src.stream, partial, startAt, total)
@@ -978,7 +1000,19 @@ class DownloadManager private constructor(context: Context) {
      * node, an error status) — a resumed download it hits stays paused,
      * its partial file kept, rather than failing.
      */
-    private class DownloadFailure(message: String, val retriable: Boolean = false) : IOException(message)
+    private class DownloadFailure(
+        message: String,
+        val retriable: Boolean = false,
+        /**
+         * The device ran out of room. A download whose partial file a
+         * resume can go on from pauses instead (#265): deleting what's
+         * in would only make the user fetch it all again once they've
+         * freed some space.
+         */
+        val noSpace: Boolean = false,
+    ) : IOException(message)
+
+    private fun notEnoughStorage() = DownloadFailure("Not enough storage", noSpace = true)
 
     private suspend fun openBody(
         target: DownloadTarget,
@@ -1159,10 +1193,13 @@ class DownloadManager private constructor(context: Context) {
      * may evict counted in); null when it can't be told, which doesn't
      * block the download.
      */
-    private fun allocatableBytes(dir: File): Long? = runCatching {
-        val storage = appContext.getSystemService(StorageManager::class.java)
-        storage.getAllocatableBytes(storage.getUuidForPath(dir))
-    }.getOrNull()
+    private fun allocatableBytes(dir: File): Long? {
+        allocatableForTest?.let { return it(dir) }
+        return runCatching {
+            val storage = appContext.getSystemService(StorageManager::class.java)
+            storage.getAllocatableBytes(storage.getUuidForPath(dir))
+        }.getOrNull()
+    }
 
     /** The shared-storage volume Downloads lives on. */
     private fun sharedStorageDir(): File = Environment.getExternalStorageDirectory()
@@ -1199,14 +1236,14 @@ class DownloadManager private constructor(context: Context) {
                 try {
                     sink.write(buffer, 0, n)
                 } catch (e: IOException) {
-                    throw DownloadFailure(if (isNoSpace(e)) "Not enough storage" else "Couldn't write the download")
+                    throw if (isNoSpace(e)) notEnoughStorage() else DownloadFailure("Couldn't write the download")
                 }
                 received += n
                 if (received >= nextStorageCheck) {
                     nextStorageCheck = received + STORAGE_CHECK_EVERY_BYTES
                     val stillToWrite = if (total >= 0) (total - received).coerceAtLeast(0) else 0
                     if (!downloadFitsStorage(allocatableBytes(partialDir), stillToWrite, STORAGE_FLOOR_BYTES)) {
-                        throw DownloadFailure("Not enough storage")
+                        throw notEnoughStorage()
                     }
                 }
                 val now = System.currentTimeMillis()
@@ -1230,7 +1267,12 @@ class DownloadManager private constructor(context: Context) {
                     currentCoroutineContext().ensureActive()
                     val n = src.read(buffer)
                     if (n < 0) break
-                    sink.write(buffer, 0, n)
+                    try {
+                        sink.write(buffer, 0, n)
+                    } catch (e: IOException) {
+                        if (isNoSpace(e)) throw notEnoughStorage()
+                        throw e
+                    }
                 }
             }
         }
@@ -1255,8 +1297,27 @@ class DownloadManager private constructor(context: Context) {
      */
     @Volatile internal var afterPublishForTest: ((Long) -> Unit)? = null
 
+    /** Test hook: free space on [dir]'s volume, in place of the real answer. */
+    @Volatile internal var allocatableForTest: ((dir: File) -> Long?)? = null
+
+    /** Test hook: the shared-storage volume's directory, for [allocatableForTest]. */
+    internal fun sharedStorageDirForTest(): File = sharedStorageDir()
+
     companion object {
         @Volatile private var instance: DownloadManager? = null
+
+        /**
+         * Test hook: a manager built while this is set holds its startup
+         * sweep until it completes — the window a process started by a
+         * notification tap is in.
+         */
+        @Volatile internal var sweepGateForTest: kotlinx.coroutines.Deferred<Unit>? = null
+
+        /**
+         * Test hook: a second manager on the same database, as a new
+         * process would build it (its sweep sees the rows left RUNNING).
+         */
+        internal fun newProcessForTest(context: Context): DownloadManager = DownloadManager(context)
 
         fun get(context: Context): DownloadManager =
             instance ?: synchronized(this) {

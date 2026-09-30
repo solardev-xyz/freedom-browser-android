@@ -117,8 +117,10 @@ class DownloadResumeTest {
     @Test
     fun `a 206 of the whole file to a plain request is taken as a 200`() {
         assertEquals(ResumeAnswer.FromStart(restarted = false), resumeAnswer(206, 0, "bytes 0-999/1000", 1000))
-        // With no complete length it can't be told whole.
-        assertEquals(ResumeAnswer.AskWhole, resumeAnswer(206, 0, "bytes 0-999/*", 1000))
+        // With no complete length it can't be told whole, but asking
+        // again would only get the same answer: taken, as a 200 would be.
+        assertEquals(ResumeAnswer.FromStart(restarted = false), resumeAnswer(206, 0, "bytes 0-999/*", 1000))
+        assertEquals(ResumeAnswer.FromStart(restarted = false), resumeAnswer(206, 0, "bytes 0-999/*", -1))
     }
 
     @Test
